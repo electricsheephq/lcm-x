@@ -3582,17 +3582,34 @@ def _summary_backfill_estimates(
     return est_tokens, est_cost_tokens, est_batches
 
 
-def _record_embedding_catchup(db_path, task: str, identity: str, remaining: int | bool, *, operator_retry: int = 0) -> None:
+def _record_embedding_catchup(db_path, task: str, identity: str, remaining: int | bool, *, operator_retry: int = 0,
+                              scan_state=None) -> None:
     """Best-effort advisory state after publication; never fail embedding work."""
     try:
         conn = sqlite3.connect(db_path, timeout=5.0)
         try:
             with conn:
+                if scan_state is None:
+                    conn.execute(
+                        "INSERT INTO metadata(key, value) VALUES(?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (f"embedding_catchup:{task}:{identity}",
+                         json.dumps({"remaining": remaining, "operator_retry": operator_retry, "updated_at": time.time()})),
+                    )
+                    return
+                state = scan_state or {}
+                value = json.dumps({"remaining": remaining, "operator_retry": operator_retry,
+                                    "updated_at": time.time(), "inflight_cursor": state.get("inflight_cursor", ""),
+                                    "inflight_actionable_seen": state.get("inflight_actionable_seen", False),
+                                    "inflight_uncertain_count": state.get("inflight_uncertain_count", 0),
+                                    "inflight_cycle_started_at": state.get("inflight_cycle_started_at", 0)})
                 conn.execute(
-                    "INSERT INTO metadata(key, value) VALUES(?, ?) "
+                    "INSERT INTO metadata(key, value) SELECT ?, CASE WHEN ? IS NOT NULL AND "
+                    "EXISTS (SELECT 1 FROM messages WHERE store_id > ?) "
+                    "THEN json_set(?, '$.remaining', json('true')) ELSE ? END "
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (f"embedding_catchup:{task}:{identity}",
-                     json.dumps({"remaining": remaining, "operator_retry": operator_retry, "updated_at": time.time()})),
+                    (f"embedding_catchup:{task}:{identity}", state.get("max_store_id"),
+                     state.get("max_store_id"), value, value),
                 )
         finally:
             conn.close()
@@ -4893,6 +4910,21 @@ def _record_chunk_gapfill_walk(conn, identity_hash, state):
         _record_chunk_gapfill_progress(conn, identity_hash, state, progress)
 
 
+def _chunk_gapfill_order(conn, identity, ranges, state, record_progress):
+    """Share the writable upper/low turn fence across frontier and cloud scans."""
+    if record_progress and len(ranges) > 1:
+        try:
+            key = f"chunk_gapfill_scan:{identity}"
+            records = dict(conn.execute("SELECT key,value FROM metadata WHERE key IN (?,?)", (key, key + ":low")))
+            upper, lower = (json.loads(records.get(k, "{}")) for k in (key, key + ":low"))
+            if upper.get("deferred_low") and upper.get("epoch") and (lower.get("epoch") != upper["epoch"] or lower.get("turn", -1) < upper.get("turn", 0)):
+                ranges = ranges[::-1]
+        except (ValueError, AttributeError):
+            pass
+    state["deferred_low"] = record_progress and len(ranges) > 1
+    return ranges
+
+
 def _validate_cloud_chunk_metadata(config, db_path):
     """Writer-only metadata coverage; neither chunk text nor resolve a provider."""
     store = VectorStore(db_path, config=config)
@@ -4910,9 +4942,10 @@ def _validate_cloud_chunk_metadata(config, db_path):
         policy = normalize_content_policy(getattr(config, "embedding_content_policy", ""))
         bounds = _chunk_cursor(conn, identity)
         coverage = _chunk_coverage(conn, identity, bounds[0]) if bounds else None
-        for band in _chunk_gapfill_ranges(conn, identity, bounds, _chunk_policy_revision(conn, identity),
-                                         policy, coverage=coverage):
-            state = {"metadata_only": True, "coverage": coverage}
+        state = {"metadata_only": True, "coverage": coverage}
+        ranges = _chunk_gapfill_ranges(conn, identity, bounds, _chunk_policy_revision(conn, identity),
+                                       policy, coverage=coverage)
+        for band in _chunk_gapfill_order(conn, identity, ranges, state, True):
             list(_chunk_gapfill_rows(conn, identity, band, policy, _CHUNK_HISTORY_SCAN_MESSAGES,
                                     record_progress=True, gap_scan_state=state))
             _record_chunk_gapfill_walk(conn, identity, state)
@@ -4982,17 +5015,7 @@ def _chunk_frontier_rows(
         _record_chunk_policy_revision(conn, identity_hash, bounds, policy)
     gap_scan_state = gap_scan_state if gap_scan_state is not None else {}
     unproven = False
-    if record_progress and len(gap_ranges) > 1:
-        try:
-            records = dict(conn.execute("SELECT key,value FROM metadata WHERE key IN (?,?)",
-                           (f"chunk_gapfill_scan:{identity_hash}", f"chunk_gapfill_scan:{identity_hash}:low")))
-            upper = json.loads(records.get(f"chunk_gapfill_scan:{identity_hash}", "{}"))
-            lower = json.loads(records.get(f"chunk_gapfill_scan:{identity_hash}:low", "{}"))
-            if upper.get("deferred_low") and upper.get("epoch") and (lower.get("epoch") != upper["epoch"] or lower.get("turn", -1) < upper.get("turn", 0)):
-                gap_ranges = gap_ranges[::-1]
-        except (ValueError, AttributeError):
-            pass
-    gap_scan_state["deferred_low"] = record_progress and len(gap_ranges) > 1
+    gap_ranges = _chunk_gapfill_order(conn, identity_hash, gap_ranges, gap_scan_state, record_progress)
     for band in gap_ranges:
         gap_scan_state["coverage"] = coverage
         for row in _chunk_gapfill_rows(
@@ -5144,13 +5167,19 @@ def _chunk_authorized_uncertain_rows(
     return len(documents), documents, meta
 
 
+_CHUNK_INFLIGHT_SCAN_ROWS = 256
+
+
 def _chunk_backfill_remaining(
     db_path, identity_hash: str | None, policy: str, pending: int, embedded: int,
     incremental: bool = False, *, include_boundaries: bool = False, inflight_policy: str | None = None, chunk_cache=None,
+    deadline=None, scan_state=None,
 ) -> tuple[int, int, int]:
     try:
         check_conn = _embedding_read_connection(db_path)
         try:
+            scan_state = scan_state if scan_state is not None else {}
+            scan_state["max_store_id"] = check_conn.execute("SELECT COALESCE(MAX(store_id),0) FROM messages").fetchone()[0]
             gap_scan_state = {}
             remaining, _, _ = _chunk_pending_rows(
                 check_conn, identity_hash, policy, 1, incremental=incremental,
@@ -5168,11 +5197,31 @@ def _chunk_backfill_remaining(
                 try:
                     chunks_by_source = {}
                     actionable = []
+                    saved = check_conn.execute("SELECT value FROM metadata WHERE key=?",
+                                               (f"embedding_catchup:chunk:{identity_hash}",)).fetchone()
+                    try:
+                        cycle = json.loads(saved[0]) if saved else {}
+                        cursor = str(cycle.get("inflight_cursor", ""))
+                        actionable_seen = bool(cycle.get("inflight_actionable_seen", bool(cursor)))
+                        uncertain_seen = int(cycle.get("inflight_uncertain_count", 0)) if cursor else 0
+                        cycle_started = float(cycle.get("inflight_cycle_started_at", 0)) if cursor else time.time()
+                    except (TypeError, ValueError, AttributeError):
+                        cursor = ""
+                        actionable_seen = False
+                        uncertain_seen, cycle_started = 0, time.time()
+                    scanned = 0
+                    incomplete = False
+                    scan_state["inflight_cursor"] = cursor
                     for row in check_conn.execute(
                         "SELECT embedded_id, state, lease_id, generation FROM lcm_embedding_backfill_inflight "
-                        "WHERE identity_hash = ?",
-                        (identity_hash,),
+                        "WHERE +identity_hash = ? AND embedded_id > ? ORDER BY embedded_id LIMIT ?",
+                        (identity_hash, cursor, _CHUNK_INFLIGHT_SCAN_ROWS),
                     ):
+                        if deadline is not None and time.monotonic() >= deadline:
+                            incomplete = True
+                            break
+                        scanned += 1
+                        scan_state["inflight_cursor"] = row[0]
                         try:
                             store_id = int(row[0].split(":", 1)[0])
                         except ValueError:
@@ -5183,8 +5232,29 @@ def _chunk_backfill_remaining(
                                                          if c.char_end > c.char_start} if source else set()
                         if row[0] in chunks_by_source[store_id]:
                             actionable.append(row)
+                    else:
+                        if scanned < _CHUNK_INFLIGHT_SCAN_ROWS:
+                            if check_conn.execute(
+                                "SELECT 1 FROM lcm_embedding_backfill_inflight WHERE identity_hash=? "
+                                "AND state IN ('claimed','dispatched','uncertain') AND updated_at>=? "
+                                "AND embedded_id<=? LIMIT 1",
+                                (identity_hash, cycle_started, scan_state["inflight_cursor"]),
+                            ).fetchone():
+                                remaining = max(remaining, 1)  # A new row behind the cursor needs a fresh cycle.
+                            scan_state["inflight_cursor"] = ""
+                        else:
+                            incomplete = True
+                    if incomplete:
+                        remaining = True  # Unknown backlog, never a completion certificate.
+                        scan_state["inflight_incomplete"] = True
+                    elif actionable_seen:
+                        remaining = max(remaining, 1)  # Earlier pages still have actionable backlog.
+                    scan_state["inflight_actionable_seen"] = incomplete and (actionable_seen or bool(actionable))
                     in_flight, uncertain = _embedding_inflight_counts(check_conn, identity_hash,
                         (tuple(row[1:]) + (1,) for row in actionable))
+                    uncertain += uncertain_seen
+                    scan_state["inflight_uncertain_count"] = uncertain if incomplete else 0
+                    scan_state["inflight_cycle_started_at"] = cycle_started if incomplete else 0
                 except sqlite3.OperationalError:
                     in_flight = 0
                     uncertain = 0
@@ -5860,14 +5930,20 @@ def _chunk_backfill_run(
                     )
             store.close()
 
+    scan_state = {}
+    configured_policy = normalize_content_policy(getattr(config, "embedding_content_policy", "conversational"))
     remaining, in_flight_count, uncertain_count = _chunk_backfill_remaining(
-        db_path, identity, policy, pending, embedded, incremental,
-        include_boundaries=stop_reason == "process_exit", chunk_cache=chunk_cache,
-        inflight_policy=normalize_content_policy(getattr(config, "embedding_content_policy", "conversational")),
+        db_path, identity, policy if incremental else configured_policy, pending, embedded, incremental,
+        include_boundaries=stop_reason == "process_exit", chunk_cache=chunk_cache if policy == configured_policy else {},
+        inflight_policy=configured_policy,
+        deadline=started + budget_s if budget_s > 0 else None, scan_state=scan_state,
     )
     operator_retry = uncertain_count if embedding_provider_id(provider_name) != "fastembed" else 0
-    backlog = remaining + in_flight_count + uncertain_count - operator_retry
-    _record_embedding_catchup(db_path, "chunk", identity, bool(backlog) if incremental else backlog, operator_retry=operator_retry)
+    backlog = True if scan_state.get("inflight_incomplete") else remaining + in_flight_count + uncertain_count - operator_retry
+    if incremental and policy != configured_policy:
+        backlog = True  # Override coverage cannot certify configured coverage; avoid a fresh full-history walk.
+    _record_embedding_catchup(db_path, "chunk", identity, bool(backlog) if incremental else backlog,
+                              operator_retry=operator_retry, scan_state=scan_state)
     selected_embeddable = len(documents) - len(skipped)
     status = _embedding_backfill_status(
         error=error, lease_lost=lease_lost, budget_exhausted=budget_exhausted,
