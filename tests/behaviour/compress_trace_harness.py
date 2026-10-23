@@ -491,6 +491,7 @@ OBSERVED_ATTRIBUTES = (
     "_no_progress_ingest_generation",
     "_no_progress_observed_tokens",
     "_no_progress_proof_complete",
+    "_no_progress_proof_fingerprint",
     "_no_progress_public_rows",
     "_note_fresh_tail_pressure_relieved",
     "_objective_only_noop",
@@ -555,6 +556,7 @@ class Canonical:
     def __init__(self, root: Path) -> None:
         self.root = str(root)
         self.ids: dict[str, str] = {}
+        self.proof_digests: dict[str, str] = {}
         self.excluded: dict[str, str] = {}
 
     def text(self, value: str) -> str:
@@ -568,6 +570,10 @@ class Canonical:
                       r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", replace, value)
 
     def value(self, value: Any, path: str = "") -> Any:
+        if path == "_no_progress_proof_fingerprint" and isinstance(value, str):
+            # Store paths enter this opaque digest. Preserve equality/transitions;
+            # the focused regressions check actual fingerprint state binding.
+            return self.proof_digests.setdefault(value, f"<proof-digest-{len(self.proof_digests)}>")
         if value is None or isinstance(value, (bool, int, float)):
             return value
         if isinstance(value, (str, Path)):

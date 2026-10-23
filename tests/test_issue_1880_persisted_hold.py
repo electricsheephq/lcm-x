@@ -500,3 +500,161 @@ def test_h2_host_held_pruned_stub_keeps_current_public_proof(tmp_path):
         assert engine._no_progress_public_rows[id(active)]["content"] == CLEARED
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("mode", ["route_at", "write_failure"])
+def test_r1_unpersistable_result_keeps_base_local_hold(tmp_path, monkeypatch, mode):
+    engine, view = _reorder(tmp_path, False)
+    engine._config.fresh_tail_pressure_yield_enabled = False
+    engine._config.empty_lifecycle_gc_enabled = False
+    try:
+        view = engine.compress(view, current_tokens=10_000)
+        engine._no_progress_hold = None
+        if mode == "route_at":
+            engine.model = "claude-sonnet-4-5@20250929"
+        else:
+            real_write = engine._store.write_metadata_json
+
+            def write(keys, value, **kwargs):
+                if KEY in keys:
+                    raise OSError("synthetic metadata write failure")
+                return real_write(keys, value, **kwargs)
+
+            monkeypatch.setattr(engine._store, "write_metadata_json", write)
+        start = engine_module.time.monotonic()
+        assert engine.compress(view, current_tokens=10_000) == view
+        assert not engine.should_compress(10_000)
+        assert engine._no_progress_hold[1] == "no_progress"
+        assert start + 600 <= engine._no_progress_hold[0] <= engine_module.time.monotonic() + 600
+        assert engine._no_progress_hold_persisted is False
+        assert engine._store.read_metadata_json(KEY) is None
+        scan = Mock(wraps=engine._prepare_compression_sweep)
+        monkeypatch.setattr(engine, "_prepare_compression_sweep", scan)
+        engine.compress(view, current_tokens=10_000)
+        scan.assert_not_called()
+        reader = rebuild(tmp_path)
+        try:
+            if mode == "route_at":
+                reader.model = engine.model
+            reader._ingest_messages(view)
+            assert reader.should_compress(10_000)
+            assert not reader._automatic_compression_blocked()
+            assert reader._store.read_metadata_json(KEY) is None
+        finally:
+            reader.shutdown()
+        deadline = engine._no_progress_hold[0]
+        monkeypatch.setattr(engine_module.time, "monotonic", lambda: deadline + 1)
+        assert engine.should_compress(10_000)
+    finally:
+        engine.shutdown()
+
+
+def _r1_tail_engine(path):
+    return make_engine(path, window=200_000, session_id="S", conversation_id="conv",
+                       fresh_tail_count=4, leaf_chunk_tokens=100,
+                       fresh_tail_pressure_yield_enabled=False, context_threshold=0.001,
+                       temporal_rollups_enabled=False, empty_lifecycle_gc_enabled=False,
+                       survival_fit=False)
+
+
+def _r1_views():
+    view = [{"role": "user", "content": "synthetic user objective " * 30},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "synthetic-call",
+             "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "synthetic-call", "content": "synthetic result " * 30},
+            {"role": "assistant", "content": "synthetic answer " * 30}]
+    return view, copy.deepcopy(view) + [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"new tail {i} " * 50}
+        for i in range(8)]
+
+
+def test_r1_publication_between_verdict_and_persist_cannot_certify_new_state(tmp_path, monkeypatch):
+    view, extended = _r1_views()
+    engine, publisher = _r1_tail_engine(tmp_path), _r1_tail_engine(tmp_path)
+    real = engine._record_compress_commit_proof
+    published = []
+
+    def publish(messages, result):
+        if not published:
+            published.append(publisher.compress(extended, current_tokens=10_000))
+            assert publisher._last_compress_leaves[1] >= 1
+        return real(messages, result)
+
+    monkeypatch.setattr(engine, "_record_compress_commit_proof", publish)
+    try:
+        assert engine.compress(view, current_tokens=10_000) == view
+        assert published
+        reader = _r1_tail_engine(tmp_path)
+        try:
+            reader.last_prompt_tokens = 10_000
+            reader._ingest_messages(copy.deepcopy(view))  # review probe 7c's post-publication state
+            assert reader.should_compress(10_000)
+            assert not reader._automatic_compression_blocked()
+            assert reader._store.read_metadata_json(KEY) is None
+        finally:
+            reader.shutdown()
+        assert engine._store.read_metadata_json(KEY) is None
+        assert not engine._no_progress_hold_persisted
+        assert not engine.should_compress(10_000)  # BASE local pacing still applies.
+    finally:
+        publisher.shutdown()
+        engine.shutdown()
+
+
+def _r1_record(engine, corrupt=False):
+    now = engine_module.time.time()
+    raw = "{" if corrupt else json.dumps({"version": 1, "reason": "no_progress",
+                                         "fingerprint": "0" * 64, "recorded_at": now,
+                                         "expires_at": now + 600})
+    engine._store.write_metadata_json([KEY], raw)
+
+
+@pytest.mark.parametrize("record", ["valid", "corrupt", "absent"])
+def test_r1_committed_leaf_clears_scoped_record(tmp_path, monkeypatch, caplog, record):
+    _, view = _r1_views()
+    engine = _r1_tail_engine(tmp_path)
+    engine._config.threshold_full_sweep_enabled = False
+    try:
+        engine._ingest_messages(view)
+        before = copy.deepcopy(engine._store.get_session_messages("S"))
+        if record != "absent":
+            _r1_record(engine, corrupt=record == "corrupt")
+        write = Mock(wraps=engine._store.write_metadata_json)
+        condensation = Mock(wraps=engine._run_threshold_sweep_condensation)
+        monkeypatch.setattr(engine._store, "write_metadata_json", write)
+        monkeypatch.setattr(engine, "_run_threshold_sweep_condensation", condensation)
+        engine.compress(view, current_tokens=10_000, force=True)
+        assert engine._last_compress_leaves[1] >= 1
+        condensation.assert_not_called()  # The condensation clear cannot mask a missing leaf clear.
+        assert engine._store.get_session_messages("S") == before
+        assert engine._store.read_metadata_json(KEY) is None
+        clears = [call for call in write.call_args_list if KEY in call.args[0]]
+        assert len(clears) == (0 if record == "absent" else 1)
+        caplog.clear()
+        reader = _r1_tail_engine(tmp_path)
+        try:
+            reader._ingest_messages(view)
+            reader.should_compress(10_000)
+            assert not any("no-progress metadata unavailable" in r.message for r in caplog.records)
+        finally:
+            reader.shutdown()
+    finally:
+        engine.shutdown()
+
+
+def test_r1_committed_condensation_clears_scoped_record(tmp_path):
+    engine = _r1_tail_engine(tmp_path)
+    try:
+        ids = [engine._dag.add_node(SummaryNode(
+            session_id="S", depth=0, summary=f"synthetic summary {i} " * 100,
+            token_count=5_000, source_token_count=10_000, source_ids=[], source_type="messages",
+        )) for i in range(2)]
+        _r1_record(engine)
+        passes, _ = engine._run_threshold_sweep_condensation(
+            target_tokens=5_000, pass_budget=1, deadline=engine_module.time.monotonic() + 100)
+        assert passes == 1
+        assert any(node.source_ids == ids for node in engine._dag.get_session_nodes("S"))
+        assert all(engine._dag.get_node(node_id) is not None for node_id in ids)
+        assert engine._store.read_metadata_json(KEY) is None
+    finally:
+        engine.shutdown()

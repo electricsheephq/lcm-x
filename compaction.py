@@ -2494,6 +2494,9 @@ class CompactionMixin:
                 and state.noop_reason != "selected leaf chunk lacks raw store lineage"
                 and not state.budget.summary_failure and state.budget.hung_route is None
             )
+            self._no_progress_proof_fingerprint = (
+                self._no_progress_fingerprint() if self._no_progress_proof_complete else None
+            )
             return "return", sanitized_messages
         return "next", None
 

@@ -2615,7 +2615,9 @@ class LCMEngine(
     def _persist_no_progress_hold(self) -> None:
         fingerprint = self._no_progress_fingerprint()
         self._no_progress_hold = None
-        if fingerprint is None:
+        if fingerprint is None or fingerprint != getattr(self, "_no_progress_proof_fingerprint", None):
+            self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, "no_progress")
+            self._no_progress_hold_persisted = False
             return
         if self._persisted_no_progress_hold_active():
             return  # No rearming and no write for a matching proof.
@@ -2629,11 +2631,17 @@ class LCMEngine(
             self._no_progress_hold = (deadline, "no_progress")
         except Exception:
             self._no_progress_metadata_warning()
+            self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, "no_progress")
+            self._no_progress_hold_persisted = False
 
     def _clear_persisted_no_progress_hold(self) -> None:
         try:
             key = f"compaction_no_progress:v1:{self._session_id}"
-            if self._store.read_metadata_json(key) is not None:
+            try:
+                record = self._store.read_metadata_json(key)
+            except json.JSONDecodeError:
+                record = True  # A corrupt value still exists and must be cleared after progress.
+            if record is not None:
                 self._store.write_metadata_json([key], "null", skip_unchanged=True)
         except Exception:
             self._no_progress_metadata_warning()
