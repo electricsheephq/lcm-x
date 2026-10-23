@@ -1,0 +1,81 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "lcmx-1451-pra-20261023-public-summary",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "live",
+  "owner_lane": "lcmx-occurrence-pr-a-public-summary",
+  "claim_class": "advisory",
+  "created": "2026-10-23T03:32:29Z",
+  "settled": null,
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "e6e4f0e5586245e0cf87bb0fec52745c82f17fd0",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python compare.py; python cost.py (preserved full run packet; this directory is the public summary)",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "occurrence-matrix",
+      "metric": "new_loss_checkpoints",
+      "value": 0.0,
+      "n": 1296,
+      "baseline_run": "supplied-base-5df5a3c",
+      "source": "SUMMARY.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "RESULT.md",
+      "role": "headline",
+      "sha256": "0bd126b38e7f944b2e0fff1803b189c4170e9bc19c500702a73895ec092fe216",
+      "bytes": 4456
+    },
+    {
+      "path": "SUMMARY.json",
+      "role": "headline",
+      "sha256": "d67f43d23669977a31c8b0bd1764e36d98d9c6b66c7f5f0e51c20bee520c370a",
+      "bytes": 1758
+    },
+    {
+      "path": "CHANGED-CELLS.md",
+      "role": "headline",
+      "sha256": "f57ae00f60ad884cad2b1a36a1fc1b88fe736549135599374c34ec2cd5c75ddf",
+      "bytes": 14081
+    },
+    {
+      "path": "cost.json",
+      "role": "headline",
+      "sha256": "64877b75d1f199503e809cf1736bf00a176dbde8685d4a954dada2e79bfe0cf0",
+      "bytes": 491
+    },
+    {
+      "path": "cost-samples.json",
+      "role": "headline",
+      "sha256": "5b491c2b51b0029e384f26e9a26246ac8be670b46838ea9be7708d385f9b1407",
+      "bytes": 21801
+    }
+  ],
+  "rescore": {
+    "command": null,
+    "inputs": [],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "CHANGED-CELLS.md",
+    "RESULT.md",
+    "SUMMARY.json",
+    "cost-samples.json",
+    "cost.json"
+  ],
+  "publication_boundary": "Public summary only; complete raw run and rescore inputs retained, T2 unpublished."
+}
