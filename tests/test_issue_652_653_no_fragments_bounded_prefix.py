@@ -22,6 +22,7 @@ import hermes_lcm.tokens as tokens
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
+from tests.harness import make_engine
 
 PAD = " alpha beta gamma delta" * 30
 LEAF = "Earlier turns.\nExpand for details about: turns"
@@ -254,11 +255,13 @@ def test_t4_pre_leaf_rejection_skips_the_post_drain_condensation(tmp_path, monke
 # Recorded at the base of this change (v0.24.6 for these paths): per sweep shape, the summariser calls as
 # (depth, source_tokens), the telemetry passes and stop reason, and a digest of the returned context.
 # The digests were re-pinned for #680: the LCM system note in the returned context gained one sentence.
+# #998: the digests cover the in-context LCM note, which now names lcm_recall.
+# #1016: re-pinned again; the note's stub sentence names user/assistant payload stubs (calls and passes unchanged).
 T5_EXPECTED = {
     "partial": ([(0, 361)] * 12, (12, 0, 12, "pass_budget_exhausted"),
-                "7b537c108b1818dc04de210ec3a313eb0f61dcb9516f04ba392508f5b9479fdb"),
+                "49b00ee5b00747c6f7f04342fd96438df7fb4c90cf1c202bbea6124bf5156d4c"),
     "drained": ([(0, 361)] * 5 + [(1, 260)], (5, 1, 6, "summary_prefix_target_reached"),
-                "525063f307cca86317324a516d82e101116afdcc3f5098028114fbc521ddd1b7"),
+                "748bcc062bed982273139fa529e3aaafc338e8f58435626a98c04afb359e8477"),
 }
 
 
@@ -268,7 +271,7 @@ def _digest(result) -> str:
 
 @pytest.mark.parametrize("shape", ["partial", "drained"])
 def test_t5_at_or_below_the_target_the_sweep_is_unchanged(tmp_path, monkeypatch, caplog, shape):
-    engine = _engine(tmp_path, condensation_fanin=2)
+    engine = _engine(tmp_path, condensation_fanin=2, summary_prefix_target_tokens=400)
     stub = _summaries(monkeypatch)
     _depth_0_nodes(engine, 3, token_count=130)  # 390 tokens: at or below the 400 token sweep target
     try:
@@ -289,11 +292,17 @@ def test_t6_partial_sweeps_do_not_grow_the_prefix(tmp_path, monkeypatch, caplog)
     60 s soft target, so the summariser takes 19 s per call on the clock (a call that takes no time would let
     every later leaf in under the target while the condensation passes are bounded by time)."""
     # #605 F2: the 150-token leaves are over a lowered level 3 bound, so each one calls (and takes its 19 s).
-    engine = _engine(tmp_path, condensation_fanin=2, leaf_chunk_tokens=150, l3_truncate_tokens=2)
+    # Rollups share the provider seam: their worker must not spend the foreground test's fake time.
+    engine = make_engine(
+        tmp_path, window=200_000, conversation_id="conv", platform="telegram",
+        fresh_tail_count=2, context_threshold=0.001, threshold_full_sweep_enabled=True,
+        max_assembly_tokens=100_000, condensation_fanin=2, leaf_chunk_tokens=150, l3_truncate_tokens=2,
+        summary_prefix_target_tokens=150, temporal_rollups_enabled=False,
+    )  # Preserve this partial-sweep bound's original target.
     long_leaf = "Earlier turns." + " summary words" * 20 + "\nExpand for details about: turns"
     offset = [0.0]
-    real_monotonic = time.monotonic
-    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + offset[0])
+    # Only the scripted calls spend time; host load cannot change which passes are admitted.
+    monkeypatch.setattr(time, "monotonic", lambda: offset[0])
 
     def provider(prompt, max_tokens, model="", timeout=None, reasoning_effort=""):
         offset[0] += 19.0

@@ -115,7 +115,12 @@ def test_t1_below_threshold_automatic_compress_writes_no_leaf_and_still_ingests(
 
 
 def test_t1_the_handoff_needs_the_preflight_request_and_its_own_tokens_below_threshold(tmp_path, summaries):
-    engine, view, rough = _maintenance_engine(tmp_path)
+    engine, view, rough = _maintenance_engine(tmp_path,
+        # #1013 part B: deferred leaf fixture covers the unstubbed path
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     try:  # the host observed the threshold after all: a normal pass, not cleanup-only
         engine.compress(view, current_tokens=engine.threshold_tokens)
         assert summaries and _leaves(engine) >= 1
@@ -205,19 +210,23 @@ def test_t3_the_hold_survives_a_following_turn_that_stores_new_rows(tmp_path, su
         engine.shutdown()
 
 
-def test_t3_a_hidden_only_leaf_is_progress_and_does_not_arm_the_hold(tmp_path, summaries):
+def test_t3_a_hidden_only_leaf_advances_coverage_and_holds_until_turn_end(tmp_path, summaries):
     """#581 (b): the view is all fresh tail; the leaf covers owned rows the view does not show. It consumes no
-    host row and the returned list grows, yet coverage advanced: no hold."""
-    engine = _engine(tmp_path, leaf_chunk_tokens=400, context_threshold=0.001)
+    host row; #904 keeps the host list unchanged and holds further passes until turn end."""
+    engine = _engine(tmp_path, leaf_chunk_tokens=400, context_threshold=0.001,
+                     threshold_full_sweep_enabled=False)  # #1013: one hidden-only leaf, as before the default flip
     old = [*_turn("H1", 100.0), *_turn("H2", 110.0)]
     tail = _turn("T9", 900.0)
     try:
         engine.ingest([*old, *tail])
-        result = engine.compress(list(tail))
+        view = list(tail)
+        result = engine.compress(view)
         assert engine._last_compression_status == "compacted", engine._last_compression_noop_reason
-        assert _leaves(engine) == 1 and len(result) >= len(tail)
-        assert count_messages_tokens(result) >= count_messages_tokens(tail)
-        assert engine._no_progress_hold is None and engine.get_status()["no_progress_hold"] is None
+        assert _leaves(engine) == 1 and result is view
+        assert result == tail
+        assert engine.get_status()["no_progress_hold"]["reason"] == "hidden_only"
+        engine.note_turn_complete()
+        assert engine._no_progress_hold is None
     finally:
         engine.shutdown()
 
@@ -281,7 +290,8 @@ def test_t4_the_hold_does_not_apply_at_the_survival_ceiling(tmp_path, summaries)
 def _review_trace_engine(tmp_path):
     """The review's trace: window 100k, threshold 35k, reserve 0.15, assembly cap 90k; a foreground no-progress
     pass at 40k arms the hold; an in-process auxiliary (LCM-bypassed) call then runs on this thread."""
-    engine = _engine(tmp_path, context_length=100_000, leaf_chunk_tokens=100_000, max_assembly_tokens=90_000)
+    engine = _engine(tmp_path, context_length=100_000, leaf_chunk_tokens=100_000, max_assembly_tokens=90_000,
+                     context_threshold=0.35)  # #1013: the review trace is the pre-#1013 35k threshold
     view = _view(1)  # #668: an unshortenable newest turn still arms the no-progress hold
     assert engine.threshold_tokens == 35_000
     engine.last_prompt_tokens = 40_000
@@ -352,9 +362,9 @@ def test_g1_at_the_survival_ceiling_a_held_pass_is_not_forced_cleanup_only(tmp_p
     try:
         assert engine._no_progress_hold_blocks(ceiling) is False
         engine.compress(view, current_tokens=ceiling)
-        # #618 item 3: not cleanup-only, and no sweep either: a held pass at the ceiling only fits
-        assert summaries == [] and _leaves(engine) == 0
-        assert (engine._last_compression_status, engine._last_compression_noop_reason) == ("noop", "held")
+        # rc4: the #651 hold is exempt at the ceiling, including after cleanup-only preflight.
+        assert summaries and _leaves(engine) >= 1
+        assert engine._last_compression_status == "compacted"
     finally:
         engine.shutdown()
 

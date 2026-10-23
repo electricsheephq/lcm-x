@@ -16,10 +16,22 @@ import shutil
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from typing import Iterable, Sequence
 
+from .config import _parse_bool_env, lcm_env_get, sqlite_mmap_size
+from .schema_families import SchemaFinding
+
 logger = logging.getLogger(__name__)
+_wal_reset_warned = False  # no lock: a rare duplicate warning beats a lock a forked child could inherit held
+
+
+def sqlite_wal_reset_affected(version_info=None) -> bool:
+    """Whether the linked SQLite version lacks the WAL-reset fix/backports."""
+    v = sqlite3.sqlite_version_info if version_info is None else version_info
+    return ((3, 7, 0) <= v < (3, 51, 3)
+            and not (3, 50, 7) <= v < (3, 51, 0)
+            and not (3, 44, 6) <= v < (3, 45, 0))
 
 
 class SchemaVersionTooNewError(RuntimeError):
@@ -61,12 +73,14 @@ class ExternalContentFtsSpec:
         content_rowid: str,
         indexed_column: str,
         trigger_sqls: Sequence[str],
+        tokenize: str = "",
     ) -> None:
         self.table_name = table_name
         self.content_table = content_table
         self.content_rowid = content_rowid
         self.indexed_column = indexed_column
         self.trigger_sqls = tuple(trigger_sqls)
+        self.tokenize = tokenize
 
 
 def _is_sqlite_lock_error(exc: BaseException) -> bool:
@@ -124,15 +138,25 @@ def configure_connection(conn: sqlite3.Connection) -> None:
                                              or cap growth while another
                                              connection holds an old WAL
                                              end mark.
-    - mmap_size=268435456 (256 MiB)        : memory-map reads so concurrent
-                                              readers cache WAL pages in RAM.
+    - mmap_size=LCM_SQLITE_MMAP_SIZE      : main-database mapped reads;
+                                          default 256 MiB, 0 disables mapping.
     """
     conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     _execute_wal_conversion_with_lock_retry(conn)
+    global _wal_reset_warned
+    if not _wal_reset_warned and sqlite_wal_reset_affected():
+        _wal_reset_warned = True
+        logger.warning(
+            "LCM-X: the linked SQLite %s has the WAL-reset bug "
+            "(https://sqlite.org/wal.html#walresetbug), which can rarely corrupt "
+            "a WAL database written by several connections; upgrade to a Python "
+            "whose SQLite is 3.51.3 or newer (or 3.50.7+ on the 3.50 branch, 3.44.6+ on the 3.44 branch).",
+            sqlite3.sqlite_version,
+        )
     conn.execute("PRAGMA synchronous=FULL")
     conn.execute("PRAGMA wal_autocheckpoint=500")
     conn.execute("PRAGMA journal_size_limit=67108864")
-    conn.execute("PRAGMA mmap_size=268435456")
+    conn.execute(f"PRAGMA mmap_size={sqlite_mmap_size()}")
 
 
 def _execute_wal_conversion_with_lock_retry(
@@ -475,7 +499,8 @@ def classify_version_mismatch(conn: sqlite3.Connection) -> str:
     # The feature table's *internal* shape is intentionally NOT checked here — an
     # early-variant feature table is still an interim stamp, repaired on apply.
     allowed = set(_V5_CORE_TABLE_COLUMNS) | set(_V5_CORE_PRESENCE_ONLY)
-    for fts in _V5_CORE_PRESENCE_ONLY:
+    allowed.add("messages_fts_stem")
+    for fts in (*_V5_CORE_PRESENCE_ONLY, "messages_fts_stem"):
         allowed.update(get_fts_shadow_table_names(fts))
     for table in tables:
         if table in allowed:
@@ -941,17 +966,29 @@ def ensure_temporal_rollup_tables(conn: sqlite3.Connection) -> None:
         )
 
     def ensure_index(name: str, create_sql: str) -> None:
-        existing = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
-            (name,),
-        ).fetchone()
         def normalize(value: object) -> str:
             return " ".join(str(value or "").lower().split())
-        if existing is not None and normalize(existing[0]) == normalize(create_sql):
-            return
-        if existing is not None:
-            conn.execute(f"DROP INDEX {name}")
-        conn.execute(create_sql)
+        for attempt in range(5):  # A delayed peer DROP can remove a winning index.
+            existing = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (name,),
+            ).fetchone()
+            if existing is not None and normalize(existing[0]) == normalize(create_sql):
+                return
+            if existing is not None:
+                conn.execute(f"DROP INDEX IF EXISTS {name}")
+            try:
+                conn.execute(create_sql)
+                return
+            except sqlite3.OperationalError as exc:
+                if str(exc) != f"index {name} already exists":
+                    raise
+                concurrent = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (name,),
+                ).fetchone()
+                if concurrent is not None and normalize(concurrent[0]) == normalize(create_sql):
+                    return
+                if attempt == 4:
+                    raise
 
     ensure_index(
         "idx_lcm_rollups_ready_period",
@@ -1102,16 +1139,31 @@ def ensure_temporal_rollup_invalidation_triggers(conn: sqlite3.Connection) -> No
     def normalized(sql: object) -> str:
         return re.sub(r"\s+", "", str(sql or "").lower()).rstrip(";")
 
-    for trigger_name, expected_sql in trigger_sql.items():
-        row = conn.execute(
+    # Healthy opens must remain read-only behind another WAL writer (#622).
+    # A repair still re-reads every definition after acquiring write ownership.
+    if all(
+        (row := conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
             (trigger_name,),
-        ).fetchone()
-        if row is not None and normalized(row[0]) != normalized(expected_sql):
-            conn.execute(f"DROP TRIGGER {trigger_name}")
-            row = None
-        if row is None:
-            conn.execute(expected_sql)
+        ).fetchone()) is not None
+        and normalized(row[0]) == normalized(expected_sql)
+        for trigger_name, expected_sql in trigger_sql.items()
+    ):
+        return
+
+    # Reuse schema-repair ownership: BEGIN IMMEDIATE before the decisive read,
+    # or a savepoint that leaves an existing caller transaction uncommitted.
+    with _fts_repair_ownership(conn):
+        for trigger_name, expected_sql in trigger_sql.items():
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                (trigger_name,),
+            ).fetchone()
+            if row is not None and normalized(row[0]) != normalized(expected_sql):
+                conn.execute(f"DROP TRIGGER {trigger_name}")
+                row = None
+            if row is None:
+                conn.execute(expected_sql)
 
 
 REQUIRED_TEMPORAL_ROLLUP_TABLES = (
@@ -1590,7 +1642,7 @@ def embedding_schema_missing(conn: sqlite3.Connection) -> set[str]:
     return required - present
 
 
-def verify_embedding_schema(conn: sqlite3.Connection) -> list[str]:
+def embedding_schema_findings(conn: sqlite3.Connection) -> list[SchemaFinding]:
     """Return structural embedding-schema errors, not just missing names.
 
     Feature state is derived and rebuildable, but silently accepting a table
@@ -1599,7 +1651,7 @@ def verify_embedding_schema(conn: sqlite3.Connection) -> list[str]:
     ``ensure_embedding_tables``; incompatible same-name objects are rejected
     before the named migration marker is published.
     """
-    errors = [f"missing object: {name}" for name in sorted(embedding_schema_missing(conn))]
+    errors = [SchemaFinding("missing object", name) for name in sorted(embedding_schema_missing(conn))]
     if errors:
         return errors
 
@@ -1615,7 +1667,7 @@ def verify_embedding_schema(conn: sqlite3.Connection) -> list[str]:
             for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
         )
         if actual != expected:
-            errors.append(f"malformed table: {table}")
+            errors.append(SchemaFinding("malformed table", table))
 
     # CHECK expressions are not exposed by PRAGMA table_info, so fingerprint
     # their normalized expressions exactly rather than looking for a loose
@@ -1632,7 +1684,7 @@ def verify_embedding_schema(conn: sqlite3.Connection) -> list[str]:
         sql = table_sql.get(table, "")
         actual_checks = _sql_check_expressions(sql)
         if actual_checks != expected_checks:
-            errors.append(f"malformed constraints: {table}")
+            errors.append(SchemaFinding("malformed constraints", table))
 
     for index, (table, expected_columns, predicate) in _EMBEDDING_INDEX_SHAPES.items():
         index_shape = tuple(
@@ -1666,8 +1718,13 @@ def verify_embedding_schema(conn: sqlite3.Connection) -> list[str]:
             or partial != int(predicate is not None)
             or actual_predicate != predicate
         ):
-            errors.append(f"malformed index: {index}")
-    return sorted(set(errors))
+            errors.append(SchemaFinding("malformed index", index))
+    return sorted(set(errors), key=str)
+
+
+def verify_embedding_schema(conn: sqlite3.Connection) -> list[str]:
+    """Return the historical string findings in their original order."""
+    return [str(f) for f in embedding_schema_findings(conn)]
 
 
 def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
@@ -1685,6 +1742,16 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
     vectors, keyed on ``(chunk_id, identity_hash)`` where ``chunk_id`` is
     ``store_id:chunk_index``.
     """
+    ensure_metadata_table(conn)
+    has_messages = conn.execute("SELECT 1 FROM sqlite_master WHERE name='messages' AND type='table'").fetchone()
+    observed = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
+        "AND name IN ('lcm_chunk_gapfill_delete', 'lcm_chunk_gapfill_update', 'lcm_chunk_gapfill_message')",
+    ).fetchone()[0]
+    if observed != (3 if has_messages else 2):
+        # Legacy proof predates mutation observation; revalidate it once.
+        conn.execute("DELETE FROM metadata WHERE key LIKE 'chunk_gapfill_scan:%' "
+                     "OR key LIKE 'chunk_policy_revision_through:%'")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS lcm_chunk_meta (
@@ -1720,8 +1787,41 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
             bits BLOB NOT NULL,
             PRIMARY KEY(chunk_id, identity_hash)
         );
+
+        -- A skip proof certifies derived coverage, never immutable source data.
+        -- Raw SQL repair and chunk replacement must invalidate it atomically.
+        CREATE TRIGGER IF NOT EXISTS lcm_chunk_gapfill_delete
+        AFTER DELETE ON lcm_chunk_meta BEGIN
+            DELETE FROM metadata WHERE key IN (
+                'chunk_gapfill_scan:' || OLD.identity_hash,
+                'chunk_policy_revision_through:' || OLD.identity_hash);
+        END;
+        CREATE TRIGGER IF NOT EXISTS lcm_chunk_gapfill_update
+        AFTER UPDATE OF store_id, identity_hash, chunk_id, char_start, char_end ON lcm_chunk_meta BEGIN
+            DELETE FROM metadata WHERE key IN (
+                'chunk_gapfill_scan:' || OLD.identity_hash,
+                'chunk_policy_revision_through:' || OLD.identity_hash,
+                'chunk_gapfill_scan:' || NEW.identity_hash,
+                'chunk_policy_revision_through:' || NEW.identity_hash);
+        END;
         """
     )
+    if has_messages:
+        conn.executescript("""
+        CREATE TRIGGER IF NOT EXISTS lcm_chunk_gapfill_message
+        AFTER UPDATE OF role, content ON messages
+        WHEN lower(trim(OLD.role)) IN ('user', 'assistant')
+          OR lower(trim(NEW.role)) IN ('user', 'assistant')
+          OR (OLD.role IS NOT NEW.role AND
+              (lower(trim(OLD.role)) = 'tool' OR lower(trim(NEW.role)) = 'tool'))
+          OR (lower(trim(OLD.role)) = 'tool' AND lower(trim(NEW.role)) = 'tool'
+              AND (trim(COALESCE(OLD.content, ''), char(9,10,11,12,13,32)) = '')
+                  != (trim(COALESCE(NEW.content, ''), char(9,10,11,12,13,32)) = ''))
+        BEGIN
+            DELETE FROM metadata WHERE key LIKE 'chunk_gapfill_scan:%'
+                OR key LIKE 'chunk_policy_revision_through:%';
+        END;
+        """)
 
 
 # The tables and indexes ``ensure_chunk_tables`` owns. Verified on chunk-corpus
@@ -1982,14 +2082,10 @@ _ASSERTION_TRIGGER_FRAGMENTS: dict[str, tuple[str, ...]] = {
 }
 
 
-def ensure_assertion_tables(conn: sqlite3.Connection) -> None:
-    """Materialize the opt-in V4 assertion family in the existing ``lcm.db``."""
-    # This guard is owned by the rebuildable assertion family. Recreate it so
-    # databases opened after the optional source-time migration compare the
-    # derived observation time, with the legacy write timestamp as fallback.
-    conn.execute("DROP TRIGGER IF EXISTS lcm_assertion_source_insert_guard")
-    conn.executescript(
-        """
+@lru_cache(maxsize=1)
+def _assertion_schema_statements() -> dict[str, str]:
+    """Keep initialization and schema verification on the same DDL contract."""
+    schema_sql = """
         CREATE TABLE IF NOT EXISTS lcm_assertion_sources (
             source_store_id INTEGER NOT NULL,
             extraction_version TEXT NOT NULL
@@ -2203,7 +2299,58 @@ def ensure_assertion_tables(conn: sqlite3.Connection) -> None:
                AND source_content_sha256 = OLD.source_content_sha256;
         END;
         """
-    )
+    statements = {}
+    statement = ""
+    for line in schema_sql.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            match = re.match(
+                r"\s*CREATE (?:TABLE|(?:UNIQUE )?INDEX|TRIGGER) IF NOT EXISTS (\w+)",
+                statement,
+            )
+            assert match is not None
+            statements[match[1]] = statement.strip()
+            statement = ""
+    assert not statement.strip()
+    return statements
+
+
+def ensure_assertion_tables(conn: sqlite3.Connection) -> None:
+    """Materialize missing assertion objects; replace the source guard atomically."""
+    statements = _assertion_schema_statements()
+    guard = "lcm_assertion_source_insert_guard"
+
+    def pending() -> list[str]:
+        placeholders = ",".join("?" for _ in statements)
+        existing = dict(conn.execute(
+            f"SELECT name, sql FROM sqlite_master WHERE name IN ({placeholders})",
+            tuple(statements),
+        ).fetchall())
+        # Only the source-time guard has an in-place upgrade. Other malformed
+        # objects remain untouched and are rejected by verify_assertion_schema.
+        return [
+            name for name, sql in statements.items()
+            if name not in existing or (
+                name == guard
+                and _normalize_trigger_sql(existing[name]) != _normalize_trigger_sql(sql)
+            )
+        ]
+
+    if not pending():
+        return
+    # Do not use executescript here: its implicit commit would expose the gap
+    # between the DROP and CREATE to concurrent assertion/FTS connections.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Another opener may have completed initialization while we waited.
+        for name in pending():
+            if name == guard:
+                conn.execute(f"DROP TRIGGER IF EXISTS {guard}")
+            conn.execute(statements[name])
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 @lru_cache(maxsize=1)
@@ -2494,7 +2641,9 @@ def quote_sql_identifier(identifier: str) -> str:
     return f'"{identifier}"'
 
 
-def _fts_needs_rebuild_structural(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> bool:
+def _fts_needs_rebuild_structural(
+    conn: sqlite3.Connection, spec: ExternalContentFtsSpec, *, _retry_schema: bool = True,
+) -> bool:
     shadow_tables = get_fts_shadow_table_names(spec.table_name)
     existing_tables = get_existing_table_names(conn, [spec.table_name, *shadow_tables])
     if spec.table_name not in existing_tables:
@@ -2510,6 +2659,11 @@ def _fts_needs_rebuild_structural(conn: sqlite3.Connection, spec: ExternalConten
         sql = (info[0] if info else "") or ""
         normalized = sql.lower()
         if "virtual table" not in normalized or "using fts5" not in normalized:
+            return True
+
+        if spec.tokenize and not re.search(
+            r"tokenize\s*=\s*[\"']" + re.escape(spec.tokenize) + r"[\"']", normalized
+        ):
             return True
 
         columns = conn.execute(
@@ -2539,6 +2693,12 @@ def _fts_needs_rebuild_structural(conn: sqlite3.Connection, spec: ExternalConten
         # turning lock exhaustion into destructive repair.
         if _is_sqlite_lock_error(exc):
             raise
+        # #1112: a racing schema change can make a healthy FTS5 connect fail.
+        if _retry_schema and (
+            getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_SCHEMA
+            or "vtable constructor failed" in str(exc).lower()
+        ):
+            return _fts_needs_rebuild_structural(conn, spec, _retry_schema=False)
         return True
 
     return False
@@ -2554,7 +2714,7 @@ def _integrity_check_interval_hours() -> float:
     ``0`` checks on every startup (previous behavior); a negative value never
     checks on startup (relies on structural checks + LIKE fallback + doctor).
     """
-    raw = os.environ.get(INTEGRITY_CHECK_INTERVAL_ENV)
+    raw = lcm_env_get(INTEGRITY_CHECK_INTERVAL_ENV)
     if raw is None:
         return DEFAULT_INTEGRITY_CHECK_INTERVAL_HOURS
     try:
@@ -2650,10 +2810,7 @@ _integrity_scan_threads: dict[tuple[str, str], threading.Thread] = {}
 def _background_integrity_enabled() -> bool:
     """Kill-switch: ``LCM_FTS_INTEGRITY_BACKGROUND=false`` restores the exact old
     synchronous integrity-check behavior on the startup path."""
-    raw = os.environ.get(BACKGROUND_INTEGRITY_ENV)
-    if raw is None:
-        return True
-    return raw.strip().lower() not in ("0", "false", "no", "off")
+    return _parse_bool_env(BACKGROUND_INTEGRITY_ENV, True, unknown=True, true_values=())
 
 
 def _integrity_failed_key(spec: ExternalContentFtsSpec) -> str:
@@ -2923,6 +3080,7 @@ def join_background_integrity_scans(timeout: float | None = None) -> None:
         threads = list(_integrity_scan_threads.values())
     for thread in threads:
         thread.join(timeout)
+    join_background_stem_backfills(timeout)
 
 
 def _fts_needs_rebuild(
@@ -3065,6 +3223,203 @@ def _drop_fts_triggers(conn: sqlite3.Connection, trigger_sqls: Sequence[str]) ->
 def _drop_fts_artifacts(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> None:
     _drop_fts_triggers(conn, spec.trigger_sqls)
     _drop_fts_table(conn, spec.table_name)
+
+
+def _fts_tokenize_clause(spec: ExternalContentFtsSpec) -> str:
+    return ", tokenize='" + spec.tokenize.replace("'", "''") + "'" if spec.tokenize else ""
+
+
+def _create_stem_fts(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> None:
+    conn.execute(
+        f"CREATE VIRTUAL TABLE IF NOT EXISTS {spec.table_name} USING fts5("
+        f"content, content='messages', content_rowid='store_id'{_fts_tokenize_clause(spec)})"
+    )
+    for sql in spec.trigger_sqls:
+        conn.execute(sql)
+
+
+def _stem_metadata(conn: sqlite3.Connection, key: str, value: str | None = None) -> str:
+    if value is not None:
+        conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)", (key, value))
+    row = conn.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
+    return str(row[0]) if row else ""
+
+
+def _mark_stem_ready(conn: sqlite3.Connection) -> None:
+    _stem_metadata(conn, "fts_stem_state", "ready")
+    if not get_existing_table_names(conn, ["lcm_migration_state"]):
+        logger.warning("Stem index ready; migration history table missing, skipping marker")
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO lcm_migration_state(step_name, completed_at) "
+        "VALUES('fts_stem_v1', strftime('%s','now'))"
+    )
+
+
+def ensure_message_stem_fts(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> bool:
+    """DDL and constant-size state checks only; never populate on the open path.
+
+    Returns False when a busy writer deferred the work to the next open: the caller must not
+    read the stem index on this handle, whose state may claim ``ready`` over missing triggers."""
+    if conn.execute("PRAGMA query_only").fetchone()[0]:
+        return True
+    state = _stem_metadata(conn, "fts_stem_state")
+    if (state in ("ready", "backfilling")
+            and get_existing_table_names(conn, [spec.table_name])
+            and not _fts_missing_triggers(conn, spec)):
+        # Nothing to repair: a steady-state open takes no write lock (#622). A backfill still in
+        # flight, or one skipped for low disk, is re-dispatched; the dispatch claims on its own.
+        if state == "backfilling":
+            dispatch_background_stem_backfill(conn, spec)
+        return True
+    previous_timeout = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+    try:
+        with conn:
+            # Acquire write ownership before any DDL: read-only handles skip the
+            # optional index, and restored triggers commit with the reset flags.
+            # The index is optional, so a busy writer gets a short wait, not the
+            # open's full busy timeout (#622); the next open retries.
+            conn.execute(f"PRAGMA busy_timeout={INTEGRITY_SCAN_CLAIM_BUSY_TIMEOUT_MS}")
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+            finally:
+                conn.execute(f"PRAGMA busy_timeout={previous_timeout}")
+            state = _stem_metadata(conn, "fts_stem_state")
+            table_existed = bool(get_existing_table_names(conn, [spec.table_name]))
+            missing = not table_existed or _fts_missing_triggers(conn, spec)
+            _create_stem_fts(conn, spec)
+            if missing and (state or table_existed):
+                # Writes skipped the index while a trigger was absent, whatever the prior state; an
+                # unreset backfill would skip those rows (their docsize exists) and still go ready.
+                _stem_metadata(conn, "fts_stem_reset", "1")
+                _stem_metadata(conn, "fts_stem_state", "backfilling")
+            elif (state != "ready" and _stem_metadata(conn, "fts_stem_reset") != "1"
+                  and not conn.execute("SELECT 1 FROM messages LIMIT 1").fetchone()):
+                _mark_stem_ready(conn)
+            elif not state:
+                _stem_metadata(conn, "fts_stem_state", "backfilling")
+    except sqlite3.OperationalError as exc:
+        if _is_sqlite_lock_error(exc):
+            logger.warning("Database busy: stem index initialization deferred to the next open")
+            return False
+        if "readonly" not in str(exc).lower() and "read-only" not in str(exc).lower():
+            raise
+        logger.info("Read-only database: skipping optional stem index initialization")
+        return True
+    if _stem_metadata(conn, "fts_stem_state") == "backfilling":
+        dispatch_background_stem_backfill(conn, spec)
+    return True
+
+
+_stem_threads: dict[str, threading.Thread] = {}
+_stem_lock = threading.Lock()
+
+
+def _run_stem_backfill(db_path: str, spec: ExternalContentFtsSpec, stamp: str) -> None:
+    try:
+        with closing(sqlite3.connect(db_path, timeout=30)) as conn:
+            def disk_available() -> bool:
+                if _check_disk_space(db_path):
+                    return True
+                logger.warning("Low disk space: stem backfill skipped")
+                return False
+
+            if not disk_available():
+                return
+            conn.execute("BEGIN IMMEDIATE")
+            if _stem_metadata(conn, "fts_stem_reset") == "1":
+                conn.execute("INSERT INTO messages_fts_stem(messages_fts_stem) VALUES('delete-all')")
+                conn.execute("DELETE FROM metadata WHERE key='fts_stem_reset'")
+            conn.commit()
+            for _ in range(2):
+                # Page by key, 1000 existing rows at a time: sparse or imported store_ids cost no
+                # empty batches, so the run scales with the message count, not the id span.
+                last = conn.execute("SELECT COALESCE(MIN(store_id), 1) - 1 FROM messages").fetchone()[0]
+                while True:
+                    end = conn.execute(
+                        "SELECT MAX(store_id) FROM (SELECT store_id FROM messages WHERE store_id > ? "
+                        "ORDER BY store_id LIMIT 1000)", (last,),
+                    ).fetchone()[0]
+                    if end is None:
+                        break
+                    if not disk_available():
+                        return
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute(
+                        "INSERT INTO messages_fts_stem(rowid, content) "
+                        "SELECT store_id, content FROM messages WHERE store_id > ? AND store_id <= ? "
+                        "AND NOT EXISTS (SELECT 1 FROM messages_fts_stem_docsize WHERE id=store_id)",
+                        (last, end),
+                    )
+                    conn.commit()
+                    time.sleep(0.03)
+                    last = end
+                if not disk_available():
+                    return
+                conn.execute("BEGIN IMMEDIATE")
+                indexed = conn.execute("SELECT COUNT(*) FROM messages_fts_stem_docsize").fetchone()[0]
+                total = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+                if indexed == total and _stem_metadata(conn, "fts_stem_reset") != "1":
+                    _mark_stem_ready(conn)
+                    conn.commit()
+                    return
+                conn.commit()
+            logger.warning("Stem backfill count mismatch; leaving state backfilling")
+    except Exception:
+        logger.exception("Background stem backfill failed; leaving state backfilling")
+    finally:
+        try:
+            with closing(sqlite3.connect(db_path, timeout=0.05)) as cleanup:
+                cleanup.execute("DELETE FROM metadata WHERE key='fts_stem_claim' AND value=?", (stamp,))
+                cleanup.commit()
+        except sqlite3.Error:
+            logger.warning("Could not clear stem backfill claim; it will expire")
+        with _stem_lock:
+            if _stem_threads.get(db_path) is threading.current_thread():
+                _stem_threads.pop(db_path, None)
+
+
+def dispatch_background_stem_backfill(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> None:
+    db_path = _database_path_for_connection(conn)
+    if not db_path or db_path == ":memory:":
+        return
+    with _stem_lock:
+        if db_path in _stem_threads and _stem_threads[db_path].is_alive():
+            return
+        stamp = str(time.time())
+        try:
+            with closing(sqlite3.connect(db_path, timeout=INTEGRITY_SCAN_CLAIM_BUSY_TIMEOUT_MS / 1000)) as claim:
+                claim.execute("BEGIN IMMEDIATE")
+                previous = _stem_metadata(claim, "fts_stem_claim")
+                if previous and float(stamp) - float(previous) < INTEGRITY_SCAN_STALE_SECONDS:
+                    return
+                _stem_metadata(claim, "fts_stem_claim", stamp)
+                claim.commit()
+        except sqlite3.Error:
+            logger.warning("Stem backfill claim locked; skipped for this open")
+            return
+        thread = threading.Thread(target=_run_stem_backfill, args=(db_path, spec, stamp), daemon=True)
+        _stem_threads[db_path] = thread
+        thread.start()
+
+
+def join_background_stem_backfills(timeout: float | None = None) -> None:
+    with _stem_lock:
+        threads = list(_stem_threads.values())
+    for thread in threads:
+        thread.join(timeout)
+
+
+def stem_index_status(conn: sqlite3.Connection | None) -> str:
+    try:
+        state = _stem_metadata(conn, "fts_stem_state")
+        if state == "backfilling":
+            indexed = conn.execute("SELECT COUNT(*) FROM messages_fts_stem_docsize").fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            return f"backfilling {indexed}/{total}"
+        return state or "absent"
+    except (sqlite3.Error, AttributeError, TypeError):
+        return "absent"
 
 
 def _check_disk_space(db_path: str) -> bool:
@@ -3308,7 +3663,7 @@ def repair_external_content_fts(
                     CREATE VIRTUAL TABLE {quote_sql_identifier(spec.table_name)} USING fts5(
                         {quote_sql_identifier(spec.indexed_column)},
                         content={quote_sql_identifier(spec.content_table)},
-                        content_rowid={quote_sql_identifier(spec.content_rowid)}
+                        content_rowid={quote_sql_identifier(spec.content_rowid)}{_fts_tokenize_clause(spec)}
                     )
                     """
                 )

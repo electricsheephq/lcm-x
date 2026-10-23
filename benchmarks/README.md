@@ -228,26 +228,27 @@ The shipped preset catalog is inspectable from the `/lcm` command surface when s
 /lcm preset apply codex_gpt_long_context --dry-run
 ```
 
-Current `codex_gpt_long_context` / `codex_spark_context` provenance from the fresh-main validation suite:
+Current shipped preset provenance from `presets.py`:
 
-- policy file: `benchmarks/policies/codex_gpt_long_context.yaml`
-- policy version: `1`
-- benchmark version: `2`
-- fixture suite: committed baseline/chatter/failure fixtures, two scrubbed operator-shape fixtures, plus `codex_pressure_probe:42:4:1000` and `spark_pressure_probe:42:4:1000`
-- aggregate candidate score: `92.941` vs `82.941` for `baseline_272k`
-- retrieval canary recall: `1.0`
-- repeated-compaction risk: candidate `0`, baseline `4`
-- Spark minimum post-compaction headroom: `26,432` tokens in the validation suite
+- `codex_gpt_long_context`: policy file `benchmarks/policies/codex_gpt_long_context.yaml`, policy version `2`, benchmark version `pmw-1`.
+  - Fixture suite: Track S, Sol summary route, `--turn-end-notify`, 6 runs per arm.
+  - Evidence: v0.27.0 per-message-wait replay cell (#1123, #1128): 24k chunk with a 2,000-token summary cap vs 8k, Sol summary route, 120 s summary timeout (the shipped `LCM_SUMMARY_TIMEOUT_MS` default). The baseline metrics below are the 8k arm.
+  - Metrics (candidate vs baseline): compactions per 100 messages `20.0` vs `87.0`; mean wait per message `10.0s` vs `52.4s`; waited-message share `0.20` vs `0.85`; facts kept at cp304 `0.853` vs `0.683`; summary-call failures `0` vs `124`; dropped rows `0` vs `47`.
+- `codex_spark_context` (provisional): policy file `benchmarks/policies/codex_spark_context.yaml`, policy version `2`, benchmark version `pmw-1`.
+  - Fixture suite: inherited long-context replay cell (#1123, #1128).
+  - Evidence: inherits the long-context cell's 24k chunk; #1139 bounds the effective chunk at a quarter of the threshold, equal to 24,000 at a 96k threshold. No separate 128k cell has run yet.
+  - Metric summary: none recorded for this preset; prior 8k headroom metrics are omitted because they are unverified at 24k.
 
 The dry-run apply surface previews env-var changes only:
 
 ```text
 LCM_CONTEXT_THRESHOLD=0.75
 LCM_FRESH_TAIL_COUNT=24
-LCM_LEAF_CHUNK_TOKENS=8000
+LCM_LEAF_CHUNK_TOKENS=24000
+LCM_LEAF_TARGET_MAX_TOKENS=2000
 ```
 
-Explicit parseable preset-managed operator config wins. If `LCM_FRESH_TAIL_COUNT` or another supported preset-managed `LCM_*` knob is already set to a value the runtime can parse, `/lcm preset suggest` and `/lcm preset apply ... --dry-run` report that value as kept rather than overwritten. Invalid env values are reported separately, and the preview shows the preset value that would replace them. Runtime `target_after_compaction` is still benchmark-only metadata because the engine does not yet expose that as a live config field.
+Explicit parseable preset-managed operator config wins. If `LCM_FRESH_TAIL_COUNT` or another supported preset-managed `LCM_*` knob is already set to a value the runtime can parse, `/lcm preset suggest` and `/lcm preset apply ... --dry-run` report that value as kept rather than overwritten. Invalid env values are reported separately, and the preview shows the preset value that would replace them.
 
 ## Metrics added for preset research
 

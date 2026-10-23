@@ -1,7 +1,8 @@
 name: hermes-lcm-x
-version: 0.24.9
-description: "LCM-X — Lossless Context Memory eXtension for Hermes, with a recoverable DAG-based context engine"
+version: 0.28.1
+description: "LCM-X — Lossless Context Memory eXtension for Hermes, with a recoverable DAG-based context engine OmniMemEval: BEAM 100K 1st of 12, LongMemEval 2nd of 13."
 author: "Voltropy / Hermes Community"
+requires_hermes: ">=0.21.3"   # the plugin API floor (ctx.register_hook); matches the catalog entry
 provides_tools:
   - lcm_grep
   - lcm_recall

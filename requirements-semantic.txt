@@ -26,4 +26,4 @@
 #   openai-compatible  -> nothing to install; set the API key + base URL
 #   ollama             -> nothing to install; run the Ollama daemon
 
-fastembed
+fastembed>=0.8.0,<1.0

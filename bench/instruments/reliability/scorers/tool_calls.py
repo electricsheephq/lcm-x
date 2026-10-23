@@ -24,15 +24,43 @@ def canon(args) -> str:
     return json.dumps(args, sort_keys=True)
 
 
+def underlying(name: str, args):
+    """The host's ``tool_call`` bridge (tools/tool_search.py ``resolve_underlying_call``): the dispatch hooks see the
+    underlying tool while the stored call keeps the bridge. One entry, ``{name, arguments}`` or ``{calls: [entry]}``."""
+    if name != "tool_call":
+        return name, args
+    try:
+        a = json.loads(args) if isinstance(args, str) else args
+        calls = a.get("calls")
+        entry = a if calls is None else calls[0] if isinstance(calls, list) and len(calls) == 1 else None
+        inner = entry.get("arguments")
+        inner = json.loads(inner) if isinstance(inner, str) and inner.strip() else inner or {}
+        return (entry["name"], inner) if entry.get("name") else (name, args)
+    except (AttributeError, TypeError, ValueError):
+        return name, args
+
+
 def completed(a: dict) -> bool:
     end = a.get("end") or {}
     return bool(a["ended"]) and not end.get("failed") and end.get("kind") != "cancel"
 
 
-def bind(atts: list[dict], lineage_of=lambda a: "chat") -> dict:
+# Hosts without agent/turn_preflight.py's re-anchor after a post-tool compaction (0.21.5 adds it): upstream v2026.9.14
+# (0.21.3) and v2026.9.21 (0.21.4). Only there does bind() license a dangling-tail notice.
+HOSTS_WITHOUT_POST_TOOL_REANCHOR = frozenset({"345cd2b057a452236de401d3534b8502a7465e8d",
+                                              "d337b736aa1e8ebecfab043842d13e4a2d2f48a3"})
+
+
+def bind(atts: list[dict], lineage_of=lambda a: "chat", *, license_wire_notices: bool = False) -> dict:
     """Per completed attempt: gaps (dispatch never happened -> UNSUPPORTED), failures (wrong/failed/incomplete/unseen
-    result, unplanned dispatch -> FAIL) and the expected keys. Calls of unfinished attempts may be stored at most once."""
-    gaps, failures, expected, loose = [], [], Counter(), set()
+    result, unplanned dispatch -> FAIL) and the expected keys. Calls of unfinished attempts may be stored at most once.
+
+    ``wire_notices``: floor-0.21.3 (345cd2b0) does not re-anchor the turn after a post-tool compaction, so its request
+    copy replaces this turn's live results with its own dangling-tail notice (agent/replay_cleanup.py) while the host
+    persists the dispatched result. Only for a successful dispatch the probe saw so flagged (``host_wire_notice``) is
+    the expected key the dispatch's result, and only with ``license_wire_notices`` (a host in
+    HOSTS_WITHOUT_POST_TOOL_REANCHOR); each such call is recorded."""
+    gaps, failures, expected, loose, wire_notices = [], [], Counter(), set(), []
     for a in atts:
         issues, g = a.get("tool_issues", []), lineage_of(a)
         if not completed(a):
@@ -43,25 +71,30 @@ def bind(atts: list[dict], lineage_of=lambda a: "chat") -> dict:
         free = [d for d in a.get("tool_dispatch", [])]
         seen = {s["id"]: s for s in a.get("tool_seen", [])}
         for c in issues:
+            name, args = underlying(c["name"], c["args"])
             d = next((d for d in free if d.get("id") == c["id"]), None) or \
-                next((d for d in free if d.get("id") is None and d["name"] == c["name"] and canon(d["args"]) == canon(c["args"])), None)
+                next((d for d in free if d.get("id") is None and d["name"] == name and canon(d["args"]) == canon(args)), None)
             if d is None:
                 gaps.append(f"{a['tag']}: planned {c['name']} ({c['id']}) was never dispatched by the host")
                 continue
             free.remove(d)
-            if d["name"] != c["name"] or canon(d["args"]) != canon(c["args"]):
+            if d["name"] != name or canon(d["args"]) != canon(args):
                 failures.append(f"{a['tag']}: {c['id']} planned {c['name']} but the host ran {d['name']}")
             elif not d.get("ok"):
                 failures.append(f"{a['tag']}: {c['name']} ({c['id']}) failed: {d.get('detail')}")
             elif d.get("chars", 0) < (c.get("expect") or {}).get("min_chars", 0):
                 failures.append(f"{a['tag']}: {c['name']} result {d.get('chars')} chars < {c['expect']['min_chars']}")
             expected[(g, "call", c["id"], c["name"], canon(c["args"]))] += 1
-            if c["id"] in seen:
+            if license_wire_notices and c["id"] in seen and seen[c["id"]].get("host_wire_notice") and d.get("ok") \
+                    and d.get("result_sha256"):
+                expected[(g, "tool", c["id"], d["result_sha256"])] += 1
+                wire_notices.append({"id": c["id"], "notice_sha256": seen[c["id"]]["sha"], "result_sha256": d["result_sha256"]})
+            elif c["id"] in seen:
                 expected[(g, "tool", c["id"], seen[c["id"]]["sha"])] += 1
             else:
                 failures.append(f"{a['tag']}: the result of {c['id']} never reached the next provider request")
         failures += [f"{a['tag']}: unplanned host dispatch of {d['name']}" for d in free]
-    return {"gaps": gaps, "failures": failures, "expected": expected, "loose": loose}
+    return {"gaps": gaps, "failures": failures, "expected": expected, "loose": loose, "wire_notices": wire_notices}
 
 
 def stored_keys(rows, lineage=lambda sid: "chat") -> Counter:

@@ -6,6 +6,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  merge_group:
 
 permissions:
   contents: read
@@ -41,6 +42,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
@@ -54,7 +56,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install test dependencies
-        run: pip install pytest numpy
+        run: pip install pytest==9.1.1 pytest-xdist==3.8.0 numpy ruff==0.15.13 hypothesis==6.141.1
+
+      - name: Use the runtime SQLite library
+        uses: ./.github/actions/sqlite-runtime
 
       - name: Stub hermes-agent ABC
         run: |
@@ -62,33 +67,105 @@ jobs:
           cat > agent/__init__.py <<'STUB'
           STUB
           cat > agent/context_engine.py <<'STUB'
-          """Minimal stub of hermes-agent ContextEngine ABC for CI."""
-          class ContextEngine:
-              """Base class stub — just enough for LCMEngine to import."""
+          """Dependency-free ContextEngine contract shared by the pinned hosts."""
+          import copy
+          import json
+          from abc import ABC, abstractmethod
+
+          class ContextEngine(ABC):
+              last_prompt_tokens = 0
+              last_completion_tokens = 0
+              last_total_tokens = 0
+              threshold_tokens = 0
+              context_length = 0
+              compression_count = 0
+              threshold_percent = 0.75
+              protect_first_n = 3
+              protect_last_n = 6
+              emit_automatic_compaction_status = True
+
               def __init__(self, **kwargs):
                   self.compression_count = 0
                   self.last_prompt_tokens = 0
-              def compress(self, messages, current_tokens=None, **kwargs):
+
+              @property
+              @abstractmethod
+              def name(self):
                   raise NotImplementedError
+
+              @abstractmethod
+              def update_from_response(self, usage):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def should_compress(self, prompt_tokens=None):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def compress(self, messages, current_tokens=None, focus_topic=None, force=False, memory_context=""):
+                  raise NotImplementedError
+
+              def should_compress_info(self, prompt_tokens=None):
+                  return self.should_compress(prompt_tokens), None
+
+              def should_compress_preflight(self, messages):
+                  return False
+
+              def get_automatic_compaction_status_message(self, *, phase, default_message, **context):
+                  return default_message if self.emit_automatic_compaction_status else None
+
               def on_session_start(self, session_id, **kwargs):
                   pass
-              def on_session_end(self, **kwargs):
+
+              def on_session_end(self, session_id, messages):
                   pass
+
               def on_session_reset(self):
                   self.compression_count = 0
                   self.last_prompt_tokens = 0
+                  self.last_completion_tokens = 0
+                  self.last_total_tokens = 0
+
               def get_tool_schemas(self):
                   return []
+
               def handle_tool_call(self, name, args, **kwargs):
-                  raise NotImplementedError
+                  return json.dumps({"error": f"Unknown context engine tool: {name}"})
+
               def get_status(self):
-                  return {}
+                  last_prompt = max(self.last_prompt_tokens, 0)
+                  return {
+                      "last_prompt_tokens": last_prompt,
+                      "threshold_tokens": self.threshold_tokens,
+                      "context_length": self.context_length,
+                      "usage_percent": min(100, last_prompt / self.context_length * 100) if self.context_length else 0,
+                      "compression_count": self.compression_count,
+                  }
+
+              def clone_for_agent(self):
+                  return copy.deepcopy(self)
+
+              def update_model(self, model, context_length, base_url="", api_key="", provider="", api_mode=""):
+                  # Host threshold resolution imports its compressor; keep this
+                  # unit-test fallback dependency-free. LCMEngine overrides it.
+                  self.context_length = context_length
           STUB
+
+      - name: Fetch the rollback-reader commits
+        # The old-reader tests run these releases' code against a store the
+        # current code wrote; under CI a missing commit fails them (#841).
+        run: git fetch --no-tags --depth=1 origin c36b46e3a7b1bff23cfa45fa117565ab8624441d f47b55e031b507b424ff5f480d8f2a80d358f1f0 6800cf45ad05280e6cf6fa9e1ad96c62b7132646 49e99a272d2d461e5c90732e7ef2bc20e96f0826 c67d7633d963a2ffd24cf90995189ee58e2f88c7 709099b3a397a7893a7abae8802ebe7bf605f79e f3cc8de918ba14c21ae246099652762a26255554 77b2b4f795fb6a4f84c55abf6d0441da4469971e
+
+      - name: Print linked SQLite version
+        run: python -c "import sqlite3; print('sqlite', sqlite3.sqlite_version)"
 
       - name: Run pytest under low file descriptor limit
         run: |
           ulimit -n 1024
-          python -m pytest tests/ -q
+          python -m pytest tests/ -q -m "not latency" -n 4 --ignore=tests/test_embedding_privacy.py -o junit_family=xunit1 --junitxml=reports/test-${{ matrix.python-version }}/main.xml
+          # Runs alone: one of its tests asserts a wall-clock budget that
+          # parallel load on the runner can exceed.
+          python -m pytest tests/test_embedding_privacy.py -q -m "not latency" -o junit_family=xunit1 --junitxml=reports/test-${{ matrix.python-version }}/privacy.xml
 
       - name: Run static validation
         run: |
@@ -96,3 +173,64 @@ jobs:
           python -m py_compile scripts/import_lossless_claw.py
           bash -n scripts/install.sh
           git diff --check
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: junit-test-${{ matrix.python-version }}
+          path: reports/
+          if-no-files-found: error
+
+  bench-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HF_HUB_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - run: pip install --no-deps pytest==9.1.1 pytest-xdist==3.8.0 numpy==2.4.2 httpx==0.28.1 PyYAML==6.0.3 psutil==7.2.2 anyio==4.15.1 certifi==2026.10.19 httpcore==1.0.9 idna==3.20 h11==0.16.0 typing_extensions==4.16.0 iniconfig==2.3.1 packaging==26.3 pluggy==1.7.0 pygments==2.21.0 execnet==2.1.2
+      - name: Run isolated bench test roots
+        env:
+          TMPDIR: ${{ runner.temp }}
+        shell: bash
+        run: |
+          status=0
+          for root in bench/aml bench/fmp/tests bench/instruments/local_catchup/tests bench/instruments/compaction_probe bench/instruments/compaction_probe/track_s/decision/tests bench/instruments/compaction_probe/track_s/scorer/tests bench/instruments/reliability bench/instruments/scale389/tests bench/scoreboard bench/tools/tests; do
+            targets=("$root")
+            if [[ "$root" == bench/instruments/compaction_probe ]]; then targets=("$root"/test*.py); fi
+            python -m pytest "${targets[@]}" -q -n 4 -o junit_family=xunit1 --junitxml="reports/${root//\//-}.xml" || status=1
+          done
+          exit "$status"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: junit-bench
+          path: reports/
+          if-no-files-found: error
+
+  tests-ran:
+    needs: [test, bench-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: junit-*
+          path: reports/
+          merge-multiple: true
+      - name: Require executed tests and complete JUnit evidence
+        run: >-
+          python scripts/ci/check_tests_ran.py
+          --junit reports/test-{3.11,3.12,3.13,3.14}/{main,privacy}.xml
+          reports/bench-{aml,fmp-tests,instruments-local_catchup-tests,instruments-compaction_probe,instruments-compaction_probe-track_s-decision-tests,instruments-compaction_probe-track_s-scorer-tests,instruments-reliability,instruments-scale389-tests,scoreboard,tools-tests}.xml

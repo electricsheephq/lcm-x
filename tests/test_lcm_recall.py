@@ -10,11 +10,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import sqlite3
 import time
 from types import SimpleNamespace
 
 import pytest
 
+from hermes_lcm import recall_delivery
 import hermes_lcm.tools as lcm_tools
 import hermes_lcm.vector_store as vector_store_module
 from hermes_lcm.config import LCMConfig
@@ -73,6 +75,629 @@ def recall_engine(tmp_path):
     finally:
         dag.close()
         store.close()
+
+
+@pytest.mark.parametrize("query", ["VALUE_S1586_SHARD000007_0000", "api:v2", "part-42", "alpha_beta", "3.14"])
+def test_recall_fts_arm_identifier_queries_literal_phrase_first(recall_engine, monkeypatch, query):
+    engine = recall_engine
+    target = engine._store.append("session-old", {"role": "user", "content": query})
+    for i in range(80):
+        engine._store.append(f"noise-{i}", {
+            "role": "user", "content": "VALUE S1586 unrelated SHARD000007 different 0000 api part alpha 3",
+        })
+    original = lcm_tools._lcm_grep_full_text_with_deadline
+    calls = []
+    statements = []
+    original_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        conn = original_connect(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    def capture(args, **kwargs):
+        calls.append((dict(args), kwargs))
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(lcm_tools, "_lcm_grep_full_text_with_deadline", capture)
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    deadline = time.monotonic() + 5.0
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        engine, query, candidate_limit=10, deadline=deadline, excluded_session_ids=set(),
+    )
+    assert error is None
+    assert len(calls) == 1
+    assert calls[0][0]["query"] == f'"{query}"'
+    assert calls[0][0]["_stemmed"] is True
+    assert calls[0][0]["sort"] == "relevance"
+    assert calls[0][1]["deadline"] == deadline
+    assert [hit["store_id"] for hit in hits] == [target]
+    assert hits.fts_index == "stem"
+    from hermes_lcm.search_query import sanitize_fts5_query
+
+    phrase = sanitize_fts5_query(f'"{query}"')
+    assert any(" MATCH " in sql and phrase in sql for sql in statements)
+
+
+def test_recall_fts_arm_identifier_literal_miss_falls_back_to_or_query(recall_engine, monkeypatch):
+    engine = recall_engine
+    engine._store.append("session-old", {"role": "user", "content": "VALUE scattered S1586"})
+    deadline = time.monotonic() + 5.0
+    expected = lcm_tools._lcm_recall_fts_arm(
+        engine, "VALUE S1586", candidate_limit=10, deadline=deadline, excluded_session_ids=set(),
+    )
+    original = lcm_tools._lcm_grep_full_text_with_deadline
+    calls = []
+
+    def capture(args, **kwargs):
+        calls.append((dict(args), kwargs))
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(lcm_tools, "_lcm_grep_full_text_with_deadline", capture)
+    actual = lcm_tools._lcm_recall_fts_arm(
+        engine, "VALUE_S1586", candidate_limit=10, deadline=deadline, excluded_session_ids=set(),
+    )
+    assert [args["query"] for args, _ in calls] == ['"VALUE_S1586"', "VALUE OR S1586"]
+    assert all(kwargs["deadline"] == deadline for _, kwargs in calls)
+    assert calls[-1][0]["_allow_operators"] is True
+    assert actual == expected
+    assert actual[0].fts_index == expected[0].fts_index
+
+
+@pytest.mark.parametrize("failure", [
+    {"error": "full-text query timed out", "timeout": True},
+    {"error": "full-text worker capacity exhausted"},
+    {"message_search_error": "interrupted", "results": []},
+])
+def test_recall_fts_arm_identifier_literal_timeout_skips_or_fallback(recall_engine, monkeypatch, failure):
+    calls = []
+
+    def fail(args, **kwargs):
+        calls.append(args["query"])
+        return failure
+
+    monkeypatch.setattr(lcm_tools, "_lcm_grep_full_text_with_deadline", fail)
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        recall_engine, "VALUE_S1586", candidate_limit=10,
+        deadline=time.monotonic() + 2.0, excluded_session_ids=set(),
+    )
+    assert calls == ['"VALUE_S1586"']
+    assert hits == []
+    if "error" in failure:
+        assert error is failure
+    else:
+        assert error == {"error": "full-text message search failed: interrupted"}
+
+
+@pytest.mark.parametrize("literal_hit", [True, False])
+def test_recall_fts_arm_identifier_literal_honors_exclusions(recall_engine, monkeypatch, literal_hit):
+    engine = recall_engine
+    engine._store.append("excluded", {"role": "user", "content": "VALUE_S1586"})
+    target = engine._store.append("allowed", {
+        "role": "user", "content": "VALUE_S1586" if literal_hit else "VALUE scattered S1586",
+    })
+    original = lcm_tools._lcm_grep_full_text_with_deadline
+    calls = []
+    excluded = {"excluded"}
+
+    def capture(args, **kwargs):
+        calls.append(dict(args))
+        assert args["_excluded_session_ids"] is excluded
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(lcm_tools, "_lcm_grep_full_text_with_deadline", capture)
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        engine, "VALUE_S1586", candidate_limit=10,
+        deadline=time.monotonic() + 5.0, excluded_session_ids=excluded,
+    )
+    assert error is None
+    assert calls[0]["query"] == '"VALUE_S1586"'
+    assert len(calls) == (1 if literal_hit else 2)
+    assert [hit["store_id"] for hit in hits] == [target]
+    assert all(hit["session_id"] == "allowed" for hit in hits)
+
+
+@pytest.mark.parametrize(("query", "expected_query", "operators", "sort"), [
+    ("What name did we give the beagle puppy?", "name OR we OR give OR beagle OR puppy", True, "relevance"),
+    ("art-related", "art OR related", True, "relevance"),
+    ('"VALUE_S1586"', '"VALUE S1586"', True, "relevance"),
+    ("東京_42", "東京 OR 42", True, "relevance"),
+    ("🚀_42", "🚀_42", False, "relevance"),
+    ("VALUE_S1586 extra", "VALUE OR S1586 OR extra", True, "relevance"),
+    ("single42", "single42", True, "relevance"),
+    ("what did the?", "what did the?", False, "recency"),
+])
+def test_recall_fts_arm_natural_language_and_hyphenated_queries_unchanged(
+    recall_engine, monkeypatch, query, expected_query, operators, sort,
+):
+    # Golden request and complete arm payload from the pre-fix route.
+    calls = []
+    excluded = {"excluded"}
+    deadline = time.monotonic() + 5.0
+
+    def respond(args, **kwargs):
+        calls.append((args, kwargs))
+        return {"fts_index": "stem", "results": [{
+            "store_id": 7, "session_id": "old", "role": "user", "timestamp": 123,
+            "snippet": "fixed source excerpt", "source": "fixture",
+        }]}
+
+    monkeypatch.setattr(lcm_tools, "_lcm_grep_full_text_with_deadline", respond)
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        recall_engine, query, candidate_limit=10, deadline=deadline, excluded_session_ids=excluded,
+    )
+    assert error is None
+    assert calls == [({
+        "query": expected_query, "_allow_operators": operators, "_stemmed": True,
+        "sort": sort, "mode": "recall", "session_scope": "all", "limit": 10,
+        "_excluded_session_ids": excluded,
+    }, {"engine": recall_engine, "deadline": deadline, "limit_cap": lcm_tools._LCM_GREP_HYBRID_CANDIDATE_CAP})]
+    assert hits.fts_index == "stem"
+    assert hits == [{
+        "kind": "message_excerpt", "store_id": 7, "session_id": "old", "source": "fixture",
+        "role": "user", "timestamp": 123, "content_offset": 0,
+        "snippet": "fixed source excerpt", "_fts_snippet": "fixed source excerpt",
+        "from_current_session": False, "expand_hint": lcm_tools._lcm_recall_excerpt_expand_hint({
+            "session_id": "old", "store_id": 7, "content_offset": 0,
+        }),
+    }]
+
+
+def test_fulltext_recall_natural_language_question(recall_engine):
+    engine = recall_engine
+    engine._config.embeddings_enabled = False
+    engine._store.append("session-old", {
+        "role": "user",
+        "content": "We adopted a beagle puppy last spring and named him Biscuit.",
+    })
+    engine._store.append("session-other", {
+        "role": "user", "content": "Quarterly budget review moved to Thursday afternoon.",
+    })
+
+    payload = json.loads(lcm_tools.lcm_recall(
+        {"query": "What name did we give the beagle puppy?"}, engine=engine,
+    ))
+    assert payload["hits"]
+    assert payload["hits"][0]["session_id"] == "session-old"
+    assert payload["provenance"]["coverage"]["fts"] == "ok"
+    assert payload["degraded"] is True
+
+
+@pytest.mark.parametrize("query", ["what did the?", "?!,", "and OR the!"])
+def test_fulltext_recall_empty_content_query_keeps_raw_path(recall_engine, monkeypatch, query):
+    from hermes_lcm.search_query import build_recall_or_query
+
+    assert build_recall_or_query(query) == ""
+    engine = recall_engine
+    engine._config.embeddings_enabled = False
+    engine._store.append("session-old", {"role": "user", "content": "what did the"})
+    original = lcm_tools._lcm_grep_full_text_with_deadline
+    calls = []
+
+    def capture(args, **kwargs):
+        calls.append(dict(args))
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(lcm_tools, "_lcm_grep_full_text_with_deadline", capture)
+    payload = json.loads(lcm_tools.lcm_recall({"query": query}, engine=engine))
+    assert calls[0]["query"] == query
+    assert not calls[0].get("_allow_operators", False)
+    assert calls[0].get("sort", "recency") == "recency"
+    expected = json.loads(lcm_tools._lcm_grep_full_text(
+        {"query": query, "session_scope": "all"}, engine=engine,
+    ))
+    assert [hit["store_id"] for hit in payload["hits"]] == [
+        hit["store_id"] for hit in expected["results"]
+    ]
+    assert payload["provenance"]["coverage"]["fts"] == "ok"
+    assert payload["degraded"] is True
+
+
+@pytest.mark.parametrize("mode", ["full_text", "semantic", "hybrid"])
+def test_public_grep_cannot_enable_recall_operators(recall_engine, monkeypatch, mode):
+    engine = recall_engine
+    engine._config.embeddings_enabled = False
+    engine._store.append("session-old", {"role": "user", "content": "beagle puppy"})
+    original = engine._store.search
+    operator_flags = []
+
+    def capture(query, **kwargs):
+        operator_flags.append(kwargs.get("allow_operators"))
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(engine._store, "search", capture)
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        engine, "beagle puppy", candidate_limit=10,
+        deadline=time.monotonic() + 2.0, excluded_session_ids=set(),
+    )
+    assert error is None
+    assert hits
+    assert operator_flags == [True]
+
+    args = {"query": "beagle OR puppy", "session_scope": "all", "mode": mode}
+    ordinary = json.loads(lcm_tools.lcm_grep(args, engine=engine))
+    crafted = json.loads(lcm_tools.lcm_grep(
+        {**args, "_allow_operators": True}, engine=engine,
+    ))
+    assert crafted == ordinary
+    assert crafted["results"]
+    assert operator_flags == [True, False, False]
+
+
+@pytest.fixture
+def grep_operator_engine(recall_engine):
+    for content in ("alpha", "beta", "alpha or beta"):
+        recall_engine._store.append(CURRENT, {"role": "user", "content": content})
+    return recall_engine
+
+
+def test_grep_agent_or_matches_all_three_rows(grep_operator_engine):
+    payload = json.loads(lcm_tools.lcm_grep({"query": "alpha OR beta"}, engine=grep_operator_engine))
+    assert {hit["snippet"].replace(">>>", "").replace("<<<", "") for hit in payload["results"]} == {
+        "alpha", "beta", "alpha or beta",
+    }
+    assert payload["total_results"] == 3
+    assert payload["sort"] == "recency"
+    assert "retried" not in payload
+
+
+def test_grep_agent_prefix_matches_deployment(recall_engine):
+    target = recall_engine._store.append(CURRENT, {"role": "user", "content": "deployment"})
+    payload = json.loads(lcm_tools.lcm_grep({"query": "deploy*"}, engine=recall_engine))
+    assert [hit["store_id"] for hit in payload["results"]] == [target]
+    assert "retried" not in payload
+
+
+def test_grep_agent_not_excludes_both_row(grep_operator_engine):
+    payload = json.loads(lcm_tools.lcm_grep({"query": "alpha NOT beta"}, engine=grep_operator_engine))
+    assert len(payload["results"]) == 1
+    assert "beta" not in payload["results"][0]["snippet"]
+    assert "retried" not in payload
+
+
+@pytest.mark.parametrize("layer", ["store", "dag"])
+def test_grep_zero_hit_not_never_retries(recall_engine, layer):
+    for content in (
+        "deploy staging done", "staging cluster rebooted", "this is not related at all",
+    ):
+        if layer == "store":
+            recall_engine._store.append(CURRENT, {"role": "user", "content": content})
+        else:
+            recall_engine._dag.add_node(SummaryNode(
+                session_id=CURRENT, depth=0, summary=content,
+                token_count=6, source_ids=[], source_type="messages",
+            ))
+    payload = json.loads(lcm_tools.lcm_grep({"query": "deploy NOT staging"}, engine=recall_engine))
+    assert payload["results"] == []
+    assert payload["total_results"] == 0
+    assert "retried" not in payload
+
+
+@pytest.mark.parametrize("query", ["OR", "NOT", "NEAR", "OR NOT"])
+def test_grep_operator_only_queries_stay_on_fts(recall_engine, monkeypatch, query):
+    for target in (recall_engine._store, recall_engine._dag):
+        monkeypatch.setattr(target, "_search_like", lambda *a, **kw: pytest.fail("operator-only LIKE scan"))
+    payload = json.loads(lcm_tools.lcm_grep({"query": query}, engine=recall_engine))
+    assert payload["results"] == []
+    assert "message_search_error" not in payload
+    assert "retried" not in payload
+
+
+@pytest.mark.parametrize(("query", "contents"), [
+    ("(alpha OR gamma) beta", ("alpha beta", "gamma beta", "alpha gamma")),
+    ("alpha NEAR beta", ("alpha beta", "alpha near beta", "alpha", "beta")),
+])
+@pytest.mark.parametrize("layer", ["store", "dag"])
+def test_grep_neutralized_forms_match_main(recall_engine, query, contents, layer):
+    for content in contents:
+        if layer == "store":
+            recall_engine._store.append(CURRENT, {"role": "user", "content": content})
+        else:
+            recall_engine._dag.add_node(SummaryNode(
+                session_id=CURRENT, depth=0, summary=content,
+                token_count=4, source_ids=[], source_type="messages",
+            ))
+    target = getattr(recall_engine, "_" + layer)
+    identity = (lambda hit: hit["store_id"]) if layer == "store" else (lambda hit: hit.node_id)
+    expected = [identity(hit) for hit in target.search(query, session_id=CURRENT, sort="recency")]
+    actual = [identity(hit) for hit in target.search(
+        query, session_id=CURRENT, sort="recency", agent_operators=True,
+    )]
+    assert actual == expected
+    payload = json.loads(lcm_tools.lcm_grep({"query": query}, engine=recall_engine))
+    key = "store_id" if layer == "store" else "node_id"
+    assert [hit[key] for hit in payload["results"]] == expected
+    assert "retried" not in payload
+
+
+@pytest.mark.parametrize("word", ["NOT", "NEAR", "OR", "AND"])
+def test_grep_retry_keeps_quoted_operator_words_literal(recall_engine, monkeypatch, word):
+    recall_engine._store.append(CURRENT, {"role": "user", "content": "alpha beta"})
+    original = recall_engine._store.search
+    queries = []
+
+    def capture(query, **kwargs):
+        queries.append(query)
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(recall_engine._store, "search", capture)
+    payload = json.loads(lcm_tools.lcm_grep({"query": f'alpha "{word}" beta'}, engine=recall_engine))
+    assert payload["total_results"] == 1
+    assert payload["retried"] == "any_term"
+    assert queries == [f'alpha "{word}" beta', f'alpha OR "{word}" OR beta']
+
+
+@pytest.mark.parametrize(("query", "content", "retry"), [
+    ("deploy* missing", "deployment", "deploy* OR missing"),
+    ("the launch", "the", "the OR launch"),
+    ('"alpha OR beta" gamma', "alpha or beta", '"alpha OR beta" OR gamma'),
+    ('"not now" gamma', "not now", '"not now" OR gamma'),
+    ('alpha "NOT" beta', "not", 'alpha OR "NOT" OR beta'),
+    ("deploy* missing deploy*", "deployment", "deploy* OR missing"),
+])
+@pytest.mark.parametrize("layer", ["store", "dag"])
+def test_grep_retry_preserves_own_operands(recall_engine, monkeypatch, query, content, retry, layer):
+    target = getattr(recall_engine, "_" + layer)
+    if layer == "store":
+        target.append(CURRENT, {"role": "user", "content": content})
+    else:
+        target.add_node(SummaryNode(
+            session_id=CURRENT, depth=0, summary=content,
+            token_count=4, source_ids=[], source_type="messages",
+        ))
+    original = target.search
+    queries = []
+
+    def capture(query, **kwargs):
+        queries.append(query)
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(target, "search", capture)
+    payload = json.loads(lcm_tools.lcm_grep({"query": query}, engine=recall_engine))
+    assert payload["query"] == query
+    assert payload["total_results"] == 1
+    assert payload["retried"] == "any_term"
+    assert queries == [query, retry]
+
+
+@pytest.mark.parametrize("layer", ["store", "dag"])
+def test_grep_quoted_parentheses_preserve_or(recall_engine, layer):
+    for content in ("function(foo)", "alpha"):
+        if layer == "store":
+            recall_engine._store.append(CURRENT, {"role": "user", "content": content})
+        else:
+            recall_engine._dag.add_node(SummaryNode(
+                session_id=CURRENT, depth=0, summary=content,
+                token_count=3, source_ids=[], source_type="messages",
+            ))
+    payload = json.loads(lcm_tools.lcm_grep(
+        {"query": '"function(foo)" OR alpha'}, engine=recall_engine,
+    ))
+    assert payload["total_results"] == 2
+    assert "retried" not in payload
+
+
+def test_grep_bare_near_retry_omits_near(recall_engine, monkeypatch):
+    recall_engine._store.append(CURRENT, {"role": "user", "content": "alpha beta"})
+    original = recall_engine._store.search
+    queries = []
+
+    def capture(query, **kwargs):
+        queries.append(query)
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(recall_engine._store, "search", capture)
+    payload = json.loads(lcm_tools.lcm_grep({"query": "alpha NEAR beta"}, engine=recall_engine))
+    assert payload["total_results"] == 1
+    assert payload["retried"] == "any_term"
+    assert queries == ["alpha NEAR beta", "alpha OR beta"]
+
+
+@pytest.mark.parametrize(("query", "count"), [
+    ("OR alpha", 2), ("alpha OR", 2), ("NOT alpha", 2),
+    ("alpha OR OR beta", 1), ("alpha*beta", 1), ("*", 0),
+    ('alpha OR "beta', 1), ("alpha OR (beta", 1),
+])
+def test_grep_invalid_operator_forms_are_safe(grep_operator_engine, query, count):
+    payload = json.loads(lcm_tools.lcm_grep({"query": query}, engine=grep_operator_engine))
+    assert "error" not in payload
+    assert "message_search_error" not in payload
+    assert payload["total_results"] == count
+
+
+@pytest.mark.parametrize(("query", "retried", "count"), [
+    ("alpha gamma", True, 1), ("alpha", False, 1), ("alpha beta", False, 1),
+    ("alpha OR gamma", False, 1), ("gamma OR delta", False, 0),
+    ("gamma", False, 0), ("alpha 東京", False, 1), ("alpha 🚀", False, 1),
+])
+def test_grep_zero_hit_retry_is_bounded(recall_engine, monkeypatch, query, retried, count):
+    recall_engine._store.append(CURRENT, {"role": "user", "content": "alpha beta"})
+    original = recall_engine._store.search
+    calls = []
+
+    def capture(query, **kwargs):
+        calls.append((query, kwargs))
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(recall_engine._store, "search", capture)
+    payload = json.loads(lcm_tools.lcm_grep({"query": query}, engine=recall_engine))
+    assert payload["query"] == query
+    assert payload["total_results"] == count
+    assert (payload.get("retried") == "any_term") is retried
+    assert len(calls) == (2 if retried else 1)
+    if retried:
+        assert calls[1][0] == "alpha OR gamma"
+        assert calls[1][1]["allow_operators"] is True
+
+
+@pytest.mark.parametrize(("query", "count", "retried"), [
+    ("alpha OR beta", 3, False), ("alpha NOT beta", 1, False),
+    ("deploy*", 1, False), ("alpha gamma", 2, True),
+])
+def test_grep_summary_operator_and_retry_parity(recall_engine, query, count, retried):
+    for content in ("alpha", "beta", "alpha or beta", "deployment"):
+        recall_engine._dag.add_node(SummaryNode(
+            session_id=CURRENT, depth=0, summary=content,
+            token_count=3, source_ids=[], source_type="messages",
+        ))
+    payload = json.loads(lcm_tools.lcm_grep({"query": query}, engine=recall_engine))
+    assert len(payload["results"]) == count
+    assert all(hit["type"] == "summary" for hit in payload["results"])
+    assert (payload.get("retried") == "any_term") is retried
+    # Existing direct DAG consumers still neutralize OR and strip prefixes.
+    assert len(recall_engine._dag.search("alpha OR beta", session_id=CURRENT)) == 1
+    assert recall_engine._dag.search("deploy*", session_id=CURRENT) == []
+
+
+@pytest.mark.parametrize("layer", ["store", "dag"])
+def test_grep_match_syntax_error_retries_neutralized_fts_once(recall_engine, monkeypatch, layer):
+    import hermes_lcm.dag as dag_module
+    import hermes_lcm.store as store_module
+
+    recall_engine._store.append(CURRENT, {"role": "user", "content": "alpha or beta"})
+    recall_engine._dag.add_node(SummaryNode(
+        session_id=CURRENT, depth=0, summary="alpha or beta",
+        token_count=3, source_ids=[], source_type="messages",
+    ))
+    target = getattr(recall_engine, "_" + layer)
+    module = store_module if layer == "store" else dag_module
+    original = module.sanitize_fts5_query
+    queries = []
+
+    def broken_operator(query, **kwargs):
+        return "alpha OR" if kwargs.get("agent_operators") else original(query, **kwargs)
+
+    monkeypatch.setattr(module, "sanitize_fts5_query", broken_operator)
+    monkeypatch.setattr(target, "_search_like", lambda *a, **kw: pytest.fail("syntax error reached LIKE"))
+    target._conn.set_trace_callback(queries.append)
+    assert len(target.search("alpha OR beta", session_id=CURRENT, agent_operators=True)) == 1
+    table = "messages_fts" if layer == "store" else "nodes_fts"
+    match_queries = [sql for sql in queries if f"WHERE {table} MATCH" in sql]
+    assert len(match_queries) == 2
+    assert "MATCH 'alpha OR'" in match_queries[0]
+    assert "MATCH 'alpha or beta'" in match_queries[1]
+
+
+@pytest.mark.parametrize("layer", ["store", "dag"])
+def test_grep_second_match_syntax_error_falls_back_like_main(recall_engine, monkeypatch, layer):
+    import hermes_lcm.dag as dag_module
+    import hermes_lcm.store as store_module
+
+    recall_engine._store.append(CURRENT, {"role": "user", "content": "alpha beta"})
+    recall_engine._dag.add_node(SummaryNode(
+        session_id=CURRENT, depth=0, summary="alpha beta",
+        token_count=2, source_ids=[], source_type="messages",
+    ))
+    target = getattr(recall_engine, "_" + layer)
+    module = store_module if layer == "store" else dag_module
+    expected = target._search_like("alpha beta", session_id=CURRENT)
+    original = target._search_like
+    like_queries = []
+    match_queries = []
+
+    def capture_like(query, **kwargs):
+        like_queries.append(query)
+        return original(query, **kwargs)
+
+    # Both the agent form and the neutralized retry produce MATCH syntax errors.
+    monkeypatch.setattr(module, "sanitize_fts5_query", lambda *a, **kw: "alpha OR")
+    monkeypatch.setattr(target, "_search_like", capture_like)
+    target._conn.set_trace_callback(match_queries.append)
+    assert target.search("alpha beta", session_id=CURRENT, agent_operators=True) == expected
+    assert like_queries == ["alpha beta"]
+    table = "messages_fts" if layer == "store" else "nodes_fts"
+    assert len([sql for sql in match_queries if f"WHERE {table} MATCH" in sql]) == 2
+
+
+def test_recall_portland_or_keeps_existing_composition(recall_engine, monkeypatch):
+    from hermes_lcm.search_query import sanitize_fts5_query
+
+    recall_engine._config.embeddings_enabled = False
+    recall_engine._store.append(CURRENT, {"role": "user", "content": "Portland or hotel"})
+    original = recall_engine._store.search
+    queries = []
+
+    def capture(query, **kwargs):
+        queries.append((query, kwargs))
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(recall_engine._store, "search", capture)
+    payload = json.loads(lcm_tools.lcm_recall({"query": "Portland, OR hotel"}, engine=recall_engine))
+    assert payload["hits"]
+    assert queries[0][0] == "Portland OR hotel"  # Recall's existing content-term OR composition.
+    assert queries[0][1]["allow_operators"] is True
+    assert not queries[0][1].get("agent_operators")
+    assert sanitize_fts5_query("Portland, OR hotel") == "Portland or hotel"
+
+
+def test_recall_or_emoji_signal_survives_launch_distractors(recall_engine, monkeypatch):
+    engine = recall_engine
+    target = engine._store.append("emoji", {"role": "user", "content": "launch 🚀"})
+    for index in range(40):
+        engine._store.append(f"launch-{index}", {"role": "user", "content": "launch"})
+    original = engine._store._search_like
+    like_queries = []
+
+    def capture(query, **kwargs):
+        like_queries.append(query)
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(engine._store, "_search_like", capture)
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        engine, "launch 🚀", candidate_limit=5,
+        deadline=time.monotonic() + 2.0, excluded_session_ids=set(),
+    )
+    assert error is None
+    assert target in [hit["store_id"] for hit in hits]
+    assert len(hits) <= 5
+    assert like_queries == ["launch 🚀"]
+
+
+def test_recall_or_cjk_keeps_existing_like_route(recall_engine, monkeypatch):
+    from hermes_lcm.search_query import build_recall_or_query
+
+    target = recall_engine._store.append("cjk", {"role": "user", "content": "launch 東京"})
+    original = recall_engine._store._search_like
+    like_queries = []
+
+    def capture(query, **kwargs):
+        like_queries.append(query)
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(recall_engine._store, "_search_like", capture)
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        recall_engine, "launch 東京", candidate_limit=5,
+        deadline=time.monotonic() + 2.0, excluded_session_ids=set(),
+    )
+    assert error is None
+    assert [hit["store_id"] for hit in hits] == [target]
+    assert like_queries == [build_recall_or_query("launch 東京")] == ["launch OR 東京"]
+
+
+@pytest.mark.parametrize("delta", [False, True])
+def test_recall_or_answer_ready_centers_content_term(recall_engine, delta):
+    recall_engine._config.embeddings_enabled = False
+    content = "somewhere Zebrawood " + "filler " * 500 + "zEBra now " + "tail " * 500
+    store_id = recall_engine._store.append("late-term", {"role": "user", "content": content})
+    store_ids = {store_id}
+    if delta:
+        store_ids.add(recall_engine._store.append("late-term-other", {"role": "user", "content": content}))
+    payload = json.loads(lcm_tools.lcm_recall({
+        "query": "where is Zebra now", "detail": "answer_ready", "limit": 1,
+        **({"seen_refs": []} if delta else {}),
+    }, engine=recall_engine))
+    hit = payload["hits"][0]
+    assert hit["store_id"] in store_ids
+    assert "zEBra now" in hit["content"]
+    assert hit["evidence_span"]["char_start"] == content.index("zEBra")
+    if delta:
+        refill = json.loads(lcm_tools.lcm_recall({
+            "query": "where is Zebra now", "detail": "answer_ready", "limit": 1,
+            "seen_refs": [hit["exact_ref"]],
+        }, engine=recall_engine))["hits"][0]
+        assert refill["store_id"] in store_ids - {hit["store_id"]}
+        assert "zEBra now" in refill["content"]
+        assert refill["evidence_span"]["char_start"] == content.index("zEBra")
 
 
 def _add_summary(
@@ -1518,6 +2143,681 @@ def test_occurrence_time_legacy_row_uses_ingest_fallback_without_relative_event(
     assert hit["observation_time"]["source"] == "ingest_fallback"
 
 
+_EVENT_TIME_KEYS = ("event_time", "event_time_source")
+
+
+def _seed_event_time_rows(engine):
+    """Rows with and without a host observation, all matching one query.
+
+    The observed rows carry sub-second host stamps so the second-precision
+    rendering is exercised; the bare rows have ``observed_at`` NULL.
+    """
+    engine._config.embeddings_enabled = False
+    observed = {}
+    bare = []
+    for index in range(12):
+        content = f"kanban dashboard sprint note {index} " + ("detail " * (index * 40))
+        if index % 2 == 0:
+            stamp = datetime(2024, 3, 20, 13, 45, index, 750_000, tzinfo=timezone.utc)
+            store_id = engine._store.append(
+                f"session-{index}",
+                {"role": "user", "content": content, "timestamp": stamp.timestamp()},
+            )
+            observed[store_id] = stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            bare.append(
+                engine._store.append(
+                    f"session-{index}", {"role": "assistant", "content": content}
+                )
+            )
+    return observed, bare
+
+
+def _strip_event_time(payload):
+    payload = json.loads(json.dumps(payload))
+    for hit in payload.get("hits", []):
+        for key in _EVENT_TIME_KEYS:
+            hit.pop(key, None)
+    return payload
+
+
+_EVENT_TIME_SQL = "SELECT store_id, observed_at, observed_at_source FROM messages"
+
+
+class _EventTimeReadConnection:
+    """Wrap the event-time read's private connection to observe or slow it.
+
+    ``before_read`` runs on the real connection just before the event-time
+    statement; ``fetch_delay_s`` sleeps after the rows are fetched, in Python,
+    where the SQLite progress handler cannot interrupt.
+    """
+
+    def __init__(self, conn, statements, *, before_read=None, fetch_delay_s=0.0):
+        self._conn = conn
+        self._statements = statements
+        self._before_read = before_read
+        self._fetch_delay_s = fetch_delay_s
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def execute(self, sql, *params):
+        self._statements.append(sql)
+        if not sql.startswith(_EVENT_TIME_SQL):
+            return self._conn.execute(sql, *params)
+        if self._before_read is not None:
+            self._before_read(self._conn)
+        rows = self._conn.execute(sql, *params).fetchall()
+        delay = self._fetch_delay_s
+        return SimpleNamespace(fetchall=lambda: (time.sleep(delay), rows)[1])
+
+
+class _SqliteWithConnect:
+    """The ``sqlite3`` module as ``tools`` sees it, with ``connect`` replaced."""
+
+    def __init__(self, connect):
+        self.connect = connect
+
+    def __getattr__(self, name):
+        return getattr(sqlite3, name)
+
+
+def _patched_event_time_rows(monkeypatch, *, connect=None, path=None):
+    """Run the real event-time read with its ``connect`` or ``Path`` replaced."""
+    real_rows = lcm_tools._lcm_recall_event_time_rows
+
+    def rows(engine, store_ids, *, deadline):
+        with monkeypatch.context() as patch:
+            if connect is not None:
+                patch.setattr(lcm_tools, "sqlite3", _SqliteWithConnect(connect))
+            if path is not None:
+                patch.setattr(lcm_tools, "Path", path)
+            return real_rows(engine, store_ids, deadline=deadline)
+
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_event_time_rows", rows)
+
+
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready", "answer_ready_non_strict"])
+def test_recall_message_hits_carry_event_time_only_from_observed_at(
+    recall_engine, monkeypatch, detail
+):
+    observed, bare = _seed_event_time_rows(recall_engine)
+    if detail == "answer_ready_non_strict":
+        _non_strict(recall_engine)
+        detail = "answer_ready"
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "kanban dashboard sprint", "detail": detail, "limit": 25},
+            engine=recall_engine,
+        )
+    )
+    hits = [hit for hit in payload["hits"] if hit["kind"] != "summary"]
+    assert {hit["store_id"] for hit in hits} <= set(observed) | set(bare)
+    assert any(hit["store_id"] in observed for hit in hits)
+    assert any(hit["store_id"] in bare for hit in hits)
+    for hit in hits:
+        if hit["store_id"] in observed:
+            assert hit["event_time"] == observed[hit["store_id"]]
+            assert hit["event_time_source"] == "host_message_timestamp"
+        else:
+            # LCM's write time (messages.timestamp) is never relabelled as event time.
+            assert "event_time" not in hit
+            assert "event_time_source" not in hit
+    if not recall_engine._config.recall_reference_strict:
+        # Hits past the hydration limit are covered too, not only expanded ones.
+        assert len(hits) == len(observed) + len(bare)
+        assert any("content" not in hit and "event_time" in hit for hit in hits)
+
+
+def test_recall_event_time_without_source_label_emits_time_only(recall_engine, monkeypatch):
+    recall_engine._config.embeddings_enabled = False
+    store_id = recall_engine._store.append(
+        "session-a",
+        {"role": "user", "content": "kanban dashboard sprint", "timestamp": 1_710_942_330.9},
+    )
+    recall_engine._store._conn.execute(
+        "UPDATE messages SET observed_at_source = NULL WHERE store_id = ?", (store_id,)
+    )
+    # The event-time read uses its own read-only connection, which sees
+    # committed rows only, as every store write commits.
+    recall_engine._store._conn.commit()
+    payload = json.loads(
+        lcm_tools.lcm_recall({"query": "kanban dashboard sprint"}, engine=recall_engine)
+    )
+    hit = payload["hits"][0]
+    assert hit["event_time"] == "2024-03-20T13:45:30Z"
+    assert "event_time_source" not in hit
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"detail": "snippets", "limit": 25},
+        {"detail": "answer_ready", "limit": 25},
+        {"detail": "answer_ready", "limit": 25, "seen_refs": []},
+        {"detail": "answer_ready", "limit": 25, "_non_strict": True},
+    ],
+)
+def test_recall_event_time_leaves_order_ids_and_content_unchanged(
+    recall_engine, monkeypatch, args
+):
+    _seed_event_time_rows(recall_engine)
+    args = dict(args)
+    if args.pop("_non_strict", False):
+        _non_strict(recall_engine)
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    request = {"query": "kanban dashboard sprint", **args}
+    with_fields = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    # Disabling the field helper reproduces main's response for the same store.
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_event_time", lambda _stored: {})
+    without_fields = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+
+    assert any("event_time" in hit for hit in with_fields["hits"])
+    assert not any("event_time" in hit for hit in without_fields["hits"])
+    assert _strip_event_time(with_fields) == without_fields
+    assert [(hit["kind"], hit.get("store_id")) for hit in with_fields["hits"]] == [
+        (hit["kind"], hit.get("store_id")) for hit in without_fields["hits"]
+    ]
+    for new, old in zip(with_fields["hits"], without_fields["hits"]):
+        assert new.get("content") == old.get("content")
+        assert new["snippet"] == old["snippet"]
+
+
+def test_recall_event_time_content_is_a_verbatim_slice(recall_engine, monkeypatch):
+    observed, _bare = _seed_event_time_rows(recall_engine)
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "kanban dashboard sprint", "detail": "answer_ready", "limit": 25},
+            engine=recall_engine,
+        )
+    )
+    expanded = [hit for hit in payload["hits"] if "content" in hit]
+    assert expanded
+    for hit in expanded:
+        row = recall_engine._store.get(hit["store_id"])
+        start = hit["content_offset"]
+        assert hit["content"] == row["content"][start:start + hit["content_returned_chars"]]
+        assert ("event_time" in hit) == (hit["store_id"] in observed)
+
+
+def test_recall_snippets_event_time_costs_one_batched_read(recall_engine, monkeypatch):
+    _seed_event_time_rows(recall_engine)
+    calls = {"search": 0, "get_batch": 0, "event_time_rows": 0}
+    real_search = MessageStore.search
+    real_get_batch = MessageStore.get_batch
+    real_rows = lcm_tools._lcm_recall_event_time_rows
+
+    def counted_rows(*args, **kwargs):
+        calls["event_time_rows"] += 1
+        return real_rows(*args, **kwargs)
+
+    def counted_search(self, *args, **kwargs):
+        calls["search"] += 1
+        return real_search(self, *args, **kwargs)
+
+    def counted_get_batch(self, *args, **kwargs):
+        calls["get_batch"] += 1
+        return real_get_batch(self, *args, **kwargs)
+
+    monkeypatch.setattr(MessageStore, "search", counted_search)
+    monkeypatch.setattr(MessageStore, "get_batch", counted_get_batch)
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_event_time_rows", counted_rows)
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "kanban dashboard sprint", "limit": 25}, engine=recall_engine
+        )
+    )
+    assert any("event_time" in hit for hit in payload["hits"])
+    # The event-time read is its own narrow statement, not a full-row get_batch.
+    assert calls == {"search": 1, "get_batch": 0, "event_time_rows": 1}
+
+
+def test_recall_event_time_read_selects_only_its_three_columns(
+    recall_engine, monkeypatch
+):
+    observed, _bare = _seed_event_time_rows(recall_engine)
+    statements = []
+
+    def recorded_connect(*args, **kwargs):
+        return _EventTimeReadConnection(sqlite3.connect(*args, **kwargs), statements)
+
+    def no_get_batch(self, *args, **kwargs):
+        raise AssertionError("the event-time read must not fetch full rows")
+
+    monkeypatch.setattr(MessageStore, "get_batch", no_get_batch)
+    _patched_event_time_rows(monkeypatch, connect=recorded_connect)
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "kanban dashboard sprint", "limit": 25}, engine=recall_engine
+        )
+    )
+    reads = [sql for sql in statements if "FROM messages" in sql]
+    assert len(reads) == 1 and reads[0].startswith(_EVENT_TIME_SQL + " WHERE store_id IN")
+    for column in ("content", "tool_calls", "*"):
+        assert column not in reads[0].split("FROM")[0]
+    for hit in payload["hits"]:
+        if hit["store_id"] in observed:
+            assert hit["event_time"] == observed[hit["store_id"]]
+    assert "event_time_unavailable" not in payload
+
+
+def test_recall_event_time_read_finished_past_the_deadline_is_dropped(
+    recall_engine, monkeypatch
+):
+    observed, _bare = _seed_event_time_rows(recall_engine)
+    statements = []
+
+    def slow_fetch_connect(*args, **kwargs):
+        return _EventTimeReadConnection(
+            sqlite3.connect(*args, **kwargs), statements, fetch_delay_s=0.3
+        )
+
+    # Unpatched, the same read returns every observed row.
+    rows, reason = lcm_tools._lcm_recall_event_time_rows(
+        recall_engine, list(observed), deadline=time.monotonic() + 30.0
+    )
+    assert reason is None and set(rows) == set(observed)
+    monkeypatch.setattr(lcm_tools, "sqlite3", _SqliteWithConnect(slow_fetch_connect))
+    rows, reason = lcm_tools._lcm_recall_event_time_rows(
+        recall_engine, list(observed), deadline=time.monotonic() + 0.1
+    )
+    # The rows were fetched, but only after the budget ran out: the partial
+    # result is dropped and reported as a deadline skip, never returned late.
+    assert any(sql.startswith(_EVENT_TIME_SQL) for sql in statements)
+    assert (rows, reason) == ({}, "deadline")
+
+
+def test_recall_event_time_read_failure_sets_the_unavailable_marker(
+    recall_engine, monkeypatch
+):
+    _seed_event_time_rows(recall_engine)
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    request = {"query": "kanban dashboard sprint", "limit": 25}
+    expected = _strip_event_time(
+        json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    )
+    assert "event_time_unavailable" not in expected
+
+    def failing_read(conn):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    _patched_event_time_rows(
+        monkeypatch,
+        connect=lambda *args, **kwargs: _EventTimeReadConnection(
+            sqlite3.connect(*args, **kwargs), [], before_read=failing_read
+        ),
+    )
+    payload = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    # A failed read is reported, never passed off as "no recorded event time".
+    assert payload.pop("event_time_unavailable") is True
+    assert payload.pop("event_time_unavailable_reason") == "read_error"
+    assert payload == expected
+
+
+def test_recall_event_time_read_is_skipped_once_the_deadline_is_spent(
+    recall_engine, monkeypatch
+):
+    _seed_event_time_rows(recall_engine)
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    request = {"query": "kanban dashboard sprint", "limit": 25}
+    expected = _strip_event_time(
+        json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    )
+    reads = {"connect": 0}
+    real_rows = lcm_tools._lcm_recall_event_time_rows
+    real_connect = lcm_tools.sqlite3.connect
+
+    def counted_connect(*args, **kwargs):
+        reads["connect"] += 1
+        return real_connect(*args, **kwargs)
+
+    def spent_rows(engine, store_ids, *, deadline):
+        # The rest of the pipeline ran inside its budget; only this read sees
+        # it spent, so the hits are otherwise exactly the baseline.
+        with monkeypatch.context() as patch:
+            patch.setattr(lcm_tools.sqlite3, "connect", counted_connect)
+            return real_rows(
+                engine, store_ids, deadline=lcm_tools.time.monotonic() - 1.0
+            )
+
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_event_time_rows", spent_rows)
+    payload = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    assert reads == {"connect": 0}
+    assert payload.pop("event_time_unavailable") is True
+    assert payload.pop("event_time_unavailable_reason") == "deadline"
+    assert payload == expected
+
+
+def test_recall_event_time_read_cannot_outlive_the_deadline(recall_engine, monkeypatch, latency_check):
+    _seed_event_time_rows(recall_engine)
+    recall_engine._config.recall_query_timeout_s = 1.0
+    connect_timeouts = []
+    read_errors = []
+    now = [0.0]
+    if not latency_check:
+        monkeypatch.setattr(time, "monotonic", lambda: now[0])
+
+    def blocked_read(conn):
+        # Only the private connection's progress handler can end the timed read.
+        # The logical-clock case has a cap as a hang guard for a missing handler.
+        if not latency_check:
+            now[0] += 2.0
+        guard = " WHERE x < 10000000" if not latency_check else ""
+        try:
+            conn.execute(
+                "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n" + guard + ") "
+                "SELECT count(*) FROM n"
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            read_errors.append(str(exc))
+            raise
+
+    def recorded_connect(*args, **kwargs):
+        connect_timeouts.append(kwargs.get("timeout"))
+        return _EventTimeReadConnection(
+            sqlite3.connect(*args, **kwargs), [], before_read=blocked_read
+        )
+
+    _patched_event_time_rows(monkeypatch, connect=recorded_connect)
+    started = time.monotonic() if latency_check else None
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "kanban dashboard sprint", "limit": 25}, engine=recall_engine
+        )
+    )
+    if latency_check:
+        assert time.monotonic() - started < 1.0 + 0.5
+    else:
+        assert len(read_errors) == 1 and "interrupt" in read_errors[0].lower()
+    assert payload["hits"]
+    assert not any("event_time" in hit for hit in payload["hits"])
+    assert payload["event_time_unavailable"] is True
+    assert payload["event_time_unavailable_reason"] == "deadline"
+    # The busy wait is the remaining budget, never the store's 30 s timeout.
+    assert len(connect_timeouts) == 1 and 0 < connect_timeouts[0] <= 1.0
+
+
+def test_recall_event_time_path_error_sets_the_read_error_marker(
+    recall_engine, monkeypatch
+):
+    _seed_event_time_rows(recall_engine)
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    request = {"query": "kanban dashboard sprint", "limit": 25}
+    expected = _strip_event_time(
+        json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    )
+
+    class UnresolvablePath:
+        def __init__(self, *args):
+            pass
+
+        def resolve(self):
+            raise OSError(40, "Too many levels of symbolic links")
+
+    _patched_event_time_rows(monkeypatch, path=UnresolvablePath)
+    payload = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    assert payload.pop("event_time_unavailable") is True
+    assert payload.pop("event_time_unavailable_reason") == "read_error"
+    assert payload == expected
+
+
+def test_recall_event_time_read_does_not_swallow_unrelated_errors(
+    recall_engine, monkeypatch
+):
+    observed, _bare = _seed_event_time_rows(recall_engine)
+
+    class BrokenPath:
+        def __init__(self, *args):
+            raise ValueError("not a filesystem error")
+
+    monkeypatch.setattr(lcm_tools, "Path", BrokenPath)
+    with pytest.raises(ValueError, match="not a filesystem error"):
+        lcm_tools._lcm_recall_event_time_rows(
+            recall_engine, list(observed), deadline=time.monotonic() + 30.0
+        )
+
+
+def _hit_order(payload):
+    return [(hit["kind"], hit.get("store_id")) for hit in payload["hits"]]
+
+
+def _without_event_time_marker(payload):
+    payload = _strip_event_time(payload)
+    payload.pop("event_time_unavailable", None)
+    payload.pop("event_time_unavailable_reason", None)
+    return payload
+
+
+def _event_time_cap_baseline(engine, monkeypatch, request):
+    """Main's response for ``request`` (no event-time fields) and its exact fit.
+
+    The exact fit is the encoded length for answer_ready, whose final check
+    sizes the whole response, and the summed hit sizes for snippets, whose
+    only check is the per-hit one.
+    """
+    with monkeypatch.context() as patch:
+        patch.setattr(lcm_tools, "_lcm_recall_event_time", lambda _stored: {})
+        encoded = lcm_tools.lcm_recall(request, engine=engine)
+        main = json.loads(encoded)
+        if request["detail"] == "answer_ready":
+            assert not main["provenance"]["answer_ready"]["response_truncated"]
+            exact = len(encoded)
+        else:
+            exact = sum(len(json.dumps(hit, ensure_ascii=False)) for hit in main["hits"])
+        # Sized to fit exactly, main still delivers every hit unchanged.
+        patch.setattr(lcm_tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", exact)
+        refit_encoded = lcm_tools.lcm_recall(request, engine=engine)
+    refit = json.loads(refit_encoded)
+    assert refit["hits"] == main["hits"]
+    if request["detail"] == "answer_ready":
+        assert len(refit_encoded) == exact
+        assert not refit["provenance"]["answer_ready"]["response_truncated"]
+    return refit, exact
+
+
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
+def test_recall_event_time_never_evicts_a_hit_that_fits_exactly_on_main(
+    recall_engine, monkeypatch, detail
+):
+    observed, _bare = _seed_event_time_rows(recall_engine)
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    request = {"query": "kanban dashboard sprint", "detail": detail, "limit": 25}
+    main, exact = _event_time_cap_baseline(recall_engine, monkeypatch, request)
+    assert any(store_id in observed for _kind, store_id in _hit_order(main))
+
+    monkeypatch.setattr(lcm_tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", exact)
+    encoded = lcm_tools.lcm_recall(request, engine=recall_engine)
+    payload = json.loads(encoded)
+    # The rows carry event time, yet the same hits come back in the same order:
+    # the optional fields give way, never a hit.
+    assert _hit_order(payload) == _hit_order(main)
+    assert _without_event_time_marker(payload) == main
+    if detail == "answer_ready":
+        assert len(encoded) <= exact
+    else:
+        assert payload["event_time_unavailable_reason"] == "response_cap"
+
+
+def test_recall_event_time_evicts_only_what_main_evicts(recall_engine, monkeypatch):
+    observed, _bare = _seed_event_time_rows(recall_engine)
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    request = {"query": "kanban dashboard sprint", "detail": "answer_ready", "limit": 25}
+    _fit, exact = _event_time_cap_baseline(recall_engine, monkeypatch, request)
+    # One character short: main itself must evict its lowest-ranked hit.
+    monkeypatch.setattr(lcm_tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", exact - 1)
+    with monkeypatch.context() as patch:
+        patch.setattr(lcm_tools, "_lcm_recall_event_time", lambda _stored: {})
+        main = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    assert main["provenance"]["answer_ready"]["response_truncated"]
+
+    encoded = lcm_tools.lcm_recall(request, engine=recall_engine)
+    payload = json.loads(encoded)
+    assert len(encoded) <= exact - 1
+    assert _hit_order(payload) == _hit_order(main)
+    assert _without_event_time_marker(payload) == main
+    # The eviction freed room, so the stripped fields are reported after all.
+    assert payload["event_time_unavailable_reason"] == "response_cap"
+    assert any(hit["store_id"] in observed for hit in payload["hits"])
+
+
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
+def test_recall_event_time_over_the_cap_is_stripped_lowest_rank_first(
+    recall_engine, monkeypatch, detail
+):
+    observed, _bare = _seed_event_time_rows(recall_engine)
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    request = {"query": "kanban dashboard sprint", "detail": detail, "limit": 25}
+    main, exact = _event_time_cap_baseline(recall_engine, monkeypatch, request)
+    full_encoded = lcm_tools.lcm_recall(request, engine=recall_engine)
+    full = json.loads(full_encoded)
+    assert "event_time_unavailable" not in full
+    if detail == "answer_ready":
+        full_size = len(full_encoded)
+    else:
+        full_size = sum(len(json.dumps(hit, ensure_ascii=False)) for hit in full["hits"])
+    assert full_size > exact
+
+    monkeypatch.setattr(lcm_tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", full_size - 1)
+    encoded = lcm_tools.lcm_recall(request, engine=recall_engine)
+    payload = json.loads(encoded)
+    assert _hit_order(payload) == _hit_order(main)
+    assert payload["event_time_unavailable"] is True
+    assert payload["event_time_unavailable_reason"] == "response_cap"
+    if detail == "answer_ready":
+        assert len(encoded) <= full_size - 1
+    kept = [
+        "event_time" in hit for hit in payload["hits"] if hit.get("store_id") in observed
+    ]
+    # Higher-ranked hits keep their fields; the lowest-ranked lose them first.
+    assert kept[0] and not kept[-1]
+    assert kept == sorted(kept, reverse=True)
+    for new, old in zip(payload["hits"], full["hits"]):
+        if "event_time" in new:
+            assert new == old
+
+
+def _fail_event_time_read(monkeypatch, reason):
+    """Make the event-time read end with ``reason``, the rest of the run in budget."""
+    if reason == "read_error":
+
+        def failing_read(conn):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        _patched_event_time_rows(
+            monkeypatch,
+            connect=lambda *args, **kwargs: _EventTimeReadConnection(
+                sqlite3.connect(*args, **kwargs), [], before_read=failing_read
+            ),
+        )
+        return
+    real_rows = lcm_tools._lcm_recall_event_time_rows
+
+    def spent_rows(engine, store_ids, *, deadline):
+        return real_rows(engine, store_ids, deadline=lcm_tools.time.monotonic() - 1.0)
+
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_event_time_rows", spent_rows)
+
+
+def _event_time_marker_cap(main, exact, reason):
+    """A cap with room for ``main`` plus the ``reason`` marker, and ``main`` at it."""
+    # The two keys plus the ``", "`` that joins them to the rest of the response.
+    capped = exact + len(
+        json.dumps(
+            {"event_time_unavailable": True, "event_time_unavailable_reason": reason},
+            ensure_ascii=False,
+        )
+    )
+    # The response reports its cap, so the same digit count keeps main's size.
+    assert len(str(capped)) == len(str(exact))
+    main = json.loads(json.dumps(main))
+    main["provenance"]["answer_ready"]["response_char_cap"] = capped
+    return capped, main
+
+
+@pytest.mark.parametrize("reason", ["read_error", "deadline"])
+def test_recall_failed_event_time_read_marker_never_evicts_a_hit(
+    recall_engine, monkeypatch, reason
+):
+    _seed_event_time_rows(recall_engine)
+    _non_strict(recall_engine)
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    request = {"query": "kanban dashboard sprint", "detail": "answer_ready", "limit": 25}
+    main, exact = _event_time_cap_baseline(recall_engine, monkeypatch, request)
+    _fail_event_time_read(monkeypatch, reason)
+    uncapped = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    assert uncapped["event_time_unavailable_reason"] == reason
+
+    # Sized to fit exactly on main: the marker has no room, so it gives way.
+    monkeypatch.setattr(lcm_tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", exact)
+    encoded = lcm_tools.lcm_recall(request, engine=recall_engine)
+    payload = json.loads(encoded)
+    assert len(encoded) <= exact
+    assert _hit_order(payload) == _hit_order(main)
+    assert "event_time_unavailable" not in payload
+    assert "event_time_unavailable_reason" not in payload
+    assert _strip_event_time(payload) == main
+
+    # With room for it, the marker comes back with its original reason.
+    capped, main = _event_time_marker_cap(main, exact, reason)
+    monkeypatch.setattr(lcm_tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", capped)
+    encoded = lcm_tools.lcm_recall(request, engine=recall_engine)
+    payload = json.loads(encoded)
+    assert len(encoded) <= capped
+    assert _hit_order(payload) == _hit_order(main)
+    assert payload["event_time_unavailable"] is True
+    assert payload["event_time_unavailable_reason"] == reason
+    assert _without_event_time_marker(payload) == main
+
+
+def test_recall_event_time_cap_strip_keeps_the_read_error_reason(
+    recall_engine, monkeypatch
+):
+    observed, _bare = _seed_event_time_rows(recall_engine)
+    _non_strict(recall_engine)
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    request = {"query": "kanban dashboard sprint", "detail": "answer_ready", "limit": 25}
+    main, exact = _event_time_cap_baseline(recall_engine, monkeypatch, request)
+    _fail_event_time_read(monkeypatch, "read_error")
+    partial = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    # The single provenance batch covers hydrated and unhydrated hits together;
+    # failed disclosure must not publish a possibly carried time as certain.
+    assert not any("event_time" in hit for hit in partial["hits"])
+    assert any(
+        hit["store_id"] in observed and "event_time" not in hit
+        for hit in partial["hits"]
+    )
+    assert partial["event_time_unavailable_reason"] == "read_error"
+
+    capped, main = _event_time_marker_cap(main, exact, "read_error")
+    monkeypatch.setattr(lcm_tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", capped)
+    encoded = lcm_tools.lcm_recall(request, engine=recall_engine)
+    payload = json.loads(encoded)
+    assert len(encoded) <= capped
+    # The cap keeps the read failure reason, never ``response_cap``.
+    assert not any("event_time" in hit for hit in payload["hits"])
+    assert payload["event_time_unavailable"] is True
+    assert payload["event_time_unavailable_reason"] == "read_error"
+    assert _hit_order(payload) == _hit_order(main)
+    assert _without_event_time_marker(payload) == main
+
+
+def test_recall_event_time_read_of_null_observed_at_sets_no_marker(recall_engine):
+    recall_engine._config.embeddings_enabled = False
+    recall_engine._store.append(
+        "session-a", {"role": "assistant", "content": "kanban dashboard sprint"}
+    )
+    payload = json.loads(
+        lcm_tools.lcm_recall({"query": "kanban dashboard sprint"}, engine=recall_engine)
+    )
+    assert payload["hits"]
+    assert "event_time_unavailable" not in payload
+    assert "event_time_unavailable_reason" not in payload
+    for hit in payload["hits"]:
+        assert "event_time" not in hit
+        assert "event_time_source" not in hit
+
+
 def test_invalid_recall_detail_is_rejected(recall_engine):
     payload = json.loads(
         lcm_tools.lcm_recall(
@@ -1607,7 +2907,7 @@ def test_answer_ready_keeps_missing_session_refs_independently_eligible():
         for index in range(7)
     ]
 
-    selected, dropped = lcm_tools._lcm_recall_diverse_entries(
+    selected, dropped = recall_delivery._diverse_entries(
         entries,
         limit=7,
         per_session_limit=5,
@@ -1658,6 +2958,79 @@ def test_answer_ready_centers_message_content_on_exact_chunk_span(
         "char_start": match_start,
         "char_end": match_end,
     }
+
+
+def test_answer_ready_far_apart_chunk_and_fts_keep_their_windows(
+    recall_engine, monkeypatch
+):
+    semantic = "visual workspace status panel"
+    content = ("a" * 497 + " dashboard " + "b" * 8002 + " "
+               + semantic + " " + "z" * 2000)
+    start = content.index(semantic)
+    end = start + len(semantic)
+    store_id = recall_engine._store.append(
+        "session-a", {"role": "user", "content": content}, source="chat",
+    )
+    _seed_chunk_vectors(recall_engine, [(store_id, 0, start, end, [1.0, 0.0])])
+    args = dict(query="dashboard", include="verbatim", detail="answer_ready",
+                scope_bias=0.0, limit=1)
+    fused = _recall(recall_engine, monkeypatch, **args)["hits"][0]
+    assert set(fused["arms"]) == {"fts", "chunk"}
+
+    # Controls run before the regression assertion: chunk-only keeps its span,
+    # and embeddings-off still uses B2's FTS span when there is no chunk.
+    with monkeypatch.context() as patch:
+        patch.setattr(lcm_tools, "_lcm_recall_fts_arm", lambda *a, **k: ([], None))
+        chunk_only = _recall(recall_engine, monkeypatch, **args)["hits"][0]
+    assert chunk_only["arms"] == ["chunk"]
+    assert chunk_only["evidence_span"] == {"char_start": start, "char_end": end}
+    assert semantic in chunk_only["content"]
+    recall_engine._config.embeddings_enabled = False
+    fts_only = _recall(recall_engine, monkeypatch, **args)["hits"][0]
+    assert fts_only["arms"] == ["fts"]
+    assert "chunk_span" not in fts_only
+    assert fts_only["evidence_span"] == {"char_start": 498, "char_end": 507}
+    assert fts_only["content_offset"] == 0
+
+    assert fused["chunk_span"] == chunk_only["chunk_span"]
+    assert fused["evidence_span"] == chunk_only["evidence_span"]
+    assert fused["content_offset"] == chunk_only["content_offset"]
+    assert fused["content"] == chunk_only["content"]
+
+
+@pytest.mark.parametrize("content", ["a>>b c d", "x>b and stuff"])
+def test_fts_match_span_excludes_adjacent_marker_characters(content):
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("CREATE VIRTUAL TABLE docs USING fts5(content)")
+        connection.execute("INSERT INTO docs VALUES (?)", (content,))
+        snippet, = connection.execute(
+            "SELECT snippet(docs, 0, '>>>', '<<<', '...', 16) "
+            "FROM docs WHERE docs MATCH 'b'",
+        ).fetchone()
+    start = content.index("b")
+    assert lcm_tools._lcm_recall_fts_match_span(snippet, content) == (start, start + 1)
+
+
+def test_strict_fts_fallback_drops_stale_fused_chunk_span(recall_engine, monkeypatch):
+    content = "The dashboard is ready."
+    store_id = recall_engine._store.append("session-a", {"role": "user", "content": content})
+    chunk_hit = {
+        "kind": "message_excerpt", "store_id": store_id, "session_id": "session-a",
+        "snippet": "obsolete vector passage", "content_offset": 120,
+        "chunk_span": {"char_start": 120, "char_end": 143},
+        "_fts_snippet": "The >>>dashboard<<< is ready.",
+    }
+    monkeypatch.setattr(lcm_tools, "_LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT", 0)
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_chunk_arm",
+                        lambda *a, **k: ([dict(chunk_hit)], "full", 1, 1))
+    # Supply the corpus metadata needed to run the mock vector arm.
+    _seed_chunk_vectors(recall_engine, [(store_id, 0, 0, len(content), [1.0, 0.0])])
+    hit = _recall(recall_engine, monkeypatch, query="dashboard", include="verbatim",
+                  detail="answer_ready", limit=1)["hits"][0]
+    assert set(hit["arms"]) == {"chunk", "fts"}
+    assert hit["snippet"] == content
+    assert hit["content_offset"] == 0
+    assert "chunk_span" not in hit
 
 
 def test_answer_ready_expands_summary_ref_with_2400_char_bound(
@@ -4577,3 +5950,36 @@ def test_cross_session_summary_hint_quotes_hostile_session_ids():
     )
 
     assert hint == f"lcm_expand(node_id=7, session_id={hostile!r})"
+
+
+@pytest.mark.parametrize("late", ["New-York", "New\nYork"], ids=["hyphen", "newline"])
+def test_recall_or_answer_ready_centers_phrase_across_separators(recall_engine, late):
+    """An FTS5 phrase matches adjacent tokens across punctuation and line breaks; centring follows it."""
+    recall_engine._config.embeddings_enabled = False
+    content = "renewal notes " + "filler " * 500 + late + " office " + "tail " * 500
+    recall_engine._store.append("late-phrase", {"role": "user", "content": content})
+    hit = json.loads(lcm_tools.lcm_recall(
+        {"query": '"New York"', "detail": "answer_ready", "limit": 1}, engine=recall_engine))["hits"][0]
+    assert late in hit["content"]
+    assert hit["evidence_span"]["char_start"] == content.index(late)
+
+
+def test_recall_or_answer_ready_phrase_gap_never_splits_a_combining_mark(recall_engine):
+    """unicode61 indexes "a\u0301b" as one token, so it is no phrase match for "a b"; centring skips it."""
+    recall_engine._config.embeddings_enabled = False
+    content = "a\u0301b " + "filler " * 500 + "a b " + "tail " * 500
+    recall_engine._store.append("mark", {"role": "user", "content": content})
+    hit = json.loads(lcm_tools.lcm_recall(
+        {"query": '"a b"', "detail": "answer_ready", "limit": 1}, engine=recall_engine))["hits"][0]
+    assert hit["evidence_span"]["char_start"] == content.index("a b ")
+
+
+@pytest.mark.parametrize("inside", ["\ue000", "\U000f0000", "\u07fd", "\u0898"], ids=["pua", "pua-astral", "nko-mark", "arabic-mark"])
+def test_recall_or_answer_ready_phrase_gap_never_crosses_a_token_character(recall_engine, inside):
+    """unicode61 keeps these inside a token, so "New<c>York" is no match for "New York"; centring skips it."""
+    recall_engine._config.embeddings_enabled = False
+    content = f"New{inside}York " + "filler " * 500 + "New York office " + "tail " * 500
+    recall_engine._store.append("token-char", {"role": "user", "content": content})
+    hit = json.loads(lcm_tools.lcm_recall(
+        {"query": '"New York"', "detail": "answer_ready", "limit": 1}, engine=recall_engine))["hits"][0]
+    assert hit["evidence_span"]["char_start"] == content.index("New York office")

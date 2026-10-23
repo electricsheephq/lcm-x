@@ -19,8 +19,10 @@ runtime evidence.
 - **SQLite message store** - preserves raw messages by default before compaction
 - **Summary DAG** - compacts older context into depth-aware summary nodes
 - **Bounded recovery** - pages raw messages, child summaries, and externalized payloads without flooding the main context
-- **Agent tools** - 15 schemas spanning retrieval, session/provenance,
-  query/evidence, computation, status, inspection, and doctor workflows
+- **Agent tools** - 15 declared schemas spanning retrieval, session/provenance,
+  query/evidence, computation, status, inspection, and doctor workflows; 13 are
+  advertised by default, with `lcm_query_state` and `lcm_retrieve` hidden until
+  their assertion/adaptive-retrieval flags are on. `LCM_DISABLED_TOOLS` can hide any tool.
 - **Source-aware retrieval** - filters raw rows and summaries by descendant source lineage
 - **Session controls** - ignore noisy sessions or keep sessions read-only with glob patterns
 - **Large payload controls** - optional ingest-time externalization for oversized tool/media/raw payloads, plus transcript GC for already-externalized tool results
@@ -98,8 +100,8 @@ snippets are read from raw durable rows, so they are passed through the same pro
 transform whenever the embedding-privacy resolution is ON, with ranking indices mapped back
 to the original untransformed hits (#371).
 
-Eva's accepted hosted-vector evidence proves this architecture for one exact
-profile/configuration only. It does not make trajectory embeddings, reranking,
+The reference agent's accepted hosted-vector evidence (v0.23.1) proves this
+architecture for one exact profile/configuration only. It does not make trajectory embeddings, reranking,
 remote Ollama, or fleet/customer paths safe by implication.
 
 ## Development
@@ -111,6 +113,7 @@ Plugin surface
   plugin.yaml            manifest
   __init__.py            plugin registration and optional slash-command registration
   schemas.py             tool schemas shown to the model
+  tool_registry.py       ordered tool schemas, handler names, emojis, and dormant flags
   tools.py               lcm_grep, lcm_load_session, lcm_describe, lcm_expand, lcm_expand_query
   command.py             /lcm command handlers
   config.py              env var defaults and overrides
@@ -125,6 +128,7 @@ Engine
   engine_registry.py     process-wide active-clone registry (resolve_active_lcm_engine)
   runtime_identity.py    plugin/git identity for status and doctor
   codex_routing.py       Codex OAuth route detection and effective context caps
+  compaction_policy.py   pure context-window, threshold and assembly-cap policy
   sqlite_util.py         SQLite lock-contention / busy-timeout helpers
   message_analysis.py    tool-call-id pairing and synthetic-noise detection
   sanitize.py            active-context sanitizers

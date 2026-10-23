@@ -266,7 +266,8 @@ def test_r3f_two_null_rows_one_stamped_occurrence_reserves_the_first_in_store_or
         members = [rel[2] for rel in _relations(engine) if rel[1] == "composite"]
         assert u1 not in members
         assert (u2 in members) == (shown_alone == 1), members
-        assert _stored(_rows(engine))[("user", text)] == 2 + (shown_alone - 1)
+        # #1403: an unproven moved NULL occurrence is retained, not consumed.
+        assert _stored(_rows(engine))[("user", text)] == 2 + 2 * (shown_alone - 1)
     finally:
         engine.shutdown()
 

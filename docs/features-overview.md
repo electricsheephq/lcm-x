@@ -9,10 +9,11 @@ embedding provider setup see [Embeddings setup](embeddings-setup.md).
 From v0.24.0 the installed plugin is `hermes-lcm-x` and the runtime engine is
 `lcm-x` (#471); the bundled skill keeps the name `hermes-lcm`.
 
-**Every feature below ships default-off.** A stock install behaves exactly
-like the previous release until an operator opts in with an environment
-variable, and each family keeps its data out of the core schema until first
-use, so a disabled install stays readable by older builds.
+**Defaults.** Large-output externalization, active-replay stubbing, the fresh-tail
+token cap, the threshold full sweep (family 1), and temporal rollups (family 2)
+are on by default, matching the managed deployment. Semantic retrieval stays
+default-off until an operator opts in with an environment variable. Each family keeps its data out of the core schema
+until first use, so a disabled install stays readable by older builds.
 
 ## The one-paragraph mental model
 
@@ -68,9 +69,10 @@ Failure posture: externalization is fail-open (if a write fails, the provider
 still receives the original inline payload — nothing is dropped), and every
 replaced payload keeps a lossless recovery path via its ref.
 
-Key switches: `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED`,
-`LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` (+ threshold vars),
-`LCM_FRESH_TAIL_MAX_TOKENS`, `LCM_THRESHOLD_FULL_SWEEP_ENABLED`.
+Key switches: `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` (default `true`),
+`LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` (default `true`; + threshold vars),
+`LCM_FRESH_TAIL_MAX_TOKENS` (default `24000`), `LCM_THRESHOLD_FULL_SWEEP_ENABLED`
+(default `true`).
 Full table: [Operator guide → Configuration](operator-guide.md#configuration).
 
 ## Family 2 — Temporal memory (rollups + `lcm_recent`)
@@ -92,7 +94,7 @@ on exactly these seams): build tokens carry non-reusable nonces, late or
 superseded builders cannot overwrite newer state, deleted sources stale every
 covered period, and multi-target rebuild seeding is atomic.
 
-Key switches: `LCM_TEMPORAL_ROLLUPS_ENABLED` (+ `LCM_ROLLUP_*` tuning).
+Key switches: `LCM_TEMPORAL_ROLLUPS_ENABLED` (default `true`; + `LCM_ROLLUP_*` tuning).
 
 ## Family 3 — Semantic retrieval (embeddings + hybrid search)
 
@@ -113,8 +115,9 @@ Safety posture: `mode='full_text'` remains the byte-compatible default;
 semantic timeouts degrade to full-text with an explicit `degraded_to_fts`
 marker; filters that the semantic arm cannot honor exactly cause a degrade
 rather than approximate results; source-lineage checks fail closed.
-Degrading is for transient or capability failures only: an embedding-privacy policy error is
-a deterministic configuration fault, so `lcm_recall` raises it instead of degrading, and
+A stale or missing cloud embedding identity also degrades to full-text, with an
+`embedding_identity_stale:` reason and a doctor warning. Invalid embedding-privacy
+policies remain deterministic configuration faults, so `lcm_recall` raises instead of degrading, and
 proactive recall counts it in `privacy_policy_errors` rather than injecting nothing quietly (#370).
 
 Known cloud providers protect provider-bound input by default

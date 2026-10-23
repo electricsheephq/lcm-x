@@ -185,11 +185,12 @@ class AuxiliarySessionMixin:
                 if previous_generation != generation:
                     if previous_generation is not None:
                         self._retire_auxiliary_generation(session_id, previous_generation)
-                    if self._host_fallback_session_id == session_id:
+                    if self._host_fallback_state_for_session(session_id).get("_host_fallback_session_id") == session_id:
                         self._end_host_fallback_compressor_for_session(
                             session_id,
                             [],
                             current_session_bypasses=True,
+                            require_session_match=True,
                         )
                     if (
                         had_active_session
@@ -291,6 +292,9 @@ class AuxiliarySessionMixin:
         else:
             stack.clear()
         self._sync_thread_context_current_auxiliary()
+        if not stack:
+            for key in ("_last_compression_status", "_last_compression_noop_reason", "_last_compress_aborted"):
+                vars(self._thread_context).pop(key, None)
 
     def _handoff_auxiliary_session(
         self,
@@ -298,7 +302,6 @@ class AuxiliarySessionMixin:
         new_session_id: str,
         *,
         preserve_old_session: bool = False,
-        preserve_old_foreground_marker: bool = False,
     ) -> None:
         generation = self._in_process_auxiliary_caller_generation(new_session_id)
         if generation and self._auxiliary_generation_is_retired(new_session_id, generation):
@@ -411,11 +414,14 @@ class AuxiliarySessionMixin:
                     self._auxiliary_session_ids.add(new_session_id)
                     self._auxiliary_foreground_reused_session_ids.discard(new_session_id)
                     if generation:
-                        if previous_new_generation != generation and self._host_fallback_session_id == new_session_id:
+                        if (previous_new_generation != generation
+                                and self._host_fallback_state_for_session(new_session_id).get(
+                                    "_host_fallback_session_id") == new_session_id):
                             self._end_host_fallback_compressor_for_session(
                                 new_session_id,
                                 [],
                                 current_session_bypasses=True,
+                                require_session_match=True,
                             )
                         self._auxiliary_session_generations[new_session_id] = generation
                         self._auxiliary_handoff_parent_session_ids.pop(new_session_id, None)
@@ -427,11 +433,12 @@ class AuxiliarySessionMixin:
                             self._retire_auxiliary_generation(new_session_id, previous_new_generation)
                         self._auxiliary_last_prompt_tokens.pop(new_session_id, None)
                         self._auxiliary_direct_end_guard_session_ids.discard(new_session_id)
-                        if self._host_fallback_session_id == new_session_id:
+                        if self._host_fallback_state_for_session(new_session_id).get("_host_fallback_session_id") == new_session_id:
                             self._end_host_fallback_compressor_for_session(
                                 new_session_id,
                                 [],
                                 current_session_bypasses=True,
+                                require_session_match=True,
                             )
                     self._auxiliary_session_ids.add(new_session_id)
                     self._auxiliary_session_generations[new_session_id] = generation
@@ -441,11 +448,12 @@ class AuxiliarySessionMixin:
                         self._retire_auxiliary_generation(new_session_id, previous_new_generation)
                     self._auxiliary_last_prompt_tokens.pop(new_session_id, None)
                     self._auxiliary_direct_end_guard_session_ids.discard(new_session_id)
-                    if self._host_fallback_session_id == new_session_id:
+                    if self._host_fallback_state_for_session(new_session_id).get("_host_fallback_session_id") == new_session_id:
                         self._end_host_fallback_compressor_for_session(
                             new_session_id,
                             [],
                             current_session_bypasses=True,
+                            require_session_match=True,
                         )
                     self._auxiliary_session_ids.add(new_session_id)
                     self._auxiliary_session_generations.pop(new_session_id, None)

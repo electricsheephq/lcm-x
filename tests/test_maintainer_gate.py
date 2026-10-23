@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shlex
+import shutil
 import subprocess
 import sys
 from copy import deepcopy
@@ -8,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.maintainer_gate import evaluate, review_lanes_hint
+from scripts.maintainer_gate import NON_TURN_PATH_FILES, TURN_PATH_FILES, evaluate, review_lanes_hint
 
 
 HEAD = "1" * 40
@@ -22,9 +24,28 @@ REQUIRED = [
     {"context": "test (3.12)", "integration_id": 15368},
     {"context": "test (3.13)", "integration_id": 15368},
     {"context": "test (3.14)", "integration_id": 15368},
+    {"context": "bench-tests", "integration_id": 15368},
+    {"context": "tests-ran", "integration_id": 15368},
+    {"context": "differential", "integration_id": 15368},
 ]
 BOTH_LANES = ["acceptance", "adversarial"]
+TURN_PATH_PACKET = [
+    "Consumer enumeration: rg call sites for every changed helper and effects on each consumer.",
+    "Previous-GA differential row: tests/differential (opt-in).",
+    "Sibling shapes: neighbouring windows, row roles, and recovery paths.",
+]
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "maintainer_gate.py"
+
+
+def test_top_level_modules_are_classified() -> None:
+    modules = {path.name for path in SCRIPT.parents[1].glob("*.py") if path.is_file()}
+    guidance = (
+        "Classify every new top-level module in scripts/maintainer_gate.py's TURN_PATH_FILES "
+        "or NON_TURN_PATH_FILES; for turn-path modules, update TURN_PATH_FILES in "
+        ".github/workflows/differential.yml too."
+    )
+    assert TURN_PATH_FILES.isdisjoint(NON_TURN_PATH_FILES), guidance
+    assert modules == TURN_PATH_FILES | NON_TURN_PATH_FILES, guidance
 
 
 def passing_checks(head_sha: str = HEAD) -> list[dict[str, object]]:
@@ -50,7 +71,10 @@ def ready_payload(mode: str = "readiness") -> dict[str, object]:
             "base_ref": "main",
             "base_sha": BASE,
             "ruleset_id": 20888757,
-            "strict_required_status_checks_policy": True,
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+            "strict_required_status_checks_policy": False,
+            "merge_queue": {"merge_method": "MERGE", "grouping_strategy": "ALLGREEN", "max_entries_to_merge": 1},
             "required_checks": deepcopy(REQUIRED),
             "bypass_actors": [],
         },
@@ -145,7 +169,7 @@ def test_readiness_rejects_a_merge_authorization_envelope():
 def test_pr_authored_policy_cannot_weaken_protected_main_policy():
     payload = ready_payload()
     payload["pr_policy"] = {"required_checks": []}
-    payload["checks"] = payload["checks"][:-1]
+    payload["checks"] = [c for c in payload["checks"] if c["context"] != "test (3.14)"]
 
     receipt = evaluate(payload)
 
@@ -191,7 +215,7 @@ def test_human_approval_cannot_substitute_for_a_required_check():
             "codeowner": True,
         }
     ]
-    payload["checks"] = payload["checks"][:-1]
+    payload["checks"] = [c for c in payload["checks"] if c["context"] != "test (3.14)"]
 
     receipt = evaluate(payload)
 
@@ -225,13 +249,21 @@ def test_retired_ai_review_check_is_not_required():
     )
 
 
-def test_review_lanes_hint_never_blocks_readiness():
+@pytest.mark.parametrize("checks_present", [True, False], ids=["ready", "blocked"])
+def test_review_lanes_hint_never_blocks_readiness(checks_present):
     payload = ready_payload()
+    if not checks_present:
+        payload["checks"] = []
     missing = evaluate(payload)
     payload["changed_files"] = [{"filename": "engine.py"}]
     supplied = evaluate(payload)
 
-    assert missing["decision"] == supplied["decision"] == "READY_FOR_AUTHORIZED_LANDING"
+    assert missing["decision"] == supplied["decision"] == (
+        "READY_FOR_AUTHORIZED_LANDING" if checks_present else "NOT_READY"
+    )
+    assert missing["blocker_codes"] == supplied["blocker_codes"]
+    assert supplied["review_lanes_hint"]["turn_path_probe_packet"] == TURN_PATH_PACKET
+    assert "turn_path_probe_packet" not in missing["review_lanes_hint"]
     assert missing["review_lanes_hint"]["changed_files"] == "unknown"
     assert missing["review_lanes_hint"]["required_review_lanes"] == BOTH_LANES
     assert supplied["review_lanes_hint"]["required_review_lanes"] == BOTH_LANES
@@ -240,7 +272,52 @@ def test_review_lanes_hint_never_blocks_readiness():
 @pytest.mark.parametrize(
     ("changed_files", "risks", "lanes"),
     [
-        ([{"filename": "engine.py"}], ["lcm-memory-preservation"], BOTH_LANES),
+        *[
+            ([{"filename": path}], ["lcm-memory-preservation", "turn-path"], BOTH_LANES)
+            for path in (
+                "engine.py", "survival_fit.py", "__init__.py", "compaction.py", "identity_anchor.py",
+                "assembly_plan.py", "compaction_policy.py", "compaction_request.py", "compress_run.py",
+                "leaf_prep.py", "summary_attempt.py", "summary_outcome.py", "survival_codec.py", "tool_pairs.py",
+                "config.py",
+                "db_bootstrap.py",
+                "diagnostics.py",
+                "engine_registry.py",
+                "message_patterns.py",
+                "model_routing.py",
+                "plugin_identity.py",
+                "rollup_builder.py",
+                "rollup_periods.py",
+                "rollup_store.py",
+                "schemas.py",
+                "session_patterns.py",
+                "sqlite_util.py",
+                "store.py",
+                "tool_registry.py",
+                "reset_state.py",
+                "recognition_matching.py",
+                "emission_projection.py",
+                "ingest_content.py",
+                "ingest_integrity.py",
+                "ingest_pem_model.py",
+                "ingest_pem_scan.py",
+                "ingest_persisted.py",
+                "ingest_policy.py",
+            )
+        ],
+        *[
+            ([{"filename": path}], ["lcm-memory-preservation"], BOTH_LANES)
+            for path in ("presets.py", "tools.py")
+        ],
+        (
+            [{"filename": "engine.py", "previous_filename": "presets.py"}],
+            ["lcm-memory-preservation", "turn-path"],
+            BOTH_LANES,
+        ),
+        (
+            [{"filename": "presets.py", "previous_filename": "engine.py"}],
+            ["lcm-memory-preservation", "turn-path"],
+            BOTH_LANES,
+        ),
         ([{"filename": "docs/operator-guide.md"}, "README.md"], [], ["acceptance"]),
         (
             [{"filename": "docs/moved.md", "previous_filename": "AGENTS.md"}],
@@ -248,25 +325,61 @@ def test_review_lanes_hint_never_blocks_readiness():
             BOTH_LANES,
         ),
     ],
-    ids=["top-level-python", "docs-only", "rename-across-boundary"],
+    ids=["engine", "survival-fit", "pre-llm-hook", "compaction", "ingest-identity",
+         "assembly-plan", "compaction-policy", "compaction-request", "compress-run", "leaf-prep",
+         "summary-attempt", "summary-outcome", "survival-codec", "tool-pairs",
+         "config",
+         "db-bootstrap",
+         "diagnostics",
+         "engine-registry",
+         "message-patterns",
+         "model-routing",
+         "plugin-identity",
+         "rollup-builder",
+         "rollup-periods",
+         "rollup-store",
+         "schemas",
+         "session-patterns",
+         "sqlite-util",
+         "store",
+         "tool-registry",
+         "reset-state",
+         "recognition-matching",
+         "emission-projection",
+         "ingest-content",
+         "ingest-integrity",
+         "ingest-pem-model",
+         "ingest-pem-scan",
+         "ingest-persisted",
+         "ingest-policy",
+         "preset-only", "tools-only",
+         "rename-into-turn-path", "rename-out-of-turn-path",
+         "docs-only", "rename-across-policy-boundary"],
 )
 def test_review_lanes_hint_maps_changed_paths(changed_files, risks, lanes):
     hint = review_lanes_hint(changed_files)
 
     assert hint["named_risks"] == risks
     assert hint["required_review_lanes"] == lanes
+    assert set(hint) == {"changed_files", "named_risks", "required_review_lanes"} | (
+        {"turn_path_probe_packet"} if "turn-path" in risks else set()
+    )
+    if "turn-path" in risks:
+        assert hint["turn_path_probe_packet"] == TURN_PATH_PACKET
 
 
 @pytest.mark.parametrize(
     "changed_files",
-    [[], [""], [{"filename": "  "}], [{"filename": "docs/a.md", "previous_filename": ""}]],
-    ids=["empty-list", "blank-string", "blank-filename", "blank-previous-filename"],
+    [None, [], [""], [{"filename": "  "}],
+     [{"filename": "docs/a.md", "previous_filename": ""}]],
+    ids=["unknown", "empty-list", "blank-string", "blank-filename", "blank-previous-filename"],
 )
 def test_unretrieved_changed_files_keep_both_review_lanes(changed_files):
     hint = review_lanes_hint(changed_files)
 
     assert hint["changed_files"] == "unknown"
     assert hint["named_risks"] is None
+    assert "turn_path_probe_packet" not in hint
     assert hint["required_review_lanes"] == BOTH_LANES
 
 
@@ -339,14 +452,70 @@ def test_wrong_ruleset_id_is_an_owner_gate():
     assert "PROTECTED_POLICY_UNTRUSTED" in receipt["blocker_codes"]
 
 
-def test_non_strict_required_checks_policy_is_an_owner_gate():
-    payload = ready_payload()
-    payload["protected_policy"]["strict_required_status_checks_policy"] = False
+@pytest.mark.parametrize("mode", ["readiness", "landing", "post_merge"])
+def test_merge_queue_policy_is_trusted(mode):
+    payload = post_merge_payload() if mode == "post_merge" else ready_payload(mode)
+    if mode == "landing":
+        payload["merge_authorization"] = exact_authorization()
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == (
+        "POST_MERGE_VERIFIED" if mode == "post_merge" else "READY_FOR_AUTHORIZED_LANDING"
+    )
+    assert "PROTECTED_POLICY_UNTRUSTED" not in receipt["blocker_codes"]
+
+
+@pytest.mark.parametrize("mode", ["readiness", "landing", "post_merge"])
+@pytest.mark.parametrize(
+    "policy_delta",
+    [
+        {"enforcement": "disabled"},
+        {"conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": ["refs/heads/main"]}}},
+        {"conditions": {}},
+        {"merge_queue": {"merge_method": "MERGE", "grouping_strategy": "ALLGREEN", "max_entries_to_merge": 5}},
+        {"strict_required_status_checks_policy": True},
+        {"merge_queue": None},
+        {"merge_queue": {}},
+        {"merge_queue": {"merge_method": "SQUASH", "grouping_strategy": "ALLGREEN"}},
+        {"merge_queue": {"merge_method": "MERGE", "grouping_strategy": "HEADGREEN"}},
+    ],
+    ids=["disabled", "excludes-main", "missing-condition", "batch-size-5",
+         "strict-true", "missing-queue", "empty-queue", "wrong-method", "wrong-grouping"],
+)
+def test_untrusted_merge_queue_policy_is_an_owner_gate(mode, policy_delta):
+    payload = post_merge_payload() if mode == "post_merge" else ready_payload(mode)
+    if mode == "landing":
+        payload["merge_authorization"] = exact_authorization()
+    payload["protected_policy"].update(policy_delta)
+    if payload["protected_policy"].get("merge_queue") is None:
+        payload["protected_policy"].pop("merge_queue")
 
     receipt = evaluate(payload)
 
     assert receipt["decision"] == "OWNER_GATE"
     assert "PROTECTED_POLICY_UNTRUSTED" in receipt["blocker_codes"]
+
+
+@pytest.mark.parametrize("mode", ["readiness", "post_merge"])
+@pytest.mark.parametrize("context", ["bench-tests", "tests-ran"])
+def test_test_execution_checks_are_required(mode, context):
+    payload = post_merge_payload() if mode == "post_merge" else ready_payload(mode)
+    payload["checks"] = [c for c in payload["checks"] if c["context"] != context]
+
+    receipt = evaluate(payload)
+
+    assert f"TRUSTED_CHECK_UNSATISFIED:{context}:15368" in receipt["blocker_codes"]
+
+
+@pytest.mark.parametrize("context", ["bench-tests", "tests-ran"])
+def test_test_execution_checks_cannot_be_omitted_from_protected_policy(context):
+    payload = ready_payload()
+    payload["protected_policy"]["required_checks"] = [
+        item for item in REQUIRED if item["context"] != context
+    ]
+
+    assert "PROTECTED_POLICY_UNTRUSTED" in evaluate(payload)["blocker_codes"]
 
 
 def test_normal_exact_authorization_is_ready_for_landing():
@@ -387,6 +556,26 @@ def test_post_merge_verifies_exact_merge_commit():
 
     assert receipt["decision"] == "POST_MERGE_VERIFIED"
     assert len(receipt["matched_trusted_checks"]) == len(REQUIRED)
+
+
+def test_post_merge_requires_differential_on_the_merge_commit():
+    payload = post_merge_payload()
+    payload["checks"] = [c for c in payload["checks"] if c["context"] != "differential"]
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert "TRUSTED_CHECK_UNSATISFIED:differential:15368" in receipt["blocker_codes"]
+
+
+def test_readiness_requires_differential_on_the_pr_head():
+    payload = ready_payload()
+    payload["checks"] = [c for c in payload["checks"] if c["context"] != "differential"]
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] != "READY_FOR_AUTHORIZED_LANDING"
+    assert "TRUSTED_CHECK_UNSATISFIED:differential:15368" in receipt["blocker_codes"]
 
 
 def test_post_merge_rejects_an_open_pr():
@@ -520,3 +709,83 @@ def test_malformed_nested_json_fails_closed_with_a_receipt():
     assert receipt["decision"] == "OWNER_GATE"
     assert receipt["blocker_codes"] == ["INPUT_INVALID"]
     assert receipt["authority_granted"] is False
+
+
+@pytest.mark.parametrize("include", [["~DEFAULT_BRANCH"], ["refs/heads/main"]])
+def test_maintainer_gate_trusts_active_ruleset_targeting_main(include):
+    payload = ready_payload()
+    payload["protected_policy"]["conditions"]["ref_name"]["include"] = include
+    assert evaluate(payload)["decision"] == "READY_FOR_AUTHORIZED_LANDING"
+
+
+@pytest.mark.parametrize("exclude", [["~DEFAULT_BRANCH"], ["~ALL"], ["refs/heads/*"]])
+def test_maintainer_gate_rejects_main_exclusion_patterns(exclude):
+    payload = ready_payload()
+    payload["protected_policy"]["conditions"]["ref_name"]["exclude"] = exclude
+    assert "PROTECTED_POLICY_UNTRUSTED" in evaluate(payload)["blocker_codes"]
+
+
+def test_post_merge_accepts_successful_queue_and_push_pair():
+    payload = post_merge_payload(LATER_MAIN)
+    payload["checks"] += [deepcopy(c) for c in payload["checks"] if c["context"] != "differential"]
+    assert evaluate(payload)["decision"] == "POST_MERGE_VERIFIED"
+
+
+@pytest.mark.parametrize("context", [item["context"] for item in REQUIRED])
+@pytest.mark.parametrize("status,conclusion", [
+    ("completed", "failure"), ("completed", "cancelled"),
+    ("in_progress", None), ("queued", None), ("completed", "skipped"),
+])
+def test_post_merge_blocks_any_unsuccessful_paired_run(context, status, conclusion):
+    payload = post_merge_payload()
+    other = deepcopy(next(c for c in payload["checks"] if c["context"] == context))
+    other.update(status=status, conclusion=conclusion)
+    payload["checks"].append(other)
+    assert evaluate(payload)["decision"] == "NOT_READY"
+
+
+def test_land_pr_rechecks_identity_then_enqueues_pinned_head_only():
+    landing = (SCRIPT.parents[1] / ".agents/skills/land-pr/SKILL.md").read_text()
+    final = landing.split("## 7. Merge Deterministically", 1)[1].split("## 8.", 1)[0]
+    check_command = "--json name,state,bucket,workflow,link,startedAt,completedAt"
+    assert check_command in landing.split("## 3. Verify Exact-Head Checks", 1)[1].split("## 4.", 1)[0]
+    assert check_command in final
+    assert final.index(check_command) < final.index("enqueuePullRequest")
+    assert "expectedHeadOid:$h" in final and '-f h="$head"' in final
+    assert "gh pr merge" not in final
+    assert "workflow_id" in final and "duplicate" in final
+
+
+def test_land_pr_verifies_own_merge_commit_ancestry_and_all_checks():
+    landing = (SCRIPT.parents[1] / ".agents/skills/land-pr/SKILL.md").read_text()
+    closeout = landing.split("## 8. Verify And Close Out", 1)[1]
+    assert 'git merge-base --is-ancestor "$merge_commit" origin/main' in closeout
+    assert 'commits/$merge_commit/check-runs' in closeout
+    assert 'test "$(gh api repos/electricsheephq/lcm-x/commits/main' not in closeout
+    assert "max_entries_to_merge" in landing
+    assert "all(.status ==" in closeout
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="landing command requires jq")
+@pytest.mark.parametrize("bad", [None, "failure", "cancelled", "in_progress", "missing-differential"])
+def test_land_pr_post_merge_jq_checks_every_queue_and_push_run(bad):
+    landing = (SCRIPT.parents[1] / ".agents/skills/land-pr/SKILL.md").read_text()
+    closeout = landing.split("## 8. Verify And Close Out", 1)[1]
+    command = next(line for line in closeout.splitlines() if line.startswith('required="'))
+    program = shlex.split(command)[-1]
+    required = [{"name": c["context"], "app_id": c["integration_id"]} for c in REQUIRED]
+    checks = [dict(name=c["context"], app={"id": c["integration_id"]},
+                   head_sha=MERGE, status="completed", conclusion="success") for c in REQUIRED]
+    checks += deepcopy(checks[:-1])
+    if bad == "missing-differential":
+        checks = [c for c in checks if c["name"] != "differential"]
+    elif bad:
+        checks[-1].update(status="in_progress" if bad == "in_progress" else "completed",
+                          conclusion=None if bad == "in_progress" else bad)
+    result = subprocess.run(
+        ["jq", "-e", "--arg", "sha", MERGE, "--argjson", "required", json.dumps(required),
+         "--argjson", "expected", json.dumps([c["context"] for c in REQUIRED]), program],
+        input=json.dumps([{"check_runs": checks[:5]}, {"check_runs": checks[5:]}]),
+        capture_output=True, text=True,
+    )
+    assert result.returncode == (0 if bad is None else 1), result.stderr

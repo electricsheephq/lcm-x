@@ -1,0 +1,225 @@
+name: Differential
+on:
+  schedule: [{cron: "41 4 * * *"}]
+  workflow_dispatch:
+  pull_request:
+  merge_group:
+permissions: {contents: read}
+concurrency: {group: '${{ github.workflow }}-${{ github.ref }}', cancel-in-progress: true}
+jobs:
+  differential:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env: {CI: 'true', PYTHONPATH: '${{ github.workspace }}', HERMES_DISABLE_LAZY_INSTALLS: '1'}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with: {persist-credentials: false, fetch-depth: 0}
+      - name: Determine differential relevance
+        id: relevance
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          # Keep identical to scripts/maintainer_gate.py's TURN_PATH_FILES.
+          TURN_PATH_FILES: |-
+            __init__.py
+            assembly_plan.py
+            aux_session.py
+            bypass.py
+            codex_routing.py
+            compaction.py
+            compaction_policy.py
+            compaction_request.py
+            compress_run.py
+            config.py
+            dag.py
+            db_bootstrap.py
+            diagnostics.py
+            emission_projection.py
+            engine.py
+            engine_registry.py
+            escalation.py
+            externalize.py
+            extraction.py
+            frontier_state.py
+            fresh_tail.py
+            host_uid.py
+            host_uid_emit.py
+            identity_anchor.py
+            ingest_content.py
+            ingest_integrity.py
+            ingest_pem_model.py
+            ingest_pem_scan.py
+            ingest_persisted.py
+            ingest_policy.py
+            ingest_protection.py
+            leaf_prep.py
+            lifecycle_state.py
+            message_analysis.py
+            message_content.py
+            message_patterns.py
+            model_routing.py
+            placeholder_ledger.py
+            plugin_identity.py
+            prefix_matching.py
+            recognition_matching.py
+            reconcile.py
+            reset_state.py
+            rollup_builder.py
+            rollup_periods.py
+            rollup_store.py
+            sanitize.py
+            schemas.py
+            session_patterns.py
+            sqlite_util.py
+            store.py
+            store_complete.py
+            summary_attempt.py
+            summary_input_clip.py
+            summary_outcome.py
+            survival_codec.py
+            survival_fit.py
+            tokens.py
+            tool_pairs.py
+            tool_registry.py
+        run: |
+          relevant=true
+          if [[ "$EVENT_NAME" == pull_request || "$EVENT_NAME" == merge_group ]]; then
+            relevant=false
+            changed_paths=$(git diff --no-renames --name-only "$PR_BASE_SHA"...HEAD)
+            while IFS= read -r path; do
+              case "$path" in
+                tests/differential/*|.github/workflows/differential.yml) relevant=true; break ;;
+              esac
+              if grep -Fxq -- "$path" <<< "$TURN_PATH_FILES"; then
+                relevant=true
+                break
+              fi
+            done <<< "$changed_paths"
+          fi
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          if [[ "$relevant" == false ]]; then
+            echo "No differential-relevant changes; skipping."
+          fi
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        if: steps.relevance.outputs.relevant == 'true'
+        with: {python-version: '3.12'}
+      - run: pip install pytest numpy
+        if: steps.relevance.outputs.relevant == 'true'
+      - name: Use the runtime SQLite library
+        if: steps.relevance.outputs.relevant == 'true'
+        uses: ./.github/actions/sqlite-runtime
+      # keep identical to ci.yml's stub step
+      - name: Stub hermes-agent ABC
+        if: steps.relevance.outputs.relevant == 'true'
+        run: |
+          mkdir -p agent
+          cat > agent/__init__.py <<'STUB'
+          STUB
+          cat > agent/context_engine.py <<'STUB'
+          """Dependency-free ContextEngine contract shared by the pinned hosts."""
+          import copy
+          import json
+          from abc import ABC, abstractmethod
+
+          class ContextEngine(ABC):
+              last_prompt_tokens = 0
+              last_completion_tokens = 0
+              last_total_tokens = 0
+              threshold_tokens = 0
+              context_length = 0
+              compression_count = 0
+              threshold_percent = 0.75
+              protect_first_n = 3
+              protect_last_n = 6
+              emit_automatic_compaction_status = True
+
+              def __init__(self, **kwargs):
+                  self.compression_count = 0
+                  self.last_prompt_tokens = 0
+
+              @property
+              @abstractmethod
+              def name(self):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def update_from_response(self, usage):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def should_compress(self, prompt_tokens=None):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def compress(self, messages, current_tokens=None, focus_topic=None, force=False, memory_context=""):
+                  raise NotImplementedError
+
+              def should_compress_info(self, prompt_tokens=None):
+                  return self.should_compress(prompt_tokens), None
+
+              def should_compress_preflight(self, messages):
+                  return False
+
+              def get_automatic_compaction_status_message(self, *, phase, default_message, **context):
+                  return default_message if self.emit_automatic_compaction_status else None
+
+              def on_session_start(self, session_id, **kwargs):
+                  pass
+
+              def on_session_end(self, session_id, messages):
+                  pass
+
+              def on_session_reset(self):
+                  self.compression_count = 0
+                  self.last_prompt_tokens = 0
+                  self.last_completion_tokens = 0
+                  self.last_total_tokens = 0
+
+              def get_tool_schemas(self):
+                  return []
+
+              def handle_tool_call(self, name, args, **kwargs):
+                  return json.dumps({"error": f"Unknown context engine tool: {name}"})
+
+              def get_status(self):
+                  last_prompt = max(self.last_prompt_tokens, 0)
+                  return {
+                      "last_prompt_tokens": last_prompt,
+                      "threshold_tokens": self.threshold_tokens,
+                      "context_length": self.context_length,
+                      "usage_percent": min(100, last_prompt / self.context_length * 100) if self.context_length else 0,
+                      "compression_count": self.compression_count,
+                  }
+
+              def clone_for_agent(self):
+                  return copy.deepcopy(self)
+
+              def update_model(self, model, context_length, base_url="", api_key="", provider="", api_mode=""):
+                  # Host threshold resolution imports its compressor; keep this
+                  # unit-test fallback dependency-free. LCMEngine overrides it.
+                  self.context_length = context_length
+          STUB
+      - run: git fetch --no-tags --depth=1 origin 709099b3a397a7893a7abae8802ebe7bf605f79e c67d7633d963a2ffd24cf90995189ee58e2f88c7 6800cf45ad05280e6cf6fa9e1ad96c62b7132646
+        if: steps.relevance.outputs.relevant == 'true'
+      - name: Run and report differential
+        if: steps.relevance.outputs.relevant == 'true'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/differential"
+          set +e
+          LCM_DIFFERENTIAL=1 LCM_DIFFERENTIAL_OUT=$RUNNER_TEMP/differential python -m pytest tests/differential -q -rx -p no:randomly 2>&1 | tee "$RUNNER_TEMP/differential/pytest.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          {
+            printf '# Differential report\n\nPytest exit code: %s\n\n' "$status"
+            tail -n 1 "$RUNNER_TEMP/differential/pytest.log"
+            while IFS= read -r summary; do
+              printf '\n### %s\n' "$(basename "$(dirname "$summary")")"
+              sed -n '4p' "$summary"
+            done < <(find "$RUNNER_TEMP/differential" -name summary.md -type f | sort)
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && steps.relevance.outputs.relevant == 'true'
+        with: {name: differential, path: '${{ runner.temp }}/differential', retention-days: 14}

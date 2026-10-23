@@ -27,11 +27,14 @@ from pathlib import Path
 
 import pytest
 
+from tests.timing_helpers import returns_while_blocked
+
 from hermes_lcm import db_bootstrap
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.inactive_record import RECORD_NAME
 
+RECORD_DIR = ("plugin-data", "hermes-lcm-x")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BACKFILL_STEP = "messages_ingested_at_backfill_v1"
 ACTIVE_LINE = "LCM plugin loaded — lossless context management active"
@@ -173,15 +176,36 @@ def _shutdown(ctx):
 def test_t1_abandoned_load_logs_one_error_and_writes_record(tmp_path, monkeypatch, caplog):
     home = tmp_path / "hermes-home"
     home.mkdir()
-    _install_host(monkeypatch, home, delay=0.8)
+    _install_host(monkeypatch, home)
     module = _load_plugin("hermes_lcm_622_t1")
+    ctx = _Ctx(_Manager())
+    ctx._abandon_load()
+    monkeypatch.setattr(module, "_MODULE_IMPORTED_AT", time.monotonic() - 1.0)
+    caplog.set_level(logging.INFO)
+    try:
+        module.register(ctx)
+    finally:
+        _shutdown(ctx)
+    _assert_abandoned_load(ctx, caplog, home)
+
+
+@pytest.mark.latency
+def test_t1_abandoned_load_logs_one_error_and_writes_record_latency(tmp_path, monkeypatch, caplog):
+    """The real path: a host load slower than the deadline is abandoned by ``run_with_load_deadline``."""
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    _install_host(monkeypatch, home, delay=0.8)
+    module = _load_plugin("hermes_lcm_622_t1_latency")
     ctx = _Ctx(_Manager())
     caplog.set_level(logging.INFO)
     try:
         _register_under_deadline(module, ctx, deadline=0.3)
     finally:
         _shutdown(ctx)
+    _assert_abandoned_load(ctx, caplog, home)
 
+
+def _assert_abandoned_load(ctx, caplog, home: Path) -> None:
     assert ctx._manager._context_engine is None
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1, [r.getMessage() for r in errors]
@@ -194,7 +218,7 @@ def test_t1_abandoned_load_logs_one_error_and_writes_record(tmp_path, monkeypatc
     assert "LCM plugin loaded" not in caplog.text
     assert "Path B" not in caplog.text
 
-    record = json.loads((home / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
+    record = json.loads((home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
     assert set(record) == {"pid", "process_start", "elapsed_s", "reason", "written_at"}
     assert record["pid"] == os.getpid()
     assert record["elapsed_s"] >= 0.8
@@ -216,7 +240,7 @@ def test_t2_fast_load_logs_active_line_with_load_time(tmp_path, monkeypatch, cap
     assert ctx._manager._context_engine is ctx.offered
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert "NOT active" not in caplog.text
-    assert not (home / RECORD_NAME.format(pid=os.getpid())).exists()
+    assert not (home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=os.getpid())).exists()
     active = [r.getMessage() for r in caplog.records if ACTIVE_LINE in r.getMessage()]
     assert len(active) == 1
     assert re.search(r"\(load \d+\.\d\d s\)$", active[0]), active[0]
@@ -243,7 +267,7 @@ def test_t3_other_engine_in_slot_logs_warning_not_error(tmp_path, monkeypatch, c
     assert "_OtherEngine" in warnings[0]
     assert "load_timeout_seconds" not in warnings[0]
     assert "LCM plugin loaded" not in caplog.text
-    record = json.loads((home / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
+    record = json.loads((home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
     assert "_OtherEngine" in record["reason"]
 
 
@@ -289,7 +313,7 @@ def test_t4_record_reported_while_pid_alive_and_dropped_after(tmp_path):
         status = json.loads(lcm_tools.lcm_status({}, engine=engine))
         assert "inactive_process" not in status
         assert "was not active in process" not in handle_lcm_command("doctor", engine)
-        assert not (home / RECORD_NAME.format(pid=child.pid)).exists()
+        assert not (home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=child.pid)).exists()
     finally:
         engine.shutdown()
 
@@ -308,7 +332,7 @@ def test_t5_unknown_host_shape_is_treated_as_active(tmp_path, monkeypatch, caplo
 
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING and "LCM-X is NOT" in r.getMessage()]
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert not (home / RECORD_NAME.format(pid=os.getpid())).exists()
+    assert not (home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=os.getpid())).exists()
     active = [r.getMessage() for r in caplog.records if ACTIVE_LINE in r.getMessage()]
     assert len(active) == 1
     assert re.search(r"\(load \d+\.\d\d s\)$", active[0]), active[0]
@@ -362,17 +386,19 @@ def _age_markers(db: Path, hours: float) -> float:
     return aged
 
 
-def _hold_write_lock(db: Path, seconds: float) -> threading.Timer:
+def _hold_write_lock(db: Path):
     holder = sqlite3.connect(str(db), timeout=10, check_same_thread=False)
     holder.execute("BEGIN IMMEDIATE")
+    release = threading.Event()
 
-    def _release():
+    def unlock():
+        release.wait()
         holder.rollback()
         holder.close()
 
-    timer = threading.Timer(seconds, _release)
-    timer.start()
-    return timer
+    worker = threading.Thread(target=unlock, daemon=True)
+    worker.start()
+    return release, worker
 
 
 def _timed_open(db: Path, **overrides) -> float:
@@ -383,12 +409,39 @@ def _timed_open(db: Path, **overrides) -> float:
     return elapsed
 
 
-def test_t6_due_deep_check_behind_a_writer_does_not_stall_the_open(tmp_path):
+def test_t6_due_deep_check_behind_a_writer_does_not_stall_the_open(tmp_path, monkeypatch):
     db = tmp_path / "lcm.db"
     _seed(db)
     aged = _age_markers(db, hours=25)
 
-    timer = _hold_write_lock(db, seconds=5)
+    release, holder = _hold_write_lock(db)
+    statements = _record_busy_timeouts(monkeypatch)
+    try:
+        returns_while_blocked(lambda: _timed_open(db), release)
+        assert "PRAGMA busy_timeout=50" in statements, "store open did not use its 50 ms claim budget"
+    finally:
+        release.set()
+        holder.join(timeout=10)
+    db_bootstrap.join_background_integrity_scans(timeout=30)
+    # Skipped, not stamped: the markers stay due for a later open.
+    assert _markers(db) == {"messages_fts": aged, "nodes_fts": aged}
+
+    for _ in range(3):
+        _timed_open(db)
+        db_bootstrap.join_background_integrity_scans(timeout=30)
+        if all(value > aged for value in _markers(db).values()):
+            break
+    stamped = _markers(db)
+    assert stamped["messages_fts"] > aged and stamped["nodes_fts"] > aged, stamped
+
+
+@pytest.mark.latency
+def test_t6_due_deep_check_behind_a_writer_does_not_stall_the_open_latency(tmp_path):
+    db = tmp_path / "lcm.db"
+    _seed(db)
+    aged = _age_markers(db, hours=25)
+
+    timer = _hold_write_lock_for_latency(db, seconds=5)
     try:
         elapsed = _timed_open(db)
     finally:
@@ -487,12 +540,26 @@ def test_t8_rollups_on_open_does_not_wait_for_another_writer(tmp_path):
     db = tmp_path / "lcm.db"
     _seed(db, temporal_rollups_enabled=True)
 
-    timer = _hold_write_lock(db, seconds=5)
+    release, holder = _hold_write_lock(db)
+    try:
+        returns_while_blocked(lambda: _timed_open(db, temporal_rollups_enabled=True), release)
+    finally:
+        release.set()
+        holder.join(timeout=10)
+
+
+@pytest.mark.latency
+def test_t8_rollups_on_open_does_not_wait_for_another_writer_latency(tmp_path):
+    db = tmp_path / "lcm.db"
+    _seed(db, temporal_rollups_enabled=True)
+
+    timer = _hold_write_lock_for_latency(db, seconds=5)
     try:
         elapsed = _timed_open(db, temporal_rollups_enabled=True)
     finally:
         timer.join()
     assert elapsed < 1.0, f"rollups-on store open took {elapsed:.2f} s behind a held write lock"
+
 
 
 # --- review round 2 (#691) -----------------------------------------------------
@@ -530,7 +597,7 @@ def test_b1_abandonment_during_the_active_line_is_still_reported(tmp_path, monke
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1, errors
     assert "LCM-X is NOT active in this process" in errors[0]
-    record = json.loads((home / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
+    record = json.loads((home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
     assert "plugins.load_timeout_seconds" in record["reason"]
 
 
@@ -592,3 +659,29 @@ def test_n3_non_null_ingested_at_zero_is_kept_in_reasoning(tmp_path):
     # ingested_at 0.0 is a stored value, not NULL: it is the observation time, so the row is before as_of.
     assert error is None
     assert grounded is not None and grounded.store_id == store_id
+
+
+def _hold_write_lock_for_latency(db: Path, seconds: float) -> threading.Timer:
+    holder = sqlite3.connect(str(db), timeout=10, check_same_thread=False)
+    holder.execute("BEGIN IMMEDIATE")
+
+    def _release():
+        holder.rollback()
+        holder.close()
+
+    timer = threading.Timer(seconds, _release)
+    timer.start()
+    return timer
+
+
+def _record_busy_timeouts(monkeypatch):
+    statements = []
+    connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
+    return statements
