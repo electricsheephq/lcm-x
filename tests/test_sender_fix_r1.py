@@ -264,3 +264,87 @@ def test_retired_refusal_has_debug_reason(tmp_path, monkeypatch, caplog, retired
         with caplog.at_level("DEBUG"):
             assert begin(e, [row]) is None
         assert "sender_capture:refused_retired" in caplog.messages
+
+
+@pytest.mark.parametrize("anchor", ["0", "1"])
+@pytest.mark.parametrize("path", ["live-inplace", "compress-copy",
+                                 "gw_fresh_stored_at_a", "gw_fresh_unstored_at_a"])
+def test_w6_empty_b_own_probe(tmp_path, monkeypatch, anchor, path):
+    """Port the claimant's uid-less and gateway empty-B probe families."""
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", anchor)
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as e:
+        prefix = [message(), dict(role="assistant", content="synthetic reply", timestamp=100.5)]
+        a = dict(role="user", content=A_TEXT, timestamp=101.0)
+        e.ingest(prefix if path == "gw_fresh_unstored_at_a" else [*prefix, a])
+        e.on_turn_complete([*prefix, a], failed=True, turn_id="turn-a")
+        view = deepcopy([*prefix, a]) if path.startswith("gw_") else [*prefix, a]
+        view.append(dict(role="user", content="", timestamp=102.0))
+        e.ingest(view)
+        assert e.drain_rollup_maintenance(timeout=10)
+        if path != "live-inplace":
+            out = deepcopy(view)
+            e._rekey_host_rewrite_watch(view, out)
+            view = out
+        merge_v0215(view)
+        assert view[-1]["content"] == A_TEXT
+        begin(e, view, turn="turn-b", sender_id="synthetic-y")
+        assert_owners(e)
+        e.ingest(view)
+        assert e.drain_rollup_maintenance(timeout=10)
+        assert_owners(e)
+
+
+@pytest.mark.parametrize("anchor", ["0", "1"])
+@pytest.mark.parametrize("path", ["live-inplace", "compress-copy"])
+@pytest.mark.parametrize("case", ["empty-b", "nonempty-b-control", "empty-b-a-prestamped"])
+def test_w6_empty_b_verifier_probe(tmp_path, monkeypatch, anchor, path, case):
+    """Port the independent verifier, retaining its nonempty/prestamped controls."""
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", anchor)
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as e:
+        prefix = [message(), dict(role="assistant", content="synthetic reply", timestamp=100.5)]
+        a = dict(role="user", content=A_TEXT, timestamp=101.0)
+        if case.endswith("prestamped"):
+            begin(e, [*prefix, a], turn="turn-a", sender_id="synthetic-x")
+        e.ingest([*prefix, a])
+        assert e.drain_rollup_maintenance(timeout=10)
+        e.on_turn_complete([*prefix, a], failed=True, turn_id="turn-a")
+        b_text = B_TEXT if case == "nonempty-b-control" else ""
+        view = [*prefix, a, dict(role="user", content=b_text, timestamp=102.0)]
+        e.ingest(view)
+        assert e.drain_rollup_maintenance(timeout=10)
+        if path == "compress-copy":
+            out = deepcopy(view)
+            e._rekey_host_rewrite_watch(view, out)
+            view = out
+        merge_v0215(view)
+        begin(e, view, turn="turn-b", sender_id="synthetic-y")
+        assert_owners(e)
+        e.ingest(view)
+        assert e.drain_rollup_maintenance(timeout=10)
+        assert_owners(e)
+
+
+@pytest.mark.parametrize("anchor", ["0", "1"])
+@pytest.mark.parametrize("candidate_session", ["S", "ancestor"])
+@pytest.mark.parametrize("later", ["none", "user", "assistant", "tool", "other-session-user"])
+def test_w6_update_latest_user_controls(tmp_path, monkeypatch, anchor, candidate_session, later):
+    """Only a later user in the candidate row's own session vetoes UPDATE."""
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", anchor)
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as e:
+        row = message()
+        e.ingest([row])
+        assert e.drain_rollup_maintenance(timeout=10)
+        store = e._store
+        sid = store.connection.execute("SELECT store_id FROM messages").fetchone()[0]
+        if candidate_session == "ancestor":
+            store.connection.execute("UPDATE messages SET session_id='ancestor' WHERE store_id=?", (sid,))
+            store.connection.commit()
+            e._identity_anchor_chain_cache = ("S", ["ancestor"])
+        if later != "none":
+            role = "user" if later == "other-session-user" else later
+            session = "other" if later == "other-session-user" else candidate_session
+            later_id = store.append(session, dict(role=role, content="synthetic later row"))
+            assert later_id > sid
+        pending = begin(e, [row])
+        assert store.get_message_senders([sid])[sid] == ((None, None) if later == "user" else expected())
+        assert bool(pending.store_ids) == (later != "user")

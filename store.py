@@ -733,7 +733,10 @@ class MessageStore:
             count = conn.execute(
                 "UPDATE messages SET sender_id = ?, sender_source = ?"
                 " WHERE store_id = ? AND role = 'user' AND sender_id IS NULL AND sender_source IS NULL"
-                f" AND session_id IN ({marks})", (sender_id, sender_source, store_id, *session_ids)).rowcount
+                f" AND session_id IN ({marks})"
+                " AND NOT EXISTS (SELECT 1 FROM messages later WHERE later.session_id = messages.session_id"
+                " AND later.role = 'user' AND later.store_id > messages.store_id)",
+                (sender_id, sender_source, store_id, *session_ids)).rowcount
             assert count in (0, 1)
             if not count:
                 existing = self.get_message_senders([store_id]).get(store_id)

@@ -33,7 +33,7 @@ def test_t4_generated_sender_occurrences(tmp_path, uid_host):
                     sid = stored["store_id"]
                     owners.setdefault(sid, turn)
                     value = stamped[sid]
-                    if sid not in owners or owners[sid] == turn:
+                    if owners[sid] == turn:
                         stamped_count += value != (None, None)
                     allowed = (f"telegram:synthetic-{owners[sid]}", "gateway_principal")
                     if value not in {(None, None), allowed}:
@@ -61,6 +61,7 @@ def test_t4_merge_survivors_are_null(tmp_path, shape):
             # leaves content unchanged but still carries the prefix witness.
             row["_merged_turn_prefix"] = row["content"]
             if shape.endswith("extended"):
+                # W1's identity guard catches this extension before the prefix check matters.
                 row["content"] += "\n\nsynthetic second constituent"
         elif shape == "empty-witness":
             row["_absorbed_message_uids"] = []
