@@ -99,7 +99,7 @@ def test_failed_publication_rolls_back_and_keeps_positional_proof(published, mon
             engine._record_compress_commit_proof(host, output)
         assert pair(engine) == before
         assert engine._compress_commit_proof["durable"] is False
-        assert "output_metadata" not in engine._compress_commit_proof
+        assert "output_metadata" in engine._compress_commit_proof
         assert engine._durable_commit_proof_payload() is None
         assert states_at_warning == [False]
     finally:
@@ -166,16 +166,25 @@ def test_malformed_snapshot_matches_missing_on_cold_ingest(tmp_path, kind):
     assert results[0] == results[1]
 
 
-def test_invalid_writer_snapshot_never_gets_a_matching_digest(published):
+@pytest.mark.parametrize("kind", MALFORMED)
+def test_invalid_writer_snapshot_never_gets_a_matching_digest(published, kind):
     engine, _host_input, _output = published
     before = pair(engine)
     proof = engine._compress_commit_proof
-    proof["output_metadata"] = None
+    invalid = malformed(kind, proof["output_metadata"])
+    proof["output_metadata"] = invalid
     engine._persist_compress_commit_proof(proof)
     assert pair(engine) == before
     assert engine._compress_commit_proof["durable"] is False
-    assert "output_metadata" not in engine._compress_commit_proof
+    assert engine._compress_commit_proof["output_metadata"] == invalid
     assert engine._durable_commit_proof_payload() is None
+    # Rejected metadata remains process-local but cannot crash positional ingest.
+    engine.ingest(copy.deepcopy(_output))
+    assert engine._ingest_failure_count == 0
+    engine._persist_compress_commit_proof(proof)
+    assert proof["durable"] is True
+    assert pair(engine)[1] is None
+    assert "output_metadata" not in engine._durable_commit_proof_payload()
 
 
 @pytest.mark.parametrize("mutation", ["valid", "short", "long", "extra-scaffold", "bool-length"])
@@ -219,7 +228,7 @@ def test_legacy_snapshot_with_leading_system_anchor_attaches(tmp_path, monkeypat
         engine.shutdown()
 
 
-def test_boundary_can_republish_positional_proof_without_snapshot(published, monkeypatch):
+def test_boundary_can_republish_positional_proof_without_snapshot(published, monkeypatch, tmp_path):
     engine, host, output = published
     original = engine._store.write_metadata_json
     def fail(*args, **kwargs):
@@ -227,9 +236,20 @@ def test_boundary_can_republish_positional_proof_without_snapshot(published, mon
     monkeypatch.setattr(engine._store, "write_metadata_json", fail)
     engine._record_compress_commit_proof(host, output)
     proof = engine._compress_commit_proof
-    assert proof["durable"] is False and "output_metadata" not in proof
+    assert proof["durable"] is False and "output_metadata" in proof
     monkeypatch.setattr(engine._store, "write_metadata_json", original)
     engine._persist_compress_commit_proof(proof)
     assert engine._compress_commit_proof is proof and proof["durable"] is True
     assert "output_metadata" not in engine._durable_commit_proof_payload()
     assert pair(engine)[1] is None
+    engine.shutdown()
+    cold = _engine(tmp_path)
+    try:
+        assert "output_metadata" not in cold._durable_commit_proof_payload()
+        before = len(cold._store.get_session_messages("S"))
+        cold.ingest(copy.deepcopy(output) + [_m("user", "fresh row after retry", 999.0, "retry-fresh")])
+        rows = cold._store.get_session_messages("S")
+        assert len(rows) == before + 1
+        assert rows[-1]["content"] == "fresh row after retry"
+    finally:
+        cold.shutdown()

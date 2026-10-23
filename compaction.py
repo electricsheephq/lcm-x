@@ -1178,7 +1178,6 @@ class CompactionMixin:
             if "durable" in proof:
                 proof["durable"] = True
         except Exception:
-            proof.pop("output_metadata", None)
             proof["durable"] = False
             logger.warning("LCM occurrence-proof publication failed; proof not durable", exc_info=True)
 

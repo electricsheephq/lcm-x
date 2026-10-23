@@ -6647,7 +6647,7 @@ class LCMEngine(
 
     def _write_compress_commit_proof_payload(self, proof, payload) -> None:
         snapshot = None
-        if "output_metadata" in proof:
+        if "output_metadata" in proof and proof.get("durable") is not False:
             snapshot = {"output_metadata": proof["output_metadata"], "output_length": len(proof["output"])}
             if not self._occurrence_snapshot_shape_valid(snapshot, payload):
                 raise ValueError("invalid occurrence snapshot")
@@ -6824,6 +6824,11 @@ class LCMEngine(
         proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.
         accepted_compaction_prefix = 0
         proof = getattr(self, "_compress_commit_proof", None)
+        if proof and proof.get("durable") is False:
+            metadata = proof.get("output_metadata")
+            if (not isinstance(metadata, list) or len(metadata) != len(proof.get("output") or ())
+                    or any(not isinstance(row, dict) for row in metadata)):
+                proof = {**proof, "output_metadata": []}
         if (
             not self._ingest_cursor_needs_reconcile
             and proof
