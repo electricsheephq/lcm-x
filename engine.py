@@ -5012,7 +5012,7 @@ class LCMEngine(
                     pass  # Diagnostic handlers cannot change the observed operation's result.
 
     @contextmanager
-    def _session_end_diagnostic(self, messages, started, admitted):
+    def _session_end_diagnostic(self, messages, started, admitted, admission_started):
         previous = self._end_attribution
         self._end_attribution = diagnostic = dict.fromkeys(
             ("classifier_ms", "ingest_ms", "finalize_ms", "snapshot_ms", "retire_ms"), 0.0)
@@ -5022,29 +5022,31 @@ class LCMEngine(
             yield
         finally:
             diagnostic.update(outer_ms=(time.perf_counter() - started) * 1000,
-                              admission_ms=(admitted - started) * 1000, cursor_exit=self._ingest_cursor,
+                              admission_ms=(admitted - admission_started) * 1000,
+                              prelude_ms=(admission_started - started) * 1000, cursor_exit=self._ingest_cursor,
                               reconcile_exit=int(self._ingest_cursor_needs_reconcile))
             self._end_attribution = previous
             try:
                 logger.info("LCM attribution phase=session_end engine_token=%d compress_sequence=%d writer_reason=%s proof_state=%s "
                     "reason=%s rows=%d cursor_entry=%d reconcile_entry=%d cursor_exit=%d reconcile_exit=%d "
-                    "outer_ms=%.3f admission_ms=%.3f classifier_ms=%.3f ingest_ms=%.3f finalize_ms=%.3f "
+                    "outer_ms=%.3f admission_ms=%.3f prelude_ms=%.3f classifier_ms=%.3f ingest_ms=%.3f finalize_ms=%.3f "
                     "snapshot_ms=%.3f retire_ms=%.3f",
                     self._diagnostic_engine_token, self._compress_calls, self._compress_commit_reason,
                     self._compress_commit_publication if self._compress_commit_proof else "none",
                     *(diagnostic[key] for key in ("reason", "rows", "cursor_entry", "reconcile_entry", "cursor_exit",
-                      "reconcile_exit", "outer_ms", "admission_ms", "classifier_ms", "ingest_ms", "finalize_ms",
+                      "reconcile_exit", "outer_ms", "admission_ms", "prelude_ms", "classifier_ms", "ingest_ms", "finalize_ms",
                       "snapshot_ms", "retire_ms")))
             except Exception:
                 pass
 
     def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
-        sender_capture.retire(self)
         started = time.perf_counter()
+        sender_capture.retire(self)
+        admission_started = time.perf_counter()
         with self._exclusive_lifecycle("end"):
             if self._stable_use_closed:
                 return
-            with self._session_end_diagnostic(messages, started, time.perf_counter()):
+            with self._session_end_diagnostic(messages, started, time.perf_counter(), admission_started):
                 self._retry_session_end_tails()
                 try:
                     self._on_session_end_unlocked(session_id, messages)

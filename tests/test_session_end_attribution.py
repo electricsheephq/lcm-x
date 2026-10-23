@@ -168,3 +168,15 @@ def test_debug_gate_avoids_clocks_at_info(published, monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         with engine._attribution_span("preflight", 3):
             pass
+
+
+def test_outer_prelude_and_admission_clocks_are_separate(published, monkeypatch, caplog):
+    engine, _host, _output = published
+    monkeypatch.setattr(engine_module.time, "perf_counter", lambda: 5.0)
+    with caplog.at_level(logging.INFO):
+        with engine._session_end_diagnostic([], 1.0, 3.0, 2.0):
+            pass
+    data = fields(records(caplog)[0])
+    assert float(data["outer_ms"]) == 4000.0
+    assert float(data["prelude_ms"]) == 1000.0
+    assert float(data["admission_ms"]) == 1000.0
