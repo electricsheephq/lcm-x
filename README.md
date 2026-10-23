@@ -493,7 +493,7 @@ The manifest still declares all 16 tools.
 | `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. |
 | `lcm_inspect` | Read-only operator inventory for current-session lineage, frontier/fresh-tail metadata, externalized refs/readability, compaction skip/no-op reasons, and matched ignore/stateless patterns. Returns metadata only; use retrieval tools for content. |
 | `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. |
-| `lcm_memory` | Default-off read-only `lookup`/`list` over this profile. Lookup accepts a name and up to 8 aliases; returns capped mention counts, event/write-labelled first/last times, sessions, cited snippets and compatible assertion facts. Optional question ranks up to 5 mentions across all entity matches, independently of the card limit. List groups assertion subjects by namespace; without assertions there is no registry until E2. No writes or model calls. |
+| `lcm_memory` | Default-off read-only `lookup`/`list` over this profile. Lookup accepts a name and up to 8 aliases; returns mention counts, event/write-labelled first/last times (carried times marked `time_uncertain: carried`) and sessions over all matching rows, plus capped cited snippets and compatible assertion facts. Optional question ranks up to 5 mentions across all entity matches, independently of the card limit. List groups assertion subjects by namespace; without assertions there is no registry until E2. No writes or model calls. |
 
 ## Recall skill and policy
 
