@@ -136,8 +136,8 @@ def test_platform_collision_attach_and_undo_bytes(store, ops, api):
     target = last(store)
     other = ops.add_alias(b, "ExactID", "platform_id", platform="tg", verified=True)
     events = store.events_after()
-    error = refused(api, "platform_id_held", lambda: ops.undo(target))
-    assert error.holder == b
+    error = refused(api, "dependent_events", lambda: ops.undo(target))
+    assert error.blocking_event_ids == [last(store)]
     assert store.events_after() == events
     ops.undo(last(store))
     ops.undo(target)
@@ -208,6 +208,10 @@ def test_seeded_sequences(seed, store, ops, api):
                    lambda: ops.add_note("fact", entity_id=entity, cites=[1]),
                    lambda: ops.undo(event["event_id"]),
                    lambda: ops.add_alias(entity, "shared", "platform_id", platform="tg", verified=True)]
+        notes = store.notes_for_entity(entity)
+        if notes:
+            note = rng.choice(notes)["note_id"]
+            actions.append(lambda: entities.append(ops.split(entity, [], [note], "note split")))
         if aliases:
             alias = rng.choice(aliases)["alias_id"]
             actions.extend([lambda: ops.retire_alias(alias),
@@ -253,6 +257,12 @@ def test_merge_and_undo_serialize(store, ops, api):
         futures = [pool.submit(run, lambda o: o.merge(b, c)), pool.submit(run, lambda o: o.undo(target))]
         outcomes = [f.result(timeout=20) for f in futures]
     assert outcomes in [["ok", "ok"], ["ok", "dependent_events"]]
+    if outcomes == ["ok", "ok"]:
+        assert store.get_entity(b)["merged_into"] is None
+        assert store.get_entity(c)["merged_into"] == b
+    else:
+        assert store.get_entity(b)["merged_into"] == a
+        assert store.get_entity(c)["merged_into"] == a
     assert api.replay_projection(store) == projection(store)
 
 
@@ -433,3 +443,216 @@ def test_restore_first_mutant_is_killed_and_rolls_back(store, ops, api, monkeypa
     assert scope_rows(store) == before
     ops.undo(event)
     assert api.replay_projection(store) == projection(store)
+
+
+# --- Rule 1 / W1A-2 / W1S-1 / CR-7: split with notes writes exactly one event (kills R5b).
+def test_split_with_notes_is_one_event(store, ops, api):
+    e = ops.create_entity("E")
+    alias = ops.add_alias(e, "Alex", source_store_ids=[2])
+    note = ops.add_note("fact", entity_id=e, cites=[2])
+    before = len(store.events_after())
+    ops.split(e, [alias], [note], "E2")
+    assert len(store.events_after()) == before + 1
+    assert [r["op"] for r in store.events_after()[before:]] == ["split"]
+
+
+# --- Rule 6.3 / ADR D4: split supersedes the original note by the copy (kills M19).
+def test_split_supersedes_original_note(store, ops, api):
+    e = ops.create_entity("E")
+    ops.add_alias(e, "keep", source_store_ids=[2])
+    note = ops.add_note("fact", entity_id=e, cites=[2])
+    e2 = ops.split(e, [], [note], "E2")
+    copy = store.notes_for_entity(e2)[0]["note_id"]
+    assert store.get_note(note)["superseded_by"] == copy
+    view = api.resolved_view(store)
+    assert view["cards"][e]["notes"] == []
+    assert [n["note_id"] for n in view["cards"][e2]["notes"]] == [copy]
+
+
+# --- Rule 6 refusals: a retired alias or a superseded note is foreign_row (kills M36).
+def test_split_refuses_inactive_rows(store, ops, api):
+    e = ops.create_entity("E")
+    alias = ops.add_alias(e, "old")
+    ops.add_alias(e, "keep")
+    ops.retire_alias(alias)
+    refused(api, "foreign_row", lambda: ops.split(e, [alias], [], "E2"))
+    n1 = ops.add_note("one", entity_id=e, cites=[1])
+    ops.add_note("two", entity_id=e, cites=[1], superseded_by=None)
+    ops.split(e, [], [n1], "E3")  # n1 now superseded on E
+    count = len(store.events_after())
+    refused(api, "foreign_row", lambda: ops.split(e, [], [n1], "E4"))
+    assert len(store.events_after()) == count
+
+
+# --- Rule 6 + D8: split copies keep provenance, so visibility does not widen (kills M60/M62).
+def test_split_copy_keeps_provenance_and_owner(store, ops, api):
+    e, owner = ops.create_entity("E"), ops.create_entity("speaker")
+    p1_only = ops.add_alias(e, "P1 SECRET NAME", source_store_ids=[1])
+    rel = ops.add_alias(e, "my sister", "relation_phrase", owner_entity_id=owner, source_store_ids=[2])
+    ops.add_alias(e, "visible", source_store_ids=[2])
+    p2_owner = dict(access_scope="P2", principal_is_owner=True)
+    assert "SECRET" not in json.dumps(api.resolved_view(store, **p2_owner))
+    e2 = ops.split(e, [p1_only, rel], [], "E2")
+    copies = {a["alias_display"]: a for a in store.aliases_for_entity(e2)}
+    assert json.loads(copies["P1 SECRET NAME"]["source_store_ids"]) == [1]
+    assert copies["my sister"]["owner_entity_id"] == owner
+    assert "SECRET" not in json.dumps(api.resolved_view(store, **p2_owner))
+
+
+# --- Rule 2: the LATEST not-undone change_kind wins (kills M1).
+def test_latest_change_kind_wins(store, ops, api):
+    a, b = ops.create_entity("A"), ops.create_entity("B", "org")
+    ops.change_kind(a, "org")
+    ops.change_kind(a, "thing")
+    assert api.resolved_view(store)["cards"][a]["kind"] == "thing"
+    refused(api, "kind_mismatch", lambda: ops.merge(b, a))
+
+
+# --- Rule 5: allow_kind_mismatch=True merges; forgotten FROM side refused (kills M21/M22).
+def test_merge_allow_kind_mismatch_and_forgotten_from(store, ops, api):
+    a, b = ops.create_entity("A"), ops.create_entity("B", "org")
+    refused(api, "kind_mismatch", lambda: ops.merge(a, b))
+    ops.merge(a, b, allow_kind_mismatch=True)
+    assert api.resolved_view(store)["canonical"][b] == a
+    c, d = ops.create_entity("C"), ops.create_entity("D")
+    with store.transaction():
+        store.set_entity_status(d, "forgotten", log_event=False)
+    refused(api, "forgotten", lambda: ops.merge(c, d))
+
+
+# --- Rule 4: blocking ids newest first (kills M27).
+def test_blockers_newest_first(store, ops, api):
+    e = ops.create_entity("E")
+    target = last(store)
+    ops.add_alias(e, "x")
+    first = last(store)
+    ops.add_alias(e, "y")
+    second = last(store)
+    error = refused(api, "dependent_events", lambda: ops.undo(target))
+    assert error.blocking_event_ids[:2] == [second, first]
+
+
+# --- Rule 4 touch set: both canonical sides of a merge (kills M64).
+def test_merge_touch_set_includes_canonical_into(store, ops, api):
+    a, b, c = [ops.create_entity(n) for n in "ABC"]
+    ops.merge(a, b)                      # B -> A
+    ops.change_kind(a, "org")
+    kind_event = last(store)
+    ops.change_kind(c, "org")
+    ops.merge(b, c)                      # into=B resolves to A; C -> A (kind check used A's derived kind)
+    refused(api, "dependent_events", lambda: ops.undo(kind_event))
+
+
+# --- Rule 9 / acceptance 5: undo's dependent scan runs inside BEGIN IMMEDIATE (kills R22).
+def test_undo_scan_inside_transaction(store, ops, api):
+    a, b, c = [ops.create_entity(n) for n in "ABC"]
+    ops.merge(a, b)
+    target = last(store)
+    merged = threading.Event()
+    with closing(EntityStore(store.db_path, profile_key=store.scope_key)) as s1, \
+            closing(EntityStore(store.db_path, profile_key=store.scope_key)) as s2:
+        undoer, merger = api.EntityOps(s1), api.EntityOps(s2)
+        real = s1.transaction
+
+        def gated():
+            # The merge on the second connection commits before undo's transaction begins.
+            if not merged.is_set():
+                t = threading.Thread(target=lambda: (merger.merge(b, c), merged.set()))
+                t.start()
+                t.join(10)
+            return real()
+
+        s1.transaction = gated
+        try:
+            outcome = undoer.undo(target)
+            result = "ok"
+        except api.EntityOpRefused as error:
+            result = error.reason
+    assert merged.is_set()
+    # Serial order is merge-then-undo, so the undo must see the merge and refuse.
+    assert result == "dependent_events", (result, outcome if result == "ok" else None)
+
+
+def test_hidden_merged_into_visible_never_leaks(store, ops, api):
+    hidden, visible = ops.create_entity("P1"), ops.create_entity("P2")
+    ops.add_alias(hidden, "Alex", source_store_ids=[1])
+    ops.add_note("P1_ONLY_SENTINEL", entity_id=hidden, cites=[1])
+    ops.add_alias(visible, "Alex", source_store_ids=[2])
+    access = dict(access_scope="P2", principal_is_owner=False)
+    before = api.resolved_view(store, **access)
+    ops.merge(visible, hidden)
+    outputs = [api.resolved_view(store, **access), ops.lookup_alias("Alex", **access)]
+    assert outputs[0]["canonical"] == {visible: visible}
+    assert outputs[0] == before
+    assert hidden not in json.dumps(outputs)
+    assert "SENTINEL" not in json.dumps(outputs)
+
+
+def test_visible_records_hide_reference_ids(store, ops, api):
+    hidden, visible = ops.create_entity("hidden"), ops.create_entity("visible")
+    old = ops.add_note("hidden note", entity_id=hidden, cites=[1])
+    ops.add_alias(visible, "my sister", "relation_phrase", owner_entity_id=hidden, source_store_ids=[2])
+    ops.add_note("visible fact", entity_id=visible, cites=[2], about_entity_id=hidden,
+                 asserted_by_entity_id=hidden, retracts_note_id=old)
+    outputs = [api.resolved_view(store, "P2", True), ops.lookup_alias("my sister", "P2", True)]
+    assert outputs[0]["cards"][visible]["notes"][0]["text"] == "visible fact"
+    assert hidden not in json.dumps(outputs) and old not in json.dumps(outputs)
+
+
+def test_other_profile_forged_events_do_not_change_projection(store, ops, api):
+    entity = ops.create_entity("A")
+    ops.add_alias(entity, "Alex", source_store_ids=[1])
+    note = ops.add_note("fact", entity_id=entity, cites=[1])
+    target = last(store)
+    before = [api.resolved_view(store), api.resolved_view(store, "P1"), api.replay_projection(store)]
+    with closing(EntityStore(store.db_path, profile_key="profile-B")) as other:
+        other.append_event("change_kind", {"kind": {"entity_id": entity, "after": "org"}})
+        other.append_event("undo", {}, target_event_id=target)
+        other.append_event("create_entity", {"created": {"notes": [note]}})
+    assert [api.resolved_view(store), api.resolved_view(store, "P1"), api.replay_projection(store)] == before
+    ops.undo(target)
+    assert api.resolved_view(store, "P1")["cards"][entity]["notes"] == []
+
+
+def test_pid_five_op_shrunk_sequence_undo_all(store, ops, api):
+    """Hypothesis shrink: attach, retire, attach, retire, undo(first retire)."""
+    empty = api.resolved_view(store)
+    first = ops.attach_or_create_for_platform_id("tg:pid", "A", verified=True)
+    ops.retire_alias(store.aliases_for_entity(first)[0]["alias_id"])
+    target = last(store)
+    second = ops.attach_or_create_for_platform_id("tg:pid", "B", verified=True)
+    attach = last(store)
+    ops.retire_alias(store.aliases_for_entity(second)[0]["alias_id"])
+    retirement = last(store)
+    before = scope_rows(store)
+    error = refused(api, "dependent_events", lambda: ops.undo(target))
+    assert error.blocking_event_ids == [retirement, attach]
+    assert scope_rows(store) == before
+    for event in reversed(store.events_after()):
+        ops.undo(event["event_id"])
+        assert api.replay_projection(store) == projection(store)
+    assert api.resolved_view(store) == empty
+
+
+@pytest.mark.parametrize("operation", ["holder", "attach", "lookup"])
+def test_pid_prefix_normalized_for_attach_holder_lookup(operation, store, ops, api):
+    entity = ops.create_entity("A")
+    ops.add_alias(entity, "AbC", "platform_id", platform="tg", verified=True)
+    before = scope_rows(store)
+    if operation == "holder":
+        assert ops.holder_for_platform_id("TG:AbC") == entity
+    elif operation == "attach":
+        assert ops.attach_or_create_for_platform_id("TG:AbC", "unused", verified=True) == entity
+    else:
+        assert ops.lookup_alias("TG:AbC") == {"candidates": [entity], "ambiguous": False}
+    assert ops.lookup_alias("TG:abc") == {"candidates": [], "ambiguous": False}
+    assert scope_rows(store) == before
+
+
+def test_pid_holder_on_read_only_store(store, ops, api):
+    entity = ops.create_entity("A")
+    ops.add_alias(entity, "AbC", "platform_id", platform="tg", verified=True)
+    with closing(EntityStore(store.db_path, profile_key=store.scope_key, read_only=True)) as reader:
+        bound = api.EntityOps(reader)
+        assert bound.holder_for_platform_id("tg:AbC") == entity
+        assert bound.lookup_alias("TG:AbC") == {"candidates": [entity], "ambiguous": False}
