@@ -416,15 +416,30 @@ def test_t6_due_deep_check_behind_a_writer_does_not_stall_the_open(tmp_path, mon
 
     release, holder = _hold_write_lock(db)
     statements = _record_busy_timeouts(monkeypatch)
+    deep_checks_while_locked = []
+    real_check = db_bootstrap.check_external_content_fts_integrity
+
+    def record_deep_check(conn, spec):
+        if not release.is_set():
+            deep_checks_while_locked.append(spec.table_name)
+        return real_check(conn, spec)
+
+    def open_and_snapshot():
+        _timed_open(db)
+        # returns_while_blocked releases the writer in its finally block.
+        # Observe the open's markers before any post-release scan can stamp.
+        return _markers(db)
+
+    monkeypatch.setattr(db_bootstrap, "check_external_content_fts_integrity", record_deep_check)
     try:
-        returns_while_blocked(lambda: _timed_open(db), release)
+        markers_before_release = returns_while_blocked(open_and_snapshot, release)
         assert "PRAGMA busy_timeout=50" in statements, "store open did not use its 50 ms claim budget"
     finally:
         release.set()
         holder.join(timeout=10)
     db_bootstrap.join_background_integrity_scans(timeout=30)
-    # Skipped, not stamped: the markers stay due for a later open.
-    assert _markers(db) == {"messages_fts": aged, "nodes_fts": aged}
+    assert deep_checks_while_locked == []
+    assert markers_before_release == {"messages_fts": aged, "nodes_fts": aged}
 
     for _ in range(3):
         _timed_open(db)
