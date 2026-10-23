@@ -4194,6 +4194,7 @@ class LCMEngine(
             # #1116: Hermes fires this boundary only after it committed the compression, so the stub-first list
             # compress() handed it is the host's now: its proof becomes durable, as the rotation re-key does.
             self._persist_compress_commit_proof(proof, last_store_id=proof.get("stub_first_last_store_id"))
+            proof = self._compress_commit_proof
         cursor_proven = bool(
             proof
             and proof.get("session_id") == session_id
@@ -6634,46 +6635,62 @@ class LCMEngine(
             redacted_replay_messages.append(redacted_message)
         return redacted_replay_messages
 
-    def _record_compress_commit_proof(self, messages, result) -> None:
-        if self._bypasses_lcm_context_management():
-            return
-        super()._record_compress_commit_proof(messages, result)
-        if self._compress_commit_proof is not None:
-            proof = self._compress_commit_proof
-            # Snapshot before the host can mutate rows. Effective identity maps
-            # retained rows through the host's scaffold/user merge, including on restart.
-            _, identities = self._occurrence_replay_identities(result, proof)
-            proof["output_metadata"] = [
-                {**self._host_occurrence_metadata(message), "identity_sha256": (
-                    _commit_proof_identity_digest(_proof_user_identity(identity)) if identity is not None else None
-                )}
-                for message, identity in zip(result, identities)
-            ]
-            if any(proof.get(key) for key in ("published", "native", "recovery", "filtered")):
-                self._persist_compress_commit_proof(proof)
+    def _prepare_compress_commit_proof(self, proof, result) -> None:
+        # Snapshot before the host can mutate rows, and before either durable write.
+        _, identities = self._occurrence_replay_identities(result, proof)
+        proof["output_metadata"] = [
+            {**self._host_occurrence_metadata(message), "identity_sha256": (
+                _commit_proof_identity_digest(_proof_user_identity(identity)) if identity is not None else None
+            )}
+            for message, identity in zip(result, identities)
+        ]
 
-    def _persist_compress_commit_proof(self, proof, last_store_id=None) -> None:
-        super()._persist_compress_commit_proof(proof, last_store_id=last_store_id)
-        if "output_metadata" not in proof:
-            return
-        try:
-            key = self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
-            expected = [_commit_proof_identity_digest(identity) for identity in proof["output_effective"]]
+    def _write_compress_commit_proof_payload(self, proof, payload) -> None:
+        metadata = proof.get("output_metadata")
+        snapshot = {"output_metadata": metadata, "output_length": len(proof["output"])}
+        if not self._occurrence_snapshot_shape_valid(snapshot, payload):
+            raise ValueError("invalid occurrence snapshot")
+        snapshot["proof_sha256"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        # Helpers defer their commits to this owner; no exception is swallowed before rollback.
+        with self._store.atomic(immediate=True):
+            super()._write_compress_commit_proof_payload(proof, payload)
+            self._store.write_metadata_json(
+                [self._replay_snapshot_metadata_key("host_occurrence_snapshot")],
+                json.dumps(snapshot, sort_keys=True),
+            )
 
-            payload = self._store.read_metadata_json(key)
-            if (isinstance(payload, dict) and payload.get("session_id") == proof.get("session_id")
-                    and payload.get("effective_sha256_v4") == expected):
-                # Keep the rollback-compatible proof wire unchanged. This
-                # snapshot is usable only with the exact proof that wrote it.
-                self._store.write_metadata_json(
-                    [self._replay_snapshot_metadata_key("host_occurrence_snapshot")],
-                    json.dumps({
-                        "proof_sha256": hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest(),
-                        "output_metadata": proof["output_metadata"],
-                    }, sort_keys=True),
-                )
-        except Exception:
-            logger.debug("LCM occurrence metadata persistence failed", exc_info=True)
+    @staticmethod
+    def _occurrence_snapshot_shape_valid(snapshot, payload) -> bool:
+        rows = snapshot.get("output_metadata")
+        if not isinstance(rows, list):
+            return False
+        if "output_length" in snapshot and (type(snapshot["output_length"]) is not int
+                                            or snapshot["output_length"] != len(rows)):
+            return False
+        for row in rows:
+            if not isinstance(row, dict) or not {"timestamp", "message_uid", "identity_sha256"} <= row.keys():
+                return False
+            stamp, uid, digest = row["timestamp"], row["message_uid"], row["identity_sha256"]
+            if stamp is not None and (type(stamp) not in (int, float) or _normalize_observed_at(stamp) != stamp):
+                return False
+            if uid is not None and not _valid_uid(uid):
+                return False
+            if digest is not None and (not isinstance(digest, str) or len(digest) != 64
+                                       or any(c not in "0123456789abcdef" for c in digest)):
+                return False
+        if [row["identity_sha256"] for row in rows if row["identity_sha256"] is not None] != payload.get(
+                "effective_sha256_v4", payload.get("effective_sha256", [])):
+            return False
+        if "output_length" not in snapshot:
+            # Old snapshots lack a count. Their effective sequence and known scaffold positions must agree.
+            scaffold = payload.get("scaffold_sha256_v4", payload.get("scaffold_sha256"))
+            if scaffold is not None:
+                return len(rows) == len(scaffold)
+            positions = {item["output_occurrence"]["index"] for item in payload.get("emissions", [])
+                         if item.get("retained_source") is None}
+            if {i for i, row in enumerate(rows) if row["identity_sha256"] is None} != positions:
+                return False
+        return True
 
     def _durable_commit_proof_payload(self, session_id=None):
         payload = super()._durable_commit_proof_payload(session_id)
@@ -6689,7 +6706,8 @@ class LCMEngine(
             # attach the snapshot only to the proof that was validated above.
             same_proof = isinstance(raw, dict) and all(
                 raw.get(field) == payload.get(field) for field in ("created_at", "effective_sha256_v4"))
-            if same_proof and isinstance(snapshot, dict) and snapshot.get("proof_sha256") == digest:
+            if (same_proof and isinstance(snapshot, dict) and snapshot.get("proof_sha256") == digest
+                    and self._occurrence_snapshot_shape_valid(snapshot, payload)):
                 payload["output_metadata"] = snapshot["output_metadata"]
         except Exception:
             logger.debug("LCM occurrence metadata load failed", exc_info=True)
