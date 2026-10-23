@@ -63,17 +63,19 @@ def test_r4_1_replaced_user_behind_unchanged_scaffold(machine, anchor, fresh):
 
 @pytest.mark.parametrize("anchor", [False, True])
 @pytest.mark.parametrize("compacted", [False, True])
-def test_r4_2_uid_only_replacement_keeps_unchanged_suffix(machine, anchor, compacted):
+@pytest.mark.parametrize("known_stamp", [False, True])
+def test_r4_2_uid_only_replacement_keeps_unchanged_suffix(machine, anchor, compacted, known_stamp):
     machine.patch.setenv("LCM_IDENTITY_ANCHOR", str(int(anchor)))
     machine.patch.setattr(machine, "stamp", lambda row: dict(
-        row, message_uid=f"uid-{len(machine.occurrences)}-{row['role']}"))
+        row, message_uid=f"uid-{len(machine.occurrences)}-{row['role']}",
+        **({"timestamp": 10.} if known_stamp else {})))
     for text in ("alpha", "same text"):
         machine.new_turn(text, False, 0, False, "lookup")
     if compacted:
         machine.compress()
         assert machine.engine._last_compression_status == "compacted"
     host = deepcopy(machine.host)
-    assert all("timestamp" not in row for row in host)
+    assert all((row.get("timestamp") == 10.) if known_stamp else "timestamp" not in row for row in host)
     replacement = dict(host[-2], message_uid="replacement-user")
     host[-2] = replacement
     # Isolate suffix duplication from main's known #1179 replacement loss.

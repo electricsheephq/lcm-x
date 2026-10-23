@@ -7552,6 +7552,16 @@ class LCMEngine(
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
         new_prefix_occurrences = set()
+        normalized_new_prefix_occurrences = set()
+
+        def prefix_occurrence_changed(index, previous):
+            changed = self._host_occurrence_changed(messages[index], previous)
+            if changed and self._host_occurrence_changed(
+                    self._occurrence_metadata(messages[index], switches=occurrence.get("switches")),
+                    self._occurrence_metadata(previous, switches=occurrence.get("switches"))):
+                normalized_new_prefix_occurrences.add(index)
+            return changed
+
         unchanged_prefix_occurrences = set()
         proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.
         accepted_compaction_prefix = 0
@@ -7598,7 +7608,7 @@ class LCMEngine(
                 proven_cursor = self._ingest_cursor
                 new_prefix_occurrences = {
                     idx for idx, previous in enumerate(proof.get("output_metadata", ()))
-                    if self._host_occurrence_changed(messages[idx], previous)
+                    if prefix_occurrence_changed(idx, previous)
                 }
                 if new_prefix_occurrences:
                     unchanged_prefix_occurrences = {
@@ -7625,7 +7635,7 @@ class LCMEngine(
                     metadata = self._remapped_output_metadata(messages, proof, remapped)
                     new_prefix_occurrences = {
                         idx for idx, previous in metadata.items()
-                        if self._host_occurrence_changed(messages[idx], previous)
+                        if prefix_occurrence_changed(idx, previous)
                     }
                     unchanged_prefix_occurrences = {
                         idx for idx, previous in metadata.items()
@@ -7659,7 +7669,7 @@ class LCMEngine(
                     # against committed witnesses; retain rewind bookkeeping too.
                     unchanged_prefix_occurrences.add(idx)
                     continue
-                if self._host_occurrence_changed(messages[idx], previous):
+                if prefix_occurrence_changed(idx, previous):
                     new_prefix_occurrences.add(idx)
                 elif (messages[idx].get("content") == previous.get("content")
                       and self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)):
@@ -7711,7 +7721,7 @@ class LCMEngine(
                 metadata = self._remapped_output_metadata(messages, durable, min(cursor, proven_cursor))
                 new_prefix_occurrences = {
                     idx for idx, previous in metadata.items()
-                    if self._host_occurrence_changed(messages[idx], previous)
+                    if prefix_occurrence_changed(idx, previous)
                 }
                 if new_prefix_occurrences:
                     unchanged_prefix_occurrences = {
@@ -7782,6 +7792,7 @@ class LCMEngine(
                     elif role == "tool" and str(messages[idx].get("tool_call_id") or "") in call_owners:
                         segments[call_owners[str(messages[idx].get("tool_call_id") or "")]].append(idx)
                     elif (role == "assistant" and idx in occurrence["proven"]
+                          and (start in normalized_new_prefix_occurrences or start in occurrence["fresh"])
                           and occurrence["owners"].get(idx, (None, None))[0] == start
                           and not any(self._occurrence_metadata(messages[idx], switches=occurrence["switches"])[key]
                                       is not None for key in ("timestamp", "message_uid"))):
