@@ -178,3 +178,46 @@ def test_unquoted_hash_comment_boundary(yaml_config, selected_loader, text, expe
     except ImportError:
         return
     assert _typed(expected) == _typed(yaml.safe_load(text))
+
+
+
+def test_recursive_alias_preserves_other_settings(yaml_config, selected_loader):
+    yaml_config.write_text("extra: &loop [*loop]\nlcm: {context_threshold: 0.35}\n")
+    loaded = config._load_hermes_config_yaml(yaml_config)
+    assert type(loaded) is dict
+    if selected_loader != "line":
+        assert loaded["lcm"]["context_threshold"] == 0.35
+        assert type(loaded["extra"]) is list
+        assert loaded["extra"][0] is loaded["extra"]
+
+
+@pytest.mark.parametrize("anchor", ["[one, two]", "{key: value}"])
+def test_ruamel_shared_alias_identity(yaml_config, monkeypatch, anchor):
+    monkeypatch.setattr(config, "yaml", None)
+    monkeypatch.setattr(config, "ruamel_yaml", pytest.importorskip("ruamel.yaml"))
+    yaml_config.write_text(f"first: &shared {anchor}\nsecond: *shared\n")
+    loaded = config._load_hermes_config_yaml(yaml_config)
+    assert loaded["first"] is loaded["second"]
+    assert type(loaded["first"]) is (list if anchor.startswith("[") else dict)
+
+
+def test_ruamel_alias_doubling_normalizes_within_budget(yaml_config, monkeypatch):
+    from time import perf_counter
+
+    ruamel = pytest.importorskip("ruamel.yaml")
+    monkeypatch.setattr(config, "yaml", None)
+    monkeypatch.setattr(config, "ruamel_yaml", ruamel)
+    text = "level0: &a0 [leaf]\n" + "".join(
+        f"level{i}: &a{i} [*a{i-1}, *a{i-1}]\n" for i in range(1, 7)
+    )
+    yaml_config.write_text(text)
+    raw = ruamel.YAML(typ="safe", pure=True).load(text)
+    started = perf_counter()
+    normalized = config._plain_yaml_value(raw)
+    elapsed = perf_counter() - started
+    assert elapsed < 0.1
+    loaded = config._load_hermes_config_yaml(yaml_config)
+    for document in (normalized, loaded):
+        for level in range(1, 7):
+            assert document[f"level{level}"][0] is document[f"level{level-1}"]
+            assert document[f"level{level}"][1] is document[f"level{level-1}"]
