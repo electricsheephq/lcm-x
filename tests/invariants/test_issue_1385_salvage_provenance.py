@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from hermes_lcm.compaction import CompactionMixin
 from tests.harness import engine_context, stored_rows
 from tests.test_issue_773_hermes_pruned_tool_replay import (
     CLEARED,
@@ -20,7 +21,7 @@ from tests.test_issue_773_hermes_pruned_tool_replay import (
 
 
 @pytest.mark.parametrize("matcher", ["host-rewrite", "commit-proof"])
-def test_legacy_placeholder_copy_with_host_rewrite_replays_once(make_engine, matcher):  # noqa: F811
+def test_legacy_placeholder_copy_with_host_rewrite_replays_once(make_engine, matcher, monkeypatch):  # noqa: F811
     """I1/I2/I8: an older literal copy also admits its salvage alias on replay.
 
     Two newer results let the host borrow X's full identity; the rewritten final
@@ -32,11 +33,14 @@ def test_legacy_placeholder_copy_with_host_rewrite_replays_once(make_engine, mat
     first._ingest_messages(original)
     if matcher == "commit-proof":
         identities = [first._proof_replay_identity(row) for row in original]
-        first._persist_compress_commit_proof({
-            **first._emission_binding(), "session_id": first._session_id,
-            "conversation_id": first._conversation_id,
-            "output": identities, "output_effective": identities, "emissions": [],
-        })
+        with monkeypatch.context() as legacy:
+            legacy.setattr(type(first), "_write_compress_commit_proof_payload",
+                           CompactionMixin._write_compress_commit_proof_payload)
+            first._persist_compress_commit_proof({
+                **first._emission_binding(), "session_id": first._session_id,
+                "conversation_id": first._conversation_id,
+                "output": identities, "output_effective": identities, "emissions": [],
+            })
         assert first._durable_commit_proof_payload() is not None
     legacy = [_call("X"), _result("X", CLEARED),
               _call("Y"), _result("Y", "result Y"),

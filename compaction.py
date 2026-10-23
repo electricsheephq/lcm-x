@@ -1074,6 +1074,7 @@ class CompactionMixin:
                 "emissions": copy.deepcopy(emissions),
             }
             self._compress_commit_proof = proof
+            self._prepare_compress_commit_proof(proof, result)
             if any(d.get("kind") == "recovery" for d in getattr(self, "_pending_emission_candidates", ())):
                 self._identity_anchor_record_recovery(result, emissions)
             if proof["published"] or proof["native"] or proof["recovery"] or proof["filtered"]:
@@ -1085,6 +1086,7 @@ class CompactionMixin:
                 proof["stub_first_compress_call"] = self._compress_calls
         except Exception:
             self._compress_commit_proof = None
+            logger.warning("LCM occurrence-proof construction failed; proof unavailable", exc_info=True)
 
     def _carry_prior_emissions(self, messages, result, emissions, emission_binding) -> None:
         """Extend ``emissions`` with the prior proof's descriptors still emitted once in ``result``; sorted."""
@@ -1198,13 +1200,21 @@ class CompactionMixin:
                 payload["scaffold_sha256"] = proof.get("output_sha256_v3", full)
             if not effective:
                 payload["scaffold_sha256_v4"] = full
-            self._store.write_metadata_json(
-                [self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)],
-                json.dumps(payload, sort_keys=True),
-                skip_unchanged=True,
-            )
+            self._write_compress_commit_proof_payload(proof, payload)
+            if "durable" in proof:
+                proof["durable"] = True
         except Exception:
-            logger.debug("LCM durable compaction-commit proof write failed", exc_info=True)
+            proof["durable"] = False
+            logger.warning("LCM occurrence-proof publication failed; proof not durable", exc_info=True)
+
+    def _prepare_compress_commit_proof(self, proof, result) -> None:
+        """Attach engine-specific evidence before the proof's publication point."""
+
+    def _write_compress_commit_proof_payload(self, proof, payload) -> None:
+        self._store.write_metadata_json(
+            [self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)],
+            json.dumps(payload, sort_keys=True), skip_unchanged=True,
+        )
 
     def _publish_leaf_node(
         self,

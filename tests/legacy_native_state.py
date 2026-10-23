@@ -324,6 +324,8 @@ def legacy_commit_proof(self, messages, result) -> None:
 
 def install_legacy_writer(monkeypatch, engine_class):
     """Fixture setup only: emit a historical snapshot and proof for reader tests."""
+    from hermes_lcm.compaction import CompactionMixin
+
     def old_impl(self, messages, current_tokens=None, **kwargs):
         working = self._ingest_messages(messages)
         self._prepare_retained_user_anchor(working)
@@ -341,3 +343,5 @@ def install_legacy_writer(monkeypatch, engine_class):
     monkeypatch.setattr(engine_class, "compress", old_compress)
     monkeypatch.setattr(engine_class, "_compress_impl", old_impl)
     monkeypatch.setattr(engine_class, "_record_compress_commit_proof", legacy_commit_proof)
+    monkeypatch.setattr(engine_class, "_write_compress_commit_proof_payload",
+                        CompactionMixin._write_compress_commit_proof_payload)

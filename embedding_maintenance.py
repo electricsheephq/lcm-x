@@ -39,8 +39,8 @@ _PREPARE_THREAD: threading.Thread | None = None
 # never displaces another engine's callback for the same database.
 _PREPARE_READY: dict[tuple[str, str, int], dict[tuple[str, object], Callable[[], None]]] = {}
 _PREPARE_RETRY: dict[tuple[str, str, int], tuple[int, float]] = {}
-# #1586 v1 CPU bars: target at most 40% maintenance duty, without a new setting.
-_LOCAL_IDLE_MULTIPLIER = 1.5
+# #1586: 0.82 passes the coverage/CPU bars in the 2-vCPU floor-surrogate probe.
+_LOCAL_IDLE_MULTIPLIER = 0.82
 _SUCCESS_OUTCOMES = frozenset({"complete"})
 
 
