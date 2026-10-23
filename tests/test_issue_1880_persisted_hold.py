@@ -333,3 +333,92 @@ def test_exact_pressure_change_inside_bucket_releases_hold(tmp_path):
         assert engine.should_compress(10_001)
     finally:
         engine.shutdown()
+
+
+def test_h2_zero_observation_preserves_legacy_gate(tmp_path):
+    engine = make_engine(tmp_path, window=200_000, conversation_id="conv", survival_fit=False)
+    view = [{"role": "user", "content": "synthetic current objective"},
+            {"role": "assistant", "content": "synthetic reply"}]
+    try:
+        engine._last_gate_tokens = 50_883
+        engine.compress(view, current_tokens=0)
+        assert not engine._survival_pass_observed
+        assert engine._last_gate_tokens == 50_883
+        assert engine._no_progress_fingerprint() is None  # Explicitly unobserved pressure is unknown.
+        assert engine._store.read_metadata_json(KEY) is None
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("observations", [1, 2])
+def test_h2_default_pre_yield_hold_survives_rebuild(tmp_path, observations):
+    settings = dict(window=200_000, conversation_id="conv", context_threshold=0.001,
+                    threshold_full_sweep_enabled=False, temporal_rollups_enabled=False,
+                    empty_lifecycle_gc_enabled=False, survival_fit=False)
+    engine = make_engine(tmp_path, **settings)
+    view = [{"role": "user", "content": "synthetic current objective " * 40},
+            {"role": "assistant", "content": "synthetic reply " * 40}]
+    try:
+        assert engine._config.fresh_tail_pressure_yield_enabled
+        assert engine._config.fresh_tail_pressure_yield_min_observations == 3
+        engine._pressure_yield_blocked_streak = observations - 1
+        view = engine.compress(view, current_tokens=10_000)
+        assert engine._pressure_yield_blocked_streak == observations
+        assert engine._store.read_metadata_json(KEY)["reason"] == "no_progress"
+    finally:
+        engine.shutdown()
+    engine = make_engine(tmp_path, **settings)
+    try:
+        engine.last_prompt_tokens = 10_000
+        engine._ingest_messages(view)
+        assert engine._pressure_yield_blocked_streak == 0
+        assert not engine.should_compress(10_000)
+        engine._pressure_yield_blocked_streak = 2
+        assert not engine.should_compress(10_000)
+        engine._pressure_yield_blocked_streak = 3
+        assert engine.should_compress(10_000)  # A meaningful yield-guard crossing still releases it.
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("consumer", ["direct", "preflight", "ingest"])
+def test_h2_swallowed_audit_failure_stays_unknown_until_clean_recovery(tmp_path, monkeypatch, consumer):
+    view, _ = arm(tmp_path)
+    engine = rebuild(tmp_path)
+    try:
+        engine.should_compress(10_000)
+        engine._ingest_messages(view)
+        engine._clear_persisted_no_progress_hold()
+        engine._no_progress_hold = None
+        engine._compress_commit_proof = None
+        view = copy.deepcopy(view)
+        view[-1]["content"] += " changed synthetic current replay"
+        failures = engine._ingest_failure_count
+        prematch = engine._identity_anchor_prematch
+
+        def fail_audit(messages, identities, cursor, audit_from=None, **kwargs):
+            assert audit_from is not None  # Reach the supported swallowed audited-prefix branch.
+            raise RuntimeError("synthetic audited-prefix failure")
+
+        def invoke():
+            if consumer == "direct":
+                return engine.compress(view, current_tokens=10_000)
+            if consumer == "preflight":
+                return engine.should_compress_preflight(view)
+            return engine.ingest(view)
+
+        monkeypatch.setattr(engine, "_identity_anchor_prematch", fail_audit)
+        invoke()
+        assert engine._ingest_failure_count == failures + 1
+        assert engine._consecutive_ingest_failures == 1
+        assert engine._no_progress_replay is None
+        assert engine._no_progress_fingerprint() is None
+        assert engine._store.read_metadata_json(KEY) is None
+        monkeypatch.setattr(engine, "_identity_anchor_prematch", prematch)
+        invoke()
+        assert engine._ingest_failure_count == failures + 1
+        assert engine._consecutive_ingest_failures == 0
+        assert engine._no_progress_replay is not None
+        assert engine._no_progress_fingerprint() is not None
+    finally:
+        engine.shutdown()
