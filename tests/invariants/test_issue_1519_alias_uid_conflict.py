@@ -60,11 +60,11 @@ def deterministic_host(tmp_path, monkeypatch):
         db.execute("INSERT INTO sessions VALUES ('parent', NULL, NULL)")
 
 
-def prepare(engine, case):
+def prepare(engine, case, *, seed_uid="host-old"):
     """Adapt the six-case probe: real recovery, publication and host rewrite, never imported."""
     source = message(TEXT, 20., _row_id=101, platform_message_id="platform-old")
     if case not in {"old_view_absent", "missing_to_known"}:
-        source["message_uid"] = "host-old"
+        source["message_uid"] = seed_uid
     incoming = {**source, "timestamp": 30.}
     if case in {"old_view_absent", "different_known_key", "missing_to_known"}:
         incoming["platform_message_id"] = "platform-new"

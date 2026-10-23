@@ -24,9 +24,13 @@ def test_non_alias_view_order(tmp_path, uids):
     """Adapt Claude m16/m20 and its 24 deterministic random-UID trials."""
     old, other, _fresh = uids
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as eng:
-        prepare(eng, "same_known_key")
-        eng._store._conn.execute("UPDATE host_uid_bindings SET uid=? WHERE uid='host-old'", (old,))
-        eng._store._conn.commit()
+        prepare(eng, "same_known_key", seed_uid=old)
+        sid = targets(eng)[0]["store_id"]
+        fact = eng._store.read_metadata_json(f"host_occurrence_row:parent:{sid}")
+        coverage = eng._occurrence_fact_coverage(
+            eng._store.read_metadata_json("host_occurrence_accepted_view:parent"), "parent")
+        assert fact["message_uid"] == old and sid in coverage
+        assert [binding[0] for binding in bindings(eng, sid)] == [old]
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as eng:
         eng.ingest([message(TEXT, 30., message_uid=u) for u in (old, other)])
         prior = [r["store_id"] for r in targets(eng)]
