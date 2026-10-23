@@ -195,6 +195,45 @@ def test_1799_verified_view_projection_requires_its_stored_original(tmp_path, ca
     assert bool(out["numbers"]["B2"]["verified_survival_projections"]) == (case == "valid")
 
 
+def test_projection_cannot_use_a_future_persist_witness(tmp_path):
+    original = "[T02] user turn 2: " + "alpha beta gamma delta " * 1600 + "end."
+    projection = projections.codec(TREE).projected_fields(
+        {"store_id": 1, "role": "user", "content": original}, 9210, 1200, 600)["content"]
+    earlier = fixture.turn_events(1, held=projection)
+    earlier[0].update(content=projection, persist=projection)
+    later = fixture.turn_events(2, held=original)
+    later[0].update(content=original, persist=original)
+    out = fixture.make(tmp_path, rows=[("user", original), ("user", original),
+                       ("assistant", fixture.R.format(1, 1)), ("assistant", fixture.R.format(2, 2))],
+                       events=earlier + later, plugin={"tree": TREE}, bars=["B2"])
+    assert out["numbers"]["B2"]["deficit_rows"] == 1
+    assert "B2" in out["failed_bars"]
+    assert out["numbers"]["B2"]["verified_survival_projections"] == []
+
+
+@pytest.mark.parametrize("source", ["persist", "ingress"])
+@pytest.mark.parametrize("witness_attempt", [1, 2, 3])
+def test_projection_witness_is_available_only_from_same_or_earlier_attempt(tmp_path, source, witness_attempt):
+    original = "original " + "alpha beta gamma delta " * 1600 + "end."
+    projection = projections.codec(TREE).projected_fields(
+        {"store_id": 3, "role": "user", "content": original}, 9210, 1200, 600)["content"]
+    events, rows = [], []
+    for turn in range(1, 4):
+        persist = original if source == "persist" and turn == witness_attempt else fixture.U.format(turn, turn)
+        held = projection if turn == 2 else persist
+        attempt = fixture.turn_events(turn, held=held)
+        attempt[0].update(content=persist, persist=persist)
+        if source == "ingress" and turn == witness_attempt:
+            attempt.insert(1, {"event": "engine_ingress", "session": "S0", "occurrences": [
+                {"role": "user", "sha256": hashlib.sha256(original.encode()).hexdigest()}]})
+        events += attempt
+        rows += [("user", original if turn == 2 else persist), ("assistant", fixture.R.format(turn, turn))]
+    out = fixture.make(tmp_path, rows=rows, events=events, plugin={"tree": TREE}, bars=["B2"])
+    accepted = witness_attempt <= 2
+    assert out["numbers"]["B2"]["deficit_rows"] == int(not accepted)
+    assert bool(out["numbers"]["B2"]["verified_survival_projections"]) == accepted
+
+
 def test_complete_missing_and_resolved_mismatch_lists(tmp_path):
     events = fixture.clean_events(55)
     rows = [("user", "wrong " + str(i)) for i in range(55)]

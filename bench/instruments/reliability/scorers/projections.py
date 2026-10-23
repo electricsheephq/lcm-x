@@ -19,7 +19,7 @@ def codec(tree):
 
 
 def verify(atts, rows, events, group, tree):
-    """Only map an exactly regenerated view to a same-lineage original witnessed before scoring.
+    """Only map an exactly regenerated view to an original witnessed in this or an earlier attempt.
 
     The full original hash is checked too: head/tail equality alone cannot detect an altered middle.
     An unavailable codec or unverified lookalike leaves the held bytes as an ordinary B2 expectation.
@@ -33,16 +33,21 @@ def verify(atts, rows, events, group, tree):
         renderer = codec(tree)
     except (ImportError, OSError, SyntaxError):
         return receipts
+    ingress = {}
+    attempt_index = -1
+    for e in events:
+        if e.get("event") in ("user_sent", "retry"):
+            attempt_index += 1
+        elif e.get("event") == "engine_ingress" and e.get("session"):
+            ingress.setdefault(max(0, attempt_index), []).append(e)
     originals = {}
-    for a in atts:
+    by_id = {r[0]: r for r in rows}
+    for i, a in enumerate(atts):
         g = attempt_group(a, group)
         originals.setdefault(g, set()).add(hashlib.sha256(a["persist"].encode()).hexdigest())
-    for e in events:
-        if e.get("event") == "engine_ingress" and e.get("session"):
+        for e in ingress.get(i, []):
             originals.setdefault(group(e["session"]), set()).update(
                 r["sha256"] for r in e.get("occurrences", []) if r.get("role") == "user")
-    by_id = {r[0]: r for r in rows}
-    for a in atts:
         held = a.get("held")
         if not isinstance(held, str):
             continue
