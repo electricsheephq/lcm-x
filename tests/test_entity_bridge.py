@@ -323,3 +323,175 @@ def test_key_source_visibility_and_scoped_override_view_cost(bridge, scoped):
     api.resolved_view(store, "P1")
     store.connection.set_trace_callback(None)
     assert sum(sql.lstrip().upper().startswith("SELECT") for sql in trace) == 5
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+@pytest.mark.parametrize("namespace,kind,accepted", [
+    ("event", "person", False), ("conversation", "other", False),
+    ("future", "topic", False), ("person", "org", False),
+    ("person", "topic", True), ("person", "other", True)])
+def test_r1b_1_override_namespace_and_resolved_kind(bridge, scoped, namespace, kind, accepted):
+    api, ops, store, _, _ = bridge
+    target = ops.create_entity("Chosen")
+    ops.change_kind(target, kind)
+    subject = namespace + ":alex"
+    source = publish(bridge, subject)
+    before = list(store.connection.iterdump())
+    options = dict(scope_store_ids=[source]) if scoped else {}
+    if accepted:
+        ops.override_key(subject, target, **options)
+        assert api.resolve_key(store, subject, source) == target
+    else:
+        with pytest.raises(api.EntityOpRefused):
+            ops.override_key(subject, target, **options)
+        assert list(store.connection.iterdump()) == before
+
+
+@pytest.mark.parametrize("owner_scoped", [False, True])
+def test_r1b_2_hidden_relation_never_falls_through_to_name(bridge, owner_scoped):
+    api, ops, store, _, _ = bridge
+    source = publish(bridge, "person:mom", scope="P2")
+    owner, mom, unrelated = [ops.create_entity(name) for name in ("Owner", "Martha", "Mom Jones")]
+    for entity, alias in [(owner, "Owner"), (mom, "Martha"), (unrelated, "mom")]:
+        ops.add_alias(entity, alias, source_store_ids=[source])
+    ops.add_alias(mom, "my mom", "relation_phrase", owner_entity_id=owner)
+    rebuild(bridge, sender_lookup=lambda sid: (owner, True, True))
+    options = dict(owner_entity_id=owner) if owner_scoped else {}
+    assert api.resolve_key(store, "person:mom", source, **options) == (mom if owner_scoped else None)
+    assert api.resolve_key(store, "person:mom", source, access_scope="P2", **options) is None
+
+
+@pytest.mark.parametrize("operation", ["rebuild", "override", "undo"])
+def test_r1b_3_deleted_session_key_rows_never_collide(bridge, operation):
+    api, ops, store, messages, assertions = bridge
+    original, chosen = ops.create_entity("Original"), ops.create_entity("Chosen")
+    ops.add_alias(original, "alex")
+    source = publish(bridge, "person:alex")
+    rebuild(bridge)
+    if operation == "undo":
+        event = ops.override_key("person:alex", chosen)
+        assertions.invalidate_source(source, reason="test")
+        publish(bridge, "person:alex")
+        rebuild(bridge)
+    assert messages.delete_session_messages("S") > 0
+    if operation == "rebuild":
+        rebuild(bridge)
+        assert active(store) == []
+        current = publish(bridge, "person:alex")
+        rebuild(bridge)
+        assert api.resolve_key(store, "person:alex", current) == original
+    elif operation == "override":
+        publish(bridge, "person:alex")
+        ops.override_key("person:alex", chosen)
+    else:
+        with pytest.raises(api.EntityOpRefused, match="key_held"):
+            ops.undo(event)
+
+
+@pytest.mark.parametrize("churn", ["shrink", "merge"])
+def test_r1b_4_global_override_rederived_row_is_undoable(bridge, churn):
+    api, ops, store, _, assertions = bridge
+    original, chosen, merged = [ops.create_entity(name) for name in ("Original", "Chosen", "Merged")]
+    ops.add_alias(original, "alex")
+    first, second = publish(bridge, "person:alex"), publish(bridge, "person:alex")
+    rebuild(bridge)
+    event = ops.override_key("person:alex", chosen)
+    if churn == "shrink":
+        assertions.invalidate_source(second, reason="test")
+    else:
+        ops.merge(merged, chosen)
+        merge_event = store.events_after()[-1]["event_id"]
+        rebuild(bridge)
+        ops.undo(merge_event)
+    rebuild(bridge)
+    ops.undo(event)
+    rebuild(bridge)
+    assert api.resolve_key(store, "person:alex", first) == original
+    assert {row["method"] for row in active(store)} == {"alias_match"}
+
+
+@pytest.mark.parametrize("namespace", ["person", "user"])
+def test_r1b_5_global_override_cites_only_owners_sources(bridge, namespace):
+    api, ops, store, _, _ = bridge
+    owners = [ops.create_entity("Owner") for _ in range(2)]
+    targets = owners if namespace == "user" else [ops.create_entity("Sister") for _ in range(2)]
+    chosen = ops.create_entity("Chosen", "other")
+    subject = namespace + (":self" if namespace == "user" else ":sister")
+    sources = [publish(bridge, subject, scope=scope) for scope in ("P1", "P2")]
+    for owner, target, source in zip(owners, targets, sources):
+        ops.add_alias(owner, "owner", source_store_ids=[source])
+        ops.add_alias(target, "my sister", "relation_phrase", owner_entity_id=owner, source_store_ids=[source])
+    ops.add_alias(chosen, "chosen", source_store_ids=[sources[0]])
+    lookup = dict(zip(sources, [(owner, True, True) for owner in owners])).get
+    rebuild(bridge, sender_lookup=lookup)
+    ops.override_key(subject, chosen, owner_entity_id=owners[0])
+    payload = json.loads(store.events_after()[-1]["payload_json"])["override"]
+    assert payload["scope_store_ids"] == [sources[0]]
+    rebuild(bridge, sender_lookup=lookup)
+    row = next(r for r in active(store) if r["owner_entity_id"] == owners[0])
+    assert json.loads(row["source_store_ids"]) == [sources[0]]
+    assert api.resolve_key(store, subject, sources[1], owner_entity_id=owners[0]) is None
+    assert api.resolve_key(store, subject, sources[0], owner_entity_id=owners[0], access_scope="P1") == chosen
+
+
+@pytest.mark.parametrize("namespace", ["person", "user"])
+def test_r1b_6_owner_override_leaves_new_evidence_to_aliases(bridge, namespace):
+    api, ops, store, _, _ = bridge
+    owner, sister, chosen = [ops.create_entity(name) for name in ("Owner", "Sister", "Chosen")]
+    ops.add_alias(sister, "my sister", "relation_phrase", owner_entity_id=owner)
+    subject = namespace + (":self" if namespace == "user" else ":sister")
+    original = owner if namespace == "user" else sister
+    first = publish(bridge, subject)
+    lookup = lambda sid: (owner, True, True)
+    rebuild(bridge, sender_lookup=lookup)
+    ops.override_key(subject, chosen, owner_entity_id=owner)
+    new = publish(bridge, subject)
+    rebuild(bridge, sender_lookup=lookup)
+    assert api.resolve_key(store, subject, first, owner_entity_id=owner) == chosen
+    assert api.resolve_key(store, subject, new, owner_entity_id=owner) == original
+    assert json.loads(active(store)[0]["source_store_ids"]) == [first]
+    assert rebuild(bridge, sender_lookup=lookup) == 0
+
+
+def test_r1b_7_principal_keys_require_visible_alias_support(bridge):
+    api, ops, store, _, _ = bridge
+    source = publish(bridge, "person:alex", scope="P2")
+    hidden = publish(bridge, "person:other", scope="P1")
+    target = ops.create_entity("Alex")
+    ops.add_alias(target, "alex", source_store_ids=[hidden])
+    ops.add_alias(target, "visible identity", source_store_ids=[source])
+    rebuild(bridge)
+    assert api.resolved_view(store)["keys"]
+    assert api.resolve_key(store, "person:alex", source, access_scope="P2") is None
+    assert api.resolved_view(store, "P2").get("keys", []) == []
+    ops.add_alias(target, "alex", source_store_ids=[source])
+    assert api.resolved_view(store, "P2")["keys"][0]["entity_id"] == target
+
+
+def test_r1b_m10_read_candidates_use_resolved_compatible_kind(bridge):
+    api, ops, store, _, _ = bridge
+    target = ops.create_entity("Alex", "person")
+    ops.add_alias(target, "alex")
+    source = publish(bridge, "person:alex")
+    rebuild(bridge)
+    ops.change_kind(target, "org")
+    assert api.resolve_key(store, "person:alex", source) is None
+
+
+def test_r1b_m1_profile_entities_require_compatible_kind(bridge):
+    _, ops, store, _, _ = bridge
+    wrong_user, wrong_agent = ops.create_entity("User", "agent"), ops.create_entity("Agent", "person")
+    publish(bridge, "user:self")
+    publish(bridge, "assistant:self")
+    rebuild(bridge, profile_entities=lambda bound: (wrong_user, wrong_agent))
+    assert active(store) == []
+
+
+@pytest.mark.parametrize("namespace,kind", [("user", "person"), ("assistant", "agent")])
+def test_r1b_m2_profile_names_never_supply_automatic_candidates(bridge, namespace, kind):
+    api, ops, store, _, _ = bridge
+    target = ops.create_entity("Self", kind)
+    ops.add_alias(target, "self")
+    source = publish(bridge, namespace + ":self")
+    assert api._key_candidates(api.resolved_view(store), namespace + ":self") == []
+    assert api.resolve_key(store, namespace + ":self", source) is None
