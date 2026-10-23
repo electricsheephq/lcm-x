@@ -37,11 +37,19 @@ def request_object(text):
     obj = match[1].strip(" .!?;")
     if re.match(r"(?:to\b|about\s+it\b)", obj, re.I):
         return None
-    obj = re.sub(r"^(?:(?:what|everything|anything)\s+i\s+(?:just\s+)?(?:said|told you|mentioned)|"
-                 r"my\s+(?:(?:earlier|previous)\s+)?(?:statement|information|details?))\s*(?:about\s+)?", "", obj, flags=re.I)
+    lead = re.match(r"^(?:(?:what|everything|anything)\s+i\s+(?:just\s+)?(?:said|told you|mentioned)|"
+                    r"my\s+(?:(?:earlier|previous)\s+)?(?:statement|information|details?))\b", obj, re.I)
+    if lead:
+        obj = obj[lead.end():].strip()
+        if "told you" in lead[0].lower() and re.search(
+                r",\s*(?:(?:[\w'-]+\s+){1,4}(?:said|wrote|replied)\b|said\s+my\s+\w+)", obj, re.I):
+            return None
     if re.search(r"\b(?:if|hypothetically|told|says|said to|tell me|talk about)\b",
                  text[:match.start(1)] + obj, re.I):
         return None
+    if lead:
+        clause = re.match(r"(?:about|regarding|concerning)\s+(.+)", obj, re.I)
+        obj = re.split(r"[,;.!?]|\s+and\s+", clause[1], maxsplit=1)[0].strip() if clause else ""
     if obj.lower() == "all that" or not _words(obj):
         obj = ""
     return obj.lower()
