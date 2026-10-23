@@ -6929,6 +6929,7 @@ class LCMEngine(
             warm_plain = (not self._ingest_cursor_needs_reconcile and self._ingest_cursor > 0
                           and not getattr(self, "_compress_commit_proof", None)
                           and not self._active_emission_proof())
+            previous_view = getattr(self, "_last_active_replay_messages", ())
             owner_user, owner_segment = None, None
             for index, message in enumerate(messages):
                 if message.get("role") == "user":
@@ -6978,7 +6979,9 @@ class LCMEngine(
                         if same_uid or any(_normalize_observed_at(r.get("observed_at")) == current[index]["timestamp"]
                                            for r in aliases):
                             conflict = False
-                        elif not ((warm_plain or pruned_turn) and message.get("role") == "user"):
+                        elif aliases or not ((pruned_turn or warm_plain and index < len(previous_view)
+                                              and self._host_occurrence_changed(message, previous_view[index]))
+                                             and message.get("role") == "user"):
                             result["deferred"].add(index)
                             continue  # The existing stamp/recovery owner decides this partition.
                     (bad if conflict else good).append(sid)
@@ -7011,6 +7014,12 @@ class LCMEngine(
                 if uid and not facts[sid].get("message_uid"):
                     name = f"host_occurrence_row:{by_id[sid]['session_id']}:{sid}"
                     result["updates"][name] = {**facts[sid], "message_uid": uid}
+                    if (current[index]["timestamp"] is not None and by_id[sid].get("observed_at") is not None
+                            and current[index]["timestamp"] != by_id[sid]["observed_at"]):
+                        # A positive stamp alias permits adoption, while its
+                        # existing owner still records the canonical UID binding.
+                        result["proven"].discard(index)
+                        result["deferred"].add(index)
 
             index = 0
             while index < len(messages):
@@ -7129,7 +7138,9 @@ class LCMEngine(
                 result["fresh"].update(unmatched)
             else:
                 result["deferred"].update(unmatched)
-            if self._load_compression_carry_ranges() and not any(r["session_id"] == self._session_id for r in rows):
+            if (proof and len(messages) < len(proof.get("output_metadata", ()))
+                    and self._load_compression_carry_ranges()
+                    and not any(r["session_id"] == self._session_id for r in rows)):
                 # First accepted child view: store each emitted head once so
                 # its facts can witness the shortened view across restarts.
                 result["fresh"].update(emitted_heads)
@@ -7167,6 +7178,7 @@ class LCMEngine(
         with self._store.atomic(immediate=True):
             for key, fact in plan["updates"].items():
                 self._store.write_metadata_json([key], json.dumps(fact, separators=(",", ":")), skip_unchanged=True)
+        self._occurrence_window_cache = None
 
     def _occurrence_batch_factory(self, batch):
         """Retry-local state resets on the first callback of every insert attempt."""

@@ -10,6 +10,7 @@ import time
 import pytest
 
 from tests.harness import engine_context, pin_char_counter
+from hermes_lcm.engine import LCMEngine
 
 
 CASES = (
@@ -19,6 +20,8 @@ CASES = (
     "invalid_incoming", "invalid_stored", "non_alias",
 )
 TEXT = "Synthetic durable-key availability fixture. " * 500
+V2_UID_CONFLICTS = {"different_known_key", "alias_candidate", "engine_incoming", "engine_stored",
+                    "other_lineage", "invalid_stored", "non_alias"}
 
 
 def message(content, stamp, role="user", **keys):
@@ -124,6 +127,7 @@ def test_cold_alias_replay(tmp_path, case, record_property, caplog):
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
         old = targets(engine)[0]
         sid = old["store_id"]
+        before = rows(engine)
         with caplog.at_level("DEBUG", logger="hermes_lcm.identity_anchor"):
             engine.ingest(replay)
         # Every row field, including the pinned clock fields, contributes to the ordered hash list.
@@ -131,9 +135,56 @@ def test_cold_alias_replay(tmp_path, case, record_property, caplog):
                  "bindings_hash": digest([bindings(engine, r["store_id"]) for r in rows(engine)])}
         record_property("byte_identity", json.dumps(proof, sort_keys=True))
         assert digest(next(r for r in rows(engine) if r["store_id"] == sid)) == digest(old)
-        assert len(targets(engine)) == 1
+        assert len(targets(engine)) == (2 if case in V2_UID_CONFLICTS else 1)
+        if case in V2_UID_CONFLICTS:
+            # v2 actual-row facts act independently of the observation-only
+            # alias binding. Never mutate the original row or adopt its new UID.
+            fact = engine._store.read_metadata_json(f"host_occurrence_row:parent:{sid}")
+            accepted = targets(engine)[-1]
+            fresh = engine._store.read_metadata_json(f"host_occurrence_row:parent:{accepted['store_id']}")
+            assert rows(engine)[:len(before)] == before
+            assert [(r["role"], r["observed_at"]) for r in rows(engine)[len(before):]] == [
+                ("user", replay[0]["timestamp"]), ("assistant", 51.)]
+            coverage = engine._store.read_metadata_json("host_occurrence_accepted_view:parent")["fact_store_ids"]
+            assert fact["occurrence_version"] == fresh["occurrence_version"] == 2
+            assert sid in coverage and accepted["store_id"] in coverage
+            assert fact["message_uid"] != fresh["message_uid"] == replay[0]["message_uid"]
+            before_repeat = rows(engine)
+            engine.ingest(deepcopy(replay))
+            assert rows(engine) == before_repeat
         if case == "different_known_key":
             assert any("would reject" in r.message for r in caplog.records)
+    if case in V2_UID_CONFLICTS:
+        with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+            engine.ingest(deepcopy(replay))
+            assert rows(engine) == before_repeat
+
+
+@pytest.mark.parametrize("case", sorted(V2_UID_CONFLICTS))
+def test_base_metadata_writer_alias_stays_observation_only(tmp_path, monkeypatch, case):
+    """BASE's raw-row factory, from the first insert, supplies the legacy witness."""
+    with monkeypatch.context() as writer:
+        # This is BASE's exact metadata_factory seam, not metadata removal
+        # after a new writer has already committed positive v2 evidence.
+        writer.setattr(LCMEngine, "_occurrence_batch_factory",
+                       lambda self, batch: self._real_user_scaffold_metadata_rows)
+        with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+            replay = prepare(engine, case)
+            assert engine._store._conn.execute(
+                "SELECT count(*) FROM metadata WHERE key LIKE 'host_occurrence_row:%' "
+                "OR key LIKE 'host_occurrence_accepted_view:%'").fetchone()[0] == 0
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        original = targets(engine)[0]
+        sid = original["store_id"]
+        assert any(r["observed_at"] == 30. for r in engine._store.get_message_relations([sid], "alt_stamp"))
+        assert engine._store.read_metadata_json(f"host_occurrence_row:parent:{sid}") is None
+        for _ in range(2):
+            plan = engine._resolve_occurrence_view(replay)
+            assert 0 not in plan["proven"]
+            assert f"host_occurrence_row:parent:{sid}" not in plan["updates"]
+            engine.ingest(deepcopy(replay))
+            assert targets(engine) == [original]
+            assert engine._store.read_metadata_json(f"host_occurrence_row:parent:{sid}") is None
 
 
 

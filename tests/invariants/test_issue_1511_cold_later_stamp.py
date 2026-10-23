@@ -501,6 +501,18 @@ def test_cold_replay_partition(tmp_path, case, record_property):
         assert replay["rows"][:len(initial["rows"])] == initial["rows"]
         assert {k: v for k, v in replay.items() if k != "phase"} == {
             k: v for k, v in repeat.items() if k != "phase"}
+    elif case.startswith("uid-") and case[4:] in uid_fixture.V2_UID_CONFLICTS:
+        # PR-B's positive v2 row proof supersedes the old new-writer UID
+        # observation expectation; the actual BASE-writer controls live in #1519.
+        prepared, replay, repeat = events
+        assert fingerprints["prepared"] == json.loads(REFERENCE.read_text())[case]["prepared"]
+        before = prepared["rows"]
+        assert replay["rows"][:len(before)] == before
+        added = replay["rows"][len(before):]
+        assert [(r["role"], r["observed_at"]) for r in added] == [
+            ("user", 20. if case == "uid-non_alias" else 30.), ("assistant", 51.)]
+        assert {k: v for k, v in replay.items() if k != "phase"} == {
+            k: v for k, v in repeat.items() if k != "phase"}
     else:
         assert fingerprints == json.loads(REFERENCE.read_text())[case]
 
