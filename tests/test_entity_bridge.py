@@ -301,6 +301,8 @@ def test_explicit_owner_overrides_never_coalesce_and_foreign_owner_refused(bridg
         for foreign in (owners[0], "ent_missing"):
             with pytest.raises(api.EntityOpRefused, match="not_found"):
                 bound.override_key("person:sister", entity, scope_store_ids=sources, owner_entity_id=foreign)
+            with pytest.raises(api.EntityOpRefused, match="not_found"):
+                api.resolve_key(other, "person:sister", sources[0], owner_entity_id=foreign)
         assert list(other.connection.iterdump()) == before
 
 
