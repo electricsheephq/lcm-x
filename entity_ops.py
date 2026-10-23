@@ -103,6 +103,10 @@ class EntityOps:
         for key in keys:
             if key is not None and key not in p["touches"][family]:
                 p["touches"][family].append(key)
+                if family == "aliases":
+                    row = self.store.get_alias(key)
+                    if row["alias_kind"] == "platform_id" and row["alias_norm"] not in p["touches"][family]:
+                        p["touches"][family].append(row["alias_norm"])
 
     def _created(self, p, family, key):
         p["created"][family].append(key)
@@ -243,7 +247,8 @@ class EntityOps:
         return new
 
     def holder_for_platform_id(self, pid):
-        with self.store.transaction():
+        pid = normalize_platform_id(*pid.split(":", 1))
+        with _read_snapshot(self.store):
             aliases = self.store.aliases_by_norm(pid)
             return next((_canonical(self._entities(), a["entity_id"]) for a in aliases
                          if a["alias_kind"] == "platform_id"), None)
@@ -255,6 +260,7 @@ class EntityOps:
         with self.store.transaction():
             if not verified:
                 raise EntityOpRefused("unverified_platform_id")
+            pid = normalize_platform_id(*pid.split(":", 1))
             holder = self.holder_for_platform_id(pid)
             if holder is not None:
                 return holder
@@ -386,5 +392,7 @@ def resolved_view(store, access_scope=None, principal_is_owner=False):
 def lookup_alias(store, text, access_scope=None, principal_is_owner=False):
     view = resolved_view(store, access_scope, principal_is_owner)
     # Names use S normalization; platform identifiers retain their exact bytes.
+    if ":" in text:
+        text = normalize_platform_id(*text.split(":", 1))
     return view["aliases"].get(text, view["aliases"].get(
         normalize_alias(text), dict(candidates=[], ambiguous=False)))
