@@ -6870,10 +6870,12 @@ class LCMEngine(
                     accepted=self._validate_occurrence_receipt(rows, facts, receipt=receipt),
                     legacy=any(r["store_id"] not in facts for r in rows))
 
-    def _occurrence_context(self):
-        from .config import host_message_uid_mode
+    def _occurrence_context(self, switches=None):
+        if switches is None:
+            from .config import host_message_uid_mode
 
-        return (identity_anchor_enabled(), host_message_uid_mode(), tuple(self._compiled_ignore_message_patterns),
+            switches = (identity_anchor_enabled(), host_message_uid_mode())
+        return (*switches, tuple(self._compiled_ignore_message_patterns),
                 id(getattr(self, "_compress_commit_proof", None)),
                 id(getattr(self, "_last_emission_descriptors", None)),
                 getattr(self, "_retired_durable_proof", None), self._last_compacted_store_id)
@@ -6930,14 +6932,13 @@ class LCMEngine(
         ranges = self._occurrence_fact_ranges(receipt, source, conversation_id)
         return None if ranges is None else {sid for start, end in ranges for sid in range(start, end + 1)}
 
-    def _occurrence_metadata(self, message, *, stored=False, fact=None):
-        from .config import host_message_uid_mode
-
+    def _occurrence_metadata(self, message, *, stored=False, fact=None, switches=None):
         result = self._host_occurrence_metadata(message)
         if stored:
             result["timestamp"] = _normalize_observed_at(message.get("observed_at"))
             result["message_uid"] = (fact or {}).get("message_uid")
-        if not identity_anchor_enabled() or host_message_uid_mode() == "off":
+        switches = self._occurrence_context()[:2] if switches is None else switches
+        if not switches[0] or switches[1] == "off":
             result["message_uid"] = None
         absorbed = (fact or {}).get("absorbed_message_uids") if stored else message.get("_absorbed_message_uids")
         result["_absorbed_message_uids"] = absorbed if isinstance(absorbed, list) else None
@@ -6976,6 +6977,9 @@ class LCMEngine(
         result = dict(matched={}, proven=set(), fresh=set(), legacy=set(), deferred=set(),
                       updates={}, owners={}, witness=set(), failed=False)
         try:
+            context = self._occurrence_context()
+            switches = context[:2]
+            result["switches"] = switches
             rows, facts, missing = self._stored_occurrence_metadata()
             state = self._occurrence_window_cache[4]
             legacy_rows = state["legacy"] and any(r["store_id"] not in facts and r["store_id"] not in missing for r in rows)
@@ -6984,10 +6988,10 @@ class LCMEngine(
             warm = state.get("warm")
             previous_view = getattr(self, "_last_active_replay_messages", ())
             if (warm and not missing and not self._ingest_cursor_needs_reconcile
-                    and warm[0] == self._occurrence_context() and self._ingest_cursor == len(previous_view)
+                    and warm[0] == context and self._ingest_cursor == len(previous_view)
                     and len(messages) >= len(previous_view) and messages[:len(previous_view)] == previous_view):
                 tail = messages[len(previous_view):]
-                metadata = [self._occurrence_metadata(m) for m in tail]
+                metadata = [self._occurrence_metadata(m, switches=switches) for m in tail]
                 if (not tail or tail[0].get("role") == "user" and all(
                         m.get("role") in ("user", "assistant") and m.get("tool_calls") is None
                         and isinstance(m.get("content"), str) and meta["_absorbed_message_uids"] is None
@@ -7002,7 +7006,7 @@ class LCMEngine(
             result["needs_receipt"] = bool(accepted)
             protected = _hermes_salvage_protected_positions(messages)
             choices, conflicts = {}, {}
-            current = current or [self._occurrence_metadata(m) for m in messages]
+            current = current or [self._occurrence_metadata(m, switches=switches) for m in messages]
             warm_plain = (not self._ingest_cursor_needs_reconcile and self._ingest_cursor > 0
                           and not getattr(self, "_compress_commit_proof", None))
             previous_view = getattr(self, "_last_active_replay_messages", ())
@@ -7027,7 +7031,7 @@ class LCMEngine(
                     if raw:
                         candidates = list(raw)  # The actual stored carrier outranks its retained-user alias.
                 if (message.get("role") == "tool" and message.get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
-                        and index not in protected and identity_anchor_enabled()):
+                        and index not in protected and switches[0]):
                     # A rotation child's alias index need not include its parent
                     # rows. Discovery uses only the permitted carry window; the
                     # complete segment and each row's metadata must still bind.
@@ -7040,7 +7044,7 @@ class LCMEngine(
                             r, stored_row=True, allow_pruned_tool_alias=False))]))
                 good, bad = [], []
                 for sid in candidates:
-                    old = self._occurrence_metadata(by_id[sid], stored=True, fact=facts[sid])
+                    old = self._occurrence_metadata(by_id[sid], stored=True, fact=facts[sid], switches=switches)
                     absorbed, old_absorbed = current[index]["_absorbed_message_uids"], old["_absorbed_message_uids"]
                     retained_conflict = bool(absorbed and old_absorbed and set(absorbed) != set(old_absorbed))
                     conflict = self._host_occurrence_changed(current[index], old) or retained_conflict
@@ -7053,7 +7057,7 @@ class LCMEngine(
                             m.get("role") == "tool" and m.get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
                             for m in messages[index + 1:end]))
                         aliases = (self._store.get_message_relations([sid], "alt_stamp")
-                                   + self._store.get_message_relations([sid], "carried_stamp")) if identity_anchor_enabled() else []
+                                   + self._store.get_message_relations([sid], "carried_stamp")) if switches[0] else []
                         same_uid = False
                         uid = current[index]["message_uid"]
                         if uid is not None and uid == old["message_uid"]:
@@ -7128,7 +7132,7 @@ class LCMEngine(
                     if len(group) > 1 and len(user_groups[group]) >= len(group):
                         ordinal = user_groups[group].index(index)
                         user_id = group[ordinal] if ordinal < len(group) and group[ordinal] not in used else None
-                    if not identity_anchor_enabled():
+                    if not switches[0]:
                         proof = self._durable_commit_proof_payload() or {}
                         if index >= len(proof.get("output_metadata", ())):
                             user_id = None
@@ -7136,7 +7140,7 @@ class LCMEngine(
                         accept(index, user_id)
                     elif conflicts[index]:
                         result["fresh"].add(index)
-                    elif eligible and current[index]["timestamp"] is not None and identity_anchor_enabled():
+                    elif eligible and current[index]["timestamp"] is not None and switches[0]:
                         # Accepted #1830 user-stamp policy: leave ambiguity to
                         # the existing anchor, without choosing a row or binding
                         # its pair. It cannot authorize fact adoption.
@@ -7181,7 +7185,7 @@ class LCMEngine(
                         winners = []
                     borrowed = any(messages[p].get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
                                    for p in segment[1:])
-                    if borrowed and not identity_anchor_enabled():
+                    if borrowed and not switches[0]:
                         winners = []
                     if len(winners) == 1:
                         if user_id is None and user_index is not None and not anchored:
@@ -7293,6 +7297,9 @@ class LCMEngine(
     def _occurrence_batch_factory(self, batch):
         """Retry-local state resets on the first callback of every insert attempt."""
         source = batch["session_id"]
+        # Fresh for the actual append, including an off-current queued retry;
+        # never retain settings in the queued batch or across ingest calls.
+        switches = self._occurrence_context()[:2]
         initial = batch.get("occurrence_matched", {})
         ids, written = {}, set()
 
@@ -7311,7 +7318,7 @@ class LCMEngine(
                 return reference[1] if reference and reference[0] == source else None
             fact = dict(occurrence_version=2,
                         identity_sha256=message["_occurrence_digest"],
-                        message_uid=self._occurrence_metadata(message)["message_uid"],
+                        message_uid=self._occurrence_metadata(message, switches=switches)["message_uid"],
                         user_store_id=owner("_occurrence_user"),
                         segment_call_store_id=owner("_occurrence_segment"))
             absorbed = message.get("_absorbed_message_uids")
@@ -7786,7 +7793,7 @@ class LCMEngine(
                                 and isinstance(m.get("content"), str) and meta["_absorbed_message_uids"] is None
                                 and meta["timestamp"] is not None and meta["message_uid"] is not None
                                 for m, meta in zip(messages, current))):
-                    state["warm"] = (self._occurrence_context(), occurrence)
+                    state["warm"] = (self._occurrence_context(occurrence.get("switches")), occurrence)
             return result
 
         if not new_messages:

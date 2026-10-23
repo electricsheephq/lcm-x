@@ -1048,3 +1048,63 @@ def test_occurrence_cold_established_prefix_admits_cached_completion(build, monk
         engine.ingest(deepcopy(view))
     assert engine._ingest_failure_count == 0, engine._last_ingest_error
     assert stored(engine) == after
+
+
+@pytest.mark.parametrize("disabled", ["LCM_IDENTITY_ANCHOR", "LCM_HOST_MESSAGE_UID"])
+def test_occurrence_settings_change_invalidates_warm_admission(build, monkeypatch, disabled):
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "1")
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
+    engine = build()
+    host = [{"role": "user", "content": "settings user", "timestamp": 10., "message_uid": "a" * 32},
+            {"role": "assistant", "content": "settings reply", "timestamp": 11., "message_uid": "b" * 32}]
+    engine.ingest(deepcopy(host))
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    assert engine._occurrence_window_cache[4].get("warm")
+    monkeypatch.setenv(disabled, "0" if disabled == "LCM_IDENTITY_ANCHOR" else "off")
+    reads = []
+    bindings = engine._store.host_uid_bindings_for
+    def observed(*args, **kwargs):
+        reads.append(True)
+        return bindings(*args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "host_uid_bindings_for", observed)
+        engine.ingest(deepcopy(host))
+        assert not reads, "disabled UID semantics must not query bindings"
+    state = engine._occurrence_window_cache[4]
+    assert not state.get("warm")
+    assert all(meta["message_uid"] is None for meta in state["current"])
+    assert stored(engine) == before
+    monkeypatch.setenv(disabled, "1" if disabled == "LCM_IDENTITY_ANCHOR" else "on")
+    engine.ingest(deepcopy(host))
+    assert engine._occurrence_window_cache[4].get("warm")
+    assert stored(engine) == before
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+
+
+def test_occurrence_pending_tail_uses_retry_operation_settings(build, monkeypatch):
+    import sqlite3
+
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "1")
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
+    engine = build()
+    host = [{"role": "user", "content": "queued settings user", "timestamp": 10., "message_uid": "e" * 32},
+            {"role": "assistant", "content": "queued settings reply", "timestamp": 11., "message_uid": "f" * 32}]
+    def busy(_batch):
+        raise sqlite3.OperationalError("database is locked")
+    engine._session_end_flush_active = True
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_append_ingest_batch", busy)
+        with pytest.raises(sqlite3.OperationalError):
+            engine._ingest_messages(deepcopy(host))
+    assert engine._pending_session_tails
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "off")
+    monkeypatch.setattr(engine, "_session_id", "synthetic-other")
+    engine._retry_pending_session_tails()
+    assert not engine._pending_session_tails
+    rows = engine._store.get_session_messages("S")
+    assert engine._store.get_session_messages("synthetic-other") == []
+    assert len(rows) == 2 and [r["content"] for r in rows] == [m["content"] for m in host]
+    for row in rows:
+        fact = engine._store.read_metadata_json(f"host_occurrence_row:S:{row['store_id']}")
+        assert fact["message_uid"] is None
