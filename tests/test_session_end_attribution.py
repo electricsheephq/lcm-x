@@ -180,3 +180,22 @@ def test_outer_prelude_and_admission_clocks_are_separate(published, monkeypatch,
     assert float(data["outer_ms"]) == 4000.0
     assert float(data["prelude_ms"]) == 1000.0
     assert float(data["admission_ms"]) == 1000.0
+
+
+@pytest.mark.parametrize("case", ["other_session", "retry_tails_raise"])
+def test_non_foreground_end_is_labelled_not_foreground(published, monkeypatch, caplog, case):
+    engine, host, _output = published
+    session = "S"
+    if case == "other_session":
+        session = "OTHER"
+    else:
+        def raise_retry(*args, **kwargs):
+            raise RuntimeError("retry tails")
+        monkeypatch.setattr(engine, "_retry_session_end_tails", raise_retry)
+    with caplog.at_level(logging.INFO):
+        if case == "retry_tails_raise":
+            with pytest.raises(RuntimeError):
+                engine.on_session_end(session, host)
+        else:
+            engine.on_session_end(session, host)
+    assert [fields(record)["reason"] for record in records(caplog)] == ["not_foreground"]
