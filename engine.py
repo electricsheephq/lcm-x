@@ -7150,8 +7150,7 @@ class LCMEngine(
             if switches[0] and extent:
                 for pos in choices:
                     if (pos < extent or pos in accepted or messages[pos].get("role") != "user"
-                            or current[pos]["timestamp"] is None or pos + 2 >= len(messages)
-                            or not messages[pos + 1].get("tool_calls") or messages[pos + 2].get("role") != "tool"):
+                            or current[pos]["timestamp"] is None):
                         continue
                     digest = _commit_proof_identity_digest(_proof_user_identity(self._message_replay_identity(
                         messages[pos], strip_carrier=False, allow_pruned_tool_alias=False)))
@@ -7161,22 +7160,11 @@ class LCMEngine(
                             and self._message_replay_identity(m, strip_carrier=False) == self._message_replay_identity(
                                 messages[pos], strip_carrier=False) for i, m in enumerate(messages)) != 1:
                         continue
-                    call_digest = _commit_proof_identity_digest(_proof_user_identity(self._message_replay_identity(
-                        messages[pos + 1], strip_carrier=False, allow_pruned_tool_alias=False)))
-                    calls = [sid for sid in by_digest.get(call_digest, ()) if facts[sid].get("user_store_id") == users[0]]
-                    if len(calls) == 1 and any(fact.get("segment_call_store_id") == calls[0]
-                            and by_id[sid].get("role") == "tool"
-                            and by_id[sid].get("tool_call_id") == messages[pos + 2].get("tool_call_id")
-                            and isinstance(by_id[sid].get("content"), str)
-                            and len(by_id[sid]["content"]) > _HERMES_PRUNE_MIN_CHARS
-                            and messages[pos + 2].get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
-                            for sid, fact in facts.items()):
-                        # #1869: this positively bound historical class is past
-                        # ORIGINAL output extent, with no newer accepted slot.
-                        # Leave its user to that owner; never v2-PROVEN.
-                        historical.add(pos)
-                        choices[pos], conflicts[pos] = [], []
-                        result["deferred"].add(pos)
+                    # #1869's user owner ends at ORIGINAL output extent;
+                    # a genuinely new call is still decided as a fresh pair.
+                    historical.add(pos)
+                    choices[pos], conflicts[pos] = [], []
+                    result["deferred"].add(pos)
             used = {ref[1] for ref in result["matched"].values()}
             user_index = result["owners"].get(start - 1, (None, None))[0]
             user_id = result["matched"].get(user_index, (None, None))[1]
@@ -7294,7 +7282,12 @@ class LCMEngine(
                             winners.append(selection)
                     # Known pair UIDs outrank a user-only replacement. Otherwise
                     # the accepted user relation identifies its re-stored pair.
-                    anchored = any(any(v is not None for v in current[pos].values()) for pos in segment)
+                    anchored = any(accepted.get(pos) == sid
+                                   or current[pos]["message_uid"] is not None
+                                   and current[pos]["message_uid"] == facts[sid].get("message_uid")
+                                   or current[pos]["timestamp"] is not None
+                                   and current[pos]["timestamp"] == _normalize_observed_at(by_id[sid].get("observed_at"))
+                                   for winner in winners for pos, sid in winner.items())
                     steady_single = (not self._ingest_cursor_needs_reconcile and self._ingest_cursor > 0
                                      and not getattr(self, "_compress_commit_proof", None)
                                      and not self._durable_commit_proof_payload()
@@ -7384,7 +7377,10 @@ class LCMEngine(
                 # its independently validated delivered head. It is never a
                 # fabricated parent row or a blanket generated-row insertion.
                 heads = {i for i, entry in enumerate(projection.entries) if entry.generated_span is not None}
-                if heads and set(range(len(messages))) - heads <= result["proven"]:
+                tool_carry = any(messages[pos].get("role") == "tool" and segment is not None
+                                 and pos in result["proven"] and result["matched"][pos][0] != self._session_id
+                                 for pos, (_user, segment) in result["owners"].items())
+                if heads and tool_carry and set(range(len(messages))) - heads <= result["proven"]:
                     emitted_heads.update(heads)
                     result["needs_receipt"] = True
                 result["witness"].update(emitted_heads)
@@ -7785,6 +7781,18 @@ class LCMEngine(
                                            if isinstance(call, dict) and call.get("id"))
                     elif role == "tool" and str(messages[idx].get("tool_call_id") or "") in call_owners:
                         segments[call_owners[str(messages[idx].get("tool_call_id") or "")]].append(idx)
+                    elif (role == "assistant" and idx in occurrence["proven"]
+                          and occurrence["owners"].get(idx, (None, None))[0] == start
+                          and not any(self._occurrence_metadata(messages[idx], switches=occurrence["switches"])[key]
+                                      is not None for key in ("timestamp", "message_uid"))):
+                        # A later proof/anchor owner established this fresh user;
+                        # its unknown reply cannot keep a provisional old match.
+                        occurrence["proven"].discard(idx)
+                        occurrence["matched"].pop(idx, None)
+                        occurrence["fresh"].add(idx)
+                        occurrence["needs_receipt"] = True
+                        new_prefix_occurrences.add(idx)
+                        unchanged_prefix_occurrences.discard(idx)
                     elif idx in unchanged_prefix_occurrences and not self._host_occurrence_known(messages[idx]):
                         unchanged_prefix_occurrences.discard(idx)
                 for segment in segments.values():
