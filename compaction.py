@@ -304,7 +304,8 @@ class CompactionMixin:
         self._ingest_replay_redaction_changes = {}
         if self._session_id and messages:
             try:
-                replay_messages = self._ingest_messages(messages)
+                with self._attribution_span("preflight", len(messages)):
+                    replay_messages = self._ingest_messages(messages)
                 self._prepare_retained_user_anchor(replay_messages)
                 self._record_ingest_success()
             except Exception as e:
@@ -995,12 +996,12 @@ class CompactionMixin:
             return
         try:
             self._compress_commit_proof = None
-            if (
-                not self._session_id
-                or not isinstance(result, list)
-                or self._ingest_cursor_needs_reconcile
-                or self._ingest_cursor != len(result)
-            ):
+            self._compress_commit_publication = "local"
+            self._compress_commit_reason = (
+                "no_session" if not self._session_id else "non_list_output" if not isinstance(result, list)
+                else "reconcile_pending" if self._ingest_cursor_needs_reconcile
+                else "cursor_mismatch" if self._ingest_cursor != len(result) else "ready")
+            if self._compress_commit_reason != "ready":
                 return
             emission_binding = self._emission_binding()
             emissions = _finalize_emission_descriptors(
@@ -1035,6 +1036,7 @@ class CompactionMixin:
             for item in emissions:  # multiplicity witness for carried-forward proofs, which omit "output"
                 item["output_multiplicity"] = proof["output"].count(proof["output"][item["output_occurrence"]["index"]])
             if proof["output"] == proof["input"]:
+                self._compress_commit_reason = "identity_noop"
                 # No-progress compress: Hermes has nothing to commit, and an
                 # end call with this list must stay a real session end.
                 return
@@ -1086,6 +1088,7 @@ class CompactionMixin:
                 proof["stub_first_compress_call"] = self._compress_calls
         except Exception:
             self._compress_commit_proof = None
+            self._compress_commit_reason = "construction_error"
             logger.warning("LCM occurrence-proof construction failed; proof unavailable", exc_info=True)
 
     def _carry_prior_emissions(self, messages, result, emissions, emission_binding) -> None:
@@ -1201,10 +1204,12 @@ class CompactionMixin:
             if not effective:
                 payload["scaffold_sha256_v4"] = full
             self._write_compress_commit_proof_payload(proof, payload)
+            self._compress_commit_reason, self._compress_commit_publication = "ready", "durable"
             if "durable" in proof:
                 proof["durable"] = True
         except Exception:
             proof["durable"] = False
+            self._compress_commit_reason, self._compress_commit_publication = "publication_failed", "local"
             logger.warning("LCM occurrence-proof publication failed; proof not durable", exc_info=True)
 
     def _prepare_compress_commit_proof(self, proof, result) -> None:
