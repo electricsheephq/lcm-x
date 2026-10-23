@@ -16,28 +16,28 @@ compaction.py:788:            pending_no_progress = (self._no_progress_candidate
 compaction.py:799:            if pending_no_progress:
 compaction.py:801:                self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress",
 compaction.py:802:                                             persist=self._no_progress_proof_complete)
-compaction.py:1777:        self._no_progress_observed_tokens = int(state.observed_prompt_tokens or 0)
-compaction.py:1811:            state.working_messages = self._ingest_messages(messages)
-compaction.py:1816:                and self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
-compaction.py:1817:                and self._no_progress_hold[1] == "no_progress"):
-compaction.py:1848:                or self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
-compaction.py:1858:                    and self._sweep_budget_hold_applies(state.observed_prompt_tokens))
-compaction.py:1919:        self._no_progress_candidate = bool(
-compaction.py:1973:        if self._no_progress_candidate and not recovery_attempt:
-compaction.py:2323:                self._start_sweep_budget_hold(seconds_left, turn_paced=(
-compaction.py:2324:                    self._sweep_budget_hold_turn_paced
-compaction.py:2325:                    and self._sweep_budget_hold_active()
-compaction.py:2340:                self._sweep_budget_hold_turn_paced = False
-compaction.py:2345:                    self._no_progress_candidate = False  # let the next automatic pass try the fallback
-compaction.py:2352:                        self._no_progress_candidate = False
-compaction.py:2353:                    self._start_sweep_budget_hold(turn_paced=first_hang)
-compaction.py:2374:                    self._start_sweep_budget_hold()
-compaction.py:2426:                # _ingest_messages() already advanced the cursor to the original
-compaction.py:2480:            self._no_progress_proof_complete = bool(
-compaction.py:2877:        self._sweep_budget_hold_until = 0.0  # #608: a stored leaf ends the hold
-compaction.py:2878:        self._hung_summary_strike, self._sweep_budget_hold_turn_paced = None, False
-compaction.py:2879:        self._no_progress_hold, self._no_progress_candidate = None, False  # #651: hidden-only leaves too
-compaction.py:2880:        self._clear_persisted_no_progress_hold()
+compaction.py:1787:        self._no_progress_observed_tokens = int(state.observed_prompt_tokens or 0)
+compaction.py:1821:            state.working_messages = self._ingest_messages(messages)
+compaction.py:1826:                and self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
+compaction.py:1827:                and self._no_progress_hold[1] == "no_progress"):
+compaction.py:1858:                or self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
+compaction.py:1868:                    and self._sweep_budget_hold_applies(state.observed_prompt_tokens))
+compaction.py:1929:        self._no_progress_candidate = bool(
+compaction.py:1983:        if self._no_progress_candidate and not recovery_attempt:
+compaction.py:2333:                self._start_sweep_budget_hold(seconds_left, turn_paced=(
+compaction.py:2334:                    self._sweep_budget_hold_turn_paced
+compaction.py:2335:                    and self._sweep_budget_hold_active()
+compaction.py:2350:                self._sweep_budget_hold_turn_paced = False
+compaction.py:2355:                    self._no_progress_candidate = False  # let the next automatic pass try the fallback
+compaction.py:2362:                        self._no_progress_candidate = False
+compaction.py:2363:                    self._start_sweep_budget_hold(turn_paced=first_hang)
+compaction.py:2384:                    self._start_sweep_budget_hold()
+compaction.py:2436:                # _ingest_messages() already advanced the cursor to the original
+compaction.py:2490:            self._no_progress_proof_complete = bool(
+compaction.py:2887:        self._sweep_budget_hold_until = 0.0  # #608: a stored leaf ends the hold
+compaction.py:2888:        self._hung_summary_strike, self._sweep_budget_hold_turn_paced = None, False
+compaction.py:2889:        self._no_progress_hold, self._no_progress_candidate = None, False  # #651: hidden-only leaves too
+compaction.py:2890:        self._clear_persisted_no_progress_hold()
 engine.py:1381:        self._sweep_budget_hold_until: float = 0.0
 engine.py:1382:        self._sweep_budget_hold_conversation = ""
 engine.py:1383:        self._sweep_budget_hold_turn_paced = False
@@ -134,31 +134,31 @@ engine.py:2794:        self._no_progress_replay = None
 engine.py:3064:        Uses the same _ingest_messages cursor as compress(), so if
 engine.py:3081:                self._ingest_messages(messages)
 engine.py:3089:                self._record_ingest_failure("per-turn ingest()", e)
-engine.py:4677:            self._reset_session_scoped_runtime_state()
-engine.py:5088:                    self._reset_session_scoped_runtime_state()
-engine.py:5149:            self._reset_session_scoped_runtime_state()
-engine.py:5522:                    self._ingest_messages(
-engine.py:5627:        self._reset_session_scoped_runtime_state()
-engine.py:5888:                    self._ingest_messages(messages)
-engine.py:5892:                    self._record_ingest_failure("tool-call ingest", e)
-engine.py:5986:            "no_progress_hold": self._no_progress_hold_status(),
-engine.py:6380:        self._no_progress_public_rows = public_rows
-engine.py:6397:    def _remember_active_replay_messages(
-engine.py:6419:        self._observe_no_progress_replay(original_messages, active_replay_messages)
-engine.py:6446:            if id(row) not in self._no_progress_public_rows:
-engine.py:6447:                self._no_progress_public_rows[id(row)] = {
-engine.py:6453:    def _cached_active_replay_messages(
-engine.py:6472:                self._observe_no_progress_replay(original_messages, current)
-engine.py:6967:    def _ingest_messages(
-engine.py:6985:        self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
-engine.py:6986:        self._no_progress_ingest_generation = self._ingest_failure_count
-engine.py:7268:                    self._record_ingest_failure("identity-anchor pre-match", exc)
-engine.py:7331:            result = self._remember_active_replay_messages(messages, active)
-engine.py:7345:            cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
-engine.py:8815:            self._no_progress_candidate = False  # #909/#651: a stored condensation is progress
-engine.py:8816:            self._clear_persisted_no_progress_hold()
-engine.py:8826:                return passes, "condensation_no_progress"
-engine.py:10148:        (output of ``_ingest_messages``), not raw messages.  ``working_messages``
+engine.py:4678:            self._reset_session_scoped_runtime_state()
+engine.py:5089:                    self._reset_session_scoped_runtime_state()
+engine.py:5150:            self._reset_session_scoped_runtime_state()
+engine.py:5523:                    self._ingest_messages(
+engine.py:5628:        self._reset_session_scoped_runtime_state()
+engine.py:5889:                    self._ingest_messages(messages)
+engine.py:5893:                    self._record_ingest_failure("tool-call ingest", e)
+engine.py:5987:            "no_progress_hold": self._no_progress_hold_status(),
+engine.py:6381:        self._no_progress_public_rows = public_rows
+engine.py:6398:    def _remember_active_replay_messages(
+engine.py:6420:        self._observe_no_progress_replay(original_messages, active_replay_messages)
+engine.py:6447:            if id(row) not in self._no_progress_public_rows:
+engine.py:6448:                self._no_progress_public_rows[id(row)] = {
+engine.py:6454:    def _cached_active_replay_messages(
+engine.py:6473:                self._observe_no_progress_replay(original_messages, current)
+engine.py:6990:    def _ingest_messages(
+engine.py:7008:        self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
+engine.py:7009:        self._no_progress_ingest_generation = self._ingest_failure_count
+engine.py:7296:                    self._record_ingest_failure("identity-anchor pre-match", exc)
+engine.py:7359:            result = self._remember_active_replay_messages(messages, active)
+engine.py:7373:            cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
+engine.py:8843:            self._no_progress_candidate = False  # #909/#651: a stored condensation is progress
+engine.py:8844:            self._clear_persisted_no_progress_hold()
+engine.py:8854:                return passes, "condensation_no_progress"
+engine.py:10176:        (output of ``_ingest_messages``), not raw messages.  ``working_messages``
 level3_repair.py:219:                conn.execute("DELETE FROM metadata WHERE key = ?", (f"compaction_no_progress:v1:{session_id}",))
 reset_state.py:49:    def _reset_session_scoped_runtime_state(self) -> None:
 reset_state.py:71:        self._no_progress_hold, self._no_progress_candidate = None, False
@@ -1201,12 +1201,12 @@ tests/invariants/test_issue_1353_fault_cache_consistency.py:384:        out = e.
 tests/invariants/test_issue_1353_placeholder_provenance.py:51:        e._ingest_messages(
 tests/invariants/test_issue_1353_prematch_fault_prefix.py:104:            assert e._no_progress_replay is None
 tests/invariants/test_issue_1353_prematch_fault_prefix.py:111:        assert e._no_progress_replay is not None
-tests/invariants/test_issue_1385_salvage_provenance.py:32:    first._ingest_messages(original)
-tests/invariants/test_issue_1385_salvage_provenance.py:55:    engine._ingest_messages(host)
-tests/invariants/test_issue_1385_salvage_provenance.py:62:    engine._ingest_messages(copy.deepcopy(host))
-tests/invariants/test_issue_1385_salvage_provenance.py:130:    engine._ingest_messages(host)
-tests/invariants/test_issue_1385_salvage_provenance.py:154:    first._ingest_messages(view)
-tests/invariants/test_issue_1385_salvage_provenance.py:164:    engine._ingest_messages(host)
+tests/invariants/test_issue_1385_salvage_provenance.py:33:    first._ingest_messages(original)
+tests/invariants/test_issue_1385_salvage_provenance.py:59:    engine._ingest_messages(host)
+tests/invariants/test_issue_1385_salvage_provenance.py:66:    engine._ingest_messages(copy.deepcopy(host))
+tests/invariants/test_issue_1385_salvage_provenance.py:134:    engine._ingest_messages(host)
+tests/invariants/test_issue_1385_salvage_provenance.py:158:    first._ingest_messages(view)
+tests/invariants/test_issue_1385_salvage_provenance.py:168:    engine._ingest_messages(host)
 tests/invariants/test_issue_1628_rewind_rescan.py:141:    engine._ingest_messages(host)
 tests/invariants/test_issue_1628_rewind_rescan.py:146:    active = engine._ingest_messages(host)
 tests/invariants/test_issue_1628_rewind_rescan.py:151:    active = engine._ingest_messages(host)
@@ -1225,7 +1225,7 @@ tests/invariants/test_retry_r3.py:65:    machine.engine._ingest_messages(deepcop
 tests/invariants/test_retry_r3.py:82:    machine.engine._ingest_messages(host)
 tests/invariants/test_retry_r3.py:97:    machine.engine._ingest_messages(host)
 tests/invariants/test_retry_r3.py:99:    machine.engine._ingest_messages(deepcopy(host))
-tests/legacy_native_state.py:328:        working = self._ingest_messages(messages)
+tests/legacy_native_state.py:330:        working = self._ingest_messages(messages)
 tests/test_active_tool_stubbing.py:396:    monkeypatch.setattr(engine, "_ingest_messages", ingest)
 tests/test_active_tool_stubbing.py:413:    monkeypatch.setattr(engine, "_ingest_messages", ingest)
 tests/test_active_tool_stubbing.py:438:    monkeypatch.setattr(engine, "_ingest_messages", lambda _messages: replay_messages)
@@ -1564,6 +1564,8 @@ tests/test_issue_667_level3_repair.py:301:    assert _read_no_progress_holds(eng
 tests/test_issue_667_level3_repair.py:307:    holds = _seed_no_progress_holds(engine)
 tests/test_issue_667_level3_repair.py:315:                            ("compaction_no_progress:v1:s1",)).fetchone() is None
 tests/test_issue_667_level3_repair.py:325:    assert _read_no_progress_holds(engine) == holds
+tests/test_issue_667_level3_repair.py:330:    holds = _seed_no_progress_holds(engine)
+tests/test_issue_667_level3_repair.py:348:    assert _read_no_progress_holds(engine) == holds
 tests/test_issue_671_stub_first_exit.py:115:    replay = engine._ingest_messages(messages)
 tests/test_issue_671_stub_first_exit.py:308:    working = engine._ingest_messages(view)
 tests/test_issue_671_stub_first_exit.py:405:    cold._ingest_messages(copy.deepcopy(out) + [{"role": "user", "content": "fresh-new-question"}])
@@ -1929,15 +1931,15 @@ tests/test_lcm_engine.py:14190:        monkeypatch.setattr(engine, "_ingest_mess
 tests/test_lcm_engine.py:21707:            engine_a._ingest_messages([{"role": "user", "content": "first persisted message"}])
 tests/test_lcm_engine.py:26624:        engine._ingest_messages(messages)
 tests/test_lcm_engine.py:26680:        engine._ingest_messages([
-tests/test_native_publication_fallback.py:129:    candidate._ingest_messages(compressed + new_turns)
-tests/test_native_publication_fallback.py:152:    candidate._ingest_messages(messages + new_turns)
-tests/test_native_publication_fallback.py:185:    candidate._ingest_messages(messages + new_turns)
-tests/test_native_publication_fallback.py:216:        second._ingest_messages(recovered + new_turns)
-tests/test_native_publication_fallback.py:250:    candidate._ingest_messages(compressed + new_turns)
-tests/test_native_publication_fallback.py:328:        resumed._ingest_messages(recovered + new_turns)
-tests/test_native_publication_fallback.py:379:        engine._ingest_messages(changed)
-tests/test_native_publication_fallback.py:398:    candidate._ingest_messages(recovered + [{"role": "user", "content": forged}])
-tests/test_native_publication_fallback.py:606:    candidate._ingest_messages([lossy])
+tests/test_native_publication_fallback.py:136:    candidate._ingest_messages(compressed + new_turns)
+tests/test_native_publication_fallback.py:159:    candidate._ingest_messages(messages + new_turns)
+tests/test_native_publication_fallback.py:192:    candidate._ingest_messages(messages + new_turns)
+tests/test_native_publication_fallback.py:223:        second._ingest_messages(recovered + new_turns)
+tests/test_native_publication_fallback.py:257:    candidate._ingest_messages(compressed + new_turns)
+tests/test_native_publication_fallback.py:335:        resumed._ingest_messages(recovered + new_turns)
+tests/test_native_publication_fallback.py:386:        engine._ingest_messages(changed)
+tests/test_native_publication_fallback.py:405:    candidate._ingest_messages(recovered + [{"role": "user", "content": forged}])
+tests/test_native_publication_fallback.py:613:    candidate._ingest_messages([lossy])
 tests/test_o2_native_recovery_removed.py:93:        monkeypatch.setattr(engine, "_ingest_messages", lambda _rows: replay)
 tests/test_o2_native_recovery_removed.py:130:            replay = engine._ingest_messages(rows)
 tests/test_rc4_no_progress_hold_ceiling_sweeps.py:45:    assert engine._no_progress_hold_active() and not engine._sweep_budget_hold_active()
