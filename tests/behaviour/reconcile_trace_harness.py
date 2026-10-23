@@ -680,6 +680,8 @@ def observe(case: Scenario, root: Path, *, digest_attribution: list | None = Non
             if case.variant == "no-session":
                 engine._session_id = ""
             if case.mode == "public":
+                canonical.retain_occurrence_owners(engine)
+                retired_store_id = id(engine._store)
                 engine.shutdown()
                 # The context manager shuts down the reopened instance at exit.
                 engine.__init__(config=engine._config, hermes_home=str(root / "home"))
@@ -697,6 +699,10 @@ def observe(case: Scenario, root: Path, *, digest_attribution: list | None = Non
             if case.variant == "no-tail":
                 tail = []
             before = snapshot(engine, canonical)
+            if case.mode == "public" and occurrence_attribution is not None:
+                occurrence_attribution.append({"event": "store-owner-reopen",
+                    "old_store": (retired_store_id, canonical.occurrence_pointer(retired_store_id)),
+                    "new_store": (id(engine._store), canonical.occurrence_pointer(id(engine._store)))})
             events.append("before attrs=" + fingerprint(encoded(before)))
             connections: list[tuple[str, sqlite3.Connection]] = []
             for name in ("_store", "_dag", "_lifecycle", "_host_rewrite_store"):
