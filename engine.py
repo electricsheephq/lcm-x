@@ -2504,6 +2504,7 @@ class LCMEngine(
             "fresh_tail_count", "fresh_tail_max_tokens", "fresh_tail_pressure_yield_enabled",
             "fresh_tail_pressure_yield_min_observations", "leaf_chunk_tokens",
             "leaf_target_ratio", "leaf_target_min_tokens", "leaf_target_max_tokens",
+            "l2_budget_ratio", "summary_prompt_version",
             "dynamic_leaf_chunk_enabled", "dynamic_leaf_chunk_max", "incremental_max_depth",
             "condensation_fanin", "cache_friendly_condensation_enabled", "cache_friendly_min_debt_groups",
             "threshold_full_sweep_enabled", "summary_prefix_target_tokens", "l3_truncate_tokens",
@@ -2516,6 +2517,12 @@ class LCMEngine(
             "large_output_active_replay_stub_threshold_tokens", "large_output_active_replay_stub_aged_threshold_tokens",
         )
         try:
+            route = []
+            for name in ("model", "provider", "api_mode"):
+                value = getattr(self, name)
+                if not isinstance(value, str) or any(marker in value for marker in ("://", "@", "?", "#")):
+                    return None  # An opaque or URL-shaped route cannot supply safe scalar identity.
+                route.append(value.strip())
             tokens = max(int(self.last_prompt_tokens or 0), int(self._last_gate_tokens or 0))
             ceiling = self._survival_ceiling()
             pressure = ("overflow" if self._should_force_overflow_recovery(observed_tokens=tokens)
@@ -2536,6 +2543,7 @@ class LCMEngine(
                      self._dag._conn.execute("SELECT COALESCE(MAX(node_id), 0) FROM summary_nodes").fetchone()[0],
                      pressure, tokens // 1024, int(self.context_length or 0), self.threshold_tokens,
                      self._pressure_yield_blocked_streak,
+                     route,
                      [getattr(self._config, name) for name in names]]
             return hashlib.sha256(json.dumps(state, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         except Exception:

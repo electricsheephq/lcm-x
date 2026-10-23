@@ -708,6 +708,7 @@ class CompactionMixin:
             self._compress_occurrences = None
             self._survival_fit_reason = None
             self._no_progress_candidate = False
+            self._no_progress_proof_complete = False
             self._stub_first_exit_now = self._last_stub_first_exit = None  # #671: the latest compaction only
             self._compress_calls += 1  # #1116: a stub-first proof becomes durable only for the latest call
             if bypass_cooldown:  # #651: a host recovery attempt is never cleanup-only maintenance
@@ -764,6 +765,7 @@ class CompactionMixin:
                 logger.info("LCM hidden-only compaction kept host list unchanged: leaves=%d hidden_rows=%d",
                             budget.leaves, self._compress_hidden_rows_consumed)
             pending_no_progress = (self._no_progress_candidate and not bypass_cooldown
+                    and (self._objective_only_noop or self._no_progress_proof_complete)
                     and self._last_compression_status != "error" and len(result) >= len(messages)) and (
                     count_messages_tokens(result) >= count_messages_tokens(messages))
             self._record_compress_commit_proof(messages, result)
@@ -2449,6 +2451,14 @@ class CompactionMixin:
             )
             self._write_generated_ignored_placeholder_hash_ordinals(
                 self._generated_placeholder_digest_ordinals_for_active_replay(sanitized_messages)
+            )
+            # Only a classified ordinary terminal result proves unchanged work.
+            # Budget/route/rejection/error stops leave the scan incomplete and
+            # retain their separate process-local pacing instead.
+            self._no_progress_proof_complete = bool(
+                state.sweep_stop_reason in {"", "raw_prefix_drained"}
+                and state.pre_leaf_condensation_reason in {"", "summary_prefix_target_reached"}
+                and not state.budget.summary_failure and state.budget.hung_route is None
             )
             return "return", sanitized_messages
         return "next", None

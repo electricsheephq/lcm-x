@@ -284,3 +284,26 @@ def test_leaf_target_invalidation_and_bound_store_identity(tmp_path, monkeypatch
         assert len(resolved_paths) == 4  # Same path on a different bound store is re-resolved.
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("setting", ["l2_budget_ratio", "summary_prompt_version", "model", "provider", "api_mode"])
+def test_effective_settings_and_route_only_invalidate(tmp_path, setting):
+    view, before = arm(tmp_path)
+    engine = rebuild(tmp_path)
+    try:
+        engine._ingest_messages(view)
+        assert not engine.should_compress(10_000)
+        old_window = engine.context_length
+        if setting in {"l2_budget_ratio", "summary_prompt_version"}:
+            old = getattr(engine._config, setting)
+            setattr(engine._config, setting, old + (0.01 if setting.endswith("ratio") else 1))
+        else:
+            route = dict(model=engine.model, provider=engine.provider, api_mode=engine.api_mode)
+            route[setting] = "synthetic-route"
+            engine.update_model(context_length=engine.raw_context_length, **route)
+        assert engine.context_length == old_window
+        assert engine.should_compress(10_000)
+        assert not engine._automatic_compression_blocked()
+        assert engine._store.get_session_messages("S") == before
+    finally:
+        engine.shutdown()
