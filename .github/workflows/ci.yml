@@ -259,7 +259,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           mkdir -p "$HOME" "$TMPDIR"
-          python -B docs/process/evidence/1880-persisted-hold/cost-h2/cost_probe.py --base "$RUNNER_TEMP/hold-base" --candidate . --scratch "$RUNNER_TEMP/hold-cost" --out hold-cost-results
+          python -B -m cProfile -o hold-cost-results/profile.pstats docs/process/evidence/1880-persisted-hold/cost-h2/cost_probe.py --base "$RUNNER_TEMP/hold-base" --candidate . --scratch "$RUNNER_TEMP/hold-cost" --out hold-cost-results
           python -B docs/process/evidence/1880-persisted-hold/cost-h2/score_cost.py hold-cost-results
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
