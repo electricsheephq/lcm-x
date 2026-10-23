@@ -374,7 +374,8 @@ def _parse_yaml_fallback_scalar(value: str):
         items = []
         start = 1
         # Quoted tokens consume their own commas, hashes and escaped quotes.
-        for match in re.finditer(_YAML_QUOTED_SCALAR + r"|[,\]\[]|(?<!\S)#", value[1:]):
+        quoted_item = r"(?:^|(?<=,))\s*(?:" + _YAML_QUOTED_SCALAR + ")"
+        for match in re.finditer(quoted_item + r"|[,\]\[]|(?<!\S)#", value[1:]):
             token = match.group()
             if token in {"#", "["}:
                 break  # Unsupported list shape: retain the old result.
@@ -386,7 +387,7 @@ def _parse_yaml_fallback_scalar(value: str):
                 if token == "]":
                     return items
                 start = match.end() + 1
-    for match in re.finditer(_YAML_QUOTED_SCALAR + r"|(?<!\S)#", value):
+    for match in re.finditer(r"^(?:" + _YAML_QUOTED_SCALAR + r")|(?<!\S)#", value):
         if match.group() == "#":
             value = value[:match.start()]
             break
@@ -427,7 +428,10 @@ def _load_hermes_config_yaml(cfg_path: Path | None = None) -> dict[str, Any]:
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
         content = line
-        for match in re.finditer(_YAML_QUOTED_SCALAR + r"|(?<!\S)#", line):
+        quoted_scalar = r"(?:^\s*|^[^:#]*:\s*)(?:" + _YAML_QUOTED_SCALAR + ")"
+        if line.partition(":")[2].lstrip().startswith("["):
+            quoted_scalar = r"(?<=[\[,])\s*(?:" + _YAML_QUOTED_SCALAR + ")|" + quoted_scalar
+        for match in re.finditer(quoted_scalar + r"|(?<!\S)#", line):
             if match.group() == "#":
                 content = line[:match.start()]
                 break
