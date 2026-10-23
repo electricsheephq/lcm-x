@@ -9,6 +9,7 @@ import atexit
 import contextlib
 import copy
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -179,6 +180,7 @@ from .frontier_state import FrontierState
 from . import tools as lcm_tools
 
 logger = logging.getLogger(__name__)
+_DIAGNOSTIC_ENGINE_TOKENS = itertools.count(1)
 _NATIVE_RECOVERY_WARNING_LOGGED = False
 
 
@@ -1350,6 +1352,9 @@ class LCMEngine(
         # #671: the latest stub-first exit (tokens before/after, target, backlog rows) and this compress()'s.
         self._last_stub_first_exit: Optional[dict[str, int]] = None
         self._stub_first_exit_now: Optional[dict[str, int]] = None
+        self._diagnostic_engine_token = next(_DIAGNOSTIC_ENGINE_TOKENS)
+        self._compress_commit_reason, self._compress_commit_publication = "no_proof", "local"
+        self._end_attribution = None
         self._compress_calls = 0  # #1116: which compress() a stub-first proof came from
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
@@ -4986,16 +4991,67 @@ class LCMEngine(
         self._log_session_filter_diagnostics()
 
 
+    @contextmanager
+    def _attribution_span(self, phase, rows=0):
+        diagnostic = self._end_attribution
+        if diagnostic is None and not logger.isEnabledFor(logging.DEBUG):
+            yield
+            return
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = (time.perf_counter() - started) * 1000
+            if diagnostic is not None:
+                diagnostic[phase + "_ms"] = elapsed
+            else:
+                try:
+                    logger.debug("LCM attribution phase=%s rows=%d elapsed_ms=%.3f engine_token=%d compress_sequence=%d",
+                                 phase, rows, elapsed, self._diagnostic_engine_token, self._compress_calls)
+                except Exception:
+                    pass  # Diagnostic handlers cannot change the observed operation's result.
+
+    @contextmanager
+    def _session_end_diagnostic(self, messages, started, admitted, admission_started):
+        previous = self._end_attribution
+        self._end_attribution = diagnostic = dict.fromkeys(
+            ("classifier_ms", "ingest_ms", "finalize_ms", "snapshot_ms", "retire_ms"), 0.0)
+        diagnostic.update(reason="not_foreground", rows=len(messages), cursor_entry=self._ingest_cursor,
+                          reconcile_entry=int(self._ingest_cursor_needs_reconcile))
+        try:
+            yield
+        finally:
+            diagnostic.update(outer_ms=(time.perf_counter() - started) * 1000,
+                              admission_ms=(admitted - admission_started) * 1000,
+                              prelude_ms=(admission_started - started) * 1000, cursor_exit=self._ingest_cursor,
+                              reconcile_exit=int(self._ingest_cursor_needs_reconcile))
+            self._end_attribution = previous
+            try:
+                logger.info("LCM attribution phase=session_end engine_token=%d compress_sequence=%d writer_reason=%s proof_state=%s "
+                    "reason=%s rows=%d cursor_entry=%d reconcile_entry=%d cursor_exit=%d reconcile_exit=%d "
+                    "outer_ms=%.3f admission_ms=%.3f prelude_ms=%.3f classifier_ms=%.3f ingest_ms=%.3f finalize_ms=%.3f "
+                    "snapshot_ms=%.3f retire_ms=%.3f",
+                    self._diagnostic_engine_token, self._compress_calls, self._compress_commit_reason,
+                    self._compress_commit_publication if self._compress_commit_proof else "none",
+                    *(diagnostic[key] for key in ("reason", "rows", "cursor_entry", "reconcile_entry", "cursor_exit",
+                      "reconcile_exit", "outer_ms", "admission_ms", "prelude_ms", "classifier_ms", "ingest_ms", "finalize_ms",
+                      "snapshot_ms", "retire_ms")))
+            except Exception:
+                pass
+
     def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        started = time.perf_counter()
         sender_capture.retire(self)
+        admission_started = time.perf_counter()
         with self._exclusive_lifecycle("end"):
             if self._stable_use_closed:
                 return
-            self._retry_session_end_tails()
-            try:
-                self._on_session_end_unlocked(session_id, messages)
-            finally:
-                self._session_end_flush_active = False
+            with self._session_end_diagnostic(messages, started, time.perf_counter(), admission_started):
+                self._retry_session_end_tails()
+                try:
+                    self._on_session_end_unlocked(session_id, messages)
+                finally:
+                    self._session_end_flush_active = False
 
     def _on_session_end_unlocked(
         self,
@@ -5281,23 +5337,29 @@ class LCMEngine(
         try:
             self._finalize_foreground_session_end_unlocked(session_id, messages)
         finally:
-            self._retire_embedding_maintenance(wait=False)
+            with self._attribution_span("retire"):
+                self._retire_embedding_maintenance(wait=False)
 
     def _finalize_foreground_session_end_unlocked(
         self,
         session_id: str,
         messages: List[Dict[str, Any]],
     ) -> None:
-        proof = getattr(self, "_compress_commit_proof", None)
-        if (
-            proof
-            and proof.get("session_id") == session_id
-            and proof.get("conversation_id") == self._conversation_id
-            and not proof.get("end_consumed")
-            and proof.get("input") is not None
-            and len(messages) == len(proof["input"])
-            and [self._proof_replay_identity(m, strip_carrier=False) for m in messages] == proof["input"]
-        ):
+        with self._attribution_span("classifier"):
+            proof = getattr(self, "_compress_commit_proof", None)
+            reason = next((reason for reason, gate in (
+                ("no_proof", lambda: proof),
+                ("session_mismatch", lambda: proof.get("session_id") == session_id),
+                ("conversation_mismatch", lambda: proof.get("conversation_id") == self._conversation_id),
+                ("already_consumed", lambda: not proof.get("end_consumed")),
+                ("input_unavailable", lambda: proof.get("input") is not None),
+                ("length_mismatch", lambda: len(messages) == len(proof["input"])),
+                ("identity_mismatch", lambda: [self._proof_replay_identity(m, strip_carrier=False)
+                                              for m in messages] == proof["input"]),
+            ) if not gate()), "fast")
+            if self._end_attribution is not None:
+                self._end_attribution["reason"] = reason
+        if reason == "fast":
             # Compaction commit (#483): every input row is already durable and the
             # cursor indexes compress()'s output, so skip the re-ingest. Still
             # finalize: the end may be a real exit after a cancelled commit, and
@@ -5306,7 +5368,7 @@ class LCMEngine(
             try:
                 with _temporary_sqlite_busy_timeout(
                     [getattr(self._lifecycle, "_conn", None)], _SESSION_END_BUSY_TIMEOUT_MS
-                ):
+                ), self._attribution_span("finalize"):
                     self._lifecycle.finalize_session(
                         self._conversation_id,
                         session_id,
@@ -5340,10 +5402,11 @@ class LCMEngine(
                     # consume session-end replay proof; ordinary ingest never
                     # does, so a host-supplied history cannot skip a fresh delta.
                     self._session_end_flush_active = True
-                    self._ingest_messages(
-                        messages,
-                        allow_session_end_replay_proof=is_current_session_full_history_end,
-                    )
+                    with self._attribution_span("ingest"):
+                        self._ingest_messages(
+                            messages,
+                            allow_session_end_replay_proof=is_current_session_full_history_end,
+                        )
                     self._session_end_flush_active = False
                     ingest_finished = True
                 except KeyboardInterrupt:
@@ -5368,11 +5431,12 @@ class LCMEngine(
                     raise
 
                 try:
-                    self._lifecycle.finalize_session(
-                        self._conversation_id,
-                        session_id,
-                        frontier_store_id=self._last_compacted_store_id,
-                    )
+                    with self._attribution_span("finalize"):
+                        self._lifecycle.finalize_session(
+                            self._conversation_id,
+                            session_id,
+                            frontier_store_id=self._last_compacted_store_id,
+                        )
                 except KeyboardInterrupt:
                     logger.warning(
                         "LCM session-end lifecycle finalization interrupted; "
@@ -5399,7 +5463,8 @@ class LCMEngine(
                 # This is a no-op for ordinary histories (empty digest without a
                 # generated summary scaffold) and for off-current ends (the
                 # helper writes only when session_id == self._session_id).
-                self._remember_session_end_replay_snapshot(session_id, messages)
+                with self._attribution_span("snapshot"):
+                    self._remember_session_end_replay_snapshot(session_id, messages)
         except KeyboardInterrupt:
             logger.warning(
                 "LCM session-end ingest/finalize interrupted before bounded flush completed%s",
