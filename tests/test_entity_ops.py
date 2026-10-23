@@ -82,18 +82,20 @@ def test_r1_platform_fallback_keeps_identifier_bytes(store, ops, api):
 
 @pytest.mark.parametrize("pid", ["abc", "tg:", ":x"])
 @pytest.mark.parametrize("operation", ["holder", "attach"])
-def test_r2_invalid_platform_ids_are_nonmutating(store, ops, api, pid, operation):
+@pytest.mark.parametrize("verified", [False, True])
+def test_r2_invalid_platform_ids_are_nonmutating(store, ops, api, pid, operation, verified):
     before = scope_rows(store)
     call = (lambda: ops.holder_for_platform_id(pid)) if operation == "holder" else (
-        lambda: ops.attach_or_create_for_platform_id(pid, "invalid", verified=True))
+        lambda: ops.attach_or_create_for_platform_id(pid, "invalid", verified=verified))
     refused(api, "invalid_platform_id", call)
     assert scope_rows(store) == before
 
 
-def test_r2_add_platform_alias_requires_platform(store, ops, api):
+@pytest.mark.parametrize("verified", [False, True])
+def test_r2_add_platform_alias_requires_platform(store, ops, api, verified):
     entity = ops.create_entity("pid")
     before = scope_rows(store)
-    refused(api, "invalid_platform_id", lambda: ops.add_alias(entity, "abc", "platform_id", verified=True))
+    refused(api, "invalid_platform_id", lambda: ops.add_alias(entity, "abc", "platform_id", verified=verified))
     assert scope_rows(store) == before
 
 
