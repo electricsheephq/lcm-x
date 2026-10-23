@@ -7282,8 +7282,9 @@ class LCMEngine(
                             winners.append(selection)
                     # Known pair UIDs outrank a user-only replacement. Otherwise
                     # the accepted user relation identifies its re-stored pair.
-                    anchored = any(accepted.get(pos) == sid
-                                   or current[pos]["message_uid"] is not None
+                    # A prior accepted slot selects a candidate, not independent
+                    # pair metadata over a newer owning-user conflict.
+                    anchored = any(current[pos]["message_uid"] is not None
                                    and current[pos]["message_uid"] == facts[sid].get("message_uid")
                                    or current[pos]["timestamp"] is not None
                                    and current[pos]["timestamp"] == _normalize_observed_at(by_id[sid].get("observed_at"))
