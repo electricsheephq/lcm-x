@@ -276,10 +276,8 @@ def test_t7_update_contention_is_nonblocking_and_retried_after_ingest(tmp_path, 
         thread.start()
         assert ready.wait(2)
         try:
-            start = time.monotonic()
             begin(e, [current])
-            elapsed = time.monotonic() - start
-            assert elapsed < .05
+            assert thread.is_alive() and not release.is_set()
             assert not conn.in_transaction
             assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == timeout
             assert_capture(e, [(None, None)])

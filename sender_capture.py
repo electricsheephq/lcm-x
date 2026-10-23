@@ -79,7 +79,7 @@ def create_pending(engine, payload):
                 or not re.fullmatch(r"[a-z0-9_.-]{1,32}", platform)):
             return None
         sender = raw.strip()
-        if not sender or len(sender) > 200 or any(unicodedata.category(c) == "Cc" for c in sender):
+        if not sender or len(sender) > 200 or any(unicodedata.category(c) in ("Cc", "Cs") for c in sender):
             return None
         obj = history[-1] if isinstance(history, list) and history else None
         author = payload.get("turn_author")
@@ -138,7 +138,7 @@ def batch_senders(engine, originals, excluded=()):
             return None, None
         values = [pending.sender if i not in excluded and matches(engine, pending, obj) else None
                   for i, obj in originals]
-        return (pending, values) if any(values) else (None, None)
+        return (pending, values) if sum(value is not None for value in values) == 1 else (None, None)
     except Exception:
         logger.debug("sender_capture:match_error")
         return None, None
