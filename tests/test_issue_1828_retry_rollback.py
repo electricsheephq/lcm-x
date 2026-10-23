@@ -10,12 +10,13 @@ from hermes_lcm import recall_session, tokens
 from tests.test_issue_1828_refit import RefitFixture
 
 
-@pytest.mark.parametrize("sizes,cap,uncertain", [
-    ((1600, 100), 1500, False),
-    ((1600, 200, 100), 1500, False),
-    ((100, 1600, 100), 2520, True),
+@pytest.mark.parametrize("sizes,cap,uncertain,nonconverging_retry", [
+    ((1600, 100), 1500, False, False),
+    ((1600, 200, 100), 1500, False, False),
+    ((100, 1600, 100), 2520, True, False),
+    ((1600, 100), 3240, False, True),
 ])
-def test_failed_retry_preserves_encoded_payload(monkeypatch, sizes, cap, uncertain):
+def test_failed_retry_preserves_encoded_payload(monkeypatch, sizes, cap, uncertain, nonconverging_retry):
     monkeypatch.setattr(tokens, "_get_encoder", lambda: None)
     monkeypatch.setattr(recall_session, "CHAR_BUDGET", cap)
     # Same implementation and input, with only the retry pass disabled.
@@ -27,6 +28,20 @@ def test_failed_retry_preserves_encoded_payload(monkeypatch, sizes, cap, uncerta
     exec(compile(source.replace(guard, "if False:"), "<retry-disabled>", "exec"), baseline.__dict__)
     baseline.CHAR_BUDGET = cap
     fixture = RefitFixture(sizes)
+    count = tokens.count_tokens_with_encoder
+    oscillations = 0
+
+    def retry_count(raw, *, encoder):
+        nonlocal oscillations
+        payload = json.loads(raw)
+        d = payload["provenance"]["delivery"]
+        # Only the tentative retry has B admitted with complete metadata.
+        if nonconverging_retry and any(h["store_id"] == 2 for h in payload["hits"]) and d["sessions"][1]["complete"]:
+            oscillations += 1
+            return 1 + d["response_tokens"] % 2
+        return count(raw, encoder=encoder)
+
+    monkeypatch.setattr(tokens, "count_tokens_with_encoder", retry_count)
 
     def run(module):
         return module.deliver_session(
@@ -43,6 +58,9 @@ def test_failed_retry_preserves_encoded_payload(monkeypatch, sizes, cap, uncerta
     finally:
         fixture.close()
     before, after = json.loads(expected), json.loads(actual)
+    if nonconverging_retry:
+        assert oscillations >= 10
+    assert after["provenance"]["delivery"].get("stop_reason") == before["provenance"]["delivery"].get("stop_reason")
     assert [h["store_id"] for h in before["hits"]] == [h["store_id"] for h in after["hits"]]
     if uncertain:
         assert any(h.get("event_time") for h in before["hits"])

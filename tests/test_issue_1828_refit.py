@@ -14,13 +14,13 @@ from hermes_lcm.store import MessageStore
 
 
 class RefitFixture:
-    def __init__(self, sizes):
+    def __init__(self, sizes, session_ids=None):
         self.store = MessageStore(":memory:")
         self.dag = SummaryDAG(":memory:")
         self.engine = SimpleNamespace(_store=self.store, _dag=self.dag, current_session_id="current")
         self.ordered = []
         for i, size in enumerate(sizes):
-            sid = f"session-{i}"
+            sid = session_ids[i] if session_ids else f"session-{i}"
             row_id = self.store.append(sid, {"role": "user", "content": "x" * size, "timestamp": 1})
             self.ordered.append(dict(hit=dict(session_id=sid, store_id=row_id), ranks={}, _final_score=1))
 
@@ -28,8 +28,8 @@ class RefitFixture:
         self.dag.close()
         self.store.close()
 
-    def run(self, *, seen=(), deadline=None, trace=False):
-        response = dict(query="needle", limit=len(self.ordered), provenance=dict(arms_run=[]))
+    def run(self, *, seen=(), deadline=None, trace=False, query="needle"):
+        response = dict(query=query, limit=len(self.ordered), provenance=dict(arms_run=[]))
         self.skipped = []
         if trace:
             source, start = inspect.getsourcelines(recall_session.deliver_session)
@@ -147,7 +147,7 @@ def test_refit_reconsiders_skipped_groups(refit_fixture, monkeypatch, sizes):
     assert neighbor not in {h["store_id"] for h in partial["hits"]}
     meta = next(m for m in partial["provenance"]["delivery"]["sessions"] if m["session_id"] == "session-1")
     assert not meta["complete"] and meta["omission_reason"] == "budget"
-    assert meta.get("expand_hint", f"lcm_expand(store_id={neighbor})") == f"lcm_expand(store_id={neighbor})"
+    assert meta["expand_hint"] == f"lcm_expand(store_id={neighbor})"
     if len(sizes) == 3:
         original = fixture.store.load_session_window
 

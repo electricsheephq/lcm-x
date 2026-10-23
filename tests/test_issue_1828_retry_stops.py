@@ -10,7 +10,7 @@ from hermes_lcm import recall_session, tokens
 from tests.test_issue_1828_refit import RefitFixture
 
 
-def run_with_state(fixture):
+def run_with_state(fixture, **kwargs):
     state = {}
     previous = sys.getprofile()
 
@@ -20,10 +20,44 @@ def run_with_state(fixture):
 
     sys.setprofile(profile)
     try:
-        result = fixture.run(deadline=1)
+        result = fixture.run(deadline=1, **kwargs)
     finally:
         sys.setprofile(previous)
     return result, state
+
+
+@pytest.mark.parametrize("session_ids,cap", [(tuple("ABC"), 3330),
+                                          (("session-0", "session-1", "session-2", "session-3"), 3500)])
+def test_read_error_only_marks_interrupted_and_unprocessed_sessions(monkeypatch, session_ids, cap):
+    monkeypatch.setattr(tokens, "_get_encoder", lambda: None)
+    monkeypatch.setattr(recall_session, "time", SimpleNamespace(monotonic=lambda: 0))
+    monkeypatch.setattr(recall_session, "CHAR_BUDGET", cap)
+    fixture = RefitFixture((1600,) + (100,) * (len(session_ids) - 1), session_ids)
+    original = fixture.store.load_session_window
+
+    def read(sid, **kwargs):
+        if sid == session_ids[2]:
+            raise OSError("synthetic read failure")
+        assert sid in session_ids[:2]
+        return original(sid, **kwargs)
+
+    monkeypatch.setattr(fixture.store, "load_session_window", read)
+    try:
+        result, state = run_with_state(fixture, query="")
+    finally:
+        fixture.close()
+    assert state["skipped"][0][0]["session_id"] == session_ids[1]
+    assert [h["store_id"] for h in result["hits"]] == [2]
+    sessions = {s["session_id"]: s for s in result["provenance"]["delivery"]["sessions"]}
+    for sid in session_ids[:2]:
+        assert "read_error" not in {r for r, _ in state["omissions"][sid]}
+    assert sessions[session_ids[1]]["complete"]
+    assert sessions[session_ids[1]]["omission_reason"] is None
+    for sid in session_ids[2:]:
+        assert not sessions[sid]["complete"]
+        assert sessions[sid]["omission_reason"] == "read_error"
+        assert "read_error" in {r for r, _ in state["omissions"][sid]}
+    assert result["provenance"]["delivery"]["stop_reason"] == "read_error"
 
 
 @pytest.mark.parametrize("error", [OSError, ValueError])
