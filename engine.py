@@ -6916,7 +6916,7 @@ class LCMEngine(
         a row must have an independent fact. Missing/corrupt evidence keeps it.
         """
         result = dict(matched={}, proven=set(), fresh=set(), legacy=set(), deferred=set(),
-                      updates={}, owners={}, failed=False)
+                      updates={}, owners={}, witness=set(), failed=False)
         try:
             rows, facts, missing = self._stored_occurrence_metadata()
             legacy_rows = any(r["store_id"] not in facts and r["store_id"] not in missing for r in rows)
@@ -7168,10 +7168,12 @@ class LCMEngine(
                 result["fresh"].update(unmatched)
             else:
                 result["deferred"].update(unmatched)
-            if (proof and self._load_compression_carry_ranges()
+            if (proof and len(messages) < len(proof.get("output_metadata", ()))
+                    and self._load_compression_carry_ranges()
                     and not any(r["session_id"] == self._session_id for r in rows)):
                 # Only a delivered carrier with a retained raw occurrence needs
                 # a child witness. Pure emitted scaffold is never a raw row.
+                result["witness"].update(emitted_heads)
                 result["fresh"].update(emitted_heads)
                 result["proven"].difference_update(emitted_heads)
                 for index in emitted_heads:
@@ -7524,7 +7526,7 @@ class LCMEngine(
         if accepted_compaction_prefix or reconciled_existing_session:
             # #1540: unknown metadata cannot prove replay within a known-new
             # user turn. The next user starts a separate occurrence span.
-            for start in sorted(new_prefix_occurrences):
+            for start in sorted(new_prefix_occurrences - occurrence.get("witness", set())):
                 if str(messages[start].get("role") or "") != "user":
                     continue
                 segments: dict[int, list[int]] = {}
