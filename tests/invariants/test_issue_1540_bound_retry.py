@@ -38,6 +38,35 @@ def stored(engine: Any) -> list[Row]:
     return rows
 
 
+@pytest.mark.parametrize("mode", ["warm", "cold"])
+@pytest.mark.parametrize("uid_change", ["pair-only", "result-only"])
+def test_occurrence_retry_acceptance_survives_three_restarts(build: Build, mode: str, uid_change: str) -> None:
+    """I1/I2/I8: compare every row with the accepted pair, before cursor consumption."""
+    engine, host = compact(build, mode=mode, uids=True)
+    before = stored(engine)
+    changed = host[-2:] if uid_change == "pair-only" else host[-1:]
+    for index, row in enumerate(changed):
+        row["message_uid"] = f"{100 + index:032x}"
+    host[-1]["content"] = CLEARED
+    for index in range(2):
+        host.extend(tool_pair(f"following-{index}", f"new result {index}", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    after = stored(engine)
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    assert sum(any(call["id"] == "c" for call in row.get("tool_calls") or []) for row in added) == 1
+    assert sum(row.get("tool_call_id") == "c" for row in added) == 1
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
+    for _ in range(3):
+        engine.shutdown()
+        engine = build(restart=True)
+        engine.ingest(deepcopy(host))
+        assert engine._ingest_failure_count == 0, engine._last_ingest_error
+        assert stored(engine) == after
+
+
 @pytest.mark.parametrize("anchor", ["off", "on"])
 def test_bound_retry_binding_respects_identity_anchor_switch(
     build: Build, monkeypatch: pytest.MonkeyPatch, anchor: str,
