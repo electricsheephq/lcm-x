@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hermes_lcm import command, config as config_mod, tools
+from hermes_lcm import command, config as config_mod, retrieval_core, tools
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.embedding_provider import HttpResponse, resolve_provider
 from hermes_lcm.ingest_protection import (
@@ -414,3 +414,62 @@ def test_cloud_document_privacy_before_prefix(task, tmp_path, monkeypatch):
     text = json.loads(payloads[-1])["input"][0]
     assert text.startswith("password=fixture-prefix ")
     assert "fixture-content" not in text
+
+
+@pytest.mark.parametrize("spelling", ("ollama", "Ollama", " ollama", "OpenAI"))
+@pytest.mark.parametrize("task", ("summary", "chunk"))
+def test_backfill_normalized_provider_suffix(spelling, task, tmp_path, monkeypatch):
+    engine, _, provider, _ = seeded_engine(tmp_path, monkeypatch, spelling, QUERY_PREFIX)
+    # Exercise the constructor and the apply head using the same non-canonical config.
+    assert provider.identity_revision_suffix == "+prefix:" + digest()
+    result = backfill(engine, task)
+    assert isinstance(result, dict) and result["embedded"] == 1, result
+
+
+@pytest.mark.parametrize("spelling", ("Ollama", " ollama", "OpenAI"))
+def test_status_normalized_provider_suffix(spelling):
+    from hermes_lcm.ingest_policy import embedding_prefix_status
+    assert embedding_prefix_status(configured(spelling, QUERY_PREFIX, DOCUMENT_PREFIX)) == {
+        "embedding_prefix": {"query": True, "document": True, "digest": digest()},
+    }
+
+
+@pytest.mark.parametrize("surface", ("doctor", "status"))
+def test_prefix_text_is_key_value_lines(surface, tmp_path):
+    from hermes_lcm import command_status
+    with engine_context(tmp_path, window=8192, embeddings_enabled=True) as engine:
+        engine._config.embedding_provider = "Ollama"
+        engine._config.embedding_query_prefix = QUERY_PREFIX
+        engine._config.embedding_document_prefix = DOCUMENT_PREFIX
+        output = (command._doctor_text(engine) if surface == "doctor"
+                  else command_status._status_text(engine))
+        assert output.splitlines()[-3:] == [
+            "embedding_prefix_query: True", "embedding_prefix_document: True",
+            "embedding_prefix_digest: " + digest(),
+        ]
+        assert QUERY_PREFIX not in output and DOCUMENT_PREFIX not in output
+
+
+@pytest.mark.parametrize("task", ("summary", "chunk"))
+@pytest.mark.parametrize("initial,new", (("", QUERY_PREFIX), (QUERY_PREFIX, "")))
+def test_product_knn_goes_stale(task, initial, new, tmp_path, monkeypatch):
+    engine, _, provider, _ = seeded_engine(tmp_path, monkeypatch, prefix=initial)
+    assert backfill(engine, task)["embedded"] == 1
+    run = retrieval_core.run_knn if task == "summary" else retrieval_core.run_chunk_knn
+
+    def coverage():
+        return run(
+            engine, query_vector=[1.0, 0.0], provider=provider, knn_limit=5,
+            deadline=time.monotonic() + 5, since=None, until=None,
+            conversation_ids=None, source=None, vector_store_cls=VectorStore,
+        ).coverage
+
+    assert coverage() != "none"
+    engine._config.embedding_query_prefix = new
+    engine._config.embedding_document_prefix = DOCUMENT_PREFIX if new else ""
+    provider, _ = provider_with_transport(engine._config, monkeypatch)
+    monkeypatch.setattr(command, "resolve_provider", lambda *a, **kw: provider)
+    assert coverage() == "none"
+    command._embedding_register_profiles(engine._config, engine._store.db_path, allow_download=False)
+    assert backfill(engine, task)["embedded"] == 1
+    assert coverage() != "none"
