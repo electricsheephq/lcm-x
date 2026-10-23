@@ -49,6 +49,16 @@ def test_r4_1_replaced_user_behind_unchanged_scaffold(machine, anchor, fresh):
     assert_occurrences(expected, machine.rows(), engine=machine.engine)
     machine.engine.ingest(deepcopy(host))
     assert_occurrences(expected, machine.rows(), engine=machine.engine)
+    if fresh:
+        second = deepcopy(host)
+        second[-2]["_absorbed_message_uids"] = ["second-replacement-user"]
+        expected = [*expected, second[-2]]
+        machine.engine.ingest(second)
+        assert_occurrences(expected, machine.rows(), engine=machine.engine)
+        machine.engine.shutdown()
+        machine.engine = machine.start_engine()
+        machine.engine.ingest(deepcopy(second))
+        assert_occurrences(expected, machine.rows(), engine=machine.engine)
 
 
 @pytest.mark.parametrize("anchor", [False, True])

@@ -325,6 +325,18 @@ def test_r5_null_stamp_is_backfilled_only_for_the_proven_occurrence(tmp_path):
         rows = _rows(engine)
         assert len(rows) == 6
         assert [row.get("observed_at") for row in rows[:4]] == [m["timestamp"] for m in _turns(1, 2, 0.0)]
+        replaced = [SYSTEM, *_turns(1, 2, 0.0), *_turns(10, 1, 600.0)]
+        replaced[1]["timestamp"] += 1000
+        engine.ingest(replaced)
+        after = _rows(engine)
+        assert any(row.get("observed_at") == replaced[1]["timestamp"] for row in after)
+        assert after[:len(rows)] == rows
+        engine.ingest(replaced)
+        assert _rows(engine) == after
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        engine.ingest(replaced)
+        assert _rows(engine) == after
     finally:
         engine.shutdown()
 
