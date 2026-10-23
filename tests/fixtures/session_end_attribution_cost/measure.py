@@ -21,7 +21,7 @@ from hermes_lcm.compaction import CompactionMixin  # noqa: E402
 from hermes_lcm.config import LCMConfig  # noqa: E402
 from hermes_lcm.engine import LCMEngine  # noqa: E402
 
-base = "ca98ba6aa217f5db31ec3e4c32a9eff84cf3d2d2"
+base = "440976dc4ca05caa8e82ccc8e7adcb167fa70bd9"
 source = subprocess.check_output(["git", "show", base + ":compaction.py"], text=True)
 module = types.ModuleType("hermes_lcm.compaction_baseline")
 module.__package__ = "hermes_lcm"

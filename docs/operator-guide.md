@@ -473,6 +473,7 @@ Useful environment variables:
 | `LCM_SQLITE_MMAP_SIZE` | `268435456` | SQLite mapped-read size in bytes; `0` disables mapping. Invalid or negative values fall back with one WARNING per process. |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `24` | Minimum hours between startup FTS5 deep integrity-checks (O(index size)). `0` checks every startup (previous behavior); a negative value never checks on startup. Structural checks always run regardless. |
 | `LCM_ENABLE_SLASH_COMMAND` | `false` | Enable the optional `/lcm` operator command surface |
+| `LCM_SENDER_CAPTURE` | `true` | Profile-aware, non-field toggle; `0` disables pending sender associations. Nullable columns remain; no historical backfill. Stores an unverified gateway session principal without changing stored or delivered text |
 | `LCM_EMBEDDINGS_ENABLED` | `false` | Opt in to embedding warmup, backfill, and semantic retrieval storage |
 | `LCM_RERANK_WINDOW_LIMIT` | `0` | Optional positive cap on the `lcm_recall` rerank delivery window; `0` keeps the historical window unchanged, while a bound can stabilize the delivery set at `k ≤ limit` |
 | `LCM_RERANK_MARGIN` | `0.0` | Optional positive relevance-gap gate that holds the incoming rank-1 `lcm_recall` candidate unless the rerank challenger clears the margin |

@@ -4,6 +4,7 @@ Regenerate deliberately with --regenerate. SQL retains whitespace and ordering;
 large events use the ingest oracle's sha12/length encoding and optional payloads.
 """
 from __future__ import annotations
+from tests.messages_snapshot import messages_snapshot_columns
 
 import argparse
 import dataclasses
@@ -225,7 +226,8 @@ class Observer:
         try:
             with self.read_connect(path) as conn:
                 existing = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                tables = {name: [tuple(row) for row in conn.execute(f'SELECT * FROM "{name}" ORDER BY 1, 2')]
+                tables = {name: [tuple(row) for row in conn.execute(
+                              f'SELECT {messages_snapshot_columns(conn) if name == "messages" else "*"} FROM "{name}" ORDER BY 1, 2')]
                           for name in SNAPSHOT_TABLES if name in existing}
                 identities = [row[0] for row in conn.execute("SELECT identity_hash FROM lcm_embedding_profile WHERE active=1")]
                 cursors = {identity: command._chunk_cursor(conn, identity) for identity in identities}

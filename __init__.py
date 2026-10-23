@@ -665,17 +665,20 @@ def register(ctx):
         # persists hook context as user-attributed ``api_content``.
         try:
             def _on_pre_llm_call(**payload):
+                from .sender_capture import create_pending
+
                 session_id = str(payload.get("session_id") or "")
                 conversation_id = str(
                     payload.get("conversation_id")
                     or payload.get("gateway_session_key")
                     or ""
                 )
+                def prepare(active_engine):
+                    create_pending(active_engine, payload)
+                    return _pre_llm_context(active_engine, payload)
+
                 result = use_active_lcm_engine(
-                    lambda active_engine: _pre_llm_context(
-                        active_engine,
-                        payload,
-                    ),
+                    prepare,
                     session_id=session_id,
                     conversation_id=conversation_id,
                 )
