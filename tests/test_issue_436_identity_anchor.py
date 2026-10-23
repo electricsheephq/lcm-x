@@ -323,6 +323,7 @@ def test_r5_null_stamp_is_backfilled_only_for_the_proven_occurrence(tmp_path):
     try:  # a restart: the host now stamps the same rows
         engine.ingest([SYSTEM, *_turns(1, 2, 0.0), *_turns(10, 1, 600.0)])
         rows = _rows(engine)
+        assert engine._occurrence_ingest_plan["warm_prefix"] == 0
         assert len(rows) == 6
         assert [row.get("observed_at") for row in rows[:4]] == [m["timestamp"] for m in _turns(1, 2, 0.0)]
         replaced = [SYSTEM, *_turns(1, 2, 0.0), *_turns(10, 1, 600.0)]

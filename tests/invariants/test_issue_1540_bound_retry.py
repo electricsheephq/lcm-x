@@ -995,6 +995,7 @@ def test_occurrence_warm_witness_cache_observes_fact_mutation(build, monkeypatch
     engine.ingest(deepcopy(host))  # Generation change must invalidate the warm witness.
     assert engine._ingest_failure_count == 0, engine._last_ingest_error
     after = stored(engine)
+    assert engine._occurrence_ingest_plan["warm_prefix"] == 0
     assert after[:len(before)] == before
     assert len(after) == len(before) + 1 and after[-1]["content"] == host[-1]["content"]
     engine.ingest(deepcopy(host))
@@ -1018,6 +1019,7 @@ def test_occurrence_cold_established_prefix_admits_cached_completion(build, monk
     engine = build()
     view = host[-20:]
     engine.ingest(deepcopy(view))
+    assert engine._occurrence_ingest_plan["warm_prefix"] == 0
     assert stored(engine) == before
     # The next replay takes the existing cached return, not remember(). It must
     # publish only the actual row mappings established by the cold resolver.
@@ -1030,8 +1032,10 @@ def test_occurrence_cold_established_prefix_admits_cached_completion(build, monk
         assert state.get("warm")
         assert len(state["warm"][1]["matched"]) == len(view)
         assert all(sid in state["by_id"] for _source, sid in state["warm"][1]["matched"].values())
+        state["warm"][1]["warm_prefix"] = 9999  # A copied prior extent is never current authorization.
         patch.setattr(engine, "_occurrence_metadata", no_rewrite)
         engine.ingest(deepcopy(view))
+        assert engine._occurrence_ingest_plan["warm_prefix"] == len(view)
     assert engine._ingest_failure_count == 0, engine._last_ingest_error
     assert stored(engine) == before
     # Append admission binds these two actual committed rows, not pre-insert IDs.
@@ -1040,12 +1044,14 @@ def test_occurrence_cold_established_prefix_admits_cached_completion(build, monk
     engine.ingest(deepcopy(view))
     after = stored(engine)
     assert after[:len(before)] == before and len(after) == len(before) + 2
+    assert engine._occurrence_ingest_plan["warm_prefix"] == 20
     state = engine._occurrence_window_cache[4]
     assert state.get("warm")
     assert {state["warm"][1]["matched"][i][1] for i in (20, 21)} == {r["store_id"] for r in after[-2:]}
     with monkeypatch.context() as patch:
         patch.setattr(engine, "_occurrence_metadata", no_rewrite)
         engine.ingest(deepcopy(view))
+    assert engine._occurrence_ingest_plan["warm_prefix"] == len(view)
     assert engine._ingest_failure_count == 0, engine._last_ingest_error
     assert stored(engine) == after
 
@@ -1073,6 +1079,7 @@ def test_occurrence_settings_change_invalidates_warm_admission(build, monkeypatc
         assert not reads, "disabled UID semantics must not query bindings"
     state = engine._occurrence_window_cache[4]
     assert not state.get("warm")
+    assert engine._occurrence_ingest_plan["warm_prefix"] == 0
     assert all(meta["message_uid"] is None for meta in state["current"])
     assert stored(engine) == before
     monkeypatch.setenv(disabled, "1" if disabled == "LCM_IDENTITY_ANCHOR" else "on")
@@ -1108,3 +1115,39 @@ def test_occurrence_pending_tail_uses_retry_operation_settings(build, monkeypatc
     for row in rows:
         fact = engine._store.read_metadata_json(f"host_occurrence_row:S:{row['store_id']}")
         assert fact["message_uid"] is None
+
+
+@pytest.mark.parametrize("change", ["stamp", "uid", "content", "proof"])
+def test_occurrence_warm_extent_miss_uses_normal_prefix_owner(build, monkeypatch, change):
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "1")
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
+    engine = build()
+    host = [{"role": "user", "content": "extent user", "timestamp": 10., "message_uid": "a" * 32},
+            {"role": "assistant", "content": "extent reply", "timestamp": 11., "message_uid": "b" * 32}]
+    if change == "proof":
+        host = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"proof extent row {i}",
+                 "timestamp": float(i + 1), "message_uid": f"{i + 1:032x}"} for i in range(100)]
+    engine.ingest(deepcopy(host))
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    assert engine._occurrence_window_cache[4].get("warm")
+    engine._occurrence_window_cache[4]["warm"][1]["warm_prefix"] = 9999
+    if change == "stamp":
+        host[0]["timestamp"] = 20.
+    elif change == "uid":
+        host[0]["message_uid"] = "c" * 32
+    elif change == "content":
+        host[0]["content"] = "changed extent user"
+    else:
+        # A newly published proof must invalidate the old proof-free admission.
+        engine.compress(deepcopy(host), force=True)
+        assert engine._compress_commit_proof or engine._durable_commit_proof_payload()
+    engine.ingest(deepcopy(host))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    assert engine._occurrence_ingest_plan["warm_prefix"] == 0
+    after = stored(engine)
+    assert after[:len(before)] == before
+    if change != "proof":
+        assert len(after) > len(before), "changed prefix must reach the normal owner"
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after

@@ -6975,7 +6975,7 @@ class LCMEngine(
         a row must have an independent fact. Missing/corrupt evidence keeps it.
         """
         result = dict(matched={}, proven=set(), fresh=set(), legacy=set(), deferred=set(),
-                      updates={}, owners={}, witness=set(), failed=False)
+                      updates={}, owners={}, witness=set(), failed=False, warm_prefix=0)
         try:
             context = self._occurrence_context()
             switches = context[:2]
@@ -6998,6 +6998,8 @@ class LCMEngine(
                         and meta["timestamp"] is not None and meta["message_uid"] is not None
                         for m, meta in zip(tail, metadata))):
                     result = {k: v.copy() if isinstance(v, (dict, set)) else v for k, v in warm[1].items()}
+                    # Current validation only: never inherit an old operation's extent.
+                    result["warm_prefix"] = len(previous_view)
                     if not tail:
                         return result
                     start = len(previous_view)
@@ -7264,7 +7266,7 @@ class LCMEngine(
         except Exception:
             logger.warning("LCM occurrence resolver unavailable; retaining unproven rows", exc_info=True)
             result.update(matched={}, proven=set(), fresh=set(range(len(messages))), updates={}, failed=True,
-                          needs_receipt=True)
+                          needs_receipt=True, warm_prefix=0)
             return result
 
     def _occurrence_cursor_fence(self, messages, cursor):
@@ -7525,6 +7527,11 @@ class LCMEngine(
             for idx, previous in enumerate(cached_active_replay_messages[:cursor]):
                 if current_prefix_identities[idx] != cached_source_identities[idx]:
                     break  # content changes retain the existing anchor audit
+                if idx < occurrence.get("warm_prefix", 0):
+                    # The current resolver validated these exact host dictionaries
+                    # against committed witnesses; retain rewind bookkeeping too.
+                    unchanged_prefix_occurrences.add(idx)
+                    continue
                 if self._host_occurrence_changed(messages[idx], previous):
                     new_prefix_occurrences.add(idx)
                 elif (messages[idx].get("content") == previous.get("content")
