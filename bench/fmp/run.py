@@ -144,6 +144,7 @@ def canary(args, client, dataset_sha, q):
         token = "REF-" + uuid.uuid4().hex
         places = [args.output / f"fmp-canary-{mode}.txt", args.data.parent / f"fmp-canary-{uuid.uuid4().hex}.txt"]
         records, status = [], "ok"
+        started = time.monotonic()
         try:
             for place in places:
                 place.write_text(token + "\n")
@@ -166,7 +167,9 @@ def canary(args, client, dataset_sha, q):
                 # and ends the call. Nothing executed: that is the outcome this test wants to see.
                 if any(c.get("terminal_reason") == "malformed_tool_use_exhausted" for c in records):
                     status = "no_tool_to_call"
-            paths = [Path(p) for c in records for p in c.get("transcripts", []) if p]
+            # Timeout records keep call_dir even when they omit transcripts.
+            paths = [Path(p) for c in records for p in (c.get("transcripts") or
+                     ([args.output / "harness" / c["call_dir"] / "events.jsonl"] if c.get("call_dir") else [])) if p]
             leaked = any(token in p.read_text(errors="replace") for p in paths if p.exists())
         finally:
             for place in places:
@@ -176,6 +179,22 @@ def canary(args, client, dataset_sha, q):
                         "violations": violations, "mcp_calls": sum(c.get("mcp_calls") or 0 for c in records),
                         "transcripts_checked": len(paths), "tokens": [c.get("input_tokens") for c in records],
                         "passed": status in ("ok", "no_tool_to_call") and not leaked and not violations and bool(paths)})
+        if status.startswith("error:"):
+            events = []
+            for path in paths:
+                for line in path.read_text(errors="replace").splitlines() if path.exists() else []:
+                    try:
+                        event = json.loads(line)
+                    except ValueError:  # A timed-out stream may end mid-event.
+                        continue
+                    if isinstance(event, dict) and isinstance(event.get("type"), str):
+                        kind = event["type"]
+                        if kind == "system" and event.get("subtype") == "init":
+                            kind += ":init"
+                        events.append(kind)
+            errors = sorted({c["error"] for c in records if c.get("error")})
+            results[-1]["reason"] = (f"{status}; mode={mode}; elapsed_s={time.monotonic() - started:.3f}; "
+                                     f"events={','.join(events) or 'none'}; call_errors={','.join(errors) or 'none'}")
         # Positive control: in MCP mode the reader must reach the lcmx tools, or the run proves nothing.
         results[-1]["passed"] &= mode != "mcp" or results[-1]["mcp_calls"] > 0
     write_json(args.output / "canary.json", {"at": utc(), "results": results, "versions": versions(), **switches(args)})
@@ -332,6 +351,8 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
             start = time.monotonic()
             row = {"qid": q.qid, "qtype": q.qtype, "question": q.question, "gold": q.gold,
                    "hypothesis": "", "calls": calls, "tool_calls": 0, **delivery.date_exposure(q)}
+            if q.qtype == "5":
+                row.update(gold="", adversarial_answer=q.gold)
             try:
                 if args.delivery == "agentic" and harness(args.reader):  # the MCP reader opens the store
                     row.update(delivery.answer(q, args.delivery, client, args.reader, records=calls,
@@ -394,9 +415,10 @@ def check_arms(runs, output=None):
     """Audit frozen single-delivery answer receipts, without clients."""
     if len(runs) != 2:
         raise ValueError("check-arms requires two runs")
-    indexed, arms = [], []
+    indexed, arms, manifests = [], [], []
     for directory in map(Path, runs):
         manifest = json.loads((directory / "run-manifest.json").read_text())
+        manifests.append(manifest)
         if manifest.get("delivery") != "single":
             raise ValueError("check-arms requires single delivery")
         rows = [json.loads(line) for line in (directory / "answers.jsonl").read_text().splitlines() if line.strip()]
@@ -412,6 +434,7 @@ def check_arms(runs, output=None):
                     counts["missing_recall"] += 1
                 hits[qid].append([h.get("store_id") for h in payload.get("hits", [])])
             labels, digest = row.get("evidence_labels"), row.get("evidence_sha256")
+            # The digest is an audit receipt: format checked, never recomputed here.
             if (not isinstance(labels, dict) or set(labels) != {"role", "speaker", "summary"} or
                     any(type(n) is not int or n < 0 for n in labels.values()) or
                     not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)):
@@ -443,12 +466,22 @@ def check_arms(runs, output=None):
             "speaker_label_failure": arm == "A1" and counts["role_lines"] > 0,
             "prompt_tokens_estimate": {"median": median(estimates) if estimates else None, "p90": percentile(estimates, .9)}})
         indexed.append(hits)
+    # run() records the complete reader spec (harness/model/effort), settings and
+    # summary-store identity. A0/A1 vary only hit_label; keep that switch allowed.
+    configuration_keys = ("reader", "harness", "harness_commit", "harness_tree_sha256", "prompts_sha256",
+                          "config", "summaries", "store_generation",
+                          "delivery_unit", "delivery_budget", "reasoning", "max_tokens", "tool_budget")
+    mismatches = [key for key in configuration_keys if
+                  (key in manifests[0]) != (key in manifests[1]) or
+                  json.dumps(manifests[0].get(key), sort_keys=True) != json.dumps(manifests[1].get(key), sort_keys=True)]
     report = {"arms": arms, "qid_sets_equal": set(indexed[0]) == set(indexed[1]),
+        **({"configuration_mismatches": mismatches,
+            "reason": "run configuration mismatch: " + ", ".join(mismatches)} if mismatches else {}),
         "id_list_hash_equal": bool(arms[0]["id_list_sha256"]) and arms[0]["id_list_sha256"] == arms[1]["id_list_sha256"],
         "retrieval_differing_qids": sum(indexed[0][q] != indexed[1][q] for q in indexed[0].keys() & indexed[1].keys())}
     report["declared_modes_valid"] = sorted(a["arm"] or "invalid" for a in arms) == ["A0", "A1"]
     report["dataset_hash_equal"] = bool(arms[0]["dataset_sha256"]) and arms[0]["dataset_sha256"] == arms[1]["dataset_sha256"]
-    report["passed"] = report["declared_modes_valid"] and report["dataset_hash_equal"] and report["qid_sets_equal"] and report["id_list_hash_equal"] and not report["retrieval_differing_qids"] and all(
+    report["passed"] = not mismatches and report["declared_modes_valid"] and report["dataset_hash_equal"] and report["qid_sets_equal"] and report["id_list_hash_equal"] and not report["retrieval_differing_qids"] and all(
         a["manifest_qids_match"] and a["label_check"] == "pass" and not any(a.get(k, 0) for k in ("duplicate_qids", "missing_recall", "errored_rows"))
         for a in arms)
     output = Path(output) if output else Path(os.path.commonpath([Path(r).resolve().parent for r in runs])) / f"check-arms-{uuid.uuid4().hex}.json"

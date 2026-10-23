@@ -119,6 +119,7 @@ SCENARIOS = (
       for v in ("probe", "append", "locked", "duplicate-tail", "metadata", "relation", "prematch", "durable")],
     *[Scenario(f"anchor-{v}", "P4/F1/W1", variant=v, warm=True)
       for v in ("disabled", "stamp-replay", "stamp-new-uid", "remainder", "version")],
+    Scenario("anchor-version-ignore", "P4/F1/W1", variant="version-ignore", warm=True, stored=0),
     Scenario("reconcile-tool-after-new", "P3/F1", shape="tools", variant="tool-after-new"),
     Scenario("repeated-tool-id", "P3/F1/W1", shape="tools", variant="repeated-id"),
     Scenario("repeated-equal-occurrences", "Sequence", variant="equal", stored=0),
@@ -430,8 +431,10 @@ def prepare(engine: Any, case: Scenario, root: Path, engines: ExitStack) -> tupl
             pair[1]["content"] = f"output-{index} " * 50
             original.extend(pair)
         original.append({"role": "assistant", "content": "a1"})
-    if case.variant in {"remainder", "version"} or case.fault == "relation":
+    if case.variant in {"remainder", "version", "version-ignore"} or case.fault == "relation":
         original += [{"role": "user", "content": "held head\n\n  exact whitespace \t", "timestamp": 500.}]
+    if case.variant == "version-ignore":
+        original[-1].pop("timestamp")
     incoming = [dict(m) for m in original] or [{"role": "user", "content": "fresh"}]
     if case.warm or case.variant == "warm" or case.proof in {"output", "native", "consumed"}:
         engine._ingest_messages(original)
@@ -597,10 +600,12 @@ def prepare(engine: Any, case: Scenario, root: Path, engines: ExitStack) -> tupl
     if case.variant == "remainder" or case.fault == "relation":
         incoming[-1]["content"] += "\n\n  fresh remainder \n\ntrailing \t"
         incoming.append({"role": "assistant", "content": "reply", "timestamp": 501.})
-    elif case.variant == "version":
+    elif case.variant in {"version", "version-ignore"}:
         incoming = original  # The host mutates the same watched object.
-        incoming[-1]["content"] = "edited head with new bytes"
-        incoming.append({"role": "assistant", "content": "reply", "timestamp": 501.})
+        incoming[-1]["content"] = ("IGNORE THIS ROW edited head" if case.variant == "version-ignore"
+                                    else "edited head with new bytes")
+        if case.variant == "version":
+            incoming.append({"role": "assistant", "content": "reply", "timestamp": 501.})
     if case.fault == "metadata":
         incoming = [{"role": "user", "content": "[Current user objective preserved from compacted history]\ninspect"}]
     if case.shape == "placeholder":
@@ -762,7 +767,7 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                             large_output_externalization_threshold_chars=100,
                             large_output_active_replay_stubbing_enabled=True,
                             large_output_active_replay_stub_threshold_tokens=10)
-        if case.shape in {"ignored", "ignored-ledger"}:
+        if (case.shape in {"ignored", "ignored-ledger"} or case.variant == "version-ignore"):
             settings["ignore_message_patterns"] = ["IGNORE THIS ROW"]
         if case.variant in {"ignored", "stateless"}:
             settings["ignore_session_patterns" if case.variant == "ignored" else "stateless_session_patterns"] = ["S"]
@@ -773,10 +778,10 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                              "end_reason TEXT, source TEXT, model_config TEXT)")
                 host.execute("INSERT INTO sessions VALUES ('S', NULL, NULL, 'cli', NULL)")
         with context(root, window=200000, conversation_id="trace-conversation", **settings) as engine, ExitStack() as engines:
-            if case.shape in {"ignored", "ignored-ledger"}:
+            if (case.shape in {"ignored", "ignored-ledger"} or case.variant == "version-ignore"):
                 engine._compiled_ignore_message_patterns = [LiteralPattern()]
             engine, incoming = prepare(engine, case, root, engines)
-            if case.shape in {"ignored", "ignored-ledger"}:
+            if (case.shape in {"ignored", "ignored-ledger"} or case.variant == "version-ignore"):
                 engine._compiled_ignore_message_patterns = [LiteralPattern()]
             canonical = IngestCanonical(root, incoming)
             if case.shape == "uid":
@@ -926,7 +931,7 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                     emit("next-raise", [type(exc).__name__, str(exc)])
             emit("next-state", snapshot(engine, canonical))
             engine = reopen(engine, root, engines)
-            if case.shape in {"ignored", "ignored-ledger"}:
+            if (case.shape in {"ignored", "ignored-ledger"} or case.variant == "version-ignore"):
                 engine._compiled_ignore_message_patterns = [LiteralPattern()]
             with observing():
                 try:

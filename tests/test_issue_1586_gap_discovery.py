@@ -313,6 +313,7 @@ def test_saved_pending_held_row_does_not_freeze_gap_discovery(local_store):
             selected.update(doc[0] for doc in docs)
         assert "50:0" in selected, "held saved pending row must not freeze discovery"
         assert "5:0" not in selected
+        first_scan = {k: v for k, v in first_scan.items() if k not in {"epoch", "turn"}}
         assert first_scan == dict(revision=CHUNK_POLICY_REVISION, policy="conversational",
                                   high=2110, ceiling=110)
 
@@ -341,6 +342,7 @@ def test_empty_pending_held_row_under_zero_prefix_does_not_freeze_gap_discovery(
             break
     assert expected <= covered, "held candidate must not hide deeper chunkable rows"
     assert 3000 not in covered
+    first_scan = {k: v for k, v in first_scan.items() if k not in {"epoch", "turn"}}
     assert first_scan == dict(revision=CHUNK_POLICY_REVISION, policy="conversational",
                               high=3501, ceiling=3001)
 
@@ -466,7 +468,8 @@ def test_empty_pending_saves_grown_ceiling_before_slice_stops(local_store, monke
         _, docs, _ = select(conn, identity, record_progress=True)
         assert [row[0] for row in docs] == [f"{i}:0" for i in range(81, 49, -1)]
         assert set(range(82, 146)) <= set(gap_calls)
-        assert get(conn, identity, "chunk_gapfill_scan") == {
+        saved = get(conn, identity, "chunk_gapfill_scan")
+        assert {k: v for k, v in saved.items() if k not in {"epoch", "turn"}} == {
             "revision": CHUNK_POLICY_REVISION, "policy": "conversational", "high": 146, "ceiling": 82,
         }
         assert get(conn, identity, "chunk_policy_revision_through") == 16
