@@ -113,13 +113,30 @@ def test_owner_scoped_senders_and_rejected_speech(bridge, namespace):
 def test_profile_user_assistant_defaults_and_injected_entities(bridge):
     _, ops, store, _, _ = bridge
     user, agent = ops.create_entity("User"), ops.create_entity("Agent", "agent")
+    ops.add_alias(user, "self")
+    ops.add_alias(agent, "self")
+    sources = []
     for key in ("user:self", "assistant:self"):
-        publish(bridge, key)
+        sources.append(publish(bridge, key))
     rebuild(bridge)
     assert active(store) == []
+    for key, source in zip(("user:self", "assistant:self"), sources):
+        assert bridge[0].resolve_key(store, key, source) is None
     rebuild(bridge, profile_entities=lambda bound: (user, agent))
     assert {(r["subject_key"], r["entity_id"]) for r in active(store)} == {
         ("user:self", user), ("assistant:self", agent)}
+
+
+def test_bridge_platform_matching_preserves_identifier_bytes(bridge):
+    api, ops, store, _, _ = bridge
+    entity = ops.create_entity("platform sender")
+    ops.add_alias(entity, "abc", "platform_id", platform="tg", verified=True)
+    mismatch = publish(bridge, "person:tg:ABC")
+    exact = publish(bridge, "person:tg:abc")
+    rebuild(bridge)
+    assert api.resolve_key(store, "person:tg:ABC", mismatch) is None
+    assert api.resolve_key(store, "person:tg:abc", exact) == entity
+    assert [r["subject_key"] for r in active(store)] == ["person:tg:abc"]
 
 
 @pytest.mark.parametrize("scoped", [False, True])
