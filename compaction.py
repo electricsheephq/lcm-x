@@ -714,7 +714,8 @@ class CompactionMixin:
                 self._compaction_request.below_threshold_cleanup_only = self._compaction_request.automatic_request = False
                 # #684: nor held by a boundary cooldown.
                 self._compaction_request.cleanup_only_due_to_boundary_cooldown = False
-            elif not force and self._no_progress_hold_active() and self._no_progress_hold_blocks(
+            elif (not force and self._no_progress_hold is not None
+                  and self._no_progress_hold[1] != "no_progress") and self._no_progress_hold_blocks(
                     current_tokens if current_tokens is not None else count_messages_tokens(messages)):
                 # #677: an automatic call the #651 hold blocks (a caller that skipped the host gate) is held
                 # maintenance; the survival ceiling and forced overflow are never blocked, so they summarise.
@@ -762,10 +763,9 @@ class CompactionMixin:
                     self._start_no_progress_hold("hidden_only")
                 logger.info("LCM hidden-only compaction kept host list unchanged: leaves=%d hidden_rows=%d",
                             budget.leaves, self._compress_hidden_rows_consumed)
-            if self._no_progress_candidate and not bypass_cooldown and len(result) >= len(messages) and (
-                    count_messages_tokens(result) >= count_messages_tokens(messages)):
-                # #651: no leaf, and neither rows nor tokens fell; #922 keeps the turn-paced hold.
-                self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress")
+            pending_no_progress = (self._no_progress_candidate and not bypass_cooldown
+                    and self._last_compression_status != "error" and len(result) >= len(messages)) and (
+                    count_messages_tokens(result) >= count_messages_tokens(messages))
             self._record_compress_commit_proof(messages, result)
             if self._compress_commit_proof is None:  # #1000: no proof recorded the fit's carrier
                 self._bind_survival_fit_emission(messages, result)
@@ -774,6 +774,9 @@ class CompactionMixin:
             logger.debug("LCM compaction emission descriptor count=%d",
                          len((self._compress_commit_proof or {}).get("emissions") or ()))
             self._rekey_host_rewrite_watch(messages, result)
+            if pending_no_progress:
+                # Persist only after the complete successful pass, including proof bookkeeping.
+                self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress")
             returned = result
             return result
         except BaseException as exc:
@@ -1748,6 +1751,7 @@ class CompactionMixin:
             if current_tokens is not None
             else count_messages_tokens(messages)
         )
+        self._last_gate_tokens = int(state.observed_prompt_tokens or 0)
         state.force_overflow = self._should_force_overflow_recovery(
             observed_tokens=state.observed_prompt_tokens,
             messages=messages,
@@ -1784,6 +1788,14 @@ class CompactionMixin:
             state.working_messages = self._ingest_messages(messages)
         finally:  # #1127: ingest and reconcile, untimed by the sweep steps; a raised lock wait is theirs too
             self._pre_leaf_span("ingest", span_started)
+        if (not force and not recovery_attempt and not state.force_overflow
+                and self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
+                and self._no_progress_hold[1] == "no_progress"):
+            # A cold direct caller now has current replay proof. Ingest cleanup
+            # is adopted, but no attribution/leaf/condensation work is repeated.
+            self._ingest_cursor = len(state.working_messages)
+            self._last_compression_status = "sanitized"
+            return "return", state.working_messages
         # #488: project the complete admitted list ONCE; subset consumers read a row's occurrence
         # here. Only a row at exactly one position is registered (F6): a copy or an aliased row
         # is unproven (full identity).
@@ -2831,6 +2843,7 @@ class CompactionMixin:
         self._sweep_budget_hold_until = 0.0  # #608: a stored leaf ends the hold
         self._hung_summary_strike, self._sweep_budget_hold_turn_paced = None, False
         self._no_progress_hold, self._no_progress_candidate = None, False  # #651: hidden-only leaves too
+        self._clear_persisted_no_progress_hold()
         state.leaf_passes += 1
         if leaf.prepared is not None:  # #787: a promoted pass spends no summariser pass
             leaf_prep.promoted(str(self._store.db_path), self._conversation_id, leaf.prepared)
