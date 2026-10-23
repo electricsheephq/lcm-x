@@ -145,7 +145,8 @@ def test_cold_alias_replay(tmp_path, case, record_property, caplog):
             assert rows(engine)[:len(before)] == before
             assert [(r["role"], r["observed_at"]) for r in rows(engine)[len(before):]] == [
                 ("user", replay[0]["timestamp"]), ("assistant", 51.)]
-            coverage = engine._store.read_metadata_json("host_occurrence_accepted_view:parent")["fact_store_ids"]
+            coverage = engine._occurrence_fact_coverage(
+                engine._store.read_metadata_json("host_occurrence_accepted_view:parent"), "parent")
             assert fact["occurrence_version"] == fresh["occurrence_version"] == 2
             assert sid in coverage and accepted["store_id"] in coverage
             assert fact["message_uid"] != fresh["message_uid"] == replay[0]["message_uid"]

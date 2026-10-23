@@ -68,7 +68,8 @@ def test_occurrence_retry_acceptance_survives_three_restarts(build: Build, mode:
 
 
 @pytest.mark.parametrize("fault", ["resolver-raise", "fact-raise", "missing-fact", "malformed-fact",
-                                  "coverage-missing", "coverage-malformed", "coverage-scope", "coverage-order"])
+                                  "coverage-missing", "coverage-malformed", "coverage-scope", "coverage-order",
+                                  "coverage-overlap", "coverage-overlimit", "coverage-conflicting"])
 def test_occurrence_read_failure_retains_rows(build: Build, monkeypatch, fault: str) -> None:
     """Read failures retain rows, and accepting the copy bounds later replay."""
     engine = build()
@@ -85,8 +86,14 @@ def test_occurrence_read_failure_retains_rows(build: Build, monkeypatch, fault: 
         receipt = engine._store.read_metadata_json(key)
         if fault == "coverage-scope":
             receipt["scope"]["conversation_id"] = "another synthetic conversation"
+        elif fault == "coverage-overlap":
+            receipt["fact_store_ranges"] = [[1, 3], [3, 4]]
+        elif fault == "coverage-overlimit":
+            receipt["fact_store_ranges"] = [[1, 4097]]
+        elif fault == "coverage-conflicting":
+            receipt["fact_store_ids"] = []
         elif fault == "coverage-order":
-            receipt["fact_store_ids"] = list(reversed(receipt["fact_store_ids"]))
+            receipt["fact_store_ranges"] = [[2, 1]]  # Malformed new coverage cannot fall back to legacy.
         else:
             receipt = None if fault == "coverage-missing" else {"fact_store_ids": "invalid"}
         engine._store.write_metadata_json([key], json.dumps(receipt))
@@ -169,7 +176,8 @@ def test_occurrence_writer_coverage_does_not_claim_legacy_holes(build: Build) ->
                                      conversation_id="conversation")
     host.append({"role": "user", "content": "synthetic next"})
     engine.ingest(deepcopy(host))
-    coverage = engine._store.read_metadata_json("host_occurrence_accepted_view:S")["fact_store_ids"]
+    coverage = engine._occurrence_fact_coverage(
+        engine._store.read_metadata_json("host_occurrence_accepted_view:S"), "S")
     assert set(old_ids) <= set(coverage) and max(coverage) > legacy_id
     assert legacy_id not in coverage
     assert engine._store.read_metadata_json(f"host_occurrence_row:S:{legacy_id}") is None
@@ -964,3 +972,34 @@ def test_ambiguous_user_rejects_first_and_last_match(build, monkeypatch):
         replayed = engine._replayed_tool_segment_indexes_after_cursor(host, user_index + 1)
         assert user_index + 1 not in replayed, "ambiguous first/last match suppressed the call"
         assert user_index + 2 not in replayed, "ambiguous first/last match suppressed the result"
+
+
+def test_occurrence_warm_witness_cache_observes_fact_mutation(build, monkeypatch):
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "1")
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
+    engine = build()
+    host = [{"role": "user", "content": "warm witnessed user", "timestamp": 10., "message_uid": "a" * 32},
+            {"role": "assistant", "content": "warm witnessed reply", "timestamp": 11., "message_uid": "b" * 32}]
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == before
+    assert engine._occurrence_window_cache[4].get("warm")
+    receipt = engine._store.read_metadata_json("host_occurrence_accepted_view:S")
+    coverage = engine._occurrence_fact_coverage(receipt, "S")
+    legacy = {k: v for k, v in receipt.items() if k != "fact_store_ranges"}
+    legacy["fact_store_ids"] = sorted(coverage)
+    assert engine._occurrence_fact_coverage(legacy, "S") == coverage
+    name = f"host_occurrence_row:S:{before[1]['store_id']}"
+    engine._store.write_metadata_json([name], "null")
+    engine.ingest(deepcopy(host))  # Generation change must invalidate the warm witness.
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    after = stored(engine)
+    assert after[:len(before)] == before
+    assert len(after) == len(before) + 1 and after[-1]["content"] == host[-1]["content"]
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
+    engine.shutdown()
+    engine = build()
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
