@@ -2639,7 +2639,12 @@ class LCMEngine(
             self._no_progress_metadata_warning()
 
     def _no_progress_hold_status(self) -> Optional[dict]:
-        if not self._no_progress_hold_active():
+        hold = self._no_progress_hold
+        # Legacy local pacing remains observable from auxiliary status, without
+        # granting that scope access to durable proof or admission decisions.
+        local_only = hold is not None and not (
+            hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False))
+        if not self._no_progress_hold_active(managed_scope=local_only):
             return None
         until, reason = self._no_progress_hold
         return {"reason": reason, "until": time.time() + max(0.0, until - time.monotonic())}  # #618: wall clock
