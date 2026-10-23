@@ -69,6 +69,63 @@ def refused(api, reason, call):
     return caught.value
 
 
+def test_r1_platform_fallback_keeps_identifier_bytes(store, ops, api):
+    entity = ops.create_entity("pid")
+    ops.add_alias(entity, "abc", "platform_id", platform="tg", verified=True)
+    assert ops.lookup_alias("tg:ABC") == {"candidates": [], "ambiguous": False}
+    assert ops.holder_for_platform_id("tg:ABC") is None
+    name = ops.create_entity("colon name")
+    ops.add_alias(name, "TG:ABC")
+    assert ops.lookup_alias("tg:ABC") == {"candidates": [name], "ambiguous": False}
+    assert ops.lookup_alias("tg:abc") == {"candidates": sorted([name, entity]), "ambiguous": True}
+
+
+@pytest.mark.parametrize("pid", ["abc", "tg:", ":x"])
+@pytest.mark.parametrize("operation", ["holder", "attach"])
+def test_r2_invalid_platform_ids_are_nonmutating(store, ops, api, pid, operation):
+    before = scope_rows(store)
+    call = (lambda: ops.holder_for_platform_id(pid)) if operation == "holder" else (
+        lambda: ops.attach_or_create_for_platform_id(pid, "invalid", verified=True))
+    refused(api, "invalid_platform_id", call)
+    assert scope_rows(store) == before
+
+
+def test_r2_add_platform_alias_requires_platform(store, ops, api):
+    entity = ops.create_entity("pid")
+    before = scope_rows(store)
+    refused(api, "invalid_platform_id", lambda: ops.add_alias(entity, "abc", "platform_id", verified=True))
+    assert scope_rows(store) == before
+
+
+def test_r3_foreign_footprint_blocks_undo_and_replay_fails_loud(store, ops, api):
+    entity = ops.create_entity("entity")
+    target = last(store)
+    store.add_alias(entity, "direct mutation")
+    before = scope_rows(store)
+    error = refused(api, "dependent_events", lambda: ops.undo(target))
+    assert error.blocking_event_ids == [last(store)]
+    assert scope_rows(store) == before
+    with pytest.raises(api.EntityIntegrityError):
+        api.replay_projection(store)
+
+
+def test_r3_replay_rejects_store_direct_events(store, api):
+    store.create_entity("direct source mutation")
+    with pytest.raises(api.EntityIntegrityError):
+        api.replay_projection(store)
+
+
+def test_r5_relation_candidates_are_separate_by_owner(store, ops, api):
+    owners = [ops.create_entity("owner") for _ in range(2)]
+    sisters = [ops.create_entity("sister") for _ in range(2)]
+    for owner, sister in zip(owners, sisters):
+        ops.add_alias(sister, "my sister", "relation_phrase", owner_entity_id=owner)
+    view = api.resolved_view(store)
+    assert "my sister" not in view["aliases"]
+    assert view["relations"]["my sister"] == {
+        owner: {"candidates": [sister], "ambiguous": False} for owner, sister in zip(owners, sisters)}
+
+
 def test_merge_round_trip_kind_and_canonical_chain(store, ops, api):
     a, b, c = [ops.create_entity(name) for name in "ABC"]
     original = api.resolved_view(store)
@@ -217,6 +274,17 @@ def test_seeded_sequences(seed, store, ops, api):
             actions.extend([lambda: ops.retire_alias(alias),
                             lambda: entities.append(ops.split(entity, [alias], [], "split"))])
         event_count = len(store.events_after())
+        # R1/R2: malformed identifiers are non-mutating; exact identifier bytes
+        # never re-enter the name-normalised platform-id candidate set.
+        malformed = rng.choice(["abc", "tg:", ":x"])
+        before = scope_rows(store)
+        refused(api, "invalid_platform_id", lambda: ops.holder_for_platform_id(malformed))
+        refused(api, "invalid_platform_id", lambda: ops.attach_or_create_for_platform_id(
+            malformed, "invalid", verified=True))
+        assert scope_rows(store) == before, (seed, index)
+        exact = ops.holder_for_platform_id("tg:SHARED")
+        assert exact is None, (seed, index)
+        assert ops.lookup_alias("tg:SHARED")["candidates"] == [], (seed, index)
         try:
             rng.choice(actions)()
         except api.EntityOpRefused:
@@ -399,7 +467,9 @@ def test_read_reduction_cost_and_cross_instance_freshness(store, ops, api):
                      lambda: ops.lookup_alias("A", **access)):
             statements.clear()
             read()
-            assert len(statements) == baseline + 1
+            # W1a had four SELECTs; the required W1b key view adds one.
+            assert len(statements) == baseline + 2
+            assert sum(sql.lstrip().upper().startswith("SELECT") for sql in statements) == 5
             assert sum("FROM lcm_memory_events" in sql for sql in statements) == 1
             assert all("scope_key=" in sql for sql in statements if "FROM lcm_memory_events" in sql)
     finally:

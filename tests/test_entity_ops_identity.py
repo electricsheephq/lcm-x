@@ -22,7 +22,11 @@ def test_flag_off_schema_and_turn_path(tmp_path):
         assert engine._entities is None
     finally:
         engine.shutdown()
-    root = Path(__file__).resolve().parents[1]
+    assert_no_production_imports(Path(__file__).resolve().parents[1])
+
+
+def assert_no_production_imports(root):
+    """The pre-W1b guard, exercised by scratch mutation probes below."""
     for path in root.glob("*.py"):
         if path.name == "entity_ops.py":
             continue
@@ -32,6 +36,28 @@ def test_flag_off_schema_and_turn_path(tmp_path):
                 assert node.module != "entity_ops", path
             elif isinstance(node, ast.Import):
                 assert not any(n.name.endswith("entity_ops") for n in node.names), path
+
+
+@pytest.mark.parametrize("form", [
+    "import hermes_lcm.entity_ops", "from hermes_lcm.entity_ops import EntityOps",
+    "from hermes_lcm import entity_ops", "from . import entity_ops",
+    "from .entity_ops import EntityOps", "importlib.import_module('hermes_lcm.entity_ops')",
+    "import_module('.entity_ops', package='hermes_lcm')",
+])
+@pytest.mark.parametrize("nested", [False, True])
+def test_every_production_import_form_is_killed(tmp_path, form, nested):
+    module = tmp_path / ("nested/module.py" if nested else "module.py")
+    module.parent.mkdir(exist_ok=True)
+    module.write_text(form + "\n")
+    with pytest.raises(AssertionError):
+        assert_no_production_imports(tmp_path)
+
+
+def test_import_guard_excludes_test_tree(tmp_path):
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_consumer.py").write_text("from hermes_lcm.entity_ops import EntityOps\n")
+    assert_no_production_imports(tmp_path)
 
 
 def test_s_r4_event_only_kind_requires_trusted_reduction(tmp_path):

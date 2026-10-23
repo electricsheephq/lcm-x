@@ -39,6 +39,35 @@ def rows(conn, sql, values=()):
     return [tuple(r) for r in conn.execute(sql, values)]
 
 
+def test_derived_key_writers_transaction_scope_unique_and_no_log(store, api):
+    entity = store.create_entity('key owner')
+    before = store.events_after()
+    for call in (lambda: store.add_key('person:alex', entity, 'alias_match', [1]),
+                 lambda: store.retire_key(1), lambda: store.restore_key(1)):
+        with pytest.raises(RuntimeError, match='transaction'):
+            call()
+    with store.transaction():
+        key = store.add_key('person:alex', entity, 'alias_match', [1])
+        assert store.keys_for_entity(entity)[0]['scope_key'] == store.scope_key
+        with pytest.raises(sqlite3.IntegrityError, match='UNIQUE'):
+            store.add_key('person:alex', entity, 'override', [1])
+        store.retire_key(key)
+        second = store.add_key('person:alex', entity, 'override', [1])
+        with pytest.raises(sqlite3.IntegrityError, match='UNIQUE'):
+            store.restore_key(key)
+        store.retire_key(second)
+        store.restore_key(key)
+    assert store.events_after() == before
+    with closing(api.EntityStore(store.db_path, profile_key='profile-B')) as other:
+        with other.transaction():
+            for call in (lambda: other.retire_key(key), lambda: other.restore_key(key)):
+                with pytest.raises(KeyError):
+                    call()
+            other.add_key('person:alex', entity, 'alias_match', [1])
+        assert other.keys_for_entity(entity)[0]['scope_key'] == 'profile-B'
+    assert [r['key_id'] for r in store.keys_for_entity(entity)] == [key]
+
+
 def test_flag_off(tmp_path, monkeypatch):
     trace, connect = [], sqlite3.connect
 
