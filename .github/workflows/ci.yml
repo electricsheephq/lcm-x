@@ -41,6 +41,7 @@ jobs:
         run: ruff check .
 
   test:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -182,6 +183,7 @@ jobs:
           if-no-files-found: error
 
   bench-tests:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -215,7 +217,7 @@ jobs:
 
   tests-ran:
     needs: [test, bench-tests]
-    if: always()
+    if: always() && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -234,3 +236,70 @@ jobs:
           python scripts/ci/check_tests_ran.py
           --junit reports/test-{3.11,3.12,3.13,3.14}/{main,privacy}.xml
           reports/bench-{aml,fmp-tests,instruments-local_catchup-tests,instruments-compaction_probe,instruments-compaction_probe-track_s-decision-tests,instruments-compaction_probe-track_s-scorer-tests,instruments-reliability,instruments-scale389-tests,scoreboard,tools-tests}.xml
+
+  # Temporary H6 RED and explained existing-trace merge proof; removed before freeze.
+  issue-1880-integration-proof:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HOME: ${{ runner.temp }}/proof-home
+      HERMES_HOME: ${{ runner.temp }}/proof-home
+      TMPDIR: ${{ runner.temp }}/proof-temp
+      HERMES_DISABLE_LAZY_INSTALLS: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.13"
+      - name: Install existing proof dependencies
+        run: pip install pytest==9.1.1 numpy==2.4.2 hypothesis==6.141.1
+      - name: Prove H6 rotation RED and four overlapping trace cells RED
+        run: |
+          mkdir -p "$HOME" "$TMPDIR"
+          python -B - <<'PYRED'
+          from benchmarking.standalone import ensure_agent_context_engine_importable
+          ensure_agent_context_engine_importable()
+          import json, os, pytest
+          import xml.etree.ElementTree as ET
+          for name, nodes in [
+              ('h6-red', ['tests/test_issue_667_level3_repair.py']),
+              ('trace-red', ['tests/behaviour/test_ingest_trace.py::test_ingest_golden['+s+']' for s in ['sequence-compaction','sequence-host-merge','sequence-rewrite','sequence-rotation']])]:
+              rc=pytest.main(nodes+['-q','--junitxml='+name+'.xml','--basetemp='+os.environ['TMPDIR']+'/'+name])
+              tree=ET.parse(name+'.xml')
+              failures=[{'name':c.attrib['name'],'message':f.attrib.get('message','')[:500]} for c in tree.iter('testcase') for f in c.findall('failure')]
+              msg=json.dumps({'name':name,'pytest_return':int(rc),'failures':failures},sort_keys=True)
+              print('::notice title=1880 RED::'+msg.replace('%','%25').replace('\r','%0D').replace('\n','%0A'),flush=True)
+              assert rc==1, (name,rc)
+          PYRED
+      - name: Observe full existing ingest inventory once for the explained main merge
+        run: |
+          python -B -c "from benchmarking.standalone import ensure_agent_context_engine_importable; ensure_agent_context_engine_importable(); import runpy; runpy.run_module('tests.behaviour.ingest_trace_harness',run_name='__main__')" --repo . --out merged-ingest-trace.json
+          python -B - <<'PYTRACE'
+          import hashlib, json
+          from pathlib import Path
+          path=Path('merged-ingest-trace.json')
+          current=json.loads(path.read_text())
+          prior=json.loads(Path('tests/fixtures/ingest_trace.json').read_text())
+          delta={k:v for k,v in current.items() if v!=prior[k]}
+          assert set(current)==set(prior) and len(current)==202
+          assert set(delta)=={'sequence-compaction','sequence-host-merge','sequence-rewrite','sequence-rotation'},sorted(delta)
+          def notice(title, data):
+              msg=json.dumps(data,sort_keys=True,ensure_ascii=False)
+              assert len(msg.encode())<60000
+              print('::notice title='+title+'::'+msg.replace('%','%25').replace('\r','%0D').replace('\n','%0A'),flush=True)
+          notice('1880 trace manifest',{'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'bytes':path.stat().st_size,'changed':sorted(delta),'cases':len(current)})
+          for name, trace in delta.items():notice('1880 trace case',{name:trace})
+          PYTRACE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: issue-1880-h6-trace-proof
+          path: |
+            h6-red.xml
+            trace-red.xml
+            merged-ingest-trace.json
