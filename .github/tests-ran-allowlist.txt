@@ -8,3 +8,4 @@ bench/instruments/scale389/tests/test_archive_regression.py  # Read-only F34 arc
 bench/instruments/compaction_probe/test_bot1_sandbox.py  # Operator account H smoke is disabled after the original profile was restored.
 tests/test_real_turn_loop_acp_override.py  # Requires prepared pinned Hermes runtime; executed by the non-required real-host.yml.
 tests/test_session_end_attribution_host.py  # Needs LCM_REAL_HERMES_PYTHON and a prepared pinned Hermes host; executed by the Real Hermes host workflow.
+tests/test_real_host_config_resolution.py  # Needs LCM_REAL_HERMES_PYTHON; all cases execute in the pinned real-host.yml matrix.
