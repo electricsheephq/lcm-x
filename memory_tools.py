@@ -147,7 +147,7 @@ def _lookup(engine, assertions, names, question, limit):
     for row in [*matches.values(), *rows, *mentions]:
         if row['store_id'] in carried:
             row['time_uncertain'] = 'carried'
-    groups = {}
+    groups = {row['session_id']: [] for row in rows}
     for row in matches.values():
         group = groups.setdefault(row['session_id'], [])
         group.append(row)

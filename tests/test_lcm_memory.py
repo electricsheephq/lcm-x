@@ -692,20 +692,73 @@ def test_union_rank_ties_break_by_store_id(tmp_path):
         engine.shutdown()
 
 
+# Run-6 regressions: literals generated from d10777eb cards (FTS, skip and LIKE).
+_SESSION_ORDER_ROWS = [
+    ('zz', 'tara is here with many many words of padding around the name so that bm25 ranks it lower than short rows'),
+    ('yy', 'more words tara more words and more words and padding words here'),
+    ('aa', 'tara'),
+    ('zz', 'and tara again with padding words around it in this row'),
+]
+
+
+@pytest.mark.parametrize('name,rows,sessions,ids', [
+    ('tara', _SESSION_ORDER_ROWS, ['aa', 'zz', 'yy'], [3, 4, 1, 2]),
+    ('Tara', _SESSION_ORDER_ROWS, ['aa', 'zz', 'yy'], [3, 4, 1, 2]),
+    ('tara', [('q', 'tara notes notes notes notes notes'), ('p', 'tara')],
+     ['p', 'q'], [2, 1]),
+    ('大阪tara', [('q', '大阪tara 文章 文章 文章 文章 文章 文章'), ('p', '大阪tara 大阪tara')],
+     ['p', 'q'], [2, 1]),
+])
+def test_r1f_run6_session_order_matches_base(tmp_path, name, rows, sessions, ids):
+    engine = make_engine(tmp_path, assertions=False)
+    try:
+        for session, content in rows:
+            engine._store.append(session, {'role': 'user', 'content': content})
+        engine._store.connection.execute(
+            'UPDATE messages SET timestamp=1700000000+store_id, observed_at=NULL')
+        engine._store.connection.commit()
+        card = call(engine, name=name, limit=20)
+        assert [s['session_id'] for s in card['sessions']] == sessions
+        assert mention_ids(card) == ids
+    finally:
+        engine.shutdown()
+
+
+# Run-6 regression: B1-only sessions follow first-displayed-session order.
+def test_r1f_run6_limit_cut_session_order(tmp_path):
+    engine = make_engine(tmp_path, assertions=False)
+    try:
+        for session, content in _SESSION_ORDER_ROWS:
+            engine._store.append(session, {'role': 'user', 'content': content})
+        engine._store.connection.execute(
+            'UPDATE messages SET timestamp=1700000000+store_id, observed_at=NULL')
+        engine._store.connection.commit()
+        card = call(engine, name='tara', limit=2)
+        assert [s['session_id'] for s in card['sessions']] == ['aa', 'zz', 'yy']
+        assert mention_ids(card) == [3, 4]
+        assert [s['count'] for s in card['sessions']] == [1, 2, 1]
+        assert all(s['count'] > 0 for s in card['sessions'])
+        assert card['sessions'][-1]['snippets'] == []
+        assert card['mention_count'] == 4 and card['truncated'] is True
+    finally:
+        engine.shutdown()
+
+
 def test_equal_forms_preserve_base_counts_order_and_unaffected_aggregates(tmp_path):
     from hermes_lcm import memory_tools
     import inspect
 
     engine = make_engine(tmp_path, assertions=False)
     try:
-        for text in ('alex', 'alex', '東京', 'missing nothing'):
-            engine._store.append('one', {'role': 'user', 'content': text})
+        for session, text in [('late', 'alex padding padding padding padding padding'),
+                              ('best', 'alex'), ('one', '東京'), ('one', 'missing nothing')]:
+            engine._store.append(session, {'role': 'user', 'content': text})
         engine._store.connection.execute(
             'UPDATE messages SET timestamp=1700000000, observed_at=NULL')
         engine._store.connection.commit()
         # Amendment 2: base one + one batched read + cold schema probe.
         # IDs below are in d10777eb card order.
-        for case, (value, limit, ids) in enumerate([('alex', 20, [1, 2]), ('alex', 1, [1]),
+        for case, (value, limit, ids) in enumerate([('alex', 20, [2, 1]), ('alex', 1, [2]),
                                   ('東京', 20, [3]), ('absent', 20, [])]):
             assert memory_tools._name(value) == value
             statements = []
@@ -737,8 +790,8 @@ def test_equal_forms_preserve_base_counts_order_and_unaffected_aggregates(tmp_pa
                     return {'time': '2023-11-14T22:13:20Z',
                             'time_source': 'write_timestamp', 'store_id': sid}
                 expected = {'mention_count': len(ids), 'truncated': False,
-                            'first_seen': stamp(ids[0]) if ids else None,
-                            'last_seen': stamp(ids[-1]) if ids else None}
+                            'first_seen': stamp(min(ids)) if ids else None,
+                            'last_seen': stamp(max(ids)) if ids else None}
                 assert {key: card[key] for key in expected} == expected
                 assert all('time_uncertain' not in entry for entry in
                            [card['first_seen'], card['last_seen']] if entry is not None)
