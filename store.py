@@ -746,9 +746,11 @@ class MessageStore:
             if opened:
                 conn.commit()
             return count
-        except Exception:
+        except BaseException as exc:
             if opened:
                 conn.rollback()
+            if not isinstance(exc, Exception):
+                raise
             logger.debug("sender_capture:write_unavailable")
             return 0
         finally:

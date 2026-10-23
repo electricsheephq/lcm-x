@@ -594,3 +594,45 @@ def test_w6_scope_carrier_strip_positive(tmp_path, monkeypatch, anchor):
         assert e._store.get_message_senders([sid])[sid] == expected()
     finally:
         e.shutdown()
+
+
+def test_interrupt_after_begin_rolls_back_and_releases_lock(tmp_path):
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as e:
+        e.ingest([message()])
+        assert e.drain_rollup_maintenance(timeout=10)
+        store, acquired = e._store, []
+        conn = store.connection
+        timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert timeout != 0 and not conn.in_transaction
+
+        class Interrupt:
+            def __getattr__(self, name):
+                return getattr(conn, name)
+
+            def execute(self, sql, *args):
+                if sql.startswith("UPDATE messages SET sender_id"):
+                    raise KeyboardInterrupt
+                return conn.execute(sql, *args)
+
+        store._conn = Interrupt()
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                store.set_sender_if_null(1, *expected(), ["S"])
+        finally:
+            store._conn = conn
+        in_transaction = conn.in_transaction
+        if in_transaction:  # Leave the shared connection clean for teardown on the RED path.
+            conn.rollback()
+        assert not in_transaction
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == timeout
+
+        def acquire():
+            ok = store._write_lock.acquire(blocking=False)
+            acquired.append(ok)
+            if ok:
+                store._write_lock.release()
+
+        thread = threading.Thread(target=acquire)
+        thread.start()
+        thread.join(2)
+        assert acquired == [True]
