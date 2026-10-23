@@ -2456,27 +2456,209 @@ class LCMEngine(
         self._sweep_budget_hold_until = 0.0
         return False
 
-    def _start_no_progress_hold(self, reason: str) -> None:
+    def _start_no_progress_hold(self, reason: str, *, persist: bool = False) -> None:
         """#651: hold automatic threshold passes until its time or a stored leaf; turn-paced reasons
         (#597 progress refusals, #922 objective-only no-ops, #904 hidden-only passes) also end at turn end."""
         self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
+        self._no_progress_hold_persisted = bool(reason == "no_progress" and persist)
+        if self._no_progress_hold_persisted:
+            self._persist_no_progress_hold()
         if reason in _TURN_END_HOLD_REASONS:
             logger.info("LCM automatic compaction held until turn end (cap %.0fs): %s",
                         _SWEEP_BUDGET_HOLD_SECONDS, reason)
         else:
             logger.info("LCM automatic compaction held for %.0fs: %s", _SWEEP_BUDGET_HOLD_SECONDS, reason)
 
-    def _no_progress_hold_active(self) -> bool:
+    def _no_progress_hold_active(self, *, managed_scope: bool = False) -> bool:
         """#651: never latches; it ends at its time (a stored leaf clears it in compress())."""
-        if self._no_progress_hold is None:
+        if not managed_scope and self._bypasses_lcm_context_management():
             return False
+        if self._no_progress_hold is None or (
+                self._no_progress_hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)):
+            return self._persisted_no_progress_hold_active(managed_scope=True)
         if time.monotonic() < self._no_progress_hold[0]:
             return True
         self._no_progress_hold = None
         return False
 
+    def _no_progress_metadata_warning(self) -> None:
+        # No record payload, session identifier or exception text enters diagnostics.
+        if not getattr(self, "_no_progress_metadata_warned", False):
+            self._no_progress_metadata_warned = True
+            logger.warning("LCM no-progress metadata unavailable; automatic work remains enabled")
+
+    def _observe_no_progress_replay(self, original, active) -> None:
+        """Reuse the current ingest's identities; never scan replay at admission.
+
+        Include exact cleanup bytes and occurrence metadata: canonical row identity
+        alone aliases some pruned placeholders and cannot prove unchanged cleanup.
+        Only the digest survives this ingest, never its input payload.
+        """
+        self._no_progress_replay = None
+        if getattr(self, "_no_progress_ingest_generation", None) != self._ingest_failure_count:
+            return  # An internally swallowed failure is not completed current-ingest proof.
+        try:
+            # Public copies are already owned by the current ingest copy loop.
+            public = self._no_progress_public_rows
+            payload = [self._last_active_replay_source_identities,
+                       [public[id(row)] for row in self._last_active_replay_messages],
+                       [self._host_occurrence_metadata(row) for row in original]]
+            digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            self._no_progress_replay = (self._session_id, self._conversation_id, digest)
+        except Exception:
+            self._no_progress_metadata_warning()
+
+    def _no_progress_fingerprint(self, *, managed_scope: bool = False) -> Optional[str]:
+        replay = getattr(self, "_no_progress_replay", None)
+        observed = getattr(self, "_no_progress_observed_tokens", None)
+        if (not replay or replay[:2] != (self._session_id, self._conversation_id)
+                or observed is None or observed <= 0
+                or self._consecutive_ingest_failures
+                or (not managed_scope and self._bypasses_lcm_context_management())):
+            return None
+        # Explicit non-secret settings only, never a config dump, credential, URL
+        # or prompt. Changes to filtering identities are represented only by hash.
+        names = (
+            "fresh_tail_count", "fresh_tail_max_tokens", "fresh_tail_pressure_yield_enabled",
+            "fresh_tail_pressure_yield_min_observations", "leaf_chunk_tokens",
+            "leaf_target_ratio", "leaf_target_min_tokens", "leaf_target_max_tokens",
+            "l2_budget_ratio", "summary_prompt_version",
+            "stub_first_exit_target_ratio", "proactive_recall_enabled", "proactive_recall_budget_tokens", "embeddings_enabled",
+            "dynamic_leaf_chunk_enabled", "dynamic_leaf_chunk_max", "incremental_max_depth",
+            "condensation_fanin", "cache_friendly_condensation_enabled", "cache_friendly_min_debt_groups",
+            "threshold_full_sweep_enabled", "summary_prefix_target_tokens", "l3_truncate_tokens",
+            "survival_fit", "survival_reserve", "max_assembly_tokens", "reserve_tokens_floor",
+            "deferred_maintenance_enabled", "deferred_maintenance_max_passes", "critical_budget_pressure_ratio",
+            "foreground_soft_seconds", "foreground_hard_seconds", "summary_model", "summary_fallback_models",
+            "summary_reasoning_effort", "summary_timeout_ms", "ignore_message_patterns",
+            "sensitive_patterns_enabled", "sensitive_patterns", "large_output_externalization_enabled",
+            "large_output_externalization_threshold_chars", "large_output_active_replay_stubbing_enabled",
+            "large_output_active_replay_stub_threshold_tokens", "large_output_active_replay_stub_aged_threshold_tokens",
+        )
+        try:
+            route = []
+            for name in ("model", "provider", "api_mode"):
+                value = getattr(self, name)
+                if not isinstance(value, str) or any(marker in value for marker in ("://", "@", "?", "#")):
+                    return None  # An opaque or URL-shaped route cannot supply safe scalar identity.
+                route.append(value.strip())
+            tokens = max(int(self.last_prompt_tokens or 0), int(observed))
+            yield_ready = (self._config.fresh_tail_pressure_yield_enabled
+                           and self._pressure_yield_blocked_streak >= max(
+                               1, int(self._config.fresh_tail_pressure_yield_min_observations)))
+            ceiling = self._survival_ceiling()
+            pressure = ("overflow" if self._should_force_overflow_recovery(observed_tokens=tokens)
+                        else "survival" if ceiling is not None and tokens >= ceiling
+                        else "threshold" if self.threshold_tokens > 0 and tokens >= self.threshold_tokens
+                        else "below")
+            # MAX(primary key) and lifecycle's indexed conversation lookup are
+            # bounded. Global maxima conservatively invalidate on other sessions.
+            # The open store's resolved path is invariant for this binding. Cache
+            # only that identity, never metadata or the current fingerprint.
+            store_path = self._store.db_path
+            bound_store = getattr(self, "_no_progress_bound_store", None)
+            if bound_store is None or bound_store[0] is not self._store or bound_store[1] != store_path:
+                bound_store = (self._store, store_path, str(Path(store_path).resolve()))
+                self._no_progress_bound_store = bound_store
+            state = [replay, bound_store[2], self._store.max_store_id(),
+                     self._store_complete_frontier(),
+                     self._dag._conn.execute("SELECT COALESCE(MAX(node_id), 0) FROM summary_nodes").fetchone()[0],
+                     pressure, tokens // 1024, tokens, int(self.context_length or 0), self.threshold_tokens,
+                     yield_ready,
+                     route,
+                     [getattr(self._config, name) for name in names]]
+            return hashlib.sha256(json.dumps(state, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        except Exception:
+            self._no_progress_metadata_warning()
+            return None
+
+    def _persisted_no_progress_hold_active(self, *, managed_scope: bool = False) -> bool:
+        if not self._session_id or (not managed_scope and self._bypasses_lcm_context_management()):
+            return False
+        self._no_progress_hold = None
+        try:
+            record = self._store.read_metadata_json(f"compaction_no_progress:v1:{self._session_id}")
+            if record is None:  # Common unheld gate: no fingerprint or indexed state reads.
+                return False
+            if (not isinstance(record, dict) or record.get("version") != 1
+                    or record.get("reason") != "no_progress"
+                    or not isinstance(record.get("fingerprint"), str)
+                    or re.fullmatch(r"[0-9a-f]{64}", record["fingerprint"]) is None):
+                raise ValueError("invalid metadata shape")
+            recorded, expires = record["recorded_at"], record["expires_at"]
+            if (type(recorded) not in (int, float) or type(expires) not in (int, float)
+                    or not math.isfinite(recorded) or not math.isfinite(expires)
+                    or not 0 < expires - recorded <= _SWEEP_BUDGET_HOLD_SECONDS
+                    or recorded > time.time()):
+                raise ValueError("invalid metadata time")
+            remaining = expires - time.time()
+            if remaining <= 0:
+                return False
+            fingerprint = self._no_progress_fingerprint(managed_scope=True)
+            if fingerprint is None:
+                return False
+            if fingerprint != record["fingerprint"]:
+                # Logically invalid for this state. Leave the old proof intact:
+                # another engine may still be bound to it; all readers compare.
+                return False
+            # Never extend on a hit; preserve the earlier monotonic deadline
+            # under backward wall-clock movement within the same engine.
+            identity = (record["fingerprint"], recorded, expires)
+            observed = getattr(self, "_no_progress_deadline", None)
+            deadline = time.monotonic() + remaining
+            if observed and observed[0] == identity:
+                deadline = min(deadline, observed[1])
+            self._no_progress_deadline = (identity, deadline)
+            if deadline <= time.monotonic():
+                return False
+            self._no_progress_hold = (deadline, "no_progress")
+            self._no_progress_hold_persisted = True
+            return True
+        except Exception:
+            self._no_progress_metadata_warning()
+            return False
+
+    def _persist_no_progress_hold(self) -> None:
+        fingerprint = self._no_progress_fingerprint()
+        self._no_progress_hold = None
+        if fingerprint is None or fingerprint != getattr(self, "_no_progress_proof_fingerprint", None):
+            self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, "no_progress")
+            self._no_progress_hold_persisted = False
+            return
+        if self._persisted_no_progress_hold_active():
+            return  # No rearming and no write for a matching proof.
+        try:
+            now = time.time()
+            record = {"version": 1, "fingerprint": fingerprint, "reason": "no_progress",
+                      "recorded_at": now, "expires_at": now + _SWEEP_BUDGET_HOLD_SECONDS}
+            self._store.write_metadata_json([f"compaction_no_progress:v1:{self._session_id}"], json.dumps(record))
+            deadline = time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS
+            self._no_progress_deadline = ((fingerprint, now, record["expires_at"]), deadline)
+            self._no_progress_hold = (deadline, "no_progress")
+        except Exception:
+            self._no_progress_metadata_warning()
+            self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, "no_progress")
+            self._no_progress_hold_persisted = False
+
+    def _clear_persisted_no_progress_hold(self) -> None:
+        try:
+            key = f"compaction_no_progress:v1:{self._session_id}"
+            try:
+                record = self._store.read_metadata_json(key)
+            except json.JSONDecodeError:
+                record = True  # A corrupt value still exists and must be cleared after progress.
+            if record is not None:
+                self._store.write_metadata_json([key], "null", skip_unchanged=True)
+        except Exception:
+            self._no_progress_metadata_warning()
+
     def _no_progress_hold_status(self) -> Optional[dict]:
-        if not self._no_progress_hold_active():
+        hold = self._no_progress_hold
+        # Legacy local pacing remains observable from auxiliary status, without
+        # granting that scope access to durable proof or admission decisions.
+        local_only = hold is not None and not (
+            hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False))
+        if not self._no_progress_hold_active(managed_scope=local_only):
             return None
         until, reason = self._no_progress_hold
         return {"reason": reason, "until": time.time() + max(0.0, until - time.monotonic())}  # #618: wall clock
@@ -2549,11 +2731,14 @@ class LCMEngine(
     def _no_progress_hold_blocks(self, tokens: int) -> bool:
         """#651: the one hold decision the host gate and compress() share. The hold governs LCM-managed
         compaction only, and forced overflow and the survival ceiling are never held."""
-        if self._bypasses_lcm_context_management() or not self._no_progress_hold_active():
+        if self._bypasses_lcm_context_management():
+            return False
+        self._no_progress_observed_tokens = int(tokens or 0)
+        if not self._no_progress_hold_active(managed_scope=True):
             return False
         if self._should_force_overflow_recovery(observed_tokens=tokens):
             return False
-        return self._sweep_budget_hold_applies(tokens)
+        return self._sweep_budget_hold_applies(tokens, managed_scope=True)
 
     def _sweep_budget_hold_blocks(self, tokens: int) -> bool:
         """#625: the #608 hold at the host gate, with the exemptions of ``_no_progress_hold_blocks``."""
@@ -2590,10 +2775,14 @@ class LCMEngine(
             and not self._bypasses_lcm_context_management()
             and self._sweep_budget_hold_active())
 
-    def _sweep_budget_hold_applies(self, tokens: Optional[int]) -> bool:
+    def _sweep_budget_hold_applies(self, tokens: Optional[int], *, managed_scope: bool = False) -> bool:
         """#608: the hold never applies at or over the survival ceiling, whose fit only compress() runs.
         #651: the no-progress hold applies the same way."""
-        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active():
+        # A true flag belongs only to this synchronous invocation's completed bypass check.
+        if not managed_scope and self._bypasses_lcm_context_management():
+            return False
+        self._no_progress_observed_tokens = None if tokens is None else int(tokens)
+        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active(managed_scope=True):
             return False
         ceiling = self._survival_ceiling()
         if ceiling is None or tokens is None:
@@ -2604,7 +2793,10 @@ class LCMEngine(
         return True
 
     def _record_ingest_success(self) -> None:
-        self._consecutive_ingest_failures = 0
+        if getattr(self, "_no_progress_ingest_generation", None) == self._ingest_failure_count:
+            self._consecutive_ingest_failures = 0
+        else:
+            self._no_progress_replay = None
 
     def _record_ingest_failure(self, where: str, error: Exception) -> None:
         """Track a swallowed ingest error so it is operator-visible.
@@ -2613,6 +2805,7 @@ class LCMEngine(
         transient lock is a warning, but a sustained inability to persist
         means the lossless guarantee is broken and must not stay hidden.
         """
+        self._no_progress_replay = None
         self._ingest_failure_count += 1
         self._consecutive_ingest_failures += 1
         self._last_ingest_error = f"{type(error).__name__}: {error}"
@@ -6248,6 +6441,7 @@ class LCMEngine(
         active_replay_messages: List[Dict[str, Any]],
     ) -> list[Dict[str, Any]]:
         copied_replay_messages: list[Dict[str, Any]] = []
+        public_rows = {}
         generated_message_ids = getattr(
             self,
             "_generated_ignored_active_replay_placeholder_message_ids",
@@ -6255,10 +6449,15 @@ class LCMEngine(
         )
         for message in active_replay_messages:
             copied_message = dict(message)
+            public_rows[id(copied_message)] = {
+                key: value for key, value in copied_message.items()
+                if key != "timestamp" and not str(key).startswith("_")
+            }
             if id(message) in generated_message_ids:
                 self._generated_ignored_active_replay_placeholder_message_ids.add(id(copied_message))
                 self._generated_ignored_active_replay_placeholder_messages[id(copied_message)] = copied_message
             copied_replay_messages.append(copied_message)
+        self._no_progress_public_rows = public_rows
         return copied_replay_messages
 
     def _refresh_generated_active_replay_placeholder_retention(
@@ -6297,6 +6496,7 @@ class LCMEngine(
         self._write_generated_ignored_placeholder_hash_ordinals(
             self._generated_placeholder_digest_ordinals_for_active_replay(active_replay_messages)
         )
+        self._observe_no_progress_replay(original_messages, active_replay_messages)
         return active_replay_messages
 
     def _keep_host_held_stubs(
@@ -6322,6 +6522,12 @@ class LCMEngine(
             sync_cached_host_metadata(
                 host_messages, current, self._generated_ignored_active_replay_placeholder_message_ids,
             )
+        for row in current:
+            if id(row) not in self._no_progress_public_rows:
+                self._no_progress_public_rows[id(row)] = {
+                    key: value for key, value in row.items()
+                    if key != "timestamp" and not str(key).startswith("_")
+                }
         return current
 
     def _cached_active_replay_messages(
@@ -6343,6 +6549,7 @@ class LCMEngine(
                     original_messages,
                     current,
                 )
+                self._observe_no_progress_replay(original_messages, current)
                 return current
         return None
 
@@ -6877,6 +7084,8 @@ class LCMEngine(
         assistant loops replaced by quarantine placeholders. Existing callers may
         ignore the return value when they only need durable persistence.
         """
+        self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
+        self._no_progress_ingest_generation = self._ingest_failure_count
         self._ingest_replay_redaction_changes = {}
         if not self._session_id:
             logger.debug("Ingest skipped: no session_id")
@@ -8718,6 +8927,7 @@ class LCMEngine(
                 return passes, "condensation_error"
             passes += 1
             self._no_progress_candidate = False  # #909/#651: a stored condensation is progress
+            self._clear_persisted_no_progress_hold()
             if (budget := self._foreground_call_budget()) is not None:
                 budget.progress = budget.progress or "condensation"
             try:

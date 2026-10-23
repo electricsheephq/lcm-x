@@ -99,12 +99,16 @@ def test_rewritten_prefix_survives_prematch_fault(
                 e.ingest(deepcopy(host))
         expected_failure = int(fault and rewrite != "stamp-only")
         observed_failures = e._ingest_failure_count
-        assert e._consecutive_ingest_failures == 0
+        assert e._consecutive_ingest_failures == expected_failure
+        if expected_failure:
+            assert e._no_progress_replay is None
         assert not [
             record for record in caplog.records if record.levelno >= logging.ERROR
         ]
         assert e._identity_anchor_prematch == real
         e.ingest(deepcopy(host))
+        assert e._consecutive_ingest_failures == 0
+        assert e._no_progress_replay is not None
         e.ingest(deepcopy(host))
         if rewrite == "content+stamp":
             _assert_once(e, host)

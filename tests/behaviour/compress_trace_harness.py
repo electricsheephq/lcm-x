@@ -462,6 +462,7 @@ OBSERVED_ATTRIBUTES = (
     "_last_compression_noop_reason",
     "_last_compression_status",
     "_last_condensation_suppressed_reason",
+    "_last_gate_tokens",
     "_last_hidden_backlog",
     "_last_leaf_content_filter_error",
     "_last_leaf_level_3_verbatim",
@@ -486,6 +487,12 @@ OBSERVED_ATTRIBUTES = (
     "_no_progress_candidate",
     "_no_progress_hold",
     "_no_progress_hold_blocks",
+    "_no_progress_hold_persisted",
+    "_no_progress_ingest_generation",
+    "_no_progress_observed_tokens",
+    "_no_progress_proof_complete",
+    "_no_progress_proof_fingerprint",
+    "_no_progress_public_rows",
     "_note_fresh_tail_pressure_relieved",
     "_objective_only_noop",
     "_overflow_recovery_assembly_cap",
@@ -549,6 +556,7 @@ class Canonical:
     def __init__(self, root: Path) -> None:
         self.root = str(root)
         self.ids: dict[str, str] = {}
+        self.proof_digests: dict[str, str] = {}
         self.excluded: dict[str, str] = {}
 
     def text(self, value: str) -> str:
@@ -562,6 +570,10 @@ class Canonical:
                       r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", replace, value)
 
     def value(self, value: Any, path: str = "") -> Any:
+        if path == "_no_progress_proof_fingerprint" and isinstance(value, str):
+            # Store paths enter this opaque digest. Preserve equality/transitions;
+            # the focused regressions check actual fingerprint state binding.
+            return self.proof_digests.setdefault(value, f"<proof-digest-{len(self.proof_digests)}>")
         if value is None or isinstance(value, (bool, int, float)):
             return value
         if isinstance(value, (str, Path)):
@@ -577,7 +589,7 @@ class Canonical:
             return self.value(vars(value), path)
         if isinstance(value, dict):
             # These keys are Python object identities, not durable store IDs.
-            identity_keys = path.endswith(("store_ids_by_message_id", "_compress_occurrences"))
+            identity_keys = path.endswith(("store_ids_by_message_id", "_compress_occurrences", "_no_progress_public_rows"))
             return {(f"<message-{i}>" if identity_keys else str(k)): self.value(v, f"{path}.{k}")
                     for i, (k, v) in enumerate(value.items(), 1)}
         if isinstance(value, (list, tuple)):
