@@ -23,4 +23,4 @@ Re-score: `python score_cost.py .`; reads only the preserved samples.jsonl and s
 
 Not proven: reference-session latency, host prompt/tool refresh, ingest/reconstruction cost, #1162 repair, merge, release, runtime or customer readiness. Synthetic only.
 
-T1: pending pinned registry row after this evidence commit. T2: not published; no results disposed.
+T1: https://github.com/electricsheephq/lcm-x/blob/becdbb6df4bd481578ec8baaaa85a0cf3b171eee/bench/scoreboard/results.jsonl. T2: not published; no results disposed.
