@@ -3596,7 +3596,8 @@ def _record_embedding_catchup(db_path, task: str, identity: str, remaining: int 
                     return
                 state = scan_state or {}
                 value = json.dumps({"remaining": remaining, "operator_retry": operator_retry,
-                                    "updated_at": time.time(), "inflight_cursor": state.get("inflight_cursor", "")})
+                                    "updated_at": time.time(), "inflight_cursor": state.get("inflight_cursor", ""),
+                                    "inflight_actionable_seen": state.get("inflight_actionable_seen", False)})
                 conn.execute(
                     "INSERT INTO metadata(key, value) SELECT ?, CASE WHEN ? IS NOT NULL AND "
                     "EXISTS (SELECT 1 FROM messages WHERE store_id > ?) "
@@ -5194,15 +5195,18 @@ def _chunk_backfill_remaining(
                     saved = check_conn.execute("SELECT value FROM metadata WHERE key=?",
                                                (f"embedding_catchup:chunk:{identity_hash}",)).fetchone()
                     try:
-                        cursor = str(json.loads(saved[0]).get("inflight_cursor", "")) if saved else ""
+                        cycle = json.loads(saved[0]) if saved else {}
+                        cursor = str(cycle.get("inflight_cursor", ""))
+                        actionable_seen = bool(cycle.get("inflight_actionable_seen", bool(cursor)))
                     except (ValueError, AttributeError):
                         cursor = ""
+                        actionable_seen = False
                     scanned = 0
-                    incomplete = bool(cursor)
+                    incomplete = False
                     scan_state["inflight_cursor"] = cursor
                     for row in check_conn.execute(
                         "SELECT embedded_id, state, lease_id, generation FROM lcm_embedding_backfill_inflight "
-                        "WHERE identity_hash = ? AND embedded_id > ? ORDER BY embedded_id LIMIT ?",
+                        "WHERE +identity_hash = ? AND embedded_id > ? ORDER BY embedded_id LIMIT ?",
                         (identity_hash, cursor, _CHUNK_INFLIGHT_SCAN_ROWS),
                     ):
                         if deadline is not None and time.monotonic() >= deadline:
@@ -5228,6 +5232,9 @@ def _chunk_backfill_remaining(
                     if incomplete:
                         remaining = True  # Unknown backlog, never a completion certificate.
                         scan_state["inflight_incomplete"] = True
+                    elif actionable_seen:
+                        remaining = max(remaining, 1)  # Earlier pages still have actionable backlog.
+                    scan_state["inflight_actionable_seen"] = incomplete and (actionable_seen or bool(actionable))
                     in_flight, uncertain = _embedding_inflight_counts(check_conn, identity_hash,
                         (tuple(row[1:]) + (1,) for row in actionable))
                 except sqlite3.OperationalError:
