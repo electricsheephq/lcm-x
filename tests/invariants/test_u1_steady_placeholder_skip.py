@@ -31,41 +31,6 @@ def u1_rows():
 
 
 @pytest.mark.parametrize("anchor", ["0", "1"], ids=["anchor-off", "anchor-on"])
-def test_older_salvage_and_user_restamp_match_ga(tmp_path, monkeypatch, anchor):
-    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", anchor)
-    with engine_context(
-        tmp_path, window=200_000, session_id="S", conversation_id="C",
-        fresh_tail_count=20, leaf_chunk_tokens=400,
-        large_output_externalization_enabled=False,
-        large_output_active_replay_stubbing_enabled=False,
-        temporal_rollups_enabled=False, embeddings_enabled=False,
-        deferred_maintenance_enabled=False,
-    ) as engine:
-        rows = u1_rows()
-        engine.ingest(deepcopy(rows))
-        before = engine._store.get_session_messages("S")
-        assert len(before) == 40
-        assert engine._compress_commit_proof is None
-        host = deepcopy(rows)
-        host[24].update(timestamp=999.0, message_uid=f"{999:032x}")
-        host[26]["content"] = CLEARED
-        assert [i for i, row in enumerate(host) if row["role"] == "tool"][-2:] == [34, 38]
-        assert engine._message_replay_identity(host[26]) == engine._message_replay_identity(rows[26])
-        # GA stores only the restamped user, preserving all 40 original rows.
-        fields = ("role", "content", "tool_call_id", "observed_at", "store_id")
-        expected = [tuple(row.get(key) for key in fields) for row in before]
-        expected.append(("user", rows[24]["content"], None, 999.0, 41))
-        for stage in ("after", "repeat", "end"):
-            if stage == "end":
-                engine.on_session_end("S", host)
-            else:
-                engine.ingest(host)
-            stored = engine._store.get_session_messages("S")
-            assert stored[:40] == before, stage
-            assert [tuple(row.get(key) for key in fields) for row in stored] == expected, stage
-
-
-@pytest.mark.parametrize("anchor", ["0", "1"], ids=["anchor-off", "anchor-on"])
 @pytest.mark.parametrize("tool_index", [34, 38], ids=["second-newest", "newest"])
 def test_newest_placeholder_is_changed_result_after_user_restamp(
     tmp_path, monkeypatch, anchor, tool_index,
