@@ -44,6 +44,25 @@ def test_overlapping_spans_have_order_independent_assignment(witness):
         assert sorted((c["byte_offset"], c["bytes"]) for c in results[0]) == [(0, 4), (6, 1)]
 
 
+@pytest.mark.parametrize("witness", [True, False])
+def test_span_choice_preserves_disjoint_merge_parts_fallback(witness):
+    host = {"chat": {"keys": {}, "tags": {}}}
+    events = merge_events(("a", "b", "c"))
+    if witness:
+        events += merge_events(("a", "b"))
+    multiset.merge_witnesses(host, events, lambda _s: "chat")
+    # License the enclosing row, so PASS proves preservation and surplus accounting.
+    host["chat"]["keys"][("user", multiset.h("a\n\nb\n\nc"))]["n"] = 1
+    rows = [(1, "S0", "user", "a\n\nb\n\nc"), (2, "S0", "user", "a"), (3, "S0", "user", "b")]
+    for expected in permutations([("user", "b\n\nc"), ("user", "a\n\nb")]):
+        out = multiset.score(list(expected), rows, host["chat"]["keys"])
+        assert out["deficit_rows"] == int(not witness)
+        if witness:
+            assert out["verdict"] == "PASS"
+            assert out["embedded_span_credits"][0]["sha256"] == multiset.h("b\n\nc")
+            assert out["held_composites_as_parts"][0]["witness"]["event_index"] == 1
+
+
 @pytest.mark.parametrize("field", ["store_id", "tokens", "head", "tail"])
 def test_oversized_projection_integer_is_an_ordinary_expectation(tmp_path, field):
     original = "original " + "alpha beta gamma delta " * 1600

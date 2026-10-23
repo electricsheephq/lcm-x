@@ -194,15 +194,39 @@ def embedded_credits(texts, want, stored_rows, stored, paired, host):
     units = [part for part in sorted(choices, key=lambda p: (len(choices[p]), -len(norm(texts[p]).encode()), p))
              for _ in range(min(want[part] - len(stored.get(part, [])) - paired[part], len(choices[part])))]
     units = units[:COVER_PARTS]
-    best, steps = [], 0
+    best, best_score, steps = [], -1, 0
+    needed = sum(max(0, n - len(stored.get(p, [])) - paired[p]) for p, n in want.items())
+
+    def coverage(selected):
+        """Rank spans with the same canonical, disjoint parts fallback score() will actually use."""
+        selected_counts = Counter((c["role"], c["sha256"]) for c in selected)
+        reserved_ids = {c["store_id"] for c in selected}
+        spare = Counter({p: sum(sid not in reserved_ids for sid in ids[want[p]:]) for p, ids in stored.items()})
+        matched = len(selected)
+        for part in sorted(want):
+            if part[0] != "user":
+                continue
+            remaining = want[part] - len(stored.get(part, [])) - paired[part] - selected_counts[part]
+            for merge in ((host or {}).get(part) or {}).get("merges", []):
+                if remaining <= 0:
+                    break
+                uses = Counter(merge["parts"])
+                if all(spare[p] >= n for p, n in uses.items()):
+                    spare.subtract(uses)
+                    remaining -= 1
+                    matched += 1
+        return matched
 
     def assign(index, selected):
-        nonlocal best, steps
-        if len(selected) > len(best):
-            best = selected[:]
-        if index == len(units) or steps >= COVER_STEPS or len(selected) + len(units) - index <= len(best):
+        nonlocal best, best_score, steps
+        if steps >= COVER_STEPS:
             return
         steps += 1
+        merit = coverage(selected)
+        if merit > best_score:
+            best, best_score = selected[:], merit
+        if index == len(units) or best_score == needed:
+            return
         part = units[index]
         for (sid, start, end), credit in sorted(choices[part].items()):
             if any(start < b and a < end for a, b in used[sid]):
@@ -210,7 +234,7 @@ def embedded_credits(texts, want, stored_rows, stored, paired, host):
             used[sid].append((start, end))
             assign(index + 1, selected + [credit])
             used[sid].pop()
-            if len(best) == len(units) or steps >= COVER_STEPS:
+            if best_score == needed or steps >= COVER_STEPS:
                 break
         assign(index + 1, selected)
 
@@ -238,7 +262,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
     embedded_ids = {c["store_id"] for c in span_credits}
     # #823: each active host merge record covers one missing composite. Reserve transcript rows first;
     # consume its parts before surplus licensing so no stored row can serve both purposes.
-    for key, n in want.items():
+    for key, n in sorted(want.items()):
         if key[0] != "user":
             continue
         for merge in ((host or {}).get(key) or {}).get("merges", []):
