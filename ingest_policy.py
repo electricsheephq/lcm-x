@@ -191,7 +191,8 @@ def split_prefix_revision(revision: str) -> tuple[str, str]:
 
 
 def embedding_prefix_status(config: Any) -> dict[str, Any]:
-    suffix = embedding_prefix_suffix(config, getattr(config, "embedding_provider", ""))
+    from .config import normalize_embedding_provider
+    suffix = embedding_prefix_suffix(config, normalize_embedding_provider(getattr(config, "embedding_provider", "")))
     return {"embedding_prefix": {"query": bool(config.embedding_query_prefix),
             "document": bool(config.embedding_document_prefix), "digest": suffix[8:]}} if suffix else {}
 

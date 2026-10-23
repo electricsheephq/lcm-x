@@ -651,6 +651,11 @@ PREANSWER_EVIDENCE_MODES = ("off", "legacy_selective", "requirements_v1")
 EMBEDDING_STORAGE_DTYPES = ("float32", "int8")
 
 
+def normalize_embedding_provider(spelling: str) -> str:
+    """Normalize provider spelling before alias resolution."""
+    return str(spelling or "").strip().lower()
+
+
 def embedding_provider_id(spelling: str) -> str:
     """Map an already-normalized spelling to its id; preserve unknown values."""
     return next((provider for provider, spellings in EMBEDDING_PROVIDER_SPELLINGS.items()

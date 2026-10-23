@@ -26,7 +26,7 @@ from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
 from .ingest_policy import embedding_prefix_suffix
-from .config import LCMConfig, embedding_provider_id, lcm_env_get, profile_bound
+from .config import LCMConfig, embedding_provider_id, lcm_env_get, normalize_embedding_provider, profile_bound
 from .tokens import count_tokens
 
 logger = logging.getLogger(__name__)
@@ -1992,7 +1992,7 @@ def resolve_provider(
     (451 query embeds ≈ 9k tokens ≈ negligible spend). ``max_calls=0`` disables
     the guard entirely; the circuit breaker still trips on real failures.
     """
-    provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
+    provider = normalize_embedding_provider(getattr(config, "embedding_provider", ""))
     model = str(getattr(config, "embedding_model", "") or "").strip()
     if not provider and not model:
         return None
