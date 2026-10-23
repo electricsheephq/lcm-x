@@ -607,6 +607,7 @@ def rebuild_entity_keys(store, *, sender_lookup=None, profile_entities=None):
                 entry = desired.setdefault((subject, owner), [candidates[0], "alias_match", set()])
                 entry[2].add(source)
         events, undone, _, _ = _history(store)
+        alias_desired = desired.copy()
         writes = 0
         for override in _overrides(events, undone):
             if not override["global_override"]:
@@ -615,7 +616,7 @@ def rebuild_entity_keys(store, *, sender_lookup=None, profile_entities=None):
             bound = {source for key, source in sources if key == subject} & set(override["scope_store_ids"])
             target = view["canonical"].get(override["entity_id"])
             if bound and target in view["cards"]:
-                alias = desired.get((subject, owner))
+                alias = alias_desired.get((subject, owner))
                 # Keep the owner/source derivation even while the unique active
                 # slot holds an override. Uncited evidence still uses aliases.
                 if owner is not None and alias and not any(
