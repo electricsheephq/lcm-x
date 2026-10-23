@@ -286,6 +286,16 @@ def _run_case(case, modules, directory, initial_missing, baseline_config, side, 
             start_calls, runs = calls[0], 0
             overhead = case.get("host_overhead", 0)
             prompt = tokens.count_messages_tokens(view) + overhead
+            diagnostic = None
+            if case.get("hold_diagnostics"):
+                nodes = engine._summary_frontier_nodes()
+                record = engine._store.read_metadata_json("compaction_no_progress:v1:S")
+                diagnostic = dict(frontier=engine._store_complete_frontier(), raw_max=engine._store.max_store_id(),
+                                  tail_start=engine._fresh_tail_start(view), leading=engine._leading_anchor_count(view),
+                                  summary_nodes=len(nodes), summary_tokens=sum(n.token_count for n in nodes),
+                                  hold=engine._no_progress_hold, record=record,
+                                  fingerprint=engine._no_progress_fingerprint(),
+                                  pressure_streak=engine._pressure_yield_blocked_streak)
             if "assembly_tail" in case:
                 require(("_assemble_context", "_survival_fit"))
                 assembled = engine._assemble_context(view[0], view[-case["assembly_tail"]:], include_lcm_note=False)
@@ -305,6 +315,15 @@ def _run_case(case, modules, directory, initial_missing, baseline_config, side, 
                                    overflow_recovery_failed=failed, sentinels=sorted(visible), user_marks=marks(view),
                                    user_rows=user_rows(view, produced),
                                    pair_errors=pair_errors(view)))
+            if diagnostic is not None:
+                diagnostic.update(reason=engine._last_compression_noop_reason,
+                                  leaves=(engine._last_compress_leaves or (None, 0))[1],
+                                  status=engine._last_compression_status,
+                                  stop=engine._last_threshold_full_sweep.get("stop_reason"),
+                                  complete=getattr(engine, "_no_progress_proof_complete", False),
+                                  objective_only=engine._objective_only_noop,
+                                  frontier_after=engine._store_complete_frontier())
+                sent_calls[-1]["hold_diagnostics"] = diagnostic
             if hasattr(engine, "update_from_response"):
                 engine.update_from_response({"prompt_tokens": sent, "completion_tokens": 50})
             else:
@@ -341,6 +360,8 @@ def main():
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--baseline-config", choices=["bare", "managed"], default="bare")
     parser.add_argument("--side", choices=["ga", "candidate"], default="candidate")
+    parser.add_argument("--hold-diagnostics", action="store_true", help="Synthetic metadata only; no replay bodies")
+    parser.add_argument("--work-dir", type=Path, help="Regenerable synthetic stores")
     args = parser.parse_args()
     if os.environ.get("LCM_DIFFERENTIAL") != "1":
         parser.error("set LCM_DIFFERENTIAL=1 to opt in")
@@ -354,9 +375,10 @@ def main():
         modules, missing = load_tree(args.tree)
         for line in source:
             case = json.loads(line)
+            case["hold_diagnostics"] = args.hold_diagnostics
             assert case["layer"] == args.layer
             started = time.perf_counter()
-            with tempfile.TemporaryDirectory(prefix="case-", dir=args.out.parent) as directory:
+            with tempfile.TemporaryDirectory(prefix="case-", dir=args.work_dir or args.out.parent) as directory:
                 try:
                     result = run_case(case, modules, Path(directory), missing, args.baseline_config, args.side)
                 except Exception as exc:

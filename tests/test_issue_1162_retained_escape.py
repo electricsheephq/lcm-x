@@ -91,6 +91,7 @@ def _passes(engine, view, n, lines, label="") -> tuple[list, list[dict]]:
         start = len(lines)
         view = engine.compress(view, current_tokens=10_000)
         engine.note_turn_complete()
+        engine._clear_persisted_no_progress_hold()
         engine._no_progress_hold = None
         new = lines[start:]
         stop = next((msg for _lvl, msg in new if msg.startswith("LCM compaction stop:")), "")
@@ -131,6 +132,7 @@ def _restore(tmp_path, sweep):
     view = [row for i in range(1, 13) for row in _turn(f"T{i}", 100.0 * i, tool=True)]
     view = engine.compress(view, current_tokens=10_000)
     engine.note_turn_complete()
+    engine._clear_persisted_no_progress_hold()
     engine._no_progress_hold = None
     tools = [m for m in view if m.get("role") == "tool"]
     tools[0]["content"] = "[Host replaced this tool output with genuinely new content]"
@@ -265,6 +267,7 @@ def _streak_of_three(tmp_path, lines):
 def _one_pass(engine, view, **kwargs):
     view = engine.compress(view, **kwargs)
     engine.note_turn_complete()
+    engine._clear_persisted_no_progress_hold()
     engine._no_progress_hold = None
     return view
 
@@ -311,6 +314,7 @@ def test_only_passes_that_select_a_leaf_count(tmp_path, summaries, lines, monkey
             view = engine.compress(view, current_tokens=10_000)
             assert engine._last_compression_status == "sanitized"
         assert _streak(engine) == 1
+        engine._clear_persisted_no_progress_hold()
         engine._no_progress_hold = None
         with monkeypatch.context() as patch:
             patch.setattr(engine, "_select_oldest_leaf_chunk", lambda *_args, **_kwargs: [])
