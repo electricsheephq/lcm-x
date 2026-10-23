@@ -405,7 +405,7 @@ def _load_hermes_config_yaml(cfg_path: Path | None = None) -> dict[str, Any]:
 
     if ruamel_yaml is not None:
         try:
-            loaded = _plain_yaml_value(ruamel_yaml.YAML(typ="safe").load(text))
+            loaded = _plain_yaml_value(ruamel_yaml.YAML(typ="safe", pure=True).load(text))
             return loaded if isinstance(loaded, dict) else {}
         except Exception:
             return {}
@@ -414,7 +414,12 @@ def _load_hermes_config_yaml(cfg_path: Path | None = None) -> dict[str, Any]:
     stack: list[tuple[int, dict[str, Any]]] = [(-1, root)]
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
-        if not line.strip() or line.lstrip().startswith("#") or ":" not in line:
+        content = line
+        for match in re.finditer(_YAML_QUOTED_SCALAR + r"|(?<!\S)#", line):
+            if match.group() == "#":
+                content = line[:match.start()]
+                break
+        if ":" not in content:
             continue
         indent = len(line) - len(line.lstrip(" \t"))
         key, raw_value = line.strip().split(":", 1)
