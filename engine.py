@@ -7744,15 +7744,33 @@ class LCMEngine(
         new_messages = replay_messages[cursor:] if cursor < n else []
         original_new_messages = messages[cursor:] if cursor < n else []
 
-        def remember(active):
-            previous_replay = getattr(self, "_last_active_replay_messages", ())
-            previous_generated_ids = (
-                self._generated_ignored_active_replay_placeholder_message_ids.copy() if unaudited_from is not None else ()
-            )
+        def complete(active, *, cached=False, stored_at=None):
+            # Every successful return publishes witnessed admission; cached replay
+            # deliberately skips the unrelated replay-cache rewrite below.
             generation = (self._store._conn.total_changes, self._store._conn.execute(
                 "PRAGMA data_version").fetchone()[0])
-            result = self._remember_active_replay_messages(messages, active)
+            self._host_uid_shadow(host_uids, stored_at, anchor_remainders)
             self._advance_occurrence_cache(generation)
+            result = active
+            if not cached:
+                previous_replay = getattr(self, "_last_active_replay_messages", ())
+                previous_generated_ids = (
+                    self._generated_ignored_active_replay_placeholder_message_ids.copy() if unaudited_from is not None else ()
+                )
+                generation = (self._store._conn.total_changes, self._store._conn.execute(
+                    "PRAGMA data_version").fetchone()[0])
+                result = self._remember_active_replay_messages(messages, active)
+                self._advance_occurrence_cache(generation)
+                # #1353: keep paired proof for the unaudited prefix, never the newly stored tail.
+                if unaudited_from is not None:
+                    end = min(cursor, len(cached_source_identities), len(previous_replay),
+                              len(self._last_active_replay_source_identities), len(self._last_active_replay_messages))
+                    self._last_active_replay_source_identities[unaudited_from:end] = cached_source_identities[unaudited_from:end]
+                    self._last_active_replay_messages[unaudited_from:end] = previous_replay[unaudited_from:end]
+                    for message in self._last_active_replay_messages[unaudited_from:end]:
+                        if id(message) in previous_generated_ids:
+                            self._generated_ignored_active_replay_placeholder_message_ids.add(id(message))
+                            self._generated_ignored_active_replay_placeholder_messages[id(message)] = message
             cache = getattr(self, "_occurrence_window_cache", None)
             if cache:
                 state = cache[4]
@@ -7769,16 +7787,6 @@ class LCMEngine(
                                 and meta["timestamp"] is not None and meta["message_uid"] is not None
                                 for m, meta in zip(messages, current))):
                     state["warm"] = (self._occurrence_context(), occurrence)
-            # #1353: keep paired proof for the unaudited prefix, never the newly stored tail.
-            if unaudited_from is not None:
-                end = min(cursor, len(cached_source_identities), len(previous_replay),
-                          len(self._last_active_replay_source_identities), len(self._last_active_replay_messages))
-                self._last_active_replay_source_identities[unaudited_from:end] = cached_source_identities[unaudited_from:end]
-                self._last_active_replay_messages[unaudited_from:end] = previous_replay[unaudited_from:end]
-                for message in self._last_active_replay_messages[unaudited_from:end]:
-                    if id(message) in previous_generated_ids:
-                        self._generated_ignored_active_replay_placeholder_message_ids.add(id(message))
-                        self._generated_ignored_active_replay_placeholder_messages[id(message)] = message
             return result
 
         if not new_messages:
@@ -7789,10 +7797,9 @@ class LCMEngine(
             self._compression_boundary_active_placeholder_digest_ordinals = {}
             self._compression_boundary_stored_placeholder_digest_counts = {}
             self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
-            self._host_uid_shadow(host_uids)
             if cached_replay is not None:
-                return cached_replay
-            return remember(replay_messages)
+                return complete(cached_replay, cached=True)
+            return complete(replay_messages)
 
         active_replay_messages = replay_messages
         compression_boundary_ingest_pending = self._compression_boundary_ingest_pending
@@ -7837,9 +7844,8 @@ class LCMEngine(
             self._compression_boundary_active_placeholder_digest_ordinals = {}
             self._compression_boundary_stored_placeholder_digest_counts = {}
             self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
-            self._host_uid_shadow(host_uids)
             sender_capture.try_update(self)
-            return remember(active_replay_messages)
+            return complete(active_replay_messages)
 
         protected_messages, active_replay_messages = self._protect_ingest_rows(
             messages=messages,
@@ -7876,10 +7882,6 @@ class LCMEngine(
                 )
             except Exception as exc:
                 logger.warning("LCM identity-anchor relation write failed (%s)", type(exc).__name__)
-        generation = (self._store._conn.total_changes, self._store._conn.execute("PRAGMA data_version").fetchone()[0])
-        self._host_uid_shadow(host_uids, {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index,
-                                                                                         store_ids)}, anchor_remainders)
-        self._advance_occurrence_cache(generation)
         # Rollup staleness is driven by summary-node PUBLICATION
         # (_invalidate_rollups_for_published_node at every add_node site), not by
         # raw ingest: marking a period stale before its covering summary exists
@@ -7896,7 +7898,8 @@ class LCMEngine(
         # data/base64 substrings stay provider-usable in active replay. The
         # exceptions are whole-message ``raw_payload`` externalization and the
         # separately opt-in textual tool-result interceptor above.
-        return remember(active_replay_messages)
+        return complete(active_replay_messages, stored_at={
+            idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index, store_ids)})
 
     def _build_ingest_replay(
         self,

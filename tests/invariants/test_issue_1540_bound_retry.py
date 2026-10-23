@@ -1003,3 +1003,48 @@ def test_occurrence_warm_witness_cache_observes_fact_mutation(build, monkeypatch
     engine = build()
     engine.ingest(deepcopy(host))
     assert stored(engine) == after
+
+
+def test_occurrence_cold_established_prefix_admits_cached_completion(build, monkeypatch):
+    """A larger-store tail can finish through cached replay without rewriting it."""
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "1")
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
+    host = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"cold prefix row {i}",
+             "timestamp": float(i + 1), "message_uid": f"{i + 1:032x}"} for i in range(100)]
+    engine = build()
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    engine.shutdown()
+    engine = build()
+    view = host[-20:]
+    engine.ingest(deepcopy(view))
+    assert stored(engine) == before
+    # The next replay takes the existing cached return, not remember(). It must
+    # publish only the actual row mappings established by the cold resolver.
+    def no_rewrite(*args, **kwargs):
+        pytest.fail("accepted cached replay unexpectedly rewrote replay state")
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_remember_active_replay_messages", no_rewrite)
+        engine.ingest(deepcopy(view))
+        state = engine._occurrence_window_cache[4]
+        assert state.get("warm")
+        assert len(state["warm"][1]["matched"]) == len(view)
+        assert all(sid in state["by_id"] for _source, sid in state["warm"][1]["matched"].values())
+        patch.setattr(engine, "_occurrence_metadata", no_rewrite)
+        engine.ingest(deepcopy(view))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    assert stored(engine) == before
+    # Append admission binds these two actual committed rows, not pre-insert IDs.
+    view += [{"role": "user", "content": "new cold-prefix user", "timestamp": 101., "message_uid": "c" * 32},
+             {"role": "assistant", "content": "new cold-prefix reply", "timestamp": 102., "message_uid": "d" * 32}]
+    engine.ingest(deepcopy(view))
+    after = stored(engine)
+    assert after[:len(before)] == before and len(after) == len(before) + 2
+    state = engine._occurrence_window_cache[4]
+    assert state.get("warm")
+    assert {state["warm"][1]["matched"][i][1] for i in (20, 21)} == {r["store_id"] for r in after[-2:]}
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_occurrence_metadata", no_rewrite)
+        engine.ingest(deepcopy(view))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    assert stored(engine) == after
