@@ -40,6 +40,7 @@ def rows(conn, sql, values=()):
 
 
 def test_derived_key_writers_transaction_scope_unique_and_no_log(store, api):
+    store.connection.execute("INSERT INTO messages(store_id,session_id,role,content,timestamp) VALUES(1,'S','user','synthetic',1)")
     entity = store.create_entity('key owner')
     before = store.events_after()
     for call in (lambda: store.add_key('person:alex', entity, 'alias_match', [1]),

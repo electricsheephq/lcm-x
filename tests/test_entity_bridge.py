@@ -152,6 +152,7 @@ def test_override_source_binding_churn_undo_and_replay(bridge, scoped, monkeypat
     rebuild(bridge)
     assert api.resolve_key(store, "person:renamed", source) is None
     ops.add_alias(original, "renamed")
+    renamed_event = store.events_after()[-1]["event_id"]
     rebuild(bridge)
     assert api.resolve_key(store, "person:renamed", source) == original
     assertions.invalidate_source(source, reason="test")
@@ -164,10 +165,16 @@ def test_override_source_binding_churn_undo_and_replay(bridge, scoped, monkeypat
     rebuild(bridge)
     assert api.resolve_key(store, "person:alex", unrelated) == original
     assert before["cards"][original]["display_name"] == "Alex"
-    # Rebuild retirement must not prevent undo of the override.
+    ops.undo(renamed_event)
+    # Restoration collisions fail with a typed refusal, never IntegrityError.
+    if not scoped:
+        with pytest.raises(api.EntityOpRefused, match="key_held"):
+            ops.undo(event)
+    assertions.invalidate_source(unrelated, reason="test")
+    rebuild(bridge)
     ops.undo(event)
     rebuild(bridge)
-    assert api.resolve_key(store, "person:alex", unrelated) == original
+    assert api.resolve_key(store, "person:alex", unrelated) is None
 
 
 def test_override_ambiguity_scoped_storage_dependency_and_inverse(bridge):
@@ -253,3 +260,47 @@ def test_current_sources_only_scope_override_and_read_cost(bridge):
                 bound.override_key("person:alex", foreign, scope_store_ids=[current])
         assert list(other.connection.iterdump()) == before
         assert api.resolve_key(other, "person:alex", current) is None
+
+
+def test_explicit_owner_overrides_never_coalesce_and_foreign_owner_refused(bridge):
+    api, ops, store, _, _ = bridge
+    owners = [ops.create_entity("owner") for _ in range(2)]
+    sisters = [ops.create_entity("sister") for _ in range(2)]
+    for owner, sister in zip(owners, sisters):
+        ops.add_alias(sister, "my sister", "relation_phrase", owner_entity_id=owner)
+    sources = [publish(bridge, "person:sister") for _ in range(2)]
+    with pytest.raises(api.EntityOpRefused, match="missing_owner"):
+        ops.override_key("person:sister", sisters[0], scope_store_ids=[sources[0]])
+    for owner, sister, source in zip(owners, sisters, sources):
+        event = ops.override_key("person:sister", sister, scope_store_ids=[source], owner_entity_id=owner)
+        assert json.loads(store.events_after()[-1]["payload_json"])["touches"]["keys"] == [["person:sister", owner]]
+        assert api.resolve_key(store, "person:sister", source, owner_entity_id=owner) == sister
+        assert api.resolve_key(store, "person:sister", source, owner_entity_id=owners[1 - owners.index(owner)]) is None
+        assert store.events_after()[-1]["event_id"] == event
+    with closing(EntityStore(store.db_path, profile_key="B")) as other:
+        bound = api.EntityOps(other)
+        entity = bound.create_entity("local")
+        before = list(other.connection.iterdump())
+        for foreign in (owners[0], "ent_missing"):
+            with pytest.raises(api.EntityOpRefused, match="not_found"):
+                bound.override_key("person:sister", entity, scope_store_ids=sources, owner_entity_id=foreign)
+        assert list(other.connection.iterdump()) == before
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_key_source_visibility_and_scoped_override_view_cost(bridge, scoped):
+    api, ops, store, _, _ = bridge
+    a, b = ops.create_entity("A"), ops.create_entity("B", "other")
+    visible = publish(bridge, "person:alex", scope="P1")
+    hidden = publish(bridge, "person:alex", scope="P2")
+    ops.add_alias(a, "alex", source_store_ids=[visible])
+    ops.add_alias(b, "chosen", source_store_ids=[visible])
+    rebuild(bridge)
+    assert api.resolve_key(store, "person:alex", hidden, access_scope="P1") is None
+    ops.override_key("person:alex", b, scope_store_ids=[visible, hidden] if scoped else None)
+    assert api.resolve_key(store, "person:alex", hidden, access_scope="P1") is None
+    trace = []
+    store.connection.set_trace_callback(trace.append)
+    api.resolved_view(store, "P1")
+    store.connection.set_trace_callback(None)
+    assert sum(sql.lstrip().upper().startswith("SELECT") for sql in trace) == 5
