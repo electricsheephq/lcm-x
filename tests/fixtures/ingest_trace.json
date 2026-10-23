@@ -1420,7 +1420,7 @@
 "anchor-version-ignore": [
 "input-before [{\"content\":\"IGNORE THIS ROW edited head\",\"role\":\"user\"}]",
 "aliases-before {\"inputs\":[[0]],\"output-is-input\":true,\"outputs\":[[0]]}",
-"state-before sha12/len=156faa84361c/9164",
+"state-before sha12/len=a6bfe4c73b48/9192",
 "store read_metadata_json [[\"folded_tail_lineage:S\"],{}]",
 "sql _store \"SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'\"",
 "store result read_metadata_json null",
@@ -1570,7 +1570,7 @@
 "attr _last_active_replay_messages sha12/len=f187f594cd5c/191",
 "attr _last_active_replay_source_identities [[\"user\",\"IGNORE THIS ROW edited head\",\"\",\"\",\"\"]]",
 "attr tables sha12/len=004642fa5eec/1165",
-"state-after sha12/len=f3e333775c97/9783",
+"state-after sha12/len=cbfca9f2656f/9811",
 "search-after sha12/len=21cf89ff36d6/122",
 "input-after [{\"content\":\"IGNORE THIS ROW edited head\",\"role\":\"user\"}]",
 "aliases-after {\"inputs\":[[0]],\"output-is-input\":true,\"outputs\":[[0]]}",
@@ -1702,7 +1702,7 @@
 "store result write_metadata_json false",
 "next-return sha12/len=f187f594cd5c/191",
 "next-aliases {\"inputs\":[[0]],\"output-is-input\":false,\"outputs\":[[]]}",
-"next-state sha12/len=454a89f0cc2b/9783",
+"next-state sha12/len=3cf80f1047d0/9811",
 "store read_metadata_json [[\"folded_tail_lineage:S\"],{}]",
 "sql _store \"SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'\"",
 "store result read_metadata_json null",
@@ -1872,7 +1872,7 @@
 "sql _store sha12/len=dff41730d75f/92",
 "store result write_metadata_json false",
 "cold-return sha12/len=f187f594cd5c/191",
-"cold-state sha12/len=27fcd5058a76/9816"
+"cold-state sha12/len=dbeb93a82f16/9844"
 ],
 "boundary-exhausted-other-digest": [
 "input-before sha12/len=f3a3f0b3ce5b/391",
