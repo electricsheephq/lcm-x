@@ -6880,6 +6880,61 @@ class LCMEngine(
                 id(getattr(self, "_last_emission_descriptors", None)),
                 getattr(self, "_retired_durable_proof", None), self._last_compacted_store_id)
 
+    def _current_occurrence_source_ids(self, messages, occurrences, available):
+        """Project the last committed accepted input, not a second content-first selection."""
+        plan = getattr(self, "_occurrence_ingest_plan", {})
+        binding = plan.get("publication")
+        view = getattr(self, "_last_active_replay_messages", ())
+        identities = getattr(self, "_last_active_replay_source_identities", ())
+        if (not binding or binding[:3] != (id(self._store), self._session_id, self._conversation_id)
+                or binding[3] is not view or plan.get("failed") or len(view) > 4096
+                or len(view) != len(identities) or plan.get("switches") != self._occurrence_context()[:2]):
+            return {}
+        try:
+            rows, facts, missing = self._stored_occurrence_metadata()
+            cache = self._occurrence_window_cache
+            by_id, choices, valid = cache[4]["by_id"], {}, set()
+            for pos, (source, sid) in plan["matched"].items():
+                row, fact = by_id.get(sid), facts.get(sid)
+                if (pos not in plan["proven"] or pos in plan.get("deferred", ()) or pos >= len(view)
+                        or sid not in available or sid in missing or not row or not fact or row["session_id"] != source):
+                    continue
+                full = self._message_replay_identity(view[pos], strip_carrier=False)
+                literal = self._message_replay_identity(view[pos], strip_carrier=False, allow_pruned_tool_alias=False)
+                digest = _commit_proof_identity_digest(_proof_user_identity(literal))
+                if (full != identities[pos] or _has_lossy_redacted_identity(literal)
+                        or digest != fact["identity_sha256"] or self._host_occurrence_changed(
+                            self._occurrence_metadata(view[pos], switches=plan["switches"]),
+                            self._occurrence_metadata(row, stored=True, fact=fact, switches=plan["switches"]))):
+                    continue
+                valid.add(pos)
+                choices.setdefault(digest, []).append((pos, sid))
+            # A source mapper cannot publish only the convenient half of a segment.
+            segments = {}
+            for pos, (_user, segment) in plan["owners"].items():
+                if segment is not None:
+                    segments.setdefault(segment, set()).add(pos)
+            invalid = set().union(*(group for group in segments.values() if not group <= valid)) if segments else set()
+            result, used = {}, set()
+            counts = Counter(id(msg) for msg in messages)
+            for msg, (_entry, projected) in zip(messages, occurrences or [(None, None)] * len(messages)):
+                full = self._message_replay_identity(msg, strip_carrier=False, allow_pruned_tool_alias=False)
+                options = choices.get(_commit_proof_identity_digest(_proof_user_identity(full)), ())
+                if not options and projected is not None:
+                    options = choices.get(_commit_proof_identity_digest(_proof_user_identity(projected)), ())
+                options = [(pos, sid) for pos, sid in options if pos not in invalid and sid not in used
+                           and not self._host_occurrence_changed(
+                               self._occurrence_metadata(msg, switches=plan["switches"]),
+                               self._occurrence_metadata(view[pos], switches=plan["switches"]))]
+                if len(options) == 1 and counts[id(msg)] == 1:
+                    result[id(msg)] = options[0][1]
+                    used.add(options[0][1])
+            generation = (self._store._conn.total_changes, self._store._conn.execute("PRAGMA data_version").fetchone()[0])
+            return result if generation == cache[0][3] else {}
+        except Exception:
+            logger.debug("LCM current correspondence publication unavailable", exc_info=True)
+            return {}
+
     def _advance_occurrence_cache(self, expected):
         # Only called across named writes to unrelated metadata/bindings. A
         # backfill or any unaccounted generation change invalidates raw truth.
@@ -7785,6 +7840,8 @@ class LCMEngine(
                         if id(message) in previous_generated_ids:
                             self._generated_ignored_active_replay_placeholder_message_ids.add(id(message))
                             self._generated_ignored_active_replay_placeholder_messages[id(message)] = message
+            occurrence["publication"] = (id(self._store), self._session_id, self._conversation_id,
+                                         getattr(self, "_last_active_replay_messages", ()))
             cache = getattr(self, "_occurrence_window_cache", None)
             if cache:
                 state = cache[4]
@@ -8067,6 +8124,9 @@ class LCMEngine(
                 absolute_idx = cursor + offset
                 if absolute_idx in replayed_tool_segment_indexes:
                     continue
+                plan = getattr(self, "_occurrence_ingest_plan", {})
+                if absolute_idx in plan.get("proven", ()) and absolute_idx not in plan.get("fresh", ()):
+                    continue  # The same actual row correspondence governs moved tail rows too.
                 if new_prefix_occurrences and absolute_idx in unchanged_prefix_occurrences:
                     continue
                 replay_text = text_content_for_pattern_matching(replay_msg.get("content")) or ""

@@ -1151,3 +1151,35 @@ def test_occurrence_warm_extent_miss_uses_normal_prefix_owner(build, monkeypatch
         assert len(after) > len(before), "changed prefix must reach the normal owner"
     engine.ingest(deepcopy(host))
     assert stored(engine) == after
+
+
+def test_occurrence_publication_uses_current_committed_pair_rows(build):
+    """occ-0582: publication selects accepted retry rows, not equal older pairs."""
+    engine = build()
+    host = fixture()
+    host += tool_pair("d", LONG + "d", tool_name="lookup")
+    host.append({"role": "user", "content": "pending carry sentinel", "timestamp": 40.})
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    next(row for row in host if row.get("content") == "repeat")["timestamp"] = 20.
+    for row in host:
+        if row.get("tool_call_id") in ("c", "d"):
+            row["content"] = CLEARED
+    following = [row for i in range(2) for row in tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup")]
+    host[-1:-1] = following
+    engine.ingest(deepcopy(host))
+    positions = [i for i, row in enumerate(host) if row.get("tool_call_id") in ("c", "d") or any(
+        call["id"] in ("c", "d") for call in row.get("tool_calls") or [])]
+    actual = {engine._occurrence_ingest_plan["matched"][i][1] for i in positions}
+    assert len(actual) == 4 and min(actual) > before[-1]["store_id"]
+    mapped = engine._get_store_id_map_for_messages(host)
+    assert {mapped[id(host[i])] for i in positions} == actual
+    output = engine.compress(deepcopy(host), force=True)
+    assert engine._last_compression_status == "compacted"
+    proof = engine._durable_commit_proof_payload()
+    carried = {sid for source, start, end in proof["carry_ranges"] for sid in range(start + 1, end + 1)}
+    assert actual <= carried
+    old = {row["store_id"] for row in before if row.get("tool_call_id") in ("c", "d") or any(
+        call["id"] in ("c", "d") for call in row.get("tool_calls") or [])}
+    assert not old & carried
+    assert any(row.get("tool_call_id") == "c" for row in output)

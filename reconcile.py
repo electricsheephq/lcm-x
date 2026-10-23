@@ -2961,8 +2961,13 @@ class ReconcileMixin:
                 )
                 return cursor
         stale = self._load_compression_carry_ranges(with_anchor=False)
-        if stale:  # #519 R2: the re-stored copies are the child's only rows; publication owns them alone
-            self._rewrite_own_carry_ranges([], "empty child re-stores its list", [(a + 1, b) for _s, a, b in stale])
+        if stale:  # Preserve positively selected parents before the consuming fallback.
+            plan = getattr(self, "_occurrence_ingest_plan", {})
+            selected = [(source, sid - 1, sid) for pos, (source, sid) in plan.get("matched", {}).items()
+                        if pos in plan.get("proven", ()) and source != self._session_id
+                        and any(source == s and a < sid <= b for s, a, b in stale)]
+            self._rewrite_own_carry_ranges(selected, "empty child accepts current parent witnesses",
+                                          [(a + 1, b) for _s, a, b in stale])
         return 0
 
     def _reconcile_unmatched_store_history(self, run: _StoreCursorRun) -> int:
@@ -3785,4 +3790,11 @@ class ReconcileMixin:
                 ids_by_message_id[id(msg)] = candidates[match_idx]["store_id"]
                 store_idx = match_idx + 1
 
+        current = self._current_occurrence_source_ids(
+            messages, occurrences, {int(row["store_id"]) for row in candidates})
+        if current:
+            claimed = set(current.values())
+            ids_by_message_id = {key: sid for key, sid in ids_by_message_id.items()
+                                 if key in current or sid not in claimed}
+            ids_by_message_id.update(current)
         return ids_by_message_id
