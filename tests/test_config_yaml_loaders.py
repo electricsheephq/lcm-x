@@ -160,3 +160,21 @@ def test_autoraise_disabled_consumer(yaml_config, monkeypatch, selected_loader, 
     assert config._hermes_codex_gpt55_autoraise_with_source(True) == (
         False, "config_yaml:compression.codex_gpt55_autoraise"
     )
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("items: [model#v2, other]\n", {"items": ["model#v2", "other"]}),
+    ("summary_model: foo#bar\n", {"summary_model": "foo#bar"}),
+    ("x: a #c\n", {"x": "a"}),
+    ("y: [a, b] # c\n", {"y": ["a", "b"]}),
+    ("z: http://h/#frag\n", {"z": "http://h/#frag"}),
+])
+def test_unquoted_hash_comment_boundary(yaml_config, selected_loader, text, expected):
+    yaml_config.write_text(text)
+    assert _typed(config._load_hermes_config_yaml(yaml_config)) == _typed(expected)
+    # Keep the forced-line cases runnable even without either optional library.
+    try:
+        import yaml
+    except ImportError:
+        return
+    assert _typed(expected) == _typed(yaml.safe_load(text))
