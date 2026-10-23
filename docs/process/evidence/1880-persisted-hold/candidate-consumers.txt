@@ -1,48 +1,93 @@
+__init__.py:770:    # existing _ingest_messages cursor prevents duplicates if compress() runs
 __init__.py:797:                        note = getattr(active_engine, "note_turn_complete", None)
 bench/instruments/compaction_probe/bgprep/replay.py:195:            engine.note_turn_complete()
 bench/instruments/compaction_probe/track_s/s2/run_s_hermes_builtin.py:35:    def should_compress_preflight(self, view):
 bench/instruments/compaction_probe/track_s/s2/run_s_lcmx.py:171:                if self.engine.should_compress_preflight(view):
 bench/instruments/compaction_probe/track_s/s2/run_s_lcmx.py:174:                self.engine.note_turn_complete()  # P0 cell: end turn-paced holds at each user-turn end, as a live host does
 bench/instruments/compaction_probe/track_s/s2/run_s_lcmx.py:430:                    help="call engine.note_turn_complete() at each user-turn end (live-host hold semantics; P0 cell)")
-bench/instruments/local_catchup/measurement.py:293:            due = engine.should_compress_preflight(view)
-bench/instruments/local_catchup/measurement.py:304:        engine.note_turn_complete()
+bench/instruments/local_catchup/measurement.py:294:            due = engine.should_compress_preflight(view)
+bench/instruments/local_catchup/measurement.py:305:        engine.note_turn_complete()
 bench/instruments/local_catchup/tests/test_1586_fix1.py:150:        should_compress_preflight=lambda v: False, note_turn_complete=tick, _prepare_leaves_after_turn=lambda v: None)
 bench/instruments/local_catchup/tests/test_1586_fix2.py:302:        should_compress_preflight=lambda v: True,
 bench/instruments/local_catchup/tests/test_1586_fix2.py:303:        note_turn_complete=lambda: None, _prepare_leaves_after_turn=lambda v: None)
 bench/instruments/local_catchup/tests/test_1655_round7.py:124:        monkeypatch.setattr(engine, "should_compress_preflight", lambda *a: False)
+bench/instruments/release_gauntlet/phase_a_tool_matrix.py:201:        engine._ingest_messages(messages)
+bench/instruments/release_gauntlet/phase_a_tool_matrix.py:356:    engine._ingest_messages(messages)
 benchmarking/replay.py:225:        should_compress = engine.should_compress_preflight(messages)
 benchmarking/standalone.py:61:        def should_compress_preflight(self, messages) -> bool:
 benchmarking/steady_state.py:5:``ingest()`` hook plus ``should_compress_preflight()``. That path re-scans the
 benchmarking/steady_state.py:198:                engine.should_compress_preflight(history)
 compaction.py:4:/ ``should_compress_preflight`` (public), the leaf-candidate and chunk-selection
 compaction.py:13:``should_compress_preflight`` override the ContextEngine protocol defaults.
-compaction.py:244:    def should_compress_preflight(self, messages):
-compaction.py:247:            return self._should_compress_preflight_impl(messages)
-compaction.py:249:    def _should_compress_preflight_impl(self, messages):
-compaction.py:305:                self._record_ingest_success()
-compaction.py:529:        The host asks ``should_compress_preflight`` before it emits user-visible
-compaction.py:711:            self._no_progress_proof_complete = False
-compaction.py:718:            elif (not force and self._no_progress_hold is not None
-compaction.py:719:                  and (self._no_progress_hold[1] != "no_progress"
-compaction.py:720:                       or not getattr(self, "_no_progress_hold_persisted", False))) and self._no_progress_hold_blocks(
-compaction.py:765:                    self._start_no_progress_hold("hidden_only")
-compaction.py:781:                self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress",
-compaction.py:782:                                             persist=self._no_progress_proof_complete)
-compaction.py:1792:            self._record_ingest_success()
-compaction.py:1796:                and self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
-compaction.py:1797:                and self._no_progress_hold[1] == "no_progress"):
-compaction.py:1828:                or self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
-compaction.py:2460:            self._no_progress_proof_complete = bool(
-compaction.py:2859:        self._no_progress_hold, self._no_progress_candidate = None, False  # #651: hidden-only leaves too
-compaction.py:2860:        self._clear_persisted_no_progress_hold()
+compaction.py:75:    "condensation_no_progress",
+compaction.py:238:        self._no_progress_observed_tokens = int(tokens or 0)
+compaction.py:243:        return tokens >= self.threshold_tokens and not self._sweep_budget_hold_applies(tokens)
+compaction.py:245:    def should_compress_preflight(self, messages):
+compaction.py:248:            return self._should_compress_preflight_impl(messages)
+compaction.py:250:    def _should_compress_preflight_impl(self, messages):
+compaction.py:269:        self._no_progress_observed_tokens = rough
+compaction.py:307:                replay_messages = self._ingest_messages(messages)
+compaction.py:309:                self._record_ingest_success()
+compaction.py:317:                self._record_ingest_failure("preflight", e)
+compaction.py:368:                and self._sweep_budget_hold_applies(max(rough, replay_rough, self.last_prompt_tokens or 0))
+compaction.py:435:            if self._sweep_budget_hold_applies(max(rough, self.last_prompt_tokens or 0)):
+compaction.py:549:        The host asks ``should_compress_preflight`` before it emits user-visible
+compaction.py:730:            self._no_progress_candidate = False
+compaction.py:731:            self._no_progress_proof_complete = False
+compaction.py:738:            elif (not force and self._no_progress_hold is not None
+compaction.py:739:                  and (self._no_progress_hold[1] != "no_progress"
+compaction.py:740:                       or not getattr(self, "_no_progress_hold_persisted", False))) and self._no_progress_hold_blocks(
+compaction.py:747:            self._compaction_request.hold_fit_only_requested = bool(not force and not bypass_cooldown and self._hold_fit_only_applies(
+compaction.py:785:                    self._start_no_progress_hold("hidden_only")
+compaction.py:788:            pending_no_progress = (self._no_progress_candidate and not bypass_cooldown
+compaction.py:799:            if pending_no_progress:
+compaction.py:801:                self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress",
+compaction.py:802:                                             persist=self._no_progress_proof_complete)
+compaction.py:1777:        self._no_progress_observed_tokens = int(state.observed_prompt_tokens or 0)
+compaction.py:1811:            state.working_messages = self._ingest_messages(messages)
+compaction.py:1812:            self._record_ingest_success()
+compaction.py:1816:                and self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
+compaction.py:1817:                and self._no_progress_hold[1] == "no_progress"):
+compaction.py:1848:                or self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
+compaction.py:1858:                    and self._sweep_budget_hold_applies(state.observed_prompt_tokens))
+compaction.py:1919:        self._no_progress_candidate = bool(
+compaction.py:1973:        if self._no_progress_candidate and not recovery_attempt:
+compaction.py:2323:                self._start_sweep_budget_hold(seconds_left, turn_paced=(
+compaction.py:2324:                    self._sweep_budget_hold_turn_paced
+compaction.py:2325:                    and self._sweep_budget_hold_active()
+compaction.py:2340:                self._sweep_budget_hold_turn_paced = False
+compaction.py:2345:                    self._no_progress_candidate = False  # let the next automatic pass try the fallback
+compaction.py:2352:                        self._no_progress_candidate = False
+compaction.py:2353:                    self._start_sweep_budget_hold(turn_paced=first_hang)
+compaction.py:2374:                    self._start_sweep_budget_hold()
+compaction.py:2426:                # _ingest_messages() already advanced the cursor to the original
+compaction.py:2480:            self._no_progress_proof_complete = bool(
+compaction.py:2877:        self._sweep_budget_hold_until = 0.0  # #608: a stored leaf ends the hold
+compaction.py:2878:        self._hung_summary_strike, self._sweep_budget_hold_turn_paced = None, False
+compaction.py:2879:        self._no_progress_hold, self._no_progress_candidate = None, False  # #651: hidden-only leaves too
+compaction.py:2880:        self._clear_persisted_no_progress_hold()
+docs/process/evidence/1880-persisted-hold/compat_probe.py:48:        key = "compaction_no_progress:v1:synthetic-session"
+docs/process/evidence/1880-persisted-hold/cost-integration-delta/cost_probe.py:85:    key = "compaction_no_progress:v1:S"
 docs/process/evidence/1880-persisted-hold/cost-integration-delta/cost_probe.py:116:            held._start_no_progress_hold("no_progress", persist=True)
+docs/process/evidence/1880-persisted-hold/cost-review-delta/cost_probe.py:85:    key = "compaction_no_progress:v1:S"
 docs/process/evidence/1880-persisted-hold/cost-review-delta/cost_probe.py:115:            held._start_no_progress_hold("no_progress")
+docs/process/evidence/1880-persisted-hold/cost/cost_probe.py:85:    key = "compaction_no_progress:v1:S"
 docs/process/evidence/1880-persisted-hold/cost/cost_probe.py:115:            held._start_no_progress_hold("no_progress")
+engine.py:1381:        self._sweep_budget_hold_until: float = 0.0
+engine.py:1382:        self._sweep_budget_hold_conversation = ""
+engine.py:1383:        self._sweep_budget_hold_turn_paced = False
 engine.py:1387:        self._no_progress_hold: Optional[tuple[float, str]] = None
-engine.py:1533:    def clone_for_agent(self) -> "LCMEngine":
-engine.py:1567:                source="clone_for_agent",
-engine.py:1586:        cannot be pickled. LCM already exposes clone_for_agent() as the safe
-engine.py:1590:        clone = self.clone_for_agent()
+engine.py:1394:        self._no_progress_candidate = False  # set by _compress_impl for compress()
+engine.py:2365:    def _start_sweep_budget_hold(self, seconds: Optional[float] = None, *, turn_paced: bool = False) -> None:
+engine.py:2367:        self._sweep_budget_hold_until = time.monotonic() + hold
+engine.py:2368:        self._sweep_budget_hold_conversation = self._hold_conversation_key()  # #618
+engine.py:2369:        if turn_paced and not self._sweep_budget_hold_turn_paced:
+engine.py:2372:        self._sweep_budget_hold_turn_paced = turn_paced
+engine.py:2440:    def _sweep_budget_hold_active(self) -> bool:
+engine.py:2442:        if self._sweep_budget_hold_until <= 0:
+engine.py:2444:        if self._sweep_budget_hold_conversation != self._hold_conversation_key():
+engine.py:2446:        remaining = self._sweep_budget_hold_until - time.monotonic()
+engine.py:2450:        self._sweep_budget_hold_until = 0.0
 engine.py:2453:    def _start_no_progress_hold(self, reason: str, *, persist: bool = False) -> None:
 engine.py:2456:        self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
 engine.py:2457:        self._no_progress_hold_persisted = bool(reason == "no_progress" and persist)
@@ -54,73 +99,168 @@ engine.py:2469:                self._no_progress_hold[1] == "no_progress" and ge
 engine.py:2470:            return self._persisted_no_progress_hold_active()
 engine.py:2471:        if time.monotonic() < self._no_progress_hold[0]:
 engine.py:2473:        self._no_progress_hold = None
+engine.py:2476:    def _no_progress_metadata_warning(self) -> None:
+engine.py:2478:        if not getattr(self, "_no_progress_metadata_warned", False):
+engine.py:2479:            self._no_progress_metadata_warned = True
 engine.py:2482:    def _observe_no_progress_replay(self, original, active) -> None:
 engine.py:2489:        self._no_progress_replay = None
-engine.py:2492:            public = self._no_progress_public_rows
-engine.py:2497:            self._no_progress_replay = (self._session_id, self._conversation_id, digest)
-engine.py:2501:    def _no_progress_fingerprint(self) -> Optional[str]:
-engine.py:2502:        replay = getattr(self, "_no_progress_replay", None)
-engine.py:2559:    def _persisted_no_progress_hold_active(self) -> bool:
-engine.py:2562:        self._no_progress_hold = None
-engine.py:2581:            fingerprint = self._no_progress_fingerprint()
-engine.py:2598:            self._no_progress_hold = (deadline, "no_progress")
-engine.py:2599:            self._no_progress_hold_persisted = True
-engine.py:2605:    def _persist_no_progress_hold(self) -> None:
-engine.py:2606:        fingerprint = self._no_progress_fingerprint()
-engine.py:2607:        self._no_progress_hold = None
-engine.py:2610:        if self._persisted_no_progress_hold_active():
-engine.py:2619:            self._no_progress_hold = (deadline, "no_progress")
-engine.py:2623:    def _clear_persisted_no_progress_hold(self) -> None:
-engine.py:2631:    def _no_progress_hold_status(self) -> Optional[dict]:
-engine.py:2632:        if not self._no_progress_hold_active():
-engine.py:2634:        until, reason = self._no_progress_hold
-engine.py:2642:    def record_rejected_compaction(self) -> None:
-engine.py:2654:        self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
-engine.py:2671:    def note_turn_complete(self) -> None:
-engine.py:2684:            hold = self._no_progress_hold
-engine.py:2687:                self._no_progress_hold = None
-engine.py:2692:    def _automatic_compression_blocked(self, *, ignore_cooldown: bool = False) -> bool:
-engine.py:2700:        return self._no_progress_hold_blocks(tokens) or self._sweep_budget_hold_blocks(tokens)
-engine.py:2702:    def _no_progress_hold_blocks(self, tokens: int) -> bool:
-engine.py:2705:        if self._bypasses_lcm_context_management() or not self._no_progress_hold_active():
-engine.py:2712:        """#625: the #608 hold at the host gate, with the exemptions of ``_no_progress_hold_blocks``."""
-engine.py:2719:    def _compression_block_reason(self) -> Optional[str]:
-engine.py:2722:        status = self._no_progress_hold_status()
-engine.py:2749:        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active():
-engine.py:2759:    def _record_ingest_success(self) -> None:
-engine.py:2769:        self._no_progress_replay = None
-engine.py:3024:                    active_engine.note_turn_complete()
-engine.py:3057:                self._record_ingest_success()
-engine.py:3561:        ``should_compress_preflight``). The bound armed inside a scope is
-engine.py:5864:                    self._record_ingest_success()
-engine.py:5961:            "no_progress_hold": self._no_progress_hold_status(),
-engine.py:6355:        self._no_progress_public_rows = public_rows
-engine.py:6394:        self._observe_no_progress_replay(original_messages, active_replay_messages)
-engine.py:6441:                self._observe_no_progress_replay(original_messages, current)
-engine.py:6954:        self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
-engine.py:8775:            self._clear_persisted_no_progress_hold()
+engine.py:2490:        if getattr(self, "_no_progress_ingest_generation", None) != self._ingest_failure_count:
+engine.py:2494:            public = self._no_progress_public_rows
+engine.py:2499:            self._no_progress_replay = (self._session_id, self._conversation_id, digest)
+engine.py:2501:            self._no_progress_metadata_warning()
+engine.py:2503:    def _no_progress_fingerprint(self) -> Optional[str]:
+engine.py:2504:        replay = getattr(self, "_no_progress_replay", None)
+engine.py:2505:        observed = getattr(self, "_no_progress_observed_tokens", None)
+engine.py:2550:            bound_store = getattr(self, "_no_progress_bound_store", None)
+engine.py:2553:                self._no_progress_bound_store = bound_store
+engine.py:2563:            self._no_progress_metadata_warning()
+engine.py:2566:    def _persisted_no_progress_hold_active(self) -> bool:
+engine.py:2569:        self._no_progress_hold = None
+engine.py:2571:            record = self._store.read_metadata_json(f"compaction_no_progress:v1:{self._session_id}")
+engine.py:2588:            fingerprint = self._no_progress_fingerprint()
+engine.py:2598:            observed = getattr(self, "_no_progress_deadline", None)
+engine.py:2602:            self._no_progress_deadline = (identity, deadline)
+engine.py:2605:            self._no_progress_hold = (deadline, "no_progress")
+engine.py:2606:            self._no_progress_hold_persisted = True
+engine.py:2609:            self._no_progress_metadata_warning()
+engine.py:2612:    def _persist_no_progress_hold(self) -> None:
+engine.py:2613:        fingerprint = self._no_progress_fingerprint()
+engine.py:2614:        self._no_progress_hold = None
+engine.py:2617:        if self._persisted_no_progress_hold_active():
+engine.py:2623:            self._store.write_metadata_json([f"compaction_no_progress:v1:{self._session_id}"], json.dumps(record))
+engine.py:2625:            self._no_progress_deadline = ((fingerprint, now, record["expires_at"]), deadline)
+engine.py:2626:            self._no_progress_hold = (deadline, "no_progress")
+engine.py:2628:            self._no_progress_metadata_warning()
+engine.py:2630:    def _clear_persisted_no_progress_hold(self) -> None:
+engine.py:2632:            key = f"compaction_no_progress:v1:{self._session_id}"
+engine.py:2636:            self._no_progress_metadata_warning()
+engine.py:2638:    def _no_progress_hold_status(self) -> Optional[dict]:
+engine.py:2639:        if not self._no_progress_hold_active():
+engine.py:2641:        until, reason = self._no_progress_hold
+engine.py:2649:    def record_rejected_compaction(self) -> None:
+engine.py:2661:        self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
+engine.py:2678:    def note_turn_complete(self) -> None:
+engine.py:2682:            if (self._sweep_budget_hold_turn_paced and self._hung_summary_strike is not None
+engine.py:2684:                    and self._sweep_budget_hold_conversation == self._hold_conversation_key()
+engine.py:2685:                    and self._sweep_budget_hold_active()
+engine.py:2688:                self._sweep_budget_hold_until, self._sweep_budget_hold_turn_paced = 0.0, False
+engine.py:2691:            hold = self._no_progress_hold
+engine.py:2694:                self._no_progress_hold = None
+engine.py:2699:    def _automatic_compression_blocked(self, *, ignore_cooldown: bool = False) -> bool:
+engine.py:2707:        return self._no_progress_hold_blocks(tokens) or self._sweep_budget_hold_blocks(tokens)
+engine.py:2709:    def _no_progress_hold_blocks(self, tokens: int) -> bool:
+engine.py:2714:        self._no_progress_observed_tokens = int(tokens or 0)
+engine.py:2715:        if not self._no_progress_hold_active():
+engine.py:2719:        return self._sweep_budget_hold_applies(tokens)
+engine.py:2721:    def _sweep_budget_hold_blocks(self, tokens: int) -> bool:
+engine.py:2722:        """#625: the #608 hold at the host gate, with the exemptions of ``_no_progress_hold_blocks``."""
+engine.py:2723:        if self._bypasses_lcm_context_management() or not self._sweep_budget_hold_active():
+engine.py:2727:        return self._sweep_budget_hold_applies(tokens)
+engine.py:2729:    def _compression_block_reason(self) -> Optional[str]:
+engine.py:2732:        status = self._no_progress_hold_status()
+engine.py:2735:        return "cooldown:lcm_sweep_budget" if self._sweep_budget_hold_active() else None
+engine.py:2745:    def _hold_fit_only_applies(self, tokens: int) -> bool:
+engine.py:2754:            and self._sweep_budget_hold_active())
+engine.py:2756:    def _sweep_budget_hold_applies(self, tokens: Optional[int]) -> bool:
+engine.py:2759:        self._no_progress_observed_tokens = None if tokens is None else int(tokens)
+engine.py:2760:        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active():
+engine.py:2770:    def _record_ingest_success(self) -> None:
+engine.py:2771:        if getattr(self, "_no_progress_ingest_generation", None) == self._ingest_failure_count:
+engine.py:2774:            self._no_progress_replay = None
+engine.py:2776:    def _record_ingest_failure(self, where: str, error: Exception) -> None:
+engine.py:2783:        self._no_progress_replay = None
+engine.py:3038:                    active_engine.note_turn_complete()
+engine.py:3053:        Uses the same _ingest_messages cursor as compress(), so if
+engine.py:3070:                self._ingest_messages(messages)
+engine.py:3071:                self._record_ingest_success()
+engine.py:3078:                self._record_ingest_failure("per-turn ingest()", e)
+engine.py:3575:        ``should_compress_preflight``). The bound armed inside a scope is
+engine.py:5511:                    self._ingest_messages(
+engine.py:5877:                    self._ingest_messages(messages)
+engine.py:5878:                    self._record_ingest_success()
+engine.py:5881:                    self._record_ingest_failure("tool-call ingest", e)
+engine.py:5975:            "no_progress_hold": self._no_progress_hold_status(),
+engine.py:6369:        self._no_progress_public_rows = public_rows
+engine.py:6408:        self._observe_no_progress_replay(original_messages, active_replay_messages)
+engine.py:6435:            if id(row) not in self._no_progress_public_rows:
+engine.py:6436:                self._no_progress_public_rows[id(row)] = {
+engine.py:6461:                self._observe_no_progress_replay(original_messages, current)
+engine.py:6956:    def _ingest_messages(
+engine.py:6974:        self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
+engine.py:6975:        self._no_progress_ingest_generation = self._ingest_failure_count
+engine.py:7257:                    self._record_ingest_failure("identity-anchor pre-match", exc)
+engine.py:8804:            self._no_progress_candidate = False  # #909/#651: a stored condensation is progress
+engine.py:8805:            self._clear_persisted_no_progress_hold()
+engine.py:8815:                return passes, "condensation_no_progress"
+engine.py:10137:        (output of ``_ingest_messages``), not raw messages.  ``working_messages``
 reset_state.py:71:        self._no_progress_hold, self._no_progress_candidate = None, False
 reset_state.py:72:        self._no_progress_replay = None  # Reload the scoped durable hold only after current ingest proof.
-reset_state.py:73:        self._no_progress_hold_persisted = False
+reset_state.py:73:        self._no_progress_observed_tokens = self._no_progress_ingest_generation = None
+reset_state.py:74:        self._no_progress_hold_persisted = False
+reset_state.py:77:        self._sweep_budget_hold_until, self._sweep_budget_hold_conversation = 0.0, ""
+reset_state.py:78:        self._hung_summary_strike, self._sweep_budget_hold_turn_paced = None, False
+tests/behaviour/compress_trace_harness.py:453:    "_ingest_messages",
+tests/behaviour/compress_trace_harness.py:487:    "_no_progress_candidate",
 tests/behaviour/compress_trace_harness.py:488:    "_no_progress_hold",
 tests/behaviour/compress_trace_harness.py:489:    "_no_progress_hold_blocks",
 tests/behaviour/compress_trace_harness.py:490:    "_no_progress_hold_persisted",
-tests/behaviour/compress_trace_harness.py:491:    "_no_progress_proof_complete",
-tests/behaviour/compress_trace_harness.py:492:    "_no_progress_public_rows",
-tests/behaviour/compress_trace_harness.py:584:            identity_keys = path.endswith(("store_ids_by_message_id", "_compress_occurrences", "_no_progress_public_rows"))
+tests/behaviour/compress_trace_harness.py:491:    "_no_progress_ingest_generation",
+tests/behaviour/compress_trace_harness.py:492:    "_no_progress_observed_tokens",
+tests/behaviour/compress_trace_harness.py:493:    "_no_progress_proof_complete",
+tests/behaviour/compress_trace_harness.py:494:    "_no_progress_public_rows",
+tests/behaviour/compress_trace_harness.py:518:    "_start_sweep_budget_hold",
+tests/behaviour/compress_trace_harness.py:537:    "_sweep_budget_hold_applies",
+tests/behaviour/compress_trace_harness.py:538:    "_sweep_budget_hold_turn_paced",
+tests/behaviour/compress_trace_harness.py:539:    "_sweep_budget_hold_until",
+tests/behaviour/compress_trace_harness.py:586:            identity_keys = path.endswith(("store_ids_by_message_id", "_compress_occurrences", "_no_progress_public_rows"))
+tests/behaviour/compress_trace_harness.py:1493:                                assert engine._sweep_budget_hold_turn_paced == (not repeated and not overflow and not fallback)
+tests/behaviour/compress_trace_harness.py:1495:                                    "strike": engine._hung_summary_strike, "turn_paced": engine._sweep_budget_hold_turn_paced,
+tests/behaviour/compress_trace_harness.py:1496:                                    "hold_until": engine._sweep_budget_hold_until})))
+tests/behaviour/compress_trace_harness.py:1500:                                assert engine._sweep_budget_hold_until == 0
+tests/behaviour/ingest_trace_harness.py:54:# FROZEN inventory, never generated from _ingest_messages at observation time.
 tests/behaviour/ingest_trace_harness.py:56:    "_no_progress_replay", "_no_progress_public_rows", "_no_progress_metadata_warned", "_no_progress_hold_persisted",
-tests/behaviour/ingest_trace_harness.py:275:        if path == "_no_progress_replay" and isinstance(value, tuple) and len(value) == 3:
-tests/behaviour/ingest_trace_harness.py:281:        if path == "_no_progress_public_rows" and isinstance(value, dict):
+tests/behaviour/ingest_trace_harness.py:57:    "_no_progress_ingest_generation", "_no_progress_observed_tokens", "_ingest_replay_redaction_changes",
+tests/behaviour/ingest_trace_harness.py:191:    pending, visited, attributes = ["_ingest_messages"], set(), set()
+tests/behaviour/ingest_trace_harness.py:277:        if path == "_no_progress_replay" and isinstance(value, tuple) and len(value) == 3:
+tests/behaviour/ingest_trace_harness.py:283:        if path == "_no_progress_public_rows" and isinstance(value, dict):
+tests/behaviour/ingest_trace_harness.py:467:        engine._ingest_messages(original)
+tests/behaviour/ingest_trace_harness.py:560:            active = engine._ingest_messages(incoming)
+tests/behaviour/ingest_trace_harness.py:931:                        result = engine._ingest_messages(incoming,
+tests/behaviour/ingest_trace_harness.py:957:                    result = engine._ingest_messages(incoming)
+tests/behaviour/ingest_trace_harness.py:968:                    emit("cold-return", engine._ingest_messages(incoming))
+tests/behaviour/test_child_isolation.py:20:_last_stub_first_exit _no_progress_candidate _objective_only_noop _pending_emission_candidates
+tests/behaviour/test_child_isolation.py:244:            monkeypatch.setattr(engine, "_ingest_messages", fail_ingest)
 tests/behaviour/test_child_isolation.py:260:            assert engine.should_compress_preflight([]) is False
-tests/behaviour/test_ingest_trace.py:77:    replay = canonical.value(("S", "C", "sandbox-digest-a"), "_no_progress_replay")
-tests/behaviour/test_ingest_trace.py:78:    assert replay == canonical.value(("S", "C", "sandbox-digest-a"), "_no_progress_replay")
-tests/behaviour/test_ingest_trace.py:79:    assert replay != canonical.value(("S", "C", "sandbox-digest-b"), "_no_progress_replay")
-tests/behaviour/test_ingest_trace.py:80:    assert canonical.value({id(first): first}, "_no_progress_public_rows") == {
+tests/behaviour/test_child_isolation.py:369:                        engine._ingest_messages([message])
+tests/behaviour/test_gap_engine_contracts.py:62:        # The authority inventory requires scoped writes at _ingest_messages.
+tests/behaviour/test_ingest_trace.py:32:            stage, marker, data = payload.partition("attr _no_progress_public_rows ")
+tests/behaviour/test_ingest_trace.py:46:    assert "_ingest_messages" in methods
+tests/behaviour/test_ingest_trace.py:53:        " def _ingest_messages(self): return self._moved_phase()\n"
+tests/behaviour/test_ingest_trace.py:58:    assert reachable == {"_ingest_messages", "_moved_phase", "_helper"}
+tests/behaviour/test_ingest_trace.py:90:    replay = canonical.value(("S", "C", "sandbox-digest-a"), "_no_progress_replay")
+tests/behaviour/test_ingest_trace.py:91:    assert replay == canonical.value(("S", "C", "sandbox-digest-a"), "_no_progress_replay")
+tests/behaviour/test_ingest_trace.py:92:    assert replay != canonical.value(("S", "C", "sandbox-digest-b"), "_no_progress_replay")
+tests/behaviour/test_ingest_trace.py:93:    assert canonical.value({id(first): first}, "_no_progress_public_rows") == {
+tests/behaviour/test_ingest_trace.py:104:        engine._ingest_messages(first)
+tests/behaviour/test_ingest_trace.py:109:        engine._ingest_messages([*first, missing])
+tests/behaviour/test_ingest_trace.py:159:        assert set(engine._no_progress_public_rows) == {second}
+tests/behaviour/test_ingest_trace.py:189:        engine._ingest_messages(incoming)
+tests/behaviour/test_ingest_trace.py:235:        old._ingest_messages([{"role": "user", "content": "before reopen"}])
+tests/behaviour/test_ingest_trace.py:237:        fresh._ingest_messages([{"role": "user", "content": "after reopen"}])
+tests/behaviour/test_ingest_trace.py:250:        fresh._ingest_messages([{"role": "user", "content": "cold-phase row"}])
+tests/behaviour/test_ingest_trace_observation.py:72:    original = engine_type._ingest_messages
+tests/behaviour/test_ingest_trace_observation.py:102:    monkeypatch.setattr(engine_type, "_ingest_messages", lose_owner)
+tests/behaviour/test_ingest_trace_observation.py:116:    original = harness.engine_module.LCMEngine._ingest_messages
+tests/behaviour/test_ingest_trace_observation.py:134:    monkeypatch.setattr(harness.engine_module.LCMEngine, "_ingest_messages", extra_read)
+tests/behaviour/test_ingest_trace_observation.py:147:    ingest = engine_type._ingest_messages
+tests/behaviour/test_ingest_trace_observation.py:173:    monkeypatch.setattr(engine_type, "_ingest_messages", ingest_observed)
+tests/behaviour/test_ingest_trace_observation.py:187:        if frame.f_code.co_name != "_ingest_messages":
 tests/behaviour/test_rebind_equivalence.py:58:    engine.record_rejected_compaction()
 tests/behaviour/test_rebind_equivalence.py:59:    assert engine._no_progress_hold_active()
 tests/behaviour/test_rebind_equivalence.py:60:    engine.should_compress_preflight(view)
 tests/behaviour/test_rebind_equivalence.py:72:        preflight = engine.should_compress_preflight(view)
 tests/behaviour/test_rebind_equivalence.py:82:        engine.note_turn_complete()
+tests/differential/driver.py:292:                record = engine._store.read_metadata_json("compaction_no_progress:v1:S")
 tests/differential/driver.py:296:                                  hold=engine._no_progress_hold, record=record,
 tests/differential/driver.py:297:                                  fingerprint=engine._no_progress_fingerprint(),
 tests/differential/driver.py:323:                                  complete=getattr(engine, "_no_progress_proof_complete", False),
@@ -132,24 +272,65 @@ tests/harness/test_harness.py:244:    """The host reads ``_automatic_compression
 tests/harness/test_harness.py:251:        should_compress_preflight = Mock(return_value=wants)
 tests/harness/test_harness.py:254:        def _automatic_compression_blocked(self, *, ignore_cooldown=False):
 tests/harness/test_harness.py:266:                             compress=Mock(return_value=view), _automatic_compression_blocked=lambda **kwargs: True)
-tests/invariants/test_issue_1603_profile_config.py:301:            clone = engine.clone_for_agent()
-tests/test_active_tool_stubbing.py:332:    assert engine.should_compress_preflight(messages) is True
-tests/test_active_tool_stubbing.py:352:    assert engine.should_compress_preflight(messages) is True
-tests/test_active_tool_stubbing.py:379:    assert engine.should_compress_preflight(messages) is False
-tests/test_active_tool_stubbing.py:392:    assert engine.should_compress_preflight(messages) is True
-tests/test_active_tool_stubbing.py:410:    assert engine.should_compress_preflight(messages) is True
-tests/test_active_tool_stubbing.py:432:    assert engine.should_compress_preflight(messages) is False
-tests/test_active_tool_stubbing.py:452:    assert engine.should_compress_preflight(messages) is True
-tests/test_active_tool_stubbing.py:472:    assert engine.should_compress_preflight(messages) is True
-tests/test_active_tool_stubbing.py:493:    assert engine.should_compress_preflight(messages) is True
-tests/test_active_tool_stubbing.py:519:    assert engine.should_compress_preflight(messages) is True
-tests/test_active_tool_stubbing.py:542:    assert engine.should_compress_preflight(messages) is False
+tests/invariants/test_identity_seeds.py:359:def test_rotation_no_progress_fires_no_hooks(marker_only):
+tests/invariants/test_issue_1353_fault_cache_consistency.py:344:            e._ingest_messages(deepcopy(rewritten))
+tests/invariants/test_issue_1353_fault_cache_consistency.py:345:        out_same = e._ingest_messages(deepcopy(host))  # reverted, same length
+tests/invariants/test_issue_1353_fault_cache_consistency.py:346:        out_tail = e._ingest_messages(deepcopy(host) + [_m("user", "u four", 21.0)])
+tests/invariants/test_issue_1353_fault_cache_consistency.py:381:            e._ingest_messages(deepcopy(rew))
+tests/invariants/test_issue_1353_fault_cache_consistency.py:384:        out = e._ingest_messages(nxt)
+tests/invariants/test_issue_1353_placeholder_provenance.py:51:        e._ingest_messages(
+tests/invariants/test_issue_1353_prematch_fault_prefix.py:104:            assert e._no_progress_replay is None
+tests/invariants/test_issue_1353_prematch_fault_prefix.py:111:        assert e._no_progress_replay is not None
+tests/invariants/test_issue_1385_salvage_provenance.py:32:    first._ingest_messages(original)
+tests/invariants/test_issue_1385_salvage_provenance.py:55:    engine._ingest_messages(host)
+tests/invariants/test_issue_1385_salvage_provenance.py:62:    engine._ingest_messages(copy.deepcopy(host))
+tests/invariants/test_issue_1385_salvage_provenance.py:130:    engine._ingest_messages(host)
+tests/invariants/test_issue_1385_salvage_provenance.py:154:    first._ingest_messages(view)
+tests/invariants/test_issue_1385_salvage_provenance.py:164:    engine._ingest_messages(host)
+tests/invariants/test_issue_1628_rewind_rescan.py:141:    engine._ingest_messages(host)
+tests/invariants/test_issue_1628_rewind_rescan.py:146:    active = engine._ingest_messages(host)
+tests/invariants/test_issue_1628_rewind_rescan.py:151:    active = engine._ingest_messages(host)
+tests/invariants/test_issue_1628_rewind_rescan.py:186:    active = engine._ingest_messages(host)
+tests/invariants/test_issue_1628_rewind_rescan.py:258:    engine._ingest_messages(host)
+tests/invariants/test_issue_1628_rewind_rescan.py:278:    engine._ingest_messages(host)
+tests/invariants/test_issue_1822_masked_replay.py:36:        engine._ingest_messages(messages)
+tests/invariants/test_issue_1822_masked_replay.py:66:        engine._ingest_messages(messages)
+tests/invariants/test_issue_1822_masked_replay.py:69:        engine._ingest_messages(messages)
+tests/invariants/test_issue_1822_masked_replay.py:85:    engine._ingest_messages([{"role": "user", "content": "A", "timestamp": 100.0},
+tests/invariants/test_issue_1822_masked_replay.py:99:    engine._ingest_messages([
+tests/invariants/test_retry_r3.py:43:    machine.engine._ingest_messages(host)
+tests/invariants/test_retry_r3.py:45:    machine.engine._ingest_messages(deepcopy(host))
+tests/invariants/test_retry_r3.py:63:    machine.engine._ingest_messages(host)
+tests/invariants/test_retry_r3.py:65:    machine.engine._ingest_messages(deepcopy(host))
+tests/invariants/test_retry_r3.py:82:    machine.engine._ingest_messages(host)
+tests/invariants/test_retry_r3.py:97:    machine.engine._ingest_messages(host)
+tests/invariants/test_retry_r3.py:99:    machine.engine._ingest_messages(deepcopy(host))
+tests/legacy_native_state.py:328:        working = self._ingest_messages(messages)
+tests/test_active_tool_stubbing.py:333:    assert engine.should_compress_preflight(messages) is False
+tests/test_active_tool_stubbing.py:354:    assert engine.should_compress_preflight(messages) is False
+tests/test_active_tool_stubbing.py:382:    assert engine.should_compress_preflight(messages) is False
+tests/test_active_tool_stubbing.py:396:    monkeypatch.setattr(engine, "_ingest_messages", ingest)
+tests/test_active_tool_stubbing.py:398:    assert engine.should_compress_preflight(messages) is False
+tests/test_active_tool_stubbing.py:413:    monkeypatch.setattr(engine, "_ingest_messages", ingest)
+tests/test_active_tool_stubbing.py:419:    assert engine.should_compress_preflight(messages) is False
+tests/test_active_tool_stubbing.py:438:    monkeypatch.setattr(engine, "_ingest_messages", lambda _messages: replay_messages)
+tests/test_active_tool_stubbing.py:442:    assert engine.should_compress_preflight(messages) is False
+tests/test_active_tool_stubbing.py:463:    assert engine.should_compress_preflight(messages) is True
+tests/test_active_tool_stubbing.py:483:    assert engine.should_compress_preflight(messages) is True
+tests/test_active_tool_stubbing.py:504:    assert engine.should_compress_preflight(messages) is True
+tests/test_active_tool_stubbing.py:530:    assert engine.should_compress_preflight(messages) is True
+tests/test_active_tool_stubbing.py:553:    assert engine.should_compress_preflight(messages) is False
+tests/test_adaptive_retrieval.py:460:def test_no_progress_terminates_and_incomplete_finish_falls_back(tmp_path):
+tests/test_auto_focus_topic.py:220:        _ingest_messages -> _redact_active_replay_messages, so the derived
+tests/test_auto_focus_topic.py:226:            # Note: In production, these go through _ingest_messages which calls
+tests/test_auto_focus_topic.py:260:    def test_ingest_messages_redacts_before_focus_derivation(self, tmp_path):
+tests/test_auto_focus_topic.py:261:        """Integration test: _ingest_messages returns redacted messages that
+tests/test_auto_focus_topic.py:284:            working_messages = engine._ingest_messages(raw_messages)
 tests/test_auxiliary_first_ingest.py:42:        return self.engine.should_compress_preflight(history)
 tests/test_auxiliary_first_ingest.py:53:        return self.engine.should_compress_preflight(history)
-tests/test_compression_boundary.py:606:    turn_engine = proto.clone_for_agent()
-tests/test_compression_boundary.py:633:        other = proto.clone_for_agent()  # a fresh AIAgent's clone, started without the gateway key
-tests/test_compression_boundary.py:662:    stale, other = proto.clone_for_agent(), proto.clone_for_agent()
-tests/test_compression_boundary.py:706:    engine = LCMEngine(config=cfg, hermes_home=str(tmp_path / "home")).clone_for_agent()
+tests/test_c1_s3a_emission_channels.py:80:    working = engine._ingest_messages(rows)
+tests/test_evidence_compiler.py:660:def test_no_progress_retrieval_stops_and_trace_is_secret_safe(tmp_path):
+tests/test_evidence_contract.py:1155:def test_second_targeted_query_may_close_a_named_slot_after_no_progress(tmp_path):
 tests/test_fresh_tail_pressure_yield.py:19:- ``should_compress_preflight`` agrees with ``compress`` in the yield states,
 tests/test_fresh_tail_pressure_yield.py:165:        assert engine.should_compress_preflight(list(messages)) is True
 tests/test_fresh_tail_pressure_yield.py:230:            verdicts.append(engine.should_compress_preflight(list(messages)))
@@ -179,8 +360,6 @@ tests/test_fresh_tail_pressure_yield.py:554:        assert engine.should_compres
 tests/test_fresh_tail_pressure_yield.py:596:        assert engine.should_compress_preflight(list(messages)) is True
 tests/test_fresh_tail_pressure_yield.py:625:        assert engine.should_compress_preflight(list(messages)) is False
 tests/test_fresh_tail_pressure_yield.py:653:        assert engine.should_compress_preflight(list(messages)) is True
-tests/test_frontier_state.py:96:    clone = engine.clone_for_agent() if mode == "clone" else copy.deepcopy(engine)
-tests/test_frontier_state.py:171:    clone = (engine.clone_for_agent() if mode == "clone" else
 tests/test_host_rewrite_identity.py:56:        self.engine.should_compress_preflight(self.history)  # ingests the RAW row
 tests/test_host_rewrite_identity.py:72:        self.engine.should_compress_preflight(self.history)
 tests/test_host_rewrite_identity.py:449:        engine.should_compress_preflight(messages)
@@ -189,36 +368,133 @@ tests/test_host_rewrite_identity.py:479:        host.engine.should_compress_pref
 tests/test_host_rewrite_identity.py:514:        host.engine.should_compress_preflight(host.history)
 tests/test_host_rewrite_identity.py:548:        host.engine.should_compress_preflight(host.history)
 tests/test_host_rewrite_identity.py:580:    engine.should_compress_preflight(messages)  # stores the RAW prompt, then the crash
+tests/test_host_uid_emit_carry.py:222:    engine._ingest_messages(initial)
+tests/test_host_uid_emit_carry.py:230:    out = engine._ingest_messages(host)
+tests/test_host_uid_emit_carry.py:304:    engine._ingest_messages(original)
+tests/test_host_uid_emit_carry.py:308:    out = engine._ingest_messages(retry)
+tests/test_host_uid_emit_carry.py:312:    engine._ingest_messages(copy.deepcopy(retry))
+tests/test_host_uid_emit_carry.py:365:        shadow._ingest_messages(copy.deepcopy(rows))
+tests/test_host_uid_emit_carry.py:366:        base._ingest_messages(copy.deepcopy(rows))
+tests/test_host_uid_emit_carry.py:443:        second._ingest_messages(persisted)
+tests/test_host_uid_emit_carry.py:475:        second._ingest_messages(persisted)
+tests/test_host_uid_emit_carry.py:559:        first._ingest_messages(copy.deepcopy(host))
+tests/test_host_uid_emit_carry.py:617:        first._ingest_messages(copy.deepcopy(host))
+tests/test_host_uid_emit_carry.py:657:        first._ingest_messages(copy.deepcopy(host))
+tests/test_host_uid_emit_carry.py:710:        first._ingest_messages(copy.deepcopy(host))
+tests/test_host_uid_engine_uids.py:576:            second._ingest_messages(persisted)
+tests/test_host_uid_engine_uids.py:667:        second._ingest_messages(persisted)
+tests/test_host_uid_shadow.py:155:        returned = engine._ingest_messages([dict(m) for m in messages])
+tests/test_host_uid_shadow.py:791:        returned = engine._ingest_messages([_RaisingUidDict(m) for m in _UID_LIST])
+tests/test_ingest_protection.py:126:    engine._ingest_messages([{"role": "user", "content": "hello"}])
+tests/test_ingest_protection.py:153:    engine._ingest_messages([{"role": "user", "content": f"api_key={secret}"}])
+tests/test_ingest_protection.py:183:    engine._ingest_messages([
+tests/test_ingest_protection.py:224:    engine._ingest_messages([{"role": "user", "content": content}])
+tests/test_ingest_protection.py:300:    no_session_active = no_session_engine._ingest_messages(deepcopy(messages))
+tests/test_ingest_protection.py:360:    engine._ingest_messages([
+tests/test_ingest_protection.py:737:    engine._ingest_messages([{"role": "user", "content": "see image " + DATA_URI}])
+tests/test_ingest_protection.py:786:    engine._ingest_messages([{"role": "user", "content": "see image " + DATA_URI}])
+tests/test_ingest_protection.py:812:    engine._ingest_messages([{"role": "user", "content": DATA_URI + " please analyze this"}])
+tests/test_ingest_protection.py:827:    engine._ingest_messages([{"role": "user", "content": bare_data_uri}])
+tests/test_ingest_protection.py:842:    engine._ingest_messages([{"role": "user", "content": "image " + data_uri}])
+tests/test_ingest_protection.py:869:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:883:    engine._ingest_messages([{"role": "user", "content": GENERIC_BASE64}])
+tests/test_ingest_protection.py:898:    engine._ingest_messages([{"role": "user", "content": f"prefix {GENERIC_BASE64URL} suffix"}])
+tests/test_ingest_protection.py:929:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:947:    engine._ingest_messages([{"role": "user", "content": f"prefix {GENERIC_BASE64} suffix"}])
+tests/test_ingest_protection.py:966:    engine._ingest_messages([{"role": "user", "content": f"image {DATA_URI} blob {GENERIC_BASE64} done"}])
+tests/test_ingest_protection.py:986:    engine._ingest_messages([{"role": "user", "content": repeated_text}])
+tests/test_ingest_protection.py:1002:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1022:    active = engine._ingest_messages([deepcopy(message)])
+tests/test_ingest_protection.py:1041:    active = engine._ingest_messages([deepcopy(message)])
 tests/test_ingest_protection.py:1069:    assert engine.should_compress_preflight(deepcopy(messages)) is False
 tests/test_ingest_protection.py:1070:    assert engine.should_compress_preflight(deepcopy(messages)) is False
+tests/test_ingest_protection.py:1107:    engine._ingest_messages([{"role": "user", "content": original}])
+tests/test_ingest_protection.py:1147:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1152:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1176:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1181:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1202:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1212:    replay_engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1227:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1237:    replay_engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1262:    engine._ingest_messages(messages(payload_a))
+tests/test_ingest_protection.py:1267:    replay_engine._ingest_messages(messages(payload_b))
+tests/test_ingest_protection.py:1321:    engine._ingest_messages(messages(arguments_a))
+tests/test_ingest_protection.py:1326:    engine._ingest_messages(messages(arguments_b))
+tests/test_ingest_protection.py:1379:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1395:    engine._ingest_messages([{"role": "tool", "tool_call_id": "call_media", "content": "tool saw " + DATA_URI}])
+tests/test_ingest_protection.py:1422:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1457:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1490:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1518:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1559:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1592:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1619:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1654:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1696:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1701:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1722:        engine._ingest_messages([
+tests/test_ingest_protection.py:1767:    engine._ingest_messages(messages)
+tests/test_ingest_protection.py:1785:    replay_engine._ingest_messages(messages)
+tests/test_ingest_protection.py:1794:    engine._ingest_messages([
+tests/test_ingest_protection.py:2102:    engine._ingest_messages([{"role": "user", "content": DATA_URI}])
+tests/test_ingest_protection.py:3572:    engine._ingest_messages([{"role": "assistant", "content": broken}])
 tests/test_ingest_protection.py:3665:    assert engine.should_compress_preflight(messages)
 tests/test_ingest_protection.py:3703:    assert first.should_compress_preflight(messages)
+tests/test_ingest_protection.py:3925:    engine._ingest_messages(messages)
+tests/test_ingest_protection.py:3927:    engine._ingest_messages(messages + [{"role": "user", "content": "new message"}])
+tests/test_ingest_protection.py:3938:    engine._ingest_messages([
 tests/test_ingest_protection.py:4030:    assert engine.should_compress_preflight(messages)
+tests/test_ingest_protection.py:4897:    engine._ingest_messages([{"role": "assistant", "content": report}])
+tests/test_ingest_protection.py:4954:    engine._ingest_messages([{"role": "user", "content": f"attachment:\n{wrapped}\nend"}])
+tests/test_ingest_protection.py:4966:    engine._ingest_messages([{"role": "user", "content": f"attachment:\r\n{wrapped}\r\nend"}])
+tests/test_ingest_protection.py:4981:    engine._ingest_messages([{"role": "user", "content": f"attachment:\n{wrapped}\nend"}])
 tests/test_issue_1016_nontool_externalization_floor.py:147:    if engine.should_compress_preflight(history):
-tests/test_issue_1016_nontool_externalization_floor.py:326:    if engine.should_compress_preflight(history):
-tests/test_issue_1055_window_aware_floor.py:289:    clone = parent.clone_for_agent()
+tests/test_issue_1016_nontool_externalization_floor.py:327:    requested = engine.should_compress_preflight(history)
+tests/test_issue_1096_turn_end_probe.py:42:        assert engine._sweep_budget_hold_active()
+tests/test_issue_1096_turn_end_probe.py:43:        assert engine._sweep_budget_hold_turn_paced
 tests/test_issue_1096_turn_end_probe.py:44:        assert not engine._no_progress_hold_active()
 tests/test_issue_1096_turn_end_probe.py:47:        assert engine._compression_block_reason() == "cooldown:lcm_sweep_budget"
+tests/test_issue_1096_turn_end_probe.py:51:        assert engine._hold_fit_only_applies(ceiling)
 tests/test_issue_1096_turn_end_probe.py:68:        engine.note_turn_complete()
 tests/test_issue_1096_turn_end_probe.py:69:        engine.note_turn_complete()  # duplicate host notification cannot release twice
 tests/test_issue_1096_turn_end_probe.py:71:    assert not engine._sweep_budget_hold_active() and not engine._no_progress_hold_active()
+tests/test_issue_1096_turn_end_probe.py:77:    assert not engine._sweep_budget_hold_turn_paced
 tests/test_issue_1096_turn_end_probe.py:78:    assert not engine._sweep_budget_hold_active() and not engine._no_progress_hold_active()
 tests/test_issue_1096_turn_end_probe.py:87:    engine.note_turn_complete()
+tests/test_issue_1096_turn_end_probe.py:90:    assert not engine._sweep_budget_hold_turn_paced
 tests/test_issue_1096_turn_end_probe.py:91:    assert engine._sweep_budget_hold_active() and engine._no_progress_hold_active()
 tests/test_issue_1096_turn_end_probe.py:92:    until, no_progress = engine._sweep_budget_hold_until, engine._no_progress_hold
 tests/test_issue_1096_turn_end_probe.py:93:    engine.note_turn_complete()
 tests/test_issue_1096_turn_end_probe.py:94:    assert engine._sweep_budget_hold_until == until and engine._no_progress_hold == no_progress
 tests/test_issue_1096_turn_end_probe.py:98:    assert not engine._sweep_budget_hold_active() and not engine._no_progress_hold_active()
+tests/test_issue_1096_turn_end_probe.py:101:    assert len(calls) == 3 and not engine._sweep_budget_hold_turn_paced
 tests/test_issue_1096_turn_end_probe.py:102:    assert engine._sweep_budget_hold_active() and engine._no_progress_hold_active()
+tests/test_issue_1096_turn_end_probe.py:109:        assert engine._sweep_budget_hold_active() and engine._sweep_budget_hold_turn_paced
+tests/test_issue_1096_turn_end_probe.py:114:        assert engine._sweep_budget_hold_active() and engine._sweep_budget_hold_turn_paced
 tests/test_issue_1096_turn_end_probe.py:116:        engine.note_turn_complete()
+tests/test_issue_1096_turn_end_probe.py:120:    assert not engine._sweep_budget_hold_active()
+tests/test_issue_1096_turn_end_probe.py:139:    assert not engine._sweep_budget_hold_turn_paced
+tests/test_issue_1096_turn_end_probe.py:143:        assert engine._sweep_budget_hold_active() and not engine._sweep_budget_hold_turn_paced
+tests/test_issue_1096_turn_end_probe.py:144:        until = engine._sweep_budget_hold_until
 tests/test_issue_1096_turn_end_probe.py:145:        engine.note_turn_complete()
+tests/test_issue_1096_turn_end_probe.py:147:    assert engine._sweep_budget_hold_active() and engine._sweep_budget_hold_until == until
+tests/test_issue_1096_turn_end_probe.py:156:    assert engine._sweep_budget_hold_until - armed == pytest.approx(600, abs=1)
 tests/test_issue_1096_turn_end_probe.py:165:    assert len(calls) == 2 and engine._no_progress_hold_active()
+tests/test_issue_1096_turn_end_probe.py:166:    assert not engine._sweep_budget_hold_turn_paced  # no turn end did not erase strike 1
+tests/test_issue_1096_turn_end_probe.py:173:    assert len(calls) == 1 and engine._sweep_budget_hold_turn_paced
+tests/test_issue_1096_turn_end_probe.py:175:    assert not engine._sweep_budget_hold_active()
+tests/test_issue_1096_turn_end_probe.py:201:    assert not engine._sweep_budget_hold_turn_paced  # #1369: every repeat hang disarms turn-end release
 tests/test_issue_1096_turn_end_probe.py:206:    engine.note_turn_complete()
+tests/test_issue_1096_turn_end_probe.py:217:    until = engine._sweep_budget_hold_until
 tests/test_issue_1096_turn_end_probe.py:220:        engine.note_turn_complete()
 tests/test_issue_1096_turn_end_probe.py:223:        engine.note_turn_complete()
+tests/test_issue_1096_turn_end_probe.py:224:    assert engine._sweep_budget_hold_until == until and engine._sweep_budget_hold_turn_paced
 tests/test_issue_1096_turn_end_probe.py:231:        engine.note_turn_complete()
+tests/test_issue_1096_turn_end_probe.py:234:    assert not engine._sweep_budget_hold_active()
 tests/test_issue_1096_turn_end_probe.py:245:        assert not engine._sweep_budget_hold_active() and not engine._no_progress_hold_active()
 tests/test_issue_1096_turn_end_probe.py:246:        engine.note_turn_complete()
+tests/test_issue_1096_turn_end_probe.py:267:    assert engine._hung_summary_strike is None and not engine._sweep_budget_hold_turn_paced
 tests/test_issue_1096_turn_end_probe.py:268:    assert engine._sweep_budget_hold_active() and engine._no_progress_hold_active()
 tests/test_issue_1096_turn_end_probe.py:269:    until, no_progress = engine._sweep_budget_hold_until, engine._no_progress_hold
 tests/test_issue_1096_turn_end_probe.py:270:    engine.note_turn_complete()
@@ -227,14 +503,24 @@ tests/test_issue_1096_turn_end_probe.py:289:    engine.note_turn_complete()
 tests/test_issue_1124_copy_exclusion.py:391:    assert engine._no_progress_hold is None
 tests/test_issue_1124_copy_exclusion.py:671:        engine.note_turn_complete()
 tests/test_issue_1124_copy_exclusion.py:802:        engine.note_turn_complete()
+tests/test_issue_1127_pre_leaf_diagnostic.py:150:    original = engine._ingest_messages
+tests/test_issue_1127_pre_leaf_diagnostic.py:168:        engine._ingest_messages = background_write_then_ingest
+tests/test_issue_1137_hung_route_circuit.py:228:        assert engine._sweep_budget_hold_active() is not retry
 tests/test_issue_1137_hung_route_circuit.py:229:        assert engine._no_progress_hold_active() is (failure != "hang")
+tests/test_issue_1137_hung_route_circuit.py:271:        assert not engine._sweep_budget_hold_active()
 tests/test_issue_1137_hung_route_circuit.py:272:        assert not engine._no_progress_hold_active()
 tests/test_issue_1141_unattributed_leaf.py:63:    assert engine._no_progress_hold_active()
 tests/test_issue_1141_unattributed_leaf.py:64:    assert engine._no_progress_hold[1] == "no_progress"
+tests/test_issue_1141_unattributed_leaf.py:65:    assert engine._store.read_metadata_json(f"compaction_no_progress:v1:{engine._session_id}") is None
 tests/test_issue_1141_unattributed_leaf.py:77:        engine._clear_persisted_no_progress_hold()
 tests/test_issue_1141_unattributed_leaf.py:78:        engine._no_progress_hold = None  # exercise another pass after the hold expires
+tests/test_issue_1141_unattributed_leaf.py:101:    engine._ingest_messages(history)
+tests/test_issue_1141_unattributed_leaf.py:155:    engine._ingest_messages(history)
 tests/test_issue_1141_unattributed_leaf.py:179:        engine._clear_persisted_no_progress_hold()
 tests/test_issue_1141_unattributed_leaf.py:180:        engine._no_progress_hold = None  # exercise another pass after the hold expires
+tests/test_issue_1141_unattributed_leaf.py:200:    engine._ingest_messages(history)
+tests/test_issue_1147_review_guards.py:41:        engine._ingest_messages([suffix, *tail])
+tests/test_issue_1160_session_end_flush.py:121:    monkeypatch.setattr(engine, "_ingest_messages", interrupted)
 tests/test_issue_1162_keep_reply.py:213:                engine.note_turn_complete()
 tests/test_issue_1162_keep_reply.py:217:            engine._no_progress_hold = None
 tests/test_issue_1162_keep_reply.py:299:    engine._no_progress_hold = None
@@ -256,14 +542,23 @@ tests/test_issue_1162_retained_escape.py:318:        engine._no_progress_hold = 
 tests/test_issue_1162_truthful_warning.py:32:        engine.note_turn_complete()
 tests/test_issue_1162_truthful_warning.py:33:        engine._no_progress_hold = None
 tests/test_issue_1162_truthful_warning.py:222:        engine._no_progress_hold = None
+tests/test_issue_1162_truthful_warning.py:223:        engine._sweep_budget_hold_until = 0
 tests/test_issue_1162_truthful_warning.py:224:        engine.note_turn_complete()
+tests/test_issue_1306_cli_new.py:409:        monkeypatch.setattr(engine, "_ingest_messages", fail_ingest)
+tests/test_issue_1369_first_hang_gaps.py:20:    strike, until = engine._hung_summary_strike, engine._sweep_budget_hold_until
+tests/test_issue_1369_first_hang_gaps.py:21:    assert strike == ("conv", "m1") and engine._sweep_budget_hold_turn_paced
+tests/test_issue_1369_first_hang_gaps.py:23:    assert engine._sweep_budget_hold_active() and engine._summary_circuit_breaker.allows("m1")
+tests/test_issue_1369_first_hang_gaps.py:28:    assert engine._sweep_budget_hold_until == until  # forced passes do not start another hold
+tests/test_issue_1369_first_hang_gaps.py:29:    assert not engine._sweep_budget_hold_turn_paced
+tests/test_issue_1369_first_hang_gaps.py:30:    assert engine._sweep_budget_hold_active()
 tests/test_issue_1369_first_hang_gaps.py:34:    engine.note_turn_complete()
+tests/test_issue_1369_first_hang_gaps.py:68:        assert engine._sweep_budget_hold_turn_paced and engine._sweep_budget_hold_active()
 tests/test_issue_1369_first_hang_gaps.py:79:        engine.note_turn_complete()
 tests/test_issue_1369_first_hang_gaps.py:80:        engine.note_turn_complete()
+tests/test_issue_1369_first_hang_gaps.py:86:        assert not engine._sweep_budget_hold_turn_paced and not breaker.allows("m1")
 tests/test_issue_1369_first_hang_gaps.py:87:        engine.note_turn_complete()
 tests/test_issue_1623_mutable_stop.py:28:        note = Mock(wraps=engine.note_turn_complete)
 tests/test_issue_1623_mutable_stop.py:29:        monkeypatch.setattr(engine, "note_turn_complete", note)
-tests/test_issue_1623_ownership.py:23:    engine = ctx.offered.clone_for_agent()
 tests/test_issue_1623_ownership.py:75:    monkeypatch.setattr(engine, "note_turn_complete", note)
 tests/test_issue_1623_turn_complete.py:34:    note = Mock(wraps=engine.note_turn_complete)
 tests/test_issue_1623_turn_complete.py:35:    monkeypatch.setattr(engine, "note_turn_complete", note)
@@ -274,28 +569,88 @@ tests/test_issue_1623_turn_complete.py:90:    monkeypatch.setattr(engine, "note_
 tests/test_issue_1762_followups.py:102:                assert engine._no_progress_hold_active()
 tests/test_issue_1762_followups.py:103:                offset[0] += engine._no_progress_hold[0] - clock.monotonic() + 1
 tests/test_issue_1762_followups.py:104:                assert not engine._no_progress_hold_active()
+tests/test_issue_1880_defer_size_cleanup.py:59:        requested = engine.should_compress_preflight(view)
+tests/test_issue_1880_defer_size_cleanup.py:83:    monkeypatch.setattr(engine, "_ingest_messages", ingest)
+tests/test_issue_1880_defer_size_cleanup.py:84:    assert engine.should_compress_preflight(original) is False
+tests/test_issue_1880_defer_size_cleanup.py:99:        monkeypatch.setattr(engine, "_ingest_messages", lambda _: replay)
+tests/test_issue_1880_defer_size_cleanup.py:102:    assert engine.should_compress_preflight(view) is True
+tests/test_issue_1880_defer_size_cleanup.py:117:    monkeypatch.setattr(engine, "_ingest_messages", lambda _: replay)
+tests/test_issue_1880_defer_size_cleanup.py:118:    assert engine.should_compress_preflight(original) is True
+tests/test_issue_1880_defer_size_cleanup.py:126:    assert deferred.should_compress_preflight(view) is False
+tests/test_issue_1880_defer_size_cleanup.py:129:    immediate._ingest_messages(view)
+tests/test_issue_1880_defer_size_cleanup.py:133:    assert deferred.should_compress_preflight(view) is True
+tests/test_issue_1880_defer_size_cleanup.py:150:        assert engine.should_compress_preflight(view) is redacted
+tests/test_issue_1880_defer_size_cleanup.py:159:    assert engine.should_compress_preflight(view) is False
+tests/test_issue_1880_defer_size_cleanup.py:165:    monkeypatch.setattr(engine, "_ingest_messages", ingest)
+tests/test_issue_1880_defer_size_cleanup.py:166:    assert engine.should_compress_preflight(view) is True
+tests/test_issue_1880_defer_size_cleanup.py:180:        assert engine.should_compress_preflight(view) is True
+tests/test_issue_1880_persisted_hold.py:17:KEY = "compaction_no_progress:v1:S"
 tests/test_issue_1880_persisted_hold.py:46:    engine._no_progress_hold = None
 tests/test_issue_1880_persisted_hold.py:52:    assert engine._no_progress_hold[1] == "no_progress"
+tests/test_issue_1880_persisted_hold.py:65:            engine._ingest_messages(view)
 tests/test_issue_1880_persisted_hold.py:71:            assert engine._automatic_compression_blocked()
 tests/test_issue_1880_persisted_hold.py:72:            assert engine._compression_block_reason() == "cooldown:lcm_no_progress"
 tests/test_issue_1880_persisted_hold.py:74:            assert not engine.should_compress_preflight(view)
+tests/test_issue_1880_persisted_hold.py:99:            engine._ingest_messages(view)
 tests/test_issue_1880_persisted_hold.py:100:            engine.note_turn_complete()
+tests/test_issue_1880_persisted_hold.py:118:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:123:            engine._ingest_messages(view)
 tests/test_issue_1880_persisted_hold.py:135:        assert not engine._automatic_compression_blocked()
+tests/test_issue_1880_persisted_hold.py:159:        engine._ingest_messages(view)
 tests/test_issue_1880_persisted_hold.py:162:        assert not engine._automatic_compression_blocked()
+tests/test_issue_1880_persisted_hold.py:173:        engine._ingest_messages(view)
 tests/test_issue_1880_persisted_hold.py:177:        assert not engine._automatic_compression_blocked(ignore_cooldown=True)
 tests/test_issue_1880_persisted_hold.py:178:        assert not engine._no_progress_hold_blocks(engine._survival_ceiling())
 tests/test_issue_1880_persisted_hold.py:190:        engine._no_progress_hold = None
 tests/test_issue_1880_persisted_hold.py:211:        assert engine._no_progress_hold[1] == "no_progress"
 tests/test_issue_1880_persisted_hold.py:216:        assert engine.should_compress_preflight(view)
+tests/test_issue_1880_persisted_hold.py:229:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:237:            patch.setattr(engine, "_ingest_messages", Mock(side_effect=RuntimeError("synthetic ingest failure")))
 tests/test_issue_1880_persisted_hold.py:238:            assert not engine.should_compress_preflight(view)
+tests/test_issue_1880_persisted_hold.py:251:        engine._ingest_messages(view)
 tests/test_issue_1880_persisted_hold.py:274:        fingerprint = engine._no_progress_fingerprint()
 tests/test_issue_1880_persisted_hold.py:277:        assert engine._no_progress_fingerprint() != fingerprint
 tests/test_issue_1880_persisted_hold.py:280:        assert engine._no_progress_fingerprint() == fingerprint
+tests/test_issue_1880_persisted_hold.py:282:        engine._no_progress_bound_store = (object(), original_path, "synthetic-old-store")
 tests/test_issue_1880_persisted_hold.py:283:        assert engine._no_progress_fingerprint() == fingerprint
-tests/test_issue_1880_persisted_hold.py:307:        assert not engine._automatic_compression_blocked()
+tests/test_issue_1880_persisted_hold.py:296:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:308:        assert not engine._automatic_compression_blocked()
+tests/test_issue_1880_persisted_hold.py:318:        engine._record_ingest_failure("synthetic", RuntimeError("synthetic failure"))
+tests/test_issue_1880_persisted_hold.py:332:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:348:        assert engine._no_progress_fingerprint() is None  # Explicitly unobserved pressure is unknown.
+tests/test_issue_1880_persisted_hold.py:374:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:391:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:392:        engine._clear_persisted_no_progress_hold()
+tests/test_issue_1880_persisted_hold.py:393:        engine._no_progress_hold = None
+tests/test_issue_1880_persisted_hold.py:408:                return engine.should_compress_preflight(view)
+tests/test_issue_1880_persisted_hold.py:415:        assert engine._no_progress_replay is None
+tests/test_issue_1880_persisted_hold.py:416:        assert engine._no_progress_fingerprint() is None
+tests/test_issue_1880_persisted_hold.py:422:        assert engine._no_progress_replay is not None
+tests/test_issue_1880_persisted_hold.py:423:        assert engine._no_progress_fingerprint() is not None
+tests/test_issue_1880_persisted_hold.py:445:        replay = engine._ingest_messages(host)
+tests/test_issue_1880_persisted_hold.py:448:        assert engine._no_progress_replay is not None
+tests/test_issue_1880_persisted_hold.py:450:        assert engine._no_progress_public_rows[id(active)]["content"] == CLEARED
+tests/test_issue_255_post_compaction_ingest.py:204:            restarted._ingest_messages(snapshot)
+tests/test_issue_255_post_compaction_ingest.py:241:            restarted._ingest_messages(snapshot)
+tests/test_issue_255_post_compaction_ingest.py:286:            restarted._ingest_messages(snapshot)
+tests/test_issue_255_post_compaction_ingest.py:315:            restarted._ingest_messages(snapshot)
+tests/test_issue_3_atomic_provenance.py:33:        engine._ingest_messages([_literal_scaffold()])
+tests/test_issue_3_atomic_provenance.py:64:            engine._ingest_messages([_literal_scaffold()])
+tests/test_issue_3_atomic_provenance.py:126:        engine._ingest_messages([_literal_scaffold()])
 tests/test_issue_3_retained_user_anchor.py:515:        should_compress = second.should_compress_preflight(result)
 tests/test_issue_3_retained_user_anchor.py:556:        should_compress = engine.should_compress_preflight(messages)
+tests/test_issue_488_emission_descriptors.py:667:            engine._ingest_messages(messages)
+tests/test_issue_488_emission_descriptors.py:691:            returned = engine._ingest_messages([generated])
+tests/test_issue_4_restart_safe_fail_open.py:97:        restarted._ingest_messages(result)
+tests/test_issue_4_restart_safe_fail_open.py:177:        restarted._ingest_messages(result)
+tests/test_issue_529_overflow_followups.py:203:        first._ingest_messages(
+tests/test_issue_529_overflow_followups.py:216:        replay._ingest_messages(
+tests/test_issue_529_overflow_followups.py:238:        first._ingest_messages(
+tests/test_issue_529_overflow_followups.py:251:        replay._ingest_messages(
+tests/test_issue_534_recovery_descriptors.py:95:    engine._ingest_messages(pre)
+tests/test_issue_534_recovery_descriptors.py:98:        engine._ingest_messages([dict(SYSTEM), retained_row, dict(ORPHAN)])
 tests/test_issue_581_582_store_complete_survival.py:126:            engine.note_turn_complete()  # #904: each hidden drain pass belongs to a new foreground turn
+tests/test_issue_581_582_store_complete_survival.py:1062:        monkeypatch.setattr(engine, "_ingest_messages", failing)
 tests/test_issue_581_582_store_complete_survival.py:1296:            engine.note_turn_complete()  # #904: the following user turns release the hidden-only hold
 tests/test_issue_597_progress_hold.py:42:        engine.record_rejected_compaction()
 tests/test_issue_597_progress_hold.py:43:        assert engine._no_progress_hold_status()["reason"] == "host_rejected_progress"
@@ -329,6 +684,7 @@ tests/test_issue_597_progress_hold.py:106:    assert not engine._automatic_compr
 tests/test_issue_597_progress_hold.py:113:        engine.record_rejected_compaction()
 tests/test_issue_597_progress_hold.py:114:        assert engine._no_progress_hold is None
 tests/test_issue_597_progress_hold.py:121:    engine._start_no_progress_hold(reason)
+tests/test_issue_597_progress_hold.py:122:    engine._start_sweep_budget_hold()
 tests/test_issue_597_progress_hold.py:123:    held, sweep = engine._no_progress_hold, engine._sweep_budget_hold_until
 tests/test_issue_597_progress_hold.py:124:    engine.note_turn_complete()
 tests/test_issue_597_progress_hold.py:125:    assert engine._no_progress_hold == held and engine._sweep_budget_hold_until == sweep
@@ -337,38 +693,69 @@ tests/test_issue_597_progress_hold.py:142:    assert engine._no_progress_hold_st
 tests/test_issue_597_progress_hold.py:146:    engine._start_no_progress_hold("host_rejected_progress")
 tests/test_issue_597_progress_hold.py:148:    engine.note_turn_complete()
 tests/test_issue_597_progress_hold.py:149:    assert engine._no_progress_hold is None
-tests/test_issue_597_progress_hold.py:162:    active = prototype.clone_for_agent() if path != "cold" else prototype
 tests/test_issue_597_progress_hold.py:182:    monkeypatch.setattr(active, "note_turn_complete", note)
 tests/test_issue_597_progress_hold.py:184:        monkeypatch.setattr(prototype, "note_turn_complete", lambda: pytest.fail("wrong engine notified"))
 tests/test_issue_605_foreground_budget.py:356:        assert engine._no_progress_hold is None and not engine._no_progress_hold_active()
+tests/test_issue_605_foreground_budget.py:381:        assert telemetry["pre_leaf_condensation_stop_reason"] == "condensation_no_progress"
 tests/test_issue_605_foreground_budget.py:383:        assert engine._no_progress_hold is None
+tests/test_issue_605_foreground_budget.py:403:        assert _leaves(engine) == [] and engine._sweep_budget_hold_until > time.monotonic()
+tests/test_issue_605_sweep_off_forced_f2.py:244:        assert engine._sweep_budget_hold_until > time.monotonic()  # the #608 hold ends at its time
+tests/test_issue_605_sweep_off_forced_f2.py:285:        assert engine._sweep_budget_hold_until == 0.0  # forced overflow is never held
+tests/test_issue_608_sweep_budget_stop.py:144:        assert engine._store.read_metadata_json("compaction_no_progress:v1:S") is None
+tests/test_issue_608_sweep_budget_stop.py:145:        assert engine._sweep_budget_hold_active()  # Its original process-local pacing remains.
+tests/test_issue_608_sweep_budget_stop.py:331:        assert engine._sweep_budget_hold_until > time.monotonic()
 tests/test_issue_608_sweep_budget_stop.py:333:        assert engine.should_compress_preflight(view) is False
+tests/test_issue_608_sweep_budget_stop.py:337:        engine._start_sweep_budget_hold()
+tests/test_issue_608_sweep_budget_stop.py:344:        assert engine._sweep_budget_hold_until == 0.0
+tests/test_issue_608_sweep_budget_stop.py:377:    engine._start_sweep_budget_hold()  # #618: armed for the bound conversation, on the monotonic clock
 tests/test_issue_608_sweep_budget_stop.py:399:        assert engine.should_compress_preflight(view) is False
 tests/test_issue_608_sweep_budget_stop.py:401:        assert engine.should_compress_preflight(view) is True
+tests/test_issue_608_sweep_budget_stop.py:411:    original = engine._ingest_messages
+tests/test_issue_608_sweep_budget_stop.py:419:    monkeypatch.setattr(engine, "_ingest_messages", ingest_with_a_diff)
 tests/test_issue_608_sweep_budget_stop.py:423:        assert engine.should_compress_preflight(view) is False
 tests/test_issue_608_sweep_budget_stop.py:425:        assert engine.should_compress_preflight(view) is True
+tests/test_issue_608_sweep_budget_stop.py:453:        assert engine._sweep_budget_hold_active() and engine._last_compression_noop_reason.startswith(
+tests/test_issue_608_sweep_budget_stop.py:728:        assert engine._sweep_budget_hold_until == 0.0
 tests/test_issue_618_625_hold_followups.py:99:    blocked = getattr(type(compressor), "_automatic_compression_blocked", None)
 tests/test_issue_618_625_hold_followups.py:108:    reason = getattr(compressor, "_compression_block_reason", lambda: None)()
+tests/test_issue_618_625_hold_followups.py:127:    assert engine._sweep_budget_hold_active()
+tests/test_issue_618_625_hold_followups.py:141:        assert engine._sweep_budget_hold_until == 0.0  # the reset cleared it
 tests/test_issue_618_625_hold_followups.py:142:        assert _host_gate(engine) is False and engine._compression_block_reason() is None
+tests/test_issue_618_625_hold_followups.py:153:        assert engine._sweep_budget_hold_until > 0.0  # not reset on this path
+tests/test_issue_618_625_hold_followups.py:154:        assert engine._sweep_budget_hold_active() is False
+tests/test_issue_618_625_hold_followups.py:164:        assert engine._sweep_budget_hold_until == 0.0 and not engine._sweep_budget_hold_active()
+tests/test_issue_618_625_hold_followups.py:165:        engine._start_sweep_budget_hold()
+tests/test_issue_618_625_hold_followups.py:167:        assert engine._sweep_budget_hold_until == 0.0 and not engine._sweep_budget_hold_active()
+tests/test_issue_618_625_hold_followups.py:179:        engine._start_sweep_budget_hold()
 tests/test_issue_618_625_hold_followups.py:180:        engine.record_rejected_compaction()  # the #651 no-progress hold
+tests/test_issue_618_625_hold_followups.py:184:        engine._start_sweep_budget_hold()
 tests/test_issue_618_625_hold_followups.py:185:        engine.record_rejected_compaction()
 tests/test_issue_618_625_hold_followups.py:189:        assert engine._sweep_budget_hold_active() and engine._no_progress_hold_active()
 tests/test_issue_618_625_hold_followups.py:193:        assert engine._sweep_budget_hold_active() and engine._no_progress_hold_active()
 tests/test_issue_618_625_hold_followups.py:195:        assert not engine._sweep_budget_hold_active() and not engine._no_progress_hold_active()
 tests/test_issue_618_625_hold_followups.py:203:        engine.record_rejected_compaction()
+tests/test_issue_618_625_hold_followups.py:219:        engine._start_sweep_budget_hold()
 tests/test_issue_618_625_hold_followups.py:221:        engine.record_rejected_compaction()
+tests/test_issue_618_625_hold_followups.py:269:        engine._start_sweep_budget_hold()
 tests/test_issue_618_625_hold_followups.py:281:        assert _host_gate(engine) is False and engine._compression_block_reason() is None
 tests/test_issue_618_625_hold_followups.py:283:        engine._no_progress_hold = None  # the #651 hold the same stop armed: only the #608 hold is left
 tests/test_issue_618_625_hold_followups.py:286:        assert engine._compression_block_reason() == "cooldown:lcm_sweep_budget" and _host_transient(engine)
 tests/test_issue_618_625_hold_followups.py:289:        assert _host_gate(engine) is False and engine._compression_block_reason() is None
+tests/test_issue_618_625_hold_followups.py:298:        engine._start_sweep_budget_hold()
+tests/test_issue_618_625_hold_followups.py:316:def test_item4_the_no_progress_reason_keeps_its_name(tmp_path):
+tests/test_issue_618_625_hold_followups.py:319:        engine._start_sweep_budget_hold()
 tests/test_issue_618_625_hold_followups.py:320:        engine.record_rejected_compaction()
 tests/test_issue_618_625_hold_followups.py:321:        assert engine._compression_block_reason() == "cooldown:lcm_host_rejected"
-tests/test_issue_634_engine_consequences.py:23:    a, b = proto.clone_for_agent(), proto.clone_for_agent()
-tests/test_issue_634_engine_consequences.py:88:            b = proto.clone_for_agent()
-tests/test_issue_634_engine_consequences.py:104:                b = proto.clone_for_agent()
+tests/test_issue_618_625_hold_followups.py:497:        assert engine._sweep_budget_hold_active()
+tests/test_issue_628_summary_circuit.py:215:        assert time.monotonic() < engine._sweep_budget_hold_until <= time.monotonic() + cooldown
+tests/test_issue_628_summary_circuit.py:330:        assert engine._sweep_budget_hold_active()
+tests/test_issue_628_summary_circuit.py:362:        assert engine._sweep_budget_hold_until == 0.0  # a stored leaf: no hold
+tests/test_issue_628_summary_circuit.py:454:        assert engine._sweep_budget_hold_until == 0.0 and _count(caplog, STOP_LINE) == 0
+tests/test_issue_650_survival_fit_keeps_summary.py:489:        monkeypatch.setattr(engine, "_hold_fit_only_applies", lambda tokens: True)  # #618 held
 tests/test_issue_651_below_threshold_cleanup_only.py:84:    assert engine.should_compress_preflight(view) is True
 tests/test_issue_651_below_threshold_cleanup_only.py:94:    blocked = getattr(type(compressor), "_automatic_compression_blocked", None)
 tests/test_issue_651_below_threshold_cleanup_only.py:111:        assert engine._no_progress_hold is None  # cleanup-only is not a threshold pass
+tests/test_issue_651_below_threshold_cleanup_only.py:165:def test_t3_a_no_progress_threshold_pass_arms_the_hold(tmp_path, summaries):
 tests/test_issue_651_below_threshold_cleanup_only.py:174:        assert engine.should_compress_preflight(view) is False
 tests/test_issue_651_below_threshold_cleanup_only.py:176:        assert engine._compression_block_reason() == "cooldown:lcm_no_progress"  # host: transient, never exhausts
 tests/test_issue_651_below_threshold_cleanup_only.py:192:        assert engine.get_status()["no_progress_hold"] is None and engine._no_progress_hold is None
@@ -378,6 +765,8 @@ tests/test_issue_651_below_threshold_cleanup_only.py:229:        assert engine._
 tests/test_issue_651_below_threshold_cleanup_only.py:239:        engine.record_rejected_compaction()
 tests/test_issue_651_below_threshold_cleanup_only.py:242:        assert _leaves(engine) >= 1 and engine._no_progress_hold is None and _host_gate(engine) is False
 tests/test_issue_651_below_threshold_cleanup_only.py:255:        engine.record_rejected_compaction()
+tests/test_issue_651_below_threshold_cleanup_only.py:313:    record = engine._store.read_metadata_json("compaction_no_progress:v1:S")
+tests/test_issue_651_below_threshold_cleanup_only.py:321:        assert engine._store.read_metadata_json("compaction_no_progress:v1:S") == record
 tests/test_issue_651_below_threshold_cleanup_only.py:349:    engine.record_rejected_compaction()
 tests/test_issue_651_below_threshold_cleanup_only.py:357:        assert engine._no_progress_hold_blocks(rough + 200) is True  # the one predicate the gate also uses
 tests/test_issue_651_below_threshold_cleanup_only.py:369:        assert engine._no_progress_hold_blocks(ceiling) is False
@@ -388,11 +777,17 @@ tests/test_issue_651_below_threshold_cleanup_only.py:401:        assert _host_ga
 tests/test_issue_651_below_threshold_cleanup_only.py:402:        assert engine.record_rejected_compaction() is None  # called without arguments
 tests/test_issue_651_below_threshold_cleanup_only.py:405:        assert engine._compression_block_reason() == "cooldown:lcm_host_rejected"
 tests/test_issue_651_below_threshold_cleanup_only.py:415:        engine.record_rejected_compaction()
+tests/test_issue_652_653_no_fragments_bounded_prefix.py:137:        assert engine._sweep_budget_hold_until == 0.0  # no #608 hold
 tests/test_issue_665_bypass_hold.py:60:        engine.record_rejected_compaction()  # the host refused the auxiliary session's compaction
 tests/test_issue_665_bypass_hold.py:63:        assert engine._no_progress_hold_active() is False
 tests/test_issue_665_bypass_hold.py:65:        assert engine._automatic_compression_blocked() is False and engine.should_compress(1_000) is True
 tests/test_issue_665_bypass_hold.py:77:        engine.record_rejected_compaction()
 tests/test_issue_665_bypass_hold.py:78:        assert engine._no_progress_hold_active() is True
+tests/test_issue_671_stub_first_exit.py:115:    replay = engine._ingest_messages(messages)
+tests/test_issue_671_stub_first_exit.py:308:    working = engine._ingest_messages(view)
+tests/test_issue_671_stub_first_exit.py:353:    monkeypatch.setattr(engine, "_hold_fit_only_applies", lambda tokens: True)  # #618: held at the survival ceiling
+tests/test_issue_671_stub_first_exit.py:405:    cold._ingest_messages(copy.deepcopy(out) + [{"role": "user", "content": "fresh-new-question"}])
+tests/test_issue_671_stub_first_exit.py:464:    working = engine._ingest_messages(view)
 tests/test_issue_677_host_count_decides.py:4:``should_compress_preflight(messages)``; on True it calls ``compress(messages, current_tokens=host_tokens)`` through
 tests/test_issue_677_host_count_decides.py:7:(``record_rejected_compaction(); compress(...)``) is cleanup-only too. Summaries are stubbed and counted."""
 tests/test_issue_677_host_count_decides.py:67:    blocked = getattr(type(compressor), "_automatic_compression_blocked", None)
@@ -410,6 +805,8 @@ tests/test_issue_677_host_count_decides.py:219:        assert engine.should_comp
 tests/test_issue_677_host_count_decides.py:245:        engine.record_rejected_compaction()
 tests/test_issue_677_host_count_decides.py:246:        assert engine._no_progress_hold_active() is True
 tests/test_issue_677_host_count_decides.py:247:        assert engine._no_progress_hold_blocks(ceiling) is False
+tests/test_issue_684_recovery_clears_cooldown_handoff.py:63:    real_ingest = engine._ingest_messages
+tests/test_issue_684_recovery_clears_cooldown_handoff.py:66:        patch.setattr(engine, "_ingest_messages", lambda messages: [
 tests/test_issue_684_recovery_clears_cooldown_handoff.py:68:        assert engine.should_compress_preflight(view) is True
 tests/test_issue_6_fresh_tail_pressure.py:49:            engine.should_compress_preflight(list(messages))
 tests/test_issue_6_fresh_tail_pressure.py:99:        assert engine.should_compress_preflight(list(messages)) is True
@@ -419,13 +816,77 @@ tests/test_issue_738_exit_fit_coverage.py:78:    ``gate``: the host reads ``_aut
 tests/test_issue_738_exit_fit_coverage.py:85:        if gate and type(engine)._automatic_compression_blocked(engine):
 tests/test_issue_738_exit_fit_coverage.py:90:        elif observed < engine.threshold_tokens and engine.should_compress_preflight(messages):
 tests/test_issue_738_exit_fit_coverage.py:162:                engine.record_rejected_compaction()
+tests/test_issue_738_exit_fit_coverage.py:183:            engine._start_sweep_budget_hold()
 tests/test_issue_738_exit_fit_coverage.py:185:            engine.record_rejected_compaction()
+tests/test_issue_738_exit_fit_coverage.py:215:            engine._start_sweep_budget_hold()  # rc4: this unchanged fit-only pin belongs to #608 only
 tests/test_issue_738_exit_fit_coverage.py:336:        engine.record_rejected_compaction()
 tests/test_issue_738_exit_fit_coverage.py:338:        assert engine._no_progress_hold_blocks(observed)
+tests/test_issue_738_exit_fit_coverage.py:371:        engine._start_sweep_budget_hold()  # rc4: #651 no longer suppresses native recovery at the ceiling
+tests/test_issue_738_exit_fit_coverage.py:372:        assert engine._hold_fit_only_applies(request)
+tests/test_issue_738_exit_fit_coverage.py:401:        engine._start_sweep_budget_hold()  # rc4: the zero-call budget is a #608 invariant only
+tests/test_issue_738_exit_fit_coverage.py:407:            held += engine._hold_fit_only_applies(observed)
 tests/test_issue_738_exit_fit_coverage.py:408:            if not type(engine)._automatic_compression_blocked(engine) and engine.should_compress(observed):
 tests/test_issue_738_exit_fit_coverage.py:476:        engine.record_rejected_compaction()
 tests/test_issue_738_exit_fit_coverage.py:477:        assert engine._no_progress_hold_blocks(observed)
+tests/test_issue_772_replay_keeps_host_stubs.py:67:    replay = engine._ingest_messages(host)
 tests/test_issue_772_replay_keeps_host_stubs.py:71:    assert engine.should_compress_preflight(host) is False  # rc2: requested on the replay count
+tests/test_issue_772_replay_keeps_host_stubs.py:88:    engine._ingest_messages(host)
+tests/test_issue_772_replay_keeps_host_stubs.py:89:    replay = engine._ingest_messages(copy.deepcopy(host))  # the no-new-rows path
+tests/test_issue_772_replay_keeps_host_stubs.py:98:    replay = engine._ingest_messages(host)
+tests/test_issue_772_replay_keeps_host_stubs.py:99:    fresh = engine._ingest_messages(copy.deepcopy(host))
+tests/test_issue_772_replay_keeps_host_stubs.py:103:    assert replay == fresh  # the stub row is what _ingest_messages produces for that host row
+tests/test_issue_772_replay_keeps_host_stubs.py:112:    replays = [engine._ingest_messages(turn1)]
+tests/test_issue_772_replay_keeps_host_stubs.py:114:    replays.append(engine._ingest_messages(turn2))
+tests/test_issue_772_replay_keeps_host_stubs.py:115:    replays.append(engine._ingest_messages(copy.deepcopy(turn2)))  # no new rows
+tests/test_issue_772_replay_keeps_host_stubs.py:119:    replays.append(engine._ingest_messages(host))
+tests/test_issue_772_replay_keeps_host_stubs.py:120:    replays.append(engine._ingest_messages(copy.deepcopy(host)))  # no new rows
+tests/test_issue_772_replay_keeps_host_stubs.py:131:    engine._ingest_messages(host)
+tests/test_issue_772_replay_keeps_host_stubs.py:139:    engine._ingest_messages(nxt)
+tests/test_issue_772_replay_keeps_host_stubs.py:152:    replay = engine._ingest_messages(host)
+tests/test_issue_772_replay_keeps_host_stubs.py:162:    replay = engine._ingest_messages(host)
+tests/test_issue_772_replay_keeps_host_stubs.py:163:    again = engine._ingest_messages(copy.deepcopy(host))
+tests/test_issue_773_hermes_pruned_tool_replay.py:102:    replay = engine._ingest_messages(host)
+tests/test_issue_773_hermes_pruned_tool_replay.py:113:    assert engine._ingest_messages(copy.deepcopy(host)) == replay  # the no-new-rows path: the same view
+tests/test_issue_773_hermes_pruned_tool_replay.py:123:    engine._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:128:    replay = engine._ingest_messages(host)
+tests/test_issue_773_hermes_pruned_tool_replay.py:149:            engine._ingest_messages(host)
+tests/test_issue_773_hermes_pruned_tool_replay.py:167:    engine._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:182:    first._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:195:    engine._ingest_messages(view + [{"role": "user", "content": "again"}, call, tool])
+tests/test_issue_773_hermes_pruned_tool_replay.py:207:    other._ingest_messages(host)
+tests/test_issue_773_hermes_pruned_tool_replay.py:224:    engine._ingest_messages(view[:index] + [changed] + view[index + 1:] + [{"role": "user", "content": "again"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:263:            engine._ingest_messages(host)
+tests/test_issue_773_hermes_pruned_tool_replay.py:289:    first._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:294:        legacy._ingest_messages(copy.deepcopy(host))
+tests/test_issue_773_hermes_pruned_tool_replay.py:299:    engine._ingest_messages(copy.deepcopy(host) + [{"role": "user", "content": "follow-up"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:318:    engine._ingest_messages(copy.deepcopy(tail))
+tests/test_issue_773_hermes_pruned_tool_replay.py:352:    first._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:358:    engine._ingest_messages(host + [{"role": "user", "content": "again"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:371:    first._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:379:    replay = engine._ingest_messages(host + [{"role": "user", "content": "again"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:424:    replay = engine._ingest_messages(host)
+tests/test_issue_773_hermes_pruned_tool_replay.py:465:    first._ingest_messages([SYSTEM, {"role": "user", "content": "u1"}, _call("X", content=caller),
+tests/test_issue_773_hermes_pruned_tool_replay.py:471:    engine._ingest_messages([_call("X", content=caller), _result("X", CLEARED), {"role": "assistant", "content": "done"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:491:    engine._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:506:    engine._ingest_messages(host + [{"role": "user", "content": "u5"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:538:    engine._ingest_messages([SYSTEM, {"role": "user", "content": "u1"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:543:        engine._ingest_messages([SYSTEM, {"role": "user", "content": "u1"}, *rows])
+tests/test_issue_773_hermes_pruned_tool_replay.py:567:    first._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:579:    replay = engine._ingest_messages(host + [{"role": "user", "content": "again"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:599:    first._ingest_messages(stored_view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:603:    engine._ingest_messages(stored_view + [{"role": "user", "content": "u3"}, _call("X", content=caller),
+tests/test_issue_773_hermes_pruned_tool_replay.py:628:    first._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:633:    engine._ingest_messages(host + [{"role": "user", "content": "u3"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:645:    first._ingest_messages([SYSTEM, {"role": "user", "content": "u1"}, _call("A"), _result("A", a),
+tests/test_issue_773_hermes_pruned_tool_replay.py:651:    engine._ingest_messages([_call("A"), _result("A", a), {"role": "assistant", "content": "new"},
+tests/test_issue_773_hermes_pruned_tool_replay.py:664:    first._ingest_messages([SYSTEM, {"role": "user", "content": "u1"}, _call("X"), _result("X", x),
+tests/test_issue_773_hermes_pruned_tool_replay.py:676:    engine._ingest_messages(host)
+tests/test_issue_773_hermes_pruned_tool_replay.py:693:    first._ingest_messages([SYSTEM, {"role": "user", "content": "u1"}, _call("X"), _result("X", x),
+tests/test_issue_773_hermes_pruned_tool_replay.py:698:    engine._ingest_messages([_call("A"), _result("A", a), {"role": "assistant", "content": "new"},
+tests/test_issue_773_hermes_pruned_tool_replay.py:755:    engine._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:766:    engine._ingest_messages(view + [{"role": "user", "content": "u3"}])
+tests/test_issue_904_hidden_only_no_growth.py:53:    instance._ingest_messages(history)
+tests/test_issue_904_hidden_only_no_growth.py:98:    instance._ingest_messages(history)
 tests/test_issue_904_hidden_only_no_growth.py:137:    assert instance._no_progress_hold is None
 tests/test_issue_904_hidden_only_no_growth.py:138:    assert not instance._no_progress_hold_active()
 tests/test_issue_904_hidden_only_no_growth.py:151:        assert instance._no_progress_hold[1] == "hidden_only"
@@ -436,8 +897,12 @@ tests/test_issue_904_hidden_only_no_growth.py:159:        assert instance._no_pr
 tests/test_issue_904_hidden_only_no_growth.py:172:    assert instance._no_progress_hold is None
 tests/test_issue_904_hidden_only_no_growth.py:196:        instance.note_turn_complete()
 tests/test_issue_904_hidden_only_no_growth.py:209:    assert instance._no_progress_hold is None
+tests/test_issue_906_survival_uncovered_count.py:57:        engine._start_sweep_budget_hold()
+tests/test_issue_909_condensation_starves_leaf.py:111:    assert not engine._sweep_budget_hold_active()
 tests/test_issue_909_condensation_starves_leaf.py:112:    assert not engine._no_progress_hold_active()
+tests/test_issue_909_condensation_starves_leaf.py:156:    assert not engine._sweep_budget_hold_active()
 tests/test_issue_909_condensation_starves_leaf.py:157:    assert not engine._no_progress_hold_active()
+tests/test_issue_909_condensation_starves_leaf.py:207:        engine._start_sweep_budget_hold()
 tests/test_issue_909_condensation_starves_leaf.py:209:        engine._start_no_progress_hold("no_progress")
 tests/test_issue_909_condensation_starves_leaf.py:210:    assert engine.should_compress_preflight(view) is True
 tests/test_issue_922_no_self_defeating_leaf.py:66:        engine.record_rejected_compaction()
@@ -452,22 +917,136 @@ tests/test_issue_922_no_self_defeating_leaf.py:250:def test_all_rows_in_tail_kee
 tests/test_issue_922_no_self_defeating_leaf.py:262:    instance.note_turn_complete()
 tests/test_issue_922_no_self_defeating_leaf.py:273:    assert instance._no_progress_hold == (610.0, "objective_only")
 tests/test_issue_922_no_self_defeating_leaf.py:278:    assert instance._no_progress_hold is None
+tests/test_lcm_core.py:4893:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:4910:        replay._ingest_messages(assembled + [{"role": "user", "content": "new user after restart"}])
+tests/test_lcm_core.py:4941:        engine._ingest_messages(persisted_messages)
+tests/test_lcm_core.py:4949:        replay._ingest_messages(
+tests/test_lcm_core.py:4982:        engine._ingest_messages(persisted_messages)
+tests/test_lcm_core.py:4990:        replay._ingest_messages(
+tests/test_lcm_core.py:5017:        engine._ingest_messages([
+tests/test_lcm_core.py:5041:        replay._ingest_messages([
+tests/test_lcm_core.py:5068:        engine._ingest_messages([
+tests/test_lcm_core.py:5088:        replay._ingest_messages([
+tests/test_lcm_core.py:5129:        engine._ingest_messages([
+tests/test_lcm_core.py:5149:        replay._ingest_messages([
+tests/test_lcm_core.py:5197:        engine._ingest_messages([
+tests/test_lcm_core.py:5230:        replay._ingest_messages([
+tests/test_lcm_core.py:5279:        engine._ingest_messages([
+tests/test_lcm_core.py:5320:        replay._ingest_messages([
+tests/test_lcm_core.py:5364:        engine._ingest_messages([
+tests/test_lcm_core.py:5404:        replay._ingest_messages([
+tests/test_lcm_core.py:5478:        engine._ingest_messages([
+tests/test_lcm_core.py:5503:        replay._ingest_messages([
+tests/test_lcm_core.py:5539:        engine._ingest_messages([
+tests/test_lcm_core.py:5552:        replay._ingest_messages(
+tests/test_lcm_core.py:5581:        engine._ingest_messages([
+tests/test_lcm_core.py:5595:        replay._ingest_messages([
+tests/test_lcm_core.py:5625:        engine._ingest_messages([
+tests/test_lcm_core.py:5638:        replay._ingest_messages(replayed_window + [{"role": "user", "content": "repeat me"}])
+tests/test_lcm_core.py:5657:        engine._ingest_messages([
+tests/test_lcm_core.py:5671:        replay._ingest_messages([
+tests/test_lcm_core.py:5694:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:5729:        replay_no_delta._ingest_messages(assembled)
+tests/test_lcm_core.py:5735:        replay._ingest_messages(assembled + [{"role": "user", "content": "new user after restart"}])
+tests/test_lcm_core.py:5747:        engine._ingest_messages(persisted_messages)
+tests/test_lcm_core.py:5755:        replay._ingest_messages([
+tests/test_lcm_core.py:5841:        engine._ingest_messages([
+tests/test_lcm_core.py:5885:        engine._ingest_messages([
+tests/test_lcm_core.py:5911:        engine._ingest_messages([
+tests/test_lcm_core.py:5942:        engine._ingest_messages([
+tests/test_lcm_core.py:5985:        active_messages = engine._ingest_messages(messages)
+tests/test_lcm_core.py:6035:        replay_with_redaction_disabled._ingest_messages(messages)
+tests/test_lcm_core.py:6042:        replay_from_active._ingest_messages(active_messages)
+tests/test_lcm_core.py:6073:        active_messages = engine._ingest_messages(messages)
+tests/test_lcm_core.py:6099:        replay_live_file._ingest_messages(messages)
+tests/test_lcm_core.py:6106:        replay._ingest_messages(active_messages)
+tests/test_lcm_core.py:6134:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6141:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:6172:        engine._ingest_messages(original_messages)
+tests/test_lcm_core.py:6183:        replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:6213:        engine._ingest_messages(original_messages)
+tests/test_lcm_core.py:6235:        replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:6248:        replay_after_cleanup._ingest_messages(original_messages + retry_messages)
+tests/test_lcm_core.py:6276:        engine._ingest_messages(original_messages)
+tests/test_lcm_core.py:6308:        replay._ingest_messages(original_messages + retry_messages)
+tests/test_lcm_core.py:6330:        replay_again._ingest_messages(original_messages + retry_messages)
+tests/test_lcm_core.py:6337:        replay_after_cleanup._ingest_messages(original_messages + retry_messages)
+tests/test_lcm_core.py:6361:        engine._ingest_messages([
+tests/test_lcm_core.py:6386:        replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:6421:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6436:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:6477:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6486:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:6495:        replay_again._ingest_messages(messages)
+tests/test_lcm_core.py:6501:        replay_third._ingest_messages(messages)
+tests/test_lcm_core.py:6541:        engine._ingest_messages(original_messages)
+tests/test_lcm_core.py:6554:        active_retry_messages = replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:6617:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6623:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:6653:        engine._ingest_messages(old_messages)
+tests/test_lcm_core.py:6679:        replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:6709:        engine._ingest_messages(old_messages)
+tests/test_lcm_core.py:6736:        replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:6766:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6793:        replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:6816:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6822:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:6856:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6862:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:6901:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6919:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:6956:        engine._ingest_messages(old_messages)
+tests/test_lcm_core.py:6967:        replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:7032:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:7040:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:7072:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:7082:        replay_with_file._ingest_messages(messages)
+tests/test_lcm_core.py:7091:        replay_enabled_with_file._ingest_messages(messages)
+tests/test_lcm_core.py:7099:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:7131:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:7140:        replay_with_file._ingest_messages(messages)
+tests/test_lcm_core.py:7147:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:7189:        engine._ingest_messages(original_messages)
+tests/test_lcm_core.py:7195:        replay_same._ingest_messages(original_messages)
+tests/test_lcm_core.py:7208:        replay_retry._ingest_messages(retry_messages)
+tests/test_lcm_core.py:7235:        engine._ingest_messages([
+tests/test_lcm_core.py:7270:        engine._ingest_messages([
+tests/test_lcm_core.py:7285:        engine._ingest_messages([
+tests/test_lcm_core.py:7319:        engine._ingest_messages([
+tests/test_lcm_core.py:7342:        engine._ingest_messages([
+tests/test_lcm_core.py:7369:        engine._ingest_messages([
+tests/test_lcm_core.py:7404:        engine._ingest_messages([
+tests/test_lcm_core.py:7438:        engine._ingest_messages([
+tests/test_lcm_core.py:7465:        engine._ingest_messages([
+tests/test_lcm_core.py:7482:        engine._ingest_messages([
+tests/test_lcm_core.py:7500:        engine._ingest_messages([
+tests/test_lcm_core.py:7520:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:7528:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:7557:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:7588:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:7600:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:7612:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:7635:        raw_engine._ingest_messages(messages)
+tests/test_lcm_core.py:7647:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:7663:        engine._ingest_messages([{"role": "user", "content": content}])
+tests/test_lcm_core.py:7691:        engine._ingest_messages([{"role": "user", "content": content}])
+tests/test_lcm_core.py:7738:        replay._ingest_messages(active_context)
+tests/test_lcm_core.py:7744:        replay_with_delta._ingest_messages(active_context + [{"role": "user", "content": "followup"}])
 tests/test_lcm_core.py:7755:        assert engine.should_compress_preflight(messages) is True
-tests/test_lcm_core.py:8426:    def test_clone_for_agent_isolates_session_binding_while_sharing_store(self, tmp_path):
-tests/test_lcm_core.py:8431:        first_agent = prototype.clone_for_agent()
-tests/test_lcm_core.py:8432:        second_agent = prototype.clone_for_agent()
-tests/test_lcm_core.py:8479:    def test_clone_for_agent_does_not_copy_bypass_lineage_into_normal_session(self, tmp_path):
-tests/test_lcm_core.py:8498:            clone = prototype.clone_for_agent()
-tests/test_lcm_core.py:8520:    def test_deepcopy_uses_clone_for_agent_without_copying_sqlite_handles(self, tmp_path):
-tests/test_lcm_engine.py:85:    clone = prototype.clone_for_agent()
-tests/test_lcm_engine.py:124:@pytest.mark.parametrize("make_clone", ["clone_for_agent", "deepcopy"])
-tests/test_lcm_engine.py:134:    clone = parent.clone_for_agent() if make_clone == "clone_for_agent" else copy.deepcopy(parent)
+tests/test_lcm_core.py:7771:        engine._ingest_messages([{"role": injected_role, "content": content}])
+tests/test_lcm_engine.py:547:        engine._ingest_messages([{"role": "user", "content": "message from profile a"}])
+tests/test_lcm_engine.py:559:        engine._ingest_messages([{"role": "user", "content": "message from profile b"}])
+tests/test_lcm_engine.py:652:        engine._ingest_messages([{"role": "assistant", "content": "profile-a " + "A" * 32}])
+tests/test_lcm_engine.py:662:        engine._ingest_messages([{"role": "assistant", "content": "profile-b " + "B" * 32}])
+tests/test_lcm_engine.py:739:    monkeypatch.setattr(engine, "_ingest_messages", fail_ingest)
+tests/test_lcm_engine.py:1481:    engine._ingest_messages([{"role": "user", "content": "Cronjob Response: heartbeat"}])
 tests/test_lcm_engine.py:2202:            assert not instance.should_compress_preflight(messages)
 tests/test_lcm_engine.py:2247:            assert instance.should_compress_preflight(noop_messages) is False
 tests/test_lcm_engine.py:2251:            assert instance.should_compress_preflight(eligible_messages) is True
 tests/test_lcm_engine.py:2285:            assert instance.should_compress_preflight(messages) is False
 tests/test_lcm_engine.py:2312:            assert instance.should_compress_preflight(messages) is True
 tests/test_lcm_engine.py:2316:            assert instance.should_compress_preflight(messages) is True
+tests/test_lcm_engine.py:2318:            monkeypatch.setattr(instance, "_ingest_messages", lambda _messages: _messages[:-1])
 tests/test_lcm_engine.py:2320:            assert instance.should_compress_preflight(messages) is True
 tests/test_lcm_engine.py:2360:            assert instance.should_compress_preflight(messages)
 tests/test_lcm_engine.py:2384:            assert instance.should_compress_preflight(messages)
@@ -477,100 +1056,287 @@ tests/test_lcm_engine.py:2476:            assert instance.should_compress_prefli
 tests/test_lcm_engine.py:2490:            assert instance.should_compress_preflight(child_messages)
 tests/test_lcm_engine.py:2823:            assert instance.should_compress_preflight(messages)
 tests/test_lcm_engine.py:3111:            assert instance.should_compress_preflight(messages)
+tests/test_lcm_engine.py:4244:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4266:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4295:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4322:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4398:        after_restart._ingest_messages(replay_with_new_message)
+tests/test_lcm_engine.py:4550:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4567:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4597:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4618:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4645:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4662:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4690:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4703:        after_restart._ingest_messages(list(persisted_messages))
+tests/test_lcm_engine.py:4728:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4742:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4763:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4777:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4798:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4815:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4840:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4860:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4885:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4906:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4937:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4956:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4994:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5014:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:5046:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5063:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:5090:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5109:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:5130:        before_restart._ingest_messages([
+tests/test_lcm_engine.py:5151:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:5177:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5192:            after_restart._ingest_messages(stale_runtime_snapshot)
+tests/test_lcm_engine.py:5233:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5253:        after_restart._ingest_messages(stale_runtime_snapshot)
+tests/test_lcm_engine.py:5280:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5294:        after_restart._ingest_messages(delta)
+tests/test_lcm_engine.py:5322:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5340:        after_restart._ingest_messages(delta)
+tests/test_lcm_engine.py:5373:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5393:        after_restart._ingest_messages(delta)
+tests/test_lcm_engine.py:5428:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5447:        after_restart._ingest_messages(delta)
+tests/test_lcm_engine.py:5479:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5504:        after_restart._ingest_messages(replay_with_new_rows)
+tests/test_lcm_engine.py:5538:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5563:        after_restart._ingest_messages(stale_replay)
+tests/test_lcm_engine.py:5592:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5610:        after_restart._ingest_messages([{"role": "user", "content": "real singleton tail"}])
+tests/test_lcm_engine.py:5640:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5654:        after_restart._ingest_messages(repeated_prefix_delta)
+tests/test_lcm_engine.py:5687:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5709:        after_restart._ingest_messages(ambiguous_delta)
+tests/test_lcm_engine.py:5739:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5751:        after_restart._ingest_messages([{"role": "user", "content": "status delta"}])
+tests/test_lcm_engine.py:5768:        engine._ingest_messages = boom
 tests/test_lcm_engine.py:5778:        assert engine.should_compress_preflight(msgs) is False
+tests/test_lcm_engine.py:5783:        del engine._ingest_messages
+tests/test_lcm_engine.py:5796:        engine._ingest_messages = boom
 tests/test_lcm_engine.py:5799:        assert engine.should_compress_preflight(
+tests/test_lcm_engine.py:5809:        engine._ingest_messages = boom
+tests/test_lcm_engine.py:6058:        # foreground store via _ingest_messages.
 tests/test_lcm_engine.py:6075:        and should_compress_preflight calls leave the foreground row count
 tests/test_lcm_engine.py:6106:        instance.should_compress_preflight(cron_messages)
+tests/test_lcm_engine.py:6372:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:6387:        active_replay = engine._ingest_messages(messages)
+tests/test_lcm_engine.py:6617:        first_replay = engine._ingest_messages([ignored])
+tests/test_lcm_engine.py:6621:        appended_replay = engine._ingest_messages(
+tests/test_lcm_engine.py:6723:            second._ingest_messages(first_result)
+tests/test_lcm_engine.py:6758:            second._ingest_messages([{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:6794:            second._ingest_messages([{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:6829:            second._ingest_messages(
+tests/test_lcm_engine.py:6865:        engine._ingest_messages(first_result + [{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:6883:        engine._ingest_messages([quoted_placeholder])
+tests/test_lcm_engine.py:7222:            second._ingest_messages(first_result)
+tests/test_lcm_engine.py:7287:            second._ingest_messages(first_result + [{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:7353:            second._ingest_messages(first_result + [{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:7400:            second._ingest_messages(
+tests/test_lcm_engine.py:7454:            engine._ingest_messages(active)
+tests/test_lcm_engine.py:7514:            second._ingest_messages([{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:7539:            engine._ingest_messages(
+tests/test_lcm_engine.py:7589:            engine._ingest_messages(
+tests/test_lcm_engine.py:7621:            engine._ingest_messages(
+tests/test_lcm_engine.py:7652:            engine._ingest_messages(
+tests/test_lcm_engine.py:7683:            engine._ingest_messages(
+tests/test_lcm_engine.py:7722:            engine._ingest_messages(
+tests/test_lcm_engine.py:7752:            engine._ingest_messages(
+tests/test_lcm_engine.py:7791:            second._ingest_messages(
+tests/test_lcm_engine.py:7826:            engine._ingest_messages([{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:7856:            engine._ingest_messages([{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:7898:        engine._ingest_messages(result + [{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:7925:            engine._ingest_messages([])
+tests/test_lcm_engine.py:7971:            engine._ingest_messages(first_result)
+tests/test_lcm_engine.py:8028:            second._ingest_messages(first_result)
+tests/test_lcm_engine.py:8055:        first_result = first._ingest_messages(
+tests/test_lcm_engine.py:8058:        first_result = first._ingest_messages(
+tests/test_lcm_engine.py:8084:            second._ingest_messages(first_result)
 tests/test_lcm_engine.py:8289:            assert second.should_compress_preflight(messages) is True
+tests/test_lcm_engine.py:9069:        engine._ingest_messages(
 tests/test_lcm_engine.py:9663:        assert engine.should_compress_preflight(messages) is True
 tests/test_lcm_engine.py:9686:        assert engine.should_compress_preflight(messages) is True
 tests/test_lcm_engine.py:9719:            assert engine.should_compress_preflight(messages) is False
 tests/test_lcm_engine.py:9760:            assert second.should_compress_preflight(messages) is False
-tests/test_lcm_engine.py:9805:            assert second.should_compress_preflight(messages) is True
-tests/test_lcm_engine.py:9838:        assert engine.should_compress_preflight(messages) is True
-tests/test_lcm_engine.py:9857:        assert engine.should_compress_preflight(messages) is True
-tests/test_lcm_engine.py:9887:        assert engine.should_compress_preflight(messages) is True
-tests/test_lcm_engine.py:9926:        assert engine.should_compress_preflight(messages) is True
-tests/test_lcm_engine.py:9962:            second.should_compress_preflight(messages)
-tests/test_lcm_engine.py:9986:        assert engine.should_compress_preflight(messages) is True
-tests/test_lcm_engine.py:12474:            assert instance.should_compress_preflight(messages) is True
-tests/test_lcm_engine.py:13629:        def should_compress_preflight(self, engine: LCMEngine, messages):
-tests/test_lcm_engine.py:13630:            return engine.should_compress_preflight(messages)
-tests/test_lcm_engine.py:14166:        assert engine.should_compress_preflight(fresh_messages) is False
-tests/test_lcm_engine.py:14186:        assert engine.should_compress_preflight(messages) is False
-tests/test_lcm_engine.py:14262:        assert child.should_compress_preflight(engine, background_messages) is False
-tests/test_lcm_engine.py:14339:        self.HostAgentFrame("background-review-session", "foreground-session", hermes_home).should_compress_preflight(engine, [
-tests/test_lcm_engine.py:14401:        ).should_compress_preflight(engine, [
-tests/test_lcm_engine.py:14423:        child.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:14448:            def should_compress_preflight(self, lcm_engine: LCMEngine, messages):
-tests/test_lcm_engine.py:14449:                return lcm_engine.should_compress_preflight(messages)
-tests/test_lcm_engine.py:14464:        assert child.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:14496:            def should_compress_preflight(self, lcm_engine: LCMEngine, messages):
-tests/test_lcm_engine.py:14499:                        return lcm_engine.should_compress_preflight(messages)
-tests/test_lcm_engine.py:14517:        assert child.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:14646:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:14694:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:14732:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:14777:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:14817:        engine.should_compress_preflight(messages)
-tests/test_lcm_engine.py:14858:            def should_compress_preflight(self, lcm_engine: LCMEngine, messages):
-tests/test_lcm_engine.py:14859:                return lcm_engine.should_compress_preflight(messages)
-tests/test_lcm_engine.py:14874:        frame.should_compress_preflight(engine, messages)
-tests/test_lcm_engine.py:14941:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:14961:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:15004:        old_child.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:15031:        stale_descendant.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:15046:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:15060:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:15123:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:15148:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:15303:        side_channel_child.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:15389:        assert engine.should_compress_preflight([
-tests/test_lcm_engine.py:15442:        assert engine.should_compress_preflight([
-tests/test_lcm_engine.py:16519:                engine.should_compress_preflight([shared_opener])
-tests/test_lcm_engine.py:16988:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:16998:                assert child.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:17059:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:17103:            def should_compress_preflight(self, lcm_engine: LCMEngine, messages):
-tests/test_lcm_engine.py:17104:                return lcm_engine.should_compress_preflight(messages)
-tests/test_lcm_engine.py:17126:        branch.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:17249:        engine.should_compress_preflight(messages)
-tests/test_lcm_engine.py:17333:        engine.should_compress_preflight(messages)
-tests/test_lcm_engine.py:17781:        child.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:17803:        continuation.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:17817:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:17909:        continuation.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:17971:        b.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:17995:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:18045:        a.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:18049:        b.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:18065:        a.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:18080:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:18129:        parent.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:18150:        followup.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:18249:        followup.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:18296:        child.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:18326:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:18349:        child.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:18361:        child.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:18367:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:18379:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:20220:        child.should_compress_preflight(engine, [
-tests/test_lcm_engine.py:20249:        child.should_compress_preflight(engine, late_child_messages)
-tests/test_lcm_engine.py:20254:        engine.should_compress_preflight([
-tests/test_lcm_engine.py:20269:        engine.should_compress_preflight(messages)
-tests/test_lcm_engine.py:20318:        engine.should_compress_preflight(messages)
-tests/test_lcm_engine.py:21833:        assert engine.should_compress_preflight(compressed) is False
+tests/test_lcm_engine.py:9805:            assert second.should_compress_preflight(messages) is False
+tests/test_lcm_engine.py:9844:        assert engine.should_compress_preflight(messages) is True
+tests/test_lcm_engine.py:9863:        assert engine.should_compress_preflight(messages) is True
+tests/test_lcm_engine.py:9893:        assert engine.should_compress_preflight(messages) is True
+tests/test_lcm_engine.py:9932:        assert engine.should_compress_preflight(messages) is True
+tests/test_lcm_engine.py:9968:            second.should_compress_preflight(messages)
+tests/test_lcm_engine.py:9992:        assert engine.should_compress_preflight(messages) is True
+tests/test_lcm_engine.py:10067:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10232:        engine._ingest_messages([{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:10266:        engine._ingest_messages([{"role": "assistant", "content": placeholder}])
+tests/test_lcm_engine.py:10402:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10416:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10429:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10448:        engine._ingest_messages([multimodal])
+tests/test_lcm_engine.py:10474:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10487:        engine._ingest_messages([multimodal])
+tests/test_lcm_engine.py:10500:        engine._ingest_messages([multimodal])
+tests/test_lcm_engine.py:10514:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10528:        engine._ingest_messages([
+tests/test_lcm_engine.py:10545:        engine._ingest_messages([
+tests/test_lcm_engine.py:10555:        engine._ingest_messages([
+tests/test_lcm_engine.py:10576:        engine._ingest_messages([
+tests/test_lcm_engine.py:10591:        engine._ingest_messages([
+tests/test_lcm_engine.py:10627:        engine._ingest_messages([
+tests/test_lcm_engine.py:10647:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10653:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10676:        before_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:10688:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:10710:        before_filter._ingest_messages(active_context)
+tests/test_lcm_engine.py:10726:        after_filter_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:10754:        before_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:10771:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:10788:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10797:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10798:        engine._ingest_messages(messages)  # same messages again
+tests/test_lcm_engine.py:12001:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:12480:            assert instance.should_compress_preflight(messages) is True
+tests/test_lcm_engine.py:12926:            engine._ingest_messages(compressed)
+tests/test_lcm_engine.py:12961:            engine._ingest_messages(compressed2)
+tests/test_lcm_engine.py:13146:            fresh._ingest_messages([dict(scaffold), dict(retry)])
+tests/test_lcm_engine.py:13168:            seed._ingest_messages(visible)
+tests/test_lcm_engine.py:13177:            fresh._ingest_messages([dict(scaffold), dict(retry)])
+tests/test_lcm_engine.py:13193:            engine._ingest_messages([dict(b_marker)])
+tests/test_lcm_engine.py:13267:            original_ingest = engine._ingest_messages
+tests/test_lcm_engine.py:13278:            monkeypatch.setattr(engine, "_ingest_messages", pause_a_before_reconcile)
+tests/test_lcm_engine.py:13635:        def should_compress_preflight(self, engine: LCMEngine, messages):
+tests/test_lcm_engine.py:13636:            return engine.should_compress_preflight(messages)
+tests/test_lcm_engine.py:13704:        monkeypatch.setattr(engine, "_ingest_messages", locked_ingest)
+tests/test_lcm_engine.py:13717:        monkeypatch.setattr(engine, "_ingest_messages", interrupted_ingest)
+tests/test_lcm_engine.py:13789:        monkeypatch.setattr(engine, "_ingest_messages", broken_ingest)
+tests/test_lcm_engine.py:14138:        replay = engine._ingest_messages(fresh_messages)
+tests/test_lcm_engine.py:14172:        assert engine.should_compress_preflight(fresh_messages) is False
+tests/test_lcm_engine.py:14190:        monkeypatch.setattr(engine, "_ingest_messages", replay_diff)
+tests/test_lcm_engine.py:14192:        assert engine.should_compress_preflight(messages) is False
+tests/test_lcm_engine.py:14268:        assert child.should_compress_preflight(engine, background_messages) is False
+tests/test_lcm_engine.py:14345:        self.HostAgentFrame("background-review-session", "foreground-session", hermes_home).should_compress_preflight(engine, [
+tests/test_lcm_engine.py:14407:        ).should_compress_preflight(engine, [
+tests/test_lcm_engine.py:14429:        child.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:14454:            def should_compress_preflight(self, lcm_engine: LCMEngine, messages):
+tests/test_lcm_engine.py:14455:                return lcm_engine.should_compress_preflight(messages)
+tests/test_lcm_engine.py:14470:        assert child.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:14502:            def should_compress_preflight(self, lcm_engine: LCMEngine, messages):
+tests/test_lcm_engine.py:14505:                        return lcm_engine.should_compress_preflight(messages)
+tests/test_lcm_engine.py:14523:        assert child.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:14652:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:14700:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:14738:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:14783:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:14823:        engine.should_compress_preflight(messages)
+tests/test_lcm_engine.py:14864:            def should_compress_preflight(self, lcm_engine: LCMEngine, messages):
+tests/test_lcm_engine.py:14865:                return lcm_engine.should_compress_preflight(messages)
+tests/test_lcm_engine.py:14880:        frame.should_compress_preflight(engine, messages)
+tests/test_lcm_engine.py:14947:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:14967:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:15010:        old_child.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:15037:        stale_descendant.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:15052:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:15066:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:15129:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:15154:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:15309:        side_channel_child.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:15395:        assert engine.should_compress_preflight([
+tests/test_lcm_engine.py:15448:        assert engine.should_compress_preflight([
+tests/test_lcm_engine.py:16525:                engine.should_compress_preflight([shared_opener])
+tests/test_lcm_engine.py:16994:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:17004:                assert child.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:17065:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:17109:            def should_compress_preflight(self, lcm_engine: LCMEngine, messages):
+tests/test_lcm_engine.py:17110:                return lcm_engine.should_compress_preflight(messages)
+tests/test_lcm_engine.py:17132:        branch.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:17255:        engine.should_compress_preflight(messages)
+tests/test_lcm_engine.py:17339:        engine.should_compress_preflight(messages)
+tests/test_lcm_engine.py:17787:        child.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:17809:        continuation.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:17823:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:17915:        continuation.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:17977:        b.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:18001:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:18051:        a.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:18055:        b.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:18071:        a.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:18086:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:18135:        parent.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:18156:        followup.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:18255:        followup.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:18302:        child.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:18332:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:18355:        child.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:18367:        child.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:18373:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:18385:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:20226:        child.should_compress_preflight(engine, [
+tests/test_lcm_engine.py:20255:        child.should_compress_preflight(engine, late_child_messages)
+tests/test_lcm_engine.py:20260:        engine.should_compress_preflight([
+tests/test_lcm_engine.py:20275:        engine.should_compress_preflight(messages)
+tests/test_lcm_engine.py:20324:        engine.should_compress_preflight(messages)
+tests/test_lcm_engine.py:21707:            engine_a._ingest_messages([{"role": "user", "content": "first persisted message"}])
+tests/test_lcm_engine.py:21839:        assert engine.should_compress_preflight(compressed) is False
+tests/test_lcm_engine.py:26624:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:26680:        engine._ingest_messages([
+tests/test_native_publication_fallback.py:129:    candidate._ingest_messages(compressed + new_turns)
+tests/test_native_publication_fallback.py:152:    candidate._ingest_messages(messages + new_turns)
+tests/test_native_publication_fallback.py:185:    candidate._ingest_messages(messages + new_turns)
+tests/test_native_publication_fallback.py:216:        second._ingest_messages(recovered + new_turns)
+tests/test_native_publication_fallback.py:250:    candidate._ingest_messages(compressed + new_turns)
+tests/test_native_publication_fallback.py:328:        resumed._ingest_messages(recovered + new_turns)
+tests/test_native_publication_fallback.py:379:        engine._ingest_messages(changed)
+tests/test_native_publication_fallback.py:398:    candidate._ingest_messages(recovered + [{"role": "user", "content": forged}])
+tests/test_native_publication_fallback.py:606:    candidate._ingest_messages([lossy])
+tests/test_o2_native_recovery_removed.py:93:        monkeypatch.setattr(engine, "_ingest_messages", lambda _rows: replay)
 tests/test_o2_native_recovery_removed.py:97:            decision = engine.should_compress_preflight(rows)
-tests/test_packaging_install.py:1539:    clone = prototype.clone_for_agent()
-tests/test_packaging_install.py:1636:    active_clone = ctx.engine.clone_for_agent()
-tests/test_packaging_install.py:1694:    active_clone = ctx.engine.clone_for_agent()
-tests/test_packaging_install.py:1791:        active_clone = ctx.engine.clone_for_agent()
-tests/test_plugin_identity.py:151:    assert engine.clone_for_agent().name == "lcm"
+tests/test_o2_native_recovery_removed.py:130:            replay = engine._ingest_messages(rows)
 tests/test_rc4_no_progress_hold_ceiling_sweeps.py:42:    engine.record_rejected_compaction()
 tests/test_rc4_no_progress_hold_ceiling_sweeps.py:45:    assert engine._no_progress_hold_active() and not engine._sweep_budget_hold_active()
-tests/test_teams_host_surface.py:77:    "update_model", "shutdown", "clone_for_agent", "drain_rollup_maintenance",
+tests/test_reconcile_fork_guard.py:84:            engine._ingest_messages(original)
+tests/test_reconcile_fork_guard.py:93:                replay_engine._ingest_messages(replay_msgs)
+tests/test_reconcile_fork_guard.py:119:            engine._ingest_messages(original)
+tests/test_reconcile_fork_guard.py:130:                replay_engine._ingest_messages(delta)
+tests/test_reconcile_fork_guard.py:151:            engine._ingest_messages(original)
+tests/test_reconcile_fork_guard.py:159:                replay_engine._ingest_messages(divergent)
+tests/test_reconcile_fork_guard.py:177:            engine._ingest_messages(original)
+tests/test_reconcile_fork_guard.py:184:                replay_engine._ingest_messages(divergent)
+tests/test_reconcile_fork_guard.py:205:            engine._ingest_messages(original)
+tests/test_reconcile_fork_guard.py:213:                replay_engine._ingest_messages(delta)
+tests/test_reconcile_fork_guard.py:235:                replay_engine._ingest_messages(msgs)
+tests/test_reconcile_fork_guard.py:251:            engine._ingest_messages(original)
+tests/test_reconcile_fork_guard.py:263:                fork_engine._ingest_messages(fork_msgs)
+tests/test_reconcile_model_switch.py:158:            engine._ingest_messages(original)
+tests/test_reconcile_model_switch.py:172:                switch_engine._ingest_messages(with_switch)
+tests/test_reconcile_model_switch.py:187:                replay_engine._ingest_messages(after_switch)
+tests/test_reconcile_model_switch.py:221:            engine._ingest_messages(msgs)
+tests/test_reconcile_model_switch.py:235:                replay._ingest_messages(incoming)
+tests/test_reconcile_oob_message_block.py:83:    engine._ingest_messages(
+tests/test_reconcile_oob_message_block.py:340:            engine._ingest_messages(turn1)
+tests/test_reconcile_oob_message_block.py:353:            engine._ingest_messages(turn2)
+tests/test_reconcile_oob_message_block.py:382:            engine._ingest_messages(turn1)
+tests/test_reconcile_oob_message_block.py:393:            engine._ingest_messages(turn2)
+tests/test_reconcile_oob_message_block.py:432:            engine._ingest_messages(turn1)
+tests/test_reconcile_oob_message_block.py:445:            engine._ingest_messages(turn2)
+tests/test_reconcile_oob_message_block.py:461:            engine._ingest_messages(replay)
+tests/test_reconcile_oob_message_block.py:499:            engine._ingest_messages(turn1)
+tests/test_reconcile_oob_message_block.py:512:            engine._ingest_messages(replay)
+tests/test_reconcile_oob_message_block.py:549:            engine._ingest_messages(turn1)
+tests/test_reconcile_oob_message_block.py:562:            engine._ingest_messages(turn2)
+tests/test_reconcile_oob_message_block.py:578:            engine._ingest_messages(replay)
+tests/test_reconcile_oob_message_block.py:612:            engine._ingest_messages(enriched)
+tests/test_reconcile_oob_message_block.py:618:            engine._ingest_messages(replay)
+tests/test_reconcile_oob_message_block.py:644:            engine._ingest_messages(enriched)
+tests/test_reconcile_oob_message_block.py:650:            engine._ingest_messages(replay)
+tests/test_reconcile_todo_annotation.py:195:            engine._ingest_messages(original_messages)
+tests/test_reconcile_todo_annotation.py:213:                replay_engine._ingest_messages(replay_messages)
+tests/test_reconcile_todo_annotation.py:246:            engine._ingest_messages(original_messages)
+tests/test_reconcile_todo_annotation.py:258:                replay_engine._ingest_messages(replay_messages)
+tests/test_reconcile_tool_scaffold_excerpt.py:100:            engine._ingest_messages(turn1)
+tests/test_reconcile_tool_scaffold_excerpt.py:106:            engine._ingest_messages(turn2)
+tests/test_selective_session_bundle.py:260:def test_invalid_date_error_and_no_progress_fail_to_unchanged_baseline(tmp_path):
 tests/test_teams_host_surface.py:86:    "record_rejected_compaction",
 tests/test_teams_host_surface.py:89:    "note_turn_complete",
-tests/test_teams_host_surface.py:184:    `clone_for_agent` was excluded and does not need to be: nothing in tools.py
-tests/test_teams_host_surface.py:186:    surface would expose `LCMEngine.clone_for_agent` without failing CI --
+tests/test_tool_registry_characterization.py:127:        monkeypatch.setattr(engine, "_ingest_messages", lambda messages: ingested.extend(messages))
