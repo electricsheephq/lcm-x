@@ -140,6 +140,9 @@ def test_budget_spent_in_the_first_map_returns_the_input_unchanged(tmp_path, sum
         line = next(r.getMessage() for r in caplog.records if BUDGET_LINE in r.getMessage())
         assert "(budget 120s); steps: " in line and 121.0 <= _step_seconds(line, "anchor_ids") < 151.0  # numbers and step names only
         assert "user turn" not in line and "alpha" not in line
+        # #1880: an interrupted scan is not durable ordinary no-progress proof.
+        assert engine._store.read_metadata_json("compaction_no_progress:v1:S") is None
+        assert engine._sweep_budget_hold_active()  # Its original process-local pacing remains.
     finally:
         engine.shutdown()
 

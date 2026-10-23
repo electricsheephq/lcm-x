@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        host: [floor-0.21.3, r34.10-0.21.5, r34.15-0.21.5, ref-0.21.5]
+        host: [floor-0.21.3, r34.10-0.21.5, r34.15-0.21.5, ref-0.21.5, upstream-main]
     env:
       HERMES_DISABLE_LAZY_INSTALLS: "1"
       PYTHONDONTWRITEBYTECODE: "1"
@@ -69,7 +69,9 @@ jobs:
             tests/invariants/test_issue_1438_cli_new.py \
             tests/test_real_plugin_manager_identity.py \
             tests/test_real_host_bypass_cooldown_wire.py \
+            tests/test_real_host_config_resolution.py \
             tests/test_real_turn_loop_acp_override.py \
+            tests/test_session_end_attribution_host.py \
             tests/test_real_plugin_manager_compaction.py \
             tests/test_host_stub_parity.py \
             tests/test_real_long_session.py \

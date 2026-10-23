@@ -14,6 +14,7 @@ import argparse
 import json
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 CI_HOSTS = Path(__file__).with_name("hosts.ci.json")
@@ -141,9 +142,19 @@ def prep(name: str, root: Path, out: Path) -> dict:
     for cmd in (["git", "init", "-q", str(src)],
                 ["git", "-C", str(src), "fetch", "-q", "--depth", "1", f"https://github.com/{spec['repo']}.git", spec["sha"]],
                 ["git", "-C", str(src), "checkout", "-q", "--detach", "FETCH_HEAD"],
-                ["uv", "venv", "-q", "--python", spec["python_version"], str(venv)],
-                ["uv", "pip", "install", "-q", "-p", str(venv / "bin" / "python"), "-e", f"{src}[{spec['extras']}]", *spec["pins"]]):
+                ["uv", "venv", "-q", "--python", spec["python_version"], str(venv)]):
         subprocess.run(cmd, check=True)
+    # uv pip does not inherit project-level overrides from an editable dependency.
+    # Use the pinned host's own policy (e.g. its Pillow/browser-harness override).
+    project = tomllib.loads((src / "pyproject.toml").read_text())
+    overrides = project.get("tool", {}).get("uv", {}).get("override-dependencies", [])
+    override_args = []
+    if overrides:
+        override_file = root / name / "overrides.txt"
+        override_file.write_text("\n".join(overrides) + "\n")
+        override_args = ["--overrides", str(override_file)]
+    subprocess.run(["uv", "pip", "install", "-q", "-p", str(venv / "bin" / "python"),
+                    "-e", f"{src}[{spec['extras']}]", *spec["pins"], *override_args], check=True)
     hosts = {"hosts": {name: {"python": str(venv / "bin" / "python"), "src": str(src), "sha": spec["sha"],
                               "hermes_version": spec["hermes_version"]}}}
     out.write_text(json.dumps(hosts, indent=1) + "\n")

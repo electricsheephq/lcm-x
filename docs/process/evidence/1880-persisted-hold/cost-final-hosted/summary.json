@@ -1,0 +1,212 @@
+{
+  "protocol": "1880-admission-v2-steady",
+  "warmup": 20,
+  "paired_n": 200,
+  "baseline_sha": "10407e12e33c1d7b09fe0e05141153555aec5d62",
+  "cells": [
+    {
+      "rows": 10000,
+      "mode": "absent",
+      "base": {
+        "n": 200,
+        "p50_ms": 0.005328,
+        "p95_ms": 0.005588
+      },
+      "candidate": {
+        "n": 200,
+        "p50_ms": 0.008312,
+        "p95_ms": 0.008613
+      },
+      "limit_ms": 0.055328,
+      "passed": true
+    },
+    {
+      "rows": 10000,
+      "mode": "mismatch",
+      "base": {
+        "n": 200,
+        "p50_ms": 0.005593,
+        "p95_ms": 0.006269
+      },
+      "candidate": {
+        "n": 200,
+        "p50_ms": 0.0351775,
+        "p95_ms": 0.038007
+      },
+      "limit_ms": 0.055593000000000004,
+      "passed": true
+    },
+    {
+      "rows": 10000,
+      "mode": "held",
+      "candidate": {
+        "n": 200,
+        "p50_ms": 0.037461,
+        "p95_ms": 0.044006
+      },
+      "model_calls": 0,
+      "metadata_writes": 0,
+      "full_history_scans": 0,
+      "query_plans": [
+        {
+          "query": "SELECT * FROM lcm_lifecycle_state WHERE conversation_id = 'conv'",
+          "plan": [
+            [
+              3,
+              0,
+              0,
+              "SEARCH lcm_lifecycle_state USING INDEX sqlite_autoindex_lcm_lifecycle_state_1 (conversation_id=?)"
+            ]
+          ]
+        },
+        {
+          "query": "SELECT COALESCE(MAX(node_id), 0) FROM summary_nodes",
+          "plan": [
+            [
+              3,
+              0,
+              0,
+              "SEARCH summary_nodes"
+            ]
+          ]
+        },
+        {
+          "query": "SELECT COALESCE(MAX(store_id), 0) FROM messages",
+          "plan": [
+            [
+              3,
+              0,
+              0,
+              "SEARCH messages"
+            ]
+          ]
+        },
+        {
+          "query": "SELECT value FROM metadata WHERE key = 'compaction_no_progress:v1:S'",
+          "plan": [
+            [
+              3,
+              0,
+              0,
+              "SEARCH metadata USING INDEX sqlite_autoindex_metadata_1 (key=?)"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "rows": 10000,
+      "mode": "rebuilt-held",
+      "candidate": {
+        "n": 20,
+        "p50_ms": 0.14063599999999998,
+        "p95_ms": 0.167221
+      },
+      "model_calls": 0,
+      "metadata_writes": 0
+    },
+    {
+      "rows": 100000,
+      "mode": "absent",
+      "base": {
+        "n": 200,
+        "p50_ms": 0.005548,
+        "p95_ms": 0.005909
+      },
+      "candidate": {
+        "n": 200,
+        "p50_ms": 0.008603,
+        "p95_ms": 0.008983
+      },
+      "limit_ms": 0.055548,
+      "passed": true
+    },
+    {
+      "rows": 100000,
+      "mode": "mismatch",
+      "base": {
+        "n": 200,
+        "p50_ms": 0.0057135,
+        "p95_ms": 0.00637
+      },
+      "candidate": {
+        "n": 200,
+        "p50_ms": 0.0354435,
+        "p95_ms": 0.039509
+      },
+      "limit_ms": 0.0557135,
+      "passed": true
+    },
+    {
+      "rows": 100000,
+      "mode": "held",
+      "candidate": {
+        "n": 200,
+        "p50_ms": 0.037737,
+        "p95_ms": 0.043646
+      },
+      "model_calls": 0,
+      "metadata_writes": 0,
+      "full_history_scans": 0,
+      "query_plans": [
+        {
+          "query": "SELECT * FROM lcm_lifecycle_state WHERE conversation_id = 'conv'",
+          "plan": [
+            [
+              3,
+              0,
+              0,
+              "SEARCH lcm_lifecycle_state USING INDEX sqlite_autoindex_lcm_lifecycle_state_1 (conversation_id=?)"
+            ]
+          ]
+        },
+        {
+          "query": "SELECT COALESCE(MAX(node_id), 0) FROM summary_nodes",
+          "plan": [
+            [
+              3,
+              0,
+              0,
+              "SEARCH summary_nodes"
+            ]
+          ]
+        },
+        {
+          "query": "SELECT COALESCE(MAX(store_id), 0) FROM messages",
+          "plan": [
+            [
+              3,
+              0,
+              0,
+              "SEARCH messages"
+            ]
+          ]
+        },
+        {
+          "query": "SELECT value FROM metadata WHERE key = 'compaction_no_progress:v1:S'",
+          "plan": [
+            [
+              3,
+              0,
+              0,
+              "SEARCH metadata USING INDEX sqlite_autoindex_metadata_1 (key=?)"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "rows": 100000,
+      "mode": "rebuilt-held",
+      "candidate": {
+        "n": 20,
+        "p50_ms": 0.14606449999999999,
+        "p95_ms": 0.15936
+      },
+      "model_calls": 0,
+      "metadata_writes": 0
+    }
+  ],
+  "passed": true,
+  "boundary": "Gate only; seed/ingest/rebuild excluded; synthetic data; no runtime latency claim"
+}

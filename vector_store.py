@@ -526,7 +526,7 @@ class VectorStore:
         ).fetchone()
 
     def _resolve_profile(
-        self, model_name: str, provider: str | None = None
+        self, model_name: str, provider: str | None = None, revision_suffix: str | None = None
     ) -> sqlite3.Row | None:
         """Resolve a model name to its profile, preferring the current/active one.
 
@@ -553,24 +553,24 @@ class VectorStore:
                 SELECT identity_hash, model_name, provider, revision, dim, dtype,
                        byteorder, task, registered_at, active, archived_at, data_version
                 FROM lcm_embedding_profile
-                WHERE model_name = ? AND provider = ? AND task = ?
+                WHERE model_name = ? AND provider = ? AND task = ? AND (? IS NULL OR CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ?)
                 ORDER BY (active = 1 AND archived_at IS NULL) DESC,
                          registered_at DESC, identity_hash DESC
                 LIMIT 1
                 """,
-                (model_name, provider, _DEFAULT_TASK),
+                (model_name, provider, _DEFAULT_TASK, revision_suffix, revision_suffix),
             ).fetchone()
         return self._conn.execute(
             """
             SELECT identity_hash, model_name, provider, revision, dim, dtype,
                    byteorder, task, registered_at, active, archived_at, data_version
             FROM lcm_embedding_profile
-            WHERE model_name = ? AND task = ?
+            WHERE model_name = ? AND task = ? AND (? IS NULL OR CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ?)
             ORDER BY (active = 1 AND archived_at IS NULL) DESC,
                      registered_at DESC, identity_hash DESC
             LIMIT 1
             """,
-            (model_name, _DEFAULT_TASK),
+            (model_name, _DEFAULT_TASK, revision_suffix, revision_suffix),
         ).fetchone()
 
     @staticmethod
@@ -608,13 +608,14 @@ class VectorStore:
         ).fetchone()
 
     def _resolve_chunk_profile(
-        self, model_name: str, *, provider: str | None = None
+        self, model_name: str, *, provider: str | None = None, revision_suffix: str | None = None
     ) -> sqlite3.Row | None:
         """Resolve a profile by model (+optional provider) within task='chunk'."""
         base = (
             "SELECT identity_hash, model_name, provider, revision, dim, dtype, "
             "byteorder, task, registered_at, active, archived_at, data_version "
             "FROM lcm_embedding_profile WHERE model_name = ? AND task = ?"
+            " AND (? IS NULL OR CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ?)"
         )
         order = (
             " ORDER BY (active = 1 AND archived_at IS NULL) DESC, "
@@ -623,10 +624,10 @@ class VectorStore:
         if provider is not None:
             return self._conn.execute(
                 base + " AND provider = ?" + order,
-                (str(model_name), _CHUNK_TASK, str(provider).strip().lower()),
+                (str(model_name), _CHUNK_TASK, revision_suffix, revision_suffix, str(provider).strip().lower()),
             ).fetchone()
         return self._conn.execute(
-            base + order, (str(model_name), _CHUNK_TASK)
+            base + order, (str(model_name), _CHUNK_TASK, revision_suffix, revision_suffix)
         ).fetchone()
 
     @staticmethod
@@ -688,6 +689,7 @@ class VectorStore:
         dim: int,
         *,
         revision: str = "",
+        revision_suffix: str = "",
         dtype: str = _VECTOR_DTYPE,
         byteorder: str = _VECTOR_BYTEORDER,
         task: str = _DEFAULT_TASK,
@@ -702,7 +704,7 @@ class VectorStore:
         needs no re-backfill). Exactly one profile is left active. Returns the
         identity hash.
         """
-        revision = self._prescreen_revision(revision, dtype=dtype)
+        revision = self._prescreen_revision(revision, dtype=dtype) + revision_suffix
         canonical = EmbeddingIdentity.canonical(
             provider, model_name, revision, dim, dtype, byteorder, task
         )
@@ -2108,6 +2110,7 @@ class VectorStore:
         scan_max_rows: int = 0,
         scan_budget_s: float = 0.0,
         deadline: float | None = None,
+        revision_suffix: str | None = None,
     ) -> KNNResult:
         operation_started = _monotonic()
         k = int(k)
@@ -2126,7 +2129,7 @@ class VectorStore:
         # active. An unbackfilled identity resolves to None → coverage "none" →
         # the caller degrades to full_text.
         profile = (
-            self._resolve_profile(str(model), provider=provider)
+            self._resolve_profile(str(model), provider=provider, revision_suffix=revision_suffix)
             if model is not None
             else self._current_profile()
         )
@@ -2811,6 +2814,7 @@ class VectorStore:
         scan_max_rows: int = 0,
         scan_budget_s: float = 0.0,
         deadline: float | None = None,
+        revision_suffix: str | None = None,
     ) -> KNNResult:
         """Chunk KNN with the summary coverage contract.
 
@@ -2834,7 +2838,7 @@ class VectorStore:
         if source is not None and "source" not in message_columns:
             return KNNResult(coverage="none", reason="unverifiable_provenance")
         profile = (
-            self._resolve_chunk_profile(str(model), provider=provider)
+            self._resolve_chunk_profile(str(model), provider=provider, revision_suffix=revision_suffix)
             if model is not None
             else self._current_chunk_profile()
         )

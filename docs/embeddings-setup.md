@@ -31,7 +31,7 @@ Voyage documents its allotments and rate tiers on its
 truth; the numbers above were verified 2026-07.
 
 ```bash
-export VOYAGE_API_KEY=...           # from dash.voyageai.com
+# Set VOYAGE_API_KEY from dash.voyageai.com
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=voyage
 export LCM_EMBEDDING_MODEL=voyage-4-lite   # or voyage-4 / voyage-4-large
@@ -83,7 +83,7 @@ preserved. When `LCM_EMBEDDINGS_ENABLED=false`, `warmup` is inert: it does not r
 download a model, create embedding tables, or create the configured database.
 
 The model runs with 2 threads. To load it from another cache, for example one shared, read-only
-cache for several profiles, set fastembed's own `FASTEMBED_CACHE_PATH` (default `~/.cache/fastembed`).
+cache for several profiles, set fastembed's own `FASTEMBED_CACHE_PATH` (default: the user cache directory).
 Pre-seed a read-only cache: `warmup` cannot download into it.
 
 ### A host update can remove fastembed
@@ -108,7 +108,7 @@ pip install -r requirements-semantic.txt
 ```
 
 No restart and no re-warmup are needed: the provider import is lazy and the downloaded model cache
-survives in `~/.cache/fastembed`. The plugin also logs a `WARNING` at startup when embeddings are
+survives in the user cache directory. The plugin also logs a `WARNING` at startup when embeddings are
 enabled but the configured provider is unavailable, and `/lcm doctor` reports it through the
 `embedding_provider_health` check — so this no longer fails silently.
 
@@ -121,9 +121,20 @@ ollama pull nomic-embed-text        # 768-dim; mxbai-embed-large and bge-m3 also
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=ollama
 export LCM_EMBEDDING_MODEL=nomic-embed-text
+export LCM_EMBEDDING_QUERY_PREFIX="search_query: "
+export LCM_EMBEDDING_DOCUMENT_PREFIX="search_document: "
 # LCM_OLLAMA_BASE_URL defaults to http://localhost:11434
 /lcm embed warmup && /lcm embed backfill --apply
 ```
+
+Prefixes are raw strings; quote them to preserve the trailing space. Empty defaults leave
+requests and vector identities unchanged. Only Ollama and OpenAI-compatible providers use them.
+[Contributor dhaern's measurements](https://github.com/electricsheephq/lcm-x/issues/1118#issuecomment-6358033279) on two public BEIR sets
+found model-card prefixes raised EmbeddingGemma 2 nDCG@10 by about 6% and pixie-rune-8k by under 3%; these are not LCM-X history numbers.
+
+The contributor reported that `embeddinggemma-2:270m` with Ollama's default batch size rejected inputs over about 2,000 tokens
+with HTTP 413 even with `num_ctx` 8192; raising `num_batch` to 8192 as well worked. LCM-X does not send Ollama `options`.
+Try setting both on the model with Modelfile `PARAMETER` entries; that method was not verified by the contributor.
 
 Ollama requests set `truncate: false`, so an input that exceeds the model's context fails loudly
 rather than being silently truncated to a misleading embedding. As with Voyage, an Ollama
@@ -164,7 +175,11 @@ export LCM_EMBEDDING_API_KEY=sk-...        # falls back to SILICONFLOW_API_KEY
 `/embeddings` is appended. The request body is the standard OpenAI shape —
 `{"model": ..., "input": [...]}` with a `Bearer` authorization header — so any
 compatible server works, including local llama.cpp/vLLM instances that cost
-nothing per call.
+nothing per call. For an asymmetric model such as `nomic-embed-text`, set `LCM_EMBEDDING_QUERY_PREFIX="search_query: "`
+and `LCM_EMBEDDING_DOCUMENT_PREFIX="search_document: "` to its model-card values.
+Both HTTP providers send the complete prefixed input after any cloud privacy transform;
+server size errors follow the existing error path, without silent truncation or a vector write
+for the rejected item. There is no new client-side input limit.
 
 The same deadline, spend-guard, and identity rules apply as for the other
 remote providers: `LCM_EMBEDDING_QUERY_TIMEOUT_S` bounds interactive queries,
@@ -255,6 +270,8 @@ an existing history in one go.
   identity, transactional `data_version`, and candidate ids; it is not a corpus-sized matrix.
 
 ## Switching or removing providers
+
+A prefix change (including removal) registers a new identity: restart Hermes, then run `/lcm embed warmup` and `/lcm embed backfill --apply` (add corpus/consent options for chunks). Provider caches keep their existing provider/model keys.
 
 Change provider/model → run `/lcm embed warmup` (registers the new profile as the current identity)
 → `/lcm embed backfill --apply` (embeds under the new identity; the previous model's vectors are

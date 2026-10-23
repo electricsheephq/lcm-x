@@ -1,0 +1,33 @@
+{
+  "id": "session-end-attribution-cost-2026-10-23",
+  "run_id": "session-end-attribution-20261023",
+  "t2_tag": "lcm-x/session-end-attribution-20261023",
+  "benchmark": "Session-end attribution ordinary-turn overhead",
+  "metric": "maximum_paired_median_delta_ms",
+  "value": 0.02470599999999995,
+  "display": "4/4 scoped cells pass; INFO preflight +0.004043ms, ingest +0.003702ms",
+  "tier": "P",
+  "date": "2026-10-23",
+  "system_commit": "ec11b30a3a96ac27fe2f81021a3a6254a2a6ef72",
+  "harness_commit": "ec11b30a3a96ac27fe2f81021a3a6254a2a6ef72",
+  "judge": "deterministic; no model judge",
+  "reader": "synthetic warm 24-row SQLite history",
+  "retrieval_config": "Full warm preflight and post_llm_call ingest span at INFO and DEBUG; defaults with embeddings and temporal rollups disabled; no provider calls",
+  "dataset_exposure": "Synthetic only; no customer data",
+  "breakdown": "https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/summary.json",
+  "variance": "200 alternating AB/BA pairs per cell; 10 warmups; paired medians and p10/p90 retained",
+  "failclose": "Marginal and paired median deltas must each be at most max(10% of baseline,0.05ms); 4/4 pass",
+  "evidence": [
+    "https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/RESULT.md",
+    "https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/RESULT-MANIFEST.json",
+    "https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/pairs.jsonl",
+    "https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/measurement-source.py",
+    "https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/score.py"
+  ],
+  "caveats": [
+    "Scopes exclude hook dispatch, turn-complete notification, leaf preparation and all host/model work.",
+    "Later shallow-copy correction restores the base contract and does not alter either measured path.",
+    "No live slow-commit attribution, speedup, release, runtime or customer claim.",
+    "Public raw pairs and re-score inputs retained. T2 unpublished; no result disposal."
+  ]
+}
