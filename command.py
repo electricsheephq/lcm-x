@@ -3675,7 +3675,11 @@ def _embedding_backfill_summary_run(
                 f"with LCM_EMBEDDING_STORAGE_DTYPE={expected_dtype} to register that identity",
             ])
         if apply and (profile_suffix or config.embedding_query_prefix or config.embedding_document_prefix):
-            if profile_suffix != getattr(resolve_provider(config, for_backfill=True), "identity_revision_suffix", ""):
+            try:
+                prefix_provider = resolve_provider(config, for_backfill=True)
+            except Exception as exc:
+                return "\n".join(["LCM embedding backfill", "mode: apply", "status: error", f"error: {exc}"])
+            if profile_suffix != getattr(prefix_provider, "identity_revision_suffix", ""):
                 return "configured provider does not match the current profile: embedding prefix settings changed; run /lcm embed warmup, then backfill"
         if not apply:
             pending, rows = _embedding_pending_rows(read_conn, identity, limit)

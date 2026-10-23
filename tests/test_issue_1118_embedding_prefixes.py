@@ -487,4 +487,4 @@ def test_prefix_preflight_reports_invalid_provider_config(provider_name, missing
     assert isinstance(result, str) and "status: error" in result and "error: " in result
     assert len(payloads) == requests
     with sqlite3.connect(engine._store.db_path) as conn:
-        assert conn.execute("SELECT count(*) FROM lcm_summary_embedding").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM lcm_embedding_meta").fetchone()[0] == 0
