@@ -78,6 +78,100 @@ def test_first_divergence() -> None:
     assert first_difference([], []) is None
 
 
+@pytest.mark.parametrize("name", ["cache-new-uid", "anchor-stamp-new-uid", "proof-output-new-uid",
+                                  "proof-native-new-uid", "proof-consumed-new-uid"])
+def test_new_uid_seed_matches_first_immutable_fact(name: str, tmp_path: Path) -> None:
+    payloads: list[str] = []
+    observe(next(case for case in SCENARIOS if case.name == name), tmp_path, payloads=payloads)
+    states = {label: json.loads(next(event[len(label) + 1:] for event in payloads
+                                    if event.startswith(label + " ")))
+              for label in ("state-before", "state-after", "next-state", "cold-state")}
+    metadata = dict(states["state-before"]["tables"]["metadata"])
+    if name == "proof-native-new-uid":
+        assert not any(key.startswith(("host_occurrence_row:", "host_occurrence_accepted_view:"))
+                       for key in metadata)
+    else:
+        assert json.loads(metadata["host_occurrence_row:S:1"])["message_uid"] == "old-occurrence"
+    before = states["state-before"]["tables"]["messages"]
+    after = states["state-after"]["tables"]["messages"]
+    assert after[:len(before)] == before
+    assert len(after) > len(before)
+    incoming = json.loads(next(event.removeprefix("input-before ") for event in payloads
+                               if event.startswith("input-before ")))
+    assert incoming[0]["message_uid"] == "fresh-occurrence"
+    assert states["next-state"]["tables"]["messages"] == after
+    assert states["cold-state"]["tables"]["messages"] == after
+
+
+@pytest.mark.parametrize("name", ["proof-native-remap", "proof-native-remap-new-stamp"])
+def test_native_manual_proof_is_legacy_reader_without_extra_note(name: str, tmp_path: Path) -> None:
+    payloads: list[str] = []
+    observe(next(case for case in SCENARIOS if case.name == name), tmp_path, payloads=payloads)
+    before = json.loads(next(event.removeprefix("state-before ") for event in payloads
+                             if event.startswith("state-before ")))
+    assert not any(row[0].startswith(("host_occurrence_row:", "host_occurrence_accepted_view:"))
+                   for row in before["tables"]["metadata"])
+    for label in ("state-after", "next-state", "cold-state"):
+        state = json.loads(next(event[len(label) + 1:] for event in payloads
+                                if event.startswith(label + " ")))
+        assert not any(row[5] == harness.NOTE["content"] for row in state["tables"]["messages"])
+        assert state["tables"]["messages"][:4] == before["tables"]["messages"]
+
+
+@pytest.mark.parametrize("name", ["uid-bindings-new-occurrence", "uid-bindings-canonical-same-row"])
+def test_uid_stamp_partition_has_actual_same_row_witness(name: str, tmp_path: Path) -> None:
+    payloads: list[str] = []
+    observe(next(case for case in SCENARIOS if case.name == name), tmp_path, payloads=payloads)
+    def event(label: str) -> Any:
+        return json.loads(next(row[len(label) + 1:] for row in payloads if row.startswith(label + " ")))
+    before, after = event("state-before"), event("state-after")
+    metadata = dict(before["tables"]["metadata"])
+    bindings = before["tables"]["host_uid_bindings"]
+    assert len(bindings) == 4 and all(row[3] == "canonical" for row in bindings)
+    assert event("input-before")[0]["timestamp"] == event("input-after")[0]["timestamp"] == 999.
+    rows = after["tables"]["messages"]
+    assert rows[:4] == before["tables"]["messages"]
+    if name == "uid-bindings-new-occurrence":
+        assert not any(key.startswith(("host_occurrence_row:", "host_occurrence_accepted_view:"))
+                       for key in metadata)
+        assert len(rows) == 5 and event("return-0")[0]["timestamp"] == 999.
+    else:
+        fact = json.loads(metadata["host_occurrence_row:S:1"])
+        assert fact["message_uid"] == event("input-before")[0]["message_uid"] == "host-uid-0"
+        assert any(row[0] == 1 and row[1] == "host-uid-0" and row[2] for row in bindings)
+        assert rows[0][5] == event("input-before")[0]["content"]
+        assert len(rows) == 4 and event("return-0")[0]["timestamp"] == 100.
+    assert event("cold-return")[0]["timestamp"] == 999.
+    for label in ("next-state", "cold-state"):
+        assert event(label)["tables"]["messages"] == rows
+        assert event(label)["tables"]["host_uid_bindings"] == after["tables"]["host_uid_bindings"]
+
+
+def test_exact_evidence_digest_mapping_keeps_content_distinctions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = IngestCanonical(tmp_path, [])
+    harness.observe_occurrence_digests(monkeypatch, canonical)
+    identities = [("user", str(tmp_path / "payload.txt") + suffix, "", "", "")
+                  for suffix in ("", " ", " changed")]
+    raw = [engine_module._commit_proof_identity_digest(identity) for identity in identities]
+    clean = [canonical.value(digest, "input_sha256") for digest in raw]
+    assert len(set(raw)) == len(set(clean)) == 3
+    assert clean == [hashlib.sha256(json.dumps(list(canonical.value(identity, "content")),
+                    ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+                    for identity in identities]
+    assert canonical.value({"content": raw[0], "message_uid": raw[1]}) == {
+        "content": raw[0], "message_uid": raw[1]}
+    assert canonical.value("f" * 64, "input_sha256") == "f" * 64
+    assert all(row["raw"] != row["canonical"] for row in canonical.digest_sources.values())
+    with pytest.MonkeyPatch.context() as collision:
+        collision.setattr(engine_module, "_commit_proof_identity_digest", lambda identity: "0" * 64)
+        harness.observe_occurrence_digests(collision, IngestCanonical(tmp_path, []))
+        engine_module._commit_proof_identity_digest(identities[0])
+        with pytest.raises(AssertionError, match="inconsistent evidence digest"):
+            engine_module._commit_proof_identity_digest(identities[1])
+
+
 def test_occurrence_uids_and_structured_payload_bytes_stay_distinct(tmp_path: Path) -> None:
     canonical = IngestCanonical(tmp_path, [])
     first = {"role": "user", "content": {"mtime_ns": 100, "message_uid": "nested"},

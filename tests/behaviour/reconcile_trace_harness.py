@@ -244,6 +244,93 @@ class Canonical:
         raise TypeError(f"Unclassified trace value {path}: {type(value).__name__}")
 
 
+def observe_occurrence_digests(patch: Any, canonical: Any) -> None:
+    """Display exact corresponding evidence hashes; product calls/results stay unchanged."""
+    engine = importlib.import_module("hermes_lcm.engine")
+    store = importlib.import_module("hermes_lcm.store")
+    raw_value, raw_text = canonical.value, canonical.text
+    mappings, sources = {}, {}
+    fields = {"identity_sha256", "input_sha256", "proof_sha256", "basis", "_occurrence_digest",
+              "effective_sha256", "effective_sha256_v4", "scaffold_sha256_v4"}
+
+    def register(kind: str, original: str, normalized: str, raw: Any, clean: Any) -> None:
+        assert original not in mappings or mappings[original] == normalized, "inconsistent evidence digest"
+        mappings[original] = normalized
+        sources.setdefault(original, dict(kind=kind, raw_sha256=original, canonical_sha256=normalized,
+                                          raw=raw, canonical=clean))
+
+    def json_record(text: str) -> str:
+        try:
+            record = json.loads(text)
+        except (ValueError, TypeError):
+            return text
+        if not isinstance(record, dict) or not (
+                record.get("occurrence_version") == 2 or "proof_sha256" in record
+                or "effective_sha256" in record):
+            return text
+        def collect(value: Any, key: str = "") -> set[str]:
+            if isinstance(value, str):
+                return {value} if key in fields and value in mappings else set()
+            if isinstance(value, dict):
+                return set().union(*(collect(v, str(k)) for k, v in value.items())) if value else set()
+            if isinstance(value, list):
+                return set().union(*(collect(v, key) for v in value)) if value else set()
+            return set()
+        for digest in collect(record):
+            text = text.replace('"' + digest + '"', '"' + mappings[digest] + '"')
+        return text
+
+    def text(value: str, **kwargs: Any) -> str:
+        if re.search(r"\b(?:INSERT INTO|UPDATE) metadata\b", value, re.I):
+            value = re.sub(r"'(?:''|[^'])*'", lambda m: "'" + json_record(
+                m[0][1:-1].replace("''", "'")).replace("'", "''") + "'", value)
+        return raw_text(value, **kwargs).replace(home_tag, normalized_tag)
+
+    def value(item: Any, path: str = "", **kwargs: Any) -> Any:
+        payload = kwargs.get("in_payload", False) or "content" in path.split(".") or path == "payload"
+        if isinstance(item, str) and not payload:
+            if path.rsplit(".", 1)[-1] in fields:
+                item = mappings.get(item, item)
+            else:
+                item = json_record(item)
+        return raw_value(item, path, **kwargs)
+
+    canonical.text, canonical.value = text, value
+    canonical.digest_sources = sources
+    state_path = str(Path(canonical.root) / "home" / "state.db")
+    # This is the exact trace host path used by lineage, not a wildcard hash.
+    home_tag = hashlib.sha256(state_path.encode()).hexdigest()[:16]
+    normalized_tag = hashlib.sha256(raw_text(state_path).encode()).hexdigest()[:16]
+    register("home", home_tag, normalized_tag, state_path, raw_text(state_path))
+    if hasattr(canonical, "path_hashes"):
+        canonical.path_hashes[home_tag] = normalized_tag
+
+    for module in (engine, reconcile):
+        original = module._commit_proof_identity_digest
+        def identity_digest(identity: Any, original: Any = original) -> str:
+            result = original(identity)
+            clean = raw_value(identity, "content")  # input identity never gains proof-only trim
+            normalized = hashlib.sha256(json.dumps(list(clean), ensure_ascii=False,
+                separators=(",", ":")).encode("utf-8")).hexdigest()
+            register("identity", result, normalized, identity, clean)
+            return result
+        patch.setattr(module, "_commit_proof_identity_digest", identity_digest)
+
+    original_write = store.MessageStore.write_metadata_json
+    def write(target: Any, keys: Any, serialized: str, *args: Any, **kwargs: Any) -> Any:
+        if any(key.startswith("compaction_commit_proof:") for key in keys):
+            try:
+                raw = json.loads(serialized)
+            except ValueError:
+                raw = None  # A malformed publication remains the real store's decision.
+            if isinstance(raw, dict):
+                clean = canonical.value(raw)
+                register("proof", hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest(),
+                         hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest(), raw, clean)
+        return original_write(target, keys, serialized, *args, **kwargs)
+    patch.setattr(store.MessageStore, "write_metadata_json", write)
+
+
 def rows(case: Scenario, root: Path) -> list[Message]:
     if case.shape in {"user", "assistant", "system", "tool", "externalized", "marker", "quarantine"} and case.count == 1:
         role = case.shape if case.shape in {"user", "assistant", "system", "tool"} else "tool"
@@ -371,14 +458,16 @@ def install_clock(patch: pytest.MonkeyPatch) -> None:
             patch.setattr(module, "time", clock)
 
 
-def observe(case: Scenario, root: Path) -> Trace:
+def observe(case: Scenario, root: Path, *, digest_attribution: list | None = None) -> Trace:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     events: Trace = []
+    canonical = Canonical(root, [])
     with pytest.MonkeyPatch.context() as patch:
         pin: Any = pin_char_counter
         context: Any = engine_context
         pin(patch)
+        observe_occurrence_digests(patch, canonical)
         token_module = importlib.import_module("hermes_lcm.tokens")
         counter = token_module._count_tokens_cached
 
@@ -529,7 +618,7 @@ def observe(case: Scenario, root: Path) -> Trace:
                 # The context manager shuts down the reopened instance at exit.
                 engine.__init__(config=engine._config, hermes_home=str(root / "home"))
                 engine.on_session_start("S", conversation_id="trace-conversation", context_length=200000)
-            canonical = Canonical(root, incoming)
+            canonical.identities.update((id(row), f"message-{i}") for i, row in enumerate(incoming))
             events.append("input " + compact(canonical.value(incoming)))
             aliases = [next(i for i, row in enumerate(incoming) if row is m) for m in incoming]
             events.append("aliases " + encoded(aliases))
@@ -654,6 +743,8 @@ def observe(case: Scenario, root: Path) -> Trace:
             events.append("aliases-after " + encoded(after_aliases))
             assert encoded(canonical.value(incoming)) == before_input, "target mutated caller input"
             assert after_aliases == aliases, "target changed caller aliases"
+    if digest_attribution is not None:
+        digest_attribution.extend(canonical.digest_sources.values())
     return events
 
 

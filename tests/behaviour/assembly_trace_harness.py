@@ -441,7 +441,7 @@ def snapshot(engine: Any, canonical: Canonical, result: Any = None) -> dict[str,
     return state
 
 
-def observe(case: Scenario, root: Path) -> Trace:
+def observe(case: Scenario, root: Path, *, digest_attribution: list | None = None) -> Trace:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     canonical, events = Canonical(root), []
@@ -463,6 +463,9 @@ def observe(case: Scenario, root: Path) -> Trace:
         return cast(sqlite3.Connection, conn)
 
     with pytest.MonkeyPatch.context() as patch:
+        from tests.behaviour.reconcile_trace_harness import observe_occurrence_digests
+
+        observe_occurrence_digests(patch, canonical)
         pin: Any = pin_char_counter
         context: Any = engine_context
         pin(patch)
@@ -632,6 +635,8 @@ def observe(case: Scenario, root: Path) -> Trace:
                     events.append('payload ' + str(path.relative_to(root)) + ' sha256=' + hashlib.sha256(path.read_bytes()).hexdigest())
         engine_module._model_only_display_metadata_key.cache_clear()
         importlib.import_module('hermes_lcm.retrieval_core')._reset_vector_store_pool()
+    if digest_attribution is not None:
+        digest_attribution.extend(canonical.digest_sources.values())
     return events
 
 

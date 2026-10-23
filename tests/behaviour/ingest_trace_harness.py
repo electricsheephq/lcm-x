@@ -44,6 +44,7 @@ from tests.behaviour.frontier_observer import legacy_frontier_fields, observed_a
 from tests.behaviour.reconcile_trace_harness import (  # noqa: E402
     Canonical, LiteralPattern, NOTE, Scenario as ReplayScenario, encoded, fingerprint,
     first_difference as first_difference, install_clock as install_replay_clock, rows, seed_proof,
+    observe_occurrence_digests,
 )
 from tests.harness import ScriptedSummarizer, engine_context, pin_char_counter  # noqa: E402
 from tests.phase0_hygiene import product_env_keys  # noqa: E402
@@ -97,6 +98,7 @@ class Scenario:
     boundary: int = 0
     ordinal: int = 1
     stored: int = 4
+    legacy_writer: bool = False
 
 
 SCENARIOS = (
@@ -146,7 +148,8 @@ SCENARIOS = (
       for v in ("compaction", "host-merge", "rotation", "rewrite")],
     Scenario("uid-bindings-new", "W1", shape="uid", stored=0),
     Scenario("uid-bindings-replay", "P1/W1", shape="uid", warm=True),
-    Scenario("uid-bindings-new-occurrence", "P1/W1", shape="uid", warm=True, variant="new-stamp"),
+    Scenario("uid-bindings-new-occurrence", "P1/W1", shape="uid", warm=True, variant="new-stamp", legacy_writer=True),
+    Scenario("uid-bindings-canonical-same-row", "P1/W1", shape="uid", warm=True, variant="new-stamp"),
     Scenario("row-filter-ignored-append-error", "F1/W1", shape="ignored", variant="changed", fault="append"),
     Scenario("row-filter-generated-append-error", "F1/W1", shape="quarantine", variant="generated-append", fault="append"),
     Scenario("row-filter-ignore-ledger-lock", "F1/W1", shape="ignored-ledger",
@@ -464,12 +467,27 @@ def prepare(engine: Any, case: Scenario, root: Path, engines: ExitStack) -> tupl
         original += [{"role": "user", "content": "held head\n\n  exact whitespace \t", "timestamp": 500.}]
     if case.variant == "version-ignore":
         original[-1].pop("timestamp")
+    known_uid_seed = case.variant in {"new-uid", "stamp-new-uid"} and case.warm
+    if known_uid_seed:
+        original[0]["message_uid"] = "old-occurrence"
     incoming = [dict(m) for m in original] or [{"role": "user", "content": "fresh"}]
-    if case.warm or case.variant == "warm" or case.proof in {"output", "native", "consumed"}:
-        engine._ingest_messages(original)
-    elif original:
-        engine._store.append_batch("S", original, source="cli", conversation_id="trace-conversation")
-        engine = reopen(engine, root, engines)
+    legacy_seed = case.proof == "native" or case.legacy_writer
+    with pytest.MonkeyPatch.context() as writer:
+        if legacy_seed:
+            writer.setattr(engine_module.LCMEngine, "_occurrence_batch_factory",
+                           lambda self, batch: self._real_user_scaffold_metadata_rows)
+        if case.warm or case.variant == "warm" or case.proof in {"output", "native", "consumed"}:
+            engine._ingest_messages(original)
+        elif original:
+            engine._store.append_batch("S", original, source="cli", conversation_id="trace-conversation")
+            engine = reopen(engine, root, engines)
+    if legacy_seed:
+        assert engine._store._conn.execute(
+            "SELECT count(*) FROM metadata WHERE key LIKE 'host_occurrence_row:%' "
+            "OR key LIKE 'host_occurrence_accepted_view:%'").fetchone()[0] == 0
+    elif known_uid_seed:
+        fact = engine._store.read_metadata_json("host_occurrence_row:S:1")
+        assert fact["message_uid"] == original[0]["message_uid"] == "old-occurrence"
     if case.proof in {"output", "native", "consumed"}:
         proof: dict[str, Any] = {"session_id": "S", "conversation_id": "trace-conversation", "consulted": False,
                  "output": [engine._proof_replay_identity(m, strip_carrier=False) for m in incoming],
@@ -598,12 +616,6 @@ def prepare(engine: Any, case: Scenario, root: Path, engines: ExitStack) -> tupl
         incoming.append({"role": "user", "content": "new after rewrite"})
     elif case.variant in {"new-uid", "stamp-new-uid"}:
         incoming[0]["message_uid"] = "fresh-occurrence"
-        # Both known identities are required to prove a new occurrence.
-        old = engine._last_active_replay_messages
-        if old:
-            old[0]["message_uid"] = "old-occurrence"
-        if engine._compress_commit_proof:
-            engine._compress_commit_proof["output_metadata"][0]["message_uid"] = "old-occurrence"
     elif case.variant == "new-stamp":
         incoming[0]["timestamp"] = 999.
     elif case.variant == "missing-metadata":
@@ -749,11 +761,14 @@ def sqlite_fault(engine: Any, fault: str, events: Trace) -> Iterator[None]:
         conn.set_authorizer(None)
 
 
-def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) -> Trace:
+def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None,
+            digest_attribution: list | None = None) -> Trace:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     events: Trace = []
+    canonical = IngestCanonical(root, [])
     with pytest.MonkeyPatch.context() as patch:
+        observe_occurrence_digests(patch, canonical)
         pin: Any = pin_char_counter
         context: Any = engine_context
         pin(patch)
@@ -814,7 +829,8 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
             engine, incoming = prepare(engine, case, root, engines)
             if (case.shape in {"ignored", "ignored-ledger"} or case.variant == "version-ignore"):
                 engine._compiled_ignore_message_patterns = [LiteralPattern()]
-            canonical = IngestCanonical(root, incoming)
+            canonical.identities.update((id(row), f"message-{i}") for i, row in enumerate(incoming))
+            canonical.retained_messages.update((id(row), row) for row in incoming)
             canonical.retained_messages.update(copy_owners)
             if case.shape == "uid":
                 state_path = str(Path(engine._state_db_path()).resolve())
@@ -974,6 +990,8 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
             manifest = payload_observation(engine)
             if manifest:
                 emit("payloads-cold", manifest)
+    if digest_attribution is not None:
+        digest_attribution.extend(canonical.digest_sources.values())
     return events
 
 
