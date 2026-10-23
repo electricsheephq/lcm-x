@@ -719,7 +719,7 @@ def test_r1f_run6_session_order_matches_base(tmp_path, name, rows, sessions, ids
         engine._store.connection.commit()
         card = call(engine, name=name, limit=20)
         assert [s['session_id'] for s in card['sessions']] == sessions
-        assert mention_ids(card) == ids
+        assert [m['store_id'] for s in card['sessions'] for m in s['snippets']] == ids
     finally:
         engine.shutdown()
 
@@ -735,7 +735,7 @@ def test_r1f_run6_limit_cut_session_order(tmp_path):
         engine._store.connection.commit()
         card = call(engine, name='tara', limit=2)
         assert [s['session_id'] for s in card['sessions']] == ['aa', 'zz', 'yy']
-        assert mention_ids(card) == [3, 4]
+        assert [m['store_id'] for s in card['sessions'] for m in s['snippets']] == [3, 4]
         assert [s['count'] for s in card['sessions']] == [1, 2, 1]
         assert all(s['count'] > 0 for s in card['sessions'])
         assert card['sessions'][-1]['snippets'] == []
