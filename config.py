@@ -740,6 +740,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("extraction_enabled", "LCM_EXTRACTION_ENABLED", bool),
     _EnvFieldSpec("extraction_model", "LCM_EXTRACTION_MODEL", str),
     _EnvFieldSpec("extraction_output_path", "LCM_EXTRACTION_OUTPUT_PATH", str),
+    _EnvFieldSpec("entities_enabled", "LCM_ENTITIES_ENABLED", bool),
     _EnvFieldSpec("assertions_enabled", "LCM_ASSERTIONS_ENABLED", bool),
     _EnvFieldSpec("query_views_enabled", "LCM_QUERY_VIEWS_ENABLED", bool),
     _EnvFieldSpec(
@@ -991,6 +992,9 @@ class LCMConfig:
     extraction_model: str = ""
     # Directory for daily extraction files (empty = auto: ~/.hermes/lcm-extractions/)
     extraction_output_path: str = ""
+
+    # Read-only entity cards over existing rows; no schema or recall changes.
+    entities_enabled: bool = False
 
     # -- V4 assertion sidecar --
     # Materializes the rebuildable assertion tables in the same profile lcm.db.

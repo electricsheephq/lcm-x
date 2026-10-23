@@ -6931,23 +6931,15 @@ class LCMEngine(
                 # After compaction the cursor indexes its output, not this cache
                 # of the last ingested list; the commit proof owns that boundary.
                 and self._ingest_cursor == len(cached_source_identities)):
-            recent_tools = _hermes_salvage_protected_positions(messages)
             for idx, previous in enumerate(cached_active_replay_messages[:cursor]):
                 if current_prefix_identities[idx] != cached_source_identities[idx]:
                     break  # content changes retain the existing anchor audit
                 if self._host_occurrence_changed(messages[idx], previous):
                     new_prefix_occurrences.add(idx)
-                elif (self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)
-                      and (messages[idx].get("content") == previous.get("content")
-                           or (idx not in recent_tools
-                               and messages[idx].get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
-                               and previous.get("content") != _HERMES_PRUNED_TOOL_PLACEHOLDER
-                               and self._pruned_tool_output_identity(
-                                   messages[idx], str(messages[idx].get("role") or ""),
-                                   messages[idx]["content"],
-                               ) == cached_source_identities[idx]))):
-                    # Only proven older salvage may change literal bytes here.
-                    # The complete-list newest two may be genuine retry results.
+                elif (messages[idx].get("content") == previous.get("content")
+                      and self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)):
+                    # An alias can match changed literal bytes; metadata alone
+                    # must not skip that result when a retry rewinds the cursor.
                     unchanged_prefix_occurrences.add(idx)
             if new_prefix_occurrences:
                 cursor = self._ingest_cursor = min(new_prefix_occurrences)

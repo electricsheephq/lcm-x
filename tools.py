@@ -61,6 +61,7 @@ from .ingest_protection import (
     sensitive_pattern_status,
     validate_embedding_privacy_dispatch,
 )
+from . import memory_tools as _memory_tools
 from . import evidence_tools as _evidence_tools
 from . import inspect_tools as _inspect_tools
 from . import expansion_evidence
@@ -413,6 +414,8 @@ def _parse_strict_int(value: Any, name: str) -> tuple[int | None, str | None]:
 
 _LCM_GREP_VALID_SCOPES = frozenset({"current", "all", "session"})
 _LCM_GREP_VALID_CONTENT_SCOPES = frozenset({"history", "externalized", "both"})
+_LCM_MEMORY_LOOKUP_LIMITS = (20, 50)
+_LCM_MEMORY_LIST_LIMITS = (50, 200)
 _LCM_GREP_HARD_LIMIT_CAP = 200
 _LCM_GREP_EXTERNALIZED_FILE_CAP = 256
 _LCM_GREP_EXTERNALIZED_DISCOVERY_CAP = 4096
@@ -477,6 +480,11 @@ _LCM_INSPECT_REF_SCAN_MESSAGE_LIMIT = 10_000
 _LCM_INSPECT_PAYLOAD_METADATA_READ_BYTES = 16_384
 _LCM_INSPECT_MAX_RESPONSE_CHARS = 20_000
 _OPERATOR_TEXT_FIELD_MAX_CHARS = 1_000
+
+
+def lcm_memory(args: Dict[str, Any], **kwargs) -> str:
+    """Read a cited entity card or assertion subject registry."""
+    return _memory_tools.lcm_memory(args, **kwargs)
 
 
 def lcm_query_state(args: Dict[str, Any], **kwargs) -> str:

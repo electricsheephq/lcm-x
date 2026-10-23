@@ -28,6 +28,7 @@ def _engine(tmp_path: Path, name: str = "lcm.db") -> LCMEngine:
             database_path=str(tmp_path / name),
             embeddings_enabled=False,
             assertions_enabled=True,
+            entities_enabled=True,
             adaptive_retrieval_enabled=True,
             large_output_externalization_enabled=True,
             large_output_externalization_threshold_chars=200,
@@ -107,6 +108,7 @@ def _proposal(**fields):
 
 # (tool, base args, path of the optional array parameter, documented exception or None)
 _CASES = [
+    ("lcm_memory", {"action": "lookup", "name": "kanban"}, ("aliases",), None),
     ("lcm_grep", {"query": "kanban"}, ("externalized_refs",), None),
     (
         "lcm_grep",

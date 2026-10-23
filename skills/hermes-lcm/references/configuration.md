@@ -101,11 +101,12 @@ Range warnings (`LCM_CONTEXT_THRESHOLD`, `LCM_SURVIVAL_RESERVE`, `LCM_LEAF_CHUNK
 
 Both native context-engine schemas and plugin-registry registration advertise
 13 tools by default. `LCM_ASSERTIONS_ENABLED=true` exposes `lcm_query_state`;
-`LCM_ADAPTIVE_RETRIEVAL_ENABLED=true` exposes `lcm_retrieve`. Restart after
+`LCM_ADAPTIVE_RETRIEVAL_ENABLED=true` exposes `lcm_retrieve`;
+`LCM_ENTITIES_ENABLED=1` exposes read-only `lcm_memory`. Restart after
 changing these loaded process flags. `LCM_DISABLED_TOOLS` (comma-separated
 names) hides any tool, including a flag-enabled one, and refuses direct calls.
 Calls through a cached dormant schema retain the existing disabled response.
-The manifest continues to declare all 15 tools.
+The manifest continues to declare all 16 tools.
 
 ### Recall ranking
 
@@ -187,6 +188,7 @@ warns without changing its behavior until removal.
 | `LCM_EXTRACTION_ENABLED` | `bool` | `false` | — | — |
 | `LCM_EXTRACTION_MODEL` | `str` | `""` | — | — |
 | `LCM_EXTRACTION_OUTPUT_PATH` | `str` | `""` | — | — |
+| `LCM_ENTITIES_ENABLED` | `bool` | `false` | — | — |
 | `LCM_ASSERTIONS_ENABLED` | `bool` | `false` | — | — |
 | `LCM_QUERY_VIEWS_ENABLED` | `bool` | `false` | — | — |
 | `LCM_ADAPTIVE_RETRIEVAL_ENABLED` | `bool` | `false` | — | — |

@@ -21,11 +21,11 @@ import sys
 import tempfile
 import time
 from types import ModuleType
-# This is an all-tools subject (15), not the stock default exposure (13).
-# _engine() opts into both dormant tools so their live scenarios remain covered.
+# This is an all-tools subject (16), not the stock default exposure (13).
+# _engine() opts into all dormant tools so their live scenarios remain covered.
 SCENARIOS = {
     "lcm_grep", "lcm_recall", "lcm_query_state", "lcm_compute", "lcm_compile_evidence", "lcm_evidence_pack", "lcm_retrieve", "lcm_recent",
-    "lcm_load_session", "lcm_describe", "lcm_expand", "lcm_expand_query", "lcm_status", "lcm_inspect", "lcm_doctor",
+    "lcm_load_session", "lcm_describe", "lcm_expand", "lcm_expand_query", "lcm_status", "lcm_inspect", "lcm_doctor", "lcm_memory",
 }
 # PEM armor markers are built by string concatenation so the Hermes plugin install
 # scanner does not read these planted test fixtures as an embedded private key (#471).
@@ -174,7 +174,7 @@ def _engine(
         embedding_provider=provider, embedding_model=model,
         sensitive_patterns_enabled=patterns,
         embedding_privacy_enabled=embedding_privacy, assertions_enabled=True,
-        adaptive_retrieval_enabled=True, proactive_recall_enabled=True,
+        adaptive_retrieval_enabled=True, entities_enabled=True, proactive_recall_enabled=True,
     )
     return mod["engine"].LCMEngine(config=config, hermes_home=str(state / "home"))
 def _seed(mod, engine):
@@ -214,6 +214,7 @@ def _seed(mod, engine):
     context["finance"] = rows[0]
     atlas = engine._store.search("Atlas", session_id="gauntlet-a")[0]
     context["atlas"] = atlas
+    context["entity_name"] = "Atlas"
     snapshot = engine._assertions.snapshot_source(int(atlas["store_id"]))
     quote = "Atlas decision is approved"
     start = snapshot.content.index(quote)
@@ -251,6 +252,10 @@ def _scenario(engine, tool, ctx, *, patterns, posture):
         assert "Constellation anchor" in json.dumps(_payload(engine, tool, {"query": "Constellation anchor"})["results"])
     elif tool == "lcm_recall":
         assert "Constellation anchor" in json.dumps(_payload(engine, tool, {"query": "Constellation anchor"})["hits"]).replace(">>>", "").replace("<<<", "")
+    elif tool == "lcm_memory":
+        value = _payload(engine, tool, {"action": "lookup", "name": ctx["entity_name"]})
+        assert value["mention_count"] == 1 and value["facts"][0]["source_store_id"] == atlas["store_id"]
+        assert _payload(engine, tool, {"action": "list"})["entities"][0]["subject_key"] == "project:atlas"
     elif tool == "lcm_query_state":
         assert "approved" in json.dumps(_payload(engine, tool, {"subject_key": "project:atlas"})["assertions"])
     elif tool == "lcm_compute":

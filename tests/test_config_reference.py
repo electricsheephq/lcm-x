@@ -7,6 +7,9 @@ from hermes_lcm import config
 
 def test_reference_scalar_specs_match_constructor_defaults():
     defaults = config.LCMConfig()
+    assert defaults.entities_enabled is False
+    assert any(s.name == "entities_enabled" and s.env_key == "LCM_ENTITIES_ENABLED"
+               for s in config.ENV_FIELD_SPECS)
     assert len({spec.env_key for spec in config.ENV_FIELD_SPECS}) == len(config.ENV_FIELD_SPECS)
     for spec in config.ENV_FIELD_SPECS:
         value = getattr(defaults, spec.name)
