@@ -298,6 +298,8 @@ class CompactionMixin:
             pre_ingest_placeholder_ambiguous_noop = not eligible
             pre_ingest_noop_reason = reason
         replay_messages = None
+        # A skipped/replaced ingest cannot reuse another call's classification.
+        self._ingest_replay_redaction_changes = {}
         if self._session_id and messages:
             try:
                 replay_messages = self._ingest_messages(messages)
@@ -328,6 +330,18 @@ class CompactionMixin:
                 observed_tokens=replay_rough,
                 messages=replay_messages,
             )
+            if (
+                cleanup_requested
+                and not force_overflow_requested
+                and max(rough, replay_rough) < self.threshold_tokens
+                and not self._replay_diff_requests_ingest_cleanup(
+                    messages, replay_messages, include_size_only=False,
+                )
+            ):
+                # Ingest made the size reduction durable; independent real
+                # maintenance triggers below must still get their normal vote.
+                logger.debug("LCM preflight: deferred_size_only_cleanup")
+                cleanup_requested = False
             if cleanup_requested:
                 if (
                     not force_overflow_requested
@@ -467,19 +481,23 @@ class CompactionMixin:
         self,
         original_messages: List[Dict[str, Any]],
         replay_messages: List[Dict[str, Any]],
+        *,
+        include_size_only: bool = True,
     ) -> bool:
+        """Match cleanup classes; exclude payload-size classes to detect mandatory adoption."""
         if len(original_messages) != len(replay_messages):
             return True
-        for original_msg, replay_msg in zip(original_messages, replay_messages):
+        for idx, (original_msg, replay_msg) in enumerate(zip(original_messages, replay_messages)):
             original_text = text_content_for_pattern_matching(original_msg.get("content")) or ""
             replay_text = text_content_for_pattern_matching(replay_msg.get("content")) or ""
             if original_text != replay_text:
-                if replay_text.startswith("[Externalized LCM ingest payload:"):
+                if replay_text.startswith("[Externalized LCM ingest payload: assistant output quarantined;"):
                     return True
-                if replay_text.startswith("[Externalized payload: kind=raw_payload;"):
-                    return True
-                if replay_text.startswith("[Externalized tool output:"):
-                    return True
+                if replay_text.startswith(("[Externalized LCM ingest payload:",
+                                           "[Externalized payload: kind=raw_payload;",
+                                           "[Externalized tool output:")):
+                    if include_size_only or getattr(self, "_ingest_replay_redaction_changes", {}).get(idx) is not False:
+                        return True
                 if replay_text.startswith("[LCM active replay placeholder: assistant output quarantined;"):
                     return True
                 if replay_text.startswith("[LCM active replay placeholder: message ignored;"):
