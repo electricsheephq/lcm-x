@@ -25,6 +25,12 @@ def yaml_config(tmp_path):
   plain_comment: query text # discard this
   escaped: "say \"hi\"\nnext\tline\\end"
   apostrophe: 'it''s # intact'
+  plain_apostrophe: it's # don't include
+  apostrophe_items: [it's, won't]
+  boundary_hash: "a # b" # c
+  boundary_comma: ['a, b', c]
+  literal_apostrophe: o'brien
+  boundary_list_hash: [a, 'b # c']
   empty_list: []
   nested:
     model_thresholds:
@@ -74,6 +80,9 @@ def test_shared_fixture_loader_parity(yaml_config, monkeypatch, loader):
             "items": ["a", "b", "c d", "e,f", "g#h", True, 2, 0.5, "0"],
             "quoted_comment": "keep # this", "plain_comment": "query text",
             "escaped": 'say "hi"\nnext\tline\\end', "apostrophe": "it's # intact",
+            "plain_apostrophe": "it's", "apostrophe_items": ["it's", "won't"],
+            "boundary_hash": "a # b", "boundary_comma": ["a, b", "c"],
+            "literal_apostrophe": "o'brien", "boundary_list_hash": ["a", "b # c"],
             "empty_list": [], "nested": {"model_thresholds": {"": 0.5, "valid": 0.4}},
         }
     })
@@ -221,3 +230,21 @@ def test_ruamel_alias_doubling_normalizes_within_budget(yaml_config, monkeypatch
         for level in range(1, 7):
             assert document[f"level{level}"][0] is document[f"level{level-1}"]
             assert document[f"level{level}"][1] is document[f"level{level-1}"]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("query: it's # don't include\n", {"query": "it's"}),
+    ("items: [it's, won't]\n", {"items": ["it's", "won't"]}),
+    ('x: "a # b" # c\n', {"x": "a # b"}),
+    ("y: ['a, b', c]\n", {"y": ["a, b", "c"]}),
+    ("z: o'brien\n", {"z": "o'brien"}),
+    ("w: [a, 'b # c']\n", {"w": ["a", "b # c"]}),
+])
+def test_quotes_only_at_scalar_boundaries(yaml_config, selected_loader, text, expected):
+    yaml_config.write_text(text)
+    assert _typed(config._load_hermes_config_yaml(yaml_config)) == _typed(expected)
+    try:
+        import yaml
+    except ImportError:
+        return
+    assert _typed(expected) == _typed(yaml.safe_load(text))
