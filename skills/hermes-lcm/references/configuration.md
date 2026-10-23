@@ -286,7 +286,7 @@ comma-separated values. Keep their existing source tracking and parsing rules.
 
 ## Hand-written reference: side-channel environment readers
 
-These 11 keys are read outside `config.py`, directly or through helper
+These 12 keys are read outside `config.py`, directly or through helper
 wrappers. They are not loaded into `LCMConfig`; listing them does not
 consolidate or change their readers. Reader filenames are relative to the
 checkout root. Credential entries list only variable names, never values.
@@ -295,6 +295,7 @@ checkout root. Credential entries list only variable names, never values.
 | --- | --- | --- | --- |
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `engine.py` | Absolute compaction threshold override | each call — `_set_context_length()` with a positive context length, through model updates, session-start metadata, or cloning |
 | `LCM_ENABLE_SLASH_COMMAND` | `__init__.py` | Optional slash-command registration | plugin registration |
+| `LCM_SENDER_CAPTURE` | `sender_capture.py` | Profile-aware pending sender capture; default `true`, `0` disables capture without removing columns or backfilling history | each call — pending association creation through the profile-aware boolean resolver |
 | `LCM_HERMES_BASE_DIR` | `config.py` (called by `engine.py`, `externalize.py`, `diagnostics.py`) | Storage containment boundary; process-wide, never read from a routed profile | each call — storage-directory resolution or state-database containment validation; `_get_allowed_hermes_base()` also reads it when called (tests only; no production caller) |
 | `LCM_IDENTITY_ANCHOR` | `identity_anchor.py` | Identity-anchor switch | each call — `identity_anchor_enabled()` checks during ingest, replay identity handling, and compaction |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `db_bootstrap.py` | Startup integrity-check interval | database open — startup FTS validation, after structural checks pass |

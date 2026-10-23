@@ -70,6 +70,11 @@ class IdentityAnchorMixin:
 
     # -- lineage (R7) --------------------------------------------------------
 
+    def _identity_anchor_chain_cached(self) -> list[str]:
+        """Verified ancestors already cached for this binding; never performs I/O."""
+        cached = getattr(self, "_identity_anchor_chain_cache", None)
+        return cached[1] if cached is not None and cached[0] == str(self._session_id or "") else []
+
     def _identity_anchor_chain(self) -> list[str]:
         """The bound session's verified compression ancestors, nearest first: host state.db
         ``sessions.parent_session_id`` while the parent ended with ``end_reason='compression'``

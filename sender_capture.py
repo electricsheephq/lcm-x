@@ -66,6 +66,7 @@ def create_pending(engine, payload):
         turn = str(payload.get("turn_id") or "")
         with _LOCK:
             if (*key, turn) in _RETIRED:
+                logger.debug("sender_capture:refused_retired")
                 return None
             for binding, old in list(_PENDING.items()):
                 if now - old.created >= _TTL or (binding == key and old.turn_id != turn):
@@ -90,6 +91,7 @@ def create_pending(engine, payload):
                           str(engine._conversation_id or ""), key[1], (f"{platform}:{sender}", "gateway_principal"), now)
         with _LOCK:
             if (*key, turn) in _RETIRED:
+                logger.debug("sender_capture:refused_retired")
                 return None
             old = _PENDING.get(key)
             if old is not None and old.turn_id != turn:
@@ -132,7 +134,7 @@ def matches(engine, pending, message):
 def batch_senders(engine, originals, excluded=()):
     try:
         pending = snapshot(engine)
-        if pending is None:
+        if pending is None or pending.store_ids:
             return None, None
         values = [pending.sender if i not in excluded and matches(engine, pending, obj) else None
                   for i, obj in originals]
@@ -159,13 +161,14 @@ def try_update(engine):
             return
         candidates = [(sid, obj) for sid, entry in _watch(engine)
                       if any(obj is pending.obj for obj in entry[2]) for obj in entry[2]
-                      if matches(engine, pending, obj)]
+                      if matches(engine, pending, obj)
+                      and engine._message_replay_identity(obj) == entry[0]]
         ids = {sid for sid, _obj in candidates}
         if len(ids) != 1:
             return
         sid = next(iter(ids))
         count = engine._store.set_sender_if_null(sid, *pending.sender,
-                                                [engine._session_id, *engine._identity_anchor_chain()])
+                                                [engine._session_id, *engine._identity_anchor_chain_cached()])
         if count:
             record(engine, pending, [sid], [pending.sender])
     except Exception:

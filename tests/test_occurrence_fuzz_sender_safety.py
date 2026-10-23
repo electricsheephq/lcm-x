@@ -11,6 +11,7 @@ from tests.test_sender_capture import clean_capture_registry  # noqa: F401
 
 @pytest.mark.parametrize("uid_host", [False, True], ids=["uidless-deepcopy", "uid-deepcopy"])
 def test_t4_generated_sender_occurrences(tmp_path, uid_host):
+    stamped_count = 0
     for seed in range(12):
         rng = random.Random(seed)
         with engine_context(tmp_path / str(seed), window=128000, conversation_id="conv") as e:
@@ -32,6 +33,8 @@ def test_t4_generated_sender_occurrences(tmp_path, uid_host):
                     sid = stored["store_id"]
                     owners.setdefault(sid, turn)
                     value = stamped[sid]
+                    if sid not in owners or owners[sid] == turn:
+                        stamped_count += value != (None, None)
                     allowed = (f"telegram:synthetic-{owners[sid]}", "gateway_principal")
                     if value not in {(None, None), allowed}:
                         raise AssertionError("generated cross-turn sender violation")
@@ -39,17 +42,26 @@ def test_t4_generated_sender_occurrences(tmp_path, uid_host):
                         raise AssertionError("uidless deepcopy must remain unresolved")
                 e.on_turn_complete(cloned, turn_id=f"turn-{turn}")
                 view = cloned
+    if uid_host:
+        assert stamped_count > 0, "uid schedules must exercise sender capture"
 
 
-@pytest.mark.parametrize("shape", ["first-uid-survivor", "uidless-inplace", "empty-witness", "r3-remainder"])
+@pytest.mark.parametrize("shape", ["first-uid-survivor", "uidless-inplace", "empty-witness", "r3-remainder",
+                                   "first-prefix-extended", "first-prefix-unchanged"])
 def test_t4_merge_survivors_are_null(tmp_path, shape):
     with engine_context(tmp_path, window=128000, conversation_id="conv") as e:
         row = message()
-        if shape == "first-uid-survivor":
+        if shape == "first-uid-survivor" or shape.startswith("first-prefix"):
             row["message_uid"] = "c" * 32
         p = begin(e, [row])
         if shape == "first-uid-survivor":
             row["_absorbed_message_uids"] = ["d" * 32]
+        elif shape.startswith("first-prefix"):
+            # Hermes 62b06323b2 keeps the first uid; an empty second turn
+            # leaves content unchanged but still carries the prefix witness.
+            row["_merged_turn_prefix"] = row["content"]
+            if shape.endswith("extended"):
+                row["content"] += "\n\nsynthetic second constituent"
         elif shape == "empty-witness":
             row["_absorbed_message_uids"] = []
             row["content"] += " synthetic merged suffix"

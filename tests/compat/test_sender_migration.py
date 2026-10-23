@@ -4,7 +4,7 @@ import sqlite3
 import pytest
 
 from hermes_lcm.store import MessageStore
-from tests.compat.helpers import run_old
+from tests.compat.helpers import READERS, run_old
 
 
 OLD = r'''
@@ -14,23 +14,24 @@ try:
     engine.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")
     before = engine._store.get_session_messages("S")
     view = [{"role": role, "content": f"synthetic {role} {turn} " * 400, "timestamp": 101.0 + 2 * turn + offset}
-            for turn in range(16) for offset, role in enumerate(("user", "assistant"))]
+            for turn in range(18 if before else 16) for offset, role in enumerate(("user", "assistant"))]
+    before_max = engine._store.connection.execute("SELECT COALESCE(MAX(store_id), 0) FROM messages").fetchone()[0]
     engine.ingest(view)
     engine.compress(view, current_tokens=100_000, force=True)
     assert engine._dag.get_session_nodes("S"), "old-reader compaction must publish a summary"
     assert engine._store.connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert engine._store.get_session_messages("S")
-    print(json.dumps({"read": bool(before), "rows": len(engine._store.get_session_messages("S"))}))
+    new_ids = [r[0] for r in engine._store.connection.execute(
+        "SELECT store_id FROM messages WHERE store_id > ? ORDER BY store_id", (before_max,))]
+    print(json.dumps({"read": bool(before), "rows": len(engine._store.get_session_messages("S")), "new_ids": new_ids}))
 finally:
     engine.shutdown()
 '''
 
 
-@pytest.mark.parametrize("reader", ["v0.28.1", "v0.25.0-rc1"])
+@pytest.mark.parametrize("reader", READERS)
 def test_t8_sender_forward_and_rollback(tmp_path, old_tree, host_root, reader):
-    pins = {"v0.28.1": "77b2b4f795fb6a4f84c55abf6d0441da4469971e",
-            "v0.25.0-rc1": "c36b46e3a7b1bff23cfa45fa117565ab8624441d"}
-    old = old_tree(reader, pins=pins)
+    old = old_tree(reader)
     first = run_old(old, tmp_path, host_root, OLD, mode="write")
     assert first["rows"]
     with sqlite3.connect(tmp_path / "lcm.db") as conn:
@@ -44,9 +45,11 @@ def test_t8_sender_forward_and_rollback(tmp_path, old_tree, host_root, reader):
         store.close()
     second = run_old(old, tmp_path, host_root, OLD, mode="write")
     assert second["read"] and second["rows"] >= first["rows"]
+    assert second["new_ids"], "rollback reader must write the extended view"
     store = MessageStore(tmp_path / "lcm.db")
     try:
         values = store.get_message_senders([r[0] for r in store.connection.execute("SELECT store_id FROM messages")])
+        assert all(values[new_id] == (None, None) for new_id in second["new_ids"])
         if values.pop(sid) != ("telegram:synthetic", "gateway_principal"):
             raise AssertionError("old reader changed retained sender")
         assert all(value == (None, None) for value in values.values())

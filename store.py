@@ -748,9 +748,13 @@ class MessageStore:
             logger.debug("sender_capture:write_unavailable")
             return 0
         finally:
-            if timeout is not None:
-                conn.execute(f"PRAGMA busy_timeout={int(timeout)}")
-            self._write_lock.release()
+            try:
+                if timeout is not None:
+                    conn.execute(f"PRAGMA busy_timeout={int(timeout)}")
+            except Exception:
+                logger.debug("sender_capture:restore_error")
+            finally:
+                self._write_lock.release()
 
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
         """Move all persisted messages from one session_id to another."""
