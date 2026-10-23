@@ -85,6 +85,20 @@ def occurrence_rows(messages):
             for i, m in enumerate(messages) if isinstance(m, dict) and isinstance(m.get("content"), str)]
 
 
+def observe(emit, seam, action):
+    """Observation is best effort, including its error sink; never replace engine execution."""
+    try:
+        return action()
+    except Exception as exc:
+        try:
+            emit(event="observer_error", seam=seam, error=type(exc).__name__)
+        except Exception:
+            try:
+                logging.getLogger(__name__).warning("observer_error seam=%s error=%s", seam, type(exc).__name__)
+            except Exception:
+                pass
+
+
 def trace_occurrences(etype, emit, context):
     """Observe actual engine ingress without changing arguments, return values or exceptions."""
     def carriers(engine, messages):
@@ -111,12 +125,13 @@ def trace_occurrences(etype, emit, context):
             continue
 
         def traced(self, messages, *args, _original=original, _name=name, **kwargs):
-            emit(event="engine_ingress", seam=_name, session=getattr(self, "_session_id", None),
-                 **context(), occurrences=occurrence_rows(messages))
-            carriers(self, messages)
+            observe(emit, _name + ":ingress", lambda: emit(
+                event="engine_ingress", seam=_name, session=getattr(self, "_session_id", None),
+                **context(), occurrences=occurrence_rows(messages)))
+            observe(emit, _name + ":carriers", lambda: carriers(self, messages))
             result = _original(self, messages, *args, **kwargs)
             if _name == "compress" and isinstance(result, list):
-                carriers(self, result)
+                observe(emit, _name + ":post_carriers", lambda: carriers(self, result))
             return result
         setattr(etype, name, traced)
 
@@ -128,10 +143,8 @@ def trace_user_merges(helpers, emit, context):
     if original is None or original not in passes:
         return False
 
-    def traced(messages):
-        before = [(m.get("role"), m.get("content")) if isinstance(m, dict) else (None, None) for m in messages]
-        result, count = original(messages)
-        if count:
+    def record(before, result, count):
+        if count and before is not None:
             outputs = {m.get("content") for m in result if isinstance(m, dict) and m.get("role") == "user"
                        and isinstance(m.get("content"), str)}
             for start in range(len(before)):
@@ -154,7 +167,12 @@ def trace_user_merges(helpers, emit, context):
                     emit(event="host_merge", **context(), sha256=hashlib.sha256(joined.strip().encode()).hexdigest(),
                          bytes=len(joined.strip().encode()), spans=spans,
                          occurrences=occurrence_rows([{"role": "user", "content": t} for t in parts]))
-        return result, count
+    def traced(messages):
+        before = observe(emit, "host_merge:before", lambda: [
+            (m.get("role"), m.get("content")) if isinstance(m, dict) else (None, None) for m in messages])
+        result = original(messages)
+        observe(emit, "host_merge:after", lambda: record(before, *result))
+        return result
     helpers._SEQUENCE_REPAIR_PASSES = tuple(traced if p is original else p for p in passes)
     return True
 UNSHORTENED = "LCM survival fit could not shorten the list"

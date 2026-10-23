@@ -156,10 +156,10 @@ def embedded_credits(texts, want, stored_rows, stored, paired, host):
     Exact rows are reserved first. Host copies do not create unbounded occurrences: candidate rows are
     capped by that key's host multiplicity. A hash co-presence or substring alone proves no merge.
     """
-    used, credits, counts = defaultdict(list), [], Counter()
+    used, choices, counts = defaultdict(list), defaultdict(dict), Counter()
     direct = Counter()
     slots = Counter()
-    for sid, _session, role, content in stored_rows:
+    for sid, _session, role, content in sorted(stored_rows):
         key = (role, h(content))
         if role != "user" or sid not in stored.get(key, []):
             continue
@@ -175,8 +175,8 @@ def embedded_credits(texts, want, stored_rows, stored, paired, host):
         for witness in witnesses:
             boundaries = merged_boundaries(raw, witness, held.get("merge_history", {}))
             starts, ends = sorted({a for a, _b in boundaries}), {b for _a, b in boundaries}
-            for part in want:
-                if len(stored.get(part, [])) + paired[part] + counts[part] >= want[part]:
+            for part in sorted(want):
+                if len(stored.get(part, [])) + paired[part] >= want[part]:
                     continue
                 if part[0] != "user":
                     continue
@@ -186,20 +186,68 @@ def embedded_credits(texts, want, stored_rows, stored, paired, host):
                     if end not in ends or raw[offset:end] != target or any(
                             offset < b and a < end for a, b in used[sid]):
                         continue
-                    used[sid].append((offset, end))
-                    counts[part] += 1
-                    credits.append({"role": "user", "sha256": part[1], "store_id": sid,
+                    choices[part].setdefault((sid, offset, end), {"role": "user", "sha256": part[1], "store_id": sid,
                                     "byte_offset": offset, "bytes": len(target), "composite_sha256": key[1],
                                     "provenance": "host_merge_span", "witness": witness["witness"]})
-                    if len(stored.get(part, [])) + paired[part] + counts[part] >= want[part]:
-                        break
-    return counts, credits
+    # Canonical constrained-first search: at most COVER_PARTS levels and COVER_STEPS states.
+    # Keep the best witnessed assignment if the budget expires; never reuse overlapping bytes.
+    units = [part for part in sorted(choices, key=lambda p: (len(choices[p]), -len(norm(texts[p]).encode()), p))
+             for _ in range(min(want[part] - len(stored.get(part, [])) - paired[part], len(choices[part])))]
+    units = units[:COVER_PARTS]
+    best, best_score, steps = [], -1, 0
+    needed = sum(max(0, n - len(stored.get(p, [])) - paired[p]) for p, n in want.items())
+
+    def coverage(selected):
+        """Rank spans with the same canonical, disjoint parts fallback score() will actually use."""
+        selected_counts = Counter((c["role"], c["sha256"]) for c in selected)
+        reserved_ids = {c["store_id"] for c in selected}
+        spare = Counter({p: sum(sid not in reserved_ids for sid in ids[want[p]:]) for p, ids in stored.items()})
+        matched = len(selected)
+        for part in sorted(want):
+            if part[0] != "user":
+                continue
+            remaining = want[part] - len(stored.get(part, [])) - paired[part] - selected_counts[part]
+            for merge in ((host or {}).get(part) or {}).get("merges", []):
+                if remaining <= 0:
+                    break
+                uses = Counter(merge["parts"])
+                if all(spare[p] >= n for p, n in uses.items()):
+                    spare.subtract(uses)
+                    remaining -= 1
+                    matched += 1
+        return matched
+
+    def assign(index, selected):
+        nonlocal best, best_score, steps
+        if steps >= COVER_STEPS:
+            return
+        steps += 1
+        merit = coverage(selected)
+        if merit > best_score:
+            best, best_score = selected[:], merit
+        if index == len(units) or best_score == needed:
+            return
+        part = units[index]
+        for (sid, start, end), credit in sorted(choices[part].items()):
+            if any(start < b and a < end for a, b in used[sid]):
+                continue
+            used[sid].append((start, end))
+            assign(index + 1, selected + [credit])
+            used[sid].pop()
+            if best_score == needed or steps >= COVER_STEPS:
+                break
+        assign(index + 1, selected)
+
+    assign(0, [])
+    counts.update((c["role"], c["sha256"]) for c in best)
+    return counts, best
 
 
 def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict | None = None,
           *, _key=None) -> dict:
     """``expected``: (role, text) items; ``stored_rows``: (store_id, session_id, role, content); ``host``: the
     lineage's host occurrences (key -> {"n", "ids"}), or None."""
+    stored_rows = sorted(stored_rows, key=lambda r: r[0])
     key_of = _key or (lambda role, text: (role, h(text)))
     stored, by_session = defaultdict(list), defaultdict(list)
     for sid, session, role, content in stored_rows:
@@ -211,31 +259,30 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
     want = Counter(key_of(role, text) for role, text in expected if norm(text))
     texts = {key_of(role, text): text for role, text in expected}
     composites, paired, spent = [], Counter(), Counter()
+    embedded, span_credits = embedded_credits(texts, want, stored_rows, stored, paired, host)
+    embedded_ids = {c["store_id"] for c in span_credits}
     # #823: each active host merge record covers one missing composite. Reserve transcript rows first;
     # consume its parts before surplus licensing so no stored row can serve both purposes.
-    for key, n in want.items():
+    for key, n in sorted(want.items()):
         if key[0] != "user":
             continue
         for merge in ((host or {}).get(key) or {}).get("merges", []):
-            if len(stored.get(key, [])) + paired[key] >= n:
+            if len(stored.get(key, [])) + paired[key] + embedded[key] >= n:
                 break
-            if "witness" in merge and any(role == "user" and norm(texts[key]) in norm(content)
-                                           for _sid, _session, role, content in stored_rows):
-                continue  # observed-event fallback: prefer one exact, reserved embedded span
             uses = Counter(merge["parts"])
-            if any(len(stored.get(k, [])) - want[k] < count for k, count in uses.items()):
+            available = {k: [sid for sid in stored.get(k, [])[want[k]:] if sid not in embedded_ids] for k in uses}
+            if any(len(available[k]) < count for k, count in uses.items()):
                 continue
             parts = []
             for k, count in uses.items():
-                ids = stored[k][want[k]:want[k] + count]
-                del stored[k][want[k]:want[k] + count]
+                ids = available[k][:count]
+                stored[k] = [sid for sid in stored[k] if sid not in ids]
                 parts.append({"sha256": k[1], "uses": count, "store_ids": ids})
             paired[key] += 1
             spent.update(uses)  # the host rows that prove the record license no surplus too
             composites.append({"role": "user", "expected": n, "as_parts": 1, "parts": parts,
                                **({"provenance": "host_merge_event", "witness": merge["witness"]} if "witness" in merge
                                   else {"provenance": "host_merge_record", "host_row_id": merge["host_row_id"]})})
-    embedded, span_credits = embedded_credits(texts, want, stored_rows, stored, paired, host)
     missing, duplicated, split, licensed = [], [], [], []
     for key, n in want.items():
         n -= paired[key] + embedded[key]
@@ -270,7 +317,6 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
     # licensed by host parity; the composite key is then not a deficit. Only the occurrences the host did not store
     # as the composite itself pair (those LCM should have stored whole): the whole deficit must fit within them. Same
     # lineage only; reported, never silent.
-    embedded_ids = {c["store_id"] for c in span_credits}
     licence_records = {(r["role"], r["sha256"]): r for r in licensed}
     by_key = {}
     for key, record in licence_records.items():

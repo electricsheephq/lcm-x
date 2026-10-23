@@ -53,6 +53,8 @@ def verify(atts, rows, events, group, tree):
             continue
         for match in renderer.projection_mark_candidates(held, None):
             role, tokens, sid, head, tail = match.groups()
+            if any(len(value) > 19 for value in (tokens, sid, head, tail)):
+                continue  # SQLite store ids fit signed 64-bit; malformed markers remain ordinary expectations
             row = by_id.get(int(sid))
             g = attempt_group(a, group)
             if role != "user" or row is None or row[2] != role or group(row[1]) != g:
