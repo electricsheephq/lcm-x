@@ -435,7 +435,8 @@ def test_r1b_5_global_override_cites_only_owners_sources(bridge, namespace):
 
 
 @pytest.mark.parametrize("namespace", ["person", "user"])
-def test_r1b_6_owner_override_leaves_new_evidence_to_aliases(bridge, namespace):
+@pytest.mark.parametrize("override_count", [1, 2])
+def test_r1b_6_owner_override_leaves_new_evidence_to_aliases(bridge, namespace, override_count):
     api, ops, store, _, _ = bridge
     owner, sister, chosen = [ops.create_entity(name) for name in ("Owner", "Sister", "Chosen")]
     ops.add_alias(sister, "my sister", "relation_phrase", owner_entity_id=owner)
@@ -445,7 +446,8 @@ def test_r1b_6_owner_override_leaves_new_evidence_to_aliases(bridge, namespace):
     def lookup(sid):
         return owner, True, True
     rebuild(bridge, sender_lookup=lookup)
-    ops.override_key(subject, chosen, owner_entity_id=owner)
+    for _ in range(override_count):
+        ops.override_key(subject, chosen, owner_entity_id=owner)
     new = publish(bridge, subject)
     rebuild(bridge, sender_lookup=lookup)
     assert api.resolve_key(store, subject, first, owner_entity_id=owner) == chosen
