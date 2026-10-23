@@ -122,6 +122,7 @@ from .rollup_builder import (
 )
 from .assertion_extraction import ModelAssertionExtractor
 from .assertion_store import AssertionStore, SourceSnapshot
+from .entity_store import EntityStore
 from .adaptive_retrieval import AdaptiveRetrievalRegistry
 from .query_view_store import QueryViewStore
 from .tool_registry import TOOL_REGISTRY
@@ -1603,6 +1604,7 @@ class LCMEngine(
     def _bind_storage(self, db_path: str | Path, hermes_home: str = "") -> None:
         """Bind store/DAG/lifecycle helpers to one SQLite database."""
         self._assertions = None
+        self._entities = None
         self._query_views = None
         self._adaptive_retrieval = None
         self._assertion_extractor = None
@@ -1623,6 +1625,9 @@ class LCMEngine(
                 if bool(getattr(self._config, "assertions_enabled", False))
                 else None
             )
+            self._entities = (EntityStore(db_path, profile_key=lambda: str(
+                Path(self._hermes_home or Path(db_path).parent).resolve()))
+                if self._config.entities_enabled else None)
             self._query_views = (
                 QueryViewStore(db_path)
                 if bool(getattr(self._config, "query_views_enabled", False))
@@ -1671,6 +1676,7 @@ class LCMEngine(
             "_dag",
             "_lifecycle",
             "_assertions",
+            "_entities",
             "_query_views",
         ):
             helper = getattr(self, attr, None)
@@ -10494,6 +10500,7 @@ class LCMEngine(
             self._dag.close,
             self._lifecycle.close,
             *([self._assertions.close] if self._assertions is not None else []),
+            *([self._entities.close] if self._entities is not None else []),
             *([self._query_views.close] if self._query_views is not None else []),
         ]
         failures = []
