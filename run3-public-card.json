@@ -1,0 +1,90 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "e1a-fix-r1f-run3-20261023",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "claim_class": "advisory",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "d10777ebfd7454ec97cf08267ad9d3b567550b40",
+    "dirty": true,
+    "diff_sha256": "cb8d6086a33d5e09fd8f8ee6963457179aed0340087ccb93776133a16617f7dc"
+  },
+  "created": "2026-10-23T04:22:29Z",
+  "settled": "2026-10-23T04:41:55Z",
+  "publication_note": "Public-safe projection of the existing Run-3 card; selected receipts only. Full raw evidence remains retained; this is not a complete T2 publication. Run-3 overall result was stopped at trace; Run-4 revalidates trace and suite after only a private helper rename.",
+  "original_card_sha256": "8455c97b58364396dc63d41b4aef0fe03f0d65922576b965bd121682660e6957",
+  "headline": [
+    {
+      "benchmark": "e1a-fix-r1f",
+      "metric": "differential_differences",
+      "value": 0.0,
+      "n": 800,
+      "baseline_run": "frozen-fix-r1e",
+      "source": "differential.json"
+    },
+    {
+      "benchmark": "e1a-fix-r1f",
+      "metric": "max_5000_differing_ratio_to_sum",
+      "value": 1.268343773211573,
+      "n": 200,
+      "baseline_run": "d10777eb",
+      "source": "cost-5000-limit20.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "cost-100.json",
+      "sha256": "ecd4f32a78d1b7ac8c04922df4b7f8f55de86c728a3fcf7778b95cc843c936ec",
+      "bytes": 34744
+    },
+    {
+      "path": "cost-500.json",
+      "sha256": "678701b34f5840bdbd24a56dd87a2843d4746be57ef4ce00b971f94e15a02010",
+      "bytes": 34742
+    },
+    {
+      "path": "cost-5000-limit20.json",
+      "sha256": "893a1708c92b6f018688f83cd5f7ed274d20e5a5e619aefa9250fc4de7fa2a21",
+      "bytes": 36617
+    },
+    {
+      "path": "cost-5000-limit50.json",
+      "sha256": "56bf84cc322e3592664320e3210acf8095dff8d31cf9fab61c8d9343ab925c9c",
+      "bytes": 36688
+    },
+    {
+      "path": "cost-summary.json",
+      "sha256": "86cf93a2a26fd32c1e6f5f51d19c4878711d8ad5a4b0aec85193b4b352899cc0",
+      "bytes": 6576
+    },
+    {
+      "path": "differential.json",
+      "sha256": "28d517b2e32cd8661b8763ce93908612fedc5621f5fdc8487f755337014a9c2f",
+      "bytes": 244
+    },
+    {
+      "path": "lock-hold.json",
+      "sha256": "0bd930f1337c0cb70018595fc1485fbcb4d0477e0d8ee80ea02591dd810ea8c5",
+      "bytes": 5639
+    },
+    {
+      "path": "n2-mutants.json",
+      "sha256": "387c0251d087214957cd5065e50a9d0677bbcda327fe22aef0638f7b983cf9f8",
+      "bytes": 727
+    }
+  ],
+  "keep": [
+    "RESULT.md",
+    "cost-100.json",
+    "cost-500.json",
+    "cost-5000-limit20.json",
+    "cost-5000-limit50.json",
+    "cost-summary.json",
+    "differential.json",
+    "lock-hold.json",
+    "n2-mutants.json"
+  ],
+  "published": []
+}

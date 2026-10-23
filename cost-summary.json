@@ -1,0 +1,236 @@
+{
+  "blocks": [
+    {
+      "rows": 100,
+      "other_rows": 0,
+      "limit": 20,
+      "blocks": [
+        {
+          "kind": "equal",
+          "base_raw_ms": 0.7523124999999999,
+          "head_ms": 0.8037295,
+          "fix_r1e_ms": 0.8594379999999999,
+          "bars_ms": {
+            "EQUAL": 0.82754375
+          },
+          "head_pass": {
+            "EQUAL": true
+          },
+          "n": 200,
+          "spread": "min/max plus all raw samples retained in original receipt",
+          "base_ratio": 1.068345268754673
+        },
+        {
+          "kind": "differing",
+          "base_raw_ms": 0.3492915,
+          "head_ms": 1.1928329999999998,
+          "fix_r1e_ms": 1.449792,
+          "bars_ms": {
+            "MAX": 1.548918,
+            "SUPERSEDED_c4_LITERAL": 0.698583
+          },
+          "head_pass": {
+            "MAX": true,
+            "SUPERSEDED_c4_LITERAL": false
+          },
+          "n": 200,
+          "spread": "min/max plus all raw samples retained in original receipt",
+          "base_norm_ms": 0.774459,
+          "sum_ratio": 1.0614749448387342
+        },
+        {
+          "kind": "capitalised",
+          "base_raw_ms": 1.338292,
+          "head_ms": 1.4329999999999998,
+          "fix_r1e_ms": 1.536979,
+          "bars_ms": {
+            "EQUAL": 1.4721212000000001
+          },
+          "head_pass": {
+            "EQUAL": true
+          },
+          "n": 200,
+          "spread": "min/max plus all raw samples retained in original receipt",
+          "base_ratio": 1.0707678144978823
+        }
+      ],
+      "source": "cost-100.json"
+    },
+    {
+      "rows": 500,
+      "other_rows": 2000,
+      "limit": 20,
+      "blocks": [
+        {
+          "kind": "equal",
+          "base_raw_ms": 4.297312,
+          "head_ms": 4.532729,
+          "fix_r1e_ms": 4.804437,
+          "bars_ms": {
+            "EQUAL": 4.7270432
+          },
+          "head_pass": {
+            "EQUAL": true
+          },
+          "n": 200,
+          "spread": "min/max plus all raw samples retained in original receipt",
+          "base_ratio": 1.0547823848954883
+        },
+        {
+          "kind": "differing",
+          "base_raw_ms": 1.3407915,
+          "head_ms": 6.259542,
+          "fix_r1e_ms": 7.216917,
+          "bars_ms": {
+            "MAX": 8.509834,
+            "SUPERSEDED_c4_LITERAL": 2.681583
+          },
+          "head_pass": {
+            "MAX": true,
+            "SUPERSEDED_c4_LITERAL": false
+          },
+          "n": 200,
+          "spread": "min/max plus all raw samples retained in original receipt",
+          "base_norm_ms": 4.254917,
+          "sum_ratio": 1.1186326092576124
+        },
+        {
+          "kind": "capitalised",
+          "base_raw_ms": 8.7049585,
+          "head_ms": 9.185958,
+          "fix_r1e_ms": 9.627062500000001,
+          "bars_ms": {
+            "EQUAL": 9.575454350000001
+          },
+          "head_pass": {
+            "EQUAL": true
+          },
+          "n": 200,
+          "spread": "min/max plus all raw samples retained in original receipt",
+          "base_ratio": 1.0552558062166522
+        }
+      ],
+      "source": "cost-500.json"
+    },
+    {
+      "rows": 5000,
+      "other_rows": 2000,
+      "limit": 20,
+      "blocks": [
+        {
+          "kind": "equal",
+          "base_raw_ms": 19.12825,
+          "head_ms": 21.6724795,
+          "fix_r1e_ms": 23.577771,
+          "bars_ms": {
+            "EQUAL": 22.9539
+          },
+          "head_pass": {
+            "EQUAL": true
+          },
+          "n": 200,
+          "spread": "min/max plus all raw samples retained in original receipt",
+          "base_ratio": 1.1330090050056854
+        },
+        {
+          "kind": "differing",
+          "base_raw_ms": 4.726625,
+          "head_ms": 30.3916045,
+          "fix_r1e_ms": 34.643542,
+          "bars_ms": {
+            "MAX": 38.470042,
+            "SUPERSEDED_c4_LITERAL": 9.45325,
+            "SUM_RATIO_1_35": 32.3482221
+          },
+          "head_pass": {
+            "MAX": true,
+            "SUPERSEDED_c4_LITERAL": false,
+            "SUM_RATIO_1_35": true
+          },
+          "n": 200,
+          "spread": "min/max plus all raw samples retained in original receipt",
+          "base_norm_ms": 19.235021,
+          "sum_ratio": 1.268343773211573
+        },
+        {
+          "kind": "capitalised",
+          "base_raw_ms": 30.3409795,
+          "head_ms": 35.323375,
+          "fix_r1e_ms": 38.763020999999995,
+          "bars_ms": {
+            "EQUAL": 36.409175399999995
+          },
+          "head_pass": {
+            "EQUAL": true
+          },
+          "n": 200,
+          "spread": "min/max plus all raw samples retained in original receipt",
+          "base_ratio": 1.1642134031961624
+        }
+      ],
+      "source": "cost-5000-limit20.json"
+    },
+    {
+      "rows": 5000,
+      "other_rows": 2000,
+      "limit": 50,
+      "blocks": [
+        {
+          "kind": "equal",
+          "base_raw_ms": 32.728,
+          "head_ms": 35.128896,
+          "fix_r1e_ms": 37.118562,
+          "bars_ms": {
+            "EQUAL": 39.2736
+          },
+          "head_pass": {
+            "EQUAL": true
+          },
+          "n": 200,
+          "spread": "min/max plus all raw samples retained in original receipt",
+          "base_ratio": 1.073359080909313
+        },
+        {
+          "kind": "differing",
+          "base_raw_ms": 6.416875,
+          "head_ms": 45.548896,
+          "fix_r1e_ms": 50.8539585,
+          "bars_ms": {
+            "MAX": 66.26412400000001,
+            "SUPERSEDED_c4_LITERAL": 12.83375,
+            "SUM_RATIO_1_35": 53.39106495000001
+          },
+          "head_pass": {
+            "MAX": true,
+            "SUPERSEDED_c4_LITERAL": false,
+            "SUM_RATIO_1_35": true
+          },
+          "n": 200,
+          "spread": "min/max plus all raw samples retained in original receipt",
+          "base_norm_ms": 33.132062000000005,
+          "sum_ratio": 1.1517097412757262
+        },
+        {
+          "kind": "capitalised",
+          "base_raw_ms": 53.487353999999996,
+          "head_ms": 58.361770500000006,
+          "fix_r1e_ms": 61.857396,
+          "bars_ms": {
+            "EQUAL": 64.18482479999999
+          },
+          "head_pass": {
+            "EQUAL": true
+          },
+          "n": 200,
+          "spread": "min/max plus all raw samples retained in original receipt",
+          "base_ratio": 1.0911321300358214
+        }
+      ],
+      "source": "cost-5000-limit50.json"
+    }
+  ],
+  "option": "A",
+  "fallback_used": false,
+  "reruns": 0,
+  "n5000_exception_used": false
+}

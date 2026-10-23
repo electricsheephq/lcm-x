@@ -1,0 +1,10 @@
+{
+  "trace_cases": 14,
+  "stage2_plus1": "EXPECTED_NEGATIVE (14 rejected)",
+  "stage2_minus1": "EXPECTED_NEGATIVE (14 rejected)",
+  "unclassified_select": "EXPECTED_NEGATIVE (14 rejected)",
+  "proof": "green-memory.txt; _n2_assert calls under pytest.raises",
+  "stage1_discrepancy": "500-hit limit-20 fixture uses two ranked statements, byte-equivalent apart from whitespace to exact d10777eb; pre-existing base paging; not a stop",
+  "stage6": "Exact hash-pinned d10777eb search methods run with the captured question and matching_names union; identical ranked SQL and count",
+  "final_wording": "metadata reads constant in hits, linear in names × forms up to the input cap; the question search keeps its existing paging."
+}
