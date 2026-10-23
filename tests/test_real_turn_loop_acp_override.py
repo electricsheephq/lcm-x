@@ -71,9 +71,17 @@ _PROBE = textwrap.dedent(
     engine = agent.context_compressor
     engine.update_model("test/model", 64000, base_url="https://openrouter.ai/api/v1", api_key="k", provider="openrouter")
     compression_errors = {"input": 0, "other": 0}
+    fault_calls, last_compress, rewrite_observations = {"all": 0, "child": 0}, {}, []
     original_compress = type(engine).compress
     def traced_compress(self, messages, *args, **kwargs):
+        gate_before, input_rows = getattr(self, "_last_gate_tokens", None), len(messages)
         result = original_compress(self, messages, *args, **kwargs)
+        last_compress.clear()
+        last_compress.update(turn=t, status=self._last_compression_status,
+            observed_tokens=kwargs.get("current_tokens", args[0] if args else None),
+            survival_reason=getattr(self, "_survival_fit_reason", None), input_rows=input_rows,
+            result_rows=len(result), returned_input=result is messages, gate_before=gate_before,
+            gate_after=getattr(self, "_last_gate_tokens", None), fault_calls=dict(fault_calls))
         if self._last_compression_status == "error":
             compression_errors["input" if result is messages else "other"] += 1
         return result
@@ -82,7 +90,9 @@ _PROBE = textwrap.dedent(
         from hermes_plugins.hermes_lcm_x.lifecycle_state import LifecyclePublicationConflictError
         original_stage = engine._lifecycle.stage_compaction_publication
         def conflict_in_rotation_child(conn, conversation_id, session_id, *args, **kwargs):
+            fault_calls["all"] += 1
             if session_id != "S0":
+                fault_calls["child"] += 1
                 raise LifecyclePublicationConflictError("injected persistent child conflict")
             return original_stage(conn, conversation_id, session_id, *args, **kwargs)
         engine._lifecycle.stage_compaction_publication = conflict_in_rotation_child
@@ -101,9 +111,21 @@ _PROBE = textwrap.dedent(
         idx = getattr(self, "_persist_user_message_idx", None)
         in_range = isinstance(idx, int) and 0 <= idx < len(messages)
         before = messages[idx].get("content") if in_range else None
+        exact_current_elsewhere = any(i != idx and isinstance(m, dict) and m.get("role") == "user"
+                                      and m.get("content") == raw for i, m in enumerate(messages))
         original_override(self, messages)
         if in_range and messages[idx].get("content") != before:
             rewrites["n"] += 1
+            if len(rewrite_observations) < 2:
+                row, override = messages[idx], getattr(self, "_persist_user_message_override", None)
+                tag = next((i for i in range(1, turns + 1)
+                            if isinstance(before, str) and before.startswith(f"[T{i:02d}]")), None)
+                rewrite_observations.append(dict(turn=t, index=idx, rows=len(messages), role=row.get("role"),
+                    before_tag=tag, current_tag_match=tag == t, after_current_tag_match=str(row.get("content")).startswith(f"[T{t:02d}]"),
+                    equal_override=before == override, trim_equal_override=isinstance(before, str) and before.strip() == override,
+                    contains_current_text=isinstance(before, str) and raw in before,
+                    summary=bool(row.get(getattr(host_cc, "COMPRESSED_SUMMARY_METADATA_KEY", None))), exact_current_elsewhere=exact_current_elsewhere,
+                    preceding_compress=dict(last_compress), fault_calls=dict(fault_calls)))
     type(agent)._apply_persist_user_message_override = counted_override
     def reply(content, prompt_tokens):
         msg = SimpleNamespace(content=content, tool_calls=None)
@@ -164,6 +186,8 @@ _PROBE = textwrap.dedent(
         "error_returned_input": compression_errors["input"],
         "error_returned_other": compression_errors["other"],
         "override_rewrites": rewrites["n"],
+        "rewrite_observations": rewrite_observations,
+        "injected_fault_calls": fault_calls,
         "user_rows_by_turn": {
             f"{i:02d}": sum(1 for r, c in rows if r == "user" and (c or "").startswith(f"[T{i:02d}]"))
             for i in range(1, turns + 1)
@@ -241,7 +265,7 @@ def _run_turn_loop(
     assert result["engine"] == "lcm-x", result
     assert result["commit_logged"] >= 1, result  # a same-turn compaction really committed
     # The host rewrite under test happens exactly when the prompt carries whitespace.
-    assert (result["override_rewrites"] > 0) is trailing, result
+    assert (result["override_rewrites"] > 0) is trailing, json.dumps(result, sort_keys=True)
     return result
 
 

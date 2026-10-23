@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
@@ -24,9 +25,20 @@ def test_ingest_golden(case: Any, tmp_path: Path) -> None:
     payloads: list[str] = []
     actual = observe(case, tmp_path, payloads=payloads)
     difference = first_difference(expected[case.name], actual)
+    cache_diagnostics = []
     if difference is not None:
         (tmp_path / "actual-payload.json").write_text(json.dumps(payloads, ensure_ascii=False))
-    assert difference is None, f"{case.name}: {difference}\n{TRACE_GUIDANCE}"
+        for payload in payloads:
+            stage, marker, data = payload.partition("attr _no_progress_public_rows ")
+            if marker and isinstance(cache := json.loads(data), dict):
+                entries = {}
+                for key, value in cache.items():
+                    label = key if re.fullmatch(r"(?:retained-message|message|cached-occurrence)-\d+", key) else "<unlabelled>"
+                    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+                    entries[label] = dict(sha12=hashlib.sha256(encoded.encode()).hexdigest()[:12],
+                                         fields=len(value) if isinstance(value, dict) else 0, chars=len(encoded))
+                cache_diagnostics.append(dict(stage=stage, entries=entries))
+    assert difference is None, f"{case.name}: {difference}\n{TRACE_GUIDANCE}\ncache-metadata: {json.dumps(cache_diagnostics, sort_keys=True)}"
 
 
 def test_observer_completeness(tmp_path: Path) -> None:
