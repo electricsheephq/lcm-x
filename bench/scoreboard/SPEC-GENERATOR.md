@@ -1,7 +1,8 @@
 # Dispatch packet — scoreboard generator
 
 Objective: `bench/scoreboard/generate.py` (python3.11+, stdlib only) reading
-`bench/scoreboard/results.jsonl` (schema: RESULTS-SCHEMA.md, seeds present) and
+`bench/scoreboard/results.jsonl` plus new `bench/scoreboard/results.d/<id>.json`
+(schema and combined digest: RESULTS-SCHEMA.md) and
 emitting `bench/scoreboard/SCOREBOARD.md`.
 
 Requirements:
@@ -11,7 +12,7 @@ Requirements:
    - Header: title + one-paragraph standard statement ("every number ships with
      its full run config, variance, fail-close accounting, and known dataset
      defects — rows that cannot meet the standard do not render") + generated-from
-     line (results.jsonl sha256, row count) — NO wall-clock timestamp (byte-stable
+     line (combined source SHA256, row count) — NO wall-clock timestamp (byte-stable
      output for a given input).
    - Summary table: Benchmark | Metric | Result | Tier | Date | Details anchor.
      Sort: benchmark asc, then date desc. Superseded rows struck through
@@ -22,8 +23,9 @@ Requirements:
 4. Tests in `bench/scoreboard/test_generate.py` (pytest): golden render of a
    2-row fixture; missing-field refusal; malformed-line refusal; supersession
    strike-through; byte-stable (two runs identical output).
-5. Do NOT modify results.jsonl / RESULTS-SCHEMA.md. No git commands. Write only
-   generate.py, test_generate.py, and the generated SCOREBOARD.md.
+5. Keep legacy results.jsonl unchanged; new runs use results.d/<id>.json.
+   Validate filename/id equality and reject duplicate IDs across both sources.
+   Existing row sections stay byte-identical; new rows link their own file.
 
 Acceptance (from the repository root):
 ```

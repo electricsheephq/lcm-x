@@ -13,7 +13,7 @@ from datetime import date
 from html import escape as html_escape
 from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 
 SCOREBOARD_DIR = Path(__file__).resolve().parent
@@ -165,7 +165,7 @@ def _validate_row(row: Any, line_number: int) -> dict[str, Any]:
 
 
 def load_rows(path: str | Path = RESULTS_PATH) -> list[dict[str, Any]]:
-    """Read and validate every non-empty JSONL row before any rendering."""
+    """Read legacy lines, then sibling results.d/*.json in filename order."""
     source = Path(path)
     rows: list[dict[str, Any]] = []
     seen_ids: dict[str, int] = {}
@@ -192,6 +192,21 @@ def load_rows(path: str | Path = RESULTS_PATH) -> list[dict[str, Any]]:
             seen_ids[row_id] = line_number
             rows.append(row)
 
+    for row_path in _row_files(source):
+        try:
+            parsed = json.loads(row_path.read_text(encoding="utf-8"))
+            row = _validate_row(parsed, 1)
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ScoreboardError(f"{row_path}: {exc}") from exc
+        row_id = row["id"]
+        if row_path.stem != row_id:
+            raise ScoreboardError(f"{row_path}: filename must match row id '{row_id}'")
+        if row_id in seen_ids:
+            raise ScoreboardError(f"{row_path}: duplicate id '{row_id}'")
+        seen_ids[row_id] = 1
+        row["_registry_file"] = f"results.d/{quote(row_path.name, safe='')}"
+        rows.append(row)
+
     for row in rows:
         successor = row.get("superseded_by")
         if successor is not None and successor not in seen_ids:
@@ -199,6 +214,20 @@ def load_rows(path: str | Path = RESULTS_PATH) -> list[dict[str, Any]]:
                 f"row '{row['id']}' references missing successor '{successor}'"
             )
     return rows
+
+
+def _row_files(source: Path) -> list[Path]:
+    return sorted((source.parent / "results.d").glob("*.json"))
+
+
+def sha256_sources(path: str | Path = RESULTS_PATH) -> str:
+    """Hash compact UTF-8 JSON pairs of relative filenames and raw-byte SHA256s."""
+    source = Path(path)
+    manifest = [["results.jsonl", sha256_file(source)]]
+    manifest.extend([f"results.d/{item.name}", sha256_file(item)] for item in _row_files(source))
+    return hashlib.sha256(
+        json.dumps(manifest, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def sha256_file(path: str | Path) -> str:
@@ -266,6 +295,8 @@ def _render_disclosure(row: dict[str, Any]) -> list[str]:
         else:
             lines.append(_inline(row[field]))
         lines.append("")
+    if "_registry_file" in row:
+        lines.extend([f"[registry row]({row['_registry_file']})", ""])
     return lines
 
 
@@ -277,7 +308,7 @@ def render(rows: Iterable[dict[str, Any]], source_sha256: str) -> str:
         "",
         "Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.",
         "",
-        f"Generated from `results.jsonl` (sha256: `{source_sha256}`, rows: {len(values)})",
+        f"Generated from `results.jsonl` + `results.d/*.json` (combined sha256: `{source_sha256}`, rows: {len(values)})",
         "",
         *_render_summary(values),
         "",
@@ -295,7 +326,7 @@ def generate(
 ) -> str:
     """Validate, render, and write the complete scoreboard."""
     rows = load_rows(results_path)
-    rendered = render(rows, sha256_file(results_path))
+    rendered = render(rows, sha256_sources(results_path))
     Path(output_path).write_text(rendered, encoding="utf-8")
     return rendered
 
@@ -313,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         rows = load_rows(args.results)
         if not args.check:
-            rendered = render(rows, sha256_file(args.results))
+            rendered = render(rows, sha256_sources(args.results))
             args.output.write_text(rendered, encoding="utf-8")
     except (OSError, ScoreboardError) as exc:
         print(f"scoreboard: {exc}", file=sys.stderr)

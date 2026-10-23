@@ -1,6 +1,8 @@
 # Scoreboard results schema (Track F — disclosure-first public scores page)
 
-One JSON object per line in `results.jsonl` = one BANKED run. The page generator
+New BANKED runs go in `results.d/<id>.json`, one JSON object per file;
+the filename stem must equal the row's `id`. The frozen legacy `results.jsonl`
+remains readable, including appends from PRs already in flight. The page generator
 renders a summary table plus a per-row disclosure block. **A row without its
 disclosure fields does not render** — the schema IS the seven-point standard
 (F46 §5); numbers never appear bare.
@@ -50,3 +52,15 @@ disclosure fields does not render** — the schema IS the seven-point standard
 - Tier-F rows carry their fault-finding yield in `caveats`/`evidence` — a low
   number with its decomposition is a feature of this page, not an embarrassment.
 - No projections, no adjusted-pending-measurement numbers, ever (§6e.8).
+
+## Source order and digest
+The loader reads legacy non-empty lines in line order, then `results.d/*.json`
+in filename order. Duplicate IDs anywhere are hard errors; supersession can
+cross sources. Summary order stays benchmark ascending, date descending, id
+ascending; disclosures stay id ascending. Existing evidence links, including
+`results.jsonl#L<n>`, stay unchanged; file-based disclosures link their row file.
+
+The header's combined SHA256 is SHA256 of UTF-8 compact JSON (`ensure_ascii=True`,
+separators `(',', ':')`) containing `[relative_filename, SHA256(raw_file_bytes)]`
+pairs: `results.jsonl` first, then `results.d/*.json` sorted by filename. File
+names and exact bytes participate; a missing or empty `results.d` adds no pairs.

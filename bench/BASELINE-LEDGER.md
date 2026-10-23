@@ -1,7 +1,8 @@
 # BASELINE LEDGER — merged changes that move eval baselines
 
 **Superseded:** no entries since 2026-09-05. The scoreboard
-(`bench/scoreboard/results.jsonl`) plus per-run result cards are the record.
+(`bench/scoreboard/results.d/<id>.json` for new rows; legacy
+`bench/scoreboard/results.jsonl` stays readable) plus per-run result cards are the record.
 
 Rule (architect, 2026-08-20, #252 verdict batch): a scoreboard row may be compared against a
 row from the other side of a listed boundary ONLY after the noted re-baseline has run. Rows

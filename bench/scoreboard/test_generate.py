@@ -51,7 +51,7 @@ def test_golden_render_two_rows(tmp_path):
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` (sha256: `{expected_hash}`, rows: 2)
+Generated from `results.jsonl` + `results.d/*.json` (combined sha256: `{expected_hash}`, rows: 2)
 
 ## Summary
 
@@ -377,3 +377,83 @@ def test_rejects_nested_session_folder_references(tmp_path, capsys, reference):
 
     assert generate.main(["--check", "--results", str(results)]) == 2
     assert "field 'extra.receipts[0].source'" in capsys.readouterr().err
+
+
+def _write_row_file(results, row, *, name=None):
+    directory = results.parent / "results.d"
+    directory.mkdir(exist_ok=True)
+    path = directory / f"{name or row['id']}.json"
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    return path
+
+
+def test_independent_row_files_load_in_filename_order(tmp_path):
+    results = tmp_path / "results.jsonl"
+    _write_jsonl(results, [_row("legacy")])
+    _write_row_file(results, _row("z-row"))
+    _write_row_file(results, _row("a-row"))
+    assert [row["id"] for row in generate.load_rows(results)] == ["legacy", "a-row", "z-row"]
+    output = tmp_path / "page.md"
+    rendered = generate.generate(results, output)
+    assert "[registry row](results.d/a-row.json)" in rendered
+    assert "[registry row](results.d/z-row.json)" in rendered
+    assert "results.jsonl#L" not in rendered  # legacy disclosures gain no new bytes
+
+
+def test_duplicate_id_across_sources_is_rejected(tmp_path):
+    results = tmp_path / "results.jsonl"
+    _write_jsonl(results, [_row("duplicate")])
+    _write_row_file(results, _row("duplicate"))
+    with pytest.raises(generate.ScoreboardError, match="duplicate id"):
+        generate.load_rows(results)
+
+
+def test_row_filename_must_match_id(tmp_path):
+    results = tmp_path / "results.jsonl"
+    _write_jsonl(results, [])
+    _write_row_file(results, _row("actual"), name="wrong")
+    with pytest.raises(generate.ScoreboardError, match="filename.*id"):
+        generate.load_rows(results)
+
+
+def test_existing_page_changes_only_source_header(tmp_path):
+    results = tmp_path / "results.jsonl"
+    _write_jsonl(results, [_row("legacy-old", date="2026-07-29"), _row("legacy-new")])
+    rendered = generate.generate(results, tmp_path / "page.md").encode().splitlines(keepends=True)
+    # Body digest from BASE's regenerated fixture page, not its stale committed page.
+    # Fixture rows keep this check independent of future compatible legacy appends.
+    assert hashlib.sha256(b"".join(rendered[:4] + rendered[5:])).hexdigest() == "e3f2bffe27fb2fa2d30ac88221b714b82d3a45c238c0568ee8ee03e5290ff1fa"
+    assert rendered[4].startswith(b"Generated from `results.jsonl` + `results.d/*.json`")
+
+
+def test_combined_digest_covers_names_and_exact_bytes(tmp_path):
+    results = tmp_path / "results.jsonl"
+    _write_jsonl(results, [_row("legacy")])
+    row_path = _write_row_file(results, _row("new"))
+    manifest = [["results.jsonl", hashlib.sha256(results.read_bytes()).hexdigest()],
+                ["results.d/new.json", hashlib.sha256(row_path.read_bytes()).hexdigest()]]
+    expected = hashlib.sha256(json.dumps(manifest, separators=(",", ":")).encode()).hexdigest()
+    assert generate.sha256_sources(results) == expected
+    row_path.write_text(row_path.read_text() + " ", encoding="utf-8")
+    assert generate.sha256_sources(results) != expected
+
+
+@pytest.mark.parametrize("body", ["{broken", "[]", "{}"])
+def test_row_file_validation_leaves_output_untouched(tmp_path, body):
+    results = tmp_path / "results.jsonl"
+    _write_jsonl(results, [])
+    path = _write_row_file(results, _row("bad"))
+    path.write_text(body, encoding="utf-8")
+    output = tmp_path / "page.md"
+    output.write_text("keep this", encoding="utf-8")
+    assert generate.main(["--results", str(results), "--output", str(output)]) == 2
+    assert output.read_text() == "keep this"
+
+
+def test_supersession_can_cross_sources(tmp_path):
+    results = tmp_path / "results.jsonl"
+    old = _row("old")
+    old["superseded_by"] = "new"
+    _write_jsonl(results, [old])
+    _write_row_file(results, _row("new"))
+    assert len(generate.load_rows(results)) == 2
