@@ -557,7 +557,10 @@ def observe(case: Scenario, root: Path, *, digest_attribution: list | None = Non
                 if label is None:
                     return
                 if event == 'call':
-                    arguments = {k: v for k, v in frame.f_locals.items() if k not in {'self', 'cls'}}
+                    declared = inspect.getargvalues(frame)
+                    argument_names = [*declared.args, declared.varargs, declared.keywords]
+                    arguments = {name: declared.locals[name] for name in argument_names
+                                 if name is not None and name not in {'self', 'cls'}}
                     calls[id(frame)] = label
                     events.append(label + ' call ' + canonical.compact(arguments))
                 elif event == 'return' and id(frame) in calls:
@@ -615,6 +618,7 @@ def observe(case: Scenario, root: Path, *, digest_attribution: list | None = Non
                     result = engine._assemble_context(system, tail, assembly_cap_override=case.cap,
                         include_lcm_note=case.note, retained_user_message=retained,
                         stub_over_cap_tool_results=case.forced, persist=case.persist)
+                assert sys.getprofile() is profile, 'Assembly profile callback was disabled'
             finally:
                 sys.setprofile(old_profile)
                 threading.setprofile(old_thread_profile)
