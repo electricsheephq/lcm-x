@@ -340,11 +340,19 @@ def _hermes_config_path() -> Path:
 _YAML_QUOTED_SCALAR = r""""(?:\\.|[^"\\])*"|'(?:''|[^'])*'"""
 
 
-def _plain_yaml_value(value):
-    if isinstance(value, dict):
-        return {_plain_yaml_value(k): _plain_yaml_value(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_plain_yaml_value(item) for item in value]
+def _plain_yaml_value(value, memo=None):
+    if memo is None:
+        memo = {}
+    if id(value) in memo:
+        return memo[id(value)]
+    if isinstance(value, (dict, list, tuple)):
+        result = {} if isinstance(value, dict) else []
+        memo[id(value)] = result
+        if isinstance(value, dict):
+            result.update((_plain_yaml_value(k, memo), _plain_yaml_value(v, memo)) for k, v in value.items())
+        else:
+            result.extend(_plain_yaml_value(item, memo) for item in value)
+        return result
     if value is None:
         return None
     for scalar_type in (str, bool, int, float):

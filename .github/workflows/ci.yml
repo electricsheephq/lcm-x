@@ -169,7 +169,7 @@ jobs:
 
       - name: Test the upstream ruamel loader
         run: |
-          pip install ruamel.yaml==0.18.16
+          pip install ruamel.yaml==0.18.16 PyYAML==6.0.3
           python -m pytest tests/test_config_yaml_loaders.py tests/test_per_model_threshold.py -q -p no:cacheprovider
 
       - name: Run static validation
