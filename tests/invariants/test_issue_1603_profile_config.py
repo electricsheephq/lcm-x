@@ -372,6 +372,12 @@ def test_environment_read_inventory():
     h2_proof = "docs/process/evidence/1880-persisted-hold/cost-h2/cost_probe.py"
     if (ROOT / h2_proof).is_file():
         allowed[(h2_proof, "main")] = "synthetic admission proof tool: isolated home and lazy-install controls only"
+    final_proof = "docs/process/evidence/1880-persisted-hold/cost-final-hosted/cost_probe.py"
+    if (ROOT / final_proof).is_file():
+        allowed[(final_proof, "main")] = "synthetic admission proof tool: isolated home and lazy-install controls only"
+    final_proof = "docs/process/evidence/1880-persisted-hold/cost-h2-failed-hosted/cost_probe.py"
+    if (ROOT / final_proof).is_file():
+        allowed[(final_proof, "main")] = "synthetic admission proof tool: isolated home and lazy-install controls only"
     seen = set()
     failures = []
     excluded = {"tests", "bench", "benchmarking", "benchmarks", "scripts"}

@@ -237,35 +237,57 @@ jobs:
           --junit reports/test-{3.11,3.12,3.13,3.14}/{main,privacy}.xml
           reports/bench-{aml,fmp-tests,instruments-local_catchup-tests,instruments-compaction_probe,instruments-compaction_probe-track_s-decision-tests,instruments-compaction_probe-track_s-scorer-tests,instruments-reliability,instruments-scale389-tests,scoreboard,tools-tests}.xml
 
-  # Temporary, manual-only #1880B proof; removed after its result is captured.
-  issue-1880-cost:
+
+  # Temporary named RED and pinned-host oracle proof; removed before final freeze.
+  issue-1880-proof:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    env:
+      HERMES_DISABLE_LAZY_INSTALLS: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
+          persist-credentials: false
           fetch-depth: 0
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: "3.13"
-      - name: Install existing proof dependencies
-        run: pip install numpy==2.4.2 httpx==0.28.1 PyYAML==6.0.3 pytest==9.1.1 hypothesis==6.141.1
-      - name: Prepare pinned BASE
-        run: git worktree add --detach "$RUNNER_TEMP/hold-base" 10407e12e33c1d7b09fe0e05141153555aec5d62
-      - name: Run paired steady admission proof
+      - name: Install harness dependencies
+        run: pip install uv==0.11.26 pytest==9.1.1 numpy hypothesis==6.141.1
+      - name: Prove H5 repair/status RED before product edit
         env:
-          HOME: ${{ runner.temp }}/hold-home
-          HERMES_HOME: ${{ runner.temp }}/hold-home
-          TMPDIR: ${{ runner.temp }}/hold-temp
-          PYTHONDONTWRITEBYTECODE: "1"
+          HOME: ${{ runner.temp }}/red-home
+          HERMES_HOME: ${{ runner.temp }}/red-home
+          TMPDIR: ${{ runner.temp }}/red-temp
         run: |
           mkdir -p "$HOME" "$TMPDIR"
-          python -B -c "from benchmarking.standalone import ensure_agent_context_engine_importable; ensure_agent_context_engine_importable(); import os, pytest; raise SystemExit(pytest.main(['tests/test_issue_1880_persisted_hold.py', 'tests/test_issue_651_below_threshold_cleanup_only.py', 'tests/invariants/test_issue_1353_prematch_fault_prefix.py', 'tests/invariants/test_issue_1603_profile_config.py::test_environment_read_inventory', '-q']+[\"--basetemp=\"+os.environ[\"TMPDIR\"]+\"/pytest-h3\"]))"
-          python -B docs/process/evidence/1880-persisted-hold/cost-h2/cost_probe.py --base "$RUNNER_TEMP/hold-base" --candidate . --scratch "$RUNNER_TEMP/hold-cost" --out hold-cost-results
-          python -B docs/process/evidence/1880-persisted-hold/cost-h2/score_cost.py hold-cost-results
+          python -B -c "from benchmarking.standalone import ensure_agent_context_engine_importable; ensure_agent_context_engine_importable(); import os, pytest; rc=pytest.main(['tests/test_issue_667_level3_repair.py', 'tests/test_issue_922_no_self_defeating_leaf.py::test_next_round_compacts_earlier_tool_pair_and_preserves_objective','-q','--junitxml=h5-red.xml','--basetemp='+os.environ['TMPDIR']+'/pytest']); raise SystemExit(0 if rc == 1 else 2)"
+      - name: Prepare pinned reference host
+        run: python -m bench.instruments.reliability.ci prep --host ref-0.21.5 --root "$RUNNER_TEMP/hosts" --out "$RUNNER_TEMP/hosts.json"
+      - name: Export prepared paths
+        run: |
+          python - <<'PYHOST'
+          import json, os
+          from pathlib import Path
+          host=json.loads((Path(os.environ['RUNNER_TEMP'])/'hosts.json').read_text())['hosts']['ref-0.21.5']
+          with open(os.environ['GITHUB_ENV'],'a') as env:
+              env.write(f"FASTEMBED_CACHE_PATH={os.environ['RUNNER_TEMP']}/fastembed-empty
+")
+              env.write(f"LCM_REAL_HERMES_PYTHON={host['python']}
+")
+              env.write(f"LCM_REAL_HERMES_SRC={host['src']}
+")
+              env.write(f"PYTHONPATH={os.environ['GITHUB_WORKSPACE']}:{host['src']}
+")
+          PYHOST
+      - name: Prove fault-specific full-prompt preservation oracle
+        run: python -m pytest -p no:cacheprovider -q -ra tests/test_real_turn_loop_acp_override.py::test_rotation_child_publication_error_keeps_the_host_rotation_heal --junitxml=h4-host-oracle.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: issue-1880-cost-h2
-          path: hold-cost-results/
+          name: issue-1880-red-host-oracle
+          path: |
+            h5-red.xml
+            h4-host-oracle.xml

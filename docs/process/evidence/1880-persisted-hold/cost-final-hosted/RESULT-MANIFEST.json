@@ -1,0 +1,77 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "lcmx-1880-hold-cost-h3-hosted-20261023",
+  "project": "lcm-x",
+  "kind": "benchmark",
+  "status": "settled",
+  "owner_lane": "1880-part-b",
+  "claim_class": "advisory",
+  "created": "2026-10-23T06:45:04Z",
+  "settled": "2026-10-23T06:45:04Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "441c338ff49d3d1bd64a864a9191ce2723c509bb",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python -B cost_probe.py --base BASE --candidate CANDIDATE --scratch SCRATCH --out RUN; GitHub-hosted Ubuntu Python3.13",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "#1880 H3 synthetic admission on hosted Linux",
+      "metric": "unheld_cells_within_cost_bar",
+      "value": 4.0,
+      "n": 4,
+      "baseline_run": "10407e12",
+      "source": "summary.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "samples.jsonl",
+      "role": "per-item",
+      "sha256": "804c6e087096aec415f177200df7e154c500a926f81ef84244af413f82e65029",
+      "bytes": 149771
+    },
+    {
+      "path": "summary.json",
+      "role": "per-item",
+      "sha256": "f2f8160ef99c87a34acc95bc47a8f6fc1b3b5e702ef241ae474c16cdf993a677",
+      "bytes": 4756
+    },
+    {
+      "path": "cost_probe.py",
+      "role": "per-item",
+      "sha256": "aae7c8e487baf2dfbd81d333998a07ab372c691130dd781dfe5753c8a3c39dc9",
+      "bytes": 8865
+    },
+    {
+      "path": "score_cost.py",
+      "role": "per-item",
+      "sha256": "16aba56d7991c75c7863db00c32cef57cf91fc18d63a7687d632de1918bef35d",
+      "bytes": 1610
+    }
+  ],
+  "rescore": {
+    "command": "python score_cost.py .",
+    "inputs": [
+      "samples.jsonl",
+      "summary.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "cost_probe.py",
+    "samples.jsonl",
+    "score_cost.py",
+    "summary.json"
+  ]
+}

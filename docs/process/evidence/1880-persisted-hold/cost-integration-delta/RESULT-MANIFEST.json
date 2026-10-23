@@ -78,6 +78,5 @@
     "samples.jsonl",
     "score_cost.py",
     "summary.json"
-  ],
-  "local_raw": "/Users/m1/Codex/session-notes/2026-10-23/lcmx-1880-persist-hold/artifacts/cost-integration-delta"
+  ]
 }

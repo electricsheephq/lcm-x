@@ -1,0 +1,11 @@
+#1880 B current synthetic evidence
+Initial BASE RED before product: 16 failed in 1.17s (red-green.txt).
+H2 targeted RED before product: 8 failed in 0.90s; GREEN12 passed in1.69s; affected traces419 passed in67.29s (h2-red-green.txt).
+H3 hosted focused current proof: tests/test_issue_1880_persisted_hold.py + tests/test_issue_651_below_threshold_cleanup_only.py + tests/invariants/test_issue_1353_prematch_fault_prefix.py + test_environment_read_inventory: 77 passed,2 skipped in9.11s.
+Paired200 cost: python -B cost_probe.py --base BASE --candidate CANDIDATE --scratch SCRATCH --out RUN; python -B score_cost.py RUN. GitHub-hosted Ubuntu Python3.13 measured source441c338ff49d3d1bd64a864a9191ce2723c509bb, product778609b68bc39ef4f216728ccb2952d36b53a8b1, BASE10407e12e33c1d7b09fe0e05141153555aec5d62.
+Result: all four UNHELD cells pass original cost bar; all eight scoring cells PASS; held gates zero model calls/full-history scans/metadata writes. See cost-final-hosted/RESULT.md/card/raw samples. Failed H2 cost preserved separately in cost-h2-failed-hosted/.
+Compatibility exact lines: CANDIDATE_WRITE_OK metadata-only; schema unchanged; synthetic row preserved. OLD_READER_OK v0.28.1; schema unchanged; rows and unknown metadata key preserved.
+Ruff0.15.13: All checks passed! Git diff --check: exit0/no output.
+Independent H2 semantic/memory-preservation PASS; H3 auxiliary-scope PASS; H4 all-rewrite/full80-prompt oracle and exact runtime-coverage exception PASS. Execution is a separate gate.
+H5 staged RED-only tests88b4c742bc15c2face7365d53386c9ac9c6ba982 precede any status/repair product correction; hosted RED pending. Named pinned-host oracle and exact-head full matrix remain pending.
+Not proven: real reference-session latency, host prompt/tool refresh, #1162 repair, merge/release/runtime/customer readiness. Synthetic only.
