@@ -366,7 +366,7 @@ def _parse_yaml_fallback_scalar(value: str):
         items = []
         start = 1
         # Quoted tokens consume their own commas, hashes and escaped quotes.
-        for match in re.finditer(_YAML_QUOTED_SCALAR + r"|[,\]#\[]", value[1:]):
+        for match in re.finditer(_YAML_QUOTED_SCALAR + r"|[,\]\[]|(?<!\S)#", value[1:]):
             token = match.group()
             if token in {"#", "["}:
                 break  # Unsupported list shape: retain the old result.
@@ -378,7 +378,11 @@ def _parse_yaml_fallback_scalar(value: str):
                 if token == "]":
                     return items
                 start = match.end() + 1
-    value = value.split("#", 1)[0].rstrip().strip("'\"")
+    for match in re.finditer(_YAML_QUOTED_SCALAR + r"|(?<!\S)#", value):
+        if match.group() == "#":
+            value = value[:match.start()]
+            break
+    value = value.rstrip().strip("'\"")
     lowered = value.lower()
     if lowered in {"true", "yes", "on"}:
         return True
