@@ -1,5 +1,5 @@
 {
-  "comment": "Pinned CI hosts for the reliability-nightly and real-host workflows (ci.py prep). upstream-main is bumped by a weekly PR, never floating. upstream-uid is upstream after its message-uid change (message uids and the P8 flush seams); upstream-main stays before it, where the host archive copies uncovered rows behind the running turn.",
+  "comment": "Pinned CI hosts for the reliability-nightly and real-host workflows (ci.py prep). upstream-main is bumped by a weekly PR, never floating. upstream-uid is upstream after its message-uid change (message uids and the P8 flush seams); upstream-main tracks a reviewed main snapshot and may share those capabilities.",
   "hosts": {
     "ref-0.21.5": {
       "repo": "NousResearch/hermes-agent",
@@ -46,7 +46,7 @@
     },
     "upstream-main": {
       "repo": "NousResearch/hermes-agent",
-      "sha": "6f7a7991bb069db07ae74a479823ce8310f8c7e0",
+      "sha": "cb757fac59c92b49e9b8f2910e5cd7ab75efffdd",
       "hermes_version": "0.0.0",
       "python_version": "3.14",
       "extras": "acp,edge-tts,bedrock,vertex,anthropic",
