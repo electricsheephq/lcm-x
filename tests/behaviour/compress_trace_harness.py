@@ -488,6 +488,8 @@ OBSERVED_ATTRIBUTES = (
     "_no_progress_hold",
     "_no_progress_hold_blocks",
     "_no_progress_hold_persisted",
+    "_no_progress_ingest_generation",
+    "_no_progress_observed_tokens",
     "_no_progress_proof_complete",
     "_no_progress_public_rows",
     "_note_fresh_tail_pressure_relieved",

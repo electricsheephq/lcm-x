@@ -142,6 +142,23 @@ def test_snapshot_keeps_labelled_messages_alive(tmp_path: Path, monkeypatch: pyt
         assert canonical.retained_messages[id(message)] is message
 
 
+def test_copy_return_observer_retains_replaced_owners(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    owners = {}
+    harness.retain_replay_copy_owners(monkeypatch, owners)
+    with engine_context(tmp_path, window=200000, embeddings_enabled=False) as engine:
+        def copy_occurrence(content):
+            rows = engine._copy_active_replay_messages_preserving_generated_ids([
+                {"role": "assistant", "content": content}])
+            return id(rows[0])
+
+        first = copy_occurrence("first synthetic occurrence")
+        second = copy_occurrence("second synthetic occurrence")
+        assert first != second
+        assert owners[first]["content"] == "first synthetic occurrence"
+        assert owners[second]["content"] == "second synthetic occurrence"
+        assert set(engine._no_progress_public_rows) == {second}
+
+
 @pytest.mark.parametrize("name", [case.name for case in SCENARIOS if case.shape == "uid"])
 def test_uid_scenarios_bind_durable_rows(name: str, tmp_path: Path) -> None:
     payloads: list[str] = []

@@ -54,6 +54,7 @@ TRACE_GUIDANCE = "Regenerate deliberately: python -m tests.behaviour.ingest_trac
 # FROZEN inventory, never generated from _ingest_messages at observation time.
 OBSERVED_ATTRIBUTES = frozenset({
     "_no_progress_replay", "_no_progress_public_rows", "_no_progress_metadata_warned", "_no_progress_hold_persisted",
+    "_no_progress_ingest_generation", "_no_progress_observed_tokens", "_ingest_replay_redaction_changes",
     "_session_id", "_session_ignored", "_session_stateless", "_session_platform", "_conversation_id",
     "_ingest_cursor", "_ingest_cursor_needs_reconcile", "_last_compacted_store_id",
     "_ingest_replay_redaction_changes",
@@ -291,6 +292,18 @@ class IngestCanonical(Canonical):
         if isinstance(value, bytes):
             return {"bytes": value.hex()}
         return super().value(value, path, in_payload=in_payload)
+
+
+def retain_replay_copy_owners(patch: pytest.MonkeyPatch, owners: dict[int, Message]) -> None:
+    """Observe copy return before any caller can replace/free those address owners."""
+    original = engine_module.LCMEngine._copy_active_replay_messages_preserving_generated_ids
+
+    def copied(engine: Any, rows: list[Message]) -> list[Message]:
+        result = original(engine, rows)
+        owners.update((id(row), row) for row in result)
+        return result
+
+    patch.setattr(engine_module.LCMEngine, "_copy_active_replay_messages_preserving_generated_ids", copied)
 
 
 def recovery_receipts(engine: Any, value: Any) -> Any:
@@ -792,12 +805,15 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                              "end_reason TEXT, source TEXT, model_config TEXT)")
                 host.execute("INSERT INTO sessions VALUES ('S', NULL, NULL, 'cli', NULL)")
         with context(root, window=200000, conversation_id="trace-conversation", **settings) as engine, ExitStack() as engines:
+            copy_owners: dict[int, Message] = {}
+            retain_replay_copy_owners(patch, copy_owners)
             if (case.shape in {"ignored", "ignored-ledger"} or case.variant == "version-ignore"):
                 engine._compiled_ignore_message_patterns = [LiteralPattern()]
             engine, incoming = prepare(engine, case, root, engines)
             if (case.shape in {"ignored", "ignored-ledger"} or case.variant == "version-ignore"):
                 engine._compiled_ignore_message_patterns = [LiteralPattern()]
             canonical = IngestCanonical(root, incoming)
+            canonical.retained_messages.update(copy_owners)
             if case.shape == "uid":
                 state_path = str(Path(engine._state_db_path()).resolve())
                 tag = hashlib.sha256(state_path.encode()).hexdigest()[:16]

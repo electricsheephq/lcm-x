@@ -1432,7 +1432,7 @@
 "after _host_uid_lineage_cache {\"('<sandbox>/home/state.db', 'S')\":[\"<home-tag>:S\",null]}",
 "after _kept_reply_mark null",
 "after _last_compacted_store_id 8",
-"after _last_gate_tokens 3000",
+"after _last_gate_tokens 0",
 "after _pending_context_anchor_messages null",
 "after _pending_emission_candidates sha256=71111a9dfe89f5e4de5f43da5a42b7897a2305bed365d0f606246259b0930831 chars=8418",
 "after _pressure_yield_tail_token_limit 0",

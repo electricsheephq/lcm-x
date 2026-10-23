@@ -287,7 +287,8 @@ def test_leaf_target_invalidation_and_bound_store_identity(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("setting", ["l2_budget_ratio", "summary_prompt_version", "model", "provider", "api_mode",
-                                     "stub_first_exit_target_ratio", "proactive_recall_enabled", "proactive_recall_budget_tokens"])
+                                     "stub_first_exit_target_ratio", "proactive_recall_enabled", "proactive_recall_budget_tokens",
+                                     "embeddings_enabled"])
 def test_effective_settings_and_route_only_invalidate(tmp_path, setting):
     view, before = arm(tmp_path)
     engine = rebuild(tmp_path)
@@ -420,5 +421,32 @@ def test_h2_swallowed_audit_failure_stays_unknown_until_clean_recovery(tmp_path,
         assert engine._consecutive_ingest_failures == 0
         assert engine._no_progress_replay is not None
         assert engine._no_progress_fingerprint() is not None
+    finally:
+        engine.shutdown()
+
+
+def test_h2_host_held_pruned_stub_keeps_current_public_proof(tmp_path):
+    from tests.test_issue_772_replay_keeps_host_stubs import CLEARED
+
+    engine = make_engine(tmp_path, window=200_000, conversation_id="conv",
+                         large_output_externalization_enabled=False,
+                         large_output_active_replay_stubbing_enabled=False)
+    view = [{"role": "user", "content": "synthetic current objective"}]
+    for i in range(3):
+        view += [{"role": "assistant", "content": "", "tool_calls": [{"id": f"synthetic-{i}",
+                  "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+                 {"role": "tool", "tool_call_id": f"synthetic-{i}", "content": f"synthetic result {i} " * 40}]
+    try:
+        engine.ingest(view)
+        before = copy.deepcopy(engine._store.get_session_messages("S"))
+        host = copy.deepcopy(view)
+        host[2]["content"] = CLEARED
+        assert engine._message_replay_identity(host[2], strip_carrier=False) == engine._message_replay_identity(view[2], strip_carrier=False)
+        replay = engine._ingest_messages(host)
+        assert replay[2]["content"] == CLEARED
+        assert engine._store.get_session_messages("S") == before
+        assert engine._no_progress_replay is not None
+        active = engine._last_active_replay_messages[2]
+        assert engine._no_progress_public_rows[id(active)]["content"] == CLEARED
     finally:
         engine.shutdown()

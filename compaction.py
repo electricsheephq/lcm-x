@@ -235,6 +235,7 @@ class CompactionMixin:
             return False
         tokens = prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens
         self._last_gate_tokens = int(tokens or 0)
+        self._no_progress_observed_tokens = int(tokens or 0)
         if self._should_force_overflow_recovery(observed_tokens=tokens):
             return True
         if self.threshold_tokens <= 0:
@@ -265,6 +266,7 @@ class CompactionMixin:
             return self.threshold_tokens > 0 and rough >= self.threshold_tokens
         rough = count_messages_tokens(messages)
         self._last_gate_tokens = rough
+        self._no_progress_observed_tokens = rough
         if self.threshold_tokens > 0 and rough < self.threshold_tokens:
             self._note_fresh_tail_pressure_relieved()
             self.__dict__.get("_zero_leaf_streaks", {}).pop(self._hold_conversation_key(), None)  # #1162
@@ -1772,7 +1774,7 @@ class CompactionMixin:
             if current_tokens is not None
             else count_messages_tokens(messages)
         )
-        self._last_gate_tokens = int(state.observed_prompt_tokens or 0)
+        self._no_progress_observed_tokens = int(state.observed_prompt_tokens or 0)
         state.force_overflow = self._should_force_overflow_recovery(
             observed_tokens=state.observed_prompt_tokens,
             messages=messages,

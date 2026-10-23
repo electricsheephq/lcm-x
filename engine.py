@@ -2487,6 +2487,8 @@ class LCMEngine(
         Only the digest survives this ingest, never its input payload.
         """
         self._no_progress_replay = None
+        if getattr(self, "_no_progress_ingest_generation", None) != self._ingest_failure_count:
+            return  # An internally swallowed failure is not completed current-ingest proof.
         try:
             # Public copies are already owned by the current ingest copy loop.
             public = self._no_progress_public_rows
@@ -2500,7 +2502,9 @@ class LCMEngine(
 
     def _no_progress_fingerprint(self) -> Optional[str]:
         replay = getattr(self, "_no_progress_replay", None)
+        observed = getattr(self, "_no_progress_observed_tokens", None)
         if (not replay or replay[:2] != (self._session_id, self._conversation_id)
+                or observed is None or observed <= 0
                 or self._consecutive_ingest_failures or self._bypasses_lcm_context_management()):
             return None
         # Explicit non-secret settings only, never a config dump, credential, URL
@@ -2510,7 +2514,7 @@ class LCMEngine(
             "fresh_tail_pressure_yield_min_observations", "leaf_chunk_tokens",
             "leaf_target_ratio", "leaf_target_min_tokens", "leaf_target_max_tokens",
             "l2_budget_ratio", "summary_prompt_version",
-            "stub_first_exit_target_ratio", "proactive_recall_enabled", "proactive_recall_budget_tokens",
+            "stub_first_exit_target_ratio", "proactive_recall_enabled", "proactive_recall_budget_tokens", "embeddings_enabled",
             "dynamic_leaf_chunk_enabled", "dynamic_leaf_chunk_max", "incremental_max_depth",
             "condensation_fanin", "cache_friendly_condensation_enabled", "cache_friendly_min_debt_groups",
             "threshold_full_sweep_enabled", "summary_prefix_target_tokens", "l3_truncate_tokens",
@@ -2529,7 +2533,10 @@ class LCMEngine(
                 if not isinstance(value, str) or any(marker in value for marker in ("://", "@", "?", "#")):
                     return None  # An opaque or URL-shaped route cannot supply safe scalar identity.
                 route.append(value.strip())
-            tokens = max(int(self.last_prompt_tokens or 0), int(self._last_gate_tokens or 0))
+            tokens = max(int(self.last_prompt_tokens or 0), int(observed))
+            yield_ready = (self._config.fresh_tail_pressure_yield_enabled
+                           and self._pressure_yield_blocked_streak >= max(
+                               1, int(self._config.fresh_tail_pressure_yield_min_observations)))
             ceiling = self._survival_ceiling()
             pressure = ("overflow" if self._should_force_overflow_recovery(observed_tokens=tokens)
                         else "survival" if ceiling is not None and tokens >= ceiling
@@ -2548,7 +2555,7 @@ class LCMEngine(
                      self._store_complete_frontier(),
                      self._dag._conn.execute("SELECT COALESCE(MAX(node_id), 0) FROM summary_nodes").fetchone()[0],
                      pressure, tokens // 1024, tokens, int(self.context_length or 0), self.threshold_tokens,
-                     self._pressure_yield_blocked_streak,
+                     yield_ready,
                      route,
                      [getattr(self._config, name) for name in names]]
             return hashlib.sha256(json.dumps(state, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -2702,7 +2709,10 @@ class LCMEngine(
     def _no_progress_hold_blocks(self, tokens: int) -> bool:
         """#651: the one hold decision the host gate and compress() share. The hold governs LCM-managed
         compaction only, and forced overflow and the survival ceiling are never held."""
-        if self._bypasses_lcm_context_management() or not self._no_progress_hold_active():
+        if self._bypasses_lcm_context_management():
+            return False
+        self._no_progress_observed_tokens = int(tokens or 0)
+        if not self._no_progress_hold_active():
             return False
         if self._should_force_overflow_recovery(observed_tokens=tokens):
             return False
@@ -2746,6 +2756,7 @@ class LCMEngine(
     def _sweep_budget_hold_applies(self, tokens: Optional[int]) -> bool:
         """#608: the hold never applies at or over the survival ceiling, whose fit only compress() runs.
         #651: the no-progress hold applies the same way."""
+        self._no_progress_observed_tokens = None if tokens is None else int(tokens)
         if not self._sweep_budget_hold_active() and not self._no_progress_hold_active():
             return False
         ceiling = self._survival_ceiling()
@@ -2757,7 +2768,10 @@ class LCMEngine(
         return True
 
     def _record_ingest_success(self) -> None:
-        self._consecutive_ingest_failures = 0
+        if getattr(self, "_no_progress_ingest_generation", None) == self._ingest_failure_count:
+            self._consecutive_ingest_failures = 0
+        else:
+            self._no_progress_replay = None
 
     def _record_ingest_failure(self, where: str, error: Exception) -> None:
         """Track a swallowed ingest error so it is operator-visible.
@@ -6417,6 +6431,12 @@ class LCMEngine(
             sync_cached_host_metadata(
                 host_messages, current, self._generated_ignored_active_replay_placeholder_message_ids,
             )
+        for row in current:
+            if id(row) not in self._no_progress_public_rows:
+                self._no_progress_public_rows[id(row)] = {
+                    key: value for key, value in row.items()
+                    if key != "timestamp" and not str(key).startswith("_")
+                }
         return current
 
     def _cached_active_replay_messages(
@@ -6952,6 +6972,7 @@ class LCMEngine(
         ignore the return value when they only need durable persistence.
         """
         self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
+        self._no_progress_ingest_generation = self._ingest_failure_count
         self._ingest_replay_redaction_changes = {}
         if not self._session_id:
             logger.debug("Ingest skipped: no session_id")
