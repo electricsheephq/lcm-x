@@ -34,6 +34,28 @@ def yaml_config(tmp_path):
     return path
 
 
+def _typed(value):
+    """Unlike ordinary equality, preserve bool/int and nested scalar types."""
+    kind = type(value).__name__
+    if isinstance(value, dict):
+        value = [(_typed(key), _typed(item)) for key, item in value.items()]
+    elif isinstance(value, list):
+        value = [_typed(item) for item in value]
+    else:
+        return type(value).__name__, value
+    return kind, value
+
+
+@pytest.fixture(params=["pyyaml", "ruamel", "line"])
+def selected_loader(request, monkeypatch):
+    loader = request.param
+    monkeypatch.setattr(config, "yaml", pytest.importorskip("yaml") if loader == "pyyaml" else None)
+    monkeypatch.setattr(
+        config, "ruamel_yaml", pytest.importorskip("ruamel.yaml") if loader == "ruamel" else None
+    )
+    return loader
+
+
 @pytest.mark.parametrize("loader", ["pyyaml", "ruamel", "line"])
 def test_shared_fixture_loader_parity(yaml_config, monkeypatch, loader):
     # Each optional loader skips independently; the line-parser case always runs.
@@ -43,7 +65,7 @@ def test_shared_fixture_loader_parity(yaml_config, monkeypatch, loader):
         monkeypatch.setattr(config, "yaml", None)
         ruamel = pytest.importorskip("ruamel.yaml") if loader == "ruamel" else None
         monkeypatch.setattr(config, "ruamel_yaml", ruamel, raising=False)
-    assert config._load_hermes_config_yaml(yaml_config) == {
+    assert _typed(config._load_hermes_config_yaml(yaml_config)) == _typed({
         "lcm": {
             "query": "### Query: ", "model": "provider/model#v2",
             "single": "single # text", "quoted_bool": "true",
@@ -54,23 +76,23 @@ def test_shared_fixture_loader_parity(yaml_config, monkeypatch, loader):
             "escaped": 'say "hi"\nnext\tline\\end', "apostrophe": "it's # intact",
             "empty_list": [], "nested": {"model_thresholds": {"": 0.5, "valid": 0.4}},
         }
-    }
+    })
 
 
 def test_ruamel_safe_loader_precedes_line_parser(yaml_config, monkeypatch):
     ruamel = pytest.importorskip("ruamel.yaml")
     calls = []
 
-    def safe_loader(*, typ):
-        calls.append(typ)
-        return ruamel.YAML(typ=typ)
+    def safe_loader(**kwargs):
+        calls.append(kwargs)
+        return ruamel.YAML(**kwargs)
 
     # Block scalars are outside the line parser's subset and prove routing.
     yaml_config.write_text('lcm:\n  query: |\n    query # intact\n')
     monkeypatch.setattr(config, "yaml", None)
     monkeypatch.setattr(config, "ruamel_yaml", SimpleNamespace(YAML=safe_loader), raising=False)
     assert config._load_hermes_config_yaml(yaml_config) == {"lcm": {"query": "query # intact\n"}}
-    assert calls == ["safe"]
+    assert calls == [{"typ": "safe", "pure": True}]
 
 
 @pytest.mark.parametrize("loader", ["pyyaml", "ruamel"])
@@ -81,3 +103,60 @@ def test_loader_error_returns_empty_mapping(yaml_config, monkeypatch, loader):
     monkeypatch.setattr(config, "yaml", SimpleNamespace(safe_load=fail) if loader == "pyyaml" else None)
     monkeypatch.setattr(config, "ruamel_yaml", SimpleNamespace(YAML=fail), raising=False)
     assert config._load_hermes_config_yaml(yaml_config) == {}
+
+
+
+def test_ruamel_with_clib_accepts_url_flow_map(yaml_config, monkeypatch):
+    ruamel = pytest.importorskip("ruamel.yaml")
+    pytest.importorskip("_ruamel_yaml")
+    monkeypatch.setattr(config, "yaml", None)
+    monkeypatch.setattr(config, "ruamel_yaml", ruamel)
+    monkeypatch.setattr(config, "_hermes_config_path", lambda: yaml_config)
+    yaml_config.write_text(
+        "custom_providers: [{name: local, base_url: http://localhost:11434/v1}]\n"
+        "compression:\n  codex_gpt55_autoraise: false\n"
+        "lcm:\n  context_threshold: 0.4\n"
+    )
+    assert config._hermes_codex_gpt55_autoraise_with_source(True) == (
+        False, "config_yaml:compression.codex_gpt55_autoraise"
+    )
+    assert config._hermes_compression_threshold_with_source(0.75) == (
+        0.4, "config_yaml:lcm.context_threshold"
+    )
+
+
+@pytest.mark.parametrize("text", [
+    "lcm:\n  - a # see: x\n",
+    "lcm:\n  notes: one\n    three # see: docs\n",
+    "--- # doc: 1\nlcm:\n  notes: one\n",
+])
+def test_comments_do_not_invent_ignored_keys(yaml_config, monkeypatch, text):
+    pyyaml = pytest.importorskip("yaml")
+    yaml_config.write_text(text)
+    expected = config._ignored_lcm_config_yaml_keys(pyyaml.safe_load(text))
+    monkeypatch.setattr(config, "yaml", None)
+    monkeypatch.setattr(config, "ruamel_yaml", None)
+    loaded = config._load_hermes_config_yaml(yaml_config)
+    assert config._ignored_lcm_config_yaml_keys(loaded) == expected
+    assert set(loaded) == {"lcm"}
+
+
+@pytest.mark.parametrize("token,enabled", [
+    ("off", False), ("no", False), ("Off", False), ("false", False),
+    ("yes", True), ("on", True), ("true", True),
+])
+def test_compression_enabled_consumer(yaml_config, monkeypatch, selected_loader, token, enabled):
+    yaml_config.write_text(f"compression:\n  enabled: {token}\n  threshold: 0.9\n")
+    monkeypatch.setattr(config, "_hermes_config_path", lambda: yaml_config)
+    assert config._hermes_compression_threshold_with_source(0.75) == (
+        (0.9, "config_yaml:compression.threshold") if enabled else (0.75, "default")
+    )
+
+
+@pytest.mark.parametrize("token", ["off", "no", "false"])
+def test_autoraise_disabled_consumer(yaml_config, monkeypatch, selected_loader, token):
+    yaml_config.write_text(f"compression:\n  codex_gpt55_autoraise: {token}\n")
+    monkeypatch.setattr(config, "_hermes_config_path", lambda: yaml_config)
+    assert config._hermes_codex_gpt55_autoraise_with_source(True) == (
+        False, "config_yaml:compression.codex_gpt55_autoraise"
+    )
