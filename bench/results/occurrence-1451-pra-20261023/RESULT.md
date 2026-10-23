@@ -1,7 +1,7 @@
 # #1451 PR-A synthetic acceptance
 
 Run `lcmx-1451-pra-20261023`. Claim class: advisory synthetic source evidence.
-Product measured at `0eb95e50f4bae6ef0bcc305efde49c83f3d41fca`; compatibility and cost at `e6e4f0e5586245e0cf87bb0fec52745c82f17fd0` (only rollback-test setup differs). Product: 118 changed lines. No DDL or carry-rebind changes.
+Product measured at `0eb95e50f4bae6ef0bcc305efde49c83f3d41fca`; compatibility and cost at `e6e4f0e5586245e0cf87bb0fec52745c82f17fd0` (only rollback-test setup differs). Measured product: 118 changed lines; the subsequent legacy-only correction brings the final product delta to 120 lines (see DELTA.md). No DDL or carry-rebind changes.
 
 | Gate | BASE | Candidate | Receipt |
 |---|---|---|---|
@@ -36,3 +36,5 @@ Four ingest golden scenarios (compaction, host-merge, rotation, rewrite) change 
 Re-score: the preserved full result set runs `python compare.py`; it reads `inputs/red-base.jsonl` and `candidate.jsonl` through the inherited scorer. This public directory is a summary; complete raw inputs and attribution payloads remain in the retained run packet. T2 tag reserved: `lcm-x/lcmx-1451-pra-20261023`; T2 is unpublished. No results were disposed.
 
 Not proven: live-host incidence, fleet impact, release, runtime/customer readiness, PR-B correctness, or absence of inherited occurrence defects. Remote full-suite CI and independent review are tracked by the PR separately.
+
+Legacy compatibility correction: [DELTA.md](DELTA.md) records the reproduced system-anchor case, its RED/GREEN evidence, source identity and unchanged matrix-path coverage.

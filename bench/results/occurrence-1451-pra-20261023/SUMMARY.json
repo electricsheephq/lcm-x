@@ -37,5 +37,7 @@
     "cost-samples.json": "5b491c2b51b0029e384f26e9a26246ac8be670b46838ea9be7708d385f9b1407"
   },
   "t2_tag": "lcm-x/lcmx-1451-pra-20261023",
-  "t2_state": "unpublished; raw results retained; no result disposal"
+  "t2_state": "unpublished; raw results retained; no result disposal",
+  "delta_source_commit": "9538c8387bba578db127729697f428b38a9d5551",
+  "delta_coverage": "DELTA.md and matrix-delta-coverage.json; original measurement identities preserved"
 }
