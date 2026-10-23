@@ -7144,6 +7144,39 @@ class LCMEngine(
                     good, bad = [], [previous]
                 choices[index], conflicts[index] = good, bad
 
+            proof = None if start else (getattr(self, "_compress_commit_proof", None) or self._durable_commit_proof_payload())
+            historical = set()
+            extent = len((proof or {}).get("output_metadata", ()))
+            if switches[0] and extent:
+                for pos in choices:
+                    if (pos < extent or pos in accepted or messages[pos].get("role") != "user"
+                            or current[pos]["timestamp"] is None or pos + 2 >= len(messages)
+                            or not messages[pos + 1].get("tool_calls") or messages[pos + 2].get("role") != "tool"):
+                        continue
+                    digest = _commit_proof_identity_digest(_proof_user_identity(self._message_replay_identity(
+                        messages[pos], strip_carrier=False, allow_pruned_tool_alias=False)))
+                    users = [sid for sid in by_digest.get(digest, ()) if by_id[sid].get("role") == "user"
+                             and _normalize_observed_at(by_id[sid].get("observed_at")) == current[pos]["timestamp"]]
+                    if len(users) != 1 or sum(m.get("role") == "user" and current[i]["timestamp"] == current[pos]["timestamp"]
+                            and self._message_replay_identity(m, strip_carrier=False) == self._message_replay_identity(
+                                messages[pos], strip_carrier=False) for i, m in enumerate(messages)) != 1:
+                        continue
+                    call_digest = _commit_proof_identity_digest(_proof_user_identity(self._message_replay_identity(
+                        messages[pos + 1], strip_carrier=False, allow_pruned_tool_alias=False)))
+                    calls = [sid for sid in by_digest.get(call_digest, ()) if facts[sid].get("user_store_id") == users[0]]
+                    if len(calls) == 1 and any(fact.get("segment_call_store_id") == calls[0]
+                            and by_id[sid].get("role") == "tool"
+                            and by_id[sid].get("tool_call_id") == messages[pos + 2].get("tool_call_id")
+                            and isinstance(by_id[sid].get("content"), str)
+                            and len(by_id[sid]["content"]) > _HERMES_PRUNE_MIN_CHARS
+                            and messages[pos + 2].get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
+                            for sid, fact in facts.items()):
+                        # #1869: this positively bound historical class is past
+                        # ORIGINAL output extent, with no newer accepted slot.
+                        # Leave its user to that owner; never v2-PROVEN.
+                        historical.add(pos)
+                        choices[pos], conflicts[pos] = [], []
+                        result["deferred"].add(pos)
             used = {ref[1] for ref in result["matched"].values()}
             user_index = result["owners"].get(start - 1, (None, None))[0]
             user_id = result["matched"].get(user_index, (None, None))[1]
@@ -7271,6 +7304,9 @@ class LCMEngine(
                     if not anchored and user_id is not None:
                         winners = [w for w in winners if facts[w[index]].get("user_store_id") == user_id
                                    or accepted.get(index) == w[index]]
+                    if user_index in historical:
+                        winners = [w for w in winners if not any(current[pos]["message_uid"] is not None
+                                   and facts[sid].get("message_uid") is None for pos, sid in w.items())]
                     user_changed = user_index in result["fresh"]
                     if user_index in result["legacy"] and not anchored:
                         winners = []
@@ -7324,7 +7360,6 @@ class LCMEngine(
                 elif conflicts[index]:
                     result["fresh"].add(index)
                 index += 1
-            proof = None if start else (getattr(self, "_compress_commit_proof", None) or self._durable_commit_proof_payload())
             result["proof_free"] = proof is None
             generated = set()
             emitted_heads = set()
