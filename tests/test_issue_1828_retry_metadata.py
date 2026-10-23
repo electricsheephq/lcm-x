@@ -41,16 +41,16 @@ def assert_bounded(result, cap, token_cap):
 
 def test_retry_deadline_refits_saturated_evidence(monkeypatch):
     monkeypatch.setattr(tokens, "_get_encoder", lambda: None)
-    monkeypatch.setattr(recall_session, "CHAR_BUDGET", 1648)
-    fixture = RefitFixture((1600, 200, 100), tuple("ABC"))
+    monkeypatch.setattr(recall_session, "CHAR_BUDGET", 1687)
+    fixture = RefitFixture((1600, 200, 100))
     state = retry_deadline(monkeypatch, fixture, 0)
     try:
-        result = fixture.run(deadline=1, query="")
+        result = fixture.run(deadline=1)
     finally:
         fixture.close()
     assert state["skipped"] and state["admitted"] == [3]
     assert state["checks"] == 1
-    assert_bounded(result, 1648, recall_session.TOKEN_BUDGET)
+    assert_bounded(result, 1687, recall_session.TOKEN_BUDGET)
     assert result["timeout"] is True
     assert result["provenance"]["delivery"]["stop_reason"] == "deadline"
 

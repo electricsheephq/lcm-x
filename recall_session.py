@@ -289,6 +289,7 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                     meta["omission_reason"] = "no_novel_exact_ref"
                     omissions[sid].append((meta["omission_reason"], None))
                 elif pending:
+                    pending_timed = [(h, dict(h)) for h in pending if h.get("time_uncertain")]
                     admitted.append(pending)
                     if evidence_fits():
                         emitted.update(h["store_id"] for h in pending)
@@ -300,7 +301,7 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                         omission = (meta["omission_reason"], meta["expand_hint"])
                         omissions[sid].append(omission)
                         if fit_failure == "budget":
-                            skipped.append((meta, pending, omission, (before, after), visited))
+                            skipped.append((meta, pending, omission, (before, after), visited, pending_timed))
                         # Try other ranked anchors/sessions, never repeatedly
                         # walk an over-budget neighborhood.
                         continue
@@ -345,19 +346,21 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
     delivery["truncated"] = bool(delivery.get("stop_reason")) or any(
         not s["complete"] for s in delivery["sessions"])
     # Final metadata and escaped JSON count too: refit whole groups and delta.
-    while not evidence_fits():
-        if not admitted:
-            break
-        removed = admitted.pop()
-        for meta in delivery["sessions"]:
-            if meta["session_id"] == removed[0]["session_id"]:
-                meta.update(complete=False, omission_reason=fit_failure)
-                omissions.setdefault(meta["session_id"], []).append((fit_failure, None))
-        delivery["truncated"] = True
+    def refit():
+        while not evidence_fits():
+            if not admitted:
+                break
+            removed = admitted.pop()
+            for meta in delivery["sessions"]:
+                if meta["session_id"] == removed[0]["session_id"]:
+                    meta.update(complete=False, omission_reason=fit_failure)
+                    omissions.setdefault(meta["session_id"], []).append((fit_failure, None))
+            delivery["truncated"] = True
+    refit()
     if delivery.get("stop_reason") != "deadline":
         # Only retry already-read budget skips, once, in admission order.
         # Refit removals and nonconverging groups never enter this list.
-        for meta, pending, omission, frontier, visited in skipped:
+        for meta, pending, omission, frontier, visited, pending_timed in skipped:
             try:
                 check()
             except TimeoutError:
@@ -382,6 +385,8 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                 meta["expand_hint"] = remaining[-1][1]
             delivery["truncated"] = bool(delivery.get("stop_reason")) or any(
                 not s["complete"] for s in delivery["sessions"])
+            for hit, fields in pending_timed:
+                hit.update(fields)
             admitted.append(pending)
             retry_fits = evidence_fits()
             if stop_reason is None:
@@ -405,6 +410,8 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                 omissions[meta["session_id"]] = remaining
         delivery["truncated"] = bool(delivery.get("stop_reason")) or any(
             not s["complete"] for s in delivery["sessions"])
+        if delivery.get("stop_reason") == "deadline":
+            refit()
     while not fits():
         # Metadata is budgeted too, even for K=100 bench seeds and no citable
         # groups. Keep a bounded honest envelope rather than a first-item escape.
@@ -415,6 +422,8 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
         elif delivery["summary_leads"]:
             delivery["summary_leads"].pop()
         elif delivery["sessions"]:
+            sid = delivery["sessions"][-1]["session_id"]
+            admitted[:] = [g for g in admitted if g[0]["session_id"] != sid]
             delivery["sessions"].pop()
         elif response["query"]:
             response["query"] = response["query"][:len(response["query"]) // 2]
