@@ -47,6 +47,8 @@ def _history(store):
 
 
 def _canonical(entities, key):
+    if key not in entities:
+        raise EntityOpRefused("not_found")
     for _ in range(len(entities)):
         row = entities.get(key)
         if row is None:

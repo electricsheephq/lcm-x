@@ -352,6 +352,27 @@ def test_scope_mutations_and_event_reduction_are_isolated(store, ops, api):
     assert api.resolved_view(store) == original
 
 
+def test_empty_profile_merge_missing_and_foreign_are_identical(store, ops, api):
+    foreign = ops.create_entity("profile A entity")
+    original = scope_rows(store)
+    with closing(EntityStore(store.db_path, profile_key="empty-profile-B")) as other:
+        bound = api.EntityOps(other)
+        for only_void_rows in (False, True):
+            if only_void_rows:
+                bound.create_entity("void entity")
+                bound.undo(last(other))
+            assert api.resolved_view(other) == {"canonical": {}, "aliases": {}, "cards": {}}
+            before, changes = scope_rows(other), other.connection.total_changes
+            for into, source in [(foreign, "ent_missing"), ("ent_missing", foreign),
+                                 ("ent_missing", "ent_also_missing")]:
+                error = refused(api, "not_found", lambda: bound.merge(into, source))
+                assert str(error) == "not_found"
+                assert error.__dict__ == {"reason": "not_found"}
+            assert scope_rows(other) == before
+            assert other.connection.total_changes == changes
+    assert scope_rows(store) == original
+
+
 def test_read_reduction_cost_and_cross_instance_freshness(store, ops, api):
     entity = ops.create_entity("A")
     ops.add_alias(entity, "A", source_store_ids=[1])
