@@ -7070,7 +7070,13 @@ class LCMEngine(
         # #1628: keep this after the last rewind; #1508 must precede it when restored.
         rewound = [idx for idx in range(cursor, scan_start) if idx not in anchored_replay_indexes]
         if rewound:
-            _s, rescan_ignored, rescan_replay = self._build_ingest_replay(messages=messages, n=n, cursor=cursor)
+            _s, rescan_ignored, rescan_replay = self._build_ingest_replay(
+                messages=messages, n=n, cursor=cursor, only=set(rewound),
+                store_ids=(ignored_original_messages.store_ids if self._compiled_ignore_message_patterns and not any(
+                    anchor_plan.get(key) for key in ("ws", "relations"))
+                    and all(row.get("session_id") == self._session_id for row in anchor_plan.get("carry", ()))
+                    and ignored_original_messages.rewrite_overrides == getattr(self, "_host_rewrite_overrides", {}) else None),
+            )
             replay_messages = list(replay_messages)
             for idx in rewound:
                 ignored_original_messages[idx], replay_messages[idx] = rescan_ignored[idx], rescan_replay[idx]
@@ -7242,19 +7248,45 @@ class LCMEngine(
         messages: List[Dict[str, Any]],
         n: int,
         cursor: int,
+        only: Optional[set[int]] = None,
+        store_ids: Optional[dict[int, int]] = None,
     ) -> tuple[int, list[bool], List[Dict[str, Any]]]:
         scan_start = 0 if self._ingest_cursor_needs_reconcile else cursor
         ignored_original_messages = [False] * n
         if self._compiled_ignore_message_patterns:
+            class IgnoreDecisions(list):
+                """Carry the full-list map and override snapshot within this ingest only."""
+
+            ignored_original_messages = IgnoreDecisions(ignored_original_messages)
             store_id_scope = self._compress_run.preserve_store_ids()
-            self._compress_run.store_ids_by_message_id = self._get_store_id_map_for_messages(messages)
+            ignored_original_messages.store_ids = (
+                self._get_store_id_map_for_messages(messages) if store_ids is None else store_ids
+            )
+            ignored_original_messages.rewrite_overrides = dict(self._host_rewrite_overrides)
+            self._compress_run.store_ids_by_message_id = ignored_original_messages.store_ids
             with store_id_scope:
                 for idx in range(scan_start, n):
+                    if only is not None and idx not in only:
+                        continue
                     mapped_ignore = self._mapped_stored_row_matches_ignore_message_patterns(messages[idx])
                     ignored_original_messages[idx] = (
                         self._matches_ignore_message_patterns(messages[idx])
                         or mapped_ignore
                     )
+        if only is not None:
+            from .ingest_protection import quarantine_suspicious_assistant_message
+
+            replay_messages = list(messages)  # Unselected rows retain their input defaults.
+            for idx in sorted(only):
+                message = quarantine_suspicious_assistant_message(
+                    messages[idx], config=self._config, hermes_home=self._hermes_home,
+                    session_id=self._session_id, externalize=idx >= scan_start and not ignored_original_messages[idx],
+                    prefer_existing_externalized=idx < scan_start,
+                )
+                replay_messages[idx] = self._redact_active_replay_messages([message])[0]
+            return scan_start, ignored_original_messages, self._apply_ignored_active_replay_placeholders(
+                messages, replay_messages, scan_start=scan_start, ignored_messages=ignored_original_messages,
+            )
         externalize_messages = [False] * n
         prefer_existing_externalized = [False] * n
         for idx in range(scan_start, n):
