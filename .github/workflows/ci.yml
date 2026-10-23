@@ -41,6 +41,7 @@ jobs:
         run: ruff check .
 
   test:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -182,6 +183,7 @@ jobs:
           if-no-files-found: error
 
   bench-tests:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -215,7 +217,7 @@ jobs:
 
   tests-ran:
     needs: [test, bench-tests]
-    if: always()
+    if: always() && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -248,7 +250,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install existing proof dependencies
-        run: pip install numpy==2.4.2 httpx==0.28.1 PyYAML==6.0.3
+        run: pip install numpy==2.4.2 httpx==0.28.1 PyYAML==6.0.3 pytest==9.1.1 hypothesis==6.141.1
       - name: Prepare pinned BASE
         run: git worktree add --detach "$RUNNER_TEMP/hold-base" 10407e12e33c1d7b09fe0e05141153555aec5d62
       - name: Run paired steady admission proof
@@ -259,7 +261,8 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           mkdir -p "$HOME" "$TMPDIR"
-          python -B -m cProfile -o hold-cost-results/profile.pstats docs/process/evidence/1880-persisted-hold/cost-h2/cost_probe.py --base "$RUNNER_TEMP/hold-base" --candidate . --scratch "$RUNNER_TEMP/hold-cost" --out hold-cost-results
+          python -B -c "from benchmarking.standalone import ensure_agent_context_engine_importable; ensure_agent_context_engine_importable(); import os, pytest; raise SystemExit(pytest.main(['tests/test_issue_1880_persisted_hold.py', 'tests/test_issue_651_below_threshold_cleanup_only.py', 'tests/invariants/test_issue_1353_prematch_fault_prefix.py', 'tests/invariants/test_issue_1603_profile_config.py::test_environment_read_inventory', '-q']+[\"--basetemp=\"+os.environ[\"TMPDIR\"]+\"/pytest-h3\"]))"
+          python -B docs/process/evidence/1880-persisted-hold/cost-h2/cost_probe.py --base "$RUNNER_TEMP/hold-base" --candidate . --scratch "$RUNNER_TEMP/hold-cost" --out hold-cost-results
           python -B docs/process/evidence/1880-persisted-hold/cost-h2/score_cost.py hold-cost-results
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
