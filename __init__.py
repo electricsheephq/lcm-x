@@ -6,6 +6,7 @@ that persists every message and provides structured retrieval tools.
 Based on the LCM paper by Ehrlich & Blackman (Voltropy PBC, Feb 2026).
 """
 
+from contextlib import nullcontext
 import importlib.util
 import json
 import logging
@@ -794,7 +795,8 @@ def register(ctx):
             def _ingest_and_note(active_engine):
                 # The turn ended whether or not its ingest succeeded (#597).
                 try:
-                    ingested = active_engine.ingest(history)
+                    with getattr(active_engine, "_attribution_span", lambda *_: nullcontext())("post_llm_call", len(history)):
+                        ingested = active_engine.ingest(history)
                 finally:
                     try:
                         note = getattr(active_engine, "note_turn_complete", None)

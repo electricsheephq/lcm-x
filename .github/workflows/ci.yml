@@ -234,3 +234,32 @@ jobs:
           python scripts/ci/check_tests_ran.py
           --junit reports/test-{3.11,3.12,3.13,3.14}/{main,privacy}.xml
           reports/bench-{aml,fmp-tests,instruments-local_catchup-tests,instruments-compaction_probe,instruments-compaction_probe-track_s-decision-tests,instruments-compaction_probe-track_s-scorer-tests,instruments-reliability,instruments-scale389-tests,scoreboard,tools-tests}.xml
+
+  session-end-attribution-cost:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+      - run: pip install pytest==9.1.1 numpy hypothesis==6.141.1 PyYAML==6.0.3
+      - name: Reuse the CI host contract
+        run: |
+          python - <<'PYTHON'
+          import pathlib, yaml
+          steps = yaml.safe_load(pathlib.Path(".github/workflows/ci.yml").read_text())["jobs"]["test"]["steps"]
+          script = next(step["run"] for step in steps if step.get("name") == "Stub hermes-agent ABC")
+          pathlib.Path("$RUNNER_TEMP/host-stub.sh".replace("$RUNNER_TEMP", __import__("os").environ["RUNNER_TEMP"])).write_text(script)
+          PYTHON
+          bash "$RUNNER_TEMP/host-stub.sh"
+      - name: Paired ordinary-turn cost at INFO and DEBUG
+        run: python tests/fixtures/session_end_attribution_cost/measure.py . "$RUNNER_TEMP/attribution-cost-results"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: session-end-attribution-cost
+          path: ${{ runner.temp }}/attribution-cost-results/
+          if-no-files-found: error
