@@ -71,17 +71,10 @@ _PROBE = textwrap.dedent(
     engine = agent.context_compressor
     engine.update_model("test/model", 64000, base_url="https://openrouter.ai/api/v1", api_key="k", provider="openrouter")
     compression_errors = {"input": 0, "other": 0}
-    fault_calls, last_compress, rewrite_observations = {"all": 0, "child": 0}, {}, []
+    fault_calls = {"all": 0, "child": 0}
     original_compress = type(engine).compress
     def traced_compress(self, messages, *args, **kwargs):
-        gate_before, input_rows = getattr(self, "_last_gate_tokens", None), len(messages)
         result = original_compress(self, messages, *args, **kwargs)
-        last_compress.clear()
-        last_compress.update(turn=t, status=self._last_compression_status,
-            observed_tokens=kwargs.get("current_tokens", args[0] if args else None),
-            survival_reason=getattr(self, "_survival_fit_reason", None), input_rows=input_rows,
-            result_rows=len(result), returned_input=result is messages, gate_before=gate_before,
-            gate_after=getattr(self, "_last_gate_tokens", None), fault_calls=dict(fault_calls))
         if self._last_compression_status == "error":
             compression_errors["input" if result is messages else "other"] += 1
         return result
@@ -106,26 +99,26 @@ _PROBE = textwrap.dedent(
         if name.startswith("hermes_plugins.hermes_lcm_x") and hasattr(module, "summarize_with_escalation"):
             module.summarize_with_escalation = stub
     rewrites = {"n": 0}
+    rewrite_violations = {"foreign_user": 0, "missing_raw_before": 0, "wrong_after": 0, "summary": 0}
     original_override = type(agent)._apply_persist_user_message_override
     def counted_override(self, messages):
         idx = getattr(self, "_persist_user_message_idx", None)
         in_range = isinstance(idx, int) and 0 <= idx < len(messages)
         before = messages[idx].get("content") if in_range else None
-        exact_current_elsewhere = any(i != idx and isinstance(m, dict) and m.get("role") == "user"
-                                      and m.get("content") == raw for i, m in enumerate(messages))
+        role_before = messages[idx].get("role") if in_range else None
+        summary_key = getattr(host_cc, "COMPRESSED_SUMMARY_METADATA_KEY", None)
+        summary_before = bool(messages[idx].get(summary_key)) if in_range else False
+        override = getattr(self, "_persist_user_message_override", None)
         original_override(self, messages)
         if in_range and messages[idx].get("content") != before:
             rewrites["n"] += 1
-            if len(rewrite_observations) < 2:
-                row, override = messages[idx], getattr(self, "_persist_user_message_override", None)
-                tag = next((i for i in range(1, turns + 1)
-                            if isinstance(before, str) and before.startswith(f"[T{i:02d}]")), None)
-                rewrite_observations.append(dict(turn=t, index=idx, rows=len(messages), role=row.get("role"),
-                    before_tag=tag, current_tag_match=tag == t, after_current_tag_match=str(row.get("content")).startswith(f"[T{t:02d}]"),
-                    equal_override=before == override, trim_equal_override=isinstance(before, str) and before.strip() == override,
-                    contains_current_text=isinstance(before, str) and raw in before,
-                    summary=bool(row.get(getattr(host_cc, "COMPRESSED_SUMMARY_METADATA_KEY", None))), exact_current_elsewhere=exact_current_elsewhere,
-                    preceding_compress=dict(last_compress), fault_calls=dict(fault_calls)))
+            row = messages[idx]
+            tags = set(re.findall(r"\\[T(\\d\\d)\\] user", before)) if isinstance(before, str) else set()
+            rewrite_violations["foreign_user"] += int(
+                role_before != "user" or row.get("role") != "user" or tags != {f"{t:02d}"})
+            rewrite_violations["missing_raw_before"] += int(not isinstance(before, str) or raw not in before)
+            rewrite_violations["wrong_after"] += int(row.get("content") != raw.strip() or row.get("content") != override)
+            rewrite_violations["summary"] += int(not summary_key or summary_before or bool(row.get(summary_key)))
     type(agent)._apply_persist_user_message_override = counted_override
     def reply(content, prompt_tokens):
         msg = SimpleNamespace(content=content, tool_calls=None)
@@ -134,10 +127,11 @@ _PROBE = textwrap.dedent(
         return response
     continue_turns = {int(t) for t in os.environ.get("PROBE_CONTINUE_TURNS", "").split(",") if t}
     repeat, real_usage = int(os.environ.get("PROBE_REPEAT", "400")), os.environ.get("PROBE_REAL_USAGE") == "1"
-    history = []
+    history, expected_raw = [], {}
     for t in range(1, turns + 1):
         text = "continue" if t in continue_turns else f"[T{t:02d}] user turn {t}: " + ("alpha beta gamma delta " * repeat) + "end."
         raw = text + ("\\n" if trailing else "")
+        expected_raw[t] = raw
         est = sum(len(str(m.get("content") or "")) for m in history) // 4 + len(raw) // 4 + 800
         if real_usage:  # report usage from the request actually sent (post-compaction), like a provider
             def _usage(*a, _t=t, **kw):
@@ -155,6 +149,8 @@ _PROBE = textwrap.dedent(
     stored = db.execute("SELECT store_id, session_id, role, content FROM messages ORDER BY store_id").fetchall()
     db.close()
     rows = [(r, c) for _s, _sid, r, c in stored]
+    missing_full_user_turns = [t for t, raw_prompt in expected_raw.items()
+                               if not any(r == "user" and raw_prompt in (c or "") for r, c in rows)]
     normalized = [(r, (c or "").rstrip()) for r, c in rows if (c or "").strip() != "continue"]
     state = sqlite3.connect(str(home / "state.db"))
     session_count = state.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
@@ -186,8 +182,9 @@ _PROBE = textwrap.dedent(
         "error_returned_input": compression_errors["input"],
         "error_returned_other": compression_errors["other"],
         "override_rewrites": rewrites["n"],
-        "rewrite_observations": rewrite_observations,
+        "rewrite_violations": rewrite_violations,
         "injected_fault_calls": fault_calls,
+        "missing_full_user_turns": missing_full_user_turns,
         "user_rows_by_turn": {
             f"{i:02d}": sum(1 for r, c in rows if r == "user" and (c or "").startswith(f"[T{i:02d}]"))
             for i in range(1, turns + 1)
@@ -264,8 +261,14 @@ def _run_turn_loop(
     result = json.loads(completed.stdout.strip().splitlines()[-1])
     assert result["engine"] == "lcm-x", result
     assert result["commit_logged"] >= 1, result  # a same-turn compaction really committed
-    # The host rewrite under test happens exactly when the prompt carries whitespace.
-    assert (result["override_rewrites"] > 0) is trailing, json.dumps(result, sort_keys=True)
+    if force_child_conflict:
+        # Recovery may restore API-only variants, but every rewrite must preserve the full current ask.
+        assert result["injected_fault_calls"]["child"] > 0, json.dumps(result, sort_keys=True)
+        assert all(count == 0 for count in result["rewrite_violations"].values()), json.dumps(result, sort_keys=True)
+        assert result["missing_full_user_turns"] == [], json.dumps(result, sort_keys=True)
+    else:
+        # The host rewrite under test happens exactly when the prompt carries whitespace.
+        assert (result["override_rewrites"] > 0) is trailing, result
     return result
 
 
