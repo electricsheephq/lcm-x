@@ -1,5 +1,4 @@
 """FIX-R5: an R3 exclusion applies to stored rows across UPDATE retries."""
-import re
 import sys
 
 import pytest
@@ -108,22 +107,22 @@ def test_r3_deferred_update_retry_stays_null(tmp_path, monkeypatch, retry):
 
         monkeypatch.setattr(cap, "try_update", trace)
         count = len(users(engine))
+        total = engine._store.connection.execute("SELECT count(*) FROM messages").fetchone()[0]
         if retry == "direct":
             cap.try_update(engine)
         elif retry == "pending-replacement":
             engine.on_turn_complete(view, turn_id="turn-current")
             assert begin(engine, view, "turn-replacement") is not None
         else:
-            retry_view = view
             if retry == "empty-store":
-                monkeypatch.setattr(engine, "_compiled_ignore_message_patterns",
-                                    [re.compile("^synthetic ignored$")])
-                retry_view = [*view, _a("synthetic ignored", 600.0)]
-            engine.ingest(retry_view)
+                # Revisit the survivor: the anchor filters its already-stored constituents.
+                engine._ingest_cursor = len(view) - 1
+            engine.ingest(view)
             drain(engine)
-            # The ignored new assistant reaches the filtered-empty return at ~7200.
+            # Rewound replay reaches the filtered-empty return at ~7200.
             assert calls.count("_ingest_messages") == (2 if retry == "empty-store" else 1)
             assert len(users(engine)) == count
+            assert engine._store.connection.execute("SELECT count(*) FROM messages").fetchone()[0] == total
         assert calls
         assert_null(engine)
     finally:
