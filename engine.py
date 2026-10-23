@@ -6868,6 +6868,7 @@ class LCMEngine(
             by_digest.setdefault(fact["identity_sha256"], []).append(sid)
         return dict(by_id={r["store_id"]: r for r in rows}, by_digest=by_digest,
                     accepted=self._validate_occurrence_receipt(rows, facts, receipt=receipt),
+                    accepted_context=self._occurrence_context(),
                     legacy=any(r["store_id"] not in facts for r in rows))
 
     def _occurrence_context(self, switches=None):
@@ -6999,6 +7000,26 @@ class LCMEngine(
         result["_absorbed_message_uids"] = absorbed if isinstance(absorbed, list) else None
         return result
 
+    def _occurrence_receipt_basis(self, store=None, source=None):
+        """Durable emission binding, read only for positional receipt use/write."""
+        store, source = store or self._store, source or self._session_id
+        try:
+            local = getattr(self, "_compress_commit_proof", None)
+            if store is self._store and source == self._session_id and local and local.get("durable") is False:
+                return None
+            proof = store.read_metadata_json(self._replay_snapshot_metadata_key(
+                _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, source))
+            snapshot = store.read_metadata_json(self._replay_snapshot_metadata_key("host_occurrence_snapshot", source))
+            if proof is None and snapshot is None:
+                return "no-compaction"
+            if (not isinstance(proof, dict) or not isinstance(snapshot, dict)
+                    or not self._occurrence_snapshot_shape_valid(snapshot, proof)):
+                return None
+            digest = hashlib.sha256(json.dumps(proof, sort_keys=True).encode()).hexdigest()
+            return digest if snapshot.get("proof_sha256") == digest else None
+        except Exception:
+            return None  # Unavailable binding cannot consume rows or block their write.
+
     def _validate_occurrence_receipt(self, rows, facts, *, receipt=None):
         if receipt is None:
             receipt = self._store.read_metadata_json(f"host_occurrence_accepted_view:{self._session_id}")
@@ -7008,6 +7029,9 @@ class LCMEngine(
             return {}
         entries = receipt.get("entries")
         if not isinstance(entries, list) or len(entries) > 4096:
+            return {}
+        basis = self._occurrence_receipt_basis()
+        if basis is None or receipt.get("basis") != basis:
             return {}
         available = {(r["session_id"], r["store_id"]) for r in rows if r["store_id"] in facts}
         seen, result, previous = set(), {}, -1
@@ -7037,6 +7061,9 @@ class LCMEngine(
             result["switches"] = switches
             rows, facts, missing = self._stored_occurrence_metadata()
             state = self._occurrence_window_cache[4]
+            if state["accepted_context"] != context:
+                state["accepted"] = self._validate_occurrence_receipt(rows, facts)
+                state["accepted_context"] = context
             legacy_rows = state["legacy"] and any(r["store_id"] not in facts and r["store_id"] not in missing for r in rows)
             by_id, by_digest, accepted = state["by_id"], state["by_digest"], state["accepted"]
             start, current = 0, []
@@ -7254,6 +7281,8 @@ class LCMEngine(
                         accept(index, user_id)
                     elif conflicts[index]:
                         result["fresh"].add(index)
+                    elif eligible and not any(current[index][key] is not None for key in ("timestamp", "message_uid")):
+                        result["needs_receipt"] = True
                     elif eligible and current[index]["timestamp"] is not None and switches[0]:
                         # Accepted #1830 user-stamp policy: leave ambiguity to
                         # the existing anchor, without choosing a row or binding
@@ -7350,7 +7379,18 @@ class LCMEngine(
                     eligible = []
                     result["fresh"].add(index)
                 if len(eligible) == 1:
-                    accept(index, eligible[0])
+                    sid = eligible[0]
+                    old = self._occurrence_metadata(by_id[sid], stored=True, fact=facts[sid], switches=switches)
+                    owner = result["matched"].get(user_index)
+                    bound = (accepted.get(index) == sid or any(current[index][key] is not None
+                             and old[key] is not None for key in ("timestamp", "message_uid"))
+                             or user_index in result["proven"] and owner is not None
+                             and facts[sid].get("user_store_id") == owner[1])
+                    if bound:
+                        accept(index, sid)
+                    else:
+                        result["deferred"].add(index)
+                        result["needs_receipt"] = True
                 elif conflicts[index]:
                     result["fresh"].add(index)
                 index += 1
@@ -7483,8 +7523,11 @@ class LCMEngine(
                                scope=dict(session_id=source, conversation_id=batch["conversation_id"]),
                                fact_store_ranges=ranges)
                 if batch.get("occurrence_receipt") and batch.get("occurrence_length", 4097) <= 4096:
-                    receipt["entries"] = [dict(host_index=index, source_session_id=ref[0], store_id=ref[1])
-                                          for index, ref in sorted(ids.items())]
+                    basis = self._occurrence_receipt_basis(batch["store"], source)
+                    if basis is not None:
+                        receipt["basis"] = basis
+                        receipt["entries"] = [dict(host_index=index, source_session_id=ref[0], store_id=ref[1])
+                                              for index, ref in sorted(ids.items())]
                 batch["_occurrence_written_receipt"] = receipt
                 if previous != receipt:
                     records.append((key, json.dumps(receipt, separators=(",", ":"))))

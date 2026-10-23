@@ -1153,6 +1153,40 @@ def test_occurrence_warm_extent_miss_uses_normal_prefix_owner(build, monkeypatch
     assert stored(engine) == after
 
 
+@pytest.mark.parametrize("basis", ["valid", "missing", "different", "malformed"])
+def test_occurrence_receipt_basis_keeps_fact_coverage_independent(build, basis):
+    engine = build()
+    original = [{"role": "user", "content": "basis user"},
+                {"role": "assistant", "content": "basis reply"}]
+    engine.ingest(deepcopy(original))
+    engine.shutdown()
+    engine = build()
+    assert engine._durable_commit_proof_payload() is None
+    accepted = [{"role": "user", "content": " basis user\n"}, original[1]]
+    engine.ingest(deepcopy(accepted))
+    before = stored(engine)
+    assert len(before) == 4  # The fresh raw user also owns a fresh unknown reply.
+    key = "host_occurrence_accepted_view:S"
+    receipt = engine._store.read_metadata_json(key)
+    assert receipt["basis"] == engine._occurrence_receipt_basis() == "no-compaction"
+    assert [entry["store_id"] for entry in receipt["entries"]] == [3, 4]
+    engine.shutdown()
+    engine = build()
+    engine.ingest(deepcopy(accepted))
+    assert stored(engine) == before
+    if basis == "missing":
+        receipt.pop("basis")
+    elif basis != "valid":
+        receipt["basis"] = "another compaction" if basis == "different" else [None]
+    engine._store.write_metadata_json([key], json.dumps(receipt))
+    engine._occurrence_window_cache = None
+    rows, facts, missing = engine._stored_occurrence_metadata()
+    assert not missing and set(facts) == {row["store_id"] for row in before}
+    mapping = engine._validate_occurrence_receipt(rows, facts, receipt=receipt)
+    assert mapping == ({0: 3, 1: 4} if basis == "valid" else {})
+    assert stored(engine) == before
+
+
 def test_occurrence_publication_uses_current_committed_pair_rows(build):
     """occ-0582: publication selects accepted retry rows, not equal older pairs."""
     engine = build()
