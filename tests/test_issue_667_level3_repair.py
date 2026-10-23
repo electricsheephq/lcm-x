@@ -186,8 +186,24 @@ def _raw_rows(engine):
     return engine._store.connection.execute("SELECT * FROM messages ORDER BY store_id").fetchall()
 
 
+def _seed_no_progress_holds(engine):
+    now = time.time()
+    holds = {session: {"version": 1, "reason": "no_progress", "fingerprint": digit * 64,
+                       "recorded_at": now, "expires_at": now + 600}
+             for session, digit in (("s1", "1"), ("s2", "2"))}
+    for session, record in holds.items():
+        engine._store.write_metadata_json([f"compaction_no_progress:v1:{session}"], json.dumps(record))
+    return holds
+
+
+def _read_no_progress_holds(engine):
+    return {session: engine._store.read_metadata_json(f"compaction_no_progress:v1:{session}")
+            for session in ("s1", "s2")}
+
+
 def test_apply_repairs_leaf_and_ancestors_in_place(engine, monkeypatch):
     ids = _build_store(engine)
+    holds = _seed_no_progress_holds(engine)
     before, raw_before = _texts(engine), _raw_rows(engine)
     calls = _fake_route(monkeypatch)
 
@@ -199,6 +215,7 @@ def test_apply_repairs_leaf_and_ancestors_in_place(engine, monkeypatch):
             f"-> level 1, node {ids['parent']} d1 ancestor -> level 1, node {ids['grandparent']} d2 ancestor -> level 1"
             ) in result
     assert "groups_repaired: 1" in result and "nodes_repaired: 3" in result and "summariser_calls: 3" in result
+    assert _read_no_progress_holds(engine) == {"s1": None, "s2": holds["s2"]}
     assert "second_scan: flagged_leaves=0 flagged_nodes=0 affected_ancestors=0" in result
     backup = Path(next(line for line in result.splitlines() if line.startswith("backup_path: ")).split(": ", 1)[1])
     with sqlite3.connect(backup) as copy:
@@ -251,6 +268,7 @@ def test_apply_refuses_before_backup_while_no_route(engine, monkeypatch):
 
 def test_a_level3_result_leaves_the_group_untouched(engine, monkeypatch):
     ids = _build_store(engine)
+    holds = _seed_no_progress_holds(engine)
     before = _texts(engine)
     _fake_route(monkeypatch, level=3)
 
@@ -259,11 +277,13 @@ def test_a_level3_result_leaves_the_group_untouched(engine, monkeypatch):
     assert f"skipped — summary route refused at node {ids['truncated']} (level 3)" in result
     assert "status: partial" in result and "summariser_calls: 1" in result and "backup_path: " in result
     assert _texts(engine) == before
+    assert _read_no_progress_holds(engine) == holds
     assert "second_scan: flagged_leaves=1 flagged_nodes=0 affected_ancestors=2" in result
 
 
 def test_a_concurrent_parent_rolls_the_group_back(engine, monkeypatch):
     ids = _build_store(engine)
+    holds = _seed_no_progress_holds(engine)
     added = []
 
     def live_condensation(call_number):
@@ -278,7 +298,31 @@ def test_a_concurrent_parent_rolls_the_group_back(engine, monkeypatch):
     assert "rolled back — a node changed or a new parent linked in during the repair" in result
     assert "groups_rolled_back: 1" in result and "status: partial" in result
     assert {k: v for k, v in _texts(engine).items() if k not in added} == before
+    assert _read_no_progress_holds(engine) == holds
     assert "affected_ancestors=3" in result  # the rerun sees the new parent too
+
+
+def test_repair_hold_invalidation_rolls_back_with_group(engine, monkeypatch):
+    _build_store(engine)
+    holds = _seed_no_progress_holds(engine)
+    before, raw_before = _texts(engine), _raw_rows(engine)
+    _fake_route(monkeypatch)
+    invalidated = []
+
+    def fail_after_invalidation(conn, node_ids):
+        assert conn.in_transaction
+        assert conn.execute("SELECT value FROM metadata WHERE key = ?",
+                            ("compaction_no_progress:v1:s1",)).fetchone() is None
+        invalidated.append(True)
+        raise sqlite3.OperationalError("synthetic failure after hold invalidation")
+
+    monkeypatch.setattr(level3_repair.VectorStore, "purge_embedding_batch_on_connection", fail_after_invalidation)
+    result = handle_lcm_command("doctor repair level3 apply", engine)
+
+    assert invalidated == [True]
+    assert "status: partial" in result and "synthetic failure after hold invalidation" in result
+    assert _texts(engine) == before and _raw_rows(engine) == raw_before
+    assert _read_no_progress_holds(engine) == holds
 
 
 def test_tool_path_never_writes(engine):
