@@ -385,6 +385,7 @@ _SUPPORTED_LCM_CONFIG_YAML_KEYS = {
     "model_thresholds",
     "summary_reasoning_effort",
     "expansion_reasoning_effort",
+    "embedding_query_prefix", "embedding_document_prefix",
 }
 
 
@@ -650,6 +651,11 @@ PREANSWER_EVIDENCE_MODES = ("off", "legacy_selective", "requirements_v1")
 EMBEDDING_STORAGE_DTYPES = ("float32", "int8")
 
 
+def normalize_embedding_provider(spelling: str) -> str:
+    """Normalize provider spelling before alias resolution."""
+    return str(spelling or "").strip().lower()
+
+
 def embedding_provider_id(spelling: str) -> str:
     """Map an already-normalized spelling to its id; preserve unknown values."""
     return next((provider for provider, spellings in EMBEDDING_PROVIDER_SPELLINGS.items()
@@ -809,6 +815,8 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("knn_prescreen_multiplier", "LCM_KNN_PRESCREEN_MULTIPLIER", int),
     _EnvFieldSpec("embedding_provider", "LCM_EMBEDDING_PROVIDER", str),
     _EnvFieldSpec("embedding_model", "LCM_EMBEDDING_MODEL", str),
+    _EnvFieldSpec("embedding_query_prefix", "LCM_EMBEDDING_QUERY_PREFIX", str),
+    _EnvFieldSpec("embedding_document_prefix", "LCM_EMBEDDING_DOCUMENT_PREFIX", str),
     _EnvFieldSpec("embedding_content_policy", "LCM_EMBED_CONTENT_POLICY", str),
     _EnvFieldSpec("ollama_base_url", "LCM_OLLAMA_BASE_URL", str),
     _EnvFieldSpec(
@@ -1206,6 +1214,8 @@ class LCMConfig:
     selective_compiler_model: str = ""
     embedding_provider: str = ""
     embedding_model: str = ""
+    embedding_query_prefix: str = ""
+    embedding_document_prefix: str = ""
     # Content-aware chunk policy for the raw-history chunk corpus:
     # conversational (default) | heads | full. Unknown values degrade to the
     # default in the chunker's normalize_content_policy.
@@ -1322,6 +1332,11 @@ class LCMConfig:
                 config_source_warnings.append(warning)
             elif source == f"env:LCM_{field.upper()}":
                 _warn_env_range(field, getattr(c, field), config_source_warnings)
+
+        prefix_yaml = _load_hermes_config_yaml().get("lcm", {})
+        for name in ("embedding_query_prefix", "embedding_document_prefix"):
+            if isinstance(prefix_yaml, dict) and isinstance(prefix_yaml.get(name), str):
+                setattr(c, name, prefix_yaml[name])
 
         c.ignored_config_yaml_lcm_keys = _ignored_lcm_config_yaml_keys()
 

@@ -194,7 +194,7 @@ def _provider_choice_row(monkeypatch, spelling):
         health.setattr(tools.sqlite3, "connect", lambda *a, **kw: SimpleNamespace(close=lambda: None))
         health.setattr(tools, "_lcm_store_has_live_chunk_vectors", lambda _: False)
 
-        def capture_health(conn, *, provider, model, task):
+        def capture_health(conn, *, provider, model, task, revision_suffix=""):
             health_mapped.append(provider)
             return "choice-revision"
 

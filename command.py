@@ -19,6 +19,7 @@ from typing import Any
 import uuid
 
 from . import config as config_choices
+from .ingest_policy import embedding_prefix_suffix, split_prefix_revision
 from .config import embedding_provider_id, lcm_env_get
 from .command_auth import CommandInvocation, Decision, authorize
 from .command_doctor import (
@@ -2377,6 +2378,7 @@ def _embedding_register_profiles(config, db_path, *, allow_download: bool) -> st
                 provider.provider_id,
                 store_dim,
                 revision=privacy_revision,
+                revision_suffix=getattr(provider, "identity_revision_suffix", ""),
                 dtype=storage_dtype,
             )
             store.register_profile(
@@ -2384,6 +2386,7 @@ def _embedding_register_profiles(config, db_path, *, allow_download: bool) -> st
                 chunk_provider.provider_id,
                 chunk_store_dim,
                 revision=chunk_privacy_revision,
+                revision_suffix=getattr(chunk_provider, "identity_revision_suffix", ""),
                 dtype=storage_dtype,
                 task="chunk",
             )
@@ -3660,7 +3663,7 @@ def _embedding_backfill_summary_run(
         identity = str(profile["identity_hash"])
         model = str(profile["model_name"])
         provider_name = str(profile["provider"])
-        profile_revision = str(profile["revision"] or "")
+        profile_revision, profile_suffix = split_prefix_revision(str(profile["revision"] or ""))
         profile_dtype = str(profile["dtype"] or "float32")
         if expected_dtype is not None and expected_dtype != profile_dtype:
             return "\n".join([
@@ -3671,6 +3674,13 @@ def _embedding_backfill_summary_run(
                 f"summary profile dtype ({profile_dtype}); re-run `/lcm embed warmup` "
                 f"with LCM_EMBEDDING_STORAGE_DTYPE={expected_dtype} to register that identity",
             ])
+        if apply and (profile_suffix or config.embedding_query_prefix or config.embedding_document_prefix):
+            try:
+                prefix_provider = resolve_provider(config, for_backfill=True)
+            except Exception as exc:
+                return "\n".join(["LCM embedding backfill", "mode: apply", "status: error", f"error: {exc}"])
+            if profile_suffix != getattr(prefix_provider, "identity_revision_suffix", ""):
+                return "configured provider does not match the current profile: embedding prefix settings changed; run /lcm embed warmup, then backfill"
         if not apply:
             pending, rows = _embedding_pending_rows(read_conn, identity, limit)
     except sqlite3.Error as exc:
@@ -3835,6 +3845,7 @@ def _embedding_backfill_summary_run(
         elif (
             provider.model_id != model
             or str(provider.provider_id).lower() != provider_name.lower()
+            or profile_suffix != getattr(provider, "identity_revision_suffix", "")
         ):
             error = "configured provider does not match the current profile; run `/lcm embed warmup`"
         else:
@@ -5370,7 +5381,7 @@ def _chunk_backfill_run(
             identity = str(profile["identity_hash"])
             model = str(profile["model_name"])
             provider_name = str(profile["provider"])
-            profile_revision = str(profile["revision"] or "")
+            profile_revision, profile_suffix = split_prefix_revision(str(profile["revision"] or ""))
             profile_dim = int(profile["dim"])
             profile_dtype = str(profile["dtype"] or "float32")
         else:
@@ -5392,6 +5403,8 @@ def _chunk_backfill_run(
                 f"profile dtype ({profile_dtype}); re-run `/lcm embed warmup` with "
                 f"LCM_EMBEDDING_STORAGE_DTYPE={expected_dtype} to register that identity"
             )
+        if apply and profile is not None and profile_suffix != embedding_prefix_suffix(config, configured_provider):
+            return _refused("configured provider does not match the chunk profile: embedding prefix settings changed; run /lcm embed warmup, then backfill")
         if not apply:
             pending, rows, _ = _chunk_pending_rows(read_conn, identity, policy, limit)
     except sqlite3.Error as exc:
@@ -5617,6 +5630,7 @@ def _chunk_backfill_run(
         elif (
             provider.model_id != model
             or str(provider.provider_id).lower() != provider_name.lower()
+            or profile_suffix != getattr(provider, "identity_revision_suffix", "")
         ):
             error = "configured provider does not match the chunk profile; run `/lcm embed warmup`"
         else:

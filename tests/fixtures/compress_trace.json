@@ -87,7 +87,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=97d945b34dd5717aec3e114b6701233308cd07be4004a4ea76509e49e4826469"
+"attrs count=141 sha256=734fe31ca95fb9d2692864589fa6908949a2a4e498965f9d8376adb63ee34c2d"
 ],
 "below-threshold-cleanup-only": [
 "compress attempt=1",
@@ -172,7 +172,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=4fa74c6ab56182b236553ca7009446c06d6a08f78e1932a3c34d5806b35ba037"
+"attrs count=141 sha256=4e0df1a88bf2f5370b599a054d8fb1f6b67a38869fc07a7d7e97b6eee9672b54"
 ],
 "boundary-cleanup-only": [
 "compress attempt=1",
@@ -257,7 +257,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=7884060dffab4353211a10d171f85cfda5fe3d792630fec1c824f63de73201a7"
+"attrs count=141 sha256=2239f51fadae1a9acca11196fb16b4f7ec796b5092d9f1fae4317c7a6fceca70"
 ],
 "budget-exhausted-before-leaf": [
 "compress attempt=1",
@@ -363,7 +363,7 @@
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_turn_paced=true",
 "attr _sweep_budget_hold_until=1715.0",
-"attrs count=141 sha256=cdfef85b925c11a5942f3dc4168b0569917e3f543a898b43f8570b9e96579d3a"
+"attrs count=141 sha256=54920da22dc7a6cb521df5fe48e749103b514ad8bfbcb8c56b5cff9abcd7d7b0"
 ],
 "budget-partial-pass": [
 "compress attempt=1",
@@ -490,7 +490,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=e8a28dfaa95cb28c9d2429991b6695c74f0f1efd6aa22c48fdca324bafb855da"
+"attrs count=141 sha256=f87d31e2cc265bd594fd3bac37fdde22e43f02ec51555d6dce8a05ec8d85382e"
 ],
 "child-session-bypass": [
 "compress attempt=1",
@@ -512,7 +512,7 @@
 "attr _last_compression_status=\"running\"",
 "attr _pending_emission_candidates=[]",
 "attr compression_count=1",
-"attrs count=141 sha256=3c60e7d07d708839b6237355c5fd11ff9b5e2d80650e4e7864400a99b2308188"
+"attrs count=141 sha256=7d61804b232bbaa9839cbecf00a0f6439aa987eee91f6ce8dc6e5ce64a0e208a"
 ],
 "child-session-forced": [
 "compress attempt=1",
@@ -534,7 +534,7 @@
 "attr _last_compression_status=\"running\"",
 "attr _pending_emission_candidates=[]",
 "attr compression_count=1",
-"attrs count=141 sha256=3c60e7d07d708839b6237355c5fd11ff9b5e2d80650e4e7864400a99b2308188"
+"attrs count=141 sha256=7d61804b232bbaa9839cbecf00a0f6439aa987eee91f6ce8dc6e5ce64a0e208a"
 ],
 "child-with-cached-usage": [
 "compress attempt=1",
@@ -556,7 +556,7 @@
 "attr _last_compression_status=\"running\"",
 "attr _pending_emission_candidates=[]",
 "attr compression_count=1",
-"attrs count=141 sha256=3c60e7d07d708839b6237355c5fd11ff9b5e2d80650e4e7864400a99b2308188"
+"attrs count=141 sha256=7d61804b232bbaa9839cbecf00a0f6439aa987eee91f6ce8dc6e5ce64a0e208a"
 ],
 "child-without-usage": [
 "compress attempt=1",
@@ -578,7 +578,7 @@
 "attr _last_compression_status=\"running\"",
 "attr _pending_emission_candidates=[]",
 "attr compression_count=1",
-"attrs count=141 sha256=3c60e7d07d708839b6237355c5fd11ff9b5e2d80650e4e7864400a99b2308188"
+"attrs count=141 sha256=7d61804b232bbaa9839cbecf00a0f6439aa987eee91f6ce8dc6e5ce64a0e208a"
 ],
 "condensation-levels": [
 "compress attempt=1",
@@ -712,7 +712,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=4c7ea40a023dffdb95038db768c697e07aedec3dc9eb064b5ec19fe97de98911"
+"attrs count=141 sha256=7061b659ea26c47ae10bf45822cbfc53868edc5b0ce8a1fae529979f29b1f061"
 ],
 "condensation-publication-locked": [
 "compress attempt=1",
@@ -834,7 +834,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"sqlite_publication_locked\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=9e652ec9d5473331b11f56055e9d5d8a03303a02e5d517752ab73a15afc7523d"
+"attrs count=141 sha256=49c997cde006bfa03c999b606703ac187d19f945344fb3c73655dafe962ddf43"
 ],
 "condensation-spends-soft-budget": [
 "compress attempt=1",
@@ -937,7 +937,7 @@
 "attr _pending_emission_candidates=sha12/len=fc146730afef/464",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=d1bfcc5aaf8069ceb41fe3f2b895be6e9ac8ceb8fde5707ea4183534b5fba9fe"
+"attrs count=141 sha256=252d15193e5a9aecab4ca9712693f63cd01394ab5df061ab39fb398f29501cc1"
 ],
 "context-length-rescue": [
 "compress attempt=1",
@@ -1062,7 +1062,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=498cb2119588d4f0f5ac2b212dfb84e1a8656afe05860c7da18f8019430dbbf4"
+"attrs count=141 sha256=3162858e0d5647077bc39e050666ce6b46136363bfbfa3fac404910781a7750d"
 ],
 "deadline-checkpoint-10": [
 "compress attempt=1",
@@ -1160,7 +1160,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=141 sha256=a743405e62d944f93274b8532d377128ba0b1f2a12a8f8719fc486eca888b76f"
+"attrs count=141 sha256=d988c30b5d4ec96b4ad5be593d9a9699fdbcfeb05c54388456beb81b62ed0ce4"
 ],
 "deadline-checkpoint-4": [
 "compress attempt=1",
@@ -1252,7 +1252,7 @@
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=141 sha256=24b0c9aa9049758d421f86c589d82e51e8d0f7c17749bc12ebdd26b9396bf6f1"
+"attrs count=141 sha256=74acf77fb66de20e2db337db9ba45ef8c40d1c4618ecb3154ac28d3e51df7210"
 ],
 "deadline-checkpoint-6": [
 "compress attempt=1",
@@ -1344,7 +1344,7 @@
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=141 sha256=24b0c9aa9049758d421f86c589d82e51e8d0f7c17749bc12ebdd26b9396bf6f1"
+"attrs count=141 sha256=74acf77fb66de20e2db337db9ba45ef8c40d1c4618ecb3154ac28d3e51df7210"
 ],
 "deadline-checkpoint-8": [
 "compress attempt=1",
@@ -1437,7 +1437,7 @@
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=141 sha256=ccac3f0a22cf19bcce3c1df8e4f5e854899a381543b557aa5b23943ce91dbc0a"
+"attrs count=141 sha256=02e4846ffd5722233f03bb8bc486c890ab6ba3bc818c249dfd6435b8dfad4cf5"
 ],
 "deadline-hidden-backlog-read": [
 "compress attempt=1",
@@ -1476,7 +1476,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=141 sha256=16ff2ae4e6be248451da6836e0cac79644521dcab395825743b94f9b63aeb66e"
+"attrs count=141 sha256=6db34e4a0043c7e535e78ff3b685813c2493a596f54888a7f1b17e0504b7938c"
 ],
 "default-sweep-target": [
 "compress attempt=1",
@@ -1648,7 +1648,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=446465d3737a4c27dd17f0de04c12cfdc06c7d5c63dbfe58091b0e74f4ffc2a5"
+"attrs count=141 sha256=ebc7df92f3d915d4c125c1f6a5ed7441860a3130be7192dd86d3523b52f90670"
 ],
 "deferred-critical-small-backlog": [
 "compress attempt=1",
@@ -1755,7 +1755,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=09ca6c912de09d830f0b650f186da35ada2759fed4d9a1f7493290375e54f708"
+"attrs count=141 sha256=1c983d95dcc95aaae1dee6da5c9569eeba0f0c56939b68de7b8d2179a0d43d04"
 ],
 "deferred-maintenance": [
 "compress attempt=1",
@@ -1876,7 +1876,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=47ff8befbc0b7230d9e5c31318ec30ae1d38a267bcd921998b6bd50d382f5226"
+"attrs count=141 sha256=d6dab54cc8fbf296128ca24db8eed5346048a050ae8c67f26af7a75c5a1d18f5"
 ],
 "dependent-nonreply-barrier": [
 "non-reply role: both fingerprints absent despite persisted ledger; generated=False",
@@ -1953,7 +1953,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=e2a60a8112e6b9943ed99e6a15412b3e1de795c8b51cd32c500430bdf7850820"
+"attrs count=141 sha256=cf065ec649366e470283536fb73c82e72f191a4504b7df81108870d7d2d05c4c"
 ],
 "dependent-only-leaf": [
 "compress attempt=1",
@@ -2025,7 +2025,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=0ae065bbfe09822d3f09350fc703b065b92a4bd44a6c0663c5aab14cb9312111"
+"attrs count=141 sha256=e03a4a536c3d8687a1842232c4e7cf553229d18d5678d913506dd9e7a7dc2a93"
 ],
 "dynamic-below-minimum": [
 "compress attempt=1",
@@ -2115,7 +2115,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=74a1f4c2e939361ebfd01a381c88095d1d3bc367252a658c890d980e46299859"
+"attrs count=141 sha256=903e51f47d5d1685115f59299d8c781960e540be75872cd2060a87f180049bfb"
 ],
 "dynamic-below-minimum-no-fit": [
 "compress attempt=1",
@@ -2206,7 +2206,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=3d5426d6c7ee620054fc917258b65a669f9a0ccafdf68c0f06b4d43c796fdbcd"
+"attrs count=141 sha256=f923b8f36fbc7393ddc0baf58d64f4810b1f57db4718d64752e840908d432e4d"
 ],
 "dynamic-forced-overflow": [
 "compress attempt=1",
@@ -2311,7 +2311,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=6abe91fbaecff7f9cbf466facf572269b73b10d3f783110a77d29b193472afb8"
+"attrs count=141 sha256=0d17b075eeb38bbe73134353a4bbf807a70df87349d9981954dc978e9f6fdf83"
 ],
 "dynamic-fresh-tail-yield": [
 "compress attempt=1",
@@ -2439,7 +2439,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=4ca4ca36834cef6bdb3bbe3832620dde7949e34a4270bd1cd2eafb22b1a89f18"
+"attrs count=141 sha256=0fa140f80da6067f8ad82d2c1728b2576bdc8af39bc34d261ecb47211be05206"
 ],
 "dynamic-leaf-passes": [
 "compress attempt=1",
@@ -2586,7 +2586,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=1cc60987e3ae53f189133ca93652a8ea3d4144e0805235aa1a57f77490b21efd"
+"attrs count=141 sha256=c9e543e2acf7651776189fc1dc973561ba87959e155fb4f664db38736b5d01d8"
 ],
 "dynamic-raw-drained": [
 "compress attempt=1",
@@ -2685,7 +2685,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=779cdfe4339b9a85c13f5cd6254dda30b8fc278c833a0c9821c8271342a72866"
+"attrs count=141 sha256=4ce3608dc55ebdc9cdf7a62b8d11133e63da24120d85b14ba5f346379eb3903c"
 ],
 "dynamic-small-backlog-yields": [
 "compress attempt=1",
@@ -2792,7 +2792,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=bf4056f4baea2f13634a16487b4aecb810719c7a5376ceab21871ac8c814c780"
+"attrs count=141 sha256=f41708644bba10a9c41a78ae380fb2c15c6a162920688cb6d41ee09e6d45ea55"
 ],
 "dynamic-threshold-reached": [
 "compress attempt=1",
@@ -2909,7 +2909,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=a900005ea6be57a5c2ada293882bf9a0cca16753b931bca9465f1e187d549645"
+"attrs count=141 sha256=3f66d3f41ac66d7a62c67b884df8c4628e7e832f49fdc2ceba424bc0e26baebc"
 ],
 "empty": [
 "compress attempt=1",
@@ -2927,7 +2927,7 @@
 "attr _last_compression_noop_reason=\"empty message list\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=be8546ae53f6c8bbc4cc9645754f28dfae9039948b7aa1a300c3cd8a8fafdde3"
+"attrs count=141 sha256=efa5a1cbf245289ea9857bf7d9b2d6415ef9d199396b17b915c4f84a6aa0bf0d"
 ],
 "escalation-level-three": [
 "compress attempt=1",
@@ -3046,7 +3046,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=4da5b8e282e108ac8bef9933ee5f6b403708f664b55b8df19292aead495c6cdf"
+"attrs count=141 sha256=cc19d71530249267ee2f8abd624e4dd96276c854f044507d195d6870d8456f09"
 ],
 "escalation-level-two": [
 "compress attempt=1",
@@ -3165,7 +3165,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=f94d3d65fafafbaf7e0f4e09d7957f729591aa68baedb8c8f5efdcafd59fb4a7"
+"attrs count=141 sha256=af8643e72b44cc0e9135c39feb7c8a96330ed1c1907ab74b0ec2a368b1774fe1"
 ],
 "escalation-rejected-keeps-backlog": [
 "compress attempt=1",
@@ -3268,7 +3268,7 @@
 "attr _store_complete_empty_reason=\"\"",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=5930106d5a8dc2bcd9ecd58a46c5aceb7ff951ee4ef81949dbf92ab617733370"
+"attrs count=141 sha256=3a8b8a1ecbf87ecf7245b3aa0c58421885b661cc1be0f941ab259b3a08c92774"
 ],
 "explicit-focus": [
 "compress attempt=1",
@@ -3385,7 +3385,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=e2a60a8112e6b9943ed99e6a15412b3e1de795c8b51cd32c500430bdf7850820"
+"attrs count=141 sha256=cf065ec649366e470283536fb73c82e72f191a4504b7df81108870d7d2d05c4c"
 ],
 "externalized-payloads": [
 "compress attempt=1",
@@ -3519,7 +3519,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=286e2694f997e9252376edb7319737b29160b8df0991ca688f0470f24822ec5a"
+"attrs count=141 sha256=ca4509140d8c6959b6666b9c846ef2ae411533b863056224d0ad67a28152a2b2"
 ],
 "externalized-transcript-gc": [
 "compress attempt=1",
@@ -3646,7 +3646,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=565022dca67dd17a71fc7568e2026c66f8fa754e406fcedd53d58ca43b307433"
+"attrs count=141 sha256=20b14073f6671d0fb3c8e23ff83055f8810e6e6f4e067207c6428303ec2b3189"
 ],
 "finish-callable-telemetry": [
 "compress attempt=1",
@@ -3806,7 +3806,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=02059d46b2b328c0e70d637dcd9527bf52c14be49ce5ce21e1b047c2089de5bd"
+"attrs count=141 sha256=980f492104c46ce893759d83b55fb4c2fea12528832428ebf935851a10cb245c"
 ],
 "finish-condensation-lock": [
 "compress attempt=1",
@@ -3930,7 +3930,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"sqlite_publication_locked\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=9e652ec9d5473331b11f56055e9d5d8a03303a02e5d517752ab73a15afc7523d"
+"attrs count=141 sha256=49c997cde006bfa03c999b606703ac187d19f945344fb3c73655dafe962ddf43"
 ],
 "finish-condensation-nonlock-error": [
 "compress attempt=1",
@@ -4053,7 +4053,7 @@
 "attr _store_complete_empty_reason=\"\"",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=66877fabd2a07ac2eeea29e1ff09b3b798c7ccbaba874e42457a3e1b98c8f8b6"
+"attrs count=141 sha256=54ba5d8816ed955adfdcb1129753931122308e6814a40a12f43e202e7c3e9f23"
 ],
 "finish-gc-lock": [
 "compress attempt=1",
@@ -4175,7 +4175,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"sqlite_publication_locked\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=08c598f7fb53e3b6957f9ad6919c16ddcd159b931616513bcba5f0042c208f28"
+"attrs count=141 sha256=50544cece0c9cff3165d41da043ec886a487f3b76926cea67b3599a59f0bccc8"
 ],
 "finish-post-drain-read-error": [
 "compress attempt=1",
@@ -4348,7 +4348,7 @@
 "attr _store_complete_empty_reason=\"\"",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=aa1e0a514cead5351b1a2c6a3c012eec53d0d509654d4f0943d4c11dcf905d5e"
+"attrs count=141 sha256=cd6a9e2d0ad973d9b7d1dde7bd41afe5f962e0483e121a0c385fd6ce945dbf42"
 ],
 "finish-promoted-keys": [
 "compress attempt=1",
@@ -4450,7 +4450,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=18125f622fcbf81b30b52ccf5561d0962d926cdc95f98cdf031b3f9dac2f45dd"
+"attrs count=141 sha256=2aacd4567309a564e90df54ca44bf7f19de1577c1738449def901a78eea4e4af"
 ],
 "finish-repeat-condensation-skipped": [
 "compress attempt=1",
@@ -4615,7 +4615,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=81ffd5a1f42a9f21af9ca55754375e01e412a27a55a56bfd35090457cf8ff6f6"
+"attrs count=141 sha256=3bf3efe81a00f7eb13f0ec95a4e50cf2c49c5a7a6bea3b0dee2ac8e636c95907"
 ],
 "forced-overflow": [
 "compress attempt=1",
@@ -4718,7 +4718,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=d515a9922b0c81d64eceadfe3f4e868d733bfec49ac294bc22c72dd59fe4764e"
+"attrs count=141 sha256=b1b88da80207d69fa369cecc3a3794a724e31823db00ba2c4d89008e1551df08"
 ],
 "fresh-tail-protected": [
 "compress attempt=1",
@@ -4781,7 +4781,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=ea1402633a11/3476",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=205c5c395074264b1a8630458d9e194017c6f670e27ef74553f68f1b3ab54c05"
+"attrs count=141 sha256=a1e273fb21d5b26df9700d9a50efc3444474f45044eb34ee0634417d777d1f4d"
 ],
 "fresh-tail-yield": [
 "compress attempt=1",
@@ -4901,7 +4901,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=4b1aae534010f2d3da43457113356568933a9ec6deb3d8c8620083dd5a21d58f"
+"attrs count=141 sha256=dcf8ca1b9041332bb2e23f68089b9bbeae45c077ed83da852093733758eef764"
 ],
 "generated-dependent-replies": [
 "compress attempt=1",
@@ -4998,7 +4998,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=9f2cf8cd8d648d9e6ff0712404af391cc1be09eb30eb4bd90932769e14223633"
+"attrs count=141 sha256=195c8c1c9858b6e77978790c302332e0f5203ca241a5e9aee215839b53df2561"
 ],
 "hidden-owned-backlog": [
 "compress attempt=1",
@@ -5060,7 +5060,7 @@
 "attr _store_complete_excluded=[1]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=ffc5041980929bc581a7251f718ed29214afbe03a494aa8cd7db85944d4797e9"
+"attrs count=141 sha256=d242c83fd1cfb409edd480d22fecef77f01579ce87ba602e831d381be502e21e"
 ],
 "hold-fit-only": [
 "compress attempt=1",
@@ -5147,7 +5147,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=c9c174ba1a2f38ac7b47db827c47bc8125febea860d0a17041491118ed6d70c3"
+"attrs count=141 sha256=065bdeba79e23f6a74835ca8df525f00d7ecf971f850986fc4e14e422a750e4b"
 ],
 "hung-primary-leaves-fallback": [
 "compress attempt=1",
@@ -5251,7 +5251,7 @@
 "attr _store_complete_empty_reason=\"\"",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=00956b3329275b6f5b8951b20601ac6c8df115bcf4b726d35fa4145ce9772b4b"
+"attrs count=141 sha256=556380befb56f10d3d87cb4346ab52fba15f04720d1f3bf184309c7f3144b7d5"
 ],
 "identity-anchor": [
 "compress attempt=1",
@@ -5368,7 +5368,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=817dfa1771f91628a545d02a52a05fc027cbd6dd5f4b8b2703ffe000b20e2915"
+"attrs count=141 sha256=52725354e7806da0969808391725aceeeafb86fac573e3ff76ddec83fa899ab3"
 ],
 "identity-anchor-disabled": [
 "compress attempt=1",
@@ -5475,7 +5475,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=e2a60a8112e6b9943ed99e6a15412b3e1de795c8b51cd32c500430bdf7850820"
+"attrs count=141 sha256=cf065ec649366e470283536fb73c82e72f191a4504b7df81108870d7d2d05c4c"
 ],
 "ignored-bypass-missing": [
 "compress attempt=1",
@@ -5537,7 +5537,7 @@
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: ignored session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=b9c5f1e28c62b5886cba6bac502cab3ef094153ec530b0868b67609736b1c613"
+"attrs count=141 sha256=bdbac27a223d6f3cc9e2ddf309d617cd3251223fce38ea0e6cbff3967f023504"
 ],
 "ignored-bypass-negative": [
 "compress attempt=1",
@@ -5599,7 +5599,7 @@
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: ignored session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=b9c5f1e28c62b5886cba6bac502cab3ef094153ec530b0868b67609736b1c613"
+"attrs count=141 sha256=bdbac27a223d6f3cc9e2ddf309d617cd3251223fce38ea0e6cbff3967f023504"
 ],
 "ignored-bypass-zero": [
 "compress attempt=1",
@@ -5661,7 +5661,7 @@
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: ignored session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=b9c5f1e28c62b5886cba6bac502cab3ef094153ec530b0868b67609736b1c613"
+"attrs count=141 sha256=bdbac27a223d6f3cc9e2ddf309d617cd3251223fce38ea0e6cbff3967f023504"
 ],
 "ignored-dependent-tail-eof": [
 "compress attempt=1",
@@ -5707,7 +5707,7 @@
 "attr _no_progress_public_rows=sha12/len=a1311241116e/3987",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=48b83f0f6598031dfe3c7e73664ef3e8a6ad5b0e5dc4df138083791a54ab432e"
+"attrs count=141 sha256=ed50060f3391a775943c5a39888c5f4f2e407b46775f33366344c43fc9c67223"
 ],
 "ignored-message-dependents": [
 "compress attempt=1",
@@ -5836,7 +5836,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=b3538f63e6ff592c4e918db7c890b382f30cd3499fdb5ec1f3ceb8384223f45e"
+"attrs count=141 sha256=b059fe603cec0f245df2518b846986b843ade25e1ecdae4e562f168bcaa59bac"
 ],
 "ignored-tail-nondict-barrier": [
 "compress attempt=1",
@@ -5850,7 +5850,7 @@
 "attr _foreground_budget=sha12/len=a4ce1981038b/351",
 "attr _last_compression_status=\"running\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=834186eb8469303730609ff26149e553d0b476ad779017d076dd524d0f73feb0"
+"attrs count=141 sha256=d4d51dcea642cad1287073fa1ac4f31591b39f1d062a0cf7abf2f678061853ed"
 ],
 "ignored-tail-unanchored-eof": [
 "compress attempt=1",
@@ -5894,7 +5894,7 @@
 "attr _no_progress_public_rows=sha12/len=919971a2eae2/3917",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=00f61047aa48c5ba1b4c86396fb35b588dd90ad771c8ef67feef8cf7e4c831fb"
+"attrs count=141 sha256=0002ae52cf4dfce0f5de15936a1e6b1b4359e8d211e3165cc7aeda1cd850e250"
 ],
 "ignored-tail-unknown-role": [
 "compress attempt=1",
@@ -5983,7 +5983,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=2f83e449fbd2adc66f48d685e1f5e7468d8194ee77ec6f240d252968f8636aeb"
+"attrs count=141 sha256=70899f9a576f10afd3802d2e7094148750d223c5eda9972394084990aada295d"
 ],
 "ignored-unknown-role": [
 "compress attempt=1",
@@ -6067,7 +6067,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=61ceea737a19dd6a4633a8b3ca24d456908656f7e3b8a47ad3dc210e6b295a9d"
+"attrs count=141 sha256=f816c8c2eab4cfb0d48c997afdfdbb80c5687dc420c8f78dddb94fa5d161fa2a"
 ],
 "leaf-automatic-no-sweep": [
 "compress attempt=1",
@@ -6184,7 +6184,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=aab561b7f215c0ced88ddd040f1c814020f6bd0c7b3eca221ee328be57e3747d"
+"attrs count=141 sha256=d000b3becc478266da900190ff0cf3b5c7eaa87156b719588b429f7e556e3a5e"
 ],
 "leaf-no-host-token-count": [
 "compress attempt=1",
@@ -6300,7 +6300,7 @@
 "attr _store_complete_empty_reason=\"\"",
 "attr _store_complete_excluded=[]",
 "attr compression_count=1",
-"attrs count=141 sha256=8fc339884ef3695d5cb9fb837a7c5eaaf7b276475eaa3c84b58370fa0554e62d"
+"attrs count=141 sha256=03a9ef329c9c927cf7d10c805106479b84dd793883ada58e6db6727952817d88"
 ],
 "leaf-pass": [
 "compress attempt=1",
@@ -6417,7 +6417,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=e2a60a8112e6b9943ed99e6a15412b3e1de795c8b51cd32c500430bdf7850820"
+"attrs count=141 sha256=cf065ec649366e470283536fb73c82e72f191a4504b7df81108870d7d2d05c4c"
 ],
 "leaf-phase-budget-after-leaf": [
 "compress attempt=1",
@@ -6547,7 +6547,7 @@
 "attr _sweep_budget_hold_turn_paced=true",
 "attr _sweep_budget_hold_until=1715.0",
 "attr compression_count=1",
-"attrs count=141 sha256=c5cc3f7c3731ee51733cbca6b2d72c4b985947a41e17bd51434379bb6d58a0a9"
+"attrs count=141 sha256=c58a196596e8a0508ca15b97e0181881c60dacc72998d2620e58323a6b77dcf1"
 ],
 "leaf-phase-data-error-after": [
 "compress attempt=1",
@@ -6675,7 +6675,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=cf8e974caa4c454a66f5189476a95d673669591eea624c94e3c7876ca2f5dd9e"
+"attrs count=141 sha256=de0fec6a9449a27f5b14c6853d3f4b473a742ba20bcc9f8571bd00e7a71bcd8c"
 ],
 "leaf-phase-data-error-before": [
 "compress attempt=1",
@@ -6774,7 +6774,7 @@
 "attr _store_complete_empty_reason=\"\"",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=455e14c7f9d7cbcf36f9d5d188235a414f03ada0588fdf9fd3427f99ec442fcb"
+"attrs count=141 sha256=6e040c10cab15ee55627a4b7daff7c87737b05a326c35237eefa8604f03130dc"
 ],
 "leaf-phase-dependent": [
 "compress attempt=1",
@@ -6841,7 +6841,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=74b4771ce69154adf5eb3c76a244f6ee46ac4a60ea4303bf05683074000d2c96"
+"attrs count=141 sha256=bc66de4840743fcd815178bf34f691d0502424120b40a91ea134295dc209d352"
 ],
 "leaf-phase-lineage-moved": [
 "compress attempt=1",
@@ -6948,7 +6948,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",0]]",
-"attrs count=141 sha256=7b6ab9865bd8ef673008aa0ef8f33116521737d4db063d7c47fc8d55d73be009"
+"attrs count=141 sha256=9086641aa3c778e69c7ac800822a4b3b96baeeb6b980eabd442bdf73b24d686c"
 ],
 "leaf-phase-no-call-stop": [
 "compress attempt=1",
@@ -7045,7 +7045,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=141 sha256=b8169907902169f5e7672cf9a2c223bf23343678e7ce3b7690dbe9733865847f"
+"attrs count=141 sha256=45e672291aca9249efb681581cfa6b7504e6f5c98028009a6a0d8a580c7c883b"
 ],
 "leaf-phase-raise-cleanup": [
 "compress attempt=1",
@@ -7140,7 +7140,7 @@
 "attr _store_complete_empty_reason=\"\"",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=8f5af08e260dfab5dc3b85c5efd7b51e8d4a5b8d201f8c84bb2a1ca13f0d5cf8"
+"attrs count=141 sha256=7c9ef83d1edd5227d7f36cbea07ef794422557e59a9cb5e538ad63a10e255cce"
 ],
 "leaf-phase-rescue-keeps": [
 "compress attempt=1",
@@ -7238,7 +7238,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=ce4e4909a3488f521c6b9030b4281d03c43668516ceb5c33515e7fe1a4a7329f"
+"attrs count=141 sha256=aef1fd86aa9c02bab5616fd9f44d1e1941758f5332405c9a35fd17f9aa605eb8"
 ],
 "leaf-phase-rescue-loses": [
 "compress attempt=1",
@@ -7356,7 +7356,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",52]]",
-"attrs count=141 sha256=4b80d44c0a2944965896cac8f4ab73c9494d0eb88fafcb0d265af10d7dd5c51b"
+"attrs count=141 sha256=bb390aaae6046544fc846fda368bd3b7405065421643ad21189d375a1c87dad5"
 ],
 "leaf-phase-soft-extraction": [
 "compress attempt=1",
@@ -7535,7 +7535,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=9acd9a4a2b176f93871d07e690ce45e9b80e3497839492c468575827c664409e"
+"attrs count=141 sha256=cba80dc52239bad07b45ad07ffed69555edf5b83ec2417d044d6c98cd98ff1d0"
 ],
 "legacy-filtered-backlog": [
 "compress attempt=1",
@@ -7622,7 +7622,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=8626ecb026aaf4f765eb76896885caec43a2cc0804e1a2ec153841e31ea5fc73"
+"attrs count=141 sha256=707c9ebf066454c7e9cd1175769ee00afb225f2ebb7add0eb3ac198a33174314"
 ],
 "legacy-filtered-eof-dependents": [
 "compress attempt=1",
@@ -7706,7 +7706,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=3d255d45d4ca79302a32a00d893aea1764499e6dc228d4373d2d79ba4c3fe486"
+"attrs count=141 sha256=11ecaada107b8699dec0654880be466b2fed894eba57a0729e04c4ea75af25d6"
 ],
 "legacy-filtered-tail-dependents": [
 "compress attempt=1",
@@ -7790,7 +7790,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=5df6b4deee9e26041b05c4e7fe632253f503f18525e6d1b18e0c067480aeaeda"
+"attrs count=141 sha256=0d0e812fbd02b7ece8f56e5f92e4e3099778c592788b74aca4ba9984de5223ef"
 ],
 "lifecycle-publication-conflict": [
 "compress attempt=1",
@@ -7899,7 +7899,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"publication_invariant_conflict\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=9a0de3e548e2794dde079773e88718b8000969b746df799254310d25b5173a99"
+"attrs count=141 sha256=ebec1ed485aa1da4bf22f5c35c529344988d9b671b1dfdbfc758fc0054d33ed9"
 ],
 "no-system-prompt": [
 "compress attempt=1",
@@ -8006,7 +8006,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=9713e5f30c463aa9754e68a3a5a07051bf8f036297692da652d50df0ec7ac68a"
+"attrs count=141 sha256=8ab5dc186019d5f6318f7e413548558b4ea35a0b0b44f7f12070f3f77e8a0c77"
 ],
 "objective-anchor": [
 "compress attempt=1",
@@ -8071,7 +8071,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=25ee3a20c4e0/15841",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=eed9e1f96dd65d83465174a5db2764b0b8fb6233539d684b784de3ed3a2d4629"
+"attrs count=141 sha256=54de6e3348c185d56925d476a638b2c2aebda0cbe820cd0da601887f932f5872"
 ],
 "objective-cap-too-small": [
 "compress attempt=1",
@@ -8149,7 +8149,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=113d87439d2faf345595a7e39949639601e530ff6e337955c2d97ad0fd33764c"
+"attrs count=141 sha256=e0631736cbc7264347559d3b8ac9d88bfd8cc7ed215d986a1c1a5e348d678be8"
 ],
 "objective-without-cap": [
 "compress attempt=1",
@@ -8214,7 +8214,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=25ee3a20c4e0/15841",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=8d44b234f57c9df6e6b3d0ce507a3cb7d5082de34742be123cd8ea437a4a5534"
+"attrs count=141 sha256=5d4d7dfe1350368acd0f78c19a28ee5a5caa744e4cf29d1482be41f7c1d62b4e"
 ],
 "optional-extraction-host-unavailable": [
 "compress attempt=1",
@@ -8345,7 +8345,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=f1a1148707f20cb4fe9b2145a1e06937d6b94d0f26d20e726f3a78ecfeb8b3db"
+"attrs count=141 sha256=21f3e4d7d51af231a31c157ef816a6c903e797e263b4d554c26ffe9ab3b147d1"
 ],
 "persisted-volatile-no-pattern": [
 "compress attempt=1",
@@ -8429,7 +8429,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=f9b37841755e6edbbbc576095a079e1e06bfbcc1970ab6cb9d80f20034d44fab"
+"attrs count=141 sha256=cc68b4fd5f5f88213730983ea50a486c8b2308131bf2f205bda9c5e5c636d6cc"
 ],
 "post-leaf-condensation-rejected": [
 "compress attempt=1",
@@ -8591,7 +8591,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=40382c0f8beaa88092ef19fb0c0692f30c82baa8a610bfd741397d8ab9891b3b"
+"attrs count=141 sha256=421f15b9755e49cff3a5d9f6ed3430d22e04ca4a7d6ad1fcd9a77b29883f023b"
 ],
 "post-leaf-publication-conflict": [
 "compress attempt=1",
@@ -8725,7 +8725,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"publication_invariant_conflict\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=695b9b0bfdd72e312d3be41df69112b7588902b901f9b135d65e0f67b28ac086"
+"attrs count=141 sha256=45d35472f6bf0b40b751600dc094fb2a91785c4f0d4bdd127370c921f62ecab3"
 ],
 "pre-leaf-condensation-rejected": [
 "compress attempt=1",
@@ -8831,7 +8831,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=141 sha256=c80136f3a4955ea8b75b161b08157bf2dae3c56e2b5cc78c8391fd06eb0ff99c"
+"attrs count=141 sha256=caad261eea737565454c28c714e1823cc878201cb73dcb76a8a8d7d914c4a9aa"
 ],
 "pre-leaf-frontier-read-error": [
 "compress attempt=1",
@@ -8931,7 +8931,7 @@
 "attr _pending_emission_candidates=sha12/len=fc146730afef/464",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=ea1725e488ad63d42da8b754fae8910cfe9c71130647b1737898032f9b33d398"
+"attrs count=141 sha256=d34532c8099a8276d2e7a50c33d18463083450faa11523cb6c7a2da947b134b5"
 ],
 "pre-leaf-publication-locked": [
 "compress attempt=1",
@@ -9032,7 +9032,7 @@
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_fit_reason=\"sqlite_publication_locked\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=dfa0eebb0ddbf1a29fcee651284863b8bc0638fe92ce9876f890f8912e072aa7"
+"attrs count=141 sha256=f7c05ea503fc578d87fa1d27e43c31f790a691300a093700128328e75c36d87e"
 ],
 "prepared-leaf-promotion": [
 "compress attempt=1",
@@ -9131,7 +9131,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=18125f622fcbf81b30b52ccf5561d0962d926cdc95f98cdf031b3f9dac2f45dd"
+"attrs count=141 sha256=2aacd4567309a564e90df54ca44bf7f19de1577c1738449def901a78eea4e4af"
 ],
 "prepared-leaf-route-rejected": [
 "compress attempt=1",
@@ -9208,7 +9208,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=5ebf8d7f4596897ece2b17d87b8458c27ebf5d01cb832a2e8fc2a05078b88b3c"
+"attrs count=141 sha256=6a49ac7ba12cba50d2e9f1a463415bb66003a3fbb25d692781e8d5a0d3099d29"
 ],
 "provider-aborted": [
 "compress attempt=1",
@@ -9302,7 +9302,7 @@
 "attr _store_complete_empty_reason=\"\"",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=8f5af08e260dfab5dc3b85c5efd7b51e8d4a5b8d201f8c84bb2a1ca13f0d5cf8"
+"attrs count=141 sha256=7c9ef83d1edd5227d7f36cbea07ef794422557e59a9cb5e538ad63a10e255cce"
 ],
 "publish-advance-deferred-short": [
 "compress attempt=1",
@@ -9382,7 +9382,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=193b51d50c6a735c6c4f280072feb0b618f9e32a87c1315e794e5ee3e481784f"
+"attrs count=141 sha256=e5a0e0664cf9181d63116134885cd92f78cc58e4cf9579796152f7a9df5adbc7"
 ],
 "publish-advance-dynamic-empty": [
 "compress attempt=1",
@@ -9487,7 +9487,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=252a77a90df4d6300a3822c828262fb9fdb33c5c0c362d4883b24cd75f36e585"
+"attrs count=141 sha256=41de72054d592f107931f5daeaca05361b6423cbbb6e6fe290e6ad1f74d216a2"
 ],
 "publish-advance-gc-nonlock": [
 "compress attempt=1",
@@ -9624,7 +9624,7 @@
 "attr _store_complete_empty_reason=\"\"",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=ad10b2cf20b7b86b1f3ce145ee22d9d16bfffb59b03371c3fea8a7bd9ad44af3"
+"attrs count=141 sha256=ab8eee819f05b26d3c264370a6e44a2b68136e9726dca85749b5ba0729610a8c"
 ],
 "publish-advance-hidden-drain": [
 "compress attempt=1",
@@ -9749,7 +9749,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=5645dfa758d59223e172133d0e9d9e023668172bf2c765ee23935399bdaacb8c"
+"attrs count=141 sha256=f17a41c6d03ed52fc0c1ab048c0e40ffe301ef724890c573b21367c059366153"
 ],
 "publish-advance-nonlock": [
 "compress attempt=1",
@@ -9853,7 +9853,7 @@
 "attr _store_complete_empty_reason=\"\"",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=ef3aea881544ea0f5405fe4a5bcf668eb2306804b03e2049127dd27010afe406"
+"attrs count=141 sha256=42d0a24bb5711b06bca53580c0adcaa3dd3b712d5605b3faba8fba1eafd88859"
 ],
 "publish-advance-promote-continue": [
 "compress attempt=1",
@@ -9962,7 +9962,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=7ba43ccfd710ac6b6726cf7725da0222695c81c062214bc3a40a4f9c7fe3cece"
+"attrs count=141 sha256=b9101ff6950d0ffcf0f1e6dbedcc6999d5717e3aa52c23557fe6dfc70680df18"
 ],
 "publish-advance-promote-low": [
 "compress attempt=1",
@@ -10040,7 +10040,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=d1afcb217a6530ae8121454aebe96cd0b61f9af1c1f5469bd0f93e29639828f1"
+"attrs count=141 sha256=6a6a4487782ba24fc2e298e7ceede6613859499887faeb5171e2d0bbc464ce53"
 ],
 "publish-advance-publish-binding": [
 "compress attempt=1",
@@ -10104,7 +10104,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"lifecycle_binding_changed\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=ac6d000443891890dd988936725edc55395026890da2614aa34650c9e65bd468"
+"attrs count=141 sha256=4b3bd0d5209c0a8818be9a0ad1ac7252276d7d85adfcd32ebb447f45f7ff9aed"
 ],
 "publish-advance-publish-coverage": [
 "compress attempt=1",
@@ -10187,7 +10187,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=da1c296fac11d7abb9207d43cd0f81ce124b810fb32ceb819a2b979b8cd039f0"
+"attrs count=141 sha256=6f3d7334b3b0fd794c55fe4c208508dd9276ddca1c72d9cc685d57e26ba46ba9"
 ],
 "publish-advance-publish-fence": [
 "compress attempt=1",
@@ -10251,7 +10251,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"publication_invariant_conflict\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=1d005e963309d02d114e3ef3234a8b38b49310422e5acc612945f67cefd7aa79"
+"attrs count=141 sha256=ceb7c9810e251fca7a992f9686aeac7d2b0ef78374f775d2172c4bb0576e2bc5"
 ],
 "publish-advance-publish-frontier": [
 "compress attempt=1",
@@ -10315,7 +10315,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"publication_invariant_conflict\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=1d005e963309d02d114e3ef3234a8b38b49310422e5acc612945f67cefd7aa79"
+"attrs count=141 sha256=ceb7c9810e251fca7a992f9686aeac7d2b0ef78374f775d2172c4bb0576e2bc5"
 ],
 "publish-advance-publish-retry": [
 "compress attempt=1",
@@ -10431,7 +10431,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=7ba43ccfd710ac6b6726cf7725da0222695c81c062214bc3a40a4f9c7fe3cece"
+"attrs count=141 sha256=b9101ff6950d0ffcf0f1e6dbedcc6999d5717e3aa52c23557fe6dfc70680df18"
 ],
 "publish-advance-publish-route": [
 "compress attempt=1",
@@ -10496,7 +10496,7 @@
 "attr _compress_host_rows_consumed=4",
 "attr _compress_occurrences=null",
 "attr _compress_run=sha12/len=a24b4be2c166/300",
-"attr _config=sha12/len=138779ab5560/4451",
+"attr _config=sha12/len=4c22e16eabc8/4510",
 "attr _dag=sha12/len=e9089ed1d2e5/344",
 "attr _foreground_budget=sha12/len=4b5b97b54dd4/384",
 "attr _ingest_cursor=14",
@@ -10515,7 +10515,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=5ebf8d7f4596897ece2b17d87b8458c27ebf5d01cb832a2e8fc2a05078b88b3c"
+"attrs count=141 sha256=6a49ac7ba12cba50d2e9f1a463415bb66003a3fbb25d692781e8d5a0d3099d29"
 ],
 "replayed-summary-scaffold": [
 "compress attempt=1",
@@ -10668,7 +10668,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=2",
-"attrs count=141 sha256=f108c5f750194eaed95162ffc7ef912a22e7b3c6d9747e1cdd0b5dc011650c5c"
+"attrs count=141 sha256=d35a387a4cb0e19c31069f3cf6e791c3ec89ec5fd06e6915c83946b64689b38b"
 ],
 "resume-after-interruption": [
 "compress attempt=1",
@@ -10854,7 +10854,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=b69064514c051d21acb3d22c53267137fa7451ae5af54e21b1e92884b1dbcb96"
+"attrs count=141 sha256=dd76a65e86700d4a6185f0a72d224916dce009128b5926ad4dd98088c4493b1f"
 ],
 "resume-commit-wide-tail": [
 "compress attempt=1",
@@ -10895,7 +10895,7 @@
 "attr _no_progress_proof_fingerprint=null",
 "attr _pending_emission_candidates=sha12/len=80ce4269865e/3211",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=6624615f00b1b969a913fef9f63cfb0247b07288b6a5cee1ce8e7600d86a1aa3"
+"attrs count=141 sha256=b875e9fd4a9460d764239dc72779ff0fdf63e8979b58e93fcfeed636c4e98fd5"
 ],
 "resume-unadopted-commit": [
 "compress attempt=1",
@@ -11048,7 +11048,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=2",
-"attrs count=141 sha256=e5cd2b8bd561f0b2cb7d0e1722ef54da921d52b8c6d378aad3fc24388e3cf0b9"
+"attrs count=141 sha256=64879e876a2d744e34f5b727bc302c34c286f3199d57b3fe0e068fa35898c630"
 ],
 "retained-tail-occurrence": [
 "compress attempt=1",
@@ -11123,7 +11123,7 @@
 "attr _store_complete_empty_reason=\"\"",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=7388a2c32e5cda11cf8a394aa23ceffee28af581435ec62d6b20f3901f040df3"
+"attrs count=141 sha256=3cb75bafc997954ebd54ee215b644db0df25f85fd012bdd685668a9a91efea0b"
 ],
 "route-unavailable": [
 "compress attempt=1",
@@ -11219,7 +11219,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=141 sha256=b8169907902169f5e7672cf9a2c223bf23343678e7ce3b7690dbe9733865847f"
+"attrs count=141 sha256=45e672291aca9249efb681581cfa6b7504e6f5c98028009a6a0d8a580c7c883b"
 ],
 "route-unavailable-adopt-commit": [
 "compress attempt=1",
@@ -11369,7 +11369,7 @@
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
 "attr compression_count=1",
-"attrs count=141 sha256=332da154f7c17c2609a73990e3340daaa3ac67729ed4a7e919a10d2912ad4a01"
+"attrs count=141 sha256=b6bffbb2e1c0600d865d72c2154090a231566277932f22e54c8f77c892a3df17"
 ],
 "route-unavailable-full-tail": [
 "compress attempt=1",
@@ -11431,7 +11431,7 @@
 "attr _store=sha12/len=ea1402633a11/3476",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=141 sha256=830c04df69e4115d567189fcd1a863554ffcaa4107f12288d97b7813ddbcf593"
+"attrs count=141 sha256=bb94db4c9d9c21451cbe300c8545e7af5fc11a59f3171a4aaee00fbea980f6f1"
 ],
 "selection-deferred-critical-False": [
 "compress attempt=1",
@@ -11543,7 +11543,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=f7e61dee803d359c027ce42f7695a6886e40809b6dd0c163a1731557ad326a81"
+"attrs count=141 sha256=e877c87679a9dfff81d640db2678d5bf8e847bc8a13103bb83b4290a31ffcba7"
 ],
 "selection-deferred-critical-True": [
 "compress attempt=1",
@@ -11655,7 +11655,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=fa13712859ae38a52c230d11f970b50a7d968d5e9f813be86a41d7becf1e5205"
+"attrs count=141 sha256=3b91a49c0b093dd4c6ab9304131af4f9641a5b42658aa1b347977991f5bb1b3f"
 ],
 "selection-empty-filtered": [
 "compress attempt=1",
@@ -11698,7 +11698,7 @@
 "attr _no_progress_public_rows=sha12/len=d6453683c669/1491",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=46f281319337575208b7941f66becc1275c0fceea9acb8d767b6a6f180437b09"
+"attrs count=141 sha256=92e1644977a646532f49a2ec26400dbde65109f5117e38f8249afea8eb83b501"
 ],
 "selection-objective-sweep": [
 "compress attempt=1",
@@ -11766,7 +11766,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=25ee3a20c4e0/15841",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=58909d8c06709ebfc9d51687ec2aff936e7ece50c1bc04801951ef1f6c9b5743"
+"attrs count=141 sha256=ad38e21c4e471e3a97f89f9177ac82c079f2e408dd38a9362cd7a883d2a21d03"
 ],
 "selection-prepared-hidden": [
 "compress attempt=1",
@@ -11829,7 +11829,7 @@
 "attr _store_complete_excluded=[1]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=ba91f6d801c4ecd2d4971fc71ea3ac2813f21c5ea20884d26fbea3c712df3559"
+"attrs count=141 sha256=fe907a14ebdec839eac7234d3bb9687f6be89604d1d12eb99ef8e9e52236c90d"
 ],
 "selection-prepared-input-price-change": [
 "compress attempt=1",
@@ -11911,7 +11911,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=d35300347052f86eb1fe50fafe4c3e20a5a064571a69bfb1a569319d07ee8278"
+"attrs count=141 sha256=ca923955a13a13e0831327988d04aebc0516c96c72321b192b9aed72112d02ea"
 ],
 "selection-prepared-match": [
 "compress attempt=1",
@@ -12019,7 +12019,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=7ba43ccfd710ac6b6726cf7725da0222695c81c062214bc3a40a4f9c7fe3cece"
+"attrs count=141 sha256=b9101ff6950d0ffcf0f1e6dbedcc6999d5717e3aa52c23557fe6dfc70680df18"
 ],
 "selection-prepared-no-call": [
 "compress attempt=1",
@@ -12075,7 +12075,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=141 sha256=4cb25bb6d7e715dfbf716a42d9c0cfdad36c01be984a45c3bc1b8a8efb280411"
+"attrs count=141 sha256=96c1cd8a1bab4d5ef9cf4dcd7f8d30d7afe8fec8aeeb1bedf1608f3c25904e6d"
 ],
 "selection-prepared-overflow": [
 "compress attempt=1",
@@ -12138,7 +12138,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=9847c47955d3a9ac4504ec6a8ae004f5f3bddaa660544517db33ac3601667973"
+"attrs count=141 sha256=70c23f804c576191372fc8beaf1de20a7df638c7b676f9b3db879b91a575785b"
 ],
 "selection-prepared-split": [
 "compress attempt=1",
@@ -12219,7 +12219,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=0b0d0248ef454d1f79cddedf8c0ea3c2485532da710c472b79708c5b04ea0ddb"
+"attrs count=141 sha256=01a895b066dcc05360f64bb4a5bcf93dc3064c090b7716bd29efc45a4c4b52fb"
 ],
 "selection-pressure-sweep": [
 "compress attempt=1",
@@ -12372,7 +12372,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=4cb068adf3e25c87ad68a6bd8bd96c381a08cd7d52fee926ee3397c7c91a4e43"
+"attrs count=141 sha256=ec3a3d2522eb24b36416fd0e021b02c4cb24e148bca261f9e0a008dbcdcaec2d"
 ],
 "selection-unattributed": [
 "compress attempt=1",
@@ -12488,7 +12488,7 @@
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",15]]",
 "attr compression_count=1",
-"attrs count=141 sha256=2d768898088f338e38427c5433447ea85b12a4ab10ef38c2269bfdde72e21704"
+"attrs count=141 sha256=104410048ac6570e22302436653842faecd82449cb8e45d445183d82c0cbd8e2"
 ],
 "single-below-minimum-no-fit": [
 "compress attempt=1",
@@ -12579,7 +12579,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=488da0958f19e82885df3ef969a4456d1cb2c01a33dde3fe5b44882568116320"
+"attrs count=141 sha256=e7134df37229430c428320bfda5e480064bbeea02f232c256c13eeaea3b700f7"
 ],
 "single-small-backlog-yields": [
 "compress attempt=1",
@@ -12686,7 +12686,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=b74966c6c505fb5080496f0e08233580c700e757a145f2d5edce04cba6763aff"
+"attrs count=141 sha256=2a68ba96952665d97eb7ad19499ce2a29eeeb290eaeffda44dbfff4005267fd5"
 ],
 "stateless-bypass-missing": [
 "compress attempt=1",
@@ -12748,7 +12748,7 @@
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: stateless session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=bfaa60f232fcc5015f2b7ee832ff6c808910852e4dc1d7cec004ead6b996e219"
+"attrs count=141 sha256=59cf43a0500cd6a437698834112a8cacd971b3c3f5c6a34a7328a031ddd47b75"
 ],
 "stateless-bypass-negative": [
 "compress attempt=1",
@@ -12810,7 +12810,7 @@
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: stateless session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=bfaa60f232fcc5015f2b7ee832ff6c808910852e4dc1d7cec004ead6b996e219"
+"attrs count=141 sha256=59cf43a0500cd6a437698834112a8cacd971b3c3f5c6a34a7328a031ddd47b75"
 ],
 "stateless-bypass-zero": [
 "compress attempt=1",
@@ -12872,7 +12872,7 @@
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: stateless session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=bfaa60f232fcc5015f2b7ee832ff6c808910852e4dc1d7cec004ead6b996e219"
+"attrs count=141 sha256=59cf43a0500cd6a437698834112a8cacd971b3c3f5c6a34a7328a031ddd47b75"
 ],
 "stop-hang-False-False-False": [
 "compress attempt=1",
@@ -12979,7 +12979,7 @@
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_turn_paced=true",
 "attr _sweep_budget_hold_until=1715.0",
-"attrs count=141 sha256=cdfef85b925c11a5942f3dc4168b0569917e3f543a898b43f8570b9e96579d3a"
+"attrs count=141 sha256=54920da22dc7a6cb521df5fe48e749103b514ad8bfbcb8c56b5cff9abcd7d7b0"
 ],
 "stop-hang-False-False-True": [
 "compress attempt=1",
@@ -13084,7 +13084,7 @@
 "attr _store_complete_empty_reason=\"\"",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=00956b3329275b6f5b8951b20601ac6c8df115bcf4b726d35fa4145ce9772b4b"
+"attrs count=141 sha256=556380befb56f10d3d87cb4346ab52fba15f04720d1f3bf184309c7f3144b7d5"
 ],
 "stop-hang-False-True-False": [
 "compress attempt=1",
@@ -13170,7 +13170,7 @@
 "attr _store_complete_empty_reason=\"\"",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=213eaf7fee31e528b9df48ed15895e92592997bea082f6e4d11a4cd8b4a77834"
+"attrs count=141 sha256=841dc70bf3298e6490e7678c637a0f65f4795c373e2a5875f3a46c0d0caef4f0"
 ],
 "stop-hang-False-True-True": [
 "compress attempt=1",
@@ -13256,7 +13256,7 @@
 "attr _store_complete_empty_reason=\"\"",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=ddb164778f03e9ec5cafd519031fcf8d55ad9a0c8105d558bc74bb146df967a6"
+"attrs count=141 sha256=e719c6b4ef93077401f2aa2f815291d93cd6c6cbfa8c10af2e8dae28ab01edcd"
 ],
 "stop-hang-True-False-False": [
 "compress attempt=1",
@@ -13298,7 +13298,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _sweep_budget_hold_turn_paced=false",
 "attr _sweep_budget_hold_until=2131.0",
-"attrs count=141 sha256=859d1a64e2620b543f11a56887eea5f76d084a4b802798a6cff3c3e7a71d5640"
+"attrs count=141 sha256=e694b223a1783e81dcd6281af2a9e6240f410e8a851f10b73bc7b56f878c7c28"
 ],
 "stop-hang-True-False-True": [
 "compress attempt=1",
@@ -13338,7 +13338,7 @@
 "message assistant 5af94fa49bf3/1266",
 "attr _foreground_budget=sha12/len=958f78f7b178/442",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=39f8e345a2f4aeeb281fa26efaeb9f903911fe1c985ac560b4b90ff5b189f030"
+"attrs count=141 sha256=9a922dc83b2b3253cc8557250f8cdbbc44a947bbb4913cba3d61c91083a7863c"
 ],
 "stop-hang-True-True-False": [
 "compress attempt=1",
@@ -13370,7 +13370,7 @@
 "attr _no_progress_observed_tokens=250000",
 "attr _pending_emission_candidates=[]",
 "attr _sweep_budget_hold_turn_paced=false",
-"attrs count=141 sha256=7f15ef2986014f04c82671e7392eee66f79390f5104a7e10f8905bf618f5f809"
+"attrs count=141 sha256=446a25e71d0c0c60b3be0e24fcf19157f07aceb58c5f8e0e97ec45e9a331365c"
 ],
 "stop-hang-True-True-True": [
 "compress attempt=1",
@@ -13401,7 +13401,7 @@
 "attr _last_overflow_recovery_failed=true",
 "attr _no_progress_observed_tokens=250000",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=54f3a6232f95337caeba27a9520fd9d140cc2a5ce5e0c7b0d2a9be4692fe123f"
+"attrs count=141 sha256=5d2d5aa694460192f61dd8abd1112449be288eb51e339ea024739817418594c3"
 ],
 "stop-overflow-no-leaf": [
 "compress attempt=1",
@@ -13460,7 +13460,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=ea1402633a11/3476",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=e2ac3dfd5551564033863a6e56afe325aced95b0430bac03538df8941b9052e1"
+"attrs count=141 sha256=134e7e8d731fb46377c569795bfb656ffb20a5dcf4d7027189c645418174a9f9"
 ],
 "stop-reason-cleared": [
 "compress attempt=1",
@@ -13519,7 +13519,7 @@
 "attr _no_progress_public_rows=sha12/len=3dace5636f07/21060",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=bd8338732fcb38b2d80de5f42f926fbd8adaef6dac87f24212665529e9f1a59e"
+"attrs count=141 sha256=7815973d15292eb07815e368f84a0c7bbd763df55f07362e1ae9a41ef3e14345"
 ],
 "stop-reason-retained": [
 "compress attempt=1",
@@ -13622,7 +13622,7 @@
 "attr _store_complete_empty_reason=\"\"",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=3b6ee1ed394d6316af1d2083f9d23c879efa99cf309cbe227ecbd18a02a231ad"
+"attrs count=141 sha256=1ce978a8b960c10e53cac620c1752c3160e09e2d7b27100144b34d4becfb2621"
 ],
 "stop-reason-unattributed": [
 "compress attempt=1",
@@ -13738,7 +13738,7 @@
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",15]]",
 "attr compression_count=1",
-"attrs count=141 sha256=ebb2dbb14c5a9c7fc19a8830551f5a3630654bdce6fe96a7a9f1f9583102bba6"
+"attrs count=141 sha256=9ad0ffe52dfc6991a83d523ef8dc9f9732ac15cff9f31afa683a926b86a4db9f"
 ],
 "stop-refused-restore": [
 "compress attempt=1",
@@ -13805,7 +13805,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=141 sha256=7d4e6ec843e2ab0b464b98bff35e7f23c903732b3f7fda10b7730657cccf0917"
+"attrs count=141 sha256=6063b6ff9fc4fe63ee1e7e5a04ad60b4986d6e23c91ee2a479d7a2f707b33f8c"
 ],
 "stop-rejection-after-leaf": [
 "compress attempt=1",
@@ -13933,7 +13933,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=6ced9c59b5828461b59dd9c61cf5050bdc5e49a7afd347d7951f3cd4e8d39ed8"
+"attrs count=141 sha256=e493a1c6add8d864f5f0d8464889ba5835516ee099ed68a9b5e3afdfd2e51790"
 ],
 "stop-resumed-anchor": [
 "compress attempt=1",
@@ -13984,7 +13984,7 @@
 "attr _no_progress_proof_fingerprint=null",
 "attr _pending_emission_candidates=sha12/len=7d75449c34c6/416",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=0e0268fc9d6883c6075152b59730d5bdc3a36fc844ac49a870134c9482f2ac28"
+"attrs count=141 sha256=7c28cec8c5d9bb9dc8f545e16f6b439ddd8e33d2d5746a16d83769bfc8253dc5"
 ],
 "stop-route-after-leaf": [
 "compress attempt=1",
@@ -14108,7 +14108,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=1a6c02d05724743616c8305bcaf49888f67f92391164e795e378fe6bcb55fc96"
+"attrs count=141 sha256=d66161104b0233ce0c28a38e54264c37ec893ee37148a736839ff3d73bd797ef"
 ],
 "stop-scaffold-equal": [
 "compress attempt=1",
@@ -14164,7 +14164,7 @@
 "attr _no_progress_public_rows=sha12/len=cfd1777acbed/20979",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=0bd555faab5b4a969b1db287499b1a4bd9edbfc3c8943f144907de05ffec8634"
+"attrs count=141 sha256=60b5f00def70eefce3edb541e5f6a8856fdd0bc9c42ece0838841bc9ccc98ca0"
 ],
 "stub-first-exit": [
 "compress attempt=1",
@@ -14268,7 +14268,7 @@
 "attr _store=sha12/len=acd66f87830b/35604",
 "attr _stub_first_exit_now=sha12/len=fd265c889784/84",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=d19a567e6b4d1bed9e857b799cf41032990fd9393fe947e166329b9d1ab37eea"
+"attrs count=141 sha256=48bba2a5f7f80ca7f3ae54568685ba9092cadc44376257b6fa152b26df9305c4"
 ],
 "sweep-budget-entry": [
 "compress attempt=1",
@@ -14360,7 +14360,7 @@
 "attr _store=sha12/len=78abcdec3f42/25548",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=141 sha256=d9564b4cc5b274dceb03a95dbe58e881e9cb64643a640915175102acf00ab94d"
+"attrs count=141 sha256=e8abd42d7d21a099b6b2c89280972d1938110beb55f49970d5af4094299c7461"
 ],
 "sweep-drain-condense": [
 "compress attempt=1",
@@ -14517,7 +14517,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=63a0a8352763cafd160c0352511e2fdcd70e2f59850ea211b8d146288bcf4434"
+"attrs count=141 sha256=ad6a9b5717b392eaa19c59e2ac1131a3079268207416c0f16a14a69d831df1a7"
 ],
 "sweep-fresh-tail-yield": [
 "compress attempt=1",
@@ -14669,7 +14669,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=4cb068adf3e25c87ad68a6bd8bd96c381a08cd7d52fee926ee3397c7c91a4e43"
+"attrs count=141 sha256=ec3a3d2522eb24b36416fd0e021b02c4cb24e148bca261f9e0a008dbcdcaec2d"
 ],
 "sweep-pass-budget": [
 "compress attempt=1",
@@ -14995,7 +14995,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=dd79818a758561b6ec8f0f19eb876dcc0573eacf2b8a58db487922c81d633500"
+"attrs count=141 sha256=2a3f1eaca0e4df10ae1611fc3e762a3a4ddb21c5090ddf59959b0bec9824a406"
 ],
 "sweep-pre-leaf-condensation": [
 "compress attempt=1",
@@ -15167,7 +15167,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=301097bb944198fe5a8985af6069da3bc5d97b2c2f451333ccf640277bbfb917"
+"attrs count=141 sha256=4260143393bdc468104fa584d49689cf947e5b3dd21668a0cac29606be9194e7"
 ],
 "sweep-stub-first-exit": [
 "compress attempt=1",
@@ -15272,7 +15272,7 @@
 "attr _store=sha12/len=acd66f87830b/35604",
 "attr _stub_first_exit_now=sha12/len=fd265c889784/84",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=c207a41c6247461ac352b083a6204e5eee39963f8c2f6abed65fbaa334e0d827"
+"attrs count=141 sha256=a5d49acd0a08af89ce5893a9d513af106e3c5ce0cf68f49a5d60756b7671bcfc"
 ],
 "sweep-tail-drained": [
 "compress attempt=1",
@@ -15336,7 +15336,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=ea1402633a11/3476",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=5c58f1d958bb32997e8800ed7178bc4b4e04dc47587b3bb0bf65445bac4e61eb"
+"attrs count=141 sha256=b28003fa3295e9f91d10fa888d7dad5b772218b35c37c511ffb45978544eb8d5"
 ],
 "tool-pair-groups": [
 "compress attempt=1",
@@ -15470,7 +15470,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=4c36ffa565e112c0c6e725917eae94510b58d3a6e96e6e1a3e4007e442b9e032"
+"attrs count=141 sha256=00a273af31b6fa68a45e4470fae2463a7a8572c47ff1820a8da2a84d1359ddad"
 ],
 "transcript-gc-locked": [
 "compress attempt=1",
@@ -15590,7 +15590,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"sqlite_publication_locked\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=08c598f7fb53e3b6957f9ad6919c16ddcd159b931616513bcba5f0042c208f28"
+"attrs count=141 sha256=50544cece0c9cff3165d41da043ec886a487f3b76926cea67b3599a59f0bccc8"
 ],
 "unattributed-rotated-history": [
 "compress attempt=1",
@@ -15702,7 +15702,7 @@
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",15]]",
 "attr compression_count=1",
-"attrs count=141 sha256=d52eb30eb81cfd72b37a67b592dbaa8efe388724f0e3e1d41e12675e57387b47"
+"attrs count=141 sha256=27bca7a3f378723dcab5eb5c04dd678ad9a5d5e09310d20a4c35e662e493a4b8"
 ],
 "unknown-window-default-target": [
 "compress attempt=1",
@@ -15820,7 +15820,7 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=9fa2bcb6fc950c70c5ade9382694d34d18ab5bc545a07123a66b7f0f9e2bf82c"
+"attrs count=141 sha256=b49108956e3a2b09a1fc06ff4b67686684a6d9ca88e605ac46b5c2f8ff538d12"
 ],
 "unthresholded-default-target": [
 "compress attempt=1",
@@ -15937,6 +15937,6 @@
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=121589b7bdb2c92073569bda665b805113eeaa18d9b702e6b88d35452373f41b"
+"attrs count=141 sha256=16269af0c4a430eab2f469f36aac7ac0fd3abd4677972ecd26e0f935aee28de3"
 ]
 }
