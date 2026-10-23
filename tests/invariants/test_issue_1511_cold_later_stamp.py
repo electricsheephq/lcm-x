@@ -19,6 +19,7 @@ import time
 import pytest
 
 from tests.harness import engine_context, pin_char_counter
+from tests.messages_snapshot import messages_snapshot_columns
 from tests.invariants import test_issue_1519_alias_uid_conflict as uid_fixture
 
 
@@ -51,7 +52,7 @@ def snapshot(engine):
         key = row["lineage_key"]
         if ":" in key and len(key.split(":", 1)[0]) == 16:
             row["lineage_key"] = "HOME:" + key.split(":", 1)[1]
-    rows = query("SELECT * FROM messages ORDER BY store_id")
+    rows = query(f"SELECT {messages_snapshot_columns(db)} FROM messages ORDER BY store_id")
     return dict(rows=rows, stamps=[r.get("observed_at") for r in rows], bindings=bindings,
                 relations=query("SELECT * FROM message_relations ORDER BY rowid") if "message_relations" in tables else [])
 

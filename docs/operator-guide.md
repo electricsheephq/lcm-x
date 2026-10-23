@@ -293,15 +293,16 @@ Expected signals:
   `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, `lcm_inspect`,
   and `lcm_doctor`
 - `lcm_query_state` and `lcm_retrieve` appear only with their backing flags on;
+  `lcm_memory` appears only with `LCM_ENTITIES_ENABLED=1`;
   `LCM_DISABLED_TOOLS` can hide any of these tools
 - ordinary skill discovery includes `hermes-lcm`; plugin-qualified explicit
   loading is `hermes-lcm-x:hermes-lcm` on hosts that support plugin skills
 
-On the `main` line, output with both opt-in flags enabled is:
+On the `main` line, output with all three opt-in flags enabled is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.28.1 (15 tools)
+  ✓ hermes-lcm-x v0.28.1 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -473,6 +474,7 @@ Useful environment variables:
 | `LCM_SQLITE_MMAP_SIZE` | `268435456` | SQLite mapped-read size in bytes; `0` disables mapping. Invalid or negative values fall back with one WARNING per process. |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `24` | Minimum hours between startup FTS5 deep integrity-checks (O(index size)). `0` checks every startup (previous behavior); a negative value never checks on startup. Structural checks always run regardless. |
 | `LCM_ENABLE_SLASH_COMMAND` | `false` | Enable the optional `/lcm` operator command surface |
+| `LCM_SENDER_CAPTURE` | `true` | Profile-aware, non-field toggle; `0` disables pending sender associations. Nullable columns remain; no historical backfill. Stores an unverified gateway session principal without changing stored or delivered text |
 | `LCM_EMBEDDINGS_ENABLED` | `false` | Opt in to embedding warmup, backfill, and semantic retrieval storage |
 | `LCM_RERANK_WINDOW_LIMIT` | `0` | Optional positive cap on the `lcm_recall` rerank delivery window; `0` keeps the historical window unchanged, while a bound can stabilize the delivery set at `k ≤ limit` |
 | `LCM_RERANK_MARGIN` | `0.0` | Optional positive relevance-gap gate that holds the incoming rank-1 `lcm_recall` candidate unless the rerank challenger clears the margin |
@@ -586,6 +588,7 @@ until their backing flag is on in the loaded process config:
 - `lcm_compute`, `lcm_compile_evidence`, and `lcm_evidence_pack` are bounded,
   provider-neutral operations over caller-supplied exact refs. Calling them does
   not enable a store, run an extractor, or activate an answering model.
+- `lcm_memory` is advertised only when `LCM_ENTITIES_ENABLED=1`; lookup/list read existing messages and optional assertion facts.
 - `lcm_query_state` is advertised only when `LCM_ASSERTIONS_ENABLED=true`
   creates/binds the rebuildable assertion sidecar.
 - `lcm_retrieve` is advertised only when
@@ -597,10 +600,11 @@ until their backing flag is on in the loaded process config:
 flag is on, and refuses direct calls to it. A host calling a cached dormant
 schema still receives the handler's existing `status: disabled` response.
 Restart after changing the loaded flags. `plugin.yaml` continues to declare
-all 15 tools for manifest checks.
+all 16 tools for manifest checks.
 
 | Variable | Default | Use |
 |----------|---------|-----|
+| `LCM_ENTITIES_ENABLED` | `false` | Expose read-only `lcm_memory lookup/list`; no new tables, writes or model calls. Restart after changing the flag. |
 | `LCM_ASSERTIONS_ENABLED` | `false` | Create and bind the same-DB assertion sidecar so `lcm_query_state` can return typed, source-cited state. This alone performs no extraction or backfill. |
 | `LCM_ASSERTION_EXTRACTION_ENABLED` | `false` | With assertions enabled, run bounded structured extraction over exact persisted rows before compaction. This may send source text to the configured extraction/summary model. |
 | `LCM_ASSERTION_EXTRACTION_MODEL` | empty | Extraction-model override; otherwise uses `LCM_EXTRACTION_MODEL`, then the summary model. |

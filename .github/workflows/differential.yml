@@ -68,6 +68,7 @@ jobs:
             rollup_builder.py
             rollup_periods.py
             rollup_store.py
+            sender_capture.py
             sanitize.py
             schemas.py
             session_patterns.py

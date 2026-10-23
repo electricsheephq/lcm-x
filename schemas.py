@@ -1257,3 +1257,20 @@ LCM_EXPAND_QUERY = {
         "required": ["prompt"],
     },
 }
+
+LCM_MEMORY = {
+    "name": "lcm_memory",
+    "description": "Read cited entity mentions across this profile's sessions; lookup a name and aliases, optionally rank mentions for a question, or list assertion subjects. Default off; no writes or model calls. Counts and first/last times cover all matching rows; carried times include time_uncertain: carried; snippets and facts are capped. Namespace ambiguity is shown, never resolved automatically.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["lookup", "list"]},
+            "name": {"type": "string", "description": "Required for lookup."},
+            "aliases": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+            "question": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200,
+                      "description": "Lookup: default 20, cap 50. List: default 50, cap 200."},
+        },
+        "required": ["action"],
+    },
+}

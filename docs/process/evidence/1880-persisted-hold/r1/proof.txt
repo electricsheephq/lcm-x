@@ -69,3 +69,19 @@ Testing improved: publication-clear tests with mutant proof; persistence-failure
 and concurrent-publication regression tests.
 Not proven: live-host hit rate, group latency, host refresh latency, #1162 repair,
 merge readiness, release, runtime safety or customer readiness.
+
+Conflict-forced main integration:
+GitHub reported PR1888 mergeable=CONFLICTING at the starting remote head.
+Merged main 931ea5562dc0c15f126e22239bdc3699c1da6f35 with a merge commit,
+never rebase. Product source auto-merged; conflicts were limited to the compress
+and ingest golden fixtures. Incoming main changes are separate from the 15-line
+r1 product correction; r1 introduces no DDL or stored-row mutation.
+Regenerated the two conflicting fixtures once from the integrated source.
+Compared to the r1 parent, compress changes only full-state digests and one
+_config observation (incoming default-off config); no other events changed.
+The merged ingest observer includes incoming sender fields and the existing
+current-ingest proof. No observer, assertion, fixture-size cap or scenario removed.
+pytest selection: tests/behaviour/test_compress_trace.py tests/behaviour/test_ingest_trace.py
+416 passed in 26.69s
+ruff check . (0.15.13): All checks passed!
+git diff --cached --check: exit 0; no output

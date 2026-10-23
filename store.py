@@ -95,6 +95,26 @@ class _ObservedAtRows(list):
         return deepcopy(list(self), memo)
 
 
+def _matching_names_filter(names: Collection[str] | None, prefix: str) -> tuple[str, list[Any]]:
+    """Restrict question ranking using the same literal FTS/LIKE name matching."""
+    if names is None:
+        return "", []
+    clauses, args, fts = [], [], []
+    for name in names:
+        query = '"' + name.replace('"', '""') + '"'
+        safe = sanitize_fts5_query(query)
+        if requires_like_fallback(query, safe):
+            for term in extract_search_terms(sanitize_like_query(query)):
+                clauses.append(f"{prefix}content LIKE ? ESCAPE '\\'")
+                args.append(f"%{escape_like(term)}%")
+        else:
+            fts.append(safe)
+    if fts:
+        clauses.append(f"{prefix}store_id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
+        args.append(" OR ".join(f"({query})" for query in fts))
+    return "(" + " OR ".join(clauses) + ")" if clauses else "0", args
+
+
 def _fetch_ranked_search_rows(conn: sqlite3.Connection, sql: str, args: list[Any]) -> list[list[Any]]:
     # A single SQLite result avoids reacquiring Python's GIL for every candidate.
     # JSON1 rounds REALs; tagged round-trip decimals preserve the original bits.
@@ -421,7 +441,9 @@ class MessageStore:
                 pinned INTEGER DEFAULT 0,
                 ingested_at REAL,
                 observed_at REAL,
-                observed_at_source TEXT
+                observed_at_source TEXT,
+                sender_id TEXT,
+                sender_source TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_msg_session
                 ON messages(session_id, store_id);
@@ -485,6 +507,8 @@ class MessageStore:
             "observed_at_source",
             "ALTER TABLE messages ADD COLUMN observed_at_source TEXT",
         )
+        for name in ("sender_id", "sender_source"):
+            add_column_if_missing(self._conn, columns, name, f"ALTER TABLE messages ADD COLUMN {name} TEXT")
         # The NULL probe has no index and scans the whole table, so run it once
         # per store and remember that it ran; register() opens the store under
         # Hermes' plugin load deadline (#622).
@@ -619,7 +643,8 @@ class MessageStore:
                                 ] = None,
                                 metadata_messages: Optional[
                                     List[Dict[str, Any]]
-                                ] = None) -> List[int]:
+                                ] = None,
+                                senders: Optional[List[Optional[tuple[str, str]]]] = None) -> List[int]:
         """Persist messages that already passed ingest protection.
 
         This is an internal fast path for callers that need the protected form
@@ -633,6 +658,8 @@ class MessageStore:
             raise ValueError(
                 "metadata_messages must align one-to-one with protected messages"
             )
+        if senders is not None and len(senders) != len(messages):
+            raise ValueError("senders must align one-to-one with protected messages")
 
         conn = self._conn
         if conn is None:
@@ -645,12 +672,18 @@ class MessageStore:
                 tc_json = json.dumps(tc) if tc else None
                 ts = time.time()
                 observed_at = _normalize_observed_at(msg.get("timestamp"))
+                sender = senders[index] if senders is not None else None
                 cur = conn.execute(
                     """INSERT INTO messages
                        (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
                         tool_name, timestamp, token_estimate, pinned, ingested_at,
                         observed_at, observed_at_source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""" if sender is None else
+                    """INSERT INTO messages
+                       (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
+                        tool_name, timestamp, token_estimate, pinned, ingested_at,
+                        observed_at, observed_at_source, sender_id, sender_source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         _normalize_source_value(source),
@@ -666,7 +699,7 @@ class MessageStore:
                         ts,
                         observed_at,
                         "host_message_timestamp" if observed_at is not None else None,
-                    ),
+                    ) + (sender or ()),
                 )
                 if cur.lastrowid is None:
                     raise RuntimeError("SQLite did not return a message id")
@@ -698,6 +731,56 @@ class MessageStore:
             if ids:
                 self._mark_manual_chunk_backlog()
             return ids
+
+    def get_message_senders(self, store_ids) -> dict[int, tuple[str | None, str | None]]:
+        if not store_ids:
+            return {}
+        marks = ",".join("?" for _ in store_ids)
+        return {int(sid): (sender, source) for sid, sender, source in self._conn.execute(
+            f"SELECT store_id, sender_id, sender_source FROM messages WHERE store_id IN ({marks})", list(store_ids))}
+
+    def set_sender_if_null(self, store_id, sender_id, sender_source, session_ids) -> int:
+        if not session_ids or not self._write_lock.acquire(blocking=False):
+            return 0
+        conn, opened, timeout = self._conn, False, None
+        try:
+            timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            conn.execute("PRAGMA busy_timeout=0")
+            if not conn.in_transaction:
+                conn.execute("BEGIN")
+                opened = True
+            marks = ",".join("?" for _ in session_ids)
+            # Global AUTOINCREMENT store_id orders rows across sessions, regardless of wall clocks.
+            count = conn.execute(
+                "UPDATE messages SET sender_id = ?, sender_source = ?"
+                " WHERE store_id = ? AND role = 'user' AND sender_id IS NULL AND sender_source IS NULL"
+                f" AND session_id IN ({marks})"
+                f" AND NOT EXISTS (SELECT 1 FROM messages later WHERE later.session_id IN ({marks})"
+                " AND later.role = 'user' AND later.store_id > messages.store_id)",
+                (sender_id, sender_source, store_id, *session_ids, *session_ids)).rowcount
+            assert count in (0, 1)
+            if not count:
+                existing = self.get_message_senders([store_id]).get(store_id)
+                if existing not in (None, (None, None), (sender_id, sender_source)):
+                    logger.debug("sender_capture:conflict")
+            if opened:
+                conn.commit()
+            return count
+        except BaseException as exc:
+            if opened:
+                conn.rollback()
+            if not isinstance(exc, Exception):
+                raise
+            logger.debug("sender_capture:write_unavailable")
+            return 0
+        finally:
+            try:
+                if timeout is not None:
+                    conn.execute(f"PRAGMA busy_timeout={int(timeout)}")
+            except Exception:
+                logger.debug("sender_capture:restore_error")
+            finally:
+                self._write_lock.release()
 
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
         """Move all persisted messages from one session_id to another."""
@@ -809,6 +892,23 @@ class MessageStore:
             store_ids,
         ).fetchall()
         return {row[0]: self._row_to_dict(row) for row in rows}
+
+    @contextmanager
+    def _read_snapshot(self):
+        """Hold a deferred read snapshot, retaining an enclosing transaction."""
+        with self._write_lock:
+            conn = self._conn
+            owns = not conn.in_transaction
+            if owns:
+                conn.execute("BEGIN")
+            try:
+                yield
+                if owns:
+                    conn.commit()
+            except BaseException:
+                if owns:
+                    conn.rollback()
+                raise
 
     def scan_evidence_rows(self, *, limit: int = 4096) -> Dict[str, Any]:
         """Return one bounded, read-only whole-corpus evidence snapshot.
@@ -1292,7 +1392,7 @@ class MessageStore:
             self._commit()
         return added
 
-    def get_carried_stamp_ids(self, store_ids: List[int], *, connection=None, session_ids=None) -> set[int]:
+    def get_carried_stamp_ids(self, store_ids: List[int], *, connection=None, session_ids=None, batched=False) -> set[int]:
         """Read carried-time provenance without creating schema or changing rows.
 
         A caller's read-only connection keeps recall's existing deadline policy.
@@ -1300,6 +1400,18 @@ class MessageStore:
         """
         ids = sorted({int(i) for i in store_ids})
         conn = connection if connection is not None else self._conn
+        if batched:
+            known = getattr(self, '_memory_relation_connections', {})
+            self._memory_relation_connections = known
+            if conn not in known and conn not in self._carried_relation_connections:
+                known[conn] = bool(conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
+                ).fetchone())
+            relation = ('message_relations' if conn in self._carried_relation_connections or known.get(conn)
+                        else '(SELECT NULL AS store_id, NULL AS kind)')
+            return {int(r[0]) for r in conn.execute(
+                f"SELECT store_id FROM {relation} WHERE kind='carried_stamp' "
+                "AND store_id IN (SELECT value FROM json_each(?))", (json.dumps(ids),))}
         if not (ids or session_ids):
             return set()
         if conn not in self._carried_relation_connections:
@@ -1879,7 +1991,8 @@ class MessageStore:
                     allow_operators: bool = False,
                     agent_operators: bool = False,
                     stemmed: bool = False,
-                    _include_like_excerpt: bool = False) -> List[Dict[str, Any]]:
+                    matching_names: Collection[str] | None = None,
+                    _include_like_excerpt: bool = False, _memory=None) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
         Retrieval contract:
@@ -1918,7 +2031,8 @@ class MessageStore:
                 time_from=time_from,
                 time_to=time_to,
                 exclude_session_ids=exclude_session_ids,
-                _include_excerpt=_include_like_excerpt,
+                **({"matching_names": matching_names} if matching_names is not None else {}),
+                _include_excerpt=_include_like_excerpt, _memory=_memory,
             )
 
         order_by = _build_search_order_by(
@@ -1944,6 +2058,10 @@ class MessageStore:
                 if session_id is not None:
                     where.append("m.session_id = ?")
                     args.append(session_id)
+                name_clause, name_args = _matching_names_filter(matching_names, "m.")
+                if name_clause:
+                    where.append(name_clause)
+                    args.extend(name_args)
                 if exclude_session_ids:
                     where.append(
                         "m.session_id NOT IN (SELECT value FROM json_each(?))"
@@ -1991,6 +2109,10 @@ class MessageStore:
                        ORDER BY keys.ordinal""",
                     [*args, safe_query],
                 )
+                if _memory is not None and offset == 0:
+                    _memory['rows'] = [dict(zip(('store_id', 'session_id', 'timestamp', 'observed_at'), r)) for r in self._conn.execute(
+                        f"SELECT m.store_id,m.session_id,m.timestamp,m.observed_at FROM {fts_table} fts "
+                        f"JOIN messages m ON m.store_id=fts.rowid WHERE {' AND '.join(where)}", args[:-2])]
                 self._last_fts_index = "stem" if fts_table == "messages_fts_stem" else "plain"
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
@@ -2019,7 +2141,8 @@ class MessageStore:
                     time_from=time_from,
                     time_to=time_to,
                     exclude_session_ids=exclude_session_ids,
-                    _include_excerpt=_include_like_excerpt,
+                    **({"matching_names": matching_names} if matching_names is not None else {}),
+                    _include_excerpt=_include_like_excerpt, _memory=_memory,
                 )
 
             raw_primary_values: list[float] = []
@@ -2062,9 +2185,12 @@ class MessageStore:
                      time_from: float | None = None,
                      time_to: float | None = None,
                      exclude_session_ids: Collection[str] | None = None, *,
-                     _include_excerpt: bool = False) -> List[Dict[str, Any]]:
+                     matching_names: Collection[str] | None = None,
+                     _include_excerpt: bool = False, _memory=None) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
+        if _memory is not None:
+            _memory['like'] = True
         safe_query = sanitize_like_query(query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
@@ -2076,6 +2202,10 @@ class MessageStore:
         if session_id is not None:
             where.append("session_id = ?")
             args.append(session_id)
+        name_clause, name_args = _matching_names_filter(matching_names, "")
+        if name_clause:
+            where.append(name_clause)
+            args.extend(name_args)
         if exclude_session_ids:
             where.append("session_id NOT IN (SELECT value FROM json_each(?))")
             args.append(json.dumps(list(exclude_session_ids)))
@@ -2256,14 +2386,16 @@ class MessageStore:
                 f"{role_bias} ASC, timestamp DESC, store_id DESC"
             )
             candidate_cap = compute_search_candidate_cap(limit)
+            sql = f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE {' AND '.join(where)}"
             rows = self._conn.execute(
-                f"""SELECT {_MESSAGE_SELECT_COLUMNS}
-                    FROM messages
-                    WHERE {' AND '.join(where)}
-                    {order_by}
-                    LIMIT ? OFFSET ?""",
-                [*base_args, *order_args, *exact_args, candidate_cap, 0],
-            ).fetchall()
+                f"{sql} {order_by} LIMIT ? OFFSET ?",
+                [*base_args, *order_args, *exact_args, candidate_cap, 0]).fetchall()
+            if _memory is not None:
+                for r in self._conn.execute(
+                        f"SELECT store_id,session_id,timestamp,observed_at,content FROM messages WHERE {' AND '.join(where)}", base_args):
+                    score = sum(min(count_term_matches(r[4], t), 1) if collapse_risky_repeats else count_term_matches(r[4], t) for t in terms)
+                    if score > 0:
+                        _memory['rows'].append(dict(zip(('store_id', 'session_id', 'timestamp', 'observed_at'), r)))
             add_rows(rows)
 
         results.sort(key=lambda result: _fallback_result_sort_key(result, sort))

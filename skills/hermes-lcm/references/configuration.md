@@ -67,6 +67,12 @@ Use `docs/operator-guide.md` as the complete current source. Start with:
 
 Optional slash commands are disabled by default with `LCM_ENABLE_SLASH_COMMAND=false`. Destructive cleanup apply is separately guarded. Do not enable mutation surfaces merely to diagnose a problem.
 
+`LCM_SENDER_CAPTURE` is a non-field, profile-aware boolean toggle (default
+`true`). Set `LCM_SENDER_CAPTURE=0` to disable pending sender associations;
+the nullable sender columns are still added and historical rows are never
+backfilled. Capture stores an unverified gateway session principal without
+changing stored or delivered text.
+
 `LCM_SQLITE_MMAP_SIZE` sets SQLite mapped-read bytes (default `268435456`,
 unchanged). Set `LCM_SQLITE_MMAP_SIZE=0` on SD-card or single-board hosts: a
 storage read error on a mapped page kills the process with SIGBUS, while `0`
@@ -90,11 +96,12 @@ Range warnings (`LCM_CONTEXT_THRESHOLD`, `LCM_SURVIVAL_RESERVE`, `LCM_LEAF_CHUNK
 
 Both native context-engine schemas and plugin-registry registration advertise
 13 tools by default. `LCM_ASSERTIONS_ENABLED=true` exposes `lcm_query_state`;
-`LCM_ADAPTIVE_RETRIEVAL_ENABLED=true` exposes `lcm_retrieve`. Restart after
+`LCM_ADAPTIVE_RETRIEVAL_ENABLED=true` exposes `lcm_retrieve`;
+`LCM_ENTITIES_ENABLED=1` exposes read-only `lcm_memory`. Restart after
 changing these loaded process flags. `LCM_DISABLED_TOOLS` (comma-separated
 names) hides any tool, including a flag-enabled one, and refuses direct calls.
 Calls through a cached dormant schema retain the existing disabled response.
-The manifest continues to declare all 15 tools.
+The manifest continues to declare all 16 tools.
 
 ### Recall ranking
 
@@ -176,6 +183,7 @@ warns without changing its behavior until removal.
 | `LCM_EXTRACTION_ENABLED` | `bool` | `false` | — | — |
 | `LCM_EXTRACTION_MODEL` | `str` | `""` | — | — |
 | `LCM_EXTRACTION_OUTPUT_PATH` | `str` | `""` | — | — |
+| `LCM_ENTITIES_ENABLED` | `bool` | `false` | — | — |
 | `LCM_ASSERTIONS_ENABLED` | `bool` | `false` | — | — |
 | `LCM_QUERY_VIEWS_ENABLED` | `bool` | `false` | — | — |
 | `LCM_ADAPTIVE_RETRIEVAL_ENABLED` | `bool` | `false` | — | — |
@@ -281,7 +289,7 @@ comma-separated values. Keep their existing source tracking and parsing rules.
 
 ## Hand-written reference: side-channel environment readers
 
-These 11 keys are read outside `config.py`, directly or through helper
+These 12 keys are read outside `config.py`, directly or through helper
 wrappers. They are not loaded into `LCMConfig`; listing them does not
 consolidate or change their readers. Reader filenames are relative to the
 checkout root. Credential entries list only variable names, never values.
@@ -290,6 +298,7 @@ checkout root. Credential entries list only variable names, never values.
 | --- | --- | --- | --- |
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `engine.py` | Absolute compaction threshold override | each call — `_set_context_length()` with a positive context length, through model updates, session-start metadata, or cloning |
 | `LCM_ENABLE_SLASH_COMMAND` | `__init__.py` | Optional slash-command registration | plugin registration |
+| `LCM_SENDER_CAPTURE` | `sender_capture.py` | Profile-aware pending sender capture; default `true`, `0` disables capture without removing columns or backfilling history | each call — pending association creation through the profile-aware boolean resolver |
 | `LCM_HERMES_BASE_DIR` | `config.py` (called by `engine.py`, `externalize.py`, `diagnostics.py`) | Storage containment boundary; process-wide, never read from a routed profile | each call — storage-directory resolution or state-database containment validation; `_get_allowed_hermes_base()` also reads it when called (tests only; no production caller) |
 | `LCM_IDENTITY_ANCHOR` | `identity_anchor.py` | Identity-anchor switch | each call — `identity_anchor_enabled()` checks during ingest, replay identity handling, and compaction |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `db_bootstrap.py` | Startup integrity-check interval | database open — startup FTS validation, after structural checks pass |

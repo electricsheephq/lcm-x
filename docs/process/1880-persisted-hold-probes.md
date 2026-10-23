@@ -137,3 +137,5 @@ The focused r1 regressions cover route-with-`@` and metadata-write failure, rebu
 The compress golden inventory adds `_no_progress_proof_fingerprint`, preserving equality and transitions through stable digest labels. Its 162 scenario changes contain only the new snapshot observation and full-state count/digest; existing event and message observations remain. No new cost run is required: all admission implementations remain byte-identical. The runtime-only test allowlist now correctly describes execution by the non-required real-host.yml.
 
 Testing improved: publication-clear tests with mutant proof; persistence-failure and concurrent-publication regression tests.
+
+The r1 integration merged main `931ea5562dc0c15f126e22239bdc3699c1da6f35` only after GitHub reported a conflict. Product source merged cleanly; both conflicting golden fixtures were regenerated from the combined source. All 416 compress/ingest trace checks pass. The r1 product correction remains 15 changed lines; upstream source changes are recorded separately.

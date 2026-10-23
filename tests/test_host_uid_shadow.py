@@ -728,6 +728,7 @@ ROLLBACK_READERS = {
     "v0.26.2": "6800cf45ad05280e6cf6fa9e1ad96c62b7132646",
     "v0.27.0": "c67d7633d963a2ffd24cf90995189ee58e2f88c7",
     "v0.28.0": "709099b3a397a7893a7abae8802ebe7bf605f79e",
+    "v0.28.1": "77b2b4f795fb6a4f84c55abf6d0441da4469971e",
 }
 
 PRE_V026_READERS = frozenset({"v0.25.0-rc1", "v0.25.1"})

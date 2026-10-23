@@ -32,4 +32,5 @@ TOOL_REGISTRY = (
     ToolSpec("lcm_status", schemas.LCM_STATUS, "lcm_status", "💚", None),
     ToolSpec("lcm_inspect", schemas.LCM_INSPECT, "lcm_inspect", "🧭", None),
     ToolSpec("lcm_doctor", schemas.LCM_DOCTOR, "lcm_doctor", "🏥", None),
+    ToolSpec("lcm_memory", schemas.LCM_MEMORY, "lcm_memory", "🗂️", "entities_enabled"),
 )

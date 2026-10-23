@@ -86,6 +86,7 @@ def _engine_tool_schemas(tmp_path) -> list[dict]:
     config = LCMConfig(
         database_path=str(tmp_path / "contract.db"),
         assertions_enabled=True,
+        entities_enabled=True,
         adaptive_retrieval_enabled=True,
     )
     engine = LCMEngine(config=config)
