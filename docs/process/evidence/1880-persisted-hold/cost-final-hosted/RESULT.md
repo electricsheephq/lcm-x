@@ -22,4 +22,4 @@ Re-score: python score_cost.py .; all eight cells PASS against snapshotted raw s
 
 Not proven: construction/ingest cost, reference-session latency, host tool/prompt refresh, #1162 repair, merge/release/runtime/customer readiness.
 
-T1: pending registry publication. T2: not published; no results disposed.
+T1: https://github.com/electricsheephq/lcm-x/blob/89d908dd34623ea2b67f79ffeb0c638a6230bc11/bench/scoreboard/results.jsonl. T2: not published; no results disposed.

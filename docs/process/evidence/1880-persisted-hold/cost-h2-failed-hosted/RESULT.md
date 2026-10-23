@@ -22,4 +22,4 @@ Re-score: python score_cost.py .; EXPECTED_NEGATIVE at the10k mismatch cost-bar 
 
 Not proven: passing H2 cost bar, original-Mac H2 cost, live/reference latency, retained-occurrence repair, merge/release/runtime/customer readiness.
 
-T1: pending registry publication. T2: not published; no results disposed.
+T1: https://github.com/electricsheephq/lcm-x/blob/89d908dd34623ea2b67f79ffeb0c638a6230bc11/bench/scoreboard/results.jsonl. T2: not published; no results disposed.

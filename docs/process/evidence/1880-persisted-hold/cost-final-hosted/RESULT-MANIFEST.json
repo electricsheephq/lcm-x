@@ -65,7 +65,12 @@
     "external_inputs": []
   },
   "bulk": [],
-  "published": [],
+  "published": [
+    {
+      "tier": "T1",
+      "url": "https://github.com/electricsheephq/lcm-x/blob/89d908dd34623ea2b67f79ffeb0c638a6230bc11/bench/scoreboard/results.jsonl"
+    }
+  ],
   "links": [],
   "keep": [
     "RESULT.md",
