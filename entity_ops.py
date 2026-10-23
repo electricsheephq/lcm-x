@@ -3,6 +3,7 @@
 from functools import wraps
 from contextlib import contextmanager
 import json
+import sqlite3
 
 from .entity_store import normalize_alias, normalize_platform_id
 
@@ -73,7 +74,12 @@ def _operation(method):
         with self.store.transaction():
             p = {"created": {f: [] for f in FAMILIES}, "changes": [],
                  "touches": {f: [] for f in FAMILIES}}
-            result = method(self, p, *args, **kwargs)
+            try:
+                result = method(self, p, *args, **kwargs)
+            except sqlite3.IntegrityError as error:
+                if method.__name__ != "override_key":
+                    raise
+                raise EntityOpRefused("key_held") from error
             event = self.store.append_event(method.__name__, p)
             return event if result is None else result
     return run
@@ -103,8 +109,8 @@ class EntityOps:
 
     def _get(self, family, key):
         getter = {"entities": self.store.get_entity, "aliases": self.store.get_alias,
-                  "notes": self.store.get_note, "keys": lambda key: next(iter(self.store._read(
-                      "lcm_entity_keys", "t.key_id=:id", {"id": key})), None)}[family]
+                  "notes": self.store.get_note, "keys": lambda key: next((r for r in
+                      _records(self.store, "keys") if r["key_id"] == key), None)}[family]
         row = getter(key)
         if row is None or key in _history(self.store)[2][family]:
             raise EntityOpRefused("not_found")
@@ -293,6 +299,11 @@ class EntityOps:
     @_operation
     def override_key(self, p, subject_key, entity_id, *, scope_store_ids=None, owner_entity_id=None):
         entity_id = _canonical(self._entities(), entity_id)
+        compatible = _NAMESPACE_KINDS.get(subject_key.partition(":")[0])
+        if compatible is None:
+            raise EntityOpRefused("unbridged_namespace")
+        if self._kind(self._get("entities", entity_id)) not in {compatible, "other", "topic"}:
+            raise EntityOpRefused("kind_mismatch")
         if owner_entity_id is not None:
             self._get("entities", owner_entity_id)
         view = resolved_view(self.store)
@@ -302,6 +313,11 @@ class EntityOps:
         if scope_store_ids is None and len(_key_candidates(view, subject_key, owner_entity_id)) > 1:
             raise EntityOpRefused("ambiguous_key")
         sources = {source for key, source in _key_sources(self.store) if key == subject_key}
+        if scope_store_ids is None and owner_entity_id is not None:
+            owner_rows = _owner_alias_rows(self.store, subject_key, owner_entity_id)[:1]
+            sources &= {source for row in _active_keys(self.store) + owner_rows
+                        if (row["subject_key"], row["owner_entity_id"]) == (subject_key, owner_entity_id)
+                        for source in json.loads(row["source_store_ids"])}
         cited = sorted(sources if scope_store_ids is None else sources.intersection(scope_store_ids))
         p["override"] = dict(subject_key=subject_key, entity_id=entity_id, owner_entity_id=owner_entity_id,
                              scope_store_ids=cited, global_override=scope_store_ids is None)
@@ -336,6 +352,15 @@ class EntityOps:
                     for f in FAMILIES))]
             if blockers:
                 raise EntityOpRefused("dependent_events", blocking_event_ids=blockers)
+            override = p.get("override")
+            if override and override["global_override"]:
+                # Rebuild may replace this event's row after canonical/source churn.
+                owned = [r["key_id"] for r in _active_keys(self.store)
+                         if (r["subject_key"], r["owner_entity_id"], r["method"]) ==
+                         (override["subject_key"], override["owner_entity_id"], "override")
+                         and r["entity_id"] == _canonical(self._entities(), override["entity_id"])
+                         and set(json.loads(r["source_store_ids"])) <= set(override["scope_store_ids"])]
+                p = dict(p, created=dict(p["created"], keys=list(set(p["created"].get("keys", []) + owned))))
             for change in p["changes"]:
                 if change["family"] == "keys" and change["before"]["retired_at"] is None:
                     row = self._get("keys", change["id"])
@@ -352,7 +377,12 @@ class EntityOps:
                                 raise EntityOpRefused("platform_id_held", holder=holder["entity_id"])
             self._undo_payload = {"created": {f: [] for f in FAMILIES}, "changes": [],
                                   "touches": {f: [] for f in FAMILIES}}
-            inverse(self, p)
+            try:
+                inverse(self, p)
+            except sqlite3.IntegrityError as error:
+                if target["op"] != "override_key":
+                    raise
+                raise EntityOpRefused("key_held") from error
             return self.store.append_event("undo", self._undo_payload, target_event_id=event_id)
 
 
@@ -464,6 +494,16 @@ def resolved_view(store, access_scope=None, principal_is_owner=False, *, _platfo
                 for r in store._read("lcm_entity_keys", "t.retired_at IS NULL", **access)
                 if r["entity_id"] in view["cards"] or r["entity_id"] in canonical
                 if access_scope is None or r["owner_entity_id"] is None or r["owner_entity_id"] in canonical]
+        if access_scope is not None:
+            visible_keys = []
+            for row in keys:
+                if row["method"] == "alias_match" and row["subject_key"].partition(":")[0] not in {"user", "assistant"}:
+                    candidates = _key_candidates(view, row["subject_key"], row["owner_entity_id"])
+                    if len(candidates) != 1:
+                        continue
+                    row["entity_id"] = candidates[0]
+                visible_keys.append(row)
+            keys = visible_keys
         if keys:
             view["keys"] = sorted(keys, key=lambda r: (r["subject_key"], r["owner_entity_id"] or ""))
         return view
@@ -516,7 +556,7 @@ def _key_candidates(view, subject_key, owner=None):
     if namespace in {"user", "assistant"}:
         return []
     relations = _relation_groups(view, value)
-    if relations:
+    if relations or owner is not None:
         candidates = relations.get(owner, {}).get("candidates", [])
     else:
         exact = normalize_platform_id(*value.split(":", 1)) if ":" in value else None
@@ -527,7 +567,15 @@ def _key_candidates(view, subject_key, owner=None):
 
 
 def _active_keys(store):
-    return store._read("lcm_entity_keys", "t.retired_at IS NULL")
+    # Index maintenance must also see rows whose cited messages were deleted.
+    return [r for r in _records(store, "keys") if r["retired_at"] is None]
+
+
+def _owner_alias_rows(store, subject, owner):
+    return [dict(r) for r in store.connection.execute(
+        "SELECT * FROM lcm_entity_keys WHERE scope_key=? AND subject_key=? "
+        "AND owner_entity_id=? AND method='alias_match' ORDER BY rowid DESC",
+        (store.scope_key, subject, owner))]
 
 
 def _overrides(events, undone):
@@ -559,6 +607,7 @@ def rebuild_entity_keys(store, *, sender_lookup=None, profile_entities=None):
                 entry = desired.setdefault((subject, owner), [candidates[0], "alias_match", set()])
                 entry[2].add(source)
         events, undone, _, _ = _history(store)
+        writes = 0
         for override in _overrides(events, undone):
             if not override["global_override"]:
                 continue
@@ -566,8 +615,22 @@ def rebuild_entity_keys(store, *, sender_lookup=None, profile_entities=None):
             bound = {source for key, source in sources if key == subject} & set(override["scope_store_ids"])
             target = view["canonical"].get(override["entity_id"])
             if bound and target in view["cards"]:
+                alias = desired.get((subject, owner))
+                # Keep the owner/source derivation even while the unique active
+                # slot holds an override. Uncited evidence still uses aliases.
+                if owner is not None and alias and not any(
+                        r["entity_id"] == alias[0] and set(json.loads(r["source_store_ids"])) == alias[2]
+                        for r in _owner_alias_rows(store, subject, owner)[:1]):
+                    held = [r for r in _active_keys(store)
+                            if (r["subject_key"], r["owner_entity_id"]) == (subject, owner)]
+                    for row in held:
+                        store.retire_key(row["key_id"])
+                    key = store.add_key(subject, alias[0], "alias_match", sorted(alias[2]), owner_entity_id=owner)
+                    store.retire_key(key)
+                    for row in held:
+                        store.restore_key(row["key_id"])
+                    writes += 2 + 2 * len(held)
                 desired[(subject, owner)] = [target, "override", bound]
-        writes = 0
         for row in _active_keys(store):
             identity = (row["subject_key"], row["owner_entity_id"])
             wanted = desired.get(identity)
@@ -577,7 +640,10 @@ def rebuild_entity_keys(store, *, sender_lookup=None, profile_entities=None):
                 store.retire_key(row["key_id"])
                 writes += 1
         for (subject, owner), (target, method, cited) in desired.items():
-            store.add_key(subject, target, method, sorted(cited), owner_entity_id=owner)
+            try:
+                store.add_key(subject, target, method, sorted(cited), owner_entity_id=owner)
+            except sqlite3.IntegrityError as error:
+                raise EntityOpRefused("key_held") from error
             writes += 1
         return writes
 
@@ -598,9 +664,21 @@ def resolve_key(store, subject_key, store_id, *, owner_entity_id=None,
                 return target if target in view["cards"] else None
         rows = [r for r in view.get("keys", []) if (r["subject_key"], r["owner_entity_id"], r["method"]) ==
                 (subject_key, owner_entity_id, "alias_match") and store_id in r["source_store_ids"]]
+        if owner_entity_id is not None and not rows:
+            derived = _owner_alias_rows(store, subject_key, owner_entity_id)
+            rows = [r for r in derived[:1] if store_id in json.loads(r["source_store_ids"])
+                    and r["entity_id"] in view["cards"]]
+        relation = any(r["alias_kind"] == "relation_phrase" and r["retired_at"] is None
+                       and r["alias_norm"] in {normalize_alias(subject_key.partition(":")[2]),
+                                               "my " + normalize_alias(subject_key.partition(":")[2])}
+                       for r in _records(store, "aliases"))
+        if relation and owner_entity_id is None:
+            return None
         candidates = _key_candidates(view, subject_key, owner_entity_id)
         if owner_entity_id is not None and not rows:
             return None
         if subject_key.partition(":")[0] in {"user", "assistant"}:
-            return rows[0]["entity_id"] if rows else None
+            target = view["canonical"].get(rows[0]["entity_id"]) if rows else None
+            return target if target in view["cards"] and view["cards"][target]["kind"] == _NAMESPACE_KINDS[
+                subject_key.partition(":")[0]] else None
         return candidates[0] if len(candidates) == 1 else None

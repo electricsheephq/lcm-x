@@ -442,7 +442,8 @@ def test_r1b_6_owner_override_leaves_new_evidence_to_aliases(bridge, namespace):
     subject = namespace + (":self" if namespace == "user" else ":sister")
     original = owner if namespace == "user" else sister
     first = publish(bridge, subject)
-    lookup = lambda sid: (owner, True, True)
+    def lookup(sid):
+        return owner, True, True
     rebuild(bridge, sender_lookup=lookup)
     ops.override_key(subject, chosen, owner_entity_id=owner)
     new = publish(bridge, subject)
