@@ -119,7 +119,7 @@ def test_retirement_transfers_chain_to_live_peer(local_store, monkeypatch, posit
                 engine._schedule_embedding_maintenance()
                 peer._schedule_embedding_maintenance()
                 engine._retire_embedding_maintenance(wait=True)
-        # A slow SQLite pass also earns 1.5x its wall time as a LOCAL idle delay.
+        # A slow SQLite pass also earns the LOCAL multiplier times its wall time as an idle delay.
         # Keep this a handoff/coverage check rather than a shared-runner speed bar.
         if not peer.drain_embedding_maintenance(60):
             with scheduler._condition:
