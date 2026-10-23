@@ -26,8 +26,17 @@ try:
     assert columns(replay)[:len(before)] == columns(before)
     assert len(replay) == len(first)
     assert sum(r["content"] == host[-1]["content"] for r in replay) == 1
+    for turn in range(6):
+        host.extend([{"role": "user", "content": "Rollback user " + str(turn) + " words " * 100},
+                     {"role": "assistant", "content": "Rollback reply " + str(turn) + " words " * 100}])
+    engine._config.fresh_tail_count = 2
+    engine._config.leaf_chunk_tokens = 1
+    engine.compress(host, current_tokens=100_000, force=True)
+    assert engine._last_compression_status == "compacted"
+    assert columns(engine._store.get_session_messages("S"))[:len(before)] == columns(before)
     assert engine._store._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-    print(json.dumps({"reader": "v0.28.1", "retained": len(before), "replay_added": 0, "integrity": "ok"}))
+    print(json.dumps({"reader": "v0.28.1", "retained": len(before), "replay_added": 0,
+                      "compressed": True, "integrity": "ok"}))
 finally:
     engine.shutdown()
 '''
@@ -41,13 +50,23 @@ def test_candidate_snapshot_opens_and_ingests_on_v0281(tmp_path, old_tree, host_
     engine._config.fresh_tail_count = 4
     engine._config.leaf_chunk_tokens = 1
     try:
-        output = _compress(engine, _host())
+        host = _host()
+        host.extend([{"role": "user", "content": "receipt trigger", "timestamp": 500.0},
+                     {"role": "assistant", "content": "equal reply without UID"}])
+        engine.ingest(copy.deepcopy(host))
+        host[-2]["timestamp"] = 501.0
+        engine.ingest(copy.deepcopy(host))
+        receipt = engine._store.read_metadata_json("host_occurrence_accepted_view:S")
+        assert receipt["occurrence_version"] == 2 and receipt["entries"]
+        output = _compress(engine, host)
         assert engine._last_compression_status == "compacted"
         proof = engine._durable_commit_proof_payload()
         assert proof is not None and isinstance(proof.get("output_metadata"), list)
         snapshot = engine._store.read_metadata_json(engine._replay_snapshot_metadata_key("host_occurrence_snapshot"))
-        assert snapshot["output_length"] == len(output)
+        assert snapshot["occurrence_version"] == 2
+        assert snapshot["compaction"]["output_length"] == len(output)
     finally:
         engine.shutdown()
     result = run_old(old, tmp_path, host_root, OLD_INGEST, data=json.dumps(copy.deepcopy(output)))
     assert result["reader"] == "v0.28.1" and result["replay_added"] == 0 and result["integrity"] == "ok"
+    assert result["compressed"]

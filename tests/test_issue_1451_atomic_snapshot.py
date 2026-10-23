@@ -192,7 +192,8 @@ def test_legacy_snapshot_validates_effective_sequence_and_scaffolds(published, m
     engine, _host_input, _output = published
     snapshot_key = keys(engine)[1]
     snapshot = pair(engine)[1]
-    snapshot.pop("output_length", None)
+    snapshot.pop("compaction")
+    snapshot.pop("occurrence_version")
     rows = snapshot["output_metadata"]
     if mutation in ("short", "long"):
         snapshot["output_metadata"] = malformed(mutation, rows)
@@ -216,7 +217,8 @@ def test_legacy_snapshot_with_leading_system_anchor_attaches(tmp_path, monkeypat
         assert engine._last_compression_status == "compacted"
         assert output[0]["role"] == "system"
         proof, snapshot = pair(engine)
-        snapshot.pop("output_length")  # The only change needed to reproduce the old writer's snapshot.
+        snapshot.pop("compaction")
+        snapshot.pop("occurrence_version")  # Exercise the legacy writer's unversioned snapshot.
         rows = snapshot["output_metadata"]
         assert {i for i, row in enumerate(rows) if row["identity_sha256"] is None} == {0, 1}
         assert {item["output_occurrence"]["index"] for item in proof["emissions"]
@@ -226,6 +228,27 @@ def test_legacy_snapshot_with_leading_system_anchor_attaches(tmp_path, monkeypat
         assert loaded.get("output_metadata") == rows
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("envelope", [None, 3, [], {}, {"output_length": True},
+                                    {"output_length": -1}, {"output_length": 1, "unknown": 1}])
+def test_malformed_new_envelope_never_falls_back_to_legacy_count(published, envelope):
+    engine, _host_input, output = published
+    snapshot = pair(engine)[1]
+    snapshot["output_length"] = len(output)  # A valid old count cannot rescue a broken new envelope.
+    snapshot["compaction"] = envelope
+    engine._store.write_metadata_json([keys(engine)[1]], json.dumps(snapshot))
+    assert "output_metadata" not in engine._durable_commit_proof_payload()
+
+
+def test_new_envelope_rejects_conflicting_legacy_count(published):
+    engine, _host_input, output = published
+    snapshot = pair(engine)[1]
+    assert snapshot["occurrence_version"] == 2
+    assert snapshot["compaction"]["output_length"] == len(output)
+    snapshot["output_length"] = len(output) + 1
+    engine._store.write_metadata_json([keys(engine)[1]], json.dumps(snapshot))
+    assert "output_metadata" not in engine._durable_commit_proof_payload()
 
 
 def test_boundary_can_republish_positional_proof_without_snapshot(published, monkeypatch, tmp_path):

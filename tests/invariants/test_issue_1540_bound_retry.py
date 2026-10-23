@@ -67,7 +67,8 @@ def test_occurrence_retry_acceptance_survives_three_restarts(build: Build, mode:
         assert stored(engine) == after
 
 
-@pytest.mark.parametrize("fault", ["resolver-raise", "fact-raise", "missing-fact", "malformed-fact"])
+@pytest.mark.parametrize("fault", ["resolver-raise", "fact-raise", "missing-fact", "malformed-fact",
+                                  "coverage-missing", "coverage-malformed", "coverage-scope", "coverage-order"])
 def test_occurrence_read_failure_retains_rows(build: Build, monkeypatch, fault: str) -> None:
     """Read failures retain rows, and accepting the copy bounds later replay."""
     engine = build()
@@ -79,6 +80,17 @@ def test_occurrence_read_failure_retains_rows(build: Build, monkeypatch, fault: 
     name = f"host_occurrence_row:S:{before[1]['store_id']}"
     if fault in ("missing-fact", "malformed-fact"):
         engine._store.write_metadata_json([name], json.dumps(None if fault == "missing-fact" else ["bad"]))
+    elif fault.startswith("coverage-"):
+        key = "host_occurrence_accepted_view:S"
+        receipt = engine._store.read_metadata_json(key)
+        if fault == "coverage-scope":
+            receipt["scope"]["conversation_id"] = "another synthetic conversation"
+        elif fault == "coverage-order":
+            receipt["fact_store_ids"] = list(reversed(receipt["fact_store_ids"]))
+        else:
+            receipt = None if fault == "coverage-missing" else {"fact_store_ids": "invalid"}
+        engine._store.write_metadata_json([key], json.dumps(receipt))
+        engine._store.write_metadata_json([name], "null")
     engine._occurrence_window_cache = None
     read_many = engine._store.read_metadata_json_many
     def unavailable(*args, **kwargs):
@@ -123,6 +135,7 @@ def test_occurrence_fact_write_rolls_back_insert_attempt(build: Build, monkeypat
         engine.ingest(deepcopy(host))
     assert stored(engine) == []
     assert engine._store._conn.execute("SELECT count(*) FROM metadata WHERE key LIKE 'host_occurrence_row:%'").fetchone()[0] == 0
+    assert engine._store.read_metadata_json("host_occurrence_accepted_view:S") is None
     engine.ingest(deepcopy(host))
     assert len(stored(engine)) == len(host)
 
@@ -146,6 +159,22 @@ def test_occurrence_first_ingest_and_uid_adoption_survive_restart(build: Build) 
         assert fact["message_uid"] is not None
 
 
+def test_occurrence_writer_coverage_does_not_claim_legacy_holes(build: Build) -> None:
+    engine = build()
+    host = [{"role": "user", "content": "synthetic first"},
+            {"role": "assistant", "content": "synthetic answer"}]
+    engine.ingest(deepcopy(host))
+    old_ids = [r["store_id"] for r in stored(engine)]
+    legacy_id = engine._store.append("S", {"role": "user", "content": "synthetic legacy gap"},
+                                     conversation_id="conversation")
+    host.append({"role": "user", "content": "synthetic next"})
+    engine.ingest(deepcopy(host))
+    coverage = engine._store.read_metadata_json("host_occurrence_accepted_view:S")["fact_store_ids"]
+    assert set(old_ids) <= set(coverage) and max(coverage) > legacy_id
+    assert legacy_id not in coverage
+    assert engine._store.read_metadata_json(f"host_occurrence_row:S:{legacy_id}") is None
+
+
 def test_occurrence_plain_reply_acceptance_has_no_restart_growth(build: Build) -> None:
     """A new user stamp accepts the unknown equal reply once (#1451)."""
     engine = build()
@@ -162,6 +191,52 @@ def test_occurrence_plain_reply_acceptance_has_no_restart_growth(build: Build) -
         engine = build()
         engine.ingest(deepcopy(host))
         assert stored(engine) == after
+
+
+def test_occurrence_carry_rewrite_keeps_equal_uid_segments(build: Build) -> None:
+    """The stale/user-only matrix cell binds every result in the parent scope."""
+    engine = build()
+    original = fixture(uids=True)
+    original.extend(tool_pair("d", LONG + "d", tool_name="lookup"))
+    original.append({"role": "user", "content": "pending carry sentinel", "timestamp": 40})
+    for index, row in enumerate(original):
+        row["message_uid"] = f"{index + 1:032x}"
+    engine.ingest(deepcopy(original))
+    parent = engine._store.get_session_messages("S")
+    host = engine.compress(deepcopy(original), force=True)
+    assert engine._last_compression_status == "compacted"
+    engine.on_session_end("S", deepcopy(original))
+    engine.on_session_start("C", boundary_reason="compression", old_session_id="S",
+                            conversation_id="conversation", platform="cli")
+    before = engine._store.read_metadata_json("compaction_commit_proof:C")
+    assert host[-1]["content"] == "pending carry sentinel"
+    host = host[:-1]
+    engine.ingest(deepcopy(host))
+    after = engine._store.read_metadata_json("compaction_commit_proof:C")
+    assert before["carry_ranges"] != after["carry_ranges"]
+    assert "output_metadata" in engine._durable_commit_proof_payload()
+    assert engine._store.get_session_messages("S") == parent
+    assert engine._store.get_session_messages("C"), "accepted child head needs a durable row witness"
+    next(row for row in host if row.get("content") == "repeat")["message_uid"] = "f" * 32
+    for row in host:
+        if row.get("tool_call_id") in ("c", "d"):
+            row["content"] = CLEARED
+    for index in range(2):
+        host.extend(tool_pair(f"following-{index}", f"new result {index}", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    def all_rows(e):
+        return sorted(e._store.get_session_messages("S") + e._store.get_session_messages("C"),
+                      key=lambda row: row["store_id"])
+    accepted = all_rows(engine)
+    for call_id in ("c", "d"):
+        assert sum(row.get("tool_call_id") == call_id for row in accepted) == 1
+        assert sum(any(c["id"] == call_id for c in row.get("tool_calls") or []) for row in accepted) == 1
+    for _ in range(3):
+        engine.shutdown()
+        engine = build()
+        engine.on_session_start("C", conversation_id="conversation", platform="cli")
+        engine.ingest(deepcopy(host))
+        assert all_rows(engine) == accepted
 
 
 @pytest.mark.parametrize("anchor", ["off", "on"])

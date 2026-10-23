@@ -2729,6 +2729,9 @@ class ReconcileMixin:
                     snapshot = {**snapshot, "proof_sha256": hashlib.sha256(
                         json.dumps(payload, sort_keys=True).encode()).hexdigest()}
                     self._store.write_metadata_json([snapshot_key], json.dumps(snapshot, sort_keys=True))
+            # A trimmed range changes which parent rows may witness replay.
+            # Invalidate only after commit; rollback retains the old generation.
+            self._occurrence_window_cache = None
             logger.info("LCM rewrote the rotation child's carry ranges (%s): store ids %s", reason, store_ids)
         except Exception:
             logger.warning("LCM carry-range rewrite rolled back", exc_info=True)

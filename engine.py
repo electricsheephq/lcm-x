@@ -146,7 +146,8 @@ from .message_patterns import compile_message_patterns, matches_message_pattern
 from .aux_session import AuxiliarySessionMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
-from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity
+from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _HERMES_PRUNE_MIN_CHARS, _emission_identity
+from .reconcile import _is_stored_nonstring_content
 from .reconcile import _hermes_salvage_protected_positions
 from .reconcile import _commit_proof_identity_digest, _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
 from .compaction import CompactionMixin
@@ -6658,7 +6659,8 @@ class LCMEngine(
     def _write_compress_commit_proof_payload(self, proof, payload) -> None:
         snapshot = None
         if "output_metadata" in proof and proof.get("durable") is not False:
-            snapshot = {"output_metadata": proof["output_metadata"], "output_length": len(proof["output"])}
+            snapshot = {"occurrence_version": 2, "output_metadata": proof["output_metadata"],
+                        "compaction": {"output_length": len(proof["output"])}}
             if not self._occurrence_snapshot_shape_valid(snapshot, payload):
                 raise ValueError("invalid occurrence snapshot")
             snapshot["proof_sha256"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -6675,6 +6677,16 @@ class LCMEngine(
         rows = snapshot.get("output_metadata")
         if not isinstance(rows, list):
             return False
+        if "occurrence_version" in snapshot and (snapshot["occurrence_version"] != 2 or "compaction" not in snapshot):
+            return False
+        envelope = snapshot.get("compaction")
+        if "compaction" in snapshot:
+            if (snapshot.get("occurrence_version") != 2 or not isinstance(envelope, dict)
+                    or set(envelope) != {"output_length"}
+                    or type(envelope.get("output_length")) is not int or envelope["output_length"] != len(rows)):
+                return False
+            if "output_length" in snapshot and snapshot["output_length"] != envelope["output_length"]:
+                return False
         if "output_length" in snapshot and (type(snapshot["output_length"]) is not int
                                             or snapshot["output_length"] != len(rows)):
             return False
@@ -6692,7 +6704,7 @@ class LCMEngine(
         if [row["identity_sha256"] for row in rows if row["identity_sha256"] is not None] != payload.get(
                 "effective_sha256_v4", payload.get("effective_sha256", [])):
             return False
-        if "output_length" not in snapshot:
+        if "output_length" not in snapshot and "compaction" not in snapshot:
             # Old snapshots lack a count. Their effective sequence and known scaffold positions must agree.
             scaffold = payload.get("scaffold_sha256_v4", payload.get("scaffold_sha256"))
             if scaffold is not None:
@@ -6805,7 +6817,7 @@ class LCMEngine(
         key = (id(store), self._session_id, self._conversation_id, generation)
         cache = getattr(self, "_occurrence_window_cache", None)
         if cache and cache[0] == key:
-            return cache[1], cache[2]
+            return cache[1], cache[2], cache[3]
         rows = store.get_session_tail(self._session_id, limit=4096)
         room = 4096 - len(rows)
         if room:
@@ -6819,7 +6831,8 @@ class LCMEngine(
         rows = [r for r in rows if str(r.get("conversation_id") or "")
                 in ("", str(self._conversation_id or ""))]
         keys = [f"host_occurrence_row:{r['session_id']}:{r['store_id']}" for r in rows]
-        values = store.read_metadata_json_many(keys)
+        sources = {r["session_id"] for r in rows}
+        values = store.read_metadata_json_many(keys + [f"host_occurrence_accepted_view:{s}" for s in sources])
         facts = {}
         for row, name in zip(rows, keys):
             fact = values.get(name)
@@ -6833,8 +6846,30 @@ class LCMEngine(
                            for k in ("user_store_id", "segment_call_store_id"))):
                 continue
             facts[row["store_id"]] = fact
-        self._occurrence_window_cache = (key, rows, facts)
-        return rows, facts
+        missing = set()
+        for source in sources:
+            receipt = values.get(f"host_occurrence_accepted_view:{source}")
+            coverage = self._occurrence_fact_coverage(receipt, source)
+            own = [r["store_id"] for r in rows if r["session_id"] == source]
+            # Only positive writer coverage distinguishes a legacy row from a
+            # lost v2 fact. Unavailable coverage cannot manufacture legacy proof.
+            required = (set(own) & coverage if coverage is not None else
+                        set(own) if receipt is not None or any(sid in facts for sid in own) else set())
+            missing.update(required - facts.keys())
+        self._occurrence_window_cache = (key, rows, facts, missing)
+        return rows, facts, missing
+
+    def _occurrence_fact_coverage(self, receipt, source, conversation_id=None):
+        if (not isinstance(receipt, dict) or receipt.get("occurrence_version") != 2
+                or receipt.get("scope") != {"session_id": source, "conversation_id": (
+                    self._conversation_id if conversation_id is None else conversation_id)}):
+            return None
+        covered = receipt.get("fact_store_ids")
+        if (not isinstance(covered, list) or len(covered) > 4096
+                or any(type(sid) is not int or sid <= 0 for sid in covered)
+                or covered != sorted(set(covered))):
+            return None
+        return set(covered)
 
     def _occurrence_metadata(self, message, *, stored=False, fact=None):
         from .config import host_message_uid_mode
@@ -6876,9 +6911,11 @@ class LCMEngine(
         Equal bytes only discover candidates. Known conflicts veto every source;
         a row must have an independent fact. Missing/corrupt evidence keeps it.
         """
-        result = dict(matched={}, proven=set(), fresh=set(), legacy=set(), updates={}, owners={}, failed=False)
+        result = dict(matched={}, proven=set(), fresh=set(), legacy=set(), deferred=set(),
+                      updates={}, owners={}, failed=False)
         try:
-            rows, facts = self._stored_occurrence_metadata()
+            rows, facts, missing = self._stored_occurrence_metadata()
+            legacy_rows = any(r["store_id"] not in facts and r["store_id"] not in missing for r in rows)
             result["has_facts"] = bool(facts)
             by_id = {r["store_id"]: r for r in rows}
             accepted = self._validate_occurrence_receipt(rows, facts)
@@ -6889,6 +6926,9 @@ class LCMEngine(
             protected = _hermes_salvage_protected_positions(messages)
             choices, conflicts = {}, {}
             current = [self._occurrence_metadata(m) for m in messages]
+            warm_plain = (not self._ingest_cursor_needs_reconcile and self._ingest_cursor > 0
+                          and not getattr(self, "_compress_commit_proof", None)
+                          and not self._active_emission_proof())
             owner_user, owner_segment = None, None
             for index, message in enumerate(messages):
                 if message.get("role") == "user":
@@ -6896,17 +6936,51 @@ class LCMEngine(
                 if message.get("role") == "assistant" and message.get("tool_calls"):
                     owner_segment = index
                 result["owners"][index] = (owner_user, owner_segment)
-                literal = self._message_replay_identity(message, allow_pruned_tool_alias=False)
+                literal = self._message_replay_identity(message, strip_carrier=False, allow_pruned_tool_alias=False)
                 effective = self._message_replay_identity(message, allow_pruned_tool_alias=index not in protected)
                 if _has_lossy_redacted_identity(literal) or self._matches_ignore_message_patterns(message):
                     choices[index] = []
                     continue
                 digests = {_commit_proof_identity_digest(_proof_user_identity(i)) for i in (literal, effective)}
                 candidates = list(dict.fromkeys(sid for d in digests for sid in by_digest.get(d, ())))
+                if literal != effective and self._generated_context_carrier_remainder(message) is not None:
+                    raw = by_digest.get(_commit_proof_identity_digest(_proof_user_identity(literal)), ())
+                    if raw:
+                        candidates = list(raw)  # The actual stored carrier outranks its retained-user alias.
+                if (message.get("role") == "tool" and message.get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
+                        and index not in protected and identity_anchor_enabled()):
+                    # A rotation child's alias index need not include its parent
+                    # rows. Discovery uses only the permitted carry window; the
+                    # complete segment and each row's metadata must still bind.
+                    candidates = list(dict.fromkeys(candidates + [r["store_id"] for r in rows
+                        if r["store_id"] in facts and r.get("role") == "tool"
+                        and r.get("tool_call_id") == message.get("tool_call_id")
+                        and isinstance(r.get("content"), str) and len(r["content"]) > _HERMES_PRUNE_MIN_CHARS
+                        and not _is_stored_nonstring_content(r["content"])
+                        and not _has_lossy_redacted_identity(self._message_replay_identity(
+                            r, stored_row=True, allow_pruned_tool_alias=False))]))
                 good, bad = [], []
                 for sid in candidates:
                     old = self._occurrence_metadata(by_id[sid], stored=True, fact=facts[sid])
                     conflict = self._host_occurrence_changed(current[index], old)
+                    uid_conflict = (current[index]["message_uid"] is not None and old["message_uid"] is not None
+                                    and current[index]["message_uid"] != old["message_uid"])
+                    if conflict and not uid_conflict:
+                        end = next((p for p in range(index + 1, len(messages))
+                                    if messages[p].get("role") == "user"), len(messages))
+                        pruned_turn = (message.get("role") == "user" and any(
+                            m.get("role") == "tool" and m.get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
+                            for m in messages[index + 1:end]))
+                        aliases = (self._store.get_message_relations([sid], "alt_stamp")
+                                   + self._store.get_message_relations([sid], "carried_stamp")) if identity_anchor_enabled() else []
+                        same_uid = (current[index]["message_uid"] is not None
+                                    and current[index]["message_uid"] == old["message_uid"])
+                        if same_uid or any(_normalize_observed_at(r.get("observed_at")) == current[index]["timestamp"]
+                                           for r in aliases):
+                            conflict = False
+                        elif not ((warm_plain or pruned_turn) and message.get("role") == "user"):
+                            result["deferred"].add(index)
+                            continue  # The existing stamp/recovery owner decides this partition.
                     (bad if conflict else good).append(sid)
                 if current[index]["message_uid"]:
                     equal_uid = [sid for sid in good if facts[sid].get("message_uid") == current[index]["message_uid"]]
@@ -7014,17 +7088,14 @@ class LCMEngine(
                         for pos, sid in winners[0].items():
                             accept(pos, sid)
                     else:
-                        if len(facts) < len(rows) and any(choices[pos] for pos in segment):
+                        if missing and any(choices[pos] for pos in segment):
                             result["needs_receipt"] = True
                         # Whole-segment fence for UID changes and bounded/pruned
                         # retries. Preserve #1179's literal steady-result update.
-                        if not steady_single:
+                        if not steady_single and (any(conflicts[pos] for pos in segment)
+                                                  or borrowed and not legacy_rows or user_changed
+                                                  or missing):
                             result["fresh"].update(segment)
-                        else:
-                            for pos in segment:
-                                eligible = [sid for sid in choices[pos] if sid not in used]
-                                if len(eligible) == 1:
-                                    accept(pos, eligible[0])
                     index = end
                     continue
                 eligible = [sid for sid in choices[index] if sid not in used]
@@ -7043,10 +7114,28 @@ class LCMEngine(
                 index += 1
             proof = getattr(self, "_compress_commit_proof", None) or self._durable_commit_proof_payload()
             generated = set()
+            emitted_heads = set()
             if proof:
-                _, identities = self._occurrence_replay_identities(messages, proof)
+                projection, identities = self._occurrence_replay_identities(messages, proof)
                 generated = {i for i, identity in enumerate(identities) if identity is None}
-            result["fresh"].update(set(range(len(messages))) - result["proven"] - result["legacy"] - generated)
+                emitted_heads = generated | {i for i, entry in enumerate(projection.entries)
+                                             if entry.generated_span is not None}
+            # An unmatched content/alias decision still belongs to the existing
+            # anchor/audit/protection path. It is not a fresh occurrence finding.
+            # A missing or malformed fact for this new-writer window, however,
+            # cannot authorize consumption and must retain the affected rows.
+            unmatched = set(range(len(messages))) - result["proven"] - result["legacy"] - generated
+            if missing:
+                result["fresh"].update(unmatched)
+            else:
+                result["deferred"].update(unmatched)
+            if self._load_compression_carry_ranges() and not any(r["session_id"] == self._session_id for r in rows):
+                # First accepted child view: store each emitted head once so
+                # its facts can witness the shortened view across restarts.
+                result["fresh"].update(emitted_heads)
+                result["proven"].difference_update(emitted_heads)
+                for index in emitted_heads:
+                    result["matched"].pop(index, None)
             return result
         except Exception:
             logger.warning("LCM occurrence resolver unavailable; retaining unproven rows", exc_info=True)
@@ -7067,7 +7156,7 @@ class LCMEngine(
         safe = resolution["proven"] | resolution.get("legacy", set()) | generated
         prefix = next((i for i in range(len(messages)) if i not in safe), len(messages))
         cursor = max(cursor, prefix)
-        unresolved = set(range(cursor)) - safe
+        unresolved = set(range(cursor)) - safe - resolution.get("deferred", set())
         resolution["fresh"].update(unresolved)
         return min(unresolved | resolution["fresh"], default=cursor) if unresolved else min(
             resolution["fresh"] | {cursor})
@@ -7083,14 +7172,16 @@ class LCMEngine(
         """Retry-local state resets on the first callback of every insert attempt."""
         source = batch["session_id"]
         initial = batch.get("occurrence_matched", {})
-        ids = {}
+        ids, written = {}, set()
 
         def factory(message, store_id):
             pos = message["_occurrence_position"]
             if pos == batch["metadata_messages"][0]["_occurrence_position"]:
                 ids.clear()
                 ids.update(initial)
+                written.clear()
             ids[pos] = (source, store_id)
+            written.add(store_id)
             def owner(name):
                 reference = ids.get(message.get(name))
                 return reference[1] if reference and reference[0] == source else None
@@ -7104,14 +7195,17 @@ class LCMEngine(
             if pos == batch["metadata_messages"][0]["_occurrence_position"]:
                 records.extend((key, json.dumps(value, separators=(",", ":")))
                                for key, value in batch.get("occurrence_updates", {}).items())
-            if (batch.get("occurrence_receipt") and pos == batch["metadata_messages"][-1]["_occurrence_position"]
-                    and batch.get("occurrence_length", 4097) <= 4096):
+            if pos == batch["metadata_messages"][-1]["_occurrence_position"]:
+                key = f"host_occurrence_accepted_view:{source}"
+                previous = batch["store"].read_metadata_json(key)
+                coverage = self._occurrence_fact_coverage(previous, source, batch["conversation_id"]) or set()
                 receipt = dict(occurrence_version=2,
                                scope=dict(session_id=source, conversation_id=batch["conversation_id"]),
-                               entries=[dict(host_index=index, source_session_id=ref[0], store_id=ref[1])
-                                        for index, ref in sorted(ids.items())])
-                key = f"host_occurrence_accepted_view:{source}"
-                if batch["store"].read_metadata_json(key) != receipt:
+                               fact_store_ids=sorted(coverage | written)[-4096:])
+                if batch.get("occurrence_receipt") and batch.get("occurrence_length", 4097) <= 4096:
+                    receipt["entries"] = [dict(host_index=index, source_session_id=ref[0], store_id=ref[1])
+                                          for index, ref in sorted(ids.items())]
+                if previous != receipt:
                     records.append((key, json.dumps(receipt, separators=(",", ":"))))
             return records
         return factory
@@ -7128,7 +7222,8 @@ class LCMEngine(
                 user, segment = getattr(self, "_occurrence_ingest_plan", {}).get("owners", {}).get(pos, (user, segment))
             result.append({**message, "_occurrence_position": pos, "_occurrence_user": user,
                            "_occurrence_segment": segment, "_occurrence_digest": _commit_proof_identity_digest(
-                               _proof_user_identity(self._message_replay_identity(message, allow_pruned_tool_alias=False)))})
+                               _proof_user_identity(self._message_replay_identity(
+                                   message, strip_carrier=False, allow_pruned_tool_alias=False)))})
         return result
 
     def _ingest_messages(
@@ -7343,8 +7438,9 @@ class LCMEngine(
         # decision. The compaction snapshot can never outrank a newer fact.
         cursor = self._occurrence_cursor_fence(messages, cursor)
         self._ingest_cursor = cursor
-        new_prefix_occurrences = set(occurrence["fresh"])
-        unchanged_prefix_occurrences = set(occurrence["proven"])
+        new_prefix_occurrences -= occurrence["proven"]
+        new_prefix_occurrences.update(occurrence["fresh"])
+        unchanged_prefix_occurrences.update(occurrence["proven"])
         # A restart can preserve a genuinely new row (so the cursor stops early)
         # and still replay exact durable tool pairs AFTER it. Those pairs are
         # matched on their durable ``tool_call_id`` identity, so suppressing
@@ -7510,7 +7606,7 @@ class LCMEngine(
             if cache and cache[0][:3] == (id(self._store), self._session_id, self._conversation_id):
                 generation = (self._store._conn.total_changes, self._store._conn.execute(
                     "PRAGMA data_version").fetchone()[0])
-                self._occurrence_window_cache = (cache[0][:3] + (generation,), cache[1], cache[2])
+                self._occurrence_window_cache = (cache[0][:3] + (generation,), *cache[1:])
             # #1353: keep paired proof for the unaudited prefix, never the newly stored tail.
             if unaudited_from is not None:
                 end = min(cursor, len(cached_source_identities), len(previous_replay),
@@ -10709,7 +10805,8 @@ class LCMEngine(
                               for name, value in batch.get("occurrence_updates", {}).items()})
                 facts = {r["store_id"]: facts[r["store_id"]] for r in rows if r["store_id"] in facts}
                 generation = (store._conn.total_changes, store._conn.execute("PRAGMA data_version").fetchone()[0])
-                self._occurrence_window_cache = (cache[0][:3] + (generation,), rows, facts)
+                self._occurrence_window_cache = (cache[0][:3] + (generation,), rows, facts,
+                                                cache[3] & {r["store_id"] for r in rows})
         except Exception:
             self._occurrence_window_cache = None
             logger.debug("LCM occurrence cache refresh unavailable", exc_info=True)
