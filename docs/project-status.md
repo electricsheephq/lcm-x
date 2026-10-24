@@ -1,6 +1,6 @@
 # LCM-X project state
 
-This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05 and is updated at every release; the latest update is 2026-10-21, for roadmap v4 after v0.28.1 GA.
+This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05 and is updated at every release; the latest update is 2026-10-24, for v0.29.0-rc1 preparation.
 
 ## Naming and compatibility
 
@@ -31,7 +31,9 @@ The [published GA notes](https://github.com/electricsheephq/lcm-x/releases/tag/v
 - **Known follow-ups:** Replay duplicates (#1674, now planned for v0.30.0; no v0.28.2 is planned), host review-fork detach refusals (#1675), crash and interrupted-turn persistence shapes, coverage costs, wedge recovery and other listed continuity work remain open. Local recall and background leaf preparation remain optional and off by default, with no default change or new dependency.
 - **Benchmark boundary:** The gauntlet ran at v0.28.1-rc3; v0.28.0 provides comparison evidence rather than carry-forward qualification. Controlled latency and regression rows do not establish an aggregate gauntlet pass, reference-agent latency, strict #1501 acceptance, or runtime or customer readiness; no improvement is claimed.
 
-The source snapshot used for this reconciliation is `main@a39de4aad0fee0155b868f77c6e779d7d89f3c9f`. Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits. Releases with product code are rc-first under `bench/specs/RELEASE-READINESS-V1.md`.
+The source snapshot used for this reconciliation is `main@74094bd6b87dcf720ff3ed03093fb1f10e12d03f`. Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
+
+Main carries the forward identity `0.29.0` (`hermes-lcm-x`), first tagged as `v0.29.0-rc1`; `v0.28.1` remains the latest stable release. The candidate is not qualified yet. Releases with product code are rc-first under `bench/specs/RELEASE-READINESS-V1.md`; the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
 
 ## Reference-agent acceptance state
 
