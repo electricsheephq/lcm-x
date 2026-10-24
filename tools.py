@@ -9,6 +9,7 @@ import re
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -99,7 +100,7 @@ from .search_query import (
 )
 from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore, _interrupt_read_on_deadline
-from .config import LCMConfig, embedding_provider_id, normalize_embedding_provider, profile_bound
+from .config import effective_embedding_model, LCMConfig, embedding_provider_id, normalize_embedding_provider, profile_bound
 
 if TYPE_CHECKING:
     from .engine import LCMEngine
@@ -1821,7 +1822,7 @@ def _lcm_grep_resolve_provider(
         raise RuntimeError(f"local embedding model is {state[0]}{reason}; retrieval uses full text")
     cache_key = (
         str(getattr(config, "embedding_provider", "") or "").strip().lower(),
-        str(getattr(config, "embedding_model", "") or "").strip(),
+        effective_embedding_model(getattr(config, "embedding_provider", ""), getattr(config, "embedding_model", "")),
     )
     cached = getattr(engine, "_lcm_embedding_provider_cache", None)
     if cached is not None and cached[0] == cache_key:
@@ -1857,7 +1858,7 @@ def _resolve_recall_provider(
     config = engine._config
     cache_key = (
         override.lower(),
-        str(getattr(config, "embedding_model", "") or "").strip(),
+        effective_embedding_model(override, getattr(config, "embedding_model", "")),
     )
     cached = getattr(engine, "_lcm_proactive_provider_cache", None)
     if cached is not None and cached[0] == cache_key:
@@ -4099,6 +4100,21 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     run_fts = include in {"all", "verbatim"} or not embeddings_enabled
     run_summary = include in {"all", "summaries"}
     run_chunk = include in {"all", "verbatim"}
+    selected_provider = provider_override or getattr(engine._config, "embedding_provider", "")
+    local_fallback_reasons = []
+    if embeddings_enabled and embedding_provider_id(normalize_embedding_provider(selected_provider)) == "fastembed":
+        from .embedding_maintenance import local_model_state
+        selected_config = copy.copy(engine._config)
+        selected_config.embedding_provider = selected_provider
+        selected = SimpleNamespace(provider_id="fastembed", model_id=effective_embedding_model(selected_provider, getattr(engine._config, "embedding_model", "")))
+        local_fallback_reasons = [reason for task, active in (("summary", run_summary), ("chunk", run_chunk))
+                         if active and (reason := _lcm_recall_catchup_reason(engine, selected, task))]
+        probe, state = probe_provider_availability(selected_config), local_model_state(selected_config)
+        if not probe.get("available"):
+            local_fallback_reasons.append(f"local dependency unavailable: {probe.get('detail')}")
+        elif state and state[0] != "present":
+            local_fallback_reasons.append(f"local model {state[0]}: {state[1]}")
+        run_fts = run_fts or bool(local_fallback_reasons)
 
     arm_hits: dict[str, list[dict[str, Any]]] = {}
     # Node handles from the summary arm. Reference-strict delivery routes summary
@@ -4106,7 +4122,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     # here as non-evidence drill-down leads instead of as hits.
     summary_leads: list[dict[str, Any]] = []
     coverage: dict[str, str] = {}
-    degraded_reasons: list[str] = ["cpu_limited"] if cpu_limited else []
+    degraded_reasons: list[str] = (["cpu_limited"] if cpu_limited else []) + local_fallback_reasons
     embedding_query_metrics: list[dict[str, Any]] = []
     timed_out = False
     provider: Any = None
@@ -4120,14 +4136,13 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         configured_provider = provider_override or str(
             getattr(engine._config, "embedding_provider", "") or ""
         ).strip()
-        configured_model = str(
-            getattr(engine._config, "embedding_model", "") or ""
-        ).strip()
+        configured_model = effective_embedding_model(configured_provider, getattr(engine._config, "embedding_model", ""))
         # A fallback runs because the semantic arm already failed, so it gets the
         # whole remaining budget rather than the cap reserved for that arm (#887).
         semantic_available = (
             not fallback
             and embeddings_enabled
+            and not local_fallback_reasons
             and (run_summary or run_chunk)
             # A timed-out scope resolution drops the vector arms (fail closed)
             # and an empty whitelist leaves them nothing eligible to return;
@@ -4233,6 +4248,11 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 coverage["summary"] = "disabled"
             if run_chunk:
                 coverage["chunk"] = "disabled"
+        elif local_fallback_reasons:
+            if run_summary:
+                coverage["summary"] = "none"
+            if run_chunk:
+                coverage["chunk"] = "none"
         elif time.monotonic() >= deadline:
             timed_out = True
         else:
@@ -4595,12 +4615,12 @@ def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
         try:
             command._register_summary_has_text(conn)
             profile = command._embedding_current_profile(conn)
-            wanted = str(probe.get("model") or getattr(engine._config, "embedding_model", "") or "")
+            wanted = effective_embedding_model(probe.get("provider", ""), probe.get("model") or getattr(engine._config, "embedding_model", ""))
             if profile is not None and not (embedding_provider_id(str(profile["provider"] or "")) == "fastembed"
                                             and str(profile["model_name"] or "") == wanted):
                 profile = None  # another model's vectors are not coverage for the configured one
             if model is None:
-                model = "present" if profile is not None else "not prepared (run /lcm embed warmup)"
+                model = "present" if state and state[0] == "present" else "preparing"
             vectors = "SELECT 1 WHERE 0" if profile is None else (
                 "SELECT 1 FROM lcm_embedding_meta AS m WHERE m.embedded_id = CAST(n.node_id AS TEXT) "
                 "AND m.embedded_kind = 'summary' AND m.identity_hash = :identity"
@@ -4618,9 +4638,11 @@ def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
     except sqlite3.Error as exc:
         coverage = f"unavailable ({exc})"
         if model is None:
-            model = "present" if _active_embedding_profile_exists(engine) else "not prepared (run /lcm embed warmup)"
+            model = "present" if _active_embedding_profile_exists(engine) else "preparing"
     last, _ = command.incremental_embedding_state(engine._store.db_path)
-    return f"model: {model}; coverage: {coverage}" + (f"; maintenance: {last[1]}" if last else "")
+    provider = SimpleNamespace(provider_id="fastembed", model_id=probe.get("model"), identity_revision_suffix="")
+    chunks = _lcm_recall_catchup_reason(engine, provider, "chunk") or "backlog not reported; coverage not certified"
+    return f"model: {model}; coverage: {coverage}; chunks: {chunks}" + (f"; maintenance: {last[1]}" if last else "")
 
 
 def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
@@ -4678,10 +4700,15 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
     if cpu_limited:
         detail.update(cpu_limited=True, effective_cpus=effective_cpus(), cpu_limit_reason=(
             f"semantic recall limited on this host ({effective_cpus():g} effective CPUs); full-text recall is active"))
+    readiness = str(detail.get("readiness", ""))
+    if "coverage: unavailable" in readiness:
+        detail["reason"] = "embedding coverage could not be read"
+        return {"check": "embedding_provider_health", "status": "warn", "detail": detail}
     if str(detail.get("readiness", "")).startswith("model: preparing;"):
+        detail["informational"] = True
         detail["impact"] = (
-            "semantic retrieval is degraded while the local model prepares in the background; "
-            "lcm_recall keeps answering from full text"
+            "Local semantic recall preparing; full-text recall is active; "
+            "lcm_recall keeps answering from full text while the local model prepares in the background"
         )
         return {
             "check": "embedding_provider_health",
@@ -4690,8 +4717,11 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
         }
     # An unavailable provider is the prerequisite blocker: warmup cannot succeed until it is fixed.
     if not probe.get("available") or str(detail.get("readiness", "")).startswith("model: unavailable("):
+        if readiness.startswith("model: unavailable(") and probe.get("available"):
+            detail["reason"] = readiness.split("unavailable(", 1)[1].split(");", 1)[0]
         detail["impact"] = (
-            "semantic retrieval is degraded: lcm_recall reports degraded=true and "
+            f"Local semantic recall unavailable ({detail['reason']}); full-text recall is active; "
+            "lcm_recall reports degraded=true and "
             "lcm_grep mode=semantic falls back to full-text"
         )
         return {
@@ -4766,6 +4796,9 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
                 "status": "warn",
                 "detail": detail,
             }
+    detail["informational"] = cpu_limited or readiness.startswith("model: present;")
+    if readiness.startswith("model: present;"):
+        detail["impact"] = "Model ready; summaries " + readiness.split("coverage: ", 1)[1]
     return {
         "check": "embedding_provider_health",
         "status": "warn" if cpu_limited else "pass",
@@ -5576,7 +5609,7 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     overall = "healthy"
     if any(ch["status"] == "fail" for ch in checks):
         overall = "unhealthy"
-    elif any(ch["status"] == "warn" for ch in checks):
+    elif any(ch["status"] == "warn" and not (isinstance(ch.get("detail"), dict) and ch["detail"].get("informational")) for ch in checks):
         overall = "warnings"
 
     return json.dumps({

@@ -251,9 +251,9 @@ def runtime(request):
             raise RuntimeError("foreground embedding join forbidden")
         return original_join(thread, *args, **kw)
     threading.Thread.join = join
-    cfg = config(mod, a.db) if a.state != "OFF" else mod("config").LCMConfig(database_path=str(a.db))
+    cfg = config(mod, a.db) if a.state != "OFF" else mod("config").LCMConfig(database_path=str(a.db), embeddings_enabled=False)
     if cfg.embeddings_enabled != (a.state != "OFF"):
-        raise RuntimeError("OFF product defaults no longer disable embeddings")
+        raise RuntimeError("OFF arm must explicitly disable embeddings")
     cfg = replace(cfg, fresh_tail_count=2, leaf_chunk_tokens=2000, context_threshold=.75,
         threshold_full_sweep_enabled=True, large_output_externalization_enabled=False,
         large_output_active_replay_stubbing_enabled=False, temporal_rollups_enabled=False,
@@ -269,7 +269,7 @@ def runtime(request):
     if a.state == "ON-covered":
         engine._embedding_maintenance_retired = True
     bind = (time.perf_counter()-start)*1000
-    dump(a.root/"config.json", dict(config=asdict(cfg), bind_ms=bind, ort_threads=mod("embedding_provider")._FASTEMBED_THREADS))
+    dump(a.root/"config.json", dict(config={**asdict(cfg), "embedding_model": mod("config").effective_embedding_model(cfg.embedding_provider, cfg.embedding_model)}, bind_ms=bind, ort_threads=mod("embedding_provider")._FASTEMBED_THREADS))
     a._ready = lambda: mod("embedding_provider").probe_provider_availability(cfg).get("available", False)
     return a, mod, engine, bind
 

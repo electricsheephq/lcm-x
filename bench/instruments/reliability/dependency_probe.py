@@ -124,7 +124,7 @@ def main() -> None:
         result["doctor"] = json.loads(engine.handle_tool_call("lcm_doctor", {}))
         assert token in json.dumps(result["recall"]), result
         assert result["recall"].get("degraded") is True, result
-        assert "hermes plugins enable hermes-lcm-x-local-embeddings" in json.dumps(result["doctor"]), result
+        assert f"HERMES_HOME={engine._hermes_home} hermes -p default plugins enable hermes-lcm-x-local-embeddings" in json.dumps(result["doctor"]), result
     else:
         raise ValueError(mode)
     assert result["core_enabled"] and not result["core_error"], result

@@ -327,7 +327,7 @@ def test_status_drops_previous_session_fit(no_call, boundary):
                          ({"count": 0, "count_lost": True}, True),
                          ({"count": 0, "projected_count": 1}, True), ({"count": "damaged"}, True)])
 def test_doctor_surfaces_agree(tmp_path, record, expected):
-    engine = retained._engine(tmp_path, False, context_threshold=0.75)
+    engine = retained._engine(tmp_path, False, context_threshold=0.75, embeddings_enabled=False)
     try:
         engine.ingest([{"role": "user", "content": "ordinary stored turn"}])
         baseline_command_status = handle_lcm_command("doctor", engine).splitlines()[1]

@@ -23,7 +23,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .config import embedding_provider_id, profile_bound
+from .config import effective_embedding_model, embedding_provider_id, profile_bound
 from .embedding_provider import FastembedProvider, _is_loopback_url
 
 logger = logging.getLogger(__name__)
@@ -82,7 +82,7 @@ def _local_model_key(config: Any) -> tuple[str, str, int] | None:
     provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
     if provider not in {"fastembed", "fast-embed"}:
         return None
-    model = str(getattr(config, "embedding_model", "") or "").strip()
+    model = effective_embedding_model(getattr(config, "embedding_provider", ""), getattr(config, "embedding_model", ""))
     return FastembedProvider(model)._cache_key() if model else None
 
 

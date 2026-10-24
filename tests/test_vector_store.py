@@ -1001,7 +1001,7 @@ def test_no_profile_or_vectors_returns_none_coverage(tmp_path):
 
 def test_embedding_config_defaults_are_inert_and_read_environment(monkeypatch):
     defaults = LCMConfig()
-    assert defaults.embeddings_enabled is False
+    assert defaults.embeddings_enabled is True
     assert defaults.embedding_bounded_scan_rows == 2_000
 
     monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "true")

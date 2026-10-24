@@ -29,8 +29,8 @@ The hermes-lcm plugin repo is NEVER modified: it is made importable via the same
 Environment:
     HERMES_LCM_REPO                path to the hermes-lcm checkout (required)
     HERMES_MB_WORKDIR              base dir for per-container LCM dbs (required)
-    HERMES_MB_PROVIDER            embedding provider: fastembed (default) | voyage
-    HERMES_MB_MODEL              embedding model id (default per provider)
+    HERMES_MB_PROVIDER            embedding arm: tree default (omitted) | fastembed | voyage | off
+    HERMES_MB_MODEL              embedding model id (alone selects historical fastembed arm)
     LCM_LONGMEMEVAL_FASTEMBED_CACHE  fastembed model cache dir
     VOYAGE_API_KEY               required when HERMES_MB_PROVIDER=voyage
 """
@@ -47,7 +47,6 @@ from types import SimpleNamespace
 from typing import Any
 
 _DEFAULT_MODELS = {
-    "fastembed": "BAAI/bge-small-en-v1.5",
     "voyage": "voyage-context-3",
 }
 
@@ -81,15 +80,6 @@ class Bridge:
         self.workdir = Path(workdir).resolve()
         self.workdir.mkdir(parents=True, exist_ok=True)
 
-        self.provider_name = (os.environ.get("HERMES_MB_PROVIDER") or "fastembed").strip().lower()
-        if self.provider_name in {"fast-embed"}:
-            self.provider_name = "fastembed"
-        self.model = os.environ.get("HERMES_MB_MODEL") or _DEFAULT_MODELS.get(
-            self.provider_name, ""
-        )
-        if not self.model:
-            raise RuntimeError(f"no embedding model for provider {self.provider_name!r}")
-
         # Make the plugin importable exactly the way the repo's own harness does.
         if str(self.repo_root) not in sys.path:
             sys.path.insert(0, str(self.repo_root))
@@ -100,6 +90,25 @@ class Bridge:
         )
 
         _ensure_hermes_lcm_package()
+        from hermes_lcm import config as config_module
+        defaults = config_module.LCMConfig()
+        explicit = (os.environ.get("HERMES_MB_PROVIDER") or "").strip().lower()
+        explicit = "fastembed" if explicit == "fast-embed" else explicit
+        requested_model = os.environ.get("HERMES_MB_MODEL", "")
+        self.embedding_settings_explicit = bool(explicit or requested_model)
+        self.embeddings_enabled = explicit not in {"off", "none"} and (
+            bool(explicit or requested_model) or defaults.embeddings_enabled)
+        self.provider_source = ("explicit" if explicit else
+                                "model_only_historical_fastembed" if requested_model else "tree_default")
+        self.provider_name = (explicit if explicit and self.embeddings_enabled else
+                              "fastembed" if requested_model and not explicit else defaults.embedding_provider)
+        configured_model = requested_model or (
+            _DEFAULT_MODELS.get(explicit, "") if explicit else defaults.embedding_model)
+        resolve_model = getattr(config_module, "effective_embedding_model", None)
+        # A pinned bridge can measure a pre-flip tree with the old explicit LOCAL preset.
+        self.model = (resolve_model(self.provider_name, configured_model) if resolve_model else
+                      configured_model or ("BAAI/bge-small-en-v1.5" if explicit == "fastembed" else ""))
+        self.initialized = False
         self._deterministic_session_summary = deterministic_session_summary
         self._resolve_harness_provider = resolve_harness_provider
 
@@ -116,20 +125,26 @@ class Bridge:
             raise RuntimeError("HERMES_MB_PROVIDER=voyage but VOYAGE_API_KEY is unset")
         # Warm the embedder once so the model download/load happens here, not
         # inside a per-question path, and .dim is populated.
-        self.embedder = self._resolve_harness_provider(self.provider_name, self.model)
-        self.dim = int(self.embedder.dim)
-        self.model = self.embedder.model_id
+        if self.embeddings_enabled:
+            self.embedder = self._resolve_harness_provider(self.provider_name, self.model)
+            self.dim = int(self.embedder.dim)
+            self.model = self.embedder.model_id
+        self.initialized = True
         _log(
             f"initialized provider={self.provider_name} model={self.model} dim={self.dim} "
             f"workdir={self.workdir}"
         )
-        return {
+        effective = {
             "ok": True,
             "provider": self.provider_name,
+            "provider_source": self.provider_source,
             "model": self.model,
             "dim": self.dim,
-            "embeddings_enabled": True,
+            "embeddings_enabled": self.embeddings_enabled,
+            "embeddings_enabled_explicit": self.embedding_settings_explicit,
         }
+        (self.workdir / "effective-config.json").write_text(json.dumps(effective), encoding="utf-8")
+        return effective
 
     # -- helpers --------------------------------------------------------------
 
@@ -159,15 +174,16 @@ class Bridge:
         return LCMConfig(
             recall_delivery_unit="hits",  # Historical QA/AML hydration and slicing contract.
             database_path=str(db_path),
-            embeddings_enabled=True,
+            embeddings_enabled=self.embeddings_enabled,
             embedding_provider=self.provider_name,
             embedding_model=self.model,
+            embeddings_enabled_explicit=self.embedding_settings_explicit,
         )
 
     # -- ingest ---------------------------------------------------------------
 
     def ingest(self, req: dict[str, Any]) -> dict[str, Any]:
-        if self.embedder is None:
+        if not self.initialized:
             raise RuntimeError("ingest before initialize")
         container_tag = str(req["containerTag"])
         session = req["session"]
@@ -195,12 +211,13 @@ class Bridge:
         dag = SummaryDAG(str(db_path))
         vector_store = VectorStore(str(db_path), config=config)
         try:
-            vector_store.register_profile(self.model, self.provider_name, self.dim)
-            identity = vector_store.capture_identity(self.model, provider=self.provider_name)
-            vector_store.register_profile(self.model, self.provider_name, self.dim, task="chunk")
-            chunk_identity = EmbeddingIdentity.canonical(
-                self.provider_name, self.model, "", self.dim, "float32", "little", "chunk"
-            )
+            if self.embeddings_enabled:
+                vector_store.register_profile(self.model, self.provider_name, self.dim)
+                identity = vector_store.capture_identity(self.model, provider=self.provider_name)
+                vector_store.register_profile(self.model, self.provider_name, self.dim, task="chunk")
+                chunk_identity = EmbeddingIdentity.canonical(
+                    self.provider_name, self.model, "", self.dim, "float32", "little", "chunk"
+                )
 
             store_ids: list[int] = []
             if messages:
@@ -216,7 +233,7 @@ class Bridge:
                 for chunk in iter_message_chunks(rows, policy="conversational"):
                     chunk_texts.append(chunk.text)
                     chunk_meta.append(chunk)
-                if chunk_texts:
+                if chunk_texts and self.embeddings_enabled:
                     chunk_vectors = self.embedder.embed_documents(chunk_texts)
                     for chunk, vector in zip(chunk_meta, chunk_vectors):
                         vector_store.record_chunk_embedding(
@@ -240,10 +257,11 @@ class Bridge:
                     created_at=float(order),
                 )
             )
-            summary_vector = self.embedder.embed_documents([summary_text])[0]
-            vector_store.record_embedding(
-                str(node_id), "summary", self.model, summary_vector, identity=identity
-            )
+            if self.embeddings_enabled:
+                summary_vector = self.embedder.embed_documents([summary_text])[0]
+                vector_store.record_embedding(
+                    str(node_id), "summary", self.model, summary_vector, identity=identity
+                )
         finally:
             vector_store.close()
             dag.close()
@@ -261,7 +279,7 @@ class Bridge:
     # -- search ---------------------------------------------------------------
 
     def search(self, req: dict[str, Any]) -> dict[str, Any]:
-        if self.embedder is None:
+        if not self.initialized:
             raise RuntimeError("search before initialize")
         container_tag = str(req["containerTag"])
         query = str(req.get("query", ""))
@@ -289,8 +307,9 @@ class Bridge:
                 _hermes_home=str(self.workdir),
                 current_session_id=fresh_session,
             )
-            cache_key = (self.provider_name.strip().lower(), str(self.embedder.model_id).strip())
-            engine._lcm_embedding_provider_cache = (cache_key, self.embedder)
+            if self.embeddings_enabled:
+                cache_key = (self.provider_name.strip().lower(), self.model.strip())
+                engine._lcm_embedding_provider_cache = (cache_key, self.embedder)
 
             payload = json.loads(
                 lcm_tools.lcm_recall({"query": query, "limit": limit}, engine=engine)

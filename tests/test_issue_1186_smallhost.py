@@ -14,7 +14,7 @@ from tests.test_lcm_recall import recall_engine  # noqa: F401
 
 @dataclass
 class DefaultOnConfig(LCMConfig):
-    """Exercise the future product default without changing the shipped one."""
+    """Keep an explicit local-model fixture alongside the shipped default."""
     embeddings_enabled: bool = True
     embedding_provider: str = "fastembed"
     embedding_model: str = "BAAI/bge-small-en-v1.5"
@@ -86,7 +86,7 @@ def test_provenance(monkeypatch, raw):
     assert config.embeddings_enabled_explicit is (raw is not None)
     assert config.embeddings_enabled is (raw != "false")
     assert LCMConfig(embeddings_enabled=True).embeddings_enabled_explicit
-    assert LCMConfig().embeddings_enabled is False
+    assert LCMConfig().embeddings_enabled is True
 
 
 @pytest.mark.parametrize("cpus", [0.5, 1, 2])
@@ -119,6 +119,7 @@ def test_explicit_or_normal_host_keeps_semantic(recall_engine, monkeypatch, expl
     config.embeddings_enabled_explicit = explicit
     recall_engine._config = config
     monkeypatch.setattr(tools, "effective_cpus", lambda: cpus, raising=False)
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda config: {"available": True, "detail": "synthetic backend"})
     called = []
     monkeypatch.setattr(tools, "_resolve_recall_provider", lambda *a, **k: called.append(True))
     result = json.loads(tools.lcm_recall({"query": "cobalt"}, engine=recall_engine))
@@ -176,6 +177,7 @@ def test_local_provider_spellings_share_policy(recall_engine, monkeypatch, provi
 def test_request_provider_override_preserves_explicit_choice(recall_engine, monkeypatch, override):
     recall_engine._config = DefaultOnConfig.from_env()
     monkeypatch.setattr(tools, "effective_cpus", lambda: 2)
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda config: {"available": True, "detail": "synthetic backend"})
     called = []
     monkeypatch.setattr(tools, "_resolve_recall_provider",
                         lambda *a, **k: called.append(k["provider_override"]))

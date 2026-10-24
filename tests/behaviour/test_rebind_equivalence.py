@@ -11,7 +11,7 @@ from hermes_lcm.tokens import count_messages_tokens
 from tests.harness import ScriptedSummarizer, assistant, engine_context, pin_char_counter, prose, user
 
 
-CONFIG = dict(fresh_tail_count=2, leaf_chunk_tokens=400, context_threshold=0.01,
+CONFIG = dict(embeddings_enabled=False, fresh_tail_count=2, leaf_chunk_tokens=400, context_threshold=0.01,
               large_output_externalization_enabled=False, fresh_tail_pressure_yield_enabled=False)
 
 

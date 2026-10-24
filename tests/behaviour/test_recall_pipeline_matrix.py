@@ -56,6 +56,8 @@ def arms(monkeypatch, engine, *, fts=(), summary=(), chunk=(), leads=(), rerank=
     engine._config.embeddings_enabled = True
     engine._config.rerank_enabled = rerank
     provider = SimpleNamespace(provider_id="voyage", model_id="fixture", last_usage_tokens=0)
+    engine._config.embedding_provider = provider.provider_id
+    engine._config.embedding_model = provider.model_id
     provider.rerank = lambda query, documents, **kwargs: [(i, 0.9) for i in reversed(range(len(documents)))]
     monkeypatch.setattr(tools, "_resolve_recall_provider", lambda *a, **k: provider)
     monkeypatch.setattr(tools, "_resolve_recall_chunk_provider", lambda *a, **k: provider)

@@ -281,7 +281,7 @@ def test_missing_dependency_remediation_names_host_companion(monkeypatch):
         embedding_model="BAAI/bge-small-en-v1.5"))
     assert not probe["available"]
     assert f"hermes plugins install {SOURCE}" in probe["detail"]
-    assert f"hermes plugins enable {NAME}" in probe["detail"]
+    assert f"hermes -p default plugins enable {NAME}" in probe["detail"]
 
 
 def test_doctor_action_uses_host_companion():
@@ -289,4 +289,4 @@ def test_doctor_action_uses_host_companion():
 
     guidance = doctor_guidance_for_check({"check": "embedding_provider_health", "status": "warn"})
     assert f"hermes plugins install {SOURCE}" in guidance["operator_action"]
-    assert f"hermes plugins enable {NAME}" in guidance["operator_action"]
+    assert f"hermes -p default plugins enable {NAME}" in guidance["operator_action"]

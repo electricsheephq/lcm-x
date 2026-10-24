@@ -74,7 +74,8 @@ def test_cpu_limited_doctor_keeps_provider_and_readiness(recall_engine, monkeypa
     assert called == ["probe", "readiness"]
     assert check["status"] == "warn"
     detail = check["detail"]
-    assert detail["available"] is available and detail["reason"] == reason
+    assert detail["available"] is available
+    assert detail["reason"] == ("download failed" if state == "unavailable" else reason)
     assert detail["readiness"] == readiness
     assert detail["cpu_limited"] is True and detail["effective_cpus"] == 1
     assert "semantic recall limited on this host (1 effective CPUs); full-text recall is active" in detail["cpu_limit_reason"]
@@ -125,6 +126,7 @@ def test_cpu_limited_proactive_matches_off_unless_overridden(default_engine, mon
 def test_default_normal_host_retains_semantic(recall_engine, monkeypatch, cpus):
     recall_engine._config = DefaultOnConfig.from_env()
     monkeypatch.setattr(tools, "effective_cpus", lambda: cpus)
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda config: {"available": True, "detail": "synthetic backend"})
     called = []
     monkeypatch.setattr(tools, "_resolve_recall_provider", lambda *args, **kwargs: called.append(True))
     result = json.loads(tools.lcm_recall({"query": "cobalt"}, engine=recall_engine))

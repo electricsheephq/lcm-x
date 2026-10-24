@@ -143,6 +143,8 @@ def doctor_engine(
     tmp_path: Path, case: str, patch: pytest.MonkeyPatch, *, trace: bool = False
 ) -> Iterator[Any]:
     # No session bind: no background work, host calls, or provider loads.
+    patch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    patch.setenv("HERMES_PROFILE", "default")
     engine: Any = make_engine(
         tmp_path, embeddings_enabled=False, ignore_session_patterns=["noise-*"]
     )

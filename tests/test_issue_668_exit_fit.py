@@ -29,7 +29,7 @@ def estimators(monkeypatch):
 def engine(tmp_path):
     obj = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db"), fresh_tail_count=4,
                                    leaf_chunk_tokens=1600, context_threshold=0.45,
-                                   threshold_full_sweep_enabled=True))
+                                   threshold_full_sweep_enabled=True, embeddings_enabled=False))
     obj.on_session_start("S", platform="telegram", conversation_id="conv", context_length=40_000)
     yield obj
     obj.shutdown()

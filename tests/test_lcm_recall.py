@@ -3635,6 +3635,7 @@ def test_provider_alias_uses_existing_vector_corpus_for_fts_fairness(
 
     monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
     _freeze_vector_store_clock(monkeypatch, clock)
+    monkeypatch.setattr(lcm_tools, "probe_provider_availability", lambda config: {"available": True, "detail": "synthetic backend"})
     monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: provider)
     monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", fts_arm)
 

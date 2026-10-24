@@ -59,13 +59,21 @@ refused before links or host calls. Native Hermes CLI aliases remain available.
 
 ## High-impact controls
 
+Local embeddings are on by default, with provider `fastembed`. The configured
+model remains empty; only fastembed supplies the effective default
+`BAAI/bge-small-en-v1.5`. Explicit models win; cloud providers require a model.
+Set `LCM_EMBEDDINGS_ENABLED=false` to opt out without loading/downloading a model.
+Preparation and catch-up run in the background; until ready, recall uses full
+text with `degraded=true`, the reason and actual coverage, including summaries-only requests.
 Local embeddings enabled by the product default adapt `lcm_recall` to full-text
 immediately on hosts with at most 2 effective CPUs (affinity and cgroup quotas).
 This includes summaries-only fallback, reports `cpu_limited`, and keeps background
 catch-up running. Explicit `LCM_EMBEDDINGS_ENABLED` values and programmatic
 configs take precedence. `embeddings_enabled_explicit` is internal loader
-provenance, not an environment/YAML setting. Today's embeddings default remains
-off; neither recall timeout nor scan budget changes. Proactive recall stays inert on these hosts unless a nonblank provider override is set. Doctor still checks provider availability and readiness; a healthy CPU-limited host needs only an explicit opt-in if semantic recall is wanted. For an explicit opt-in:
+provenance, not an environment/YAML setting. Neither recall timeout nor scan budget changes.
+Proactive recall stays inert on these hosts unless a nonblank provider override is set. Doctor
+separates model readiness from index coverage and treats preparation/healthy CPU limits as
+information. For an explicit opt-in on a small host:
 
 ```bash
 export LCM_EMBEDDINGS_ENABLED=true
@@ -85,7 +93,7 @@ Use `docs/operator-guide.md` as the complete current source. Start with:
 - `LCM_NATIVE_RECOVERY` (default `false`): removed in v0.25.0; ignored if set
 - `LCM_SURVIVAL_FIT` (default `true`) and `LCM_SURVIVAL_RESERVE` (default `0.15`): when compaction cannot bring the list under the model window, the oldest whole user turns leave live context (an oversized newest turn is projected) so the session survives; rows stay stored and searchable, a WARNING `LCM survival fit applied` is logged, the user is warned once and `/lcm doctor` reports `survival_fit` as history without changing its status. The `lcm_doctor` tool returns that history in its top-level `survival_fit` field (null when no fit is recorded); it is not a health check and does not affect `overall`. `lcm_status.last_survival_fit` describes the latest fit in the current session, or null, including `cause` when recorded; doctor history retains `last_cause`. The reserve is the share of the window kept free;
 - `LCM_HOST_MESSAGE_UID` (default `shadow`; `off`, `shadow`, `on`; env only): on a host whose messages carry `message_uid`, record which stored row each uid was bound to in the droppable `host_uid_bindings` table and count agreement with the existing identity matching; ingest decisions are unchanged. `/lcm doctor` reports `host_uid_*` counts. `off`: no capture, no table writes, no counts, no log line. Under `shadow` and `on`, canonical uid evidence can also exclude a proven hidden re-ingest copy of an assistant message from leaf summary input (the row stays stored and searchable); `off` disables that. `on` behaves exactly like `shadow`: both record count-only would-reject alias UID-conflict diagnostics in the debug log without changing matching, stored rows, bindings, or ingest writes. `off` performs no UID/binding reads on this diagnostic path. Unknown values behave as `shadow` and warn once. No-op on hosts without uids;
-- `FASTEMBED_CACHE_PATH` (fastembed's own variable, not an `LCM_*` key): the model cache the local `fastembed` provider loads from (default: the user cache directory); it may be a shared, read-only cache. A read-only cache must be pre-seeded, because `/lcm embed warmup` cannot download into it. The model runs with 2 threads;
+- `FASTEMBED_CACHE_PATH` (fastembed's own variable, not an `LCM_*` key): the model cache the local `fastembed` provider loads from (default: the user cache directory); it may be a shared, read-only cache. A read-only cache must be pre-seeded, because preparation cannot download into it. Bge-small uses one ONNX Runtime intra-op thread; other models use two;
 - `LCM_IGNORE_SESSION_PATTERNS` and `LCM_STATELESS_SESSION_PATTERNS`: storage ownership boundaries;
 - summary/embedding provider settings only after confirming credentials, cost, and data handling; see `docs/embeddings-setup.md`, section "A host update can remove fastembed", for the embedding-dependency recovery note. Known cloud providers protect provider-bound copies automatically with the configured nonempty known pattern list while durable storage stays raw. `LCM_SENSITIVE_PATTERNS_ENABLED=true` is a separate irreversible durable-ingest opt-in. `LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly sends raw cloud copies under the `privacy:off` vector revision; warmup binds the chosen posture and later query/backfill calls fail closed on identity drift.
 
@@ -249,7 +257,7 @@ warns without changing its behavior until removal.
 | `LCM_SUMMARY_TIMEOUT_MS` | `int` | `120000` | `> 0` | — |
 | `LCM_EXPANSION_TIMEOUT_MS` | `int` | `120000` | — | — |
 | `LCM_DATABASE_PATH` | `str` | `""` | — | — |
-| `LCM_EMBEDDINGS_ENABLED` | `bool` | `false` | — | — |
+| `LCM_EMBEDDINGS_ENABLED` | `bool` | `true` | — | — |
 | `LCM_RERANK_ENABLED` | `bool` | `false` | — | — |
 | `LCM_RERANK_MODEL` | `str` | `"rerank-2.5-lite"` | — | — |
 | `LCM_RERANK_WINDOW_LIMIT` | `int` | `0` | — | — |
@@ -273,7 +281,7 @@ warns without changing its behavior until removal.
 | `LCM_EMBEDDING_STORE_DIM` | `int` | `0` | — | — |
 | `LCM_EMBEDDING_BINARY_PRESCREEN` | `bool` | `false` | — | — |
 | `LCM_KNN_PRESCREEN_MULTIPLIER` | `int` | `4` | — | — |
-| `LCM_EMBEDDING_PROVIDER` | `str` | `""` | `"voyage"`, `"voyageai"`, `"ollama"`, `"fastembed"`, `"fast-embed"`, `"openai-compatible"`, `"openai"`, `"siliconflow"` | — |
+| `LCM_EMBEDDING_PROVIDER` | `str` | `"fastembed"` | `"voyage"`, `"voyageai"`, `"ollama"`, `"fastembed"`, `"fast-embed"`, `"openai-compatible"`, `"openai"`, `"siliconflow"` | — |
 | `LCM_EMBEDDING_MODEL` | `str` | `""` | — | — |
 | `LCM_EMBEDDING_QUERY_PREFIX` | `str` | `""` | — | — |
 | `LCM_EMBEDDING_DOCUMENT_PREFIX` | `str` | `""` | — | — |

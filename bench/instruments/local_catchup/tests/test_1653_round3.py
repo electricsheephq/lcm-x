@@ -30,6 +30,7 @@ def test_request_build_on_real_product_child_is_foreground(corpus, tmp_path, mon
             return [[.1]*384 for _ in texts]
         embed = query_embed
     monkeypatch.setattr(provider, "_load_fastembed", lambda: FakeTextEmbedding)
+    monkeypatch.setattr(mod("tools"), "probe_provider_availability", lambda config: {"available": True, "detail": "synthetic fastembed backend"})
     monkeypatch.setattr(provider.FastembedProvider, "_construct", provider.FastembedProvider._construct)
     for name in ("_chunk_backfill_run", "_embedding_backfill_summary_run"):
         monkeypatch.setattr(mod("command"), name, getattr(mod("command"), name))
