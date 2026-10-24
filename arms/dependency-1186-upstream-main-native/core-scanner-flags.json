@@ -1,0 +1,2566 @@
+{
+  "scanner_enabled": true,
+  "verdict": "dangerous",
+  "findings": [
+    {
+      "file": "tests/test_lcm_engine.py",
+      "rule": "oversized_file"
+    },
+    {
+      "file": "docs/pr-283-ignored-backlog-compaction.png",
+      "rule": "oversized_file"
+    },
+    {
+      "file": "docs/architecture.png",
+      "rule": "oversized_file"
+    },
+    {
+      "file": "docs/standard_compression.png",
+      "rule": "oversized_file"
+    },
+    {
+      "file": "docs/lcm_compression.png",
+      "rule": "oversized_file"
+    },
+    {
+      "file": "docs/media/banner.png",
+      "rule": "oversized_file"
+    },
+    {
+      "file": "tests/fixtures/ingest_trace.json",
+      "rule": "oversized_file"
+    },
+    {
+      "file": "scripts/maintainability/baseline.json",
+      "rule": "oversized_file"
+    },
+    {
+      "file": "(directory)",
+      "rule": "too_many_files"
+    },
+    {
+      "file": "(directory)",
+      "rule": "oversized_bundle"
+    },
+    {
+      "file": ".agents/skills/land-pr/SKILL.md",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": ".agents/skills/review-pr/SKILL.md",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": ".agents/skills/triage-backlog/SKILL.md",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": ".github/actions/sqlite-runtime/action.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/actions/sqlite-runtime/action.yml",
+      "rule": "echo_pipe_exec"
+    },
+    {
+      "file": ".github/workflows/ci.yml",
+      "rule": "python_import_os"
+    },
+    {
+      "file": ".github/workflows/differential.yml",
+      "rule": "unpinned_pip_install"
+    },
+    {
+      "file": ".github/workflows/host-suite.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/host-suite.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/host-suite.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/host-suite.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/host-suite.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/host-suite.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/host-suite.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/host-suite.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/host-suite.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/host-suite.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/lcmx-1586-covered-store.yml",
+      "rule": "destructive_root_rm"
+    },
+    {
+      "file": ".github/workflows/lcmx-1586-covered-store.yml",
+      "rule": "unpinned_pip_install"
+    },
+    {
+      "file": ".github/workflows/lcmx-1586-covered-store.yml",
+      "rule": "sudo_usage"
+    },
+    {
+      "file": ".github/workflows/lcmx-1586-covered-store.yml",
+      "rule": "sudo_usage"
+    },
+    {
+      "file": ".github/workflows/lcmx-1586-covered-store.yml",
+      "rule": "sudo_usage"
+    },
+    {
+      "file": ".github/workflows/lcmx-1586-covered-store.yml",
+      "rule": "sudo_usage"
+    },
+    {
+      "file": ".github/workflows/lcmx-1586-covered-store.yml",
+      "rule": "sudo_usage"
+    },
+    {
+      "file": ".github/workflows/lcmx-1586-floor.yml",
+      "rule": "destructive_root_rm"
+    },
+    {
+      "file": ".github/workflows/lcmx-1586-floor.yml",
+      "rule": "unpinned_pip_install"
+    },
+    {
+      "file": ".github/workflows/lcmx-1586-floor.yml",
+      "rule": "sudo_usage"
+    },
+    {
+      "file": ".github/workflows/lcmx-1586-floor.yml",
+      "rule": "sudo_usage"
+    },
+    {
+      "file": ".github/workflows/lcmx-1586-floor.yml",
+      "rule": "sudo_usage"
+    },
+    {
+      "file": ".github/workflows/lcmx-1586-floor.yml",
+      "rule": "sudo_usage"
+    },
+    {
+      "file": ".github/workflows/lcmx-1586-floor.yml",
+      "rule": "sudo_usage"
+    },
+    {
+      "file": ".github/workflows/real-host.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/real-host.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/real-host.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/real-host.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/real-host.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/real-host.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/real-host.yml",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": ".github/workflows/real-host.yml",
+      "rule": "dns_exfil"
+    },
+    {
+      "file": ".github/workflows/real-host.yml",
+      "rule": "dns_exfil"
+    },
+    {
+      "file": "CHANGELOG.md",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "CLAUDE.md",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "CONTRIBUTING.md",
+      "rule": "git_clone"
+    },
+    {
+      "file": "CONTRIBUTING.md",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "README.md",
+      "rule": "unpinned_pip_install"
+    },
+    {
+      "file": "README.md",
+      "rule": "unpinned_pip_install"
+    },
+    {
+      "file": "README.md",
+      "rule": "git_clone"
+    },
+    {
+      "file": "README.md",
+      "rule": "git_clone"
+    },
+    {
+      "file": "README.md",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "bench/aml/README.md",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "bench/aml/aml_server.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/aml/test_aml_server.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/aml/test_aml_server.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/aml/test_aml_server.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/aml/test_aml_server.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/aml/test_aml_server.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/aml/test_aml_server.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/common.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/common.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/common.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/common.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/derived.py",
+      "rule": "string_reversal"
+    },
+    {
+      "file": "bench/fmp/derived.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/derived.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/dev.py",
+      "rule": "string_reversal"
+    },
+    {
+      "file": "bench/fmp/dev.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/dev_cache.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/dev_cache.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/mcp_reader.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/models.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/models.py",
+      "rule": "remote_fetch"
+    },
+    {
+      "file": "bench/fmp/models.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "bench/fmp/models.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "bench/fmp/models.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "bench/fmp/run.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/run.sh",
+      "rule": "path_traversal"
+    },
+    {
+      "file": "bench/fmp/run_smoke.sh",
+      "rule": "path_traversal"
+    },
+    {
+      "file": "bench/fmp/tests/test_995.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/tests/test_995_r1.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/tests/test_fmp.py",
+      "rule": "python_import_os"
+    },
+    {
+      "file": "bench/fmp/tests/test_fmp.py",
+      "rule": "string_reversal"
+    },
+    {
+      "file": "bench/fmp/tests/test_fmp.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/tests/test_fmp.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/tests/test_fmp.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "bench/fmp/tests/test_glm.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/tests/test_r4_identity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/tests/test_r4_identity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/tests/test_reader_retry.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/tests/test_reader_retry.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/fmp/tests/test_reader_retry.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/bgprep/run.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/bgprep/run.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/bgprep/run.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/drive_codex.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/drive_hermes.py",
+      "rule": "hex_encoded_string"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/drive_hermes.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/drive_hermes_acp.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/drive_hermes_oneshot.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/test_bot1_sandbox.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/test_bot1_sandbox.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/test_deep_material.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/d2_driver.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/d2_driver.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/d2_driver.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/score_decision.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_analyze_paired.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_integrity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_integrity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_integrity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_replays.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_replays.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_replays.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_replays.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_replays.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_robustness.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_robustness.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_robustness.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_robustness.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_robustness.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_robustness.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_robustness.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_robustness.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_signal_round1.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_signal_round1.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_signal_round1.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_signal_round2.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_signal_round2.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_d2_signal_round2.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_glm_throttle.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_pmw_read.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_pmw_read.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_pmw_read.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_pmw_read.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_pmw_read.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_pmw_read.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_pmw_read.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_pmw_read.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_pmw_read.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/decision/tests/test_pmw_read.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/harness/lanes/claude.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/harness/lanes/claude.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/harness/lanes/codex_exec.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s1/run.sh",
+      "rule": "dump_all_env"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s2/run_c1.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s2/run_c1.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s2/s2lib/c1_budget.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s2/s2lib/c1_budget.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s2/s2lib/c1_budget.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s2/s2lib/seam.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s2/s2lib/seam.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s4/run_s_codex.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s4/run_s_codex.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s4/run_s_codex.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s4/run_s_codex.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s4/run_s_codex.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s4/run_s_codex.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s4/run_s_codex.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s4/run_s_codex.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s4/run_s_codex.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/s4/run_s_codex.py",
+      "rule": "other_agent_config_ref"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/scorer/score_s.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/scorer/tests/test_eval2_harness.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/scorer/tests/test_eval2_harness.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/scorer/tests/test_eval2_harness.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/scorer/tests/test_eval2_harness.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/track_s/scorer/tests/test_fix2.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/compaction_probe/verify_material.py",
+      "rule": "string_reversal"
+    },
+    {
+      "file": "bench/instruments/local_catchup/calibration.py",
+      "rule": "python_import_os"
+    },
+    {
+      "file": "bench/instruments/local_catchup/catchup.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/cpu.py",
+      "rule": "python_import_os"
+    },
+    {
+      "file": "bench/instruments/local_catchup/cpu.py",
+      "rule": "python_import_os"
+    },
+    {
+      "file": "bench/instruments/local_catchup/cpu.py",
+      "rule": "python_import_os"
+    },
+    {
+      "file": "bench/instruments/local_catchup/cpu.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/floor.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/floor.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/floor.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/floor.py",
+      "rule": "proc_access"
+    },
+    {
+      "file": "bench/instruments/local_catchup/floor.py",
+      "rule": "proc_access"
+    },
+    {
+      "file": "bench/instruments/local_catchup/measurement.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/tests/test_1586_v23.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/tests/test_1653_round3.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/tests/test_1660_bot1.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/tests/test_1664.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/tests/test_1669_item8.py",
+      "rule": "proc_access"
+    },
+    {
+      "file": "bench/instruments/local_catchup/tests/test_1669_item8.py",
+      "rule": "proc_access"
+    },
+    {
+      "file": "bench/instruments/local_catchup/tests/test_1760.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/tests/test_1767.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/tests/test_1767.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/tests/test_1767.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/tests/test_1767.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/tests/test_1767.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/local_catchup/tests/test_corpus_audit.py",
+      "rule": "python_import_os"
+    },
+    {
+      "file": "bench/instruments/release_gauntlet/phase_a_tool_matrix.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/release_gauntlet/phase_a_tool_matrix.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/reliability/README.md",
+      "rule": "uv_run"
+    },
+    {
+      "file": "bench/instruments/reliability/acp_driver.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/reliability/ci.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/reliability/ci.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/reliability/dependency_qualification.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/reliability/dependency_qualification.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/reliability/dependency_qualification.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/reliability/dependency_qualification.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/reliability/hosts.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/reliability/hosts.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/reliability/plugin_tree.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/reliability/plugin_tree.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/reliability/run_matrix.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/scale389/phase1a.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/scale389/run_scale.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/instruments/scale389/tests/test_scale389_cli_help.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/scoreboard/SPEC-GENERATOR.md",
+      "rule": "uv_run"
+    },
+    {
+      "file": "bench/scoreboard/test_generate.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/scoreboard/test_generate.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/scoreboard/test_generate.py",
+      "rule": "path_traversal"
+    },
+    {
+      "file": "bench/tools/pinverify.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/tools/tests/test_cli_help.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/tools/tests/test_d8_guard.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/tools/tests/test_d8_guard.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/tools/tests/test_d8_guard.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/tools/tests/test_d8_guard.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/tools/tests/test_d8_guard.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/tools/tests/test_d8_guard.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/tools/tests/test_issue_1782_failed_baseline.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/tools/tests/test_pinverify.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/tools/v1m-rebank/corpus_privacy_inventory.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "bench/tools/v1m-rebank/corpus_privacy_inventory.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "benchmarking/longmemeval.py",
+      "rule": "hex_encoded_string"
+    },
+    {
+      "file": "benchmarking/stress.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "benchmarks/README.md",
+      "rule": "unpinned_pip_install"
+    },
+    {
+      "file": "benchmarks/README.md",
+      "rule": "unpinned_pip_install"
+    },
+    {
+      "file": "benchmarks/README.md",
+      "rule": "uv_run"
+    },
+    {
+      "file": "benchmarks/README.md",
+      "rule": "uv_run"
+    },
+    {
+      "file": "benchmarks/qa-harness/REPLICATION.md",
+      "rule": "unpinned_pip_install"
+    },
+    {
+      "file": "benchmarks/qa-harness/REPLICATION.md",
+      "rule": "git_clone"
+    },
+    {
+      "file": "benchmarks/qa-harness/src/providers/hermes-lcm/README.md",
+      "rule": "unpinned_pip_install"
+    },
+    {
+      "file": "benchmarks/qa-harness/src/providers/hermes-lcm/index.ts",
+      "rule": "path_traversal"
+    },
+    {
+      "file": "benchmarks/qa-harness/src/providers/hermes-lcm/index.ts",
+      "rule": "path_traversal"
+    },
+    {
+      "file": "benchmarks/qa-harness/src/providers/hermes-lcm/index.ts",
+      "rule": "path_traversal"
+    },
+    {
+      "file": "benchmarks/qa-harness/src/providers/hermes-lcm/prompts.ts",
+      "rule": "path_traversal"
+    },
+    {
+      "file": "command.py",
+      "rule": "string_reversal"
+    },
+    {
+      "file": "dag.py",
+      "rule": "string_reversal"
+    },
+    {
+      "file": "docs/agent-config-profiles.md",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "docs/agent-config-profiles.md",
+      "rule": "hermes_config_ref"
+    },
+    {
+      "file": "docs/agent-config-profiles.md",
+      "rule": "hermes_config_ref"
+    },
+    {
+      "file": "docs/architecture.md",
+      "rule": "unpinned_pip_install"
+    },
+    {
+      "file": "docs/async-background-compaction.md",
+      "rule": "dump_all_env"
+    },
+    {
+      "file": "docs/embeddings-setup.md",
+      "rule": "unpinned_pip_install"
+    },
+    {
+      "file": "docs/identity-ledger.md",
+      "rule": "context_exfil"
+    },
+    {
+      "file": "docs/invariants/receipts.md",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": "docs/invariants/receipts.md",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": "docs/invariants/receipts.md",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "docs/operations/store-wedge-inspect.md",
+      "rule": "context_exfil"
+    },
+    {
+      "file": "docs/operator-guide.md",
+      "rule": "git_clone"
+    },
+    {
+      "file": "docs/operator-guide.md",
+      "rule": "git_clone"
+    },
+    {
+      "file": "docs/packaging.md",
+      "rule": "git_clone"
+    },
+    {
+      "file": "docs/process/1880-persisted-hold-probes.md",
+      "rule": "fake_policy"
+    },
+    {
+      "file": "docs/release-validation.md",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "engine.py",
+      "rule": "string_reversal"
+    },
+    {
+      "file": "inactive_record.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "runtime_identity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "scripts/ci/check_tests_ran.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "scripts/maintainability/report.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "scripts/maintainer_gate.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "scripts/validate_release.sh",
+      "rule": "unpinned_pip_install"
+    },
+    {
+      "file": "tests/behaviour/test_assembly_trace.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/behaviour/test_assembly_trace.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/behaviour/test_compress_clock_isolation.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/behaviour/test_recall_pipeline_matrix.py",
+      "rule": "string_reversal"
+    },
+    {
+      "file": "tests/behaviour/test_reconcile_trace.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/behaviour/test_reconcile_trace.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/compat/conftest.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/compat/conftest.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/compat/helpers.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/compat/test_occurrence_snapshot_upgrade.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/diag_1753_capture.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/differential/run.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/differential/run.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/differential/test_differential_vs_ga.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/differential/test_differential_vs_ga.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/differential/trees.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/differential/trees.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/fixtures/compress_trace.json",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/fixtures/compress_trace.json",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/fixtures/compress_trace.json",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/fixtures/compress_trace.json",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/fixtures/compress_trace.json",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/fixtures/compress_trace.json",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/fixtures/e1a_default_bytes.json",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/fixtures/expand_family_contract.json",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/fixtures/expand_family_contract.json",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/fixtures/expand_family_contract.json",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/fixtures/expand_family_contract.json",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/fixtures/expand_family_contract.json",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/fixtures/expand_query_contract.json",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/fixtures/expand_query_contract.json",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/fixtures/issue_1880_preflight_cost/measurement-source.txt",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": "tests/fixtures/issue_1880_preflight_cost/measurement-source.txt",
+      "rule": "python_compile_exec"
+    },
+    {
+      "file": "tests/fixtures/issue_1880_preflight_cost/measurement-source.txt",
+      "rule": "python_compile_exec"
+    },
+    {
+      "file": "tests/fixtures/issue_1880_preflight_cost/measurement-source.txt",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/fixtures/issue_1880_preflight_cost/measurement-source.txt",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/fixtures/issue_1880_preflight_cost_final/measurement-source.txt",
+      "rule": "python_os_environ"
+    },
+    {
+      "file": "tests/fixtures/issue_1880_preflight_cost_final/measurement-source.txt",
+      "rule": "python_compile_exec"
+    },
+    {
+      "file": "tests/fixtures/issue_1880_preflight_cost_final/measurement-source.txt",
+      "rule": "python_compile_exec"
+    },
+    {
+      "file": "tests/fixtures/issue_1880_preflight_cost_final/measurement-source.txt",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/fixtures/issue_1880_preflight_cost_final/measurement-source.txt",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/fixtures/session_end_attribution_cost/measure.py",
+      "rule": "python_compile_exec"
+    },
+    {
+      "file": "tests/fixtures/session_end_attribution_cost/measure.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/invariants/issue_1718_nonmedia_base.json",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/invariants/test_identity_seeds.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_ci_tests_ran.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_ci_tests_ran.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_ci_tests_ran.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_ci_tests_ran.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_ci_tests_ran.py",
+      "rule": "path_traversal_deep"
+    },
+    {
+      "file": "tests/test_ci_tests_ran.py",
+      "rule": "path_traversal"
+    },
+    {
+      "file": "tests/test_db_bootstrap_fts.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_diag_1753_capture.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_differential_workflow.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_differential_workflow.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_privacy.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_embedding_search_modes.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_embedding_search_modes.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_fd_lifecycle.py",
+      "rule": "proc_access"
+    },
+    {
+      "file": "tests/test_fulltext_sql_cost.py",
+      "rule": "python_compile_exec"
+    },
+    {
+      "file": "tests/test_fulltext_sql_cost.py",
+      "rule": "python_compile_exec"
+    },
+    {
+      "file": "tests/test_governance_policy.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "tests/test_governance_policy.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "tests/test_historical_externalization_backfill.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_host_uid_rollback_reader.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_host_uid_rollback_reader.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_host_uid_rollback_reader.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_host_uid_shadow.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_host_uid_shadow.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_host_uid_shadow.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "openai_key_leaked"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "openai_key_leaked"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "openai_key_leaked"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "openai_key_leaked"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "openai_key_leaked"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "openai_key_leaked"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "openai_key_leaked"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "openai_key_leaked"
+    },
+    {
+      "file": "tests/test_ingest_protection.py",
+      "rule": "openai_key_leaked"
+    },
+    {
+      "file": "tests/test_inspect_contract.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_1014_incremental_embedding.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_issue_1014_incremental_embedding.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_issue_1014_incremental_embedding.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_issue_1016_nontool_externalization_floor.py",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/test_issue_1016_nontool_externalization_floor.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_issue_1124_copy_exclusion.py",
+      "rule": "python_compile_exec"
+    },
+    {
+      "file": "tests/test_issue_1124_copy_exclusion.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_1124_copy_exclusion.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_1160_session_end_flush_recovery.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_1186_dependency_companion.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_1186_dependency_companion.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_1201_summary_model_only.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_1201_summary_model_only.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_1330_retire_embedding_maintenance.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_1397_orphan_exit.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_1652_catchup_disclosure.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_issue_1652_catchup_disclosure.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_issue_1652_catchup_disclosure.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_issue_1652_catchup_disclosure.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_issue_1652_catchup_disclosure.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_issue_1659_catchup.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_issue_1659_catchup.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_issue_1659_catchup.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_issue_1659_differential.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_issue_1659_differential.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_issue_1659_inflight_cycle.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_issue_1659_r4.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_issue_1742_inspector.py",
+      "rule": "python_compile_exec"
+    },
+    {
+      "file": "tests/test_issue_1765_gapwalk.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_1828_retry_rollback.py",
+      "rule": "python_compile_exec"
+    },
+    {
+      "file": "tests/test_issue_488_emission_proof.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_488_emission_proof.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_4_restart_safe_fail_open.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_issue_4_restart_safe_fail_open.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_issue_4_restart_safe_fail_open.py",
+      "rule": "openai_key_leaked"
+    },
+    {
+      "file": "tests/test_issue_4_restart_safe_fail_open.py",
+      "rule": "openai_key_leaked"
+    },
+    {
+      "file": "tests/test_issue_513_hermes_root_isolation.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_519_replaced_tail.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_524_gen2_replay.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_534_recovery_descriptors.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_534_recovery_descriptors.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_535_retained_row_merge.py",
+      "rule": "string_reversal"
+    },
+    {
+      "file": "tests/test_issue_535_retained_row_merge.py",
+      "rule": "string_reversal"
+    },
+    {
+      "file": "tests/test_issue_559_tool_group_boundary.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_622_slow_load.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_631_not_a_pm_member.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_651_below_threshold_cleanup_only.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_759_privacy_blocked_backfill.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_issue_921_objective_survives_reassembly.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_921_objective_survives_reassembly.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_issue_921_objective_survives_reassembly.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_lcm_core.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_lcm_core.py",
+      "rule": "hardcoded_ip_port"
+    },
+    {
+      "file": "tests/test_lcm_core.py",
+      "rule": "system_passwd_access"
+    },
+    {
+      "file": "tests/test_lcm_engine.py",
+      "rule": "proc_access"
+    },
+    {
+      "file": "tests/test_lcm_memory.py",
+      "rule": "python_compile_exec"
+    },
+    {
+      "file": "tests/test_lcm_recall.py",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/test_lcm_recall.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_lcm_recall.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_lcm_recall.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_longmemeval_harness.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_longmemeval_medium.py",
+      "rule": "uv_run"
+    },
+    {
+      "file": "tests/test_maintainability_report.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_maintainer_gate.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_maintainer_gate.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_maintainer_gate.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_maintainer_gate.py",
+      "rule": "agent_config_ref"
+    },
+    {
+      "file": "tests/test_message_origin_migration.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_message_origin_migration.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_message_origin_migration.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_packaging_install.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_phase0_hygiene.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_phase0_hygiene.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_public_results_page.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_public_results_page.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_public_results_page.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_real_host_bypass_cooldown_wire.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_real_host_bypass_cooldown_wire.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_real_host_config_resolution.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_real_long_session.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_real_plugin_manager_compaction.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_real_plugin_manager_compaction.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_real_plugin_manager_identity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_real_plugin_manager_identity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_real_plugin_manager_identity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_real_plugin_manager_identity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_real_plugin_manager_identity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_real_turn_loop_acp_override.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_recall_row_handoff.py",
+      "rule": "hex_encoded_string"
+    },
+    {
+      "file": "tests/test_recall_row_handoff.py",
+      "rule": "hex_encoded_string"
+    },
+    {
+      "file": "tests/test_recall_row_handoff.py",
+      "rule": "python_compile_exec"
+    },
+    {
+      "file": "tests/test_recall_row_handoff.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_recall_search_query.py",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/test_recall_search_query.py",
+      "rule": "unicode_escape_chain"
+    },
+    {
+      "file": "tests/test_release_gauntlet_phase_a.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_release_gauntlet_phase_a.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_release_gauntlet_phase_a.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_release_gauntlet_phase_a.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_release_gauntlet_phase_a.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_release_gauntlet_phase_a.py",
+      "rule": "embedded_private_key"
+    },
+    {
+      "file": "tests/test_reliability_r2.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_reliability_scorers.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_reliability_scorers.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_reliability_scorers.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_reliability_scorers.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_reliability_scorers.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_reliability_scorers.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_reliability_scorers.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_reliability_scorers.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_reliability_scorers.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_reliability_scorers.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_reliability_scorers.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_reliability_stderr_tail.py",
+      "rule": "unpinned_pip_install"
+    },
+    {
+      "file": "tests/test_reliability_stderr_tail.py",
+      "rule": "unpinned_pip_install"
+    },
+    {
+      "file": "tests/test_rollback_v0262_store.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_rollback_v0262_store.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_rollback_v0262_store.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_session_end_attribution_host.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_store_wedge_inspect.py",
+      "rule": "python_compile_exec"
+    },
+    {
+      "file": "tests/test_track_s_integrity.py",
+      "rule": "python_compile_exec"
+    },
+    {
+      "file": "tests/test_track_s_integrity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_track_s_integrity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_track_s_integrity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_track_s_integrity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_track_s_integrity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_track_s_integrity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_track_s_integrity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_track_s_integrity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_track_s_integrity.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_track_s_phase_d_paired.py",
+      "rule": "python_subprocess"
+    },
+    {
+      "file": "tests/test_track_s_phase_d_paired.py",
+      "rule": "path_traversal"
+    },
+    {
+      "file": "tests/test_track_s_phase_d_paired.py",
+      "rule": "path_traversal"
+    },
+    {
+      "file": "tests/test_trajectory_semantic_retrieval.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/test_trajectory_store.py",
+      "rule": "hardcoded_secret"
+    },
+    {
+      "file": "tests/tool_registry_schema_bytes.json",
+      "rule": "unicode_escape_chain"
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "1186-s1-c3-40089321305-public",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "1186-s1-dependency",
+  "claim_class": "advisory",
+  "created": "2026-10-24T11:27:02Z",
+  "settled": "2026-10-24T11:27:03Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "af7994c5d631f0d95e80789069aa3481dd920b2a",
+    "dirty": false,
+    "diff_sha256": null,
+    "pr_head_sha": "4be7e931d4e1a3450114fda4c57ad0ff39e9e761"
+  },
+  "env": {
+    "command": "python -m pytest -p no:cacheprovider -q -ra tests/test_issue_1186_host_dependencies.py",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "1186-S1-C3-carrier-rebuild",
+      "metric": "wall_seconds_mean",
+      "value": 8.1737108035,
+      "n": 2,
+      "source": "arms/dependency-1186-upstream-main-native/rebuild-measurements.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "arms",
+      "role": "receipt",
+      "sha256": "b497ec347923eea613b3fa3268bffa0f2631df365ec1d40e66ec22b4644801cc",
+      "bytes": 318247
+    },
+    {
+      "path": "SCANNER-FLAGS.md",
+      "role": "receipt",
+      "sha256": "d7e21cee80cfc857143ec46784e460d9e8aa97fbe9505f44bc6a45244f8f6c91",
+      "bytes": 16731
+    },
+    {
+      "path": "rescore.py",
+      "role": "receipt",
+      "sha256": "deec616a2595fd4f5159906a1ffcd6e9f6099503ce84a319efca1d53180393ed",
+      "bytes": 731
+    }
+  ],
+  "rescore": {
+    "command": "python3 rescore.py",
+    "inputs": [
+      "arms/dependency-1186-upstream-main-native/rebuild-measurements.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [
+    "https://github.com/electricsheephq/lcm-x/actions/runs/40089321305"
+  ],
+  "keep": [
+    "RESULT.md",
+    "SCANNER-FLAGS.md",
+    "arms",
+    "arms/dependency-1186-upstream-main-native/rebuild-measurements.json",
+    "rescore.py"
+  ]
+}
