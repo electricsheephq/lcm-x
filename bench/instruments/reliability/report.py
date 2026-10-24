@@ -60,6 +60,7 @@ def signature(r: dict) -> str:
         parts.append(f"exit_fits_skipped={n['B8']['exit_fit_skipped']}")
     if b2.get("surplus_rows") or b2.get("deficit_rows"):
         parts.append(f"surplus/deficit={b2.get('surplus_rows')}/{b2.get('deficit_rows')}")
+        parts.append("deficit-only " + ("PASS" if b2.get("deficit_rows") == 0 else "FAIL"))
     if failed:
         parts.append(f"failed_turns={len(failed)} from {failed[0]}")
     if rejections:
