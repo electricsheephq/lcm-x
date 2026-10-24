@@ -1393,6 +1393,9 @@ class LCMConfig:
     # min(threshold - leaf chunk, 0.95 x threshold, int(ratio x threshold)); 0 = the built-in target.
     stub_first_exit_target_ratio: float = 0.0
 
+    # Loader provenance only, not a user setting. Manual configs are explicit.
+    embeddings_enabled_explicit: bool = True
+
     @classmethod
     def from_env(cls) -> "LCMConfig":
         """Build config from environment variables (LCM_ prefix)."""
@@ -1401,6 +1404,8 @@ class LCMConfig:
         if pinned:
             _profile_envs[env["HERMES_HOME"]] = MappingProxyType(dict(env))
         c = cls()
+        c.embeddings_enabled_explicit = env.get("LCM_EMBEDDINGS_ENABLED", "").strip().lower() in (
+            "1", "true", "yes", "on", "0", "false", "no", "off")
         c._absolute_threshold_tokens = env.get("LCM_ABSOLUTE_THRESHOLD_TOKENS", "0") if pinned else None
         config_sources: dict[str, str] = {}
         config_source_warnings: list[str] = []

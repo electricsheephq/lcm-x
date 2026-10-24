@@ -9211,6 +9211,9 @@ class LCMEngine(
         # are disabled/unwarmed (no provider to embed the newest message).
         if not getattr(config, "embeddings_enabled", False):
             return None
+        provider_override = str(getattr(config, "proactive_recall_provider", "") or "").strip()
+        if not provider_override and lcm_tools.default_semantic_cpu_limited(config):
+            return None
 
         query = self._newest_user_message_text(tail_messages)
         if not query:
@@ -9224,7 +9227,6 @@ class LCMEngine(
         budget_tokens = int(getattr(config, "proactive_recall_budget_tokens", 500) or 0)
         if budget_tokens <= 0:
             return None
-        provider_override = getattr(config, "proactive_recall_provider", "") or ""
 
         try:
             raw = lcm_tools.lcm_recall(
@@ -9678,7 +9680,10 @@ class LCMEngine(
                 tail_tokens=count_messages_tokens(tail_selected),
                 repaired_tail_tokens=count_messages_tokens(measurement_tail),
                 recall_budget_tokens=self._config.proactive_recall_budget_tokens,
-                proactive_recall_enabled=self._config.proactive_recall_enabled,
+                proactive_recall_enabled=self._config.proactive_recall_enabled and (
+                    bool(str(self._config.proactive_recall_provider or "").strip())
+                    or not lcm_tools.default_semantic_cpu_limited(self._config)
+                ),
                 embeddings_enabled=self._config.embeddings_enabled, survival_fit=self._config.survival_fit,
             )
             full_prefix = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}

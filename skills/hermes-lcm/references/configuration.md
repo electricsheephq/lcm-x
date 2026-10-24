@@ -59,6 +59,18 @@ refused before links or host calls. Native Hermes CLI aliases remain available.
 
 ## High-impact controls
 
+Local embeddings enabled by the product default adapt `lcm_recall` to full-text
+immediately on hosts with at most 2 effective CPUs (affinity and cgroup quotas).
+This includes summaries-only fallback, reports `cpu_limited`, and keeps background
+catch-up running. Explicit `LCM_EMBEDDINGS_ENABLED` values and programmatic
+configs take precedence. `embeddings_enabled_explicit` is internal loader
+provenance, not an environment/YAML setting. Today's embeddings default remains
+off; neither recall timeout nor scan budget changes. Proactive recall stays inert on these hosts unless a nonblank provider override is set. Doctor still checks provider availability and readiness; a healthy CPU-limited host needs only an explicit opt-in if semantic recall is wanted. For an explicit opt-in:
+
+```bash
+export LCM_EMBEDDINGS_ENABLED=true
+```
+
 Use `docs/operator-guide.md` as the complete current source. Start with:
 
 - `LCM_CONTEXT_THRESHOLD` (default `0.75`): when normal context pressure triggers compaction;

@@ -50,6 +50,7 @@
     "LCM_EMPTY_LIFECYCLE_GC_ENABLED": "true",
     "LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS": "12.5",
     "LCM_EMPTY_LIFECYCLE_GC_THRESHOLD": "200",
+    "LCM_ENTITIES_ENABLED": "false",
     "LCM_EXPANSION_CONTEXT_TOKENS": "32000",
     "LCM_EXPANSION_MODEL": "",
     "LCM_EXPANSION_TIMEOUT_MS": "120000",
@@ -134,8 +135,7 @@
     "LCM_TEMPORAL_ROLLUPS_ENABLED": "true",
     "LCM_THRESHOLD_FULL_SWEEP_ENABLED": "true",
     "SILICONFLOW_API_KEY": "fixture-siliconflow-key",
-    "VOYAGE_API_KEY": "fixture-voyage-key",
-    "LCM_ENTITIES_ENABLED": "false"
+    "VOYAGE_API_KEY": "fixture-voyage-key"
   },
   "expected": {
     "adaptive_retrieval_enabled": false,
@@ -200,9 +200,11 @@
     "embedding_storage_dtype": "float32",
     "embedding_store_dim": 0,
     "embeddings_enabled": true,
+    "embeddings_enabled_explicit": true,
     "empty_lifecycle_gc_enabled": true,
     "empty_lifecycle_gc_max_age_hours": 12.5,
     "empty_lifecycle_gc_threshold": 200,
+    "entities_enabled": false,
     "expansion_context_tokens": 32000,
     "expansion_model": "",
     "expansion_reasoning_effort": "",
@@ -307,7 +309,6 @@
     "survival_fit": true,
     "survival_reserve": 0.15,
     "temporal_rollups_enabled": true,
-    "threshold_full_sweep_enabled": true,
-    "entities_enabled": false
+    "threshold_full_sweep_enabled": true
   }
 }
