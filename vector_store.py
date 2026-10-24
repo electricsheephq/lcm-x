@@ -1471,7 +1471,7 @@ class VectorStore:
     def _fetch_exact_rows(self, sql, args, *, vectors=True):
         """Transfer one ordered scan, retaining the row loader on resource failure."""
         fields = (
-            "rowid, vector_id, vector_kind, length(CAST(vec AS BLOB)), "
+            "rowid, vector_id, vector_kind, length(hex(vec))/2, "
             "typeof(vec), CASE WHEN typeof(vec) != 'blob' THEN vec END"
             if vectors else "chunk_id"
         )
@@ -3016,7 +3016,7 @@ class VectorStore:
 
         candidates, scanned_rows, stopped_early = self._scan_ranked(
             candidate_ids=scan_ids,
-            batch_rows=max(1, self.bounded_scan_rows),
+            batch_rows=max(1, min(1000, self.bounded_scan_rows)),
             budget_s=scan_budget_s,
             deadline=scan_deadline,
             limit=k,

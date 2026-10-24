@@ -81,6 +81,10 @@ def main():
                       ORT_DISABLE_TELEMETRY='1', OMP_NUM_THREADS='1',
                       OPENBLAS_NUM_THREADS='1', VECLIB_MAXIMUM_THREADS='1',
                       MKL_NUM_THREADS='1', BLIS_NUM_THREADS='1', NUMEXPR_NUM_THREADS='1')
+    for name in ('XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'TMPDIR'):
+        target = a.home / name.lower()
+        target.mkdir(parents=True, exist_ok=True)
+        os.environ[name] = str(target)
     def deny(*args, **kwargs):
         raise RuntimeError('offline-only diagnostic: network forbidden')
     socket.socket.connect = socket.socket.connect_ex = deny
@@ -91,6 +95,8 @@ def main():
     cfg = config(mod, a.store / 'store.db')
     if a.recall_timeout_s is not None:
         cfg = dataclasses.replace(cfg, recall_query_timeout_s=a.recall_timeout_s)
+    import onnxruntime
+    onnxruntime.disable_telemetry_events()
     provider = mod('embedding_provider').resolve_provider(cfg)
     ensure = provider._ensure_local
     ensure(**({'allow_download': False} if 'allow_download' in inspect.signature(ensure).parameters else {}))
@@ -299,6 +305,14 @@ def main():
             busy_threads=a.busy_threads, profile=a.profile)
         (a.out/'summary.json').write_text(json.dumps(summary,indent=2))
         print(json.dumps(summary),flush=True)
+        # Attribution changes allocator/timing behaviour: acceptance ends above.
+        halt.set()
+        for thread in busy:
+            thread.join()
+        from bench.instruments.local_catchup.memory_sites import capture
+        reader._config = dataclasses.replace(cfg, recall_query_timeout_s=3600)
+        capture(a.repo, a.out, lambda: json.loads(tools.lcm_recall(
+            {'query': broad[0]}, engine=reader)))
     finally:
         halt.set()
         for thread in busy:

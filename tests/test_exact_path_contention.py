@@ -106,6 +106,25 @@ def test_chunk_candidate_transfer_is_coalesced(corpus):
     assert any('json_group_array' in sql for sql in traced)
 
 
+@pytest.mark.parametrize('encoding', ['UTF-8', 'UTF-16le', 'UTF-16be'])
+def test_exact_transfer_preserves_arbitrary_bytes_and_storage(tmp_path, encoding):
+    conn = sqlite3.connect(tmp_path / 'bytes.db')
+    conn.execute(f"PRAGMA encoding='{encoding}'")
+    conn.execute('CREATE TABLE fixture(vector_id, vector_kind, vec)')
+    values = [bytes(range(256)), b'\x00\xff\x00', b'', None, 17, 'text', b'short']
+    conn.executemany("INSERT INTO fixture VALUES (?, 'chunk', ?)", enumerate(values))
+    store = object.__new__(VectorStore)
+    store._conn = conn
+    sql = 'SELECT rowid, vector_id, vector_kind, vec FROM fixture ORDER BY rowid DESC'
+    try:
+        actual = store._fetch_exact_rows(sql, ())
+        expected = conn.execute(sql).fetchall()
+        assert [tuple(bytes(v) if isinstance(v, memoryview) else v for v in row)
+                for row in actual] == expected
+    finally:
+        conn.close()
+
+
 def test_summary_cache_survives_chunk_multibatch(corpus):
     np = pytest.importorskip('numpy')
     store, chunk, summary, ids = corpus
