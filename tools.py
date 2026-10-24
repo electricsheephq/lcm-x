@@ -4710,6 +4710,10 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
         "reachability_probed": bool(probe.get("probed")),
         "reason": probe.get("detail"),
     }
+    override = str(getattr(config, "proactive_recall_provider", "") or "").strip()
+    if (override.lower() not in {"", "fastembed", "fast-embed"}
+            and not (config.embeddings_enabled_explicit and config._embeddings_enabled_supplied)):
+        detail["proactive_recall_note"] = f"proactive override {override} is inert; set LCM_EMBEDDINGS_ENABLED=true to enable it"
     if embedding_provider_id(str(probe.get("provider") or "")) == "fastembed":
         detail["readiness"] = _embedding_readiness(engine, probe)
         held = _lcm_recall_catchup_reason(engine, SimpleNamespace(provider_id="fastembed", model_id=probe.get("model")), "summary")

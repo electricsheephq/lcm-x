@@ -208,6 +208,11 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             )
             warning_only = True
             rationale = "stale stored vectors affect only semantic recall, which is switched off"
+        elif isinstance(detail, dict) and str(detail.get("reason", "")).startswith("store's profile belongs to "):
+            action = DOCTOR_ACTION_INSPECT
+            command = detail["reason"]
+            warning_only = True
+            rationale = "the stored profile is held; full-text recall is active"
         elif isinstance(detail, dict) and "coverage: unavailable" in str(detail.get("readiness", "")):
             action = DOCTOR_ACTION_INSPECT
             command = "inspect embedding coverage SQLite read errors and database access, then re-run `/lcm doctor`"

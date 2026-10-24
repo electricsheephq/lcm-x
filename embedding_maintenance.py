@@ -118,6 +118,7 @@ def start_local_model_prepare(
     key = _local_model_key(config)
     if key is None or not getattr(config, "embeddings_enabled", False):
         return False
+    start_error = None
     with _STATE_LOCK:
         state = _PREPARE.get(key)
         attempts, retry_at = _PREPARE_RETRY.get(key, (0, 0.0))
@@ -139,18 +140,16 @@ def start_local_model_prepare(
         )
         try:
             _PREPARE_THREAD.start()
-        except Exception:
+        except Exception as exc:
             _PREPARE_THREAD = None
             if state is None:
                 _PREPARE.pop(key, None)
             else:
                 _PREPARE[key] = state
-            if not attempts:
-                _PREPARE_RETRY.pop(key, None)
-            else:
-                _PREPARE_RETRY[key] = (attempts, retry_at)
-            logger.warning("LCM local model prepare could not start; retrieval uses full text", exc_info=True)
-            return False
+            start_error = exc
+    if start_error is not None:
+        logger.warning("LCM local model prepare could not start; retrieval uses full text", exc_info=start_error)
+        return False
     return True
 
 

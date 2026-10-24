@@ -206,7 +206,10 @@ def test_prepare_start_failure_degrades_and_can_retry(tmp_path, monkeypatch, tra
         assert starts == ["lcm-embedding-prepare"]
         assert maintenance.local_model_state(config) is None
         assert maintenance._PREPARE_THREAD is None
-        assert maintenance._PREPARE_RETRY == {}
+        retry = maintenance._PREPARE_RETRY[maintenance._local_model_key(config)]
+        assert retry[0] == 1 and retry[1] > maintenance.time.monotonic()
+        # R5 keeps the retry backoff; a later trigger after it expires can start.
+        monkeypatch.setattr(maintenance.time, "monotonic", lambda: retry[1] + 1)
         with monkeypatch.context() as patch:
             patch.setattr(maintenance, "_prepare_local_model", lambda *args: None)
             assert REAL_PREPARE(config.database_path, config) is True

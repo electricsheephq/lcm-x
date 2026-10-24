@@ -138,6 +138,7 @@
     "VOYAGE_API_KEY": "fixture-voyage-key"
   },
   "expected": {
+    "_embeddings_enabled_supplied": true,
     "adaptive_retrieval_enabled": false,
     "assertion_extraction_enabled": false,
     "assertion_extraction_max_sources_per_pass": 4,

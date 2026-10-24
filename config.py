@@ -1413,11 +1413,13 @@ class LCMConfig:
 
     # Loader provenance only, not a user setting. Manual configs are explicit.
     embeddings_enabled_explicit: bool = True
+    _embeddings_enabled_supplied: bool | None = field(default=None, repr=False)
 
     def __post_init__(self):
-        self._embeddings_enabled_supplied = self.embeddings_enabled is not None
-        model_only = self.embedding_provider is None and bool(self.embedding_model)
-        if self.embedding_provider is None:
+        if self._embeddings_enabled_supplied is None:
+            self._embeddings_enabled_supplied = self.embeddings_enabled is not None
+        model_only = not str(self.embedding_provider or "").strip() and bool(self.embedding_model)
+        if not str(self.embedding_provider or "").strip():
             self.embedding_provider = "" if model_only else "fastembed"
         if self.embeddings_enabled is None:
             self.embeddings_enabled = not model_only and embedding_provider_id(normalize_embedding_provider(self.embedding_provider)) in {"", "fastembed"}

@@ -71,8 +71,11 @@ def test_bridge_constructor_preserves_input_meaning(
     if preflip:
         original = config_module.LCMConfig
         monkeypatch.delattr(config_module, "effective_embedding_model")
-        monkeypatch.setattr(config_module, "LCMConfig", lambda **kwargs: original(**{
-            "embeddings_enabled": False, "embedding_provider": "", "embedding_model": "", **kwargs}))
+        def preflip_config(**kwargs):
+            config = original(**{"embeddings_enabled": False, "embedding_model": "", **kwargs})
+            config.embedding_provider = kwargs.get("embedding_provider", "")
+            return config
+        monkeypatch.setattr(config_module, "LCMConfig", preflip_config)
     monkeypatch.setenv("HERMES_LCM_REPO", str(ROOT))
     monkeypatch.setenv("HERMES_MB_WORKDIR", str(tmp_path))
     for name, value in [("HERMES_MB_PROVIDER", provider), ("HERMES_MB_MODEL", model)]:

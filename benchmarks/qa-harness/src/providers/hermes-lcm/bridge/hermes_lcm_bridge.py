@@ -117,6 +117,7 @@ class Bridge:
         self.dim: int = 0
         # Per-container monotonic session order (recency prior in lcm_recall).
         self._order: dict[str, int] = {}
+        self._certified: set[str] = set()
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -186,6 +187,7 @@ class Bridge:
         if not self.initialized:
             raise RuntimeError("ingest before initialize")
         container_tag = str(req["containerTag"])
+        self._certified.discard(container_tag)
         session = req["session"]
         session_id = str(session["sessionId"])
         session_meta = session.get("metadata") or {}
@@ -292,6 +294,10 @@ class Bridge:
 
         db_path = self._db_path(container_tag)
         config = self._config(db_path)
+        if self.embeddings_enabled and self.provider_name in {"fastembed", "fast-embed"} and container_tag not in self._certified:
+            from benchmarking.longmemeval import certify_local_recall_store
+            certify_local_recall_store(config, db_path)
+            self._certified.add(container_tag)
         store = MessageStore(str(db_path), ingest_protection_config=config)
         dag = SummaryDAG(str(db_path))
         vector_store = VectorStore(str(db_path), config=config)  # noqa: F841 (keeps db warm)
