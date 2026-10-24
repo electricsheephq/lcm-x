@@ -111,7 +111,12 @@ if command -v hermes >/dev/null 2>&1; then
   # Both supported host pins accept repository subdirectories, not local dirs.
   # An explicit pinned install moves with install --force --ref, never update.
   COMPANION_TARGET="$TARGET_ROOT/plugins/$COMPANION"
-  if [[ -e "$COMPANION_TARGET" || -L "$COMPANION_TARGET" ]]; then
+  if [[ -L "$COMPANION_TARGET" ]]; then
+    echo "Preserving companion symlink: $COMPANION_TARGET"
+    echo "This host cannot replace an external symlink. Move only this link aside by hand,"
+    echo "keeping its target intact, then run:"
+    echo "  hermes plugins install $COMPANION_SOURCE --ref $LCM_X_REF"
+  elif [[ -e "$COMPANION_TARGET" ]]; then
     echo "Companion already present; preserving $COMPANION_TARGET. To replace explicitly:"
     echo "  hermes plugins install $COMPANION_SOURCE --force --ref $LCM_X_REF"
   else

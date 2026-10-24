@@ -60,10 +60,13 @@ def test_installer_hands_consent_to_native_install_without_forcing(tmp_path, exi
         assert not target.is_symlink()
     else:
         assert len(calls) == 1
-        assert f"hermes plugins install {SOURCE} --force --ref {sha}" in result.stdout
         if existing == "directory":
+            assert f"hermes plugins install {SOURCE} --force --ref {sha}" in result.stdout
             assert (target / "keep").read_text() == "preserve me"
         else:
+            assert "Move only this link aside by hand" in result.stdout
+            assert f"hermes plugins install {SOURCE} --ref {sha}" in result.stdout
+            assert "--force" not in result.stdout
             assert target.is_symlink()
     assert f"hermes plugins enable {NAME}" in result.stdout
     assert (home / "plugins/hermes-lcm-x").resolve() == ROOT

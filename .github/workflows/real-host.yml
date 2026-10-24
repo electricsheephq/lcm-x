@@ -114,7 +114,6 @@ jobs:
       # authority. A pre-provisioned verified PM store also satisfies preflight.
       LCM_1186_ALLOW_LOCKED_TOOLS: "0"
       LCM_1186_ARTIFACTS: ${{ github.workspace }}/1186-qualification
-      LCM_1186_SCRATCH: ${{ runner.temp }}/1186-${{ matrix.host }}-${{ matrix.route }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -148,6 +147,7 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a") as env:
               env.write(f"LCM_REAL_HERMES_PYTHON={host['python']}\n")
               env.write(f"LCM_REAL_HERMES_SRC={host['src']}\n")
+              env.write(f"LCM_1186_SCRATCH={os.environ['RUNNER_TEMP']}/1186-${{ matrix.host }}-${{ matrix.route }}\n")
           Path("1186-qualification/prepared-host.json").write_text(json.dumps(host, indent=2) + "\n")
           PY
 

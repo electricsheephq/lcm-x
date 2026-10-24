@@ -114,13 +114,17 @@ of companion installation; warmup and backfill remain explicit in this slice.
 
 The companion is a normal host-managed plugin: use host verbs to enable, disable
 or uninstall it. A pinned install does not move with `hermes plugins update`.
-To deliberately replace an existing companion (including an old symlink), use:
+To deliberately replace an existing host-managed companion, use:
 
 ```bash
 hermes plugins install electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings --force --ref "$LCM_X_REF"
 ```
 
-The installer prints this command instead of forcing replacement. Keep the
+The installer prints this command instead of forcing replacement. These host
+pins reject external symlinks before processing `--force`. If an earlier install
+linked the companion, move only that link aside by hand, preserve its target,
+then run the original install command without `--force`. The installer preserves
+the link and prints this prerequisite and the pinned host command. Keep the
 companion selected across host updates: the host records its dependency, while
 ordinary LCM-X version updates leave the stable carrier manifest unchanged.
 Disabling or uninstalling the carrier may remove fastembed on the next sync.
