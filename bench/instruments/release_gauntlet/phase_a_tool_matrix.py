@@ -26,6 +26,7 @@ from types import ModuleType
 SCENARIOS = {
     "lcm_grep", "lcm_recall", "lcm_query_state", "lcm_compute", "lcm_compile_evidence", "lcm_evidence_pack", "lcm_retrieve", "lcm_recent",
     "lcm_load_session", "lcm_describe", "lcm_expand", "lcm_expand_query", "lcm_status", "lcm_inspect", "lcm_doctor", "lcm_memory",
+    "lcm_doctor (prepared)",  # Additional local scenario, not a registry tool.
 }
 # PEM armor markers are built by string concatenation so the Hermes plugin install
 # scanner does not read these planted test fixtures as an embedded private key (#471).
@@ -308,6 +309,11 @@ def _scenario(engine, tool, ctx, *, patterns, posture):
         for check in value["checks"]:
             expected = "pass"
             if check["check"] == "embedding_provider_health" and not embedding_ok:
+                expected = "warn"
+            if (posture == "local" and check["check"] == "embedding_provider_health"
+                    and check["status"] == "warn"
+                    and check.get("detail", {}).get("readiness", "").startswith("model: preparing;")
+                    and "full text" in check.get("detail", {}).get("impact", "")):
                 expected = "warn"
             assert check["status"] == expected, value["checks"]
         assert value["overall"] == ("healthy" if all(c["status"] == "pass" for c in value["checks"]) else "warnings")
@@ -727,6 +733,20 @@ def _run_matrix(engine, registered, context, *, patterns, posture, missing):
         except Exception as exc:
             records.append((posture, tool, "FAIL", _safe_detail(exc)))
     return records
+def _prepared_doctor(mod, engine):
+    name = "lcm_doctor (prepared)"
+    if importlib.util.find_spec("fastembed") is None:
+        return ("local", name, "SKIP", "SKIP: fastembed is absent")
+    try:
+        command = mod["command"].handle_lcm_command
+        assert "status: ready" in command("embed warmup", engine)
+        assert "status: complete" in command("embed backfill --apply --limit 50", engine)
+        value = _payload(engine, "lcm_doctor", {})
+        assert all(check["status"] == "pass" for check in value["checks"]), value["checks"]
+        assert value["overall"] == "healthy", value
+        return ("local", name, "PASS", "warmup ready, backfill complete; every doctor check passed")
+    except Exception as exc:
+        return ("local", name, "FAIL", _safe_detail(exc))
 def _verdict(records, batteries, *, release, coverage_failed, preflight):
     skipped = any(row[2] == "SKIP" for row in records) or any(row[1] == "SKIP" for row in batteries)
     blocked = any(row[2] == "BLOCKED" for row in records) or any(row[1] == "BLOCKED" for row in batteries)
@@ -844,8 +864,9 @@ def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None 
                     context = _seed(mod, local)
                     registered = sorted({schema["name"] for schema in local.get_tool_schemas() if str(schema.get("name", "")).startswith("lcm_")})
                     missing = sorted(set(registered) - SCENARIOS)
-                    unexpected = sorted(SCENARIOS - set(registered))
+                    unexpected = sorted(SCENARIOS - set(registered) - {"lcm_doctor (prepared)"})
                     records += _run_matrix(local, registered, context, patterns=False, posture="local", missing=missing)
+                    records.append(_prepared_doctor(mod, local))
                 finally:
                     local.shutdown()
                 cloud_records, cloud_batteries = _cloud_rows(mod, state_root, registered, missing, expect_365_fixed=expect_365_fixed)

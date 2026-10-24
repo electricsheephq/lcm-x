@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -73,6 +74,70 @@ def _runner_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _doctor_scenario(phase_a, monkeypatch, checks):
+    monkeypatch.setattr(phase_a.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(phase_a, "_payload", lambda *_args: {
+        "checks": checks, "overall": "warnings",
+    })
+    context = {
+        "finance": {"content": "taxi costs $60; train costs $20", "store_id": "fixture"},
+        "atlas": {},
+    }
+    return phase_a._run_matrix(
+        object(), ["lcm_doctor"], context, patterns=False, posture="local", missing=[],
+    )[0]
+
+
+def test_local_doctor_accepts_only_preparing_warning(monkeypatch):
+    checks = [
+        {"check": "inactive_process", "status": "pass"},
+        {"check": "embedding_provider_health", "status": "warn", "detail": {
+            "readiness": "model: preparing; background initialization",
+            "impact": "lcm_recall keeps answering from full text",
+        }},
+    ]
+    assert _doctor_scenario(_runner_module(), monkeypatch, checks)[2] == "PASS"
+
+
+@pytest.mark.parametrize("name,readiness,impact", [
+    ("embedding_provider_health", "model: failed; initialization", "full text"),
+    ("embedding_provider_health", "model: preparing; initialization", "unavailable"),
+    ("embedding_provider_health", "", "full text"),
+    ("another_check", "model: preparing; initialization", "full text"),
+])
+def test_local_doctor_rejects_other_warnings(monkeypatch, name, readiness, impact):
+    checks = [
+        {"check": "inactive_process", "status": "pass"},
+        {"check": name, "status": "warn", "detail": {
+            "readiness": readiness, "impact": impact,
+        }},
+    ]
+    assert _doctor_scenario(_runner_module(), monkeypatch, checks)[2] == "FAIL"
+
+
+@pytest.mark.parametrize("status", ["warn", "pass"])
+def test_prepared_doctor_requires_pass_after_warmup_and_backfill(monkeypatch, status):
+    phase_a = _runner_module()
+    engine, calls = object(), []
+    monkeypatch.setattr(phase_a.importlib.util, "find_spec", lambda _name: object())
+
+    def command(text, target):
+        assert target is engine
+        calls.append(text)
+        return "status: ready" if text == "embed warmup" else "status: complete"
+
+    def doctor(target, tool, args):
+        assert target is engine and tool == "lcm_doctor" and args == {}
+        assert calls == ["embed warmup", "embed backfill --apply --limit 50"]
+        return {"checks": [{"check": "embedding_provider_health", "status": status}],
+                "overall": "healthy" if status == "pass" else "warnings"}
+
+    monkeypatch.setattr(phase_a, "_payload", doctor)
+    row = phase_a._prepared_doctor({"command": SimpleNamespace(handle_lcm_command=command)}, engine)
+    assert row[:3] == ("local", "lcm_doctor (prepared)", "PASS" if status == "pass" else "FAIL")
+    assert calls == ["embed warmup", "embed backfill --apply --limit 50"]
 
 
 def _fake_hermes_repo(root: Path, *, expected_surface: bool = True) -> Path:
@@ -152,8 +217,10 @@ def test_dev_posture_covers_every_tool_despite_disabled_tools_env(tmp_path):
     assert "Registry coverage: `COMPLETE`" in receipt
     assert "Missing matrix rows: `none`" in receipt
     assert "Unexpected scenario rows: `none`" in receipt
-    assert receipt.count("| local | `lcm_") == 16
+    assert receipt.count("| local | `lcm_") == 17
     assert "| local | `lcm_doctor` | PASS |" in receipt
+    prepared_result = "PASS" if importlib.util.find_spec("fastembed") else "SKIP"
+    assert f"| local | `lcm_doctor (prepared)` | {prepared_result} |" in receipt
     assert "| cloud-default | `lcm_recall` | SKIP | SKIP: VOYAGE_API_KEY is absent |" in receipt
     for battery in (
         "planted-secret",
@@ -469,7 +536,8 @@ def test_engine_threads_embedding_privacy_setting(tmp_path, privacy_setting, exp
     assert captured["assertions_enabled"] is True
     assert captured["adaptive_retrieval_enabled"] is True
     assert captured["entities_enabled"] is True
-    assert len(phase_a.SCENARIOS) == 16
+    assert len(phase_a.SCENARIOS - {"lcm_doctor (prepared)"}) == 16
+    assert "lcm_doctor (prepared)" in phase_a.SCENARIOS
 
 
 def test_noop_scenario_is_a_runner_failure(tmp_path):
