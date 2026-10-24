@@ -1,11 +1,11 @@
 """Keep core activation independent of the host-owned dependency consent."""
+import ast
 import json
 import os
 from pathlib import Path
 import subprocess
 
 import pytest
-import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 NAME = "hermes-lcm-x-local-embeddings"
@@ -13,15 +13,16 @@ SOURCE = f"electricsheephq/lcm-x/companions/{NAME}"
 
 
 def test_dependency_is_only_declared_by_stable_companion():
-    core = yaml.safe_load((ROOT / "plugin.yaml").read_text())
-    assert not {"python_dependencies", "pip_dependencies"} & core.keys()
+    core = {line.split(":", 1)[0] for line in (ROOT / "plugin.yaml").read_text().splitlines()}
+    assert not {"python_dependencies", "pip_dependencies"} & core
     assert not (ROOT / "pyproject.toml").exists()
-    carrier = yaml.safe_load((ROOT / "companions" / NAME / "plugin.yaml").read_text())
+    carrier = dict(line.split(": ", 1) for line in
+                   (ROOT / "companions" / NAME / "plugin.yaml").read_text().splitlines())
     requirements = [line for line in (ROOT / "requirements-semantic.txt").read_text().splitlines()
                     if line and not line.startswith("#")]
     assert carrier["name"] == NAME
     assert carrier["version"] == "0.1.0"
-    assert carrier["python_dependencies"] == requirements == ["fastembed>=0.8.0,<1.0"]
+    assert ast.literal_eval(carrier["python_dependencies"]) == requirements == ["fastembed>=0.8.0,<1.0"]
     assert not {"provides_tools", "provides_hooks", "config"} & carrier.keys()
 
 
@@ -84,6 +85,6 @@ def test_missing_dependency_remediation_names_host_companion(monkeypatch):
 def test_doctor_action_uses_host_companion():
     from hermes_lcm.diagnostics import doctor_guidance_for_check
 
-    guidance = doctor_guidance_for_check({"name": "embedding_provider_health", "status": "warn"})
+    guidance = doctor_guidance_for_check({"check": "embedding_provider_health", "status": "warn"})
     assert f"hermes plugins install {SOURCE}" in guidance["operator_action"]
     assert f"hermes plugins enable {NAME}" in guidance["operator_action"]
