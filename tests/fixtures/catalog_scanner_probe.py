@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import textwrap
 
 from hermes_cli import plugin_catalog as catalog
 from hermes_cli import plugins_cmd as pc
@@ -65,7 +66,7 @@ try:
         code = next(n.value.args[0].value for n in tree.body if isinstance(n, ast.Assign)
                     and any(isinstance(t, ast.Name) and t.id == "_PROBE" for t in n.targets))
         namespace = {}
-        exec(code, namespace)
+        exec(textwrap.dedent(code), namespace)
         assert namespace["selected"].name == "lcm-x"
         import inspect
         assert Path(inspect.getfile(type(namespace["selected"]))).resolve().is_relative_to(target.resolve())
