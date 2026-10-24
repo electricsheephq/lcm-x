@@ -22,9 +22,10 @@ pytest_plugins = ["bench.instruments.local_catchup.tests.test_fix_round3",
 def test_request_build_on_real_product_child_is_foreground(corpus, tmp_path, monkeypatch, path):
     db, manifest, mod = corpus
     provider = mod("embedding_provider")
-    # Reach the injected constructor even if a sibling request left a failed
-    # process-global prepare; this negative control models no prior readiness.
-    monkeypatch.setattr(mod("embedding_maintenance"), "local_model_state", lambda config: None)
+    # Bypass normal cold-grep readiness for the intentional foreground-construction
+    # fault; retain the no-state recall sibling's preparation negative control.
+    monkeypatch.setattr(mod("embedding_maintenance"), "local_model_state",
+                        lambda config: ("present", "") if path == "cold" else None)
     built = []
     class FakeTextEmbedding:
         def __init__(self, **kw):
