@@ -281,7 +281,6 @@ def main():
             if not group:
                 continue
             lat = sorted(r['seconds'] for r in group)
-            import math
             summary[cls] = dict(n=len(lat),p50=lat[math.ceil(.5*len(lat))-1],p90=lat[math.ceil(.9*len(lat))-1],
                 max=max(lat),timeouts=sum(bool(r['timeout']) for r in group), errors=sum(bool(r['error']) for r in group),
                 coverage=dict(collections.Counter(json.dumps(r['coverage'],sort_keys=True) for r in group)),
