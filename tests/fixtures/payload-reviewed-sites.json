@@ -17,11 +17,27 @@
   ],
   [
     "engine.py",
+    "_git_runtime_identity(_PLUGIN_ROOT)"
+  ],
+  [
+    "engine.py",
     "str(Path(__file__).resolve())"
+  ],
+  [
+    "engine.py",
+    "str(_PLUGIN_ROOT)"
   ],
   [
     "guidance.py",
     "Path(__file__).resolve().parent / 'skills' / 'hermes-lcm' / 'references' / 'recall-policy.md'"
+  ],
+  [
+    "guidance.py",
+    "RECALL_POLICY_PATH.read_text(encoding='utf-8').strip()"
+  ],
+  [
+    "guidance.py",
+    "RuntimeError(f'Hermes-LCM recall policy is empty: {RECALL_POLICY_PATH}')"
   ],
   [
     "host_uid_emit.py",
@@ -30,5 +46,9 @@
   [
     "runtime_identity.py",
     "Path(__file__).resolve().parent"
+  ],
+  [
+    "runtime_identity.py",
+    "_PLUGIN_ROOT / 'plugin.yaml'"
   ]
 ]

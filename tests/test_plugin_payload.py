@@ -4,6 +4,7 @@ from collections import Counter
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -157,8 +158,19 @@ def test_checkout_drift_gate(builder, tmp_path):
 def reviewed_sites(payload):
     sites = []
     names = {"import_module", "__import__", "spec_from_file_location"}
-    for path in sorted(payload.rglob("*.py")):
-        tree = ast.parse(path.read_bytes())
+    trees = {path: ast.parse(path.read_bytes()) for path in sorted(payload.rglob("*.py"))}
+    def module(path):
+        return path.relative_to(payload).with_suffix("").as_posix().replace("/", ".")
+    roots = set()
+    for path, tree in trees.items():
+        for assignment in tree.body:
+            if isinstance(assignment, (ast.Assign, ast.AnnAssign)) and assignment.value is not None:
+                if any((isinstance(n, ast.Name) and n.id == "__file__") or
+                       (isinstance(n, ast.Attribute) and n.attr == "__file__") for n in ast.walk(assignment.value)):
+                    targets = assignment.targets if isinstance(assignment, ast.Assign) else [assignment.target]
+                    roots.update(f"{module(path)}.{n.id}" for target in targets for n in ast.walk(target)
+                                 if isinstance(n, ast.Name))
+    for path, tree in trees.items():
         parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
         aliases = {}
         for node in ast.walk(tree):
@@ -166,7 +178,10 @@ def reviewed_sites(payload):
                 aliases.update((a.asname or a.name.split(".")[0], a.name if a.asname else a.name.split(".")[0])
                                for a in node.names)
             elif isinstance(node, ast.ImportFrom):
-                aliases.update((a.asname or a.name, (node.module or "") + "." + a.name) for a in node.names)
+                prefix = list(path.parent.relative_to(payload).parts)
+                prefix = prefix[:len(prefix) - node.level + 1] if node.level else []
+                origin = ".".join([*prefix, node.module or ""]).strip(".")
+                aliases.update((a.asname or a.name, (origin + "." + a.name).strip(".")) for a in node.names)
 
         def canonical(node):
             text = ast.unparse(node)
@@ -174,9 +189,10 @@ def reviewed_sites(payload):
             return aliases.get(first, first) + dot + rest
 
         for node in ast.walk(tree):
-            if ((isinstance(node, ast.Name) and node.id == "__file__")
-                    or (isinstance(node, ast.Call) and canonical(node.func).split(".")[-1] in names)
-                    or (isinstance(node, (ast.Name, ast.Attribute)) and canonical(node).startswith("importlib.resources"))):
+            if (isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load)
+                    and (canonical(node).split(".")[-1] in names | {"__file__"}
+                         or canonical(node).startswith("importlib.resources")
+                         or canonical(node) in roots or f"{module(path)}.{canonical(node)}" in roots)):
                 # Include the enclosing expression so a changed asset path is drift too.
                 expression = node
                 while isinstance(parent := parents.get(expression), ast.expr) and not isinstance(
@@ -195,7 +211,11 @@ def assert_reviewed_sites(payload):
 @pytest.mark.parametrize("site", ["__file__", "import_module(name)", "__import__(name)",
                                        "spec_from_file_location(name, path)", "importlib.resources.files(name)",
                                        "from importlib import resources as r; r.files(name)",
-                                       "from importlib import import_module as im; im(name)"])
+                                       "from importlib import import_module as im; im(name)",
+                                       "Path(config.__file__)", "Path(sys.modules[__name__].__file__)",
+                                       "list(map(import_module, names))", "_load = importlib.import_module",
+                                       "functools.partial(importlib.util.spec_from_file_location, name)",
+                                       "_load = __import__"])
 def test_new_unreviewed_site_mutation_fails(builder, tmp_path, site):
     payload = tmp_path / "payload"
     builder.build(git(ROOT, "rev-parse", "HEAD"), payload, tmp_path / "manifest.json")
@@ -205,6 +225,62 @@ def test_new_unreviewed_site_mutation_fails(builder, tmp_path, site):
     with pytest.raises(AssertionError):
         assert_reviewed_sites(payload)
     print(f"new reviewed-site mutation rejected: {site}")
+
+
+@pytest.mark.parametrize("module,prefix", [("runtime_identity.py", ""),
+                                                ("guidance.py", "from .runtime_identity import _PLUGIN_ROOT\n")])
+def test_reviewed_root_data_flow_mutations_fail(builder, tmp_path, module, prefix):
+    payload = tmp_path / "payload"
+    builder.build(git(ROOT, "rev-parse", "HEAD"), payload, tmp_path / "manifest.json")
+    assert_reviewed_sites(payload)
+    with (payload / module).open("a") as stream:
+        stream.write("\n" + prefix + '(_PLUGIN_ROOT / "prompts" / "extra.md").read_text()\n')
+    with pytest.raises(AssertionError):
+        assert_reviewed_sites(payload)
+    print(f"M03/M04 data-flow mutation rejected: {module}")
+
+
+def assert_payload_markdown_paths(payload):
+    repo_dirs = {p.split("/")[0] for p in git(ROOT, "ls-files").splitlines() if "/" in p}
+    checked = []
+    for page in sorted(payload.rglob("*.md")):
+        # Absolute URLs name external resources, not files in the installed payload.
+        text = re.sub(r"\[[^\]]*\]\(https?://[^)]*\)|https?://[^\s`<>)]*", "", page.read_text())
+        for match in re.finditer(r"(?<![\w/])(?:\.{1,2}/)*(?:[\w.-]+/)*[\w.-]+\.(?:md|py|sh|json|ya?ml|txt)\b", text):
+            target = match.group().split("#")[0]
+            if "/" not in target and not target.endswith(".md"):
+                continue  # Bare host config filenames are not repository references.
+            if "/" in target and target.split("/")[0] not in repo_dirs | {".", ".."}:
+                continue  # e.g. Hermes-owned agent/ and hermes_cli/ source references.
+            candidates = [(page.parent / target).resolve(), (payload / target).resolve()]
+            assert any(p.is_relative_to(payload.resolve()) and p.is_file() for p in candidates), (page, target)
+            checked.append(target)
+    return checked
+
+
+def test_payload_markdown_link_integrity(builder, tmp_path):
+    payload = tmp_path / "payload"
+    builder.build(git(ROOT, "rev-parse", "HEAD"), payload, tmp_path / "manifest.json")
+    assert "references/configuration.md" in assert_payload_markdown_paths(payload)  # Positive control.
+    page = payload / "skills/hermes-lcm/references/configuration.md"
+    with page.open("a") as stream:
+        stream.write("\nSee `docs/operator-guide.md`.\n")
+    with pytest.raises(AssertionError, match="docs/operator-guide"):
+        assert_payload_markdown_paths(payload)
+    print("relative docs mutation rejected; shipped reference positive control passed")
+
+
+def test_scanner_skip_guard_requires_both_host_variables(monkeypatch):
+    import os
+
+    tree = ast.parse((ROOT / "tests/test_catalog_scanner_on.py").read_text())
+    mark = next(n.value for n in tree.body if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in n.targets))
+    for python, src in [("", ""), ("python", ""), ("", "src"), ("python", "src")]:
+        monkeypatch.setenv("LCM_REAL_HERMES_PYTHON", python)
+        monkeypatch.setenv("LCM_REAL_HERMES_SRC", src)
+        skip = eval(compile(ast.Expression(mark), "skip guard", "eval"), dict(pytest=pytest, os=os))
+        assert skip.args[0] == (not (python and src))
 
 
 @pytest.mark.parametrize("staged", [False, True])
@@ -286,33 +362,55 @@ def test_release_order_and_idempotence(source, tmp_path):
     gh = bin_dir / "gh"
     gh.write_text(f"#!{shutil.which('python3')}\nimport os, pathlib, sys\n"
                   "with open(os.environ['GH_LOG'], 'a') as log: log.write(repr(sys.argv[1:])+'\\n')\n"
-                  "if sys.argv[1:3] == ['release','view'] and os.environ.get('GH_FAIL_VIEW'): sys.exit(1)\n"
+                  "if sys.argv[1:3] == ['release','view']:\n"
+                  " p=pathlib.Path(os.environ['GH_VIEW_COUNT']); n=int(p.read_text()) if p.exists() else 0\n"
+                  " p.write_text(str(n+1))\n"
+                  " if n < int(os.environ.get('GH_FAIL_VIEW', '0')): sys.exit(1)\n"
                   "if sys.argv[1:3] == ['release','upload']:\n"
                   " pathlib.Path(os.environ['GH_UPLOAD']).write_bytes(pathlib.Path(sys.argv[4]).read_bytes())\n")
     gh.chmod(0o755)
+    sleeper = bin_dir / "sleep"
+    sleeper.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SLEEP_LOG\"\n")
+    sleeper.chmod(0o755)
+    git_wrapper = bin_dir / "git"
+    git_wrapper.write_text(f"#!{shutil.which('python3')}\nimport os, sys\n"
+                           "if sys.argv[1] == 'push':\n"
+                           " with open(os.environ['PUSH_LOG'], 'a') as log: log.write('push\\n')\n"
+                           f"os.execv({shutil.which('git')!r}, [{shutil.which('git')!r}, *sys.argv[1:]])\n")
+    git_wrapper.chmod(0o755)
     shell = textwrap.dedent((ROOT / ".github/workflows/plugin-payload.yml").read_text().split("        run: |\n")[1])
     base_env = dict(os.environ, PATH=f"{bin_dir}:{Path(sys.executable).parent}:" + os.environ["PATH"], SOURCE_TAG="v1",
-                    GH_LOG=str(tmp_path / "gh.log"), GH_UPLOAD=str(tmp_path / "uploaded.json"),
+                    PUSH_LOG=str(tmp_path / "push.log"), GH_LOG=str(tmp_path / "gh.log"), GH_UPLOAD=str(tmp_path / "uploaded.json"),
                     GITHUB_REPOSITORY="fixture/repo")
 
-    def publish(label, missing=False, tag="v1"):
+    def publish(label, failures=0, tag="v1"):
         scratch = tmp_path / label
         scratch.mkdir()
-        env = dict(base_env, RUNNER_TEMP=str(scratch), SOURCE_TAG=tag)
-        if missing:
-            env["GH_FAIL_VIEW"] = "1"
+        env = dict(base_env, RUNNER_TEMP=str(scratch), SOURCE_TAG=tag, GH_FAIL_VIEW=str(failures),
+                   GH_VIEW_COUNT=str(scratch / "views"), SLEEP_LOG=str(scratch / "sleeps"))
         completed = subprocess.run(["bash", "-e", "-c", shell], cwd=source, env=env,
                                    capture_output=True, text=True, timeout=60)
         print(f"publication {label}: exit={completed.returncode}\n{completed.stdout}{completed.stderr}")
         return completed
 
-    missing = publish("missing", True)
-    assert missing.returncode != 0
+    missing = publish("missing", 1000)
+    assert missing.returncode == 1
+    assert "STOP: no GitHub release for v1 after 10 min; nothing pushed; re-run with workflow_dispatch once the release exists" in missing.stdout
+    assert (tmp_path / "missing/sleeps").read_text().splitlines() == ["10"] * 60
+    assert not (tmp_path / "missing/plugin").exists()
+    assert not (tmp_path / "uploaded.json").exists()
+    assert not (tmp_path / "push.log").exists()
     refs = git(origin, "for-each-ref", "refs/heads/dist")
     assert refs == "", missing.stdout + missing.stderr
-    first = publish("first")
+    first = publish("first", 3)
     assert first.returncode == 0, first.stdout + first.stderr
+    assert (tmp_path / "first/views").read_text() == "4"
+    assert (tmp_path / "first/sleeps").read_text().splitlines() == ["10"] * 3
+    gh_calls = (tmp_path / "gh.log").read_text().splitlines()
+    assert sum("'upload'" in line for line in gh_calls) == 1
+    assert (tmp_path / "push.log").read_text().splitlines() == ["push"]
     dist = git(origin, "rev-parse", "dist")
+    assert git(origin, "rev-list", "--count", "dist") == "1"
     stored = git(origin, "show", dist + ":payload-manifest.json")
     assert json.loads(stored)["tooling_sha"] == git(source, "rev-parse", "HEAD")
     # A later tooling checkout must reuse the old manifest, not rebuild provenance.

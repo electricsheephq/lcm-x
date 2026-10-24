@@ -10,7 +10,9 @@ import sys
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.skipif(not os.environ.get("LCM_REAL_HERMES_PYTHON"), reason="requires prepared real host")
+pytestmark = pytest.mark.skipif(
+    not (os.environ.get("LCM_REAL_HERMES_PYTHON") and os.environ.get("LCM_REAL_HERMES_SRC")),
+    reason="requires prepared real host (LCM_REAL_HERMES_PYTHON and LCM_REAL_HERMES_SRC)")
 
 
 def run(args, cwd, env=None):

@@ -18,8 +18,9 @@ Publication runs queue without cancellation (GitHub's finite limit is 100 pendin
 Each dist commit contains `plugin/` and `payload-manifest.json`. The commit message
 is `payload: <tag> <source-sha>`; the workflow prints the dist SHA and attaches the
 same manifest to the existing GitHub release. The release must exist before any dist
-push; if its creation is still pending, retry after it exists. Repeating a tag/source
-pair reuses its existing dist commit and re-attaches that commit's stored manifest,
+build or push; the workflow polls every 10 seconds for at most 10 minutes. If it
+times out, nothing is pushed; re-run with `workflow_dispatch` once the release exists.
+Repeating a tag/source pair reuses its existing dist commit and re-attaches that commit's stored manifest,
 even when dispatch tooling has changed. An upload failure can be retried this way.
 
 ## Verify provenance
@@ -52,6 +53,8 @@ as `sha`, and `subdir: plugin`. Its version describes the source release. Do not
 use the source commit as the payload pin or send source-installer users to `dist`.
 Rollback re-pins the catalog to a retained previous dist commit, with its matching
 version and `subdir`. Never rewrite or remove dist history.
+Find the installed dist commit with `hermes plugins list` (short pin), or the full
+`revision` in `$HERMES_HOME/plugins/.install-metadata.json`.
 For a dependency companion, use the **source SHA**, not the installed dist revision:
 read it from `payload: <tag> <source-sha>` on the exact dist commit, or `source_sha`
 in that commit's manifest / matching release asset. The catalog installation itself
