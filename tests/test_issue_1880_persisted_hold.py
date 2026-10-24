@@ -295,6 +295,8 @@ def test_red4_unreadable_metadata_and_failed_ingest(tmp_path, monkeypatch, caplo
 
 @pytest.mark.parametrize("setting", ["leaf_target_ratio", "leaf_target_min_tokens", "leaf_target_max_tokens"])
 def test_leaf_target_invalidation_and_bound_store_identity(tmp_path, monkeypatch, setting):
+    # Embedding-cache paths are outside this bound-store path-resolution probe.
+    monkeypatch.setattr(engine_module.LCMEngine, "_schedule_embedding_maintenance", lambda self: None)
     view, _ = arm(tmp_path)
     engine = rebuild(tmp_path)
     try:

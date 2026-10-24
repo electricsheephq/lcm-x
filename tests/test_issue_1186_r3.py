@@ -9,7 +9,7 @@ import pytest
 from hermes_lcm import tools
 from hermes_lcm.diagnostics import doctor_guidance_for_check
 from hermes_lcm.engine import LCMEngine
-from tests.test_issue_1186_smallhost import DefaultOnConfig
+from tests.test_issue_1186_smallhost import DefaultOnConfig, ready_local  # noqa: F401
 from tests.test_lcm_recall import recall_engine  # noqa: F401
 
 
@@ -123,7 +123,7 @@ def test_cpu_limited_proactive_matches_off_unless_overridden(default_engine, mon
 
 
 @pytest.mark.parametrize("cpus", [2.01, 2.5, 3])
-def test_default_normal_host_retains_semantic(recall_engine, monkeypatch, cpus):
+def test_default_normal_host_retains_semantic(recall_engine, monkeypatch, ready_local, cpus):
     recall_engine._config = DefaultOnConfig.from_env()
     monkeypatch.setattr(tools, "effective_cpus", lambda: cpus)
     monkeypatch.setattr(tools, "probe_provider_availability", lambda config: {"available": True, "detail": "synthetic backend"})

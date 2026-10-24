@@ -3493,7 +3493,7 @@ def _lcm_recall_catchup_reason(engine, provider, task: str) -> str | None:
                  str(provider.provider_id).strip().lower(), task, expected),
             ).fetchone()
             if row is None and embedding_provider_id(provider.provider_id) == "fastembed":
-                return f"{task} semantic index catching up (coverage not yet certified)"
+                return f"{task} semantic index catching up (coverage not certified; catch-up receipt missing)"
             record = json.loads(row[0]) if row else {}
             if record.get("remaining") or record.get("operator_retry"):
                 record["operator_retry"] = 0
@@ -3513,8 +3513,8 @@ def _lcm_recall_catchup_reason(engine, provider, task: str) -> str | None:
         return "; ".join(reasons) or None
     except Exception:
         logger.debug("Could not read embedding catch-up state", exc_info=True)
-        if embedding_provider_id(provider.provider_id) == "fastembed":
-            return f"{task} semantic index catching up (coverage unavailable)"
+        if embedding_provider_id(getattr(provider, "provider_id", "")) == "fastembed":
+            return f"{task} semantic index catching up (coverage not certified; metadata unavailable)"
     return None
 
 
