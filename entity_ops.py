@@ -576,7 +576,8 @@ def _owner_alias_rows(store, subject, owner):
         "SELECT a.* FROM lcm_entity_keys a WHERE scope_key=? AND subject_key=? "
         "AND owner_entity_id=? AND method='alias_match' AND (retired_at IS NULL OR EXISTS ("
         "SELECT 1 FROM lcm_entity_keys o WHERE o.scope_key=a.scope_key AND o.subject_key=a.subject_key "
-        "AND o.owner_entity_id=a.owner_entity_id AND o.method='override' AND o.retired_at IS NULL)) "
+        "AND o.owner_entity_id=a.owner_entity_id AND o.method='override' AND o.retired_at IS NULL "
+        "AND o.source_store_ids!='[]')) "
         "ORDER BY a.rowid DESC",
         (store.scope_key, subject, owner))]
 
