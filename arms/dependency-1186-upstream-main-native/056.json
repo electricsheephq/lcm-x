@@ -1,0 +1,14 @@
+{
+  "command": [
+    "HOST_TEMP/1186-hosts/upstream-main/venv/bin/python",
+    "CANDIDATE/bench/instruments/reliability/dependency_probe.py",
+    "scan",
+    "HOST_TEMP/1186-upstream-main-native/native/plugins/hermes-lcm-x-local-embeddings"
+  ],
+  "home": "HOST_TEMP/1186-upstream-main-native/native",
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 0.9831664099999671
+}

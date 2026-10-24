@@ -1,0 +1,107 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "1186-s1-c4-40092657328-public-summary",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "1186-s1-dependency",
+  "claim_class": "advisory",
+  "created": "2026-10-24T12:17:37Z",
+  "settled": "2026-10-24T12:17:49Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "0f86de4520abb672295882e430022ecfe4b769d9",
+    "dirty": false,
+    "diff_sha256": null,
+    "pr_head_sha": "4536f171bb4ffaf95d3ff186eb6f11e4706b54e5"
+  },
+  "env": {
+    "command": "python -m pytest -p no:cacheprovider -q -ra tests/test_issue_1186_host_dependencies.py",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "1186-S1-C4-carrier-rebuild",
+      "metric": "wall_seconds_mean",
+      "value": 9.577606005500002,
+      "n": 2,
+      "source": "arms/dependency-1186-upstream-main-native/rebuild-measurements.json"
+    },
+    {
+      "benchmark": "1186-S1-C4-carrier-rebuild",
+      "metric": "allocated_generation_bytes",
+      "value": 418062336.0,
+      "n": 2,
+      "source": "arms/dependency-1186-upstream-main-native/rebuild-measurements.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "arms",
+      "role": "receipt",
+      "sha256": "c39eb213377bfc3ee512dd00a488616a7b585dcc08a9d435d401ca93a9d193ca",
+      "bytes": 326731
+    },
+    {
+      "path": "rescore.py",
+      "role": "receipt",
+      "sha256": "5ea0d5543a1a85d95ee6de223f4e442eb0d710f81e26506251bcc9172dbdd158",
+      "bytes": 2127
+    },
+    {
+      "path": "SCANNER-FLAGS.md",
+      "role": "receipt",
+      "sha256": "e691db7e8fcee411fb529db68c6c20273b2445b4ea12875d1f3456d4a83bba98",
+      "bytes": 18330
+    },
+    {
+      "path": "SCANNER-REFUSAL-r3.md",
+      "role": "receipt",
+      "sha256": "8e451838b316d6b3c24e6174afc8e6f763d7a959e3b134c5fde9f59e043af6d2",
+      "bytes": 730
+    },
+    {
+      "path": "REVIEW-r2.md",
+      "role": "receipt",
+      "sha256": "19fbcc9811fcc050ee959db7c7a014351f9bc0fd6d0e2de0533dd715f57cb9a2",
+      "bytes": 1374
+    },
+    {
+      "path": "REVIEW-r3.md",
+      "role": "receipt",
+      "sha256": "1e20cd6a56e5d4526c56697300c8da153502b3fbca0f25f0bdf917fda78dcdeb",
+      "bytes": 2374
+    },
+    {
+      "path": "REVIEW-r4.md",
+      "role": "receipt",
+      "sha256": "00a614ae8192647f0a2a6fec8731c3fbd96fbadb6bd448b3dabe147a30913c75",
+      "bytes": 1773
+    }
+  ],
+  "rescore": {
+    "command": "python3 rescore.py",
+    "inputs": [
+      "arms/dependency-1186-upstream-main-native/rebuild-measurements.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [
+    "https://github.com/electricsheephq/lcm-x/actions/runs/40092657328"
+  ],
+  "keep": [
+    "RESULT.md",
+    "REVIEW-r2.md",
+    "REVIEW-r3.md",
+    "REVIEW-r4.md",
+    "SCANNER-FLAGS.md",
+    "SCANNER-REFUSAL-r3.md",
+    "arms",
+    "arms/dependency-1186-upstream-main-native/rebuild-measurements.json",
+    "rescore.py"
+  ]
+}

@@ -1,0 +1,490 @@
+{
+  "host": "upstream-main",
+  "candidate_sha": "0f86de4520abb672295882e430022ecfe4b769d9",
+  "cells": [
+    {
+      "cell": "locked-tools",
+      "host": "upstream-main",
+      "status": "COMPLETE",
+      "archives": [
+        {
+          "tool": "python",
+          "sha256": "0ab3305457051cd3e7c031857e005f1bda17c218a1990567dacaaac6dd1d14f0",
+          "verified": true
+        },
+        {
+          "tool": "uv",
+          "sha256": "600cf9a742aca00d292673b16b5acffaa7b8c269a364ad0c2e79498dcb1fe101",
+          "verified": true
+        }
+      ]
+    },
+    {
+      "cell": "identity",
+      "host": "upstream-main",
+      "status": "COMPLETE",
+      "host_sha": "6f7a7991bb069db07ae74a479823ce8310f8c7e0",
+      "python_version": "3.14"
+    },
+    {
+      "cell": "companion-scan",
+      "host": "upstream-main",
+      "status": "COMPLETE",
+      "route": "installer",
+      "scanner_enabled": true,
+      "verdict": "safe",
+      "findings": []
+    },
+    {
+      "cell": "d",
+      "host": "upstream-main",
+      "status": "COMPLETE",
+      "route": "installer",
+      "runtime_prefix": "HOST_TEMP/1186-upstream-main-installer/noninteractive/installs/224dc9693023d5e7/environments/2f00de91c45a4b3fa1a3f3f2887bc579/venv",
+      "runtime_executable": "HOST_TEMP/1186-upstream-main-installer/noninteractive/installs/224dc9693023d5e7/environments/2f00de91c45a4b3fa1a3f3f2887bc579/venv/bin/python",
+      "core_enabled": true,
+      "core_error": null,
+      "companion_enabled": false,
+      "companion_error": "not enabled in config (run `hermes plugins enable hermes-lcm-x-local-embeddings` to activate)",
+      "fastembed_spec": false,
+      "recall": {
+        "query": "quartzneedle1186",
+        "limit": 5,
+        "scope_bias": 0.5,
+        "include": "verbatim",
+        "total_results": 2,
+        "hits": [
+          {
+            "kind": "message_excerpt",
+            "session_id": "dependency-fixture",
+            "timestamp": 1792843810.7808263,
+            "snippet": "Recorded >>>quartzneedle1186<<<.",
+            "score": 0.012295,
+            "expand_hint": "lcm_expand(store_id=2, content_offset=0)",
+            "from_current_session": true,
+            "arms": [
+              "fts"
+            ],
+            "store_id": 2
+          },
+          {
+            "kind": "message_excerpt",
+            "session_id": "dependency-fixture",
+            "timestamp": 1792843810.7805793,
+            "snippet": "The synthetic codeword is >>>quartzneedle1186<<<.",
+            "score": 0.012097,
+            "expand_hint": "lcm_expand(store_id=1, content_offset=0)",
+            "from_current_session": true,
+            "arms": [
+              "fts"
+            ],
+            "store_id": 1
+          }
+        ],
+        "provenance": {
+          "arms_run": [
+            "fts"
+          ],
+          "arm_weights": {
+            "fts": 0.5
+          },
+          "coverage": {
+            "fts": "ok"
+          },
+          "fts_index": "stem",
+          "rerank": "disabled",
+          "ordering": "rrf-fusion -> scope/recency prior -> rerank reorder (top window); the reported score is the scope/recency-adjusted RRF score, and rerank (when applied) only permutes the top window without replacing that score"
+        },
+        "metrics": {
+          "embedding_query_calls": 0,
+          "embedding_query_tokens": 0,
+          "embedding_query_tokens_complete": true,
+          "embedding_queries": []
+        },
+        "degraded": true,
+        "degraded_reason": "embedding provider unavailable: local embedding model is unavailable (FastEmbed is not installed; install the optional fastembed dependency); retrieval uses full text"
+      },
+      "doctor": {
+        "overall": "warnings",
+        "survival_fit": null,
+        "runtime_identity": {
+          "engine": "lcm-x",
+          "engine_selected_as": "lcm-x",
+          "plugin_name": "hermes-lcm-x",
+          "plugin_version": "0.29.0",
+          "plugin_path": "RUNNER_HOME/work/lcm-x/lcm-x",
+          "module_path": "CANDIDATE/engine.py",
+          "hermes_home": "HOST_TEMP/1186-upstream-main-installer/noninteractive",
+          "database_path": "HOST_TEMP/1186-upstream-main-installer/noninteractive/lcm.db",
+          "database_path_source": "hermes_home",
+          "session_id": "dependency-fixture",
+          "session_platform": "cli",
+          "session_bound": true,
+          "conversation_id": "dependency-fixture",
+          "lifecycle_current_session_id": "dependency-fixture",
+          "lifecycle_last_finalized_session_id": "",
+          "plugin_git_commit": "0f86de4520abb672295882e430022ecfe4b769d9",
+          "plugin_git_branch": "HEAD",
+          "plugin_git_dirty": true,
+          "plugin_git_remote": "https://github.com/electricsheephq/lcm-x"
+        },
+        "checks": [
+          {
+            "check": "inactive_process",
+            "status": "pass",
+            "detail": "no live inactive process"
+          },
+          {
+            "check": "identity_migration",
+            "status": "pass",
+            "detail": "config uses hermes-lcm-x / lcm-x"
+          },
+          {
+            "check": "database_integrity",
+            "status": "pass",
+            "detail": "ok"
+          },
+          {
+            "check": "ingest_health",
+            "status": "pass",
+            "detail": "no ingest failures recorded"
+          },
+          {
+            "check": "ignore_pattern_drops",
+            "status": "pass",
+            "detail": "no messages dropped by ignore_message_patterns"
+          },
+          {
+            "check": "schema_core_tables",
+            "status": "pass",
+            "detail": {
+              "database_path": "HOST_TEMP/1186-upstream-main-installer/noninteractive/lcm.db",
+              "required_tables": [
+                "messages",
+                "metadata",
+                "summary_nodes",
+                "lcm_lifecycle_state",
+                "lcm_migration_state",
+                "messages_fts",
+                "nodes_fts"
+              ],
+              "existing_tables": [
+                "lcm_chunk_binary",
+                "lcm_chunk_meta",
+                "lcm_chunk_vectors",
+                "lcm_embedding_backfill_inflight",
+                "lcm_embedding_binary",
+                "lcm_embedding_meta",
+                "lcm_embedding_profile",
+                "lcm_embedding_vectors",
+                "lcm_lifecycle_state",
+                "lcm_migration_state",
+                "lcm_rollup_invalidations",
+                "lcm_rollup_sources",
+                "lcm_rollup_state",
+                "lcm_rollups",
+                "messages",
+                "messages_fts",
+                "messages_fts_config",
+                "messages_fts_data",
+                "messages_fts_docsize",
+                "messages_fts_idx",
+                "messages_fts_stem",
+                "messages_fts_stem_config",
+                "messages_fts_stem_data",
+                "messages_fts_stem_docsize",
+                "messages_fts_stem_idx",
+                "metadata",
+                "nodes_fts",
+                "nodes_fts_config",
+                "nodes_fts_data",
+                "nodes_fts_docsize",
+                "nodes_fts_idx",
+                "sqlite_sequence",
+                "summary_node_provenance",
+                "summary_nodes"
+              ],
+              "missing_tables": []
+            }
+          },
+          {
+            "check": "messages_fts_integrity",
+            "status": "pass",
+            "detail": "ok"
+          },
+          {
+            "check": "nodes_fts_integrity",
+            "status": "pass",
+            "detail": "ok"
+          },
+          {
+            "check": "sqlite_storage",
+            "status": "pass",
+            "detail": {
+              "database_path": "HOST_TEMP/1186-upstream-main-installer/noninteractive/lcm.db",
+              "database_exists": true,
+              "journal_mode": "wal",
+              "quick_check": "ok",
+              "database_size_bytes": 323584,
+              "wal_size_bytes": 552112
+            }
+          },
+          {
+            "check": "payload_storage",
+            "status": "pass",
+            "detail": {
+              "largest_content_rows": [
+                {
+                  "store_id": 1,
+                  "session_id": "dependency-fixture",
+                  "source": "cli",
+                  "role": "user",
+                  "field": "content",
+                  "length": 43,
+                  "content_len": 43,
+                  "suspicious_category": "largest_content"
+                },
+                {
+                  "store_id": 2,
+                  "session_id": "dependency-fixture",
+                  "source": "cli",
+                  "role": "assistant",
+                  "field": "content",
+                  "length": 26,
+                  "content_len": 26,
+                  "suspicious_category": "largest_content"
+                }
+              ],
+              "largest_tool_calls_rows": [
+                {
+                  "store_id": 1,
+                  "session_id": "dependency-fixture",
+                  "source": "cli",
+                  "role": "user",
+                  "field": "tool_calls",
+                  "length": 0,
+                  "tool_calls_len": 0,
+                  "suspicious_category": "largest_tool_calls"
+                },
+                {
+                  "store_id": 2,
+                  "session_id": "dependency-fixture",
+                  "source": "cli",
+                  "role": "assistant",
+                  "field": "tool_calls",
+                  "length": 0,
+                  "tool_calls_len": 0,
+                  "suspicious_category": "largest_tool_calls"
+                }
+              ],
+              "suspicious_data_uri_content_rows": [],
+              "suspicious_data_uri_tool_calls_rows": [],
+              "suspicious_base64_like_rows": [],
+              "quarantined_assistant_rows": [],
+              "suspicious_repetitive_assistant_rows": [],
+              "heartbeat_noise_rows": [],
+              "externalized_payload_dir": "HOST_TEMP/1186-upstream-main-installer/noninteractive/lcm-large-outputs",
+              "externalized_payload_count": 0,
+              "externalized_payload_bytes": 0,
+              "externalized_payload_chars": 0,
+              "latest_externalized_payload_path": "",
+              "latest_externalized_payload_mtime": 0.0,
+              "externalized_payload_refs_total": 0,
+              "externalized_payload_refs_existing": 0,
+              "externalized_payload_refs_missing": 0,
+              "externalized_payload_files_unreferenced": 0,
+              "missing_externalized_payload_refs": [],
+              "unreferenced_externalized_payload_files": []
+            }
+          },
+          {
+            "check": "sensitive_pattern_handling",
+            "status": "pass",
+            "detail": {
+              "sensitive_patterns_enabled": false,
+              "enabled": false,
+              "sensitive_patterns": [
+                "api_key",
+                "bearer_token",
+                "password_assignment",
+                "private_key"
+              ],
+              "patterns": [
+                "api_key",
+                "bearer_token",
+                "password_assignment",
+                "private_key"
+              ],
+              "active_patterns": [],
+              "unknown_patterns": [],
+              "source": "default",
+              "embedding_privacy_setting": "auto",
+              "embedding_privacy_enabled": false,
+              "embedding_privacy_provider_requires_privacy": false,
+              "embedding_privacy_revision": null,
+              "placeholder_format": "[LCM sensitive redaction: name=<pattern>; chars=<n>; bytes=<n>; sha256=<16 for non-password>]",
+              "lossless_recovery": null
+            }
+          },
+          {
+            "check": "fts_index_sync",
+            "status": "pass",
+            "detail": "2 session FTS rows, 2 session messages"
+          },
+          {
+            "check": "orphaned_dag_nodes",
+            "status": "pass",
+            "detail": "all nodes have valid sources"
+          },
+          {
+            "check": "summary_quality",
+            "status": "pass",
+            "detail": {
+              "total_nodes": 0,
+              "session_id": "dependency-fixture",
+              "total_source_tokens": 0,
+              "total_summary_tokens": 0,
+              "overall_compression_ratio": 0.0,
+              "extreme_ratio_threshold": 400,
+              "tiny_large_source_threshold": {
+                "source_token_count_min": 100000,
+                "token_count_max": 500
+              },
+              "extreme_ratio_nodes": 0,
+              "tiny_large_source_nodes": 0,
+              "worst_nodes": [],
+              "recommendation": "summary compression ratios are within the diagnostic thresholds"
+            }
+          },
+          {
+            "check": "config_validation",
+            "status": "pass",
+            "detail": "all settings within normal ranges"
+          },
+          {
+            "check": "embedding_provider_health",
+            "status": "warn",
+            "detail": {
+              "embeddings_enabled": true,
+              "active_embedding_profile": false,
+              "provider": "fastembed",
+              "model": "BAAI/bge-small-en-v1.5",
+              "available": false,
+              "reachability_probed": true,
+              "reason": "FastEmbed is not installed; install the dependency companion with `hermes plugins install electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings --ref <LCM-X-40-character-SHA>`; if already installed, run `hermes plugins enable hermes-lcm-x-local-embeddings`. Restart Hermes after enable; see docs/embeddings-setup.md",
+              "readiness": "model: unavailable(FastEmbed is not installed; install the dependency companion with `hermes plugins install electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings --ref <LCM-X-40-character-SHA>`; if already installed, run `hermes plugins enable hermes-lcm-x-local-embeddings`. Restart Hermes after enable; see docs/embeddings-setup.md); coverage: 0/0 summaries; maintenance: model_unavailable",
+              "impact": "semantic retrieval is degraded: lcm_recall reports degraded=true and lcm_grep mode=semantic falls back to full-text"
+            }
+          },
+          {
+            "check": "source_lineage_hygiene",
+            "status": "pass",
+            "detail": {
+              "messages_total": 2,
+              "attributed_messages": 2,
+              "normalized_unknown_messages": 0,
+              "legacy_blank_source_messages": 0,
+              "effective_unknown_messages": 0,
+              "normalization_mode": "backcompat-normalization"
+            }
+          },
+          {
+            "check": "lifecycle_fragmentation",
+            "status": "pass",
+            "detail": {
+              "read_only": true,
+              "lifecycle_rows": 1,
+              "empty_lifecycle_rows": 0,
+              "messages_total": 2,
+              "summary_nodes_total": 0,
+              "distinct_message_sessions": 1,
+              "distinct_node_sessions": 0,
+              "distinct_lcm_any_sessions": 1,
+              "lifecycle_current_sessions": 1,
+              "lifecycle_last_finalized_sessions": 0,
+              "lifecycle_current_missing_in_messages": 0,
+              "lifecycle_current_missing_in_nodes": 1,
+              "lifecycle_current_missing_in_lcm_any": 0,
+              "lifecycle_last_finalized_missing_in_messages": 0,
+              "lifecycle_last_finalized_missing_in_nodes": 0,
+              "lifecycle_last_finalized_missing_in_lcm_any": 0,
+              "message_sessions_without_lifecycle_current": 0,
+              "message_sessions_without_lifecycle_reference": 0,
+              "node_sessions_without_lifecycle_reference": 0,
+              "state_db_checked": false,
+              "state_db_error": "state database not found: HOST_TEMP/1186-upstream-main-installer/noninteractive/state.db",
+              "state_sessions_total": 0,
+              "lifecycle_current_missing_in_state": 0,
+              "lifecycle_last_finalized_missing_in_state": 0,
+              "lcm_message_sessions_missing_in_state": 0,
+              "lcm_node_sessions_missing_in_state": 0,
+              "state_sessions_missing_in_lcm_messages": 0,
+              "state_sessions_missing_in_lcm_any": 0,
+              "classification": {
+                "read_only": true,
+                "status": "pass",
+                "summary": "no lifecycle fragmentation categories detected",
+                "categories": []
+              }
+            }
+          },
+          {
+            "check": "compaction_progress",
+            "status": "pass",
+            "detail": {
+              "passes": 0
+            }
+          }
+        ],
+        "guidance": [
+          {
+            "check": "embedding_provider_health",
+            "status": "warn",
+            "action": "inspect",
+            "operator_action": "semantic retrieval is configured but not runnable: install the local fastembed dependency companion with `hermes plugins install electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings --ref <LCM-X-40-character-SHA>`; if installed, run `hermes plugins enable hermes-lcm-x-local-embeddings`. Otherwise fix LCM_EMBEDDING_PROVIDER/LCM_EMBEDDING_MODEL and provider credentials. Restart Hermes after enable, then run `/lcm embed warmup` and re-run `/lcm doctor`. Nothing is lost meanwhile -- the lossless store is intact and recall falls back to full-text",
+            "warning_only": true,
+            "rationale": "an unavailable embedding provider degrades semantic recall to full-text; it is a retrieval-capability problem, not persisted-state corruption"
+          }
+        ]
+      }
+    },
+    {
+      "cell": "f",
+      "host": "upstream-main",
+      "status": "COMPLETE",
+      "printed_command": "hermes plugins enable hermes-lcm-x-local-embeddings",
+      "runtime_prefix": "HOST_TEMP/1186-upstream-main-installer/noninteractive/installs/224dc9693023d5e7/environments/46a76da7bc9d42aebdef7c467bb90de8/venv",
+      "runtime_executable": "HOST_TEMP/1186-upstream-main-installer/noninteractive/installs/224dc9693023d5e7/environments/46a76da7bc9d42aebdef7c467bb90de8/venv/bin/python",
+      "core_enabled": true,
+      "core_error": null,
+      "companion_enabled": true,
+      "companion_error": null,
+      "fastembed_spec": true,
+      "fastembed_imported": true
+    },
+    {
+      "cell": "companion-scan",
+      "host": "upstream-main",
+      "status": "COMPLETE",
+      "route": "installer",
+      "scanner_enabled": true,
+      "verdict": "safe",
+      "findings": []
+    },
+    {
+      "cell": "a",
+      "host": "upstream-main",
+      "status": "COMPLETE",
+      "route": "installer",
+      "runtime_prefix": "HOST_TEMP/1186-upstream-main-installer/installer/installs/224dc9693023d5e7/environments/15d0e7e29e3e45c9ba610b9095c5b2a9/venv",
+      "runtime_executable": "HOST_TEMP/1186-upstream-main-installer/installer/installs/224dc9693023d5e7/environments/15d0e7e29e3e45c9ba610b9095c5b2a9/venv/bin/python",
+      "core_enabled": true,
+      "core_error": null,
+      "companion_enabled": true,
+      "companion_error": null,
+      "fastembed_spec": true,
+      "fastembed_imported": true
+    }
+  ],
+  "measurement_status": "raw; result card and publication required before citation"
+}

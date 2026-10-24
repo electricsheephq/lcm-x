@@ -1,0 +1,86 @@
+{
+  "host": "ref-0.21.5",
+  "candidate_sha": "0f86de4520abb672295882e430022ecfe4b769d9",
+  "cells": [
+    {
+      "cell": "identity",
+      "host": "ref-0.21.5",
+      "status": "COMPLETE",
+      "host_sha": "f97608f178d1ffeca59860195ab7da295f7c8e5f",
+      "python_version": "3.11"
+    },
+    {
+      "cell": "c",
+      "host": "ref-0.21.5",
+      "status": "N/A",
+      "reason": "reference pin has legacy dependency installation, no PM consent/generations"
+    },
+    {
+      "cell": "d",
+      "host": "ref-0.21.5",
+      "status": "N/A",
+      "reason": "reference pin has legacy dependency installation, no PM consent/generations"
+    },
+    {
+      "cell": "e",
+      "host": "ref-0.21.5",
+      "status": "N/A",
+      "reason": "reference pin has legacy dependency installation, no PM consent/generations"
+    },
+    {
+      "cell": "f",
+      "host": "ref-0.21.5",
+      "status": "N/A",
+      "reason": "reference pin has legacy dependency installation, no PM consent/generations"
+    },
+    {
+      "cell": "companion-scan",
+      "host": "ref-0.21.5",
+      "status": "COMPLETE",
+      "route": "native",
+      "scanner_enabled": true,
+      "verdict": "safe",
+      "findings": []
+    },
+    {
+      "cell": "companion-scan",
+      "host": "ref-0.21.5",
+      "status": "COMPLETE",
+      "route": "native",
+      "scanner_enabled": true,
+      "verdict": "safe",
+      "findings": []
+    },
+    {
+      "cell": "a",
+      "host": "ref-0.21.5",
+      "status": "COMPLETE",
+      "route": "native",
+      "runtime_prefix": "HOST_TEMP/1186-hosts/ref-0.21.5/venv",
+      "runtime_executable": "HOST_TEMP/1186-hosts/ref-0.21.5/venv/bin/python",
+      "core_enabled": true,
+      "core_error": null,
+      "companion_enabled": true,
+      "companion_error": null,
+      "fastembed_spec": true,
+      "fastembed_imported": true
+    },
+    {
+      "cell": "b",
+      "host": "ref-0.21.5",
+      "status": "COMPLETE",
+      "interactive": false,
+      "before": null,
+      "after": null,
+      "runtime_prefix": "HOST_TEMP/1186-hosts/ref-0.21.5/venv",
+      "runtime_executable": "HOST_TEMP/1186-hosts/ref-0.21.5/venv/bin/python",
+      "core_enabled": true,
+      "core_error": null,
+      "companion_enabled": true,
+      "companion_error": null,
+      "fastembed_spec": true,
+      "fastembed_imported": true
+    }
+  ],
+  "measurement_status": "raw; result card and publication required before citation"
+}

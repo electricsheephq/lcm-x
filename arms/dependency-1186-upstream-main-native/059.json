@@ -1,0 +1,13 @@
+{
+  "command": [
+    "HOST_TEMP/1186-hosts/upstream-main/venv/bin/python",
+    "CANDIDATE/bench/instruments/reliability/dependency_probe.py",
+    "state"
+  ],
+  "home": "HOST_TEMP/1186-upstream-main-native/native",
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 0.1431320599999708
+}

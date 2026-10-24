@@ -1,0 +1,66 @@
+[
+  {
+    "range_upper_bound": "0.99",
+    "wall_seconds": 9.256448911999996,
+    "allocated_generation_bytes": 418062336,
+    "allocated_delta_bytes": 117006336,
+    "new_generation_names": [
+      "b11a08959e934324b9ae14add5c1a255"
+    ],
+    "before": {
+      "stamp": "86670798178087d35ab1fd768327a6d0b5a69a1ce073c8b94a2522af1fec476c",
+      "environment": "HOST_TEMP/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/698f2fa4c8334ac7bbc74f3536a9503c/venv",
+      "state_dir": "HOST_TEMP/1186-upstream-main-native/native/installs/224dc9693023d5e7",
+      "python": "HOST_TEMP/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/698f2fa4c8334ac7bbc74f3536a9503c/venv/bin/python",
+      "committed": true
+    },
+    "after": {
+      "stamp": "b0b639c1b6bdcabc9046a5a8be032b31db7dd857d3566d336fa905118f954bb7",
+      "environment": "HOST_TEMP/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/b11a08959e934324b9ae14add5c1a255/venv",
+      "state_dir": "HOST_TEMP/1186-upstream-main-native/native/installs/224dc9693023d5e7",
+      "python": "HOST_TEMP/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/b11a08959e934324b9ae14add5c1a255/venv/bin/python",
+      "committed": true
+    },
+    "retained_leased_environments": [
+      "HOST_TEMP/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/698f2fa4c8334ac7bbc74f3536a9503c/venv"
+    ],
+    "leases": {
+      "b11a08959e934324b9ae14add5c1a255": false,
+      "15ab7ed773394ca1a8f243fdc189c290": false,
+      "698f2fa4c8334ac7bbc74f3536a9503c": true
+    }
+  },
+  {
+    "range_upper_bound": "0.98",
+    "wall_seconds": 9.898763099000007,
+    "allocated_generation_bytes": 418062336,
+    "allocated_delta_bytes": 117006336,
+    "new_generation_names": [
+      "f13fa5d7f01b4495a8fa763b475ce1a9"
+    ],
+    "before": {
+      "stamp": "b0b639c1b6bdcabc9046a5a8be032b31db7dd857d3566d336fa905118f954bb7",
+      "environment": "HOST_TEMP/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/b11a08959e934324b9ae14add5c1a255/venv",
+      "state_dir": "HOST_TEMP/1186-upstream-main-native/native/installs/224dc9693023d5e7",
+      "python": "HOST_TEMP/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/b11a08959e934324b9ae14add5c1a255/venv/bin/python",
+      "committed": true
+    },
+    "after": {
+      "stamp": "f2cc435d7772e5303c63ac4d4fc2c800e0ee2ddfa56411e5ec4a58f370b2453f",
+      "environment": "HOST_TEMP/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/f13fa5d7f01b4495a8fa763b475ce1a9/venv",
+      "state_dir": "HOST_TEMP/1186-upstream-main-native/native/installs/224dc9693023d5e7",
+      "python": "HOST_TEMP/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/f13fa5d7f01b4495a8fa763b475ce1a9/venv/bin/python",
+      "committed": true
+    },
+    "retained_leased_environments": [
+      "HOST_TEMP/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/698f2fa4c8334ac7bbc74f3536a9503c/venv",
+      "HOST_TEMP/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/b11a08959e934324b9ae14add5c1a255/venv"
+    ],
+    "leases": {
+      "f13fa5d7f01b4495a8fa763b475ce1a9": false,
+      "b11a08959e934324b9ae14add5c1a255": true,
+      "15ab7ed773394ca1a8f243fdc189c290": false,
+      "698f2fa4c8334ac7bbc74f3536a9503c": true
+    }
+  }
+]

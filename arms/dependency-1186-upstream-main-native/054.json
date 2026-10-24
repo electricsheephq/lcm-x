@@ -1,0 +1,13 @@
+{
+  "command": [
+    "HOST_TEMP/1186-hosts/upstream-main/venv/bin/python",
+    "-c",
+    "from pathlib import Path; from hermes_cli import plugins_cmd_update as pc; print(pc._pull_plugin_update(Path('HOST_TEMP/1186-upstream-main-native/native/plugins/hermes-lcm-x'), 'pinned', 'not git', interactive=False))"
+  ],
+  "home": "HOST_TEMP/1186-upstream-main-native/native",
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 3.3963763950000043
+}
