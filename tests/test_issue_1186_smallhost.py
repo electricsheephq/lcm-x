@@ -157,3 +157,15 @@ def test_explicit_cloud_provider_is_not_cpu_limited(monkeypatch):
     config.embedding_provider = "voyage"
     monkeypatch.setattr(tools, "effective_cpus", lambda: pytest.fail("cloud must not probe CPU"))
     assert tools.default_semantic_cpu_limited(config) is False
+
+
+@pytest.mark.parametrize("provider", ["FASTEMBED", " fastembed ", "FAST-EMBED", " fast-embed "])
+def test_local_provider_spellings_share_policy(recall_engine, monkeypatch, provider):
+    monkeypatch.setenv("LCM_EMBEDDING_PROVIDER", provider)
+    config = DefaultOnConfig.from_env()
+    recall_engine._config = config
+    monkeypatch.setattr(tools, "effective_cpus", lambda: 2)
+    assert tools.default_semantic_cpu_limited(config) is True
+    assert tools._embedding_provider_health_check(recall_engine)["detail"] == (
+        "semantic recall limited on this host (2 effective CPUs); full-text recall is active"
+    )

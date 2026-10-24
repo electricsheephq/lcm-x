@@ -99,7 +99,7 @@ from .search_query import (
 )
 from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore, _interrupt_read_on_deadline
-from .config import LCMConfig, embedding_provider_id, profile_bound
+from .config import LCMConfig, embedding_provider_id, normalize_embedding_provider, profile_bound
 
 if TYPE_CHECKING:
     from .engine import LCMEngine
@@ -3998,7 +3998,7 @@ def default_semantic_cpu_limited(config) -> bool:
     """Only the local product default may adapt; explicit callers retain control."""
     return (bool(getattr(config, "embeddings_enabled", False))
             and not getattr(config, "embeddings_enabled_explicit", True)
-            and embedding_provider_id(str(getattr(config, "embedding_provider", ""))) == "fastembed"
+            and embedding_provider_id(normalize_embedding_provider(getattr(config, "embedding_provider", ""))) == "fastembed"
             and effective_cpus() <= 2)
 
 
