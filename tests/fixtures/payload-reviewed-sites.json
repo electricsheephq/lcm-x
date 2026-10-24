@@ -1,0 +1,34 @@
+[
+  [
+    "__init__.py",
+    "Path(__file__).resolve().parent / 'skills' / 'hermes-lcm'"
+  ],
+  [
+    "__init__.py",
+    "importlib.util.spec_from_file_location(f'{__name__}._standalone_config', Path(__file__).resolve().with_name('config.py'))"
+  ],
+  [
+    "__init__.py",
+    "importlib.util.spec_from_file_location(f'{__name__}._standalone_config', Path(__file__).resolve().with_name('config.py'))"
+  ],
+  [
+    "bypass.py",
+    "getattr(importlib.import_module('agent.context_compressor'), 'ContextCompressor')"
+  ],
+  [
+    "engine.py",
+    "str(Path(__file__).resolve())"
+  ],
+  [
+    "guidance.py",
+    "Path(__file__).resolve().parent / 'skills' / 'hermes-lcm' / 'references' / 'recall-policy.md'"
+  ],
+  [
+    "host_uid_emit.py",
+    "import_module('agent.message_metadata').PERSISTENCE_ONLY_MESSAGE_FIELDS"
+  ],
+  [
+    "runtime_identity.py",
+    "Path(__file__).resolve().parent"
+  ]
+]

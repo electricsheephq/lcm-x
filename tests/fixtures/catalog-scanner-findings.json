@@ -1,5 +1,5 @@
 [
-  ["proc_access", "high", "cpu_capacity.py"],
-  ["python_subprocess", "medium", "inactive_record.py"],
-  ["python_subprocess", "medium", "runtime_identity.py"]
+  ["proc_access", "high", "cpu_capacity.py", 2],
+  ["python_subprocess", "medium", "inactive_record.py", 1],
+  ["python_subprocess", "medium", "runtime_identity.py", 1]
 ]

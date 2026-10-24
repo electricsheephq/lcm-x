@@ -77,7 +77,7 @@ worker slots).
 external service. The host installs its Python package through the stable companion plugin.
 
 ```bash
-# Use the same full commit SHA as your installed LCM-X core.
+# Use the full source commit SHA of your installed LCM-X core.
 LCM_X_REF=<LCM-X-40-character-SHA>
 hermes plugins install electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings --ref "$LCM_X_REF"
 export LCM_EMBEDDINGS_ENABLED=true
@@ -116,7 +116,10 @@ A profile-shaped `HERMES_HOME=<root>/profiles/<name>` selects that profile; a co
 The installer never links the companion or runs pip. Both qualified host
 pins require a repository subdirectory identifier rather than a local directory;
 `--ref` pins it to the installer's checkout commit. Native-route core users run
-the same companion command with their installed core's full SHA.
+the same companion command with their core's full source SHA. For a catalog payload,
+the installed revision is a dist commit: find the source SHA in that commit's
+`payload: <tag> <source-sha>` message or `payload-manifest.json` (`source_sha`), also
+attached to the source release. See [catalog provenance](operations/catalog-payload.md#verify-provenance).
 
 On hosts with the shared plugin manager, the native install owns the questions.
 Noninteractive installation or a decline leaves the companion installed but

@@ -64,6 +64,8 @@ def build(source, out, manifest, assets=ASSETS):
         return subprocess.check_output(["git", "-C", str(root), *args])
 
     sha = git("rev-parse", "--verify", "HEAD" if checkout else source + "^{commit}").decode().strip()
+    if checkout and git("status", "--porcelain", "--untracked-files=no"):
+        raise ValueError("dirty tracked checkout refused")
     paths = set(git("ls-files", "-z").decode().split("\0")) if checkout else {
         row.split("\t", 1)[1] for row in git("ls-tree", "-rz", sha).decode().split("\0") if row}
     paths.discard("")
@@ -94,7 +96,9 @@ def build(source, out, manifest, assets=ASSETS):
     if len(data) > MAX_FILES or sum(map(len, data.values())) > MAX_TOTAL_BYTES or any(
             len(value) > MAX_FILE_BYTES for value in data.values()):
         raise ValueError("payload exceeds host limit")
-    result = dict(source_sha=sha, builder_version=VERSION, file_count=len(data),
+    tooling_sha = subprocess.check_output(["git", "-C", str(ASSETS.parent.parent), "rev-parse", "HEAD"]).decode().strip()
+    result = dict(source_sha=sha, tooling_sha=tooling_sha, allowlist_sha256=hashlib.sha256(assets.read_bytes()).hexdigest(),
+                  builder_version=VERSION, file_count=len(data),
                   total_bytes=sum(map(len, data.values())), files=[
                       dict(path=p, bytes=len(value), sha256=hashlib.sha256(value).hexdigest()) for p, value in data.items()])
     Path(out).mkdir(parents=True, exist_ok=False)

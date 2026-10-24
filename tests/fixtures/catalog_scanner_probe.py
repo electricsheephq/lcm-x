@@ -1,5 +1,6 @@
 """Executed only in an isolated prepared Hermes interpreter; never system Hermes."""
 import ast
+from collections import Counter
 import json
 import os
 from pathlib import Path
@@ -22,14 +23,15 @@ original = guard.scan_plugin
 
 def observe(*args, **kwargs):
     result = original(*args, **kwargs)
-    findings = sorted({(f.pattern_id, f.severity, f.file) for f in result.findings})
+    counts = Counter((f.pattern_id, f.severity, f.file) for f in result.findings)
+    findings = sorted((*key, count) for key, count in counts.items())
     events.append(dict(verdict=result.verdict, scanner=guard.PLUGIN_SCANNER_VERSION, findings=findings))
     assert result.verdict != "dangerous"
     medium = [list(f) for f in findings if f[1] in {"medium", "high", "critical"}]
     baseline = json.loads(Path(expected).read_text()) if phase == "candidate" or len(events) > 1 else [
-        ["python_subprocess", "medium", "inactive_record.py"],
-        ["python_subprocess", "medium", "runtime_identity.py"],
-        ["unpinned_pip_install", "medium", "diagnostics.py"]]
+        ["python_subprocess", "medium", "inactive_record.py", 1],
+        ["python_subprocess", "medium", "runtime_identity.py", 1],
+        ["unpinned_pip_install", "medium", "diagnostics.py", 1]]
     assert medium == baseline, (medium, baseline)
     return result
 

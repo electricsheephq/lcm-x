@@ -12,6 +12,7 @@ permissions:
   contents: write
 concurrency:
   group: catalog-dist
+  queue: max
   cancel-in-progress: false
 jobs:
   payload:
@@ -28,35 +29,43 @@ jobs:
         env:
           SOURCE_TAG: ${{ inputs.source_tag || github.ref_name }}
           GH_TOKEN: ${{ github.token }}
-          GIT_INDEX_FILE: ${{ runner.temp }}/payload.index
         run: |
           pwd
           git rev-parse HEAD
           [[ "$SOURCE_TAG" == v* ]]
           git check-ref-format "refs/tags/$SOURCE_TAG"
           source_sha=$(git rev-parse "refs/tags/$SOURCE_TAG^{commit}")
-          python scripts/build_plugin_payload.py --source "$source_sha" --out "$RUNNER_TEMP/plugin" --manifest "$RUNNER_TEMP/payload-manifest.json"
-          git read-tree --empty
-          git --work-tree="$RUNNER_TEMP" add -f -- plugin payload-manifest.json
-          tree=$(git write-tree)
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          gh release view "$SOURCE_TAG"
           set +e
           git ls-remote --exit-code origin refs/heads/dist > "$RUNNER_TEMP/dist-ref"
           status=$?
           set -e
           parents=()
+          dist_sha=''
           case "$status" in
-            0) git fetch origin refs/heads/dist; parents=(-p "$(git rev-parse FETCH_HEAD)");;
+            0) git fetch origin refs/heads/dist; parents=(-p "$(git rev-parse FETCH_HEAD)")
+               while read -r old subject; do
+                 if [[ "$subject" == "payload: $SOURCE_TAG $source_sha" ]]; then dist_sha=$old; break; fi
+               done < <(git log FETCH_HEAD --format='%H %s');;
             2) :;;
             *) exit "$status";;
           esac
-          dist_sha=$(git commit-tree "$tree" "${parents[@]}" -m "payload: $SOURCE_TAG $source_sha")
-          echo "dist SHA: $dist_sha"
-          if ! git push origin "$dist_sha:refs/heads/dist"; then
-            echo 'STOP: dist push rejected. Preserve the rejection above; release manager must inspect the named ruleset. No bypass or force.'
-            gh api "repos/$GITHUB_REPOSITORY/rules/branches/dist" || true
-            exit 1
+          if [[ -n "$dist_sha" ]]; then
+            git show "$dist_sha:payload-manifest.json" > "$RUNNER_TEMP/payload-manifest.json"
+          else
+            python scripts/build_plugin_payload.py --source "$source_sha" --out "$RUNNER_TEMP/plugin" --manifest "$RUNNER_TEMP/payload-manifest.json"
+            export GIT_INDEX_FILE="$RUNNER_TEMP/payload.index"
+            git read-tree --empty
+            git --work-tree="$RUNNER_TEMP" add -f -- plugin payload-manifest.json
+            tree=$(git write-tree)
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            dist_sha=$(git commit-tree "$tree" "${parents[@]}" -m "payload: $SOURCE_TAG $source_sha")
+            if ! git push origin "$dist_sha:refs/heads/dist"; then
+              echo 'STOP: dist push rejected. Preserve the rejection above; release manager must inspect the named ruleset. No bypass or force.'
+              gh api "repos/$GITHUB_REPOSITORY/rules/branches/dist" || true
+              exit 1
+            fi
           fi
-          gh release view "$SOURCE_TAG"
-          gh release upload "$SOURCE_TAG" "$RUNNER_TEMP/payload-manifest.json"
+          echo "dist SHA: $dist_sha"
+          gh release upload "$SOURCE_TAG" "$RUNNER_TEMP/payload-manifest.json" --clobber

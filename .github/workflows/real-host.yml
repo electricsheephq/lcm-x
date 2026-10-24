@@ -29,7 +29,6 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0  # PluginManager identity tests archive the legacy GA commit.
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python (harness)
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -59,10 +58,6 @@ jobs:
               env.write(f"PYTHONPATH={os.environ['GITHUB_WORKSPACE']}:{host['src']}\n")
           PY
 
-      - name: catalog-scanner-on
-        if: matrix.host == 'upstream-main' || matrix.host == 'ref-0.21.5'
-        run: python -m pytest tests/test_catalog_scanner_on.py -q -ra --junitxml=catalog-scanner-on.xml
-
       - name: Run real-host regressions
         # LCM_REAL_HERMES_LONG stays unset; the long soak is a separate gate.
         run: |
@@ -82,12 +77,24 @@ jobs:
             tests/test_real_long_session.py \
             --junitxml=real-host-results.xml
 
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: (success() || failure()) && (matrix.host == 'upstream-main' || matrix.host == 'ref-0.21.5')
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: scanner-source
+      - name: catalog-scanner-on
+        if: (success() || failure()) && (matrix.host == 'upstream-main' || matrix.host == 'ref-0.21.5')
+        working-directory: scanner-source
+        run: python -m pytest tests/test_catalog_scanner_on.py -q -ra --junitxml=catalog-scanner-on.xml
+
       - name: Upload catalog scanner receipts
         if: always() && (matrix.host == 'upstream-main' || matrix.host == 'ref-0.21.5')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: catalog-scanner-on-${{ matrix.host }}
-          path: catalog-scanner-1946/
+          path: scanner-source/catalog-scanner-1946/
 
       - name: Upload test results
         if: always()
