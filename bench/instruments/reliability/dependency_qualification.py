@@ -296,7 +296,7 @@ class Qualification:
         target = home / "plugins" / CORE
         code = (
             "from pathlib import Path; "
-            "from hermes_cli import plugins_cmd as pc; "
+            "from hermes_cli import plugins_cmd_update as pc; "
             f"print(pc._pull_plugin_update(Path({str(target)!r}), 'pinned', 'not git', interactive=False))"
             if self.pm else
             "from pathlib import Path; from hermes_cli import plugins_cmd as pc; "
@@ -354,7 +354,7 @@ class Qualification:
                 assert all(row["leases"].get(Path(p).parent.name) for p in retained), row
                 self.probe(home, "import")
                 before = after
-            self.record("e", core_bump_rebuild=False, measurements=measurements)
+            self.record("e", core_version_update_cell="b", measurements=measurements)
         finally:
             for lease in leases:
                 lease.communicate(timeout=30)
@@ -371,10 +371,10 @@ class Qualification:
         self.decline_routes()
         native = self.fresh_routes()
         if self.route == "native":
-            self.unattended_update(native)
             if self.pm:
                 self.profiles(native)
                 self.rebuilds(native)
+            self.unattended_update(native)
 
 
 def main() -> None:
