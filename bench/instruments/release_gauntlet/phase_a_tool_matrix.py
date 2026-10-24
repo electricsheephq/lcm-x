@@ -889,6 +889,10 @@ def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None 
                 batteries += cloud_batteries
         finally:
             if world_cleanup is not None:
+                # Late maintenance must finish before the ambient home returns.
+                for name in ("_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER"):
+                    if not getattr(mod["engine"], name).quiesce(10.0):
+                        preflight.append(f"HERMES_HOME maintenance did not quiesce: {name}")
                 # Restore the host interpreter's module world (agent.* and
                 # hermes_lcm families + the inserted sys.path entry): the
                 # runner must leave zero residue in an embedding process.

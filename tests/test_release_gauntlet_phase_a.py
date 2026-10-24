@@ -313,6 +313,45 @@ def test_home_resolver_outside_out_blocks_before_engine_construction(tmp_path):
     assert "engine must not be constructed" not in receipt
 
 
+@pytest.mark.parametrize("drained", [True, False])
+def test_run_quiesces_maintenance_inside_synthetic_home_before_cleanup(
+    tmp_path, monkeypatch, drained
+):
+    phase_a = _runner_module()
+    worktree = Path(__file__).resolve().parents[1]
+    out = tmp_path / "out"
+    calls = []
+    original = dict(os.environ)
+
+    def quiesce(name, timeout):
+        assert timeout > 0
+        assert Path(os.environ["HERMES_HOME"]).is_relative_to(out)
+        calls.append(name)
+        return drained
+
+    engine = SimpleNamespace(**{
+        name: SimpleNamespace(quiesce=lambda timeout, name=name: quiesce(name, timeout))
+        for name in ("_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER")
+    })
+
+    def load(*args, **kwargs):
+        def cleanup():
+            assert Path(os.environ["HERMES_HOME"]).is_relative_to(out)
+            calls.append("cleanup")
+        return {"engine": engine}, "fake-host", None, cleanup
+
+    monkeypatch.setattr(phase_a, "_load", load)
+    monkeypatch.setattr(phase_a.importlib, "import_module", lambda _name: SimpleNamespace(
+        get_hermes_home=lambda: tmp_path / "outside-hermes"
+    ))
+    code, receipt = phase_a.run(worktree, out)
+    text = receipt.read_text()
+    assert code == 1 and "Exit verdict: `BLOCKED`" in text
+    assert calls == ["_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER", "cleanup"]
+    assert ("HERMES_HOME maintenance did not quiesce" in text) is (not drained)
+    assert dict(os.environ) == original
+
+
 def test_scrub_preserves_cloud_environment_allowlist(tmp_path, monkeypatch):
     phase_a = _runner_module()
     allowed = {
