@@ -250,7 +250,8 @@ def assert_payload_markdown_paths(payload):
             target = match.group().split("#")[0]
             if "/" not in target and not target.endswith(".md"):
                 continue  # Bare host config filenames are not repository references.
-            if "/" in target and target.split("/")[0] not in repo_dirs | {".", ".."}:
+            if ("/" in target and target.split("/")[0] not in repo_dirs | {".", ".."}
+                    and not (page.parent / target.split("/")[0]).is_dir()):
                 continue  # e.g. Hermes-owned agent/ and hermes_cli/ source references.
             candidates = [(page.parent / target).resolve(), (payload / target).resolve()]
             assert any(p.is_relative_to(payload.resolve()) and p.is_file() for p in candidates), (page, target)
