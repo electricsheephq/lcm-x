@@ -1,0 +1,62 @@
+name: Publish catalog payload
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: Existing source tag (including backfills)
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: catalog-dist
+  cancel-in-progress: false
+jobs:
+  payload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.repository.default_branch || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13'
+      - name: Build and append (no force or retry on a rejected push)
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          GIT_INDEX_FILE: ${{ runner.temp }}/payload.index
+        run: |
+          pwd
+          git rev-parse HEAD
+          [[ "$SOURCE_TAG" == v* ]]
+          git check-ref-format "refs/tags/$SOURCE_TAG"
+          source_sha=$(git rev-parse "refs/tags/$SOURCE_TAG^{commit}")
+          python scripts/build_plugin_payload.py --source "$source_sha" --out "$RUNNER_TEMP/plugin" --manifest "$RUNNER_TEMP/payload-manifest.json"
+          git read-tree --empty
+          git --work-tree="$RUNNER_TEMP" add -f -- plugin payload-manifest.json
+          tree=$(git write-tree)
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          set +e
+          git ls-remote --exit-code origin refs/heads/dist > "$RUNNER_TEMP/dist-ref"
+          status=$?
+          set -e
+          parents=()
+          case "$status" in
+            0) git fetch origin refs/heads/dist; parents=(-p "$(git rev-parse FETCH_HEAD)");;
+            2) :;;
+            *) exit "$status";;
+          esac
+          dist_sha=$(git commit-tree "$tree" "${parents[@]}" -m "payload: $SOURCE_TAG $source_sha")
+          echo "dist SHA: $dist_sha"
+          if ! git push origin "$dist_sha:refs/heads/dist"; then
+            echo 'STOP: dist push rejected. Preserve the rejection above; release manager must inspect the named ruleset. No bypass or force.'
+            gh api "repos/$GITHUB_REPOSITORY/rules/branches/dist" || true
+            exit 1
+          fi
+          gh release view "$SOURCE_TAG"
+          gh release upload "$SOURCE_TAG" "$RUNNER_TEMP/payload-manifest.json"
