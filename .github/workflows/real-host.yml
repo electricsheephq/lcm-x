@@ -59,6 +59,10 @@ jobs:
               env.write(f"PYTHONPATH={os.environ['GITHUB_WORKSPACE']}:{host['src']}\n")
           PY
 
+      - name: catalog-scanner-on
+        if: matrix.host == 'upstream-main' || matrix.host == 'ref-0.21.5'
+        run: python -m pytest tests/test_catalog_scanner_on.py -q -ra --junitxml=catalog-scanner-on.xml
+
       - name: Run real-host regressions
         # LCM_REAL_HERMES_LONG stays unset; the long soak is a separate gate.
         run: |
@@ -77,10 +81,6 @@ jobs:
             tests/test_host_stub_parity.py \
             tests/test_real_long_session.py \
             --junitxml=real-host-results.xml
-
-      - name: catalog-scanner-on
-        if: matrix.host == 'upstream-main' || matrix.host == 'ref-0.21.5'
-        run: python -m pytest tests/test_catalog_scanner_on.py -q -ra --junitxml=catalog-scanner-on.xml
 
       - name: Upload catalog scanner receipts
         if: always() && (matrix.host == 'upstream-main' || matrix.host == 'ref-0.21.5')

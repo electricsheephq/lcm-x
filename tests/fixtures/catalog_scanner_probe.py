@@ -14,7 +14,7 @@ from tools import plugin_guard as guard
 phase, config, receipt, expected, probe = sys.argv[1:]
 entries = json.loads(Path(config).read_text())
 home = Path(os.environ["HERMES_HOME"])
-home.mkdir(parents=True)
+home.mkdir(parents=True, exist_ok=True)
 events = []
 original = guard.scan_plugin
 
