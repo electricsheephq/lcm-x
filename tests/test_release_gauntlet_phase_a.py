@@ -263,6 +263,56 @@ def test_release_mode_blocks_the_same_cloud_skip(tmp_path):
     assert "Exit verdict: `BLOCKED`" in receipt
 
 
+@pytest.mark.parametrize("ambient", [None, "outside-hermes"])
+@pytest.mark.parametrize("abort", [False, True])
+def test_scrub_pins_fresh_synthetic_hermes_home_and_restores_environment(
+    tmp_path, monkeypatch, ambient, abort
+):
+    phase_a = _runner_module()
+    out = tmp_path / "out"
+    if ambient is None:
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+    else:
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ambient))
+    original = dict(os.environ)
+    homes = []
+    for _ in range(2):
+        try:
+            with phase_a._scrubbed_environment(tmp_path, out):
+                home = Path(os.environ["HERMES_HOME"])
+                assert home.is_dir() and home.is_relative_to(out)
+                assert not list(home.iterdir())
+                assert str(home) != original.get("HERMES_HOME")
+                homes.append(home)
+                if abort:
+                    raise RuntimeError("synthetic interruption")
+        except RuntimeError as exc:
+            assert abort and str(exc) == "synthetic interruption"
+        assert dict(os.environ) == original
+    assert homes[0] != homes[1]
+
+
+def test_home_resolver_outside_out_blocks_before_engine_construction(tmp_path):
+    outside = tmp_path / "outside-hermes"
+    sabotage = (
+        "from types import ModuleType\n"
+        "host = ModuleType('hermes_constants')\n"
+        f"host.get_hermes_home = lambda: Path({str(outside)!r})\n"
+        "sys.modules['hermes_constants'] = host\n"
+        "def forbidden_engine(*args, **kwargs):\n"
+        "    raise AssertionError('engine must not be constructed')\n"
+        "mod._engine = forbidden_engine\n"
+    )
+    code, receipt, stderr = _run_in_subprocess(
+        tmp_path, sabotage=sabotage, run_kwargs={}
+    )
+    assert code == 1, stderr + receipt
+    assert "Exit verdict: `BLOCKED`" in receipt
+    assert "HERMES_HOME" in receipt and str(outside) in receipt
+    assert "| local |" not in receipt and "| cloud-default |" not in receipt
+    assert "engine must not be constructed" not in receipt
+
+
 def test_scrub_preserves_cloud_environment_allowlist(tmp_path, monkeypatch):
     phase_a = _runner_module()
     allowed = {
@@ -277,7 +327,7 @@ def test_scrub_preserves_cloud_environment_allowlist(tmp_path, monkeypatch):
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("LCM_DISABLED_TOOLS", "lcm_recall")
 
-    with phase_a._scrubbed_environment(tmp_path) as scrubbed:
+    with phase_a._scrubbed_environment(tmp_path, tmp_path / "out") as scrubbed:
         assert {key: os.environ.get(key) for key in allowed} == allowed
         assert "LCM_DISABLED_TOOLS" not in os.environ
         assert "LCM_DISABLED_TOOLS" in scrubbed
