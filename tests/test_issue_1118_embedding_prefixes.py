@@ -488,3 +488,29 @@ def test_prefix_preflight_reports_invalid_provider_config(provider_name, missing
     assert len(payloads) == requests
     with sqlite3.connect(engine._store.db_path) as conn:
         assert conn.execute("SELECT count(*) FROM lcm_embedding_meta").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("batch", (False, True))
+def test_remote_prefixed_chunk_ingest_discloses_backlog(tmp_path, monkeypatch, batch):
+    from hermes_lcm import embedding_maintenance
+
+    with engine_context(tmp_path, window=8192, embeddings_enabled=True,
+                        embedding_provider="ollama", embedding_model="prefix-test",
+                        embedding_query_prefix=QUERY_PREFIX, embedding_document_prefix=DOCUMENT_PREFIX,
+                        ollama_base_url="http://192.0.2.1:11434") as engine:
+        provider, _ = provider_with_transport(engine._config, monkeypatch)
+        monkeypatch.setattr(command, "resolve_provider", lambda *a, **kw: provider)
+        assert isinstance(command._embedding_register_profiles(
+            engine._config, engine._store.db_path, allow_download=False), dict)
+        assert not embedding_maintenance._automatic_chunks_allowed(engine._config, command)
+        engine._store.append("session-a", {"role": "user", "content": "initial remote chunk"})
+        assert backfill(engine, "chunk")["embedded"] == 1
+        assert tools._lcm_recall_catchup_reason(engine, provider, "chunk") is None
+        message = {"role": "user", "content": "fresh remote chunk requiring manual embedding"}
+        ids = (engine._store.append_batch("session-a", [message]) if batch
+               else [engine._store.append("session-a", message)])
+        assert engine._store.get(ids[0])["content"] == message["content"]
+        reason = tools._lcm_recall_catchup_reason(engine, provider, "chunk")
+        assert reason and "chunk semantic index catching up" in reason
+        assert backfill(engine, "chunk")["embedded"] == 1
+        assert tools._lcm_recall_catchup_reason(engine, provider, "chunk") is None

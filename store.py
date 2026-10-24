@@ -554,7 +554,7 @@ class MessageStore:
             self._conn.execute(
                 "UPDATE metadata SET value=json_set(value, '$.remaining', json('true'), '$.updated_at', ?) "
                 "WHERE key='embedding_catchup:chunk:' || (SELECT identity_hash FROM lcm_embedding_profile "
-                "WHERE active=1 AND archived_at IS NULL AND task='chunk' "
+                "WHERE active=1 AND archived_at IS NULL AND task IN ('chunk', 'chunk+prefix') "
                 "ORDER BY registered_at DESC, identity_hash DESC LIMIT 1) "
                 "AND json_type(value, '$.remaining') IS NOT 'true'",
                 (time.time(),),
