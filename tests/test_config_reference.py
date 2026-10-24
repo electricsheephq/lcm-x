@@ -48,7 +48,7 @@ def test_reference_deprecation_warning_bytes(monkeypatch, key):
     monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda: {})
     monkeypatch.setenv(key, "true")
     assert config.LCMConfig.from_env().config_source_warnings == [
-        f"deprecated: {key} is set; this experiment is removed in v0.29.0 (#1246). "
+        f"deprecated: {key} is set; this experiment is removed in v0.30.0 (#1246). "
         "Until then it behaves as before."
     ]
 

@@ -754,8 +754,8 @@ _ENV_CHOICES = {
 
 # Deprecation/removal versions shared by the loader and generated reference.
 ENV_FIELD_DEPRECATIONS: dict[str, tuple[str, str]] = {
-    "cache_friendly_condensation_enabled": ("v0.28.0", "v0.29.0"),
-    "large_output_transcript_gc_enabled": ("v0.28.0", "v0.29.0"),
+    "cache_friendly_condensation_enabled": ("v0.28.0", "v0.30.0"),
+    "large_output_transcript_gc_enabled": ("v0.28.0", "v0.30.0"),
 }
 
 
