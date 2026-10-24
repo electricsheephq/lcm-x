@@ -3169,6 +3169,49 @@ class LCMEngine(
 
     # -- ContextEngine optional methods ------------------------------------
 
+    def select_context(
+        self,
+        request_messages: List[Dict[str, Any]],
+        *,
+        conversation_messages: List[Dict[str, Any]] = None,
+        incoming_message: Dict[str, Any] = None,
+        budget_tokens: int = 0,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Serve the assembled LCM context (DAG summaries + fresh tail) for THIS request.
+
+        Host contract (context_engine.select_context): runs on every provider request;
+        return None to leave the request unchanged; the returned list is request-only and
+        MUST NOT be persisted. We assemble with persist=False (stub-first: no payload file,
+        no fold lineage, no snapshot digest). Fail-open: any error -> None.
+        """
+        try:
+            if self._bypasses_lcm_context_management():
+                return None
+            system_msg = (
+                request_messages[0]
+                if request_messages and isinstance(request_messages[0], dict)
+                and request_messages[0].get("role") == "system"
+                else None
+            )
+            tail_messages = list(request_messages[1:]) if system_msg is not None else list(request_messages)
+            depths = self._dag.get_session_depths(self._session_id) if self._session_id else []
+            if not depths:
+                return None
+            selected = self._assemble_context(
+                system_msg, tail_messages,
+                assembly_cap_override=None,
+                include_lcm_note=True,
+                retained_user_message=None,
+                stub_over_cap_tool_results=True,
+                persist=False,
+            )
+            if not (isinstance(selected, list) and selected
+                    and all(isinstance(m, dict) for m in selected)):
+                return None
+            return selected
+        except Exception:
+            return None
+
     def _rollup_maintenance_key(self, scope: str) -> tuple[str, str]:
         raw_database_path = str(self._dag.db_path)
         if raw_database_path == ":memory:":
@@ -9436,19 +9479,7 @@ class LCMEngine(
 
         # Collect DAG summaries — highest depth first for context hierarchy
         summary_parts: list[str] = []
-        last_role = result[-1].get("role", "system") if result else "system"
-        if retained_user_msg is not None:
-            summary_role = "assistant"
-        elif not result or result[-1].get("role") == "system":
-            # The summary becomes the first provider-visible message: either no
-            # leading anchor exists (gateway-style assembly) or the system
-            # prompt is the only anchor, which Anthropic extracts into a
-            # separate field. Either way messages[0] must be role "user"; an
-            # assistant summary here is rejected with HTTP 400 after the second
-            # compaction.
-            summary_role = "user"
-        else:
-            summary_role = "assistant" if last_role != "assistant" else "user"
+        summary_role = "user"
         # #653: (selection group, node id) per part; the anchor goes first, then each depth, deepest first.
         part_keys: list[tuple[int, Optional[int]]] = []
         for candidate_index, candidate in enumerate(anchor_candidates):
@@ -9480,6 +9511,7 @@ class LCMEngine(
                     summary_parts.append(_summary_part_text(node))
 
         retained_generated_context_parts: list[str] = []
+        summary_messages: list[Dict[str, Any]] = []
         summary_message: Optional[Dict[str, Any]] = None
         if summary_parts:
             summary_budget, anchor_part = self._resolve_survival_prefix_budget(
@@ -9494,19 +9526,17 @@ class LCMEngine(
             active_summary_node_ids.update(
                 part_keys[i][1] for i in kept_indexes if part_keys[i][1] is not None)
             if selected_parts:
-                combined = "\n\n---\n\n".join(selected_parts)
-                if retained_user_msg is not None:
-                    retained_generated_context_parts.append(combined)
-                else:
-                    summary_message = {"role": summary_role, "content": combined}
-                    result.append(summary_message)
-                    summary_candidate = {
-                        "kind": "objective" if combined.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary",
-                        "span": combined,
-                        "full_identity": _emission_identity(summary_message),
-                        "row": summary_message,
-                    }
-                    emission_candidates.append(summary_candidate)
+                for part in selected_parts:
+                    msg = {"role": "user", "content": part, "_compressed_summary": True}
+                    result.append(msg)
+                    summary_messages.append(msg)
+                    emission_candidates.append({
+                        "kind": "objective" if part.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary",
+                        "span": part,
+                        "full_identity": _emission_identity(msg),
+                        "row": msg,
+                    })
+                summary_message = summary_messages[-1]
 
         # Proactive memory injection (SPEC F, default-off). One bounded block is
         # placed adjacent to the summary prefix — a stable position below the
@@ -9844,7 +9874,7 @@ class LCMEngine(
             self._clear_folded_tail_lineage()
         return result
 
-    def _mint_assembled_engine_uids(self, result, candidates, summary_message, carried_tail, recall_row,
+    def _mint_assembled_engine_uids(self, result, candidates, summary_messages, carried_tail, recall_row,
                                     context_row, tail_selected) -> None:
         """B2 (R4-1, R3-5 site 2; B1's gate): engine uids on the rows this assembly generated, in emitted order.
         A carrier keeps the summary's uid and absorbs the tail user row's identity as the host's
@@ -9853,11 +9883,11 @@ class LCMEngine(
             return
         carrier = result[-1] if carried_tail is not None else None
         specs: dict = {}
-        if summary_message is not None:
-            content = summary_message["content"]
+        for sm in summary_messages:
+            content = sm["content"]
             kind = "objective" if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary"
-            specs[id(carrier or summary_message)] = (kind, hashlib.sha256(content.encode("utf-8")).hexdigest(),
-                                                     "carrier" if carrier is not None else kind)
+            specs[id(sm)] = (kind, hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                             "carrier" if sm is carrier else kind)
         if recall_row is not None:
             specs[id(recall_row)] = ("recall", None, "recall")
         if context_row is not None:
