@@ -77,7 +77,8 @@ class Qualification:
         }
 
     def guard(self) -> None:
-        assert shutil.disk_usage(self.scratch).free >= 40 * GIB, "DISK_STOP: below 40 GiB free"
+        free = shutil.disk_usage(self.scratch).free
+        assert free >= 40 * GIB, f"DISK_STOP: {free} bytes free; requires at least {40 * GIB} bytes (40 GiB)"
         assert allocated_bytes(self.scratch) - self.initial_bytes < 15 * GIB, "DISK_STOP: 15 GiB peak cap"
 
     def run(self, home: Path, command: list[str], *, tty: bool = False, decline: bool = False,
@@ -154,7 +155,18 @@ class Qualification:
         return self.run(home, [str(self.python), "-m", "hermes_cli.main", *args], **kwargs)
 
     def probe(self, home: Path, mode: str) -> dict:
-        text = self.run(home, [str(self.python), str(PROBE), mode])
+        python, arguments = self.python, []
+        if self.pm and mode in {"import", "fts"}:
+            # Read selection through the exact bootstrap interpreter; launch
+            # product behavior in the actual committed generation, never a
+            # foreign venv carrying only the prep environment's dependencies.
+            selected = self.probe(home, "state")
+            assert selected["committed"] and selected["stamp"], (
+                "native core admission must commit a PM generation before runtime probing", selected)
+            python = Path(selected["python"])
+            assert python.is_file(), selected
+            arguments = [selected["environment"]]
+        text = self.run(home, [str(python), str(PROBE), mode, *arguments])
         return json.loads(text.strip().splitlines()[-1])
 
     def record(self, cell: str, **evidence) -> None:
@@ -327,8 +339,10 @@ class Qualification:
         home = self.scratch / "native"
         self.preflight(home)
         self.fixture_source(home)
-        native = self.fresh_routes()
+        # Prove missing-provider behavior before any home consents to the
+        # carrier; shared host selections must not pre-populate fastembed.
         self.decline_routes()
+        native = self.fresh_routes()
         if self.route == "native":
             self.unattended_update(native)
             if self.pm:

@@ -12,7 +12,9 @@ import sys
 
 
 def state() -> dict:
-    from pm.environments import install_state_dir, runtime_facts_path, selected_venv
+    from pm.environments import (
+        committed_venv, install_state_dir, project_python, runtime_facts_path, selected_venv,
+    )
     from pm.paths import repo_root
     root = repo_root()
     facts = runtime_facts_path(root)
@@ -20,6 +22,7 @@ def state() -> dict:
     return {
         "stamp": fact.get("stamp"), "environment": str(selected_venv(root)),
         "state_dir": str(install_state_dir(root)),
+        "python": str(project_python(root)), "committed": committed_venv(root) is not None,
     }
 
 
@@ -49,8 +52,11 @@ def main() -> None:
         print(json.dumps({p.name: leases_held(p) for p in root.iterdir() if p.is_dir()}))
         return
 
-    # Importing the real bootstrap activates the selected PM generation before
-    # importing PluginManager; this is the application's own import boundary.
+    # The harness chooses the committed PM generation's interpreter after
+    # admission. Bootstrap also applies the host's normal activation/path rules.
+    if len(sys.argv) > 2:
+        assert Path(sys.prefix).resolve() == Path(sys.argv[2]).resolve(), (
+            "probe did not start in the selected PM generation", sys.prefix, sys.argv[2])
     import hermes_bootstrap  # noqa: F401
     from hermes_cli import plugins as plugins
     plugins.discover_plugins(force=True)
@@ -58,6 +64,7 @@ def main() -> None:
     core = manager._plugins.get("hermes-lcm-x")
     companion = manager._plugins.get("hermes-lcm-x-local-embeddings")
     result = {
+        "runtime_prefix": sys.prefix, "runtime_executable": sys.executable,
         "core_enabled": bool(core and core.enabled), "core_error": getattr(core, "error", None),
         "companion_enabled": bool(companion and companion.enabled),
         "companion_error": getattr(companion, "error", None),
