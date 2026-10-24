@@ -182,11 +182,12 @@ class EntityStore:
         self._project("lcm_memory_notes", "note_id", note_id, {"superseded_by": superseded_by_or_None}, "supersede_note", log_event=log_event, **event)
 
     def add_key(self, subject_key, entity_id, method, source_store_ids, *, owner_entity_id=None, now=None):
-        if not self._depth:
-            raise RuntimeError("derived keys require transaction()")
-        return self._insert("lcm_entity_keys", dict(subject_key=subject_key, entity_id=entity_id,
-            method=method, source_store_ids=json.dumps(list(source_store_ids)), owner_entity_id=owner_entity_id,
-            created_at=(now or self._now)()))
+        with self._lock:
+            if not self._depth:
+                raise RuntimeError("derived keys require transaction()")
+            return self._insert("lcm_entity_keys", dict(subject_key=subject_key, entity_id=entity_id,
+                method=method, source_store_ids=json.dumps(list(source_store_ids)), owner_entity_id=owner_entity_id,
+                created_at=(now or self._now)()))
 
     def retire_key(self, key_id, *, now=None):
         if not self._depth:
