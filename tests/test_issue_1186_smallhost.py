@@ -169,3 +169,20 @@ def test_local_provider_spellings_share_policy(recall_engine, monkeypatch, provi
     assert tools._embedding_provider_health_check(recall_engine)["detail"] == (
         "semantic recall limited on this host (2 effective CPUs); full-text recall is active"
     )
+
+
+@pytest.mark.parametrize("override", ["voyage", "ollama", "fastembed", " voyage ", "", " ", "\t"])
+def test_request_provider_override_preserves_explicit_choice(recall_engine, monkeypatch, override):
+    recall_engine._config = DefaultOnConfig.from_env()
+    monkeypatch.setattr(tools, "effective_cpus", lambda: 2)
+    called = []
+    monkeypatch.setattr(tools, "_resolve_recall_provider",
+                        lambda *a, **k: called.append(k["provider_override"]))
+    result = json.loads(tools.lcm_recall({"query": "cobalt"}, engine=recall_engine,
+                                        provider_override=override))
+    if override.strip():
+        assert called == [override.strip()]
+        assert "cpu_limited" not in result.get("degraded_reason", "")
+    else:
+        assert not called
+        assert "cpu_limited" in result["degraded_reason"]

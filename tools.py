@@ -4089,7 +4089,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         rerank_window = min(rerank_window, rerank_window_limit)
 
     embeddings_enabled = bool(getattr(engine._config, "embeddings_enabled", False))
-    cpu_limited = default_semantic_cpu_limited(engine._config)
+    provider_override = str(kwargs.get("provider_override") or "").strip()
+    cpu_limited = not provider_override and default_semantic_cpu_limited(engine._config)
     embeddings_enabled = embeddings_enabled and not cpu_limited
     # FTS runs for verbatim/all normally, but ALSO whenever embeddings are
     # disabled -- including for include='summaries', whose only vector arm is dead
@@ -4109,7 +4110,6 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     embedding_query_metrics: list[dict[str, Any]] = []
     timed_out = False
     provider: Any = None
-    provider_override = str(kwargs.get("provider_override") or "").strip()
 
     served_fts_index = "plain"
     # -- FTS arm (the default-on value: works with embeddings disabled) --
