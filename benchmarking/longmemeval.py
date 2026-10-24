@@ -1003,6 +1003,8 @@ def resolve_harness_provider(
         resolved = StubEmbedder()
     else:
         _ensure_hermes_lcm_package()
+        from hermes_lcm.config import effective_embedding_model
+        model = effective_embedding_model(provider, model)
     if provider != "stub" and not model:
         raise ValueError(f"--model is required for --provider {provider}")
     if provider in {"fastembed", "fast-embed"}:
@@ -4112,6 +4114,7 @@ def run_harness(
     model: str,
     tmp_dir: Path,
     embeddings_enabled: bool | None = None,
+    shipped_default: bool = False,
     use_rerank: bool = False,
     recall_rerank: bool = False,
     recall_rerank_window: int = 0,
@@ -4129,6 +4132,15 @@ def run_harness(
     accounting: ProviderAccounting | None = None,
 ) -> dict[str, Any]:
     """Run every arm over every question and return an aggregate-only report."""
+    if shipped_default and (provider_name != "stub" or model or embeddings_enabled is not None):
+        raise ValueError("shipped_default cannot override explicit embedding settings")
+    if shipped_default or provider_name != "stub":
+        _ensure_hermes_lcm_package()
+        from hermes_lcm.config import LCMConfig, effective_embedding_model
+        if shipped_default:
+            defaults = LCMConfig()
+            provider_name, model, embeddings_enabled = defaults.embedding_provider, defaults.embedding_model, defaults.embeddings_enabled
+        model = effective_embedding_model(provider_name, model)
     _reset_privacy_counts()
     dataset_report: dict[str, Any] = dataset_coordinates(dataset_label)
     if source_sha256 is not None:
@@ -4277,7 +4289,7 @@ def run_harness(
             # Lexical-only runs retain the historical summary-provider setup but
             # never resolve or warm the distinct production chunk identity.
             summary_provider = resolve_harness_provider(
-                provider_name,
+                "stub" if shipped_default else provider_name,
                 model,
                 accounting=accounting,
                 accounting_role="summary_documents",

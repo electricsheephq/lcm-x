@@ -128,8 +128,8 @@ from a compression layer into a memory system: **large-output externalization
 and context-budget controls** (giant tool results move to recoverable refs
 instead of crowding the prompt), **temporal memory** (day/week/month rollups
 plus natural-time recall through `lcm_recent`), and **semantic retrieval**
-(opt-in embedding-backed `lcm_grep` semantic/hybrid modes with Voyage,
-OpenAI-compatible endpoints, Ollama, or in-process FastEmbed). See the
+(automatic local recall with in-process FastEmbed, plus `lcm_grep`
+semantic/hybrid modes and explicit Voyage, OpenAI-compatible or Ollama options). See the
 [Feature overview](docs/features-overview.md) for what each family does and
 why, and [Agent configuration profiles](docs/agent-config-profiles.md) for
 copy-paste setups per agent type. Externalization and temporal rollups are on by default.
@@ -255,7 +255,21 @@ A profile-shaped `HERMES_HOME=<root>/profiles/<name>` selects that profile; a co
 Companion failure leaves a successful core install usable with full-text recall
 and prints a retry command; context-engine selection remains manual.
 
-Semantic retrieval is optional; its dependency and recovery after a host update are described in the [embedding setup doc](docs/embeddings-setup.md#install-consent-updates-and-recovery).
+Local semantic recall is enabled by default with `fastembed`. The model config
+stays empty; FastEmbed resolves it to `BAAI/bge-small-en-v1.5`. An explicit model
+wins, and cloud providers still require an explicit model and their existing
+privacy/consent steps. The companion uses the host's normal dependency consent;
+see [installation and recovery](docs/embeddings-setup.md#install-consent-updates-and-recovery).
+After it is enabled and Hermes restarts, model warmup and index catch-up run in
+the background. While the dependency, model or index is unavailable or preparing,
+recall uses full text with `degraded=true`, a reason and actual arm coverage;
+queries never download models or backfill. `/lcm doctor` distinguishes model
+readiness from summary/chunk coverage. Existing rows and vectors are preserved.
+Set `LCM_EMBEDDINGS_ENABLED=false` to opt out without loading or downloading a model.
+Under the product default, hosts with at most 2 effective CPUs use full-text recall
+immediately while background catch-up continues. An explicit
+`LCM_EMBEDDINGS_ENABLED` value or programmatic config keeps control;
+see [small-host behavior](docs/embeddings-setup.md).
 
 ### Activate it
 
@@ -383,7 +397,7 @@ catalog must be nonempty and contain only supported pattern names (any unknown
 name fails warmup and dispatch loudly). Dry-run the backfill first;
 raw-chunk cloud backfill also requires explicit raw-text consent.
 See [the operator upgrade and privacy notes](docs/operator-guide.md#upgrade-to-v0231)
-before enabling embeddings.
+before selecting a cloud embedding provider.
 
 ### Migrating from hermes-lcm (v0.23.x and earlier)
 
@@ -495,7 +509,7 @@ The manifest still declares all 16 tools.
 | Tool | Use |
 |------|-----|
 | `lcm_grep` | Search current-session raw messages and summaries. Opt into `content_scope='externalized'|'both'` for bounded active-session payload search, or `session_scope='all'|'session'` for bounded raw-message archive recovery; broader scopes return raw-message hits only. |
-| `lcm_recall` | Search the entire memory across ALL conversations and all time by meaning. Fuses full-text, summary-vector, and chunk-vector arms with RRF, then applies a soft current-conversation (`scope_bias`) and recency prior. Returns bounded summary and verbatim-excerpt hits with `lcm_expand` handles; works FTS-only when embeddings are disabled. |
+| `lcm_recall` | Search the entire memory across ALL conversations and all time by meaning. Fuses full-text, summary-vector, and chunk-vector arms with RRF, then applies a soft current-conversation (`scope_bias`) and recency prior. Returns bounded summary and verbatim-excerpt hits with `lcm_expand` handles; uses full text with visible coverage/reason while local semantic recall prepares or is unavailable, and when embeddings are disabled. |
 | `lcm_query_state` | Query the opt-in V4 assertion sidecar for bounded current or historical facts, preferences, recommendations, commitments, actions, and status. Every result carries an exact message ref/span/quote; conflicts stay visible. |
 | `lcm_compute` | Execute supported dates, distinct counts, compatible-unit sums, directed/absolute differences, ordering, and latest-state operations over exact cited evidence. Planning, arithmetic, and trace verification are dependency-free and provider-neutral; ambiguous or incomplete inputs fail closed. |
 | `lcm_compile_evidence` | Validate one bounded provider-neutral semantic proposal against exact stored refs and return a compact evidence brief with explicit sufficiency state and an optional canonical computation. It never returns final prose or treats model claims as finite-coverage proof. |

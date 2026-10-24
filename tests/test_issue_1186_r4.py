@@ -25,23 +25,20 @@ def test_not_prepared_guidance_with_real_readiness(default_engine, monkeypatch, 
             raise sqlite3.OperationalError("synthetic coverage read failure")
         monkeypatch.setattr(command, "_embedding_read_connection", unreadable)
     check = tools._embedding_provider_health_check(default_engine)
-    assert check["detail"]["readiness"].startswith("model: not prepared (run /lcm embed warmup);")
+    assert check["detail"]["readiness"].startswith("model: preparing;")
     guidance = doctor_guidance_for_check(check)
-    if cpus == 8:
-        assert check["status"] == "pass" and guidance is None
+    assert check["status"] == "warn"
+    assert not any(marker in guidance["operator_action"] for marker in (
+        "configured but not runnable", "hermes-lcm-x-local-embeddings",
+    ))
+    assert guidance["action"] == "inspect"
+    if coverage_error:
+        assert "coverage" in guidance["operator_action"] and "SQLite" in guidance["operator_action"]
+        assert not check["detail"].get("informational", False)
     else:
-        assert check["status"] == "warn"
-        assert not any(marker in guidance["operator_action"] for marker in (
-            "configured but not runnable", "hermes-lcm-x-local-embeddings",
-        ))
-        if coverage_error:
-            assert guidance["action"] == "inspect"
-            assert "coverage" in guidance["operator_action"] and "SQLite" in guidance["operator_action"]
-        else:
-            assert guidance["action"] == "safe/ignore"
-            assert "expected on this host" in guidance["rationale"]
-            assert "LCM_EMBEDDINGS_ENABLED=true" in guidance["operator_action"]
-            assert "more than 2 effective CPUs" in guidance["operator_action"]
+        assert "prepar" in guidance["operator_action"]
+        assert check["detail"]["informational"] is True
+
 
 
 @pytest.mark.parametrize("model,available,action,remedy", [

@@ -625,7 +625,9 @@ def render_doctor(facts: DoctorFacts) -> str:
     if facts.inactive_process:
         issues.append("inactive_process")
         recommended_actions.append(facts.inactive_action)
-    if facts.embedding_check and facts.embedding_check["status"] in {"warn", "fail"}:
+    if (facts.embedding_check and facts.embedding_check["status"] in {"warn", "fail"}
+            and not (isinstance(facts.embedding_check.get("detail"), dict)
+                     and facts.embedding_check["detail"].get("informational"))):
         issues.append("embedding_provider_health")
         recommended_actions.append(facts.embedding_action)
 

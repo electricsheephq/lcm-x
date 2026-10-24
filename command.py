@@ -20,7 +20,7 @@ import uuid
 
 from . import config as config_choices
 from .ingest_policy import embedding_prefix_suffix, split_prefix_revision
-from .config import embedding_provider_id, lcm_env_get
+from .config import effective_embedding_model, embedding_provider_id, lcm_env_get
 from .command_auth import CommandInvocation, Decision, authorize
 from .command_doctor import (
     _doctor_text as _doctor_text,
@@ -2400,7 +2400,7 @@ def _embedding_register_profiles(config, db_path, *, allow_download: bool) -> st
                 str(getattr(config, "embedding_provider", "") or "")
                 .strip()
                 .lower(),
-                str(getattr(config, "embedding_model", "") or "").strip(),
+                effective_embedding_model(getattr(config, "embedding_provider", ""), getattr(config, "embedding_model", "")),
             ),
             provider,
         )
@@ -5369,7 +5369,7 @@ def _chunk_backfill_run(
     configured_provider = str(
         getattr(config, "embedding_provider", "") or ""
     ).strip().lower()
-    configured_model = str(getattr(config, "embedding_model", "") or "").strip()
+    configured_model = effective_embedding_model(getattr(config, "embedding_provider", ""), getattr(config, "embedding_model", ""))
 
     try:
         read_conn = _embedding_read_connection(db_path)

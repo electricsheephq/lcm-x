@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shlex
 from collections import ChainMap
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -740,6 +741,23 @@ def embedding_provider_id(spelling: str) -> str:
                  if spelling in spellings), spelling)
 
 
+def effective_embedding_model(provider: str, configured_model: str) -> str:
+    """Only fastembed supplies a built-in model; cloud configuration fails closed."""
+    return str(configured_model or "").strip() or (
+        "BAAI/bge-small-en-v1.5"
+        if embedding_provider_id(normalize_embedding_provider(provider)) == "fastembed" else ""
+    )
+
+
+def companion_enable_command() -> str:
+    """Match install.sh's explicit root/profile target, including profile-shaped homes."""
+    home = Path(lcm_env_get("HERMES_HOME", str(Path.home() / ".hermes")))
+    profile = lcm_env_get("HERMES_PROFILE", "default")
+    if home.parent.name == "profiles":
+        profile, home = home.name, home.parent.parent
+    return f"HERMES_HOME={shlex.quote(str(home))} hermes -p {shlex.quote(profile)} plugins enable hermes-lcm-x-local-embeddings"
+
+
 _ENV_CHOICES = {
     "recall_delivery_unit": (("hits", "session"), str.lower, "ignored; using 'hits'"),
     "embedding_provider": (
@@ -1174,7 +1192,7 @@ class LCMConfig:
     database_path: str = ""       # empty = HERMES_HOME/lcm.db; LCM_DATABASE_PATH may override
 
     # -- Embeddings (default-off until a provider/model are configured) ---
-    embeddings_enabled: bool = False
+    embeddings_enabled: bool = True
     # lcm_recall cross-encoder rerank stage over the top fused candidates.
     # Default-off: recall ships value on RRF order alone, and rerank is one extra
     # billable API call the operator opts into. The lite default preserves the
@@ -1291,7 +1309,7 @@ class LCMConfig:
     # still performs only the provider-free session-bundle path.
     selective_compiler_enabled: bool = False
     selective_compiler_model: str = ""
-    embedding_provider: str = ""
+    embedding_provider: str = "fastembed"
     embedding_model: str = ""
     embedding_query_prefix: str = ""
     embedding_document_prefix: str = ""

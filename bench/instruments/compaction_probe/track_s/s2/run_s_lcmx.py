@@ -83,8 +83,10 @@ def seed_store(src: Path, dst: Path, sid: str) -> dict:
             "method": "sqlite3 backup API, source mode=ro", "counts": counts}
 
 def config_dict(cfg) -> dict:
-    return json.loads(json.dumps({f.name: getattr(cfg, f.name) for f in dataclasses.fields(cfg)
-                                  if f.name not in CFG_SKIP}, default=str))
+    values = {f.name: getattr(cfg, f.name) for f in dataclasses.fields(cfg) if f.name not in CFG_SKIP}
+    resolve_model = getattr(sys.modules[type(cfg).__module__], "effective_embedding_model", lambda provider, model: model)
+    values["embedding_model"] = resolve_model(cfg.embedding_provider, cfg.embedding_model)
+    return json.loads(json.dumps(values, default=str))
 
 def new_engine(m, home: Path, sid: str, ctx: int):
     e = m.engine.LCMEngine(config=m.config.LCMConfig.from_env(), hermes_home=str(home))
