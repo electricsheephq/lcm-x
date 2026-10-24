@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-from tests.test_entity_bridge import active, bridge, publish, rebuild  # noqa: F401
+from tests.test_entity_bridge import active, bridge as bridge, publish, rebuild
 from tests.test_entity_ops_identity import assert_no_production_imports
 
 
@@ -17,7 +17,8 @@ def test_item1_hidden_owner_cannot_resolve_override(bridge, scoped):
     hidden = publish(bridge, "person:other", scope="P2")
     ops.add_alias(owner, "owner", source_store_ids=[hidden])
     ops.add_alias(target, "target", source_store_ids=[source])
-    lookup = lambda sid: (owner, True, True)
+    def lookup(sid):
+        return owner, True, True
     rebuild(bridge, sender_lookup=lookup)
     ops.override_key("user:self", target, owner_entity_id=owner,
                      scope_store_ids=[source] if scoped else None)
@@ -34,7 +35,8 @@ def test_item2_merged_profile_id_survives_rebuild(bridge, namespace, kind):
     original, target = ops.create_entity("Original", kind), ops.create_entity("Target", kind)
     key = namespace + ":self"
     source = publish(bridge, key)
-    profiles = lambda bound: (original, None) if namespace == "user" else (None, original)
+    def profiles(bound):
+        return (original, None) if namespace == "user" else (None, original)
     rebuild(bridge, profile_entities=profiles)
     assert api.resolve_key(store, key, source) == original
     ops.merge(target, original)
@@ -119,7 +121,8 @@ def test_item6_override_replay_rechecks_current_kind(bridge, scoped, owned):
     source = publish(bridge, key)
     if owned:
         ops.add_alias(target, "sister", "relation_phrase", owner_entity_id=owner)
-    lookup = lambda sid: (owner, True, True) if owned else None
+    def lookup(sid):
+        return (owner, True, True) if owned else None
     rebuild(bridge, sender_lookup=lookup)
     ops.override_key(key, target, owner_entity_id=owner,
                      scope_store_ids=[source] if scoped else None)
