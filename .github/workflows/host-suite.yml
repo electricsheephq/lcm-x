@@ -107,7 +107,7 @@ jobs:
           PY
 
       - name: Install CI test dependencies in the host venv
-        run: uv pip install --python "$LCM_REAL_HERMES_PYTHON" pytest==9.1.1 numpy ruff==0.15.13 hypothesis==6.141.1
+        run: uv pip install --python "$LCM_REAL_HERMES_PYTHON" pytest==9.1.1 pytest-xdist==3.8.0 numpy ruff==0.15.13 hypothesis==6.141.1
 
       - name: Print host SQLite version
         run: |
