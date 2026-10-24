@@ -85,7 +85,7 @@ class Qualification:
         assert allocated_bytes(self.scratch) - self.initial_bytes < 15 * GIB, "DISK_STOP: 15 GiB peak cap"
 
     def run(self, home: Path, command: list[str], *, tty: bool = False, decline: bool = False,
-            timeout: int = 600) -> str:
+            timeout: int = 600, profile: str | None = None) -> str:
         self.guard()
         self.sequence += 1
         prefix = self.out / f"{self.sequence:03d}"
@@ -93,10 +93,13 @@ class Qualification:
         raw, err, prompts = b"", b"", []
         status = "RUNNING"
         process = None
+        environment = self.env(home)
+        if profile is not None:
+            environment["HERMES_PROFILE"] = profile
         try:
             if tty:
                 master, slave = pty.openpty()
-                process = subprocess.Popen(command, cwd=self.src, env=self.env(home),
+                process = subprocess.Popen(command, cwd=self.src, env=environment,
                                            stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
                 os.close(slave)
                 answered = 0
@@ -129,7 +132,7 @@ class Qualification:
                 finally:
                     os.close(master)
             else:
-                process = subprocess.Popen(command, cwd=self.src, env=self.env(home),
+                process = subprocess.Popen(command, cwd=self.src, env=environment,
                                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                            start_new_session=True)
                 raw, err = process.communicate(timeout=timeout)
@@ -146,7 +149,7 @@ class Qualification:
             prefix.with_suffix(".stdout").write_bytes(raw)
             prefix.with_suffix(".stderr").write_bytes(err)
             prefix.with_suffix(".json").write_text(json.dumps({
-                "command": command, "home": str(home), "tty": tty, "prompts": prompts,
+                "command": command, "home": str(home), "profile": profile, "tty": tty, "prompts": prompts,
                 "status": status, "returncode": process.returncode if process else None,
                 "wall_seconds": time.monotonic() - started,
             }, indent=2) + "\n")
@@ -213,6 +216,8 @@ class Qualification:
             # upstream for the subsequent real unattended-update transaction.
             # S1-C.3 allows scanner-off for this core native install only.
             # Restore before EVERY companion install, including decline cells.
+            assert os.environ.get("GITHUB_ACTIONS") == "true", "install scan exception: hosted CI only"
+            assert home.resolve().is_relative_to(self.scratch.resolve()), "synthetic home only"
             (home / "config.yaml").write_text("plugins:\n  scan_on_install: false\n")
             try:
                 self.cli(home, "plugins", "install", self.fixture.as_uri(), tty=True)
@@ -256,17 +261,37 @@ class Qualification:
         for route, tty in ((self.route, self.route == "native"),):
             home = self.scratch / ("decline" if tty else "noninteractive")
             text = self.install(home, route, tty=tty, decline=True)
-            assert "hermes plugins enable" in text, text
+            assert "Plugin installed but not enabled." in text, "missing host-owned hint: " + text
+            assert f"Run `hermes plugins enable {COMPANION}` to activate." in text, text
             result = self.probe(home, "fts")
             assert not result["companion_enabled"], result
             self.record("d", route=route, **result)
             if not tty:
-                command = f"hermes plugins enable {COMPANION}"
+                command = f"hermes -p default plugins enable {COMPANION}"
                 assert command in text, text
                 self.cli(home, "plugins", "enable", COMPANION)
                 enabled = self.probe(home, "import")
                 assert enabled["companion_enabled"], enabled
                 self.record("f", printed_command=command, **enabled)
+
+    def profile_installer(self, home: Path) -> None:
+        """Exercise the documented installer route on a real PM named profile."""
+        name = "qualification-installer"
+        self.cli(home, "profile", "create", name, "--no-alias", "--no-skills")
+        profile = home / "profiles" / name
+        root_config = (home / "config.yaml").read_bytes()
+        self.run(home, ["bash", str(REPO / "scripts/install.sh")], tty=True, profile=name)
+        assert (profile / "plugins" / CORE).resolve() == REPO.resolve()
+        assert not (profile / "plugins" / COMPANION).is_symlink()
+        scan = json.loads(self.run(profile, [str(self.python), str(PROBE), "scan",
+                                            str(profile / "plugins" / COMPANION)]).strip().splitlines()[-1])
+        assert scan["scanner_enabled"] and scan["verdict"] == "safe", scan
+        self.record("companion-scan", route="profile-installer", **scan)
+        result = self.probe(profile, "import")
+        assert result["companion_enabled"] and not result["companion_error"], result
+        self.probe(home, "import")
+        assert (home / "config.yaml").read_bytes() == root_config
+        self.record("a-profile-installer", profile=name, root_unchanged=True, **result)
 
     def profiles(self, home: Path) -> None:
         before = self.probe(home, "state")
@@ -404,6 +429,8 @@ class Qualification:
         # carrier; shared host selections must not pre-populate fastembed.
         self.decline_routes()
         native = self.fresh_routes()
+        if self.pm and self.route == "installer":
+            self.profile_installer(native)
         if self.route == "native":
             if self.pm:
                 self.profiles(native)

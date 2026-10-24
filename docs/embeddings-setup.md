@@ -91,8 +91,16 @@ Pre-seed a read-only cache: `warmup` cannot download into it.
 ### Install consent, updates and recovery
 
 `scripts/install.sh` links LCM-X core and its skill as before, enables the core
-through `hermes plugins enable hermes-lcm-x`, then runs the companion install
-command above. It never links the companion or runs pip. Both qualified host
+through the host's enable verb, then runs the companion install command above.
+It passes `-p "${HERMES_PROFILE:-default}"` to every host command with `HERMES_HOME`
+set to the install root: a named profile targets `root/profiles/<name>`, and
+unset or `default` targets the root even with a sticky active profile. Printed
+retry/enable commands retain that root and profile. A separate older copy prevents
+automatic core enablement until the printed migration is completed. Optional
+companion failure preserves successful core installation and full-text recall;
+for a non-Git archive, replace the retry's SHA placeholder with the core's published
+full commit SHA. Context-engine selection remains manual.
+The installer never links the companion or runs pip. Both qualified host
 pins require a repository subdirectory identifier rather than a local directory;
 `--ref` pins it to the installer's checkout commit. Native-route core users run
 the same companion command with their installed core's full SHA.

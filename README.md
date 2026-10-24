@@ -239,9 +239,16 @@ plugin path. It leaves that checkout in place and exposes the bundled
 installer preflights both paths and refuses conflicts before creating links.
 When it finds a pre-0.24 install (`plugins/hermes-lcm`, or a `config.yaml` that
 enables `hermes-lcm` / selects `context.engine: lcm`), it prints the migration
-steps below. It never edits `config.yaml` and never deletes the old directory.
+steps below and never deletes the old directory. With Hermes available it enables
+the core through the host (which updates `config.yaml`) and natively installs the
+optional local-embeddings companion with host-owned consent. A separate older copy
+prevents automatic core enablement until migration. `HERMES_PROFILE` selects a named
+profile; unset or `default` selects the root, even with a sticky active profile.
+`HERMES_HOME` sets that install root. Printed host commands preserve both selections.
+Companion failure leaves a successful core install usable with full-text recall
+and prints a retry command; context-engine selection remains manual.
 
-Semantic retrieval is optional; its dependency and recovery after a host update are described in the [embedding setup doc](docs/embeddings-setup.md#a-host-update-can-remove-fastembed).
+Semantic retrieval is optional; its dependency and recovery after a host update are described in the [embedding setup doc](docs/embeddings-setup.md#install-consent-updates-and-recovery).
 
 ### Activate it
 

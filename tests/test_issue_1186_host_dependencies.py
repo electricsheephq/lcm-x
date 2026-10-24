@@ -39,6 +39,51 @@ def test_workflow_keeps_exact_host_arms_and_failure_artifacts():
     assert "1186-qualification/" in qualification
 
 
+@pytest.mark.parametrize("hosted,synthetic", [(False, True), (True, False), (True, True)])
+def test_core_scanner_exception_requires_hosted_synthetic_home(tmp_path, monkeypatch, hosted, synthetic):
+    qualification = Qualification("ref-0.21.5", Path("python"), REPO,
+                                  tmp_path / "scratch", tmp_path / "out")
+    home = qualification.scratch / "native" if synthetic else tmp_path / "outside"
+    monkeypatch.setenv("GITHUB_ACTIONS", "true" if hosted else "false")
+    calls = []
+
+    def stop_before_host(*args, **kwargs):
+        calls.append(args)
+        raise RuntimeError("host call reached")
+
+    monkeypatch.setattr(qualification, "cli", stop_before_host)
+    monkeypatch.setattr(qualification, "run", lambda *a, **k: "")
+    if hosted and synthetic:
+        with pytest.raises(RuntimeError, match="host call reached"):
+            qualification.install(home, "native")
+        assert calls
+    else:
+        with pytest.raises(AssertionError, match="hosted CI only|synthetic home only"):
+            qualification.install(home, "native")
+        assert not calls
+        assert not (home / "config.yaml").exists()
+
+
+@pytest.mark.parametrize("route", ["native", "installer"])
+@pytest.mark.parametrize("host_hint", [False, True])
+def test_decline_cell_requires_host_hint_independent_of_installer_echo(tmp_path, monkeypatch, route, host_hint):
+    qualification = Qualification("upstream-main", Path("python"), REPO,
+                                  tmp_path / "scratch", tmp_path / "out", route=route)
+    text = "If the companion is disabled, run: hermes -p default plugins enable hermes-lcm-x-local-embeddings"
+    if host_hint:
+        text += "\nPlugin installed but not enabled. Run `hermes plugins enable hermes-lcm-x-local-embeddings` to activate."
+    monkeypatch.setattr(qualification, "install", lambda *a, **k: text)
+    monkeypatch.setattr(qualification, "probe", lambda home, mode: {"companion_enabled": mode == "import"})
+    monkeypatch.setattr(qualification, "cli", lambda *a: "")
+    if host_hint:
+        qualification.decline_routes()
+        assert any(cell["cell"] == "d" for cell in qualification.cells)
+    else:
+        # Deleting only the host's hint must fail even if install.sh echoes enable.
+        with pytest.raises(AssertionError, match="host.*hint"):
+            qualification.decline_routes()
+
+
 @pytest.mark.skipif(os.environ.get("LCM_1186_QUALIFY") != "1", reason="hosted exact-host qualification only")
 def test_exact_host_dependency_cells():
     host = os.environ["LCM_1186_HOST"]
