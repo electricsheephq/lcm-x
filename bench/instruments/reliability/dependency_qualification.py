@@ -236,7 +236,7 @@ class Qualification:
         before = self.probe(home, "state")
         observations = [self.probe(home, "import")]
         for name in ("qualification-one", "qualification-two"):
-            self.cli(home, "profile", "create", name)
+            self.cli(home, "profile", "create", name, "--no-alias", "--no-skills")
             profile = home / "profiles" / name
             (profile / "plugins").mkdir(exist_ok=True)
             for plugin in (CORE, COMPANION):
