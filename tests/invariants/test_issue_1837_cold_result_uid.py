@@ -7,7 +7,7 @@ import pytest
 from tests.invariants.test_issue_1529_warm_proof_salvage import (
     build as build, compact, CLEARED, LONG, stored as raw_stored,
 )
-from tests.invariants.test_issue_1540_bound_retry import stored
+from tests.invariants.test_issue_1540_bound_retry import parallel_compact, stored
 from tests.test_issue_671_stub_first_exit import tool_pair
 
 
@@ -67,3 +67,29 @@ def test_retried_result_uid_keeps_complete_segment(build, monkeypatch, mode, cha
     assert stored(engine) == after
     engine.ingest(deepcopy(host))
     assert stored(engine) == after, "equal-UID repeat was stored again"
+
+
+@pytest.mark.parametrize("mode", ["warm", "cold"])
+@pytest.mark.parametrize("changed_result", ["c", "d"])
+def test_new_result_uid_keeps_all_parallel_results(build, mode, changed_result):
+    engine, host = parallel_compact(build, mode, True)
+    before = stored(engine)
+    for row in host:
+        if row.get("tool_call_id") in {"c", "d"}:
+            row["content"] = CLEARED
+        if row.get("tool_call_id") == changed_result:
+            row["message_uid"] = f"{900:032x}"
+    for index in range(2):
+        host.extend(tool_pair(f"following-{index}", f"fresh {index}", tool_name="lookup"))
+
+    engine.ingest(deepcopy(host))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    after = raw_stored(engine)
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    assert len(added) == 7
+    assert sum(any(call["id"] == "c" for call in row.get("tool_calls") or []) for row in added) == 1
+    assert [row.get("tool_call_id") for row in added if row.get("tool_call_id") in {"c", "d"}] == ["c", "d"]
+    assert stored(engine) == after
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after, "parallel replay was stored again"
