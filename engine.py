@@ -9680,7 +9680,10 @@ class LCMEngine(
                 tail_tokens=count_messages_tokens(tail_selected),
                 repaired_tail_tokens=count_messages_tokens(measurement_tail),
                 recall_budget_tokens=self._config.proactive_recall_budget_tokens,
-                proactive_recall_enabled=self._config.proactive_recall_enabled,
+                proactive_recall_enabled=self._config.proactive_recall_enabled and (
+                    bool(str(self._config.proactive_recall_provider or "").strip())
+                    or not lcm_tools.default_semantic_cpu_limited(self._config)
+                ),
                 embeddings_enabled=self._config.embeddings_enabled, survival_fit=self._config.survival_fit,
             )
             full_prefix = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}

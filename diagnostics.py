@@ -209,13 +209,22 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             warning_only = True
             rationale = "stale stored vectors affect only semantic recall, which is switched off"
         elif (status == "warn" and isinstance(detail, dict) and detail.get("cpu_limited")
-              and detail.get("available") and str(detail.get("readiness", "")).startswith("model: present;")
-              and "coverage: unavailable" not in str(detail.get("readiness", ""))):
+              and detail.get("available")
+              and not str(detail.get("readiness", "")).startswith("model: unavailable(")):
             action = DOCTOR_ACTION_SAFE_IGNORE
             command = ("set LCM_EMBEDDINGS_ENABLED=true (or use a host with more than 2 "
                        "effective CPUs) if semantic recall is wanted")
             warning_only = True
             rationale = "informational: semantic recall is CPU-limited as expected on this host; full-text recall is active"
+            readiness = str(detail.get("readiness", ""))
+            if readiness.startswith("model: preparing;"):
+                action = DOCTOR_ACTION_INSPECT
+                command = "inspect background model preparation; run `/lcm embed warmup` if preparation fails, then re-run `/lcm doctor`"
+                rationale = "local model preparation is in progress; full-text recall is active"
+            elif "coverage: unavailable" in readiness:
+                action = DOCTOR_ACTION_INSPECT
+                command = "inspect embedding coverage SQLite read errors and database access, then re-run `/lcm doctor`"
+                rationale = "embedding coverage could not be read; full-text recall is active"
         elif status == "warn":
             action = DOCTOR_ACTION_INSPECT
             command = (
