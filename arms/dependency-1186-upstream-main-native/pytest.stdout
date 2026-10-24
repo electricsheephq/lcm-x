@@ -1,0 +1,21 @@
+...........................                                              [100%]
+============================= slowest 25 durations =============================
+405.34s call     tests/test_issue_1186_host_dependencies.py::test_exact_host_dependency_cells
+1.16s setup    tests/test_issue_1186_host_dependencies.py::test_test_user_declines_only_the_actual_host_dependency_question
+0.18s call     tests/test_issue_1186_host_dependencies.py::test_installer_uses_real_pinned_profile_resolution[False-profile-home]
+0.12s call     tests/test_issue_1186_host_dependencies.py::test_installer_uses_real_pinned_profile_resolution[False-matching]
+0.12s call     tests/test_issue_1186_host_dependencies.py::test_installer_uses_real_pinned_profile_resolution[False-named]
+0.12s call     tests/test_issue_1186_host_dependencies.py::test_installer_uses_real_pinned_profile_resolution[False-custom]
+0.12s call     tests/test_issue_1186_host_dependencies.py::test_installer_uses_real_pinned_profile_resolution[False-default]
+0.12s call     tests/test_issue_1186_host_dependencies.py::test_installer_uses_real_pinned_profile_resolution[False-sticky]
+0.07s call     tests/test_issue_1186_host_dependencies.py::test_installer_uses_real_pinned_profile_resolution[True-matching]
+0.07s call     tests/test_issue_1186_host_dependencies.py::test_installer_uses_real_pinned_profile_resolution[True-profile-home]
+0.07s call     tests/test_issue_1186_host_dependencies.py::test_installer_uses_real_pinned_profile_resolution[True-sticky]
+0.07s call     tests/test_issue_1186_host_dependencies.py::test_installer_uses_real_pinned_profile_resolution[True-custom]
+0.07s call     tests/test_issue_1186_host_dependencies.py::test_installer_uses_real_pinned_profile_resolution[True-default]
+0.07s call     tests/test_issue_1186_host_dependencies.py::test_installer_uses_real_pinned_profile_resolution[True-named]
+0.01s call     tests/test_issue_1186_host_dependencies.py::test_installer_uses_real_pinned_profile_resolution[True-conflict]
+0.01s call     tests/test_issue_1186_host_dependencies.py::test_installer_uses_real_pinned_profile_resolution[False-conflict]
+
+(9 durations < 0.005s hidden.  Use -vv to show these durations.)
+27 passed in 407.99s (0:06:47)

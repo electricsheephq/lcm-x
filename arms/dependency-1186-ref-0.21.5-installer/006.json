@@ -1,0 +1,18 @@
+{
+  "command": [
+    "bash",
+    "/home/runner/work/lcm-x/lcm-x/scripts/install.sh"
+  ],
+  "home": "/home/runner/work/_temp/1186-ref-0.21.5-installer/installer",
+  "profile": null,
+  "tty": true,
+  "prompts": [
+    {
+      "prompt": "  Enable 'hermes-lcm-x-local-embeddings' now? [y/N]: ",
+      "answer": "y"
+    }
+  ],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 7.986947495999999
+}

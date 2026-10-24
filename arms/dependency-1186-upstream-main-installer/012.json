@@ -1,0 +1,14 @@
+{
+  "command": [
+    "bash",
+    "-c",
+    "HERMES_HOME=/home/runner/work/_temp/1186-upstream-main-installer/noninteractive hermes -p default plugins enable hermes-lcm-x-local-embeddings"
+  ],
+  "home": "/home/runner/work/_temp/1186-upstream-main-installer/noninteractive",
+  "profile": null,
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 15.388669667999977
+}

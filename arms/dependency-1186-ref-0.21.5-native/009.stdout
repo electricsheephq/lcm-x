@@ -1,0 +1,18 @@
+Warning: custom (unreviewed) source — not from the Hermes catalog.
+Cloning https://github.com/electricsheephq/lcm-x.git (subdir: 
+companions/hermes-lcm-x-local-embeddings)...
+✓ Installed Python dependencies: fastembed<1.0,>=0.8.0
+
+╭──────────────────────────────── ✓ Installed ─────────────────────────────────╮
+│ Plugin installed:                                                            │
+│ electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings               │
+│ Location:                                                                    │
+│ /home/runner/work/_temp/1186-ref-0.21.5-native/native/plugins/hermes-lcm-x-l │
+│ ocal-embeddings                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+  Enable 'hermes-lcm-x-local-embeddings' now? [y/N]: y
+✓ Plugin hermes-lcm-x-local-embeddings enabled.
+Restart the gateway for the plugin to take effect:
+  hermes gateway restart
+

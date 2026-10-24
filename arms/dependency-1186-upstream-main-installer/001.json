@@ -1,0 +1,16 @@
+{
+  "command": [
+    "git",
+    "-C",
+    "/home/runner/work/_temp/1186-hosts/upstream-main/src",
+    "rev-parse",
+    "HEAD"
+  ],
+  "home": "/home/runner/work/_temp/1186-upstream-main-installer/native",
+  "profile": null,
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 0.0016232959999911145
+}

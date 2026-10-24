@@ -1,0 +1,66 @@
+[
+  {
+    "range_upper_bound": "0.99",
+    "wall_seconds": 9.332705676999979,
+    "allocated_generation_bytes": 418062336,
+    "allocated_delta_bytes": 117006336,
+    "new_generation_names": [
+      "f23c6a8c955c4c4782fefdf5a5f8d4be"
+    ],
+    "before": {
+      "stamp": "86670798178087d35ab1fd768327a6d0b5a69a1ce073c8b94a2522af1fec476c",
+      "environment": "/home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/9532390a47f5466f8d6aada219cdb954/venv",
+      "state_dir": "/home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7",
+      "python": "/home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/9532390a47f5466f8d6aada219cdb954/venv/bin/python",
+      "committed": true
+    },
+    "after": {
+      "stamp": "b0b639c1b6bdcabc9046a5a8be032b31db7dd857d3566d336fa905118f954bb7",
+      "environment": "/home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/f23c6a8c955c4c4782fefdf5a5f8d4be/venv",
+      "state_dir": "/home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7",
+      "python": "/home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/f23c6a8c955c4c4782fefdf5a5f8d4be/venv/bin/python",
+      "committed": true
+    },
+    "retained_leased_environments": [
+      "/home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/9532390a47f5466f8d6aada219cdb954/venv"
+    ],
+    "leases": {
+      "d7938900ff7646159b334fc992d67670": false,
+      "f23c6a8c955c4c4782fefdf5a5f8d4be": false,
+      "9532390a47f5466f8d6aada219cdb954": true
+    }
+  },
+  {
+    "range_upper_bound": "0.98",
+    "wall_seconds": 9.819055683000045,
+    "allocated_generation_bytes": 418062336,
+    "allocated_delta_bytes": 117006336,
+    "new_generation_names": [
+      "b88718380a4041d9b2b0417e6f0b5dde"
+    ],
+    "before": {
+      "stamp": "b0b639c1b6bdcabc9046a5a8be032b31db7dd857d3566d336fa905118f954bb7",
+      "environment": "/home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/f23c6a8c955c4c4782fefdf5a5f8d4be/venv",
+      "state_dir": "/home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7",
+      "python": "/home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/f23c6a8c955c4c4782fefdf5a5f8d4be/venv/bin/python",
+      "committed": true
+    },
+    "after": {
+      "stamp": "f2cc435d7772e5303c63ac4d4fc2c800e0ee2ddfa56411e5ec4a58f370b2453f",
+      "environment": "/home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/b88718380a4041d9b2b0417e6f0b5dde/venv",
+      "state_dir": "/home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7",
+      "python": "/home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/b88718380a4041d9b2b0417e6f0b5dde/venv/bin/python",
+      "committed": true
+    },
+    "retained_leased_environments": [
+      "/home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/9532390a47f5466f8d6aada219cdb954/venv",
+      "/home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/f23c6a8c955c4c4782fefdf5a5f8d4be/venv"
+    ],
+    "leases": {
+      "d7938900ff7646159b334fc992d67670": false,
+      "b88718380a4041d9b2b0417e6f0b5dde": false,
+      "f23c6a8c955c4c4782fefdf5a5f8d4be": true,
+      "9532390a47f5466f8d6aada219cdb954": true
+    }
+  }
+]

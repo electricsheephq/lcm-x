@@ -1,0 +1,80 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "1186-s1-c6-40099535101",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "1186-s1-dependency-r6",
+  "claim_class": "advisory",
+  "created": "2026-10-24T13:55:16Z",
+  "settled": "2026-10-24T13:55:16Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "161b237acbd26b66d8ed8e2f456b6fd538b8fae5",
+    "dirty": false,
+    "diff_sha256": null,
+    "pr_head_sha": "9f2e8134608ae3bf8d4149be77fe3451635c7418",
+    "base_sha": "1771678475aa0d3ef4426ce56fc3b6f333406c5c"
+  },
+  "env": {
+    "command": "python -m pytest -p no:cacheprovider -q -ra tests/test_issue_1186_host_dependencies.py",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "1186-S1-C6-carrier-rebuild",
+      "metric": "wall_seconds_mean",
+      "value": 9.575880680000012,
+      "n": 2,
+      "source": "arms/dependency-1186-upstream-main-native/rebuild-measurements.json"
+    },
+    {
+      "benchmark": "1186-S1-C6-carrier-rebuild",
+      "metric": "allocated_generation_bytes",
+      "value": 418062336.0,
+      "n": 2,
+      "source": "arms/dependency-1186-upstream-main-native/rebuild-measurements.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "arms",
+      "role": "receipt",
+      "sha256": "5050328c441b74c2f70581920df202349483fece7572fb3b9bfe9ad0b18778c2",
+      "bytes": 692891
+    },
+    {
+      "path": "rescore.py",
+      "role": "receipt",
+      "sha256": "c29d05019aa00b9f6aafe112bbfcfa77c47c2b521bfdb11798736fc01647650c",
+      "bytes": 4925
+    },
+    {
+      "path": "rescore.stdout",
+      "role": "receipt",
+      "sha256": "f87ea5254da50c8bbe224db38d7f248e7677a888e93626593915e1064521f8f3",
+      "bytes": 1623
+    }
+  ],
+  "rescore": {
+    "command": "python3 rescore.py",
+    "inputs": [
+      "arms/dependency-1186-upstream-main-native/rebuild-measurements.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [
+    "https://github.com/electricsheephq/lcm-x/actions/runs/40099535101"
+  ],
+  "keep": [
+    "RESULT.md",
+    "arms",
+    "arms/dependency-1186-upstream-main-native/rebuild-measurements.json",
+    "rescore.py",
+    "rescore.stdout"
+  ]
+}

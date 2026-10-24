@@ -1,0 +1,12 @@
+dependency-1186-ref-0.21.5-installer [('identity', 'COMPLETE'), ('c', 'N/A'), ('d', 'N/A'), ('e', 'N/A'), ('f', 'N/A'), ('companion-scan', 'COMPLETE'), ('a', 'COMPLETE')]
+dependency-1186-ref-0.21.5-native [('identity', 'COMPLETE'), ('c', 'N/A'), ('d', 'N/A'), ('e', 'N/A'), ('f', 'N/A'), ('companion-scan', 'COMPLETE'), ('companion-scan', 'COMPLETE'), ('a', 'COMPLETE'), ('b', 'COMPLETE')]
+dependency-1186-upstream-main-installer [('locked-tools', 'COMPLETE'), ('identity', 'COMPLETE'), ('companion-scan', 'COMPLETE'), ('d', 'COMPLETE'), ('f', 'COMPLETE'), ('companion-scan', 'COMPLETE'), ('a', 'COMPLETE'), ('companion-scan', 'COMPLETE'), ('a-profile-installer', 'COMPLETE')]
+dependency-1186-upstream-main-native [('locked-tools', 'COMPLETE'), ('identity', 'COMPLETE'), ('companion-scan', 'COMPLETE'), ('companion-scan', 'COMPLETE'), ('d', 'COMPLETE'), ('companion-scan', 'COMPLETE'), ('companion-scan', 'COMPLETE'), ('a', 'COMPLETE'), ('c', 'COMPLETE'), ('e', 'COMPLETE'), ('b-scanner-on-refusal', 'EXPECTED_NEGATIVE'), ('companion-scan', 'COMPLETE'), ('b', 'COMPLETE'), ('e-core-version-no-rebuild', 'COMPLETE')]
+wall_seconds [9.332705676999979, 9.819055683000045]
+wall_seconds_mean 9.575880680000012
+allocated_generation_bytes [418062336, 418062336]
+allocated_delta_bytes [117006336, 117006336]
+retained_lease_counts [1, 2]
+PM_b_and_e_no_rebuild PASS; scanner_on_refusal EXPECTED_NEGATIVE; companions_scanning_ON PASS
+r6 PM profile installer/root preservation PASS; actual host hints on both PM routes PASS
+R6 both exact pins: 14 real-resolution spelling/guard cases per arm PASS; exact printed f command executed PASS

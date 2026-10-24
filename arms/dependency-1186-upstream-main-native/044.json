@@ -1,0 +1,14 @@
+{
+  "command": [
+    "/home/runner/work/_temp/1186-hosts/upstream-main/venv/bin/python",
+    "-c",
+    "from pm import sync_venv; sync_venv(explicit=True); print('SYNC_COMPLETE')"
+  ],
+  "home": "/home/runner/work/_temp/1186-upstream-main-native/native",
+  "profile": null,
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 7.0209554639999965
+}

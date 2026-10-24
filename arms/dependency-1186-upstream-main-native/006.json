@@ -1,0 +1,17 @@
+{
+  "command": [
+    "git",
+    "-C",
+    "/home/runner/work/_temp/1186-upstream-main-native/core-source",
+    "checkout",
+    "-b",
+    "qualification-update"
+  ],
+  "home": "/home/runner/work/_temp/1186-upstream-main-native/native",
+  "profile": null,
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 0.00359676900000494
+}

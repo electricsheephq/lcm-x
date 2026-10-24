@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/home/runner/work/_temp/1186-hosts/upstream-main/venv/bin/python",
+    "-m",
+    "hermes_cli.main",
+    "plugins",
+    "enable",
+    "hermes-lcm-x-local-embeddings"
+  ],
+  "home": "/home/runner/work/_temp/1186-upstream-main-native/native/profiles/qualification-one",
+  "profile": null,
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 2.5094475500000044
+}

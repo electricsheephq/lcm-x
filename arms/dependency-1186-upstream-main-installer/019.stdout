@@ -1,0 +1,13 @@
+
+Profile 'qualification-installer' created at /home/runner/work/_temp/1186-upstream-main-installer/installer/profiles/qualification-installer
+No bundled skills seeded (--no-skills). Delete .no-bundled-skills in the profile to opt back in.
+
+Next steps:
+  qualification-installer setup              Configure API keys and model
+  qualification-installer chat               Start chatting
+  qualification-installer gateway start      Start the messaging gateway
+
+  ⚠ This profile has no API keys yet. Run 'qualification-installer setup' first,
+    or it will inherit keys from your shell environment.
+  Edit /home/runner/work/_temp/1186-upstream-main-installer/installer/profiles/qualification-installer/SOUL.md to customize personality
+

@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/home/runner/work/_temp/1186-upstream-main-installer/installer/installs/224dc9693023d5e7/environments/a77c62e042d34ffaa3c6c1ed4f8b5ed4/venv/bin/python",
+    "/home/runner/work/lcm-x/lcm-x/bench/instruments/reliability/dependency_probe.py",
+    "import",
+    "/home/runner/work/_temp/1186-upstream-main-installer/installer/installs/224dc9693023d5e7/environments/a77c62e042d34ffaa3c6c1ed4f8b5ed4/venv"
+  ],
+  "home": "/home/runner/work/_temp/1186-upstream-main-installer/installer",
+  "profile": null,
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 5.0849181430000385
+}

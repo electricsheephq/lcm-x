@@ -1,0 +1,24 @@
+Warning: custom (unreviewed) source — not from the Hermes catalog.
+Cloning https://github.com/electricsheephq/lcm-x.git (subdir: 
+companions/hermes-lcm-x-local-embeddings)...
+  Enable 'hermes-lcm-x-local-embeddings' now? [y/N]: y
+
+hermes-lcm-x-local-embeddings declares Python dependencies:
+  - fastembed>=0.8.0,<1.0
+  Prepare these with Hermes through PM now? [y/N]: n
+Skipped — run `hermes plugins enable` when ready to prepare them.
+
+
+╭──────────────────────────────── ✓ Installed ─────────────────────────────────╮
+│ Plugin installed:                                                            │
+│ electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings               │
+│ Location:                                                                    │
+│ /home/runner/work/_temp/1186-upstream-main-native/decline/plugins/hermes-lcm │
+│ -x-local-embeddings                                                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+✗ Cannot enable hermes-lcm-x-local-embeddings: dependency install declined
+The plugin stays installed but disabled; re-enable after resolving the conflict.
+Plugin installed but not enabled. Run `hermes plugins enable 
+hermes-lcm-x-local-embeddings` to activate.
+

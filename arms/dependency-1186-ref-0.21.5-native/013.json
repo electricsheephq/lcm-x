@@ -1,0 +1,14 @@
+{
+  "command": [
+    "/home/runner/work/_temp/1186-hosts/ref-0.21.5/venv/bin/python",
+    "-c",
+    "from pathlib import Path; from hermes_cli import plugins_cmd as pc; print(pc._pull_plugin_update(Path('/home/runner/work/_temp/1186-ref-0.21.5-native/native/plugins/hermes-lcm-x'), 'pinned', 'not git'))"
+  ],
+  "home": "/home/runner/work/_temp/1186-ref-0.21.5-native/native",
+  "profile": null,
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 0.906470038000009
+}

@@ -1,0 +1,14 @@
+{
+  "command": [
+    "/home/runner/work/_temp/1186-hosts/upstream-main/venv/bin/python",
+    "-c",
+    "import json; from hermes_cli.plugins_cmd import PluginScanBlocked, _scan_on_install_enabled; assert _scan_on_install_enabled();\ntry:\n from pathlib import Path; from hermes_cli import plugins_cmd_update as pc; print(pc._pull_plugin_update(Path('/home/runner/work/_temp/1186-upstream-main-native/native/plugins/hermes-lcm-x'), 'pinned', 'not git', interactive=False))\nexcept PluginScanBlocked:\n print(json.dumps({'scanner_enabled': True, 'update_refused': True}))\nelse:\n raise AssertionError('expected full-core scanner refusal; revisit exception')"
+  ],
+  "home": "/home/runner/work/_temp/1186-upstream-main-native/native",
+  "profile": null,
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 70.36020106199999
+}

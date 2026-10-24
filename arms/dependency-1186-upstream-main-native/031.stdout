@@ -1,0 +1,13 @@
+
+Profile 'qualification-two' created at /home/runner/work/_temp/1186-upstream-main-native/native/profiles/qualification-two
+No bundled skills seeded (--no-skills). Delete .no-bundled-skills in the profile to opt back in.
+
+Next steps:
+  qualification-two setup              Configure API keys and model
+  qualification-two chat               Start chatting
+  qualification-two gateway start      Start the messaging gateway
+
+  ⚠ This profile has no API keys yet. Run 'qualification-two setup' first,
+    or it will inherit keys from your shell environment.
+  Edit /home/runner/work/_temp/1186-upstream-main-native/native/profiles/qualification-two/SOUL.md to customize personality
+

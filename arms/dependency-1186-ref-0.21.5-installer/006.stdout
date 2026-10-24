@@ -1,0 +1,42 @@
+✓ Plugin hermes-lcm-x enabled. Takes effect on next session.
+Restart the gateway for the plugin to take effect:
+  hermes gateway restart
+Warning: custom (unreviewed) source — not from the Hermes catalog.
+Cloning https://github.com/electricsheephq/lcm-x.git (subdir: 
+companions/hermes-lcm-x-local-embeddings)...
+✓ Installed Python dependencies: fastembed<1.0,>=0.8.0
+
+╭──────────────────────────────── ✓ Installed ─────────────────────────────────╮
+│ Plugin installed:                                                            │
+│ electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings               │
+│ Location:                                                                    │
+│ /home/runner/work/_temp/1186-ref-0.21.5-installer/installer/plugins/hermes-l │
+│ cm-x-local-embeddings                                                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+  Enable 'hermes-lcm-x-local-embeddings' now? [y/N]: y
+✓ Plugin hermes-lcm-x-local-embeddings enabled.
+Restart the gateway for the plugin to take effect:
+  hermes gateway restart
+
+If the companion is disabled, run: HERMES_HOME=/home/runner/work/_temp/1186-ref-0.21.5-installer/installer hermes -p default plugins enable hermes-lcm-x-local-embeddings
+Installed hermes-lcm-x at:
+  /home/runner/work/_temp/1186-ref-0.21.5-installer/installer/plugins/hermes-lcm-x
+
+Discoverable skill:
+  /home/runner/work/_temp/1186-ref-0.21.5-installer/installer/skills/hermes-lcm-x
+
+Activation requires both:
+
+plugins:
+  enabled:
+    - hermes-lcm-x
+
+context:
+  engine: lcm-x
+
+Verification:
+  1. Restart Hermes.
+  2. Run: HERMES_HOME=/home/runner/work/_temp/1186-ref-0.21.5-installer/installer hermes -p default plugins list
+  3. Confirm the plugin list includes hermes-lcm-x and the selected context engine is lcm-x.
+  4. Confirm the available skills include hermes-lcm.

@@ -1,0 +1,28 @@
+{
+  "command": [
+    "/home/runner/work/_temp/1186-hosts/upstream-main/venv/bin/python",
+    "-m",
+    "hermes_cli.main",
+    "plugins",
+    "install",
+    "electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings",
+    "--ref",
+    "161b237acbd26b66d8ed8e2f456b6fd538b8fae5"
+  ],
+  "home": "/home/runner/work/_temp/1186-upstream-main-native/decline",
+  "profile": null,
+  "tty": true,
+  "prompts": [
+    {
+      "prompt": "  Enable 'hermes-lcm-x-local-embeddings' now? [y/N]: ",
+      "answer": "y"
+    },
+    {
+      "prompt": "  Prepare these with Hermes through PM now? [y/N]: ",
+      "answer": "n"
+    }
+  ],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 3.0997313149999854
+}
