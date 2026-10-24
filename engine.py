@@ -7086,7 +7086,9 @@ class LCMEngine(
             idx for idx, message in enumerate(messages[:cursor])
             if idx not in result and self._host_occurrence_metadata(message)["message_uid"] is not None
         }
-        if missing_uid_indexes:
+        # A cursor at the list end re-walks identical identities: nothing to add,
+        # so skip the second projection and its store reads (frozen traces).
+        if missing_uid_indexes and cursor < len(messages):
             projection, identities = self._occurrence_replay_identities(messages, proof)
             matched = 0
             snapshot = proof.get("output_metadata", ())
