@@ -1470,15 +1470,18 @@ class VectorStore:
 
     def _fetch_exact_rows(self, sql, args, *, vectors=True):
         """Transfer one ordered scan, retaining the row loader on resource failure."""
+        raw_transfer = self._conn.execute("PRAGMA encoding").fetchone()[0] == "UTF-8"
+        width = "length(CAST(vec AS BLOB))" if raw_transfer else "length(hex(vec))/2"
+        payload = "CAST(group_concat(vec, '') AS BLOB)" if raw_transfer else "group_concat(hex(vec), '')"
         fields = (
-            "rowid, vector_id, vector_kind, length(hex(vec))/2, "
+            f"rowid, vector_id, vector_kind, {width}, "
             "typeof(vec), CASE WHEN typeof(vec) != 'blob' THEN vec END"
             if vectors else "chunk_id"
         )
         packed = (f"SELECT json_group_array(json_array({fields})), "
-                  f"group_concat(hex(vec), '') FROM ({sql})")
+                  f"{payload} FROM ({sql})")
         try:
-            metadata, hex_vectors = self._conn.execute(packed, args).fetchone()
+            metadata, transferred = self._conn.execute(packed, args).fetchone()
         except (sqlite3.Error, MemoryError) as exc:
             code = getattr(exc, "sqlite_errorcode", 0) & 0xff
             if not isinstance(exc, MemoryError) and code not in (
@@ -1490,8 +1493,8 @@ class VectorStore:
         rows = json.loads(metadata)
         if not vectors:
             return rows
-        raw = bytes.fromhex(hex_vectors or "")
-        del hex_vectors
+        raw = (transferred or b"") if raw_transfer else bytes.fromhex(transferred or "")
+        del transferred
         offset = 0
         decoded = []
         for rowid, ident, kind, width, storage, value in rows:

@@ -39,7 +39,7 @@ def capture(repo, out, query):
         if label and key not in seen:
             seen.add(key)
             objects = {}
-            for key_name in ('metadata', 'hex_vectors', 'raw', 'rows', 'decoded', 'blobs', 'matrix'):
+            for key_name in ('metadata', 'hex_vectors', 'transferred', 'raw', 'rows', 'decoded', 'blobs', 'matrix'):
                 value = values.get(key_name)
                 if isinstance(value, (bytes, str, list, memoryview)):
                     objects[key_name] = dict(type=type(value).__name__, length=len(value),
