@@ -1,0 +1,217 @@
+{
+  "method": "RCA-v1 transfer stages; one separate untimed raised-deadline query",
+  "acceptance_latency": false,
+  "acceptance_rss": false,
+  "events": [
+    {
+      "group": "summary",
+      "function": "_load_vectors_for_ids",
+      "stage": "metadata",
+      "line": 1489,
+      "rss_bytes": 714211328,
+      "traced_bytes": [
+        1228020,
+        2158402
+      ],
+      "objects": {
+        "rows": {
+          "type": "list",
+          "length": 500,
+          "shallow_bytes": 4216
+        }
+      }
+    },
+    {
+      "group": "chunk",
+      "function": "_load_chunk_matrix",
+      "stage": "metadata",
+      "line": 2768,
+      "rss_bytes": 830947328,
+      "traced_bytes": [
+        59190533,
+        59191545
+      ],
+      "objects": {
+        "rows": {
+          "type": "list",
+          "length": 25000,
+          "shallow_bytes": 219064
+        },
+        "blobs": {
+          "type": "list",
+          "length": 0,
+          "shallow_bytes": 56
+        }
+      }
+    },
+    {
+      "group": "chunk",
+      "function": "_load_chunk_matrix",
+      "stage": "matrix",
+      "line": 2801,
+      "rss_bytes": 831078400,
+      "traced_bytes": [
+        98242312,
+        100241292
+      ],
+      "objects": {
+        "rows": {
+          "type": "list",
+          "length": 25000,
+          "shallow_bytes": 219064
+        },
+        "blobs": {
+          "type": "list",
+          "length": 25000,
+          "shallow_bytes": 219064
+        },
+        "matrix": {
+          "shape": [
+            25000,
+            384
+          ],
+          "dtype": "float32",
+          "nbytes": 38400000,
+          "owns": false,
+          "base_type": "ndarray"
+        }
+      }
+    }
+  ],
+  "settled": {
+    "rss_bytes": 824901632,
+    "traced_bytes": [
+      697097,
+      103332805
+    ]
+  },
+  "settled_sites": [
+    {
+      "file": "vector_store.py",
+      "line": 1611,
+      "bytes": 159680,
+      "count": 1996
+    },
+    {
+      "file": "vector_store.py",
+      "line": 1519,
+      "bytes": 133200,
+      "count": 1850
+    },
+    {
+      "file": "vector_store.py",
+      "line": 1167,
+      "bytes": 23331,
+      "count": 11
+    },
+    {
+      "file": "memory_sites.py",
+      "line": 56,
+      "bytes": 18970,
+      "count": 19
+    },
+    {
+      "file": "vector_store.py",
+      "line": 1166,
+      "bytes": 15944,
+      "count": 185
+    },
+    {
+      "file": "retrieval_core.py",
+      "line": 633,
+      "bytes": 15552,
+      "count": 186
+    },
+    {
+      "file": "tools.py",
+      "line": 1057,
+      "bytes": 14019,
+      "count": 2
+    },
+    {
+      "file": "decoder.py",
+      "line": 361,
+      "bytes": 13693,
+      "count": 200
+    },
+    {
+      "file": "retrieval_core.py",
+      "line": 708,
+      "bytes": 13385,
+      "count": 151
+    },
+    {
+      "file": "retrieval_core.py",
+      "line": 553,
+      "bytes": 11880,
+      "count": 99
+    },
+    {
+      "file": "tools.py",
+      "line": 3996,
+      "bytes": 11319,
+      "count": 2
+    },
+    {
+      "file": "retrieval_core.py",
+      "line": 849,
+      "bytes": 10555,
+      "count": 145
+    },
+    {
+      "file": "recall_delivery.py",
+      "line": 21,
+      "bytes": 9756,
+      "count": 2
+    },
+    {
+      "file": "retrieval_core.py",
+      "line": 525,
+      "bytes": 9280,
+      "count": 145
+    },
+    {
+      "file": "retrieval_core.py",
+      "line": 699,
+      "bytes": 9000,
+      "count": 75
+    },
+    {
+      "file": "retrieval_core.py",
+      "line": 524,
+      "bytes": 6400,
+      "count": 100
+    },
+    {
+      "file": "vector_store.py",
+      "line": 2770,
+      "bytes": 4540,
+      "count": 10
+    },
+    {
+      "file": "_linalg.py",
+      "line": 2615,
+      "bytes": 4347,
+      "count": 2
+    },
+    {
+      "file": "retrieval_core.py",
+      "line": 560,
+      "bytes": 3640,
+      "count": 65
+    },
+    {
+      "file": "store.py",
+      "line": 1983,
+      "bytes": 3453,
+      "count": 2
+    }
+  ],
+  "diagnostic_peak_rss_native": 935690240,
+  "coverage": {
+    "fts": "ok",
+    "summary": "full",
+    "chunk": "full"
+  },
+  "timeout": false
+}

@@ -1,0 +1,38 @@
+{
+  "objective-trim-generated": [
+    {
+      "operation": "replace",
+      "old": [
+        "sql conn=10 sha256=545bccfe4b8de32da107d648eab563d52f69cd153d06f0e451e50fa821f50b50 chars=757"
+      ],
+      "new": [
+        "sql conn=10 \"PRAGMA encoding\"",
+        "sql conn=10 sha256=d3e3fe1bb01bee69aba88bef1d5c7d313b8acdcb98cd2bf9cd0730a9936551a3 chars=766"
+      ]
+    }
+  ],
+  "recall-on": [
+    {
+      "operation": "replace",
+      "old": [
+        "sql conn=10 sha256=545bccfe4b8de32da107d648eab563d52f69cd153d06f0e451e50fa821f50b50 chars=757"
+      ],
+      "new": [
+        "sql conn=10 \"PRAGMA encoding\"",
+        "sql conn=10 sha256=d3e3fe1bb01bee69aba88bef1d5c7d313b8acdcb98cd2bf9cd0730a9936551a3 chars=766"
+      ]
+    }
+  ],
+  "recall-retained": [
+    {
+      "operation": "replace",
+      "old": [
+        "sql conn=10 sha256=545bccfe4b8de32da107d648eab563d52f69cd153d06f0e451e50fa821f50b50 chars=757"
+      ],
+      "new": [
+        "sql conn=10 \"PRAGMA encoding\"",
+        "sql conn=10 sha256=d3e3fe1bb01bee69aba88bef1d5c7d313b8acdcb98cd2bf9cd0730a9936551a3 chars=766"
+      ]
+    }
+  ]
+}

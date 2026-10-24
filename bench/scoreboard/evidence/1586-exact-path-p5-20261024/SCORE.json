@@ -1,0 +1,144 @@
+{
+  "V": {
+    "option1": {
+      "a": {
+        "n": 8,
+        "p50": 1.8808052499662153,
+        "p90": 1.9591678750002757,
+        "max": 1.9591678750002757,
+        "timeouts": 0,
+        "errors": 0,
+        "full": 8
+      },
+      "b": {
+        "n": 8,
+        "p50": 2.1356652500107884,
+        "p90": 2.2490377080393955,
+        "max": 2.2490377080393955,
+        "timeouts": 0,
+        "errors": 0,
+        "full": 8
+      },
+      "peak_rss_bytes": 888815616
+    },
+    "variant": {
+      "a": {
+        "n": 8,
+        "p50": 1.0100625000195578,
+        "p90": 1.0982751669944264,
+        "max": 1.0982751669944264,
+        "timeouts": 0,
+        "errors": 0,
+        "full": 8
+      },
+      "b": {
+        "n": 8,
+        "p50": 1.2895523749757558,
+        "p90": 1.3747934579732828,
+        "max": 1.3747934579732828,
+        "timeouts": 0,
+        "errors": 0,
+        "full": 8
+      },
+      "peak_rss_bytes": 887144448
+    },
+    "exactness": [
+      {
+        "pairs": 8,
+        "checked": 8,
+        "censored": 0,
+        "ordered_ids_identical": true,
+        "max_abs_score_difference": 0,
+        "tolerance": 4.76837158203125e-07
+      },
+      {
+        "pairs": 8,
+        "checked": 8,
+        "censored": 0,
+        "ordered_ids_identical": true,
+        "max_abs_score_difference": 0,
+        "tolerance": 4.76837158203125e-07
+      }
+    ]
+  },
+  "N": {
+    "base": {
+      "a": {
+        "n": 200,
+        "p50": 1.2623512499849312,
+        "p90": 1.3099345410009846,
+        "max": 2.1367166669806466,
+        "timeouts": 0,
+        "errors": 0,
+        "full": 200
+      },
+      "b": {
+        "n": 200,
+        "p50": 1.4977450000005774,
+        "p90": 1.533891917031724,
+        "max": 1.7064295830205083,
+        "timeouts": 0,
+        "errors": 0,
+        "full": 200
+      },
+      "peak_rss_bytes": 935690240
+    },
+    "candidate": {
+      "a": {
+        "n": 200,
+        "p50": 1.0338345830095932,
+        "p90": 1.0602035409538075,
+        "max": 2.453371124982368,
+        "timeouts": 0,
+        "errors": 0,
+        "full": 200
+      },
+      "b": {
+        "n": 200,
+        "p50": 1.2797190829878673,
+        "p90": 1.3221094580367208,
+        "max": 2.3137607499957085,
+        "timeouts": 0,
+        "errors": 0,
+        "full": 200
+      },
+      "peak_rss_bytes": 882573312
+    },
+    "exactness": [
+      {
+        "pairs": 200,
+        "checked": 200,
+        "censored": 0,
+        "ordered_ids_identical": true,
+        "max_abs_score_difference": 0,
+        "tolerance": 4.76837158203125e-07
+      },
+      {
+        "pairs": 200,
+        "checked": 200,
+        "censored": 0,
+        "ordered_ids_identical": true,
+        "max_abs_score_difference": 0,
+        "tolerance": 4.76837158203125e-07
+      }
+    ],
+    "memory_pass": true
+  },
+  "C1": {
+    "status": "PENDING",
+    "reason": "incomplete or not admitted; see clock and load.log"
+  },
+  "C2": {
+    "status": "PENDING",
+    "reason": "incomplete or not admitted; see clock and load.log"
+  },
+  "rss_projection": {
+    "formula": "RSS(D) = measured_RSS384 + 64*1000*4*(D-384); RCA same-policy model with raw transfer instead of hex",
+    "dimensions_384_bytes": 882573312,
+    "dimensions_768_bytes": 980877312,
+    "batch_rows": 1000,
+    "bytes_per_dim": 4,
+    "cache_entries_assumption": 64,
+    "not_proven": "768d/16GB RSS and model residency; fixed overhead, unchanged allocator policy, no corpus-sized matrix"
+  }
+}

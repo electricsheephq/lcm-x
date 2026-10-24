@@ -1,0 +1,160 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "20261024-1586-perf-r5-public",
+  "project": "lcm-x",
+  "kind": "benchmark",
+  "status": "settled",
+  "owner_lane": "lcmx-1586-perf-exact-path-r5",
+  "claim_class": "advisory",
+  "created": "2026-10-24T15:48:02Z",
+  "settled": "2026-10-24T15:48:23Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "6ef9b824c6b49fef5f52c08e3881c6eef88d94ee",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python3 rescore-r5.py; measurements use bench.instruments.local_catchup.contention, uncensored config3600s for N, n100/class/block, ABAB; V n4/class/block",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "P5-uncensored-exactness",
+      "metric": "identical_ordered_topk_fraction",
+      "value": 1.0,
+      "n": 400,
+      "source": "SCORE.json"
+    },
+    {
+      "benchmark": "P5-candidate-memory",
+      "metric": "peak_rss_bytes",
+      "value": 882573312.0,
+      "n": 400,
+      "source": "SCORE.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "V-A1",
+      "role": "per-item",
+      "sha256": "c27942e3a9805c9554f86c6f9520806d2c28f9fe58085a83cfd209d08e2fd777",
+      "bytes": 49561
+    },
+    {
+      "path": "V-B1",
+      "role": "per-item",
+      "sha256": "bb334d009d446eede23e0a0979b8d72cf13874c7f64e04aea6bc95780117b523",
+      "bytes": 49555
+    },
+    {
+      "path": "V-A2",
+      "role": "per-item",
+      "sha256": "8a869a8d9bba8d0956670541571ceeb7c293d12e41495f82df15ff52ebe03b67",
+      "bytes": 50810
+    },
+    {
+      "path": "V-B2",
+      "role": "per-item",
+      "sha256": "59c038b9898b3ca4e7fba0da9265de638663a3b72690fa84f5ad984c80ac7b67",
+      "bytes": 50798
+    },
+    {
+      "path": "N-A1",
+      "role": "per-item",
+      "sha256": "32ea9d12373617c5d5516eb63265d6a50bce8b7ea7deffd611c9d5a8244a45ee",
+      "bytes": 1079160
+    },
+    {
+      "path": "N-B1",
+      "role": "per-item",
+      "sha256": "549e3dfea4684976b22a3ae86c21e94f80c077d11796d408750f2532049bcb1d",
+      "bytes": 1081323
+    },
+    {
+      "path": "N-A2",
+      "role": "per-item",
+      "sha256": "500bfc1c371dd342419ea416f06283a67673791fb89f91308d238306143d9d7b",
+      "bytes": 1075506
+    },
+    {
+      "path": "N-B2",
+      "role": "per-item",
+      "sha256": "c9b22db5590d134d8deedadbea8fabe79ea8fe292c6ed9f1b8136671db0af095",
+      "bytes": 1077653
+    },
+    {
+      "path": "SCORE.json",
+      "role": "per-item",
+      "sha256": "26f9f7d3894d482411056c5d781f4c4276934e0337b066ee2feaf4197a6ba1f7",
+      "bytes": 3449
+    },
+    {
+      "path": "SOURCE.json",
+      "role": "per-item",
+      "sha256": "c2163b48ace310b05a0ec23f14473a9f09a25b33f9be94655b16f06686f5c2ae",
+      "bytes": 1410
+    },
+    {
+      "path": "clock.json",
+      "role": "per-item",
+      "sha256": "e466c2b67811bf451b7f26588ae968cfafce27505a7330d7bfbaede204d5e11f",
+      "bytes": 126
+    },
+    {
+      "path": "assembly-delta.json",
+      "role": "per-item",
+      "sha256": "4088d02573b25477dd91a3d9c9019b07c66a51ad287d77b1ea847948608b94bb",
+      "bytes": 1110
+    },
+    {
+      "path": "rescore-r5.py",
+      "role": "per-item",
+      "sha256": "f8b87bc0a4df267d3c1e4d7b42ee7c446f6ec44f396b9663734883d1aa84a4d6",
+      "bytes": 4984
+    }
+  ],
+  "rescore": {
+    "command": "python3 rescore-r5.py",
+    "inputs": [
+      "N-A1/recalls.jsonl",
+      "N-B1/recalls.jsonl",
+      "N-A2/recalls.jsonl",
+      "N-B2/recalls.jsonl",
+      "V-A1/recalls.jsonl",
+      "V-B1/recalls.jsonl",
+      "V-A2/recalls.jsonl",
+      "V-B2/recalls.jsonl"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "N-A1",
+    "N-A1/recalls.jsonl",
+    "N-A2",
+    "N-A2/recalls.jsonl",
+    "N-B1",
+    "N-B1/recalls.jsonl",
+    "N-B2",
+    "N-B2/recalls.jsonl",
+    "RESULT.md",
+    "SCORE.json",
+    "SOURCE.json",
+    "V-A1",
+    "V-A1/recalls.jsonl",
+    "V-A2",
+    "V-A2/recalls.jsonl",
+    "V-B1",
+    "V-B1/recalls.jsonl",
+    "V-B2",
+    "V-B2/recalls.jsonl",
+    "assembly-delta.json",
+    "clock.json",
+    "rescore-r5.py"
+  ]
+}
