@@ -3,8 +3,12 @@
 Local semantic recall is **on by default**, using in-process `fastembed` and its
 effective default model `BAAI/bge-small-en-v1.5` (384 dimensions). The configured
 model stays empty: only FastEmbed supplies this built-in default. An explicit
-`LCM_EMBEDDING_MODEL` wins; cloud and OpenAI-compatible providers still require
-their own explicit model and retain their privacy and consent requirements.
+`LCM_EMBEDDING_MODEL` wins with an explicit provider; a runtime model alone keeps
+the historical missing-provider rejection and stays inert when enable is unset.
+Non-local providers (including Ollama) require `LCM_EMBEDDINGS_ENABLED=true` and
+their own explicit model, retaining their privacy and consent requirements.
+Unrecognized enable values resolve OFF with a warning. The ignored config.yaml
+key `lcm.embeddings_enabled` does not opt out; use `LCM_EMBEDDINGS_ENABLED=false`.
 Set `LCM_EMBEDDINGS_ENABLED=false` to opt out: no provider load or model download,
 and existing rows and vectors remain intact. Other providers are explicit options.
 

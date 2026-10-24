@@ -736,5 +736,7 @@ def render_doctor(facts: DoctorFacts) -> str:
 def _doctor_text(engine: Any) -> str:
     from .ingest_policy import embedding_prefix_status
     prefix = embedding_prefix_status(engine._config)
-    return render_doctor(collect_doctor(engine)) + "".join(
+    note = ("\nconfig_note: config.yaml lcm.embeddings_enabled is ignored; use LCM_EMBEDDINGS_ENABLED=true/false"
+            if "embeddings_enabled" in getattr(engine._config, "ignored_config_yaml_lcm_keys", []) else "")
+    return render_doctor(collect_doctor(engine)) + note + "".join(
         f"\nembedding_prefix_{key}: {value}" for key, value in prefix.get("embedding_prefix", {}).items())

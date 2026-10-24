@@ -1191,7 +1191,7 @@ class LCMConfig:
     # -- Storage ---
     database_path: str = ""       # empty = HERMES_HOME/lcm.db; LCM_DATABASE_PATH may override
 
-    # -- Embeddings (default-off until a provider/model are configured) ---
+    # -- Embeddings (automatic local default; non-local providers require opt-in) ---
     embeddings_enabled: bool = True
     # lcm_recall cross-encoder rerank stage over the top fused candidates.
     # Default-off: recall ships value on RRF order alone, and rerank is one extra
@@ -1422,6 +1422,16 @@ class LCMConfig:
         if pinned:
             _profile_envs[env["HERMES_HOME"]] = MappingProxyType(dict(env))
         c = cls()
+        raw_provider = env.get("LCM_EMBEDDING_PROVIDER", "").strip()
+        model_only = bool(env.get("LCM_EMBEDDING_MODEL", "").strip()) and not raw_provider
+        if model_only:
+            c.embedding_provider = ""  # A runtime model alone never selected a provider.
+        # Invalid bools retain the historical OFF fallback and warning. The
+        # flipped unset default belongs only to the local arm, never cloud consent.
+        c.embeddings_enabled = (
+            "LCM_EMBEDDINGS_ENABLED" not in env and not model_only
+            and embedding_provider_id(normalize_embedding_provider(raw_provider or c.embedding_provider)) in {"", "fastembed"}
+        )
         c.embeddings_enabled_explicit = env.get("LCM_EMBEDDINGS_ENABLED", "").strip().lower() in (
             "1", "true", "yes", "on", "0", "false", "no", "off")
         c._absolute_threshold_tokens = env.get("LCM_ABSOLUTE_THRESHOLD_TOKENS", "0") if pinned else None

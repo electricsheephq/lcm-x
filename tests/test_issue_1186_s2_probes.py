@@ -12,7 +12,7 @@ from hermes_lcm.embedding_maintenance import _local_model_key
 from hermes_lcm.ingest_policy import embedding_prefix_suffix, embedding_privacy_revision
 from hermes_lcm.leaf_prep import route_fingerprint
 from tests.invariants.test_issue_1603_profile_config import host, load_profile  # noqa: F401
-from tests.test_issue_1186_smallhost import DefaultOnConfig
+from tests.test_issue_1186_smallhost import DefaultOnConfig, ready_local  # noqa: F401
 from tests.test_lcm_recall import recall_engine  # noqa: F401
 from tests.harness import engine_context
 
@@ -31,7 +31,7 @@ def test_p1_internal_flag_not_settable(monkeypatch, raw, enabled):
 
 
 @pytest.mark.parametrize("raw,explicit,value", [
-    ("", False, True), ("   ", False, True), ("invalid", False, True),
+    ("", False, False), ("   ", False, False), ("invalid", False, False),
     ("true", True, True), ("false", True, False),
     ("1", True, True), ("0", True, False),
     (" YES ", True, True), ("off", True, False),
@@ -41,9 +41,9 @@ def test_p2_only_valid_value_is_explicit(monkeypatch, raw, explicit, value):
     config = DefaultOnConfig.from_env()
     assert config.embeddings_enabled_explicit is explicit
     assert config.embeddings_enabled is value
-    # Provenance must not add, suppress or rewrite the existing parser warning.
+    # R3 retains the historical OFF fallback; provenance still preserves its warning.
     warnings = []
-    config_module._parse_bool_env("LCM_EMBEDDINGS_ENABLED", True, warnings=warnings)
+    config_module._parse_bool_env("LCM_EMBEDDINGS_ENABLED", False, warnings=warnings)
     assert [w for w in config.config_source_warnings if "LCM_EMBEDDINGS_ENABLED=" in w] == warnings
 
 
@@ -109,7 +109,7 @@ def _assert_runtime_keys(recall_engine, monkeypatch):
 
 
 @pytest.mark.parametrize("cpus", [0.5, 1, 2, 4, 64])
-def test_p5_fleet_env_never_adapted(recall_engine, monkeypatch, cpus):
+def test_p5_fleet_env_never_adapted(recall_engine, monkeypatch, ready_local, cpus):
     monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "true")
     recall_engine._config = DefaultOnConfig.from_env()
     monkeypatch.setattr(tools, "effective_cpus", lambda: cpus)

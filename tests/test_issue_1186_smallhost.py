@@ -7,8 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from hermes_lcm import tools
+from hermes_lcm import command, embedding_maintenance, tools
 from hermes_lcm.config import LCMConfig
+from hermes_lcm.vector_store import VectorStore
 from tests.test_lcm_recall import recall_engine  # noqa: F401
 
 
@@ -18,6 +19,20 @@ class DefaultOnConfig(LCMConfig):
     embeddings_enabled: bool = True
     embedding_provider: str = "fastembed"
     embedding_model: str = "BAAI/bge-small-en-v1.5"
+
+
+@pytest.fixture
+def ready_local(recall_engine, monkeypatch):
+    """CPU-policy probes have an available model and completed catch-up receipt."""
+    monkeypatch.setattr(embedding_maintenance, "local_model_state", lambda config: ("present", ""))
+    config = DefaultOnConfig()
+    store = VectorStore(recall_engine._store.db_path, config=config)
+    try:
+        for task in ("summary", "chunk"):
+            identity = store.register_profile(config.embedding_model, "fastembed", 2, task=task)
+            command._record_embedding_catchup(recall_engine._store.db_path, task, identity, 0)
+    finally:
+        store.close()
 
 
 @pytest.mark.parametrize("version,files,affinity,expected", [
@@ -114,7 +129,7 @@ def test_default_small_host_fts(recall_engine, monkeypatch, cpus, include):
 
 
 @pytest.mark.parametrize("explicit,cpus", [(True, 1), (False, 4)])
-def test_explicit_or_normal_host_keeps_semantic(recall_engine, monkeypatch, explicit, cpus):
+def test_explicit_or_normal_host_keeps_semantic(recall_engine, monkeypatch, ready_local, explicit, cpus):
     config = DefaultOnConfig.from_env()
     config.embeddings_enabled_explicit = explicit
     recall_engine._config = config
@@ -174,7 +189,7 @@ def test_local_provider_spellings_share_policy(recall_engine, monkeypatch, provi
 
 
 @pytest.mark.parametrize("override", ["voyage", "ollama", "fastembed", " voyage ", "", " ", "\t"])
-def test_request_provider_override_preserves_explicit_choice(recall_engine, monkeypatch, override):
+def test_request_provider_override_preserves_explicit_choice(recall_engine, monkeypatch, ready_local, override):
     recall_engine._config = DefaultOnConfig.from_env()
     monkeypatch.setattr(tools, "effective_cpus", lambda: 2)
     monkeypatch.setattr(tools, "probe_provider_availability", lambda config: {"available": True, "detail": "synthetic backend"})

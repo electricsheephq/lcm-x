@@ -61,7 +61,10 @@ refused before links or host calls. Native Hermes CLI aliases remain available.
 
 Local embeddings are on by default, with provider `fastembed`. The configured
 model remains empty; only fastembed supplies the effective default
-`BAAI/bge-small-en-v1.5`. Explicit models win; cloud providers require a model.
+`BAAI/bge-small-en-v1.5`. Explicit models win with an explicit provider; runtime
+model-only input stays unconfigured. Non-local providers require an explicit
+model and `LCM_EMBEDDINGS_ENABLED=true`. Invalid enable values resolve OFF with a
+warning. config.yaml `lcm.embeddings_enabled` is ignored; use the environment key.
 Set `LCM_EMBEDDINGS_ENABLED=false` to opt out without loading/downloading a model.
 Preparation and catch-up run in the background; until ready, recall uses full
 text with `degraded=true`, the reason and actual coverage, including summaries-only requests.

@@ -62,6 +62,7 @@ def test_proactive_cloud_without_model_rejected():
 
 
 def test_explicit_fastembed_model_wins(monkeypatch):
+    monkeypatch.setenv("LCM_EMBEDDING_PROVIDER", "fastembed")
     monkeypatch.setenv("LCM_EMBEDDING_MODEL", "explicit-local-model")
     config = LCMConfig.from_env()
     assert resolve_provider(config).model_id == "explicit-local-model"

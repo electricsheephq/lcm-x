@@ -257,8 +257,10 @@ and prints a retry command; context-engine selection remains manual.
 
 Local semantic recall is enabled by default with `fastembed`. The model config
 stays empty; FastEmbed resolves it to `BAAI/bge-small-en-v1.5`. An explicit model
-wins, and cloud providers still require an explicit model and their existing
-privacy/consent steps. The companion uses the host's normal dependency consent;
+wins with an explicit provider; a runtime model alone stays disabled/unconfigured.
+Non-local providers require `LCM_EMBEDDINGS_ENABLED=true`, an explicit model and
+their existing privacy/consent steps. Invalid enable values fall back to OFF with
+a warning. The companion uses the host's normal dependency consent;
 see [installation and recovery](docs/embeddings-setup.md#install-consent-updates-and-recovery).
 After it is enabled and Hermes restarts, model warmup and index catch-up run in
 the background. While the dependency, model or index is unavailable or preparing,

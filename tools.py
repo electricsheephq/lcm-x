@@ -3492,6 +3492,8 @@ def _lcm_recall_catchup_reason(engine, provider, task: str) -> str | None:
                 (f"embedding_catchup:{task}:", str(provider.model_id).strip(),
                  str(provider.provider_id).strip().lower(), task, expected),
             ).fetchone()
+            if row is None and embedding_provider_id(provider.provider_id) == "fastembed":
+                return f"{task} semantic index catching up (coverage not yet certified)"
             record = json.loads(row[0]) if row else {}
             if record.get("remaining") or record.get("operator_retry"):
                 record["operator_retry"] = 0
@@ -3511,6 +3513,8 @@ def _lcm_recall_catchup_reason(engine, provider, task: str) -> str | None:
         return "; ".join(reasons) or None
     except Exception:
         logger.debug("Could not read embedding catch-up state", exc_info=True)
+        if embedding_provider_id(provider.provider_id) == "fastembed":
+            return f"{task} semantic index catching up (coverage unavailable)"
     return None
 
 
@@ -4103,7 +4107,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     selected_provider = provider_override or getattr(engine._config, "embedding_provider", "")
     local_fallback_reasons = []
     if embeddings_enabled and embedding_provider_id(normalize_embedding_provider(selected_provider)) == "fastembed":
-        from .embedding_maintenance import local_model_state
+        from .embedding_maintenance import local_model_state, start_local_model_prepare
         selected_config = copy.copy(engine._config)
         selected_config.embedding_provider = selected_provider
         selected = SimpleNamespace(provider_id="fastembed", model_id=effective_embedding_model(selected_provider, getattr(engine._config, "embedding_model", "")))
@@ -4112,6 +4116,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         probe, state = probe_provider_availability(selected_config), local_model_state(selected_config)
         if not probe.get("available"):
             local_fallback_reasons.append(f"local dependency unavailable: {probe.get('detail')}")
+        elif state is None:
+            start_local_model_prepare(engine._store.db_path, selected_config)
+            local_fallback_reasons.append("local model preparing")
         elif state and state[0] != "present":
             local_fallback_reasons.append(f"local model {state[0]}: {state[1]}")
         run_fts = run_fts or bool(local_fallback_reasons)
@@ -5519,7 +5526,9 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
         config_warnings.append(warning)
     for key in getattr(c, "ignored_config_yaml_lcm_keys", []) or []:
         config_warnings.append(
-            f"config.yaml lcm.{key} is not a supported LCM config.yaml key and was ignored; use the matching LCM_* env var if this setting is intentional"
+            f"config.yaml lcm.{key} is not a supported LCM config.yaml key and was ignored; "
+            + ("use LCM_EMBEDDINGS_ENABLED=true/false" if key == "embeddings_enabled"
+               else "use the matching LCM_* env var if this setting is intentional")
         )
 
     checks.append({

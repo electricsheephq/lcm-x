@@ -319,7 +319,10 @@ def _scenario(engine, tool, ctx, *, patterns, posture):
                     and "full text" in check.get("detail", {}).get("impact", "")):
                 expected = "warn"
             assert check["status"] == expected, value["checks"]
-        assert value["overall"] == ("healthy" if all(c["status"] == "pass" for c in value["checks"]) else "warnings")
+        assert value["overall"] == ("healthy" if all(
+            c["status"] == "pass" or (c["status"] == "warn" and c.get("detail", {}).get("informational"))
+            for c in value["checks"]
+        ) else "warnings")
     else:
         raise AssertionError(f"no scenario implementation for {tool}")
     return "exact named postcondition passed"
