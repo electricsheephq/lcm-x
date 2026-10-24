@@ -1,0 +1,323 @@
+"""Shared read-only diagnostic helpers for LCM tools and commands."""
+
+from __future__ import annotations
+
+from contextlib import closing
+from sqlite3 import connect
+from pathlib import Path
+from typing import Any
+
+from .config import containment_base_dir
+
+
+DOCTOR_ACTION_SAFE_IGNORE = "safe/ignore"
+DOCTOR_ACTION_INSPECT = "inspect"
+DOCTOR_ACTION_BACKUP_FIRST_CLEANUP = "backup-first cleanup"
+
+
+def fresh_sqlite_check(engine: Any, pragma: str) -> tuple[bool, str]:
+    """Avoid stale FTS state; label fallback results before giving restore advice."""
+    try:
+        timeout = engine._store.connection.execute("PRAGMA busy_timeout").fetchone()[0] / 1000
+        uri = Path(engine._store.db_path).resolve().as_uri() + "?mode=ro"
+        with closing(connect(uri, uri=True, timeout=timeout)) as conn:
+            row = conn.execute(f"PRAGMA {pragma}").fetchone()
+        return bool(row and row[0] == "ok"), str(row[0]) if row else "no response"
+    except Exception as exc:
+        name = getattr(exc, "sqlite_errorname", "")
+        if name.startswith("SQLITE_CORRUPT") or name == "SQLITE_NOTADB":
+            return False, f"error: {exc}"
+        try:
+            row = engine._store.connection.execute(f"PRAGMA {pragma}").fetchone()
+            detail = str(row[0]) if row else "no response"
+        except Exception as exc:
+            detail = f"error: {exc}"
+        return detail == "ok", detail + " (long-lived connection; unconfirmed)"
+
+
+def _enforce_state_db_containment(path: Path, *, description: str) -> Path:
+    resolved = path.expanduser().resolve()
+    env_base = containment_base_dir()
+    if env_base:
+        allowed_base = Path(env_base).expanduser().resolve()
+        try:
+            resolved.relative_to(allowed_base)
+        except ValueError:
+            raise ValueError(
+                f"{description} resolves to {resolved} which is not within allowed base {allowed_base}"
+            )
+    return resolved
+
+
+def state_db_path_for_engine(engine: Any) -> Path:
+    """Return the Hermes state database path for an LCM engine.
+
+    The path is read-only diagnostic input. When ``LCM_HERMES_BASE_DIR`` is
+    configured, enforce the same containment guard for all diagnostic surfaces.
+    """
+    hermes_home = getattr(engine, "_hermes_home", "") or ""
+    if hermes_home:
+        return _enforce_state_db_containment(
+            Path(hermes_home) / "state.db",
+            description=f"hermes_home {hermes_home}",
+        )
+    db_path = Path(getattr(engine._store, "db_path", Path.home() / ".hermes" / "lcm.db"))
+    return _enforce_state_db_containment(
+        db_path.parent / "state.db",
+        description=f"state database fallback from LCM database {db_path}",
+    )
+
+
+def has_lifecycle_fragmentation(stats: dict[str, Any]) -> bool:
+    """Return whether lifecycle diagnostics should be treated as warning evidence.
+
+    Retained-history drift is intentionally read-only diagnostic context. Keep the
+    doctor warning for concrete operator action (empty lifecycle rows that the
+    explicit backup-first cleanup path can prune) or diagnostic unreadability, but
+    do not make overall health unhealthy solely because historical LCM/state
+    indexes no longer agree.
+    """
+    empty_lifecycle_rows = int(stats.get("empty_lifecycle_rows", 0) or 0)
+    return empty_lifecycle_rows > 0 or (
+        bool(stats.get("state_db_checked")) and bool(stats.get("state_db_error"))
+    )
+
+
+def survival_fit_projection_floor_applies(record: Any) -> bool:
+    """#919: True unless the survival-fit record proves that no fit projected a row.
+
+    v0.26.x or earlier cannot recognise a short projected row (head + mark), so a plugin-only rollback must target
+    v0.27.0 or later. Only a readable projected_count of 0 with intact history rules that out: a positive, absent or
+    damaged count, or a record rebuilt after a lost count (count_lost, which restarts projected_count), is unknown.
+    """
+    record = record if isinstance(record, dict) else {}
+    projected = record.get("projected_count")
+    return bool(record.get("count_lost")) or not (type(projected) is int and projected == 0)
+
+
+def survival_fit_count(record: Any) -> int | None:
+    """Shared doctor predicate: zero means no fit; None means an unreadable/unknown count."""
+    record = record if isinstance(record, dict) else {}
+    try:
+        count = int(record.get("count") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    projected = record.get("projected_count", 0)
+    if count == 0 and (record.get("count_lost") or not (type(projected) is int and projected == 0)):
+        return None
+    return count
+
+
+def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
+    """Return operator triage guidance for one lcm_doctor check.
+
+    Guidance is deliberately conservative: most warning classes are inspect-only
+    evidence, and any mutation path is framed as preview/backup/apply rather than
+    implied automatic cleanup.
+    """
+    status = str(check.get("status") or "")
+    if status not in {"warn", "fail"}:
+        return None
+
+    name = str(check.get("check") or "unknown")
+    detail = check.get("detail")
+    action = DOCTOR_ACTION_INSPECT
+    command = "inspect the reported detail and confirm the active HERMES_HOME/LCM_DATABASE_PATH"
+    warning_only = False
+    rationale = "operator review required before changing persisted LCM state"
+
+    if name == "inactive_process":
+        commands = []
+        if "plugins.load_timeout_seconds" in str(detail):
+            commands.append("restart Hermes; if it recurs, raise plugins.load_timeout_seconds")
+        if "context engine slot held by" in str(detail):
+            commands.append("enable only one context-engine plugin and set context.engine: lcm-x, then restart Hermes")
+        command = "; ".join(commands) or "restart Hermes and inspect the inactive-process reason if it recurs"
+        warning_only = True
+        rationale = "an inactive process is a configuration/load warning; no stored data is at risk"
+    elif name == "database_integrity":
+        command = ("rerun on a fresh connection or after a restart; restore only if that check also fails"
+                   if "long-lived connection; unconfirmed" in str(detail) else
+                   "stop and inspect the SQLite database path; restore from backup if integrity_check is not ok")
+    elif name == "schema_core_tables":
+        command = "verify HERMES_HOME/LCM_DATABASE_PATH points at the intended LCM database before repair or restore"
+    elif name in {"messages_fts_integrity", "nodes_fts_integrity", "fts_index_sync"}:
+        if status == "warn" and isinstance(detail, dict) and detail.get("status") == "unchecked":
+            action = DOCTOR_ACTION_INSPECT
+            command = "rerun `/lcm doctor` with read-write SQLite access if a deep FTS integrity result is needed"
+            warning_only = True
+            rationale = "the deep FTS check could not run, but this is not evidence that the index is corrupt"
+        else:
+            action = DOCTOR_ACTION_BACKUP_FIRST_CLEANUP
+            command = "run `/lcm doctor repair` first; if it still recommends repair, run `/lcm backup` before `/lcm doctor repair apply`"
+            rationale = "FTS repair is rebuildable, but it still mutates SQLite indexes"
+    elif name == "sqlite_storage":
+        command = ("rerun on a fresh connection or after a restart; restore only if that check also fails"
+                   if "long-lived connection; unconfirmed" in str(detail) else
+                   "inspect journal/quick_check output and database/WAL size; restore from backup if SQLite reports corruption")
+    elif name == "payload_storage":
+        missing_refs = 0
+        heartbeat_rows = 0
+        suspicious_rows = 0
+        if isinstance(detail, dict):
+            missing_refs = int(detail.get("externalized_payload_refs_missing", 0) or 0)
+            heartbeat_rows = len(detail.get("heartbeat_noise_rows") or [])
+            suspicious_rows = sum(
+                len(detail.get(key) or [])
+                for key in (
+                    "suspicious_data_uri_content_rows",
+                    "suspicious_data_uri_tool_calls_rows",
+                    "suspicious_base64_like_rows",
+                    "suspicious_repetitive_assistant_rows",
+                )
+            )
+        if status == "warn" and heartbeat_rows and not missing_refs and not suspicious_rows:
+            action = DOCTOR_ACTION_SAFE_IGNORE
+            command = "safe to ignore unless heartbeat/progress noise is crowding useful recall; consider message/session filters for future rows"
+            rationale = "heartbeat rows are read-only noise diagnostics, not corruption"
+        else:
+            command = "inspect payload rows/refs; restore missing externalized payload files from backup before deleting or rewriting anything"
+            if status == "warn":
+                warning_only = True
+                rationale = "payload warnings may represent preserved user/tool data"
+            else:
+                rationale = "payload diagnostic failures mean doctor could not read storage risk state reliably"
+    elif name == "sensitive_pattern_handling":
+        command = "inspect LCM_SENSITIVE_PATTERNS settings; remove unknown names or configure supported catalog entries"
+    elif name == "orphaned_dag_nodes":
+        command = "inspect affected DAG/source IDs; do not auto-delete summaries without confirming recall impact"
+        if status == "warn":
+            warning_only = True
+        else:
+            rationale = "DAG diagnostic failures mean doctor could not read summary/source state reliably"
+    elif name == "summary_quality":
+        command = "inspect worst_nodes and retrieval behavior; treat as summary quality evidence, not cleanup input"
+        if status == "warn":
+            warning_only = True
+        else:
+            rationale = "summary-quality diagnostic failures mean doctor could not read DAG quality state reliably"
+    elif name == "config_validation":
+        command = "inspect LCM_* environment/config values and adjust only intentional operator overrides"
+    elif name == "embedding_provider_health":
+        if status == "warn" and isinstance(detail, dict) and detail.get("embeddings_enabled") is False:
+            action = DOCTOR_ACTION_INSPECT
+            command = (
+                "embeddings are off but this store still has an active embedding profile whose "
+                "vectors will go stale: set LCM_EMBEDDINGS_ENABLED=true if semantic recall is "
+                "wanted; otherwise nothing to do (full-text recall is unaffected)"
+            )
+            warning_only = True
+            rationale = "stale stored vectors affect only semantic recall, which is switched off"
+        elif status == "warn":
+            action = DOCTOR_ACTION_INSPECT
+            command = (
+                "semantic retrieval is configured but not runnable: reinstall the optional "
+                "embedding dependency (e.g. `pip install fastembed` into the active Hermes "
+                "virtualenv) or fix LCM_EMBEDDING_PROVIDER/LCM_EMBEDDING_MODEL and the "
+                "provider credentials, then run `/lcm embed warmup` and re-run `/lcm doctor`. "
+                "A dependency installed by hand can be dropped by a Hermes update, so "
+                "recheck this after an update. Nothing is lost meanwhile -- the lossless "
+                "store is intact and recall falls back to full-text"
+            )
+            warning_only = True
+            rationale = (
+                "an unavailable embedding provider degrades semantic recall to full-text; it "
+                "is a retrieval-capability problem, not persisted-state corruption"
+            )
+        else:
+            rationale = "the embedding provider probe could not read configuration state reliably"
+    elif name == "source_lineage_hygiene" and status == "warn":
+        action = DOCTOR_ACTION_SAFE_IGNORE
+        command = "safe to ignore legacy blank-source observations; use `/lcm doctor source` only when you intentionally want backup-first normalization"
+        rationale = "legacy blank sources are normalized to unknown for compatibility"
+    elif name == "source_lineage_hygiene":
+        command = "inspect source-lineage diagnostics and SQLite read errors before running any source normalization workflow"
+        rationale = "source-lineage failures indicate the doctor could not read attribution state reliably"
+    elif name == "lifecycle_fragmentation":
+        command = "inspect lifecycle categories; only use explicit backup-first lifecycle cleanup for empty lifecycle rows"
+        if status == "warn":
+            warning_only = True
+            rationale = "not every lifecycle/state mismatch is harmful or safe to mutate"
+        else:
+            rationale = "lifecycle diagnostic failures mean doctor could not read session lifecycle state reliably"
+    elif name == "context_pressure":
+        action = DOCTOR_ACTION_SAFE_IGNORE
+        command = "safe to ignore if compaction proceeds normally; inspect lcm_status only if pressure stays high or compaction loops"
+        warning_only = True
+        rationale = "context pressure is an operating state, not persisted-state corruption"
+    elif name == "compaction_progress":
+        command = ("inspect lcm_status zero_leaf_streak and the 'LCM compaction stop' lines: reason= names what stops "
+                   "the leaf, and for a retained occurrence blocked= gives its store_id, role and kind; stored rows stay intact and "
+                   "reachable (lcm_grep / lcm_expand); a new session clears a stop that persists")
+        warning_only = True
+        rationale = ("over-threshold passes that store no leaf leave the session over its threshold, so every turn pays "
+                     "for the whole prompt; this is an operating state, not persisted-state corruption")
+    elif name == "survival_fit":
+        detail = detail if isinstance(detail, dict) else {}
+        within = ("to a 0.24.x version older than v0.24.5, that plugin cannot compact stored rows that a survival fit "
+                  "removed from the live context, with or without a projection, so stop Hermes, move the configured "
+                  "database file (by default lcm.db, with its -wal and -shm companions) aside and keep it, then "
+                  "restore the database backup taken before the first v0.24.5 install together with the plugin (rows "
+                  "stored after that backup leave the LCM store and stay in the file you moved aside); a rollback of "
+                  + ("the plugin alone to v0.27.0 or later is fine; a survival fit projected rows (or the projection "
+                     "count is unknown) and v0.26.x or earlier cannot recognise a short projected row (head + mark) "
+                     "and stores it again on a cold resume (#601 duplicates), so to v0.24.5 through v0.26.x stop "
+                     "Hermes, move the configured database file (by default lcm.db, with its -wal and -shm "
+                     "companions) aside and keep it"
+                     if survival_fit_projection_floor_applies(detail) else
+                     "the plugin alone to v0.24.5 or later is fine"))
+        command = ("inspect the 'LCM survival fit applied' or 'LCM survival fit could not shorten the list' log lines "
+                   "and the compaction reason; the dropped "
+                   "turns stay stored verbatim (lcm_grep / lcm_load_session); nothing needs deleting. Rollback "
+                   f"(#601, #603): {within}. To v0.23.3: reinstall it with LCM_NATIVE_RECOVERY=true and keep the "
+                   "database file as it is — never with native recovery off, and never a backup restore (it drops "
+                   "rows and does not avoid the conflict) — and revert the v0.24.0 config migration (plugins.enabled "
+                   "back to hermes-lcm, context.engine: lcm; restore the pre-migration config.yaml) before restarting "
+                   "Hermes.")
+        if detail.get("ever_shortened") is False:
+            command = ("inspect the 'LCM survival fit could not shorten the list' log lines and the compaction "
+                       "reason; these attempts removed no rows from live context")
+            if survival_fit_projection_floor_applies(detail):  # #966: the same predicate as the observation
+                command += f". Rollback (#601, #603): {within}."
+        warning_only = True
+        rationale = ("a survival fit could not shorten the list; the request still exceeds its budget"
+                     if detail.get("last_shortened") is False else
+                     "an exit fit tried to leave threshold headroom; uncovered_rows names unsummarised stored rows"
+                     if str(detail.get("last_reason") or "").startswith("exit_fit:") else
+                     "a survival fit kept an over-window session alive; last compaction reason "
+                     f"{detail.get('last_reason') or '(unknown)'}")
+        rationale += ("; uncovered rows are counted for every survival fit; last_uncovered_rows reports the last "
+                      "count (unknown if it could not be read); uncovered_fit_count counts shortened fits with "
+                      "unsummarised stored rows removed from live context; unknown_coverage_fit_count counts "
+                      "shortened fits whose coverage could not be read, so while it is above 0 uncovered_fit_count "
+                      "is a lower bound")
+        if detail.get("last_cause"):
+            rationale += f"; last cause {detail['last_cause']}"
+    elif name == "cleanup_candidates":
+        action = DOCTOR_ACTION_BACKUP_FIRST_CLEANUP
+        command = "run `/lcm doctor clean` first; if candidates are expected junk/noise, run `/lcm backup` before `/lcm doctor clean apply`"
+        rationale = "candidate cleanup deletes rows and must stay preview-and-backup gated"
+
+    return {
+        "check": name,
+        "status": status,
+        "action": action,
+        "operator_action": command,
+        "warning_only": warning_only,
+        "rationale": rationale,
+    }
+
+
+def doctor_guidance_for_checks(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return actionable guidance for warning/failing lcm_doctor checks."""
+    guidance = []
+    for check in checks:
+        item = doctor_guidance_for_check(check)
+        if item is not None:
+            guidance.append(item)
+    return guidance
+
+
+# Backward-compatible private aliases for existing command/tool internals and tests.
+_state_db_path_for_engine = state_db_path_for_engine
+_has_lifecycle_fragmentation = has_lifecycle_fragmentation

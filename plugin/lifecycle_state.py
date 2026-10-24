@@ -1,0 +1,1191 @@
+"""Durable lifecycle/checkpoint state for hermes-lcm.
+
+This is the smallest viable substrate for cross-turn/session lifecycle state:
+- which logical conversation a session belongs to
+- which session is currently bound
+- which session was last finalized
+- the active session frontier/checkpoint marker
+- the last finalized frontier marker
+"""
+
+from __future__ import annotations
+
+import functools
+import sqlite3
+import threading
+import time
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
+
+from .db_bootstrap import (
+    configure_connection,
+    owned_conversation_clause,
+    refuse_schema_version_too_new,
+    run_versioned_migrations,
+)
+from .sqlite_session import ConnectionPolicy, open_connection
+
+
+_OWNERSHIP_QUERY_MAX_RANGES = 200
+
+
+class LifecycleBindingChangedError(RuntimeError):
+    """Raised when publication loses its active session binding."""
+
+
+class LifecyclePublicationConflictError(RuntimeError):
+    """Raised when compaction publication cannot prove its source frontier."""
+
+
+def _compaction_coverage_conflict_message(
+    expected_frontier: int,
+    authoritative_ids: list[int],
+    covered_ids: list[int],
+    excluded_ids: list[int],
+) -> str:
+    proven_ids = covered_ids + excluded_ids
+    missing = sorted(set(authoritative_ids) - set(proven_ids))
+    extra = sorted(set(proven_ids) - set(authoritative_ids))
+    double = sorted(
+        (set(covered_ids) & set(excluded_ids))
+        | {store_id for store_id, count in Counter(covered_ids).items() if count > 1}
+        | {store_id for store_id, count in Counter(excluded_ids).items() if count > 1}
+    )
+    return (
+        "Compaction publication source coverage is not contiguous "
+        f"(expected_frontier={expected_frontier}, owned={len(authoritative_ids)} "
+        f"covered={len(covered_ids)} excluded={len(excluded_ids)}; "
+        f"missing={len(missing)} {missing[:8]}; extra={len(extra)} {extra[:8]}; "
+        f"double={len(double)} {double[:8]}; authoritative={authoritative_ids}, "
+        f"covered={covered_ids}, excluded={excluded_ids})"
+    )
+
+
+def _synchronized(method):
+    """Serialize a read-modify-write method on the store's reentrant lock.
+
+    The lifecycle connection is shared across threads (check_same_thread=False,
+    autocommit). Without serialization, two callers reading state and then
+    writing can interleave and clobber each other's update.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
+@dataclass
+class LifecycleState:
+    conversation_id: str
+    current_session_id: str | None
+    last_finalized_session_id: str | None
+    current_frontier_store_id: int
+    last_finalized_frontier_store_id: int
+    debt_kind: str | None
+    debt_size_estimate: int
+    current_bound_at: float | None
+    last_finalized_at: float | None
+    debt_updated_at: float | None
+    last_maintenance_attempt_at: float | None
+    last_rollover_at: float | None
+    last_reset_at: float | None
+    updated_at: float
+
+
+class LifecycleStateStore:
+    def __init__(self, db_path: str | Path):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn: Optional[sqlite3.Connection] = None
+        # The connection is opened check_same_thread=False in autocommit mode
+        # and is shared across the gateway thread, dispatcher, and sub-agents.
+        # Serialize read-modify-write flows so concurrent binds/frontier
+        # advances cannot interleave and regress the checkpoint.
+        self._lock = threading.RLock()
+        self._init_db()
+
+    def _init_db(self) -> None:
+        open_connection(ConnectionPolicy(
+            database=str(self.db_path),
+            connect_kwargs=(
+                ("timeout", 30.0), ("check_same_thread", False), ("isolation_level", None),
+            ),
+            before_row_factory=(refuse_schema_version_too_new, configure_connection),
+            row_factory=sqlite3.Row,
+            on_open=lambda conn: setattr(self, "_conn", conn),
+            on_setup_error=None,
+        ))
+        run_versioned_migrations(self._conn)
+        self._conn.commit()
+
+    def close(self) -> None:
+        conn = getattr(self, "_conn", None)
+        if conn is not None:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            except sqlite3.Error:
+                pass
+            conn.close()
+            self._conn = None
+
+    def __del__(self) -> None:  # pragma: no cover - defensive resource cleanup
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    @property
+    def connection(self) -> sqlite3.Connection | None:
+        """The live SQLite connection, or ``None`` once :meth:`close` has run.
+
+        Exposed for read-oriented diagnostics -- for example the doctor's
+        maintenance-debt scan -- that need ad-hoc queries the store does not wrap
+        in a purpose-built method. Callers must treat it as read-only; writes go
+        through the store's own methods.
+        """
+        return getattr(self, "_conn", None)
+
+    def row_count(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS count FROM lcm_lifecycle_state").fetchone()
+        return int(row["count"] if row else 0)
+
+    def _row_to_state(self, row: sqlite3.Row | None) -> LifecycleState | None:
+        if row is None:
+            return None
+        return LifecycleState(
+            conversation_id=row["conversation_id"],
+            current_session_id=row["current_session_id"],
+            last_finalized_session_id=row["last_finalized_session_id"],
+            current_frontier_store_id=int(row["current_frontier_store_id"] or 0),
+            last_finalized_frontier_store_id=int(row["last_finalized_frontier_store_id"] or 0),
+            debt_kind=row["debt_kind"],
+            debt_size_estimate=int(row["debt_size_estimate"] or 0),
+            current_bound_at=row["current_bound_at"],
+            last_finalized_at=row["last_finalized_at"],
+            debt_updated_at=row["debt_updated_at"],
+            last_maintenance_attempt_at=row["last_maintenance_attempt_at"],
+            last_rollover_at=row["last_rollover_at"],
+            last_reset_at=row["last_reset_at"],
+            updated_at=float(row["updated_at"] or 0.0),
+        )
+
+    def get_by_conversation(self, conversation_id: str | None) -> LifecycleState | None:
+        if not conversation_id:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM lcm_lifecycle_state WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchone()
+        return self._row_to_state(row)
+
+    def get_by_session(self, session_id: str | None) -> LifecycleState | None:
+        if not session_id:
+            return None
+        row = self._conn.execute(
+            """
+            SELECT *
+            FROM lcm_lifecycle_state
+            WHERE current_session_id = ? OR last_finalized_session_id = ?
+            ORDER BY CASE WHEN current_session_id = ? THEN 0 ELSE 1 END, updated_at DESC
+            LIMIT 1
+            """,
+            (session_id, session_id, session_id),
+        ).fetchone()
+        return self._row_to_state(row)
+
+    @_synchronized
+    def bind_session(
+        self,
+        session_id: str,
+        *,
+        conversation_id: str | None = None,
+    ) -> LifecycleState:
+        existing = self.get_by_conversation(conversation_id) if conversation_id else self.get_by_session(session_id)
+        conversation_id = conversation_id or (existing.conversation_id if existing else session_id)
+        now = time.time()
+        current_frontier = 0
+        current_bound_at = now
+        last_finalized_session_id = None
+        last_finalized_frontier = 0
+        debt_kind = None
+        debt_size_estimate = 0
+        last_finalized_at = None
+        debt_updated_at = None
+        last_maintenance_attempt_at = None
+        last_rollover_at = None
+        last_reset_at = None
+
+        if existing is not None:
+            if existing.current_session_id == session_id:
+                return existing
+            # A session rebinding after its OWN finalize (same id; Hermes in-place
+            # compaction, restart/resume) resumes its published frontier: its DAG
+            # still claims every source row up to it (#483, #247 class).
+            current_frontier = (
+                existing.last_finalized_frontier_store_id
+                if existing.current_session_id is None
+                and existing.last_finalized_session_id == session_id
+                and (
+                    existing.last_reset_at is None
+                    or (existing.last_finalized_at or 0) >= existing.last_reset_at
+                )
+                else 0
+            )
+            current_bound_at = (
+                existing.current_bound_at if existing.current_session_id == session_id else now
+            )
+            last_finalized_session_id = existing.last_finalized_session_id
+            last_finalized_frontier = existing.last_finalized_frontier_store_id
+            debt_kind = existing.debt_kind
+            debt_size_estimate = existing.debt_size_estimate
+            last_finalized_at = existing.last_finalized_at
+            debt_updated_at = existing.debt_updated_at
+            last_maintenance_attempt_at = existing.last_maintenance_attempt_at
+            last_rollover_at = (
+                now
+                if (
+                    (existing.current_session_id and existing.current_session_id != session_id)
+                    or (
+                        existing.current_session_id is None
+                        and existing.last_finalized_session_id
+                        and existing.last_finalized_session_id != session_id
+                    )
+                )
+                else existing.last_rollover_at
+            )
+            last_reset_at = existing.last_reset_at
+
+        self._conn.execute(
+            """
+            INSERT INTO lcm_lifecycle_state(
+                conversation_id,
+                current_session_id,
+                last_finalized_session_id,
+                current_frontier_store_id,
+                last_finalized_frontier_store_id,
+                debt_kind,
+                debt_size_estimate,
+                current_bound_at,
+                last_finalized_at,
+                debt_updated_at,
+                last_maintenance_attempt_at,
+                last_rollover_at,
+                last_reset_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(conversation_id) DO UPDATE SET
+                current_session_id = excluded.current_session_id,
+                last_finalized_session_id = excluded.last_finalized_session_id,
+                current_frontier_store_id = excluded.current_frontier_store_id,
+                last_finalized_frontier_store_id = excluded.last_finalized_frontier_store_id,
+                debt_kind = excluded.debt_kind,
+                debt_size_estimate = excluded.debt_size_estimate,
+                current_bound_at = excluded.current_bound_at,
+                last_finalized_at = excluded.last_finalized_at,
+                debt_updated_at = excluded.debt_updated_at,
+                last_maintenance_attempt_at = excluded.last_maintenance_attempt_at,
+                last_rollover_at = excluded.last_rollover_at,
+                last_reset_at = excluded.last_reset_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                conversation_id,
+                session_id,
+                last_finalized_session_id,
+                current_frontier,
+                last_finalized_frontier,
+                debt_kind,
+                debt_size_estimate,
+                current_bound_at,
+                last_finalized_at,
+                debt_updated_at,
+                last_maintenance_attempt_at,
+                last_rollover_at,
+                last_reset_at,
+                now,
+            ),
+        )
+        self._conn.commit()
+        state = self.get_by_conversation(conversation_id)
+        assert state is not None
+        return state
+
+    @_synchronized
+    def rebind_own_finalized(self, session_id: str, conversation_id: str) -> LifecycleState | None:
+        """Compare-and-bind (R6-2): bind ``session_id`` at its own finalized frontier only if the row is
+        STILL unbound, last finalized by this session, and not reset since that finalize, checked and
+        written by ONE conditional UPDATE (atomic across engines and processes). Same fields as
+        :meth:`bind_session`'s own-finalize branch. None (nothing written) when another session bound it
+        first or the row no longer qualifies."""
+        now = time.time()
+        cursor = self._conn.execute(
+            """
+            UPDATE lcm_lifecycle_state
+            SET current_session_id = ?,
+                current_frontier_store_id = last_finalized_frontier_store_id,
+                current_bound_at = ?,
+                updated_at = ?
+            WHERE conversation_id = ?
+              AND current_session_id IS NULL
+              AND last_finalized_session_id = ?
+              AND (last_reset_at IS NULL OR COALESCE(last_finalized_at, 0) >= last_reset_at)
+            """,
+            (session_id, now, now, conversation_id, session_id),
+        )
+        self._conn.commit()
+        return self.get_by_conversation(conversation_id) if cursor.rowcount == 1 else None
+
+    @_synchronized
+    def finalize_session(
+        self,
+        conversation_id: str | None,
+        session_id: str,
+        frontier_store_id: int = 0,
+    ) -> LifecycleState | None:
+        state = self.get_by_conversation(conversation_id)
+        if state is None:
+            return None
+        now = time.time()
+        current_session_id = state.current_session_id
+        current_frontier = state.current_frontier_store_id
+        if current_session_id == session_id:
+            current_session_id = None
+            current_frontier = 0
+        # Record only the finalizing session's own frontier: another session's
+        # finalized frontier must never become this session's resumable one
+        # (bind_session restores it by owner, #484 round 2).
+        finalized_frontier = int(frontier_store_id or 0)
+        if state.last_finalized_session_id == session_id and (
+            state.last_reset_at is None or (state.last_finalized_at or 0) >= state.last_reset_at
+        ):
+            finalized_frontier = max(finalized_frontier, state.last_finalized_frontier_store_id)
+        self._conn.execute(
+            """
+            UPDATE lcm_lifecycle_state
+            SET current_session_id = ?,
+                last_finalized_session_id = ?,
+                current_frontier_store_id = ?,
+                last_finalized_frontier_store_id = ?,
+                debt_kind = debt_kind,
+                debt_size_estimate = debt_size_estimate,
+                last_finalized_at = ?,
+                updated_at = ?
+            WHERE conversation_id = ?
+            """,
+            (
+                current_session_id,
+                session_id,
+                current_frontier,
+                finalized_frontier,
+                now,
+                now,
+                state.conversation_id,
+            ),
+        )
+        self._conn.commit()
+        return self.get_by_conversation(state.conversation_id)
+
+    @_synchronized
+    def record_rollover(
+        self,
+        conversation_id: str,
+        *,
+        old_session_id: str,
+        new_session_id: str,
+        finalized_frontier_store_id: int = 0,
+    ) -> LifecycleState:
+        state = self.get_by_conversation(conversation_id)
+        if (
+            state is not None
+            and state.current_session_id == new_session_id
+            and state.last_finalized_session_id == old_session_id
+        ):
+            return state
+
+        now = time.time()
+        last_finalized_frontier = max(
+            int(finalized_frontier_store_id or 0),
+            state.last_finalized_frontier_store_id if state else 0,
+        )
+        self._conn.execute(
+            """
+            INSERT INTO lcm_lifecycle_state(
+                conversation_id,
+                current_session_id,
+                last_finalized_session_id,
+                current_frontier_store_id,
+                last_finalized_frontier_store_id,
+                current_bound_at,
+                last_finalized_at,
+                last_rollover_at,
+                last_reset_at,
+                updated_at
+            ) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(conversation_id) DO UPDATE SET
+                current_session_id = excluded.current_session_id,
+                last_finalized_session_id = excluded.last_finalized_session_id,
+                current_frontier_store_id = 0,
+                last_finalized_frontier_store_id = excluded.last_finalized_frontier_store_id,
+                current_bound_at = excluded.current_bound_at,
+                last_finalized_at = excluded.last_finalized_at,
+                last_rollover_at = excluded.last_rollover_at,
+                last_reset_at = excluded.last_reset_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                conversation_id,
+                new_session_id,
+                old_session_id,
+                last_finalized_frontier,
+                now,
+                now,
+                now,
+                now,
+                now,
+            ),
+        )
+        self._conn.commit()
+        updated = self.get_by_conversation(conversation_id)
+        assert updated is not None
+        return updated
+
+    def get_fragmentation_stats(self, state_db_path: str | Path | None = None) -> dict[str, Any]:
+        """Return read-only lifecycle/session fragmentation diagnostics.
+
+        This intentionally reports mismatches only. It does not infer that every
+        mismatch is corrupt, and it never rewrites lifecycle, message, DAG, or
+        Hermes host state. Repair/cleanup flows must stay explicit and separate.
+        """
+        conn = self._conn
+        assert conn is not None
+
+        def _count(query: str, params: tuple[Any, ...] = ()) -> int:
+            row = conn.execute(query, params).fetchone()
+            return int(row[0] if row else 0)
+
+        def _session_ids(query: str) -> set[str]:
+            return {
+                str(row[0])
+                for row in conn.execute(query).fetchall()
+                if row[0]
+            }
+
+        message_sessions = _session_ids("SELECT DISTINCT session_id FROM messages WHERE session_id IS NOT NULL")
+        node_sessions = _session_ids("SELECT DISTINCT session_id FROM summary_nodes WHERE session_id IS NOT NULL")
+        lcm_any_sessions = message_sessions | node_sessions
+        state_sessions: set[str] = set()
+        state_db_read_success = False
+        lifecycle_current_sessions = _session_ids(
+            "SELECT DISTINCT current_session_id FROM lcm_lifecycle_state WHERE current_session_id IS NOT NULL"
+        )
+        lifecycle_last_finalized_sessions = _session_ids(
+            "SELECT DISTINCT last_finalized_session_id FROM lcm_lifecycle_state WHERE last_finalized_session_id IS NOT NULL"
+        )
+        lifecycle_referenced_sessions = lifecycle_current_sessions | lifecycle_last_finalized_sessions
+
+        empty_lifecycle_rows = 0
+        for row in conn.execute(
+            """
+            SELECT current_session_id, last_finalized_session_id
+            FROM lcm_lifecycle_state
+            """
+        ).fetchall():
+            refs = {
+                str(value)
+                for value in (row["current_session_id"], row["last_finalized_session_id"])
+                if value
+            }
+            if not refs or refs.isdisjoint(lcm_any_sessions):
+                empty_lifecycle_rows += 1
+
+        stats: dict[str, Any] = {
+            "read_only": True,
+            "lifecycle_rows": _count("SELECT COUNT(*) FROM lcm_lifecycle_state"),
+            "empty_lifecycle_rows": empty_lifecycle_rows,
+            "messages_total": _count("SELECT COUNT(*) FROM messages"),
+            "summary_nodes_total": _count("SELECT COUNT(*) FROM summary_nodes"),
+            "distinct_message_sessions": len(message_sessions),
+            "distinct_node_sessions": len(node_sessions),
+            "distinct_lcm_any_sessions": len(lcm_any_sessions),
+            "lifecycle_current_sessions": len(lifecycle_current_sessions),
+            "lifecycle_last_finalized_sessions": len(lifecycle_last_finalized_sessions),
+            "lifecycle_current_missing_in_messages": len(lifecycle_current_sessions - message_sessions),
+            "lifecycle_current_missing_in_nodes": len(lifecycle_current_sessions - node_sessions),
+            "lifecycle_current_missing_in_lcm_any": len(lifecycle_current_sessions - lcm_any_sessions),
+            "lifecycle_last_finalized_missing_in_messages": len(lifecycle_last_finalized_sessions - message_sessions),
+            "lifecycle_last_finalized_missing_in_nodes": len(lifecycle_last_finalized_sessions - node_sessions),
+            "lifecycle_last_finalized_missing_in_lcm_any": len(lifecycle_last_finalized_sessions - lcm_any_sessions),
+            "message_sessions_without_lifecycle_current": len(message_sessions - lifecycle_current_sessions),
+            "message_sessions_without_lifecycle_reference": len(message_sessions - lifecycle_referenced_sessions),
+            "node_sessions_without_lifecycle_reference": len(node_sessions - lifecycle_referenced_sessions),
+            "state_db_checked": False,
+            "state_db_error": "",
+            "state_sessions_total": 0,
+            "lifecycle_current_missing_in_state": 0,
+            "lifecycle_last_finalized_missing_in_state": 0,
+            "lcm_message_sessions_missing_in_state": 0,
+            "lcm_node_sessions_missing_in_state": 0,
+            "state_sessions_missing_in_lcm_messages": 0,
+            "state_sessions_missing_in_lcm_any": 0,
+        }
+
+        if state_db_path:
+            path = Path(state_db_path).expanduser()
+            if path.exists():
+                stats["state_db_checked"] = True
+                try:
+                    state_uri = path.resolve().as_uri() + "?mode=ro"
+                    state_conn = sqlite3.connect(state_uri, uri=True)
+                    try:
+                        state_rows = state_conn.execute("SELECT id FROM sessions WHERE id IS NOT NULL").fetchall()
+                    finally:
+                        state_conn.close()
+                    state_sessions = {str(row[0]) for row in state_rows if row[0]}
+                    state_db_read_success = True
+                    stats.update({
+                        "state_sessions_total": len(state_sessions),
+                        "lifecycle_current_missing_in_state": len(lifecycle_current_sessions - state_sessions),
+                        "lifecycle_last_finalized_missing_in_state": len(
+                            lifecycle_last_finalized_sessions - state_sessions
+                        ),
+                        "lcm_message_sessions_missing_in_state": len(message_sessions - state_sessions),
+                        "lcm_node_sessions_missing_in_state": len(node_sessions - state_sessions),
+                        "state_sessions_missing_in_lcm_messages": len(state_sessions - message_sessions),
+                        "state_sessions_missing_in_lcm_any": len(state_sessions - lcm_any_sessions),
+                    })
+                except Exception as exc:  # pragma: no cover - defensive
+                    stats["state_db_error"] = str(exc)
+            else:
+                stats["state_db_error"] = f"state database not found: {path}"
+
+        stats["classification"] = self._classify_fragmentation(
+            lifecycle_rows=stats["lifecycle_rows"],
+            lifecycle_current_sessions=lifecycle_current_sessions,
+            lifecycle_last_finalized_sessions=lifecycle_last_finalized_sessions,
+            message_sessions=message_sessions,
+            node_sessions=node_sessions,
+            lcm_any_sessions=lcm_any_sessions,
+            lifecycle_referenced_sessions=lifecycle_referenced_sessions,
+            state_sessions=state_sessions,
+            state_db_read_success=state_db_read_success,
+        )
+
+        return stats
+
+    @staticmethod
+    def _classify_fragmentation(
+        *,
+        lifecycle_rows: int,
+        lifecycle_current_sessions: set[str],
+        lifecycle_last_finalized_sessions: set[str],
+        message_sessions: set[str],
+        node_sessions: set[str],
+        lcm_any_sessions: set[str],
+        lifecycle_referenced_sessions: set[str],
+        state_sessions: set[str],
+        state_db_read_success: bool,
+    ) -> dict[str, Any]:
+        """Bucket lifecycle mismatches into operator-readable read-only categories."""
+
+        def sample(session_ids: set[str], limit: int = 5) -> list[str]:
+            return sorted(session_ids)[:limit]
+
+        categories: list[dict[str, Any]] = []
+
+        def add_category(
+            name: str,
+            session_ids: set[str],
+            *,
+            severity: str,
+            description: str,
+            recommended_action: str,
+        ) -> None:
+            if not session_ids:
+                return
+            categories.append({
+                "name": name,
+                "severity": severity,
+                "count": len(session_ids),
+                "sample_session_ids": sample(session_ids),
+                "description": description,
+                "recommended_action": recommended_action,
+            })
+
+        add_category(
+            "stale_lifecycle_current",
+            lifecycle_current_sessions - lcm_any_sessions,
+            severity="warn",
+            description="Lifecycle current-session references that no longer have raw messages or summary nodes in LCM.",
+            recommended_action="Inspect samples before cleanup; these are often old or ephemeral lifecycle rows, not automatic corruption.",
+        )
+        add_category(
+            "stale_lifecycle_finalized",
+            lifecycle_last_finalized_sessions - lcm_any_sessions,
+            severity="warn",
+            description="Lifecycle finalized-session references that no longer have raw messages or summary nodes in LCM.",
+            recommended_action="Inspect samples before cleanup; only remove with an explicit backup-first lifecycle cleanup flow.",
+        )
+        if lifecycle_rows > 0:
+            add_category(
+                "lcm_message_sessions_without_lifecycle_reference",
+                message_sessions - lifecycle_referenced_sessions,
+                severity="notice",
+                description="Raw-message sessions exist in LCM but are not referenced by current or finalized lifecycle state.",
+                recommended_action="Usually safe as historical retained context; investigate only if the sessions should belong to an active conversation.",
+            )
+            add_category(
+                "lcm_node_sessions_without_lifecycle_reference",
+                node_sessions - lifecycle_referenced_sessions,
+                severity="notice",
+                description="Summary-node sessions exist in LCM but are not referenced by current or finalized lifecycle state.",
+                recommended_action="Usually safe as historical retained context; verify expand/search still work before considering cleanup.",
+            )
+
+        if state_db_read_success:
+            add_category(
+                "lcm_message_sessions_missing_in_state",
+                message_sessions - state_sessions,
+                severity="notice",
+                description="LCM raw-message sessions are absent from the Hermes session database.",
+                recommended_action="Treat as retained or imported context unless the session should still be browsable in host session history.",
+            )
+            add_category(
+                "lcm_node_sessions_missing_in_state",
+                node_sessions - state_sessions,
+                severity="notice",
+                description="LCM summary-node sessions are absent from the Hermes session database.",
+                recommended_action="Keep read-only; this can happen after host session pruning while LCM retained summaries remain useful.",
+            )
+            add_category(
+                "state_only_sessions",
+                state_sessions - lcm_any_sessions,
+                severity="notice",
+                description="Hermes host sessions exist without raw messages or summary nodes in LCM.",
+                recommended_action="Usually benign for sessions outside LCM scope, ignored sessions, or sessions that never reached durable LCM ingest.",
+            )
+
+        warn_count = sum(1 for item in categories if item["severity"] == "warn")
+        status = "warn" if warn_count else ("notice" if categories else "pass")
+        summary = (
+            "no lifecycle fragmentation categories detected"
+            if not categories
+            else f"{len(categories)} lifecycle fragmentation categories need review"
+        )
+        return {
+            "read_only": True,
+            "status": status,
+            "summary": summary,
+            "categories": categories,
+        }
+
+    @_synchronized
+    def record_debt(
+        self,
+        conversation_id: str | None,
+        *,
+        kind: str,
+        size_estimate: int,
+    ) -> LifecycleState | None:
+        if not conversation_id:
+            return None
+        state = self.get_by_conversation(conversation_id)
+        if state is None:
+            return None
+        now = time.time()
+        self._conn.execute(
+            """
+            UPDATE lcm_lifecycle_state
+            SET debt_kind = ?,
+                debt_size_estimate = ?,
+                debt_updated_at = ?,
+                updated_at = ?
+            WHERE conversation_id = ?
+            """,
+            (kind, max(0, int(size_estimate or 0)), now, now, conversation_id),
+        )
+        self._conn.commit()
+        return self.get_by_conversation(conversation_id)
+
+    def clear_debt(self, conversation_id: str | None) -> LifecycleState | None:
+        if not conversation_id:
+            return None
+        state = self.get_by_conversation(conversation_id)
+        if state is None:
+            return None
+        now = time.time()
+        self._conn.execute(
+            """
+            UPDATE lcm_lifecycle_state
+            SET debt_kind = NULL,
+                debt_size_estimate = 0,
+                debt_updated_at = ?,
+                updated_at = ?
+            WHERE conversation_id = ?
+            """,
+            (now, now, conversation_id),
+        )
+        self._conn.commit()
+        return self.get_by_conversation(conversation_id)
+
+    @_synchronized
+    def record_maintenance_attempt(self, conversation_id: str | None) -> LifecycleState | None:
+        if not conversation_id:
+            return None
+        state = self.get_by_conversation(conversation_id)
+        if state is None:
+            return None
+        now = time.time()
+        self._conn.execute(
+            """
+            UPDATE lcm_lifecycle_state
+            SET last_maintenance_attempt_at = ?,
+                updated_at = ?
+            WHERE conversation_id = ?
+            """,
+            (now, now, conversation_id),
+        )
+        self._conn.commit()
+        return self.get_by_conversation(conversation_id)
+
+    @_synchronized
+    def record_reset(self, conversation_id: str | None) -> LifecycleState | None:
+        if not conversation_id:
+            return None
+        state = self.get_by_conversation(conversation_id)
+        if state is None:
+            return None
+        now = time.time()
+        self._conn.execute(
+            """
+            UPDATE lcm_lifecycle_state
+            SET last_reset_at = ?,
+                debt_kind = NULL,
+                debt_size_estimate = 0,
+                debt_updated_at = ?,
+                updated_at = ?
+            WHERE conversation_id = ?
+            """,
+            (now, now, now, conversation_id),
+        )
+        self._conn.commit()
+        return self.get_by_conversation(conversation_id)
+
+    @_synchronized
+    def prune_empty_sessions(
+        self,
+        *,
+        protected_session_ids: set[str] | list[str] | tuple[str, ...] | None = None,
+        max_age_hours: float | None = None,
+    ) -> int:
+        """Delete lifecycle rows for sessions with no stored data.
+
+        A row is eligible when BOTH referenced session IDs
+        (``current_session_id`` and ``last_finalized_session_id``)
+        have zero messages AND zero summary_nodes in the main store.
+
+        Only the lifecycle table is modified — messages, nodes, and FTS
+        indexes are untouched (they already contain no data for these sessions).
+
+        Args:
+            protected_session_ids: Sessions that must never be deleted
+                (typically the actively-bound engine session).
+            max_age_hours: Only delete rows older than this many hours.
+                ``None`` means delete all eligible rows regardless of age.
+
+        Returns:
+            Number of rows deleted.
+        """
+        conn = self._conn
+        assert conn is not None
+        protected = {str(s) for s in (protected_session_ids or ()) if s}
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            sessions_with_data: set[str] = set()
+            tables = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+
+            def _session_has_data(session_id: str) -> bool:
+                if not session_id:
+                    return False
+                if "messages" in tables and conn.execute(
+                    "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
+                    (session_id,),
+                ).fetchone():
+                    return True
+                if "summary_nodes" in tables and conn.execute(
+                    "SELECT 1 FROM summary_nodes WHERE session_id = ? LIMIT 1",
+                    (session_id,),
+                ).fetchone():
+                    return True
+                return False
+
+            if "messages" in tables:
+                for row in conn.execute(
+                    "SELECT DISTINCT session_id FROM messages"
+                ).fetchall():
+                    sessions_with_data.add(str(row[0]))
+            if "summary_nodes" in tables:
+                for row in conn.execute(
+                    "SELECT DISTINCT session_id FROM summary_nodes"
+                ).fetchall():
+                    sessions_with_data.add(str(row[0]))
+
+            now = time.time()
+            max_age_seconds = (
+                float(max_age_hours) * 3600.0
+                if max_age_hours is not None
+                else None
+            )
+            deleted = 0
+
+            rows = conn.execute(
+                "SELECT * FROM lcm_lifecycle_state"
+            ).fetchall()
+            for row in rows:
+                cur = str(row["current_session_id"] or "")
+                fin = str(row["last_finalized_session_id"] or "")
+
+                if ((cur and cur in sessions_with_data)
+                        or (fin and fin in sessions_with_data)):
+                    continue
+
+                refs = {r for r in (cur, fin) if r}
+                if refs & protected:
+                    continue
+
+                if max_age_seconds is not None:
+                    row_age = (
+                        row["current_bound_at"]
+                        or row["last_finalized_at"]
+                        or row["updated_at"]
+                    )
+                    if row_age is not None and (now - float(row_age)) < max_age_seconds:
+                        continue
+
+                # Recheck against the tables right before deletion. BEGIN
+                # IMMEDIATE blocks concurrent writers while this transaction is
+                # open; this fresh query also keeps the safety check honest if
+                # the broad snapshot logic above changes later.
+                if _session_has_data(cur) or _session_has_data(fin):
+                    continue
+
+                conn.execute(
+                    "DELETE FROM lcm_lifecycle_state WHERE conversation_id = ?",
+                    (row["conversation_id"],),
+                )
+                deleted += 1
+
+            if deleted:
+                conn.commit()
+            else:
+                conn.rollback()
+            return deleted
+        except Exception:
+            conn.rollback()
+            raise
+
+    def delete_safe_rows_for_sessions(
+        self,
+        session_ids: set[str] | list[str] | tuple[str, ...],
+        *,
+        protected_session_ids: set[str] | list[str] | tuple[str, ...] | None = None,
+    ) -> tuple[int, int]:
+        candidates = {str(s) for s in session_ids if s}
+        if not candidates:
+            return 0, 0
+        protected = {str(s) for s in (protected_session_ids or ()) if s}
+        deleted = 0
+        skipped = 0
+        rows = self._conn.execute("SELECT * FROM lcm_lifecycle_state").fetchall()
+        for row in rows:
+            refs = {
+                str(value)
+                for value in (row["current_session_id"], row["last_finalized_session_id"])
+                if value
+            }
+            if not refs or not (refs & candidates):
+                continue
+            if refs & protected:
+                skipped += 1
+                continue
+            if refs <= candidates:
+                self._conn.execute(
+                    "DELETE FROM lcm_lifecycle_state WHERE conversation_id = ?",
+                    (row["conversation_id"],),
+                )
+                deleted += 1
+                continue
+            skipped += 1
+        if deleted:
+            self._conn.commit()
+        return deleted, skipped
+
+    def advance_frontier(
+        self,
+        conversation_id: str | None,
+        session_id: str,
+        frontier_store_id: int,
+    ) -> LifecycleState | None:
+        if not conversation_id:
+            return None
+        with self._lock:
+            state = self.get_by_conversation(conversation_id)
+            if state is None or state.current_session_id != session_id:
+                return state
+            now = time.time()
+            conn = self._conn
+            assert conn is not None
+            # MAX() in SQL keeps the advance monotonic even if a concurrent
+            # writer bumped the frontier between the read above and this write.
+            # A Python-side max() over the stale read could otherwise regress
+            # the checkpoint and force the same range to be compacted twice.
+            cursor = conn.execute(
+                """
+                UPDATE lcm_lifecycle_state
+                SET current_frontier_store_id = MAX(current_frontier_store_id, ?),
+                    updated_at = ?
+                WHERE conversation_id = ? AND current_session_id = ?
+                """,
+                (int(frontier_store_id or 0), now, conversation_id, session_id),
+            )
+            if cursor.rowcount == 0:
+                return self.get_by_conversation(conversation_id)
+            conn.commit()
+            return self.get_by_conversation(conversation_id)
+
+    @staticmethod
+    def stage_frontier_advance(
+        conn: sqlite3.Connection,
+        conversation_id: str,
+        session_id: str,
+        frontier_store_id: int,
+    ) -> None:
+        """Stage a monotonic frontier advance in a caller-owned transaction.
+
+        This intentionally uses the publishing DAG connection rather than the
+        lifecycle connection or ``self._lock``. SQLite serializes the whole
+        node/frontier write transaction; the conditional UPDATE linearizes it
+        against bind/rollover writers, while MAX keeps same-session advances
+        monotonic.
+        """
+        cursor = conn.execute(
+            """
+            UPDATE lcm_lifecycle_state
+            SET current_frontier_store_id = MAX(current_frontier_store_id, ?),
+                updated_at = ?
+            WHERE conversation_id = ? AND current_session_id = ?
+            """,
+            (
+                int(frontier_store_id or 0),
+                time.time(),
+                conversation_id,
+                session_id,
+            ),
+        )
+        if cursor.rowcount == 1:
+            return
+        row = conn.execute(
+            "SELECT current_session_id FROM lcm_lifecycle_state "
+            "WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                "Cannot publish summary without lifecycle state"
+            )
+        raise LifecycleBindingChangedError(
+            "Lifecycle session binding changed during summary publication"
+        )
+
+    def stage_compaction_publication(
+        self,
+        conn: sqlite3.Connection,
+        conversation_id: str,
+        session_id: str,
+        publication_node_id: int,
+        expected_frontier_store_id: int,
+        covered_store_ids: list[int],
+        excluded_store_ids: list[int] | None = None,
+        filter_exclusion_proofs: dict[int, Any] | None = None,
+        carried_ranges: list[tuple[str, int, int]] | None = None,
+        copy_exclusion_proofs: dict[int, int] | None = None,
+    ) -> int:
+        """Validate and stage one contiguous compaction-frontier advance.
+
+        The caller owns the node/frontier transaction. The expected frontier is
+        its optimistic publication generation.
+        """
+        expected_frontier = max(0, int(expected_frontier_store_id or 0))
+        all_covered_ids = sorted(
+            {int(store_id) for store_id in covered_store_ids if int(store_id) > 0}
+        )
+        if not all_covered_ids:
+            raise LifecyclePublicationConflictError(
+                "Compaction publication has no durable source coverage"
+            )
+        covered_end = max(expected_frontier, all_covered_ids[-1])
+        covered_ids = [
+            store_id
+            for store_id in all_covered_ids
+            if store_id > expected_frontier
+        ]
+        excluded_ids = sorted(
+            {
+                int(store_id)
+                for store_id in (excluded_store_ids or [])
+                if expected_frontier < int(store_id) <= covered_end
+            }
+        )
+        if set(covered_ids) & set(excluded_ids):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication coverage overlaps an explicit exclusion"
+            )
+        exclusion_proofs = filter_exclusion_proofs or {}
+        copy_proofs = {int(c): int(t) for c, t in (copy_exclusion_proofs or {}).items()
+                       if expected_frontier < int(c) <= covered_end}
+        if not set(copy_proofs) <= set(excluded_ids):
+            raise LifecyclePublicationConflictError("Compaction publication copy proof is not excluded")
+        allowed_carry_ranges = [
+            (str(source_session_id), int(start), int(end))
+            for source_session_id, start, end in (carried_ranges or [])
+            if source_session_id and 0 <= int(start) < int(end)
+        ]
+
+        def row_is_owned(row: Any) -> bool:
+            store_id, owner_session_id = int(row[0]), str(row[1] or "")
+            return owner_session_id == session_id or any(
+                owner_session_id == source_session_id
+                and start < store_id <= end
+                for source_session_id, start, end in allowed_carry_ranges
+            )
+
+        snapshot_ids = sorted(
+            set(all_covered_ids + excluded_ids + list(exclusion_proofs) + list(copy_proofs.values()))
+        )
+        snapshot_rows = conn.execute(
+            """
+            SELECT m.store_id, m.session_id, m.conversation_id, m.content, m.role,
+                   m.tool_call_id, m.tool_calls, m.tool_name
+            FROM json_each(?) AS source
+            CROSS JOIN messages AS m
+            WHERE m.store_id = source.value
+            ORDER BY m.store_id
+            """,
+            (str(snapshot_ids),),
+        ).fetchall()
+        if (
+            [int(row[0]) for row in snapshot_rows] != snapshot_ids
+            or not all(row_is_owned(row) for row in snapshot_rows)
+        ):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source ownership changed"
+            )
+        if any(str(row[2] or "").strip() not in {"", conversation_id} for row in snapshot_rows):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source ownership changed"
+            )
+        snapshot_by_id = {int(row[0]): row for row in snapshot_rows}
+        if any(
+            snapshot_by_id[store_id][3] != proof
+            for store_id, proof in exclusion_proofs.items()
+        ):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication filter exclusion changed"
+            )
+        if copy_proofs:
+            twin_ids = sorted(set(copy_proofs.values()))
+            node_covered = {int(row[0]) for row in conn.execute(
+                "SELECT source.value FROM summary_nodes AS node, json_each(node.source_ids) AS source "
+                "WHERE node.source_type='messages' "
+                "AND source.value IN (SELECT value FROM json_each(?))",
+                (str(twin_ids),),
+            ).fetchall()}
+            for copy, twin in copy_proofs.items():
+                if (twin >= copy or tuple(snapshot_by_id[copy][3:]) != tuple(snapshot_by_id[twin][3:])
+                        or twin not in node_covered):
+                    raise LifecyclePublicationConflictError("Compaction publication copy exclusion changed")
+        owned_ranges = [(session_id, expected_frontier, covered_end)]
+        owned_ranges.extend(
+            (source, max(expected_frontier, start), min(covered_end, end))
+            for source, start, end in allowed_carry_ranges
+            if max(expected_frontier, start) < min(covered_end, end)
+        )
+        rows_by_store_id = {}
+        for offset in range(0, len(owned_ranges), _OWNERSHIP_QUERY_MAX_RANGES):
+            range_batch = owned_ranges[offset:offset + _OWNERSHIP_QUERY_MAX_RANGES]
+            ownership_clause = " OR ".join(
+                "(session_id = ? AND store_id > ? AND store_id <= ?)"
+                for _item in range_batch
+            )
+            ownership_args = [value for item in range_batch for value in item]
+            # #581: the obligation is this conversation's rows (and blank ones); another
+            # conversation's rows under the same session follow that conversation's lifecycle
+            # and are never accepted as coverage (checked above). `IN (?, '')` keeps every
+            # range a seek on idx_msg_conversation_session (writes store the id stripped, '' blank);
+            # a store holding legacy unnormalized ids adds those values, so no owned row is missed.
+            owned_clause, owned_args = owned_conversation_clause(conn, conversation_id)
+            for row in conn.execute(
+                "SELECT store_id, session_id FROM messages WHERE ("
+                + ownership_clause
+                + ") AND "
+                + owned_clause,
+                [*ownership_args, *owned_args],
+            ).fetchall():
+                rows_by_store_id[int(row[0])] = row
+        rows = [rows_by_store_id[store_id] for store_id in sorted(rows_by_store_id)]
+        authoritative_ids = [int(row[0]) for row in rows]
+        proven_ids = sorted(covered_ids + excluded_ids)
+        if authoritative_ids != proven_ids:
+            raise LifecyclePublicationConflictError(
+                _compaction_coverage_conflict_message(
+                    expected_frontier, authoritative_ids, covered_ids, excluded_ids
+                )
+            )
+        if conn.execute(
+            """
+            SELECT 1
+            FROM summary_nodes AS node, json_each(node.source_ids) AS source
+            WHERE node.session_id = ? AND node.source_type = 'messages'
+              AND node.node_id != ?
+              AND source.value IN (SELECT value FROM json_each(?))
+            LIMIT 1
+            """,
+            (session_id, publication_node_id, str(all_covered_ids)),
+        ).fetchone():
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source lineage is already claimed"
+            )
+        row = conn.execute(
+            """
+            SELECT current_session_id, current_frontier_store_id
+            FROM lcm_lifecycle_state
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("Cannot publish summary without lifecycle state")
+        if str(row[0] or "") != session_id:
+            raise LifecycleBindingChangedError(
+                "Lifecycle session binding changed during summary publication"
+            )
+        actual_frontier = int(row[1] or 0)
+        if actual_frontier != expected_frontier:
+            raise LifecyclePublicationConflictError(
+                "Compaction publication frontier generation changed "
+                f"(expected={expected_frontier}, actual={actual_frontier})"
+            )
+        self.stage_frontier_advance(
+            conn,
+            conversation_id,
+            session_id,
+            covered_end,
+        )
+        return covered_end

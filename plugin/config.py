@@ -1,0 +1,1508 @@
+"""LCM configuration with defaults and env var overrides."""
+import contextvars
+import logging
+import os
+from collections import ChainMap
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any
+
+try:
+    import yaml
+except Exception:  # pragma: no cover - optional fallback for minimal installs
+    yaml = None
+
+
+logger = logging.getLogger(__name__)
+
+
+_profile_envs: dict[str, Mapping[str, str]] = {}
+
+
+def profile_bound(fn):
+    """Carry the scheduling profile into each invocation, including threads.
+
+    Only the host's profile binding should travel: LCM-X's own per-turn context
+    variables start from their defaults, as they would in a fresh thread.
+    """
+    captured = contextvars.copy_context()
+
+    def run(*args, **kwargs):
+        return captured.copy().run(_run_with_lcm_defaults, fn, args, kwargs)
+
+    return run
+
+
+def _run_with_lcm_defaults(fn, args, kwargs):
+    try:
+        from .externalize import _payload_lookup_memo, ingest_payload_writes
+    except ImportError:  # config.py loaded outside the package
+        pass
+    else:
+        _payload_lookup_memo.set(None)
+        ingest_payload_writes.set(True)
+    return fn(*args, **kwargs)
+
+
+@lru_cache(maxsize=128)
+def _resolved_profile_home(raw_home: str) -> str:
+    return str(Path(raw_home).resolve())
+
+
+def lcm_env():
+    """Resolve the home before consulting its registration pin.
+
+    Non-routing hosts keep live process-env semantics, including partial older
+    APIs. Only positively detected routing may fail closed; never call get_secret.
+    """
+    try:
+        from agent import secret_scope
+        routed = getattr(secret_scope, "serves_routed_profile", None)
+        multiplex = getattr(secret_scope, "is_multiplex_active", None)
+        routing = routed() if callable(routed) else callable(multiplex) and multiplex()
+    except Exception:
+        return os.environ
+    if not routing:
+        return os.environ
+    try:
+        scope_home = getattr(secret_scope, "current_secret_scope_home", lambda: None)
+        bound_home = scope_home()
+        try:
+            from hermes_cli.config import get_hermes_home
+            home = get_hermes_home()
+        except ImportError:
+            home = bound_home
+        home = _resolved_profile_home(str(home)) if home else None
+        current_scope = getattr(secret_scope, "current_secret_scope", lambda: None)
+        mapping = current_scope()
+        if mapping is not None and bound_home:
+            try:
+                from hermes_constants import get_hermes_home_override
+                # A stamped scope can route without overriding the launch home.
+                if get_hermes_home_override() is None:
+                    home = _resolved_profile_home(str(bound_home))
+            except Exception:
+                pass  # Older/partial hosts retain the existing home check.
+        if bound_home and home != _resolved_profile_home(str(bound_home)):
+            mapping = None
+        if mapping is None:
+            if home in _profile_envs:
+                return _profile_envs[home]
+            # Floor hosts cannot stamp scope provenance: an unbound read must
+            # use its own pin or defaults, never reconstruct/borrow a scope.
+            build = getattr(secret_scope, "build_profile_secret_scope", None)
+            mapping = build(Path(home)) if home and callable(routed) and callable(build) else {}
+        return MappingProxyType(ChainMap({"HERMES_HOME": home}, mapping)) if home else mapping
+    except Exception:
+        return {}
+
+
+def lcm_env_get(name: str, default=None):
+    return lcm_env().get(name, default)
+
+
+def containment_base_dir():
+    """The operator's storage containment root stays process-wide.
+
+    It is never routed through a profile, so a profile can neither drop nor widen it.
+    """
+    return os.environ.get("LCM_HERMES_BASE_DIR")
+
+
+def _parse_pattern_list(raw: str) -> list[str]:
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+# Default lcm_recall RRF arm weights. Conservative down-weight of the weak FTS
+# arm (the LongMemEval harness will tune from here); summary/chunk vector arms
+# keep full say. See docs/retrieval-tools.md.
+_DEFAULT_RECALL_ARM_WEIGHTS: dict[str, float] = {
+    "fts": 0.5,
+    "summary": 1.0,
+    "chunk": 1.0,
+}
+
+
+def _parse_arm_weights(
+    raw: str, defaults: dict[str, float], *, warnings: list[str] | None = None,
+) -> dict[str, float]:
+    """Leniently parse ``arm=weight`` pairs (e.g. ``fts=0.5,summary=1.0``).
+
+    Unknown arm names, malformed pairs, and non-finite/non-numeric weights are
+    skipped; any arm not overridden keeps its default. A wholly unparsable value
+    therefore degrades to the defaults rather than erroring the tool.
+
+    A negative weight is invalid -- it would invert RRF rank-monotonicity (a
+    rank-1 hit scoring below a rank-2 hit) -- so it is rejected and the arm keeps
+    its default with a logged warning. ``0.0`` is legal and cleanly drops the arm.
+    The optional warning sink reports dropped pairs without changing the result.
+    """
+    weights = dict(defaults)
+    dropped = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            dropped.append(part)
+            continue
+        name, _, value = part.partition("=")
+        name = name.strip().lower()
+        if name not in defaults:
+            dropped.append(part)
+            continue
+        try:
+            parsed = float(value.strip())
+        except (TypeError, ValueError):
+            dropped.append(part)
+            continue
+        if parsed != parsed or parsed in (float("inf"), float("-inf")):
+            dropped.append(part)
+            continue
+        if parsed < 0.0:
+            logger.warning(
+                "LCM_RECALL_ARM_WEIGHTS: negative weight %r for arm %r is "
+                "invalid; using default %r",
+                parsed,
+                name,
+                defaults[name],
+            )
+            dropped.append(part)
+            continue
+        weights[name] = parsed
+    _warn_dropped_env_items(warnings, "LCM_RECALL_ARM_WEIGHTS", dropped, weights)
+    return weights
+
+
+def _warn_dropped_env_items(
+    warnings: list[str] | None, key: str, dropped: list[str], value: Any,
+) -> None:
+    if warnings is not None and dropped:
+        items = ", ".join(repr(item)[:40] for item in dropped)
+        warnings.append(f"invalid env {key}: ignored items [{items}]; using {value!r}")
+
+
+def _warn_invalid_env(warnings: list[str] | None, key: str, raw: str, value: Any) -> None:
+    if warnings is not None and raw.strip():
+        warnings.append(f"invalid env {key}={repr(raw)[:40]} ignored; using {value!r}")
+
+
+def _parse_int_env(key: str, default: int, *, warnings: list[str] | None = None) -> int:
+    raw = lcm_env_get(key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        _warn_invalid_env(warnings, key, raw, default)
+        return default
+
+
+def _parse_float_env(key: str, default: float, *, warnings: list[str] | None = None) -> float:
+    raw = lcm_env_get(key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        _warn_invalid_env(warnings, key, raw, default)
+        return default
+
+
+def _parse_bool_env(
+    key: str, default: bool, *, unknown: bool | None = None,
+    true_values: tuple[str, ...] = ("1", "true", "yes", "on"),
+    false_values: tuple[str, ...] = ("0", "false", "no", "off"),
+    warnings: list[str] | None = None,
+) -> bool:
+    """Read on every call; unknown (including blank) keeps default unless specified."""
+    raw = lcm_env_get(key)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in true_values:
+        return True
+    if normalized in false_values:
+        return False
+    value = default if unknown is None else unknown
+    if warnings is not None:
+        _warn_invalid_env(warnings, key, raw, value)
+    return value
+
+
+def _disabled_tool_names() -> set[str]:
+    """Tools disabled via LCM_DISABLED_TOOLS (comma-separated lcm_* names)."""
+    return set(_parse_pattern_list(lcm_env_get("LCM_DISABLED_TOOLS", "")))
+
+
+def _parse_str_env(key: str, default):
+    return lcm_env_get(key, default)
+
+
+_HOST_MESSAGE_UID_MODES = ("off", "shadow", "on")
+_host_message_uid_mode_warned = False
+
+
+def host_message_uid_mode() -> str:
+    """``LCM_HOST_MESSAGE_UID`` (v0.26.0): ``off`` | ``shadow`` (default) | ``on`` (reserved for slice C; runs as
+    ``shadow`` today). An unknown value means ``shadow``, with one WARNING per process."""
+    global _host_message_uid_mode_warned
+    raw = (lcm_env_get("LCM_HOST_MESSAGE_UID") or "").strip().lower()
+    if raw and raw not in _HOST_MESSAGE_UID_MODES and not _host_message_uid_mode_warned:
+        _host_message_uid_mode_warned = True
+        logger.warning("invalid env LCM_HOST_MESSAGE_UID=%r ignored; using shadow", raw)
+    return raw if raw in _HOST_MESSAGE_UID_MODES else "shadow"
+
+
+def _parse_int_env_with_source(
+    key: str,
+    default: int,
+    *,
+    default_source: str = "default",
+) -> tuple[int, str, str | None]:
+    raw = lcm_env_get(key)
+    if raw is None:
+        return default, default_source, None
+    try:
+        return int(raw), f"env:{key}", None
+    except (TypeError, ValueError):
+        return default, default_source, f"invalid env {key}={raw!r} ignored"
+
+
+_sqlite_mmap_size_warned = False
+
+
+def sqlite_mmap_size() -> int:
+    """Memory-map read budget in bytes; invalid overrides warn once per process."""
+    global _sqlite_mmap_size_warned
+    default = 268_435_456
+    value, _, warning = _parse_int_env_with_source("LCM_SQLITE_MMAP_SIZE", default)
+    if warning or value < 0:
+        if not _sqlite_mmap_size_warned:
+            _sqlite_mmap_size_warned = True
+            logger.warning("invalid env LCM_SQLITE_MMAP_SIZE ignored; using %s", default)
+        return default
+    return value
+
+
+def _parse_float_env_with_source(
+    key: str,
+    default: float,
+    *,
+    default_source: str = "default",
+) -> tuple[float, str, str | None]:
+    raw = lcm_env_get(key)
+    if raw is None:
+        return default, default_source, None
+    try:
+        return float(raw), f"env:{key}", None
+    except (TypeError, ValueError):
+        return default, default_source, f"invalid env {key}={raw!r} ignored"
+
+
+def _config_bool_disabled(value) -> bool:
+    if isinstance(value, bool):
+        return value is False
+    if isinstance(value, (int, float)):
+        return value == 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"0", "false", "no", "off"}:
+            return True
+        try:
+            return float(normalized) == 0
+        except ValueError:
+            return False
+    return False
+
+
+def _hermes_config_path() -> Path:
+    try:
+        from hermes_cli.config import get_hermes_home
+        home = Path(get_hermes_home())
+    except Exception:
+        home = Path(lcm_env_get("HERMES_HOME") or Path.home() / ".hermes")
+    return home / "config.yaml"
+
+
+def _load_hermes_config_yaml(cfg_path: Path | None = None) -> dict[str, Any]:
+    cfg_path = _hermes_config_path() if cfg_path is None else cfg_path
+    try:
+        text = cfg_path.read_text()
+    except Exception:
+        return {}
+    if yaml is not None:
+        try:
+            loaded = yaml.safe_load(text) or {}
+            return loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            return {}
+
+    root: dict[str, Any] = {}
+    stack: list[tuple[int, dict[str, Any]]] = [(-1, root)]
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip() or ":" not in line:
+            continue
+        indent = len(line) - len(line.lstrip(" \t"))
+        key, raw_value = line.strip().split(":", 1)
+        # Unquote the key as well as the value below. PyYAML resolves `"": 0.5`
+        # to an empty-string key, which callers reject; without this the
+        # fallback keeps the literal two-character key `""` and the entry
+        # survives. That divergence only appears where PyYAML is absent, so it
+        # passes locally and fails in CI.
+        key = key.strip().strip("'\"")
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        parent = stack[-1][1] if stack else root
+        value = raw_value.strip()
+        if not value:
+            child: dict[str, Any] = {}
+            parent[key] = child
+            stack.append((indent, child))
+            continue
+        value = value.strip("'\"")
+        lowered = value.lower()
+        if lowered in {"true", "yes", "on"}:
+            parsed: Any = True
+        elif lowered in {"false", "no", "off"}:
+            parsed = False
+        else:
+            try:
+                parsed = float(value) if "." in value else int(value)
+            except ValueError:
+                parsed = value
+        parent[key] = parsed
+    return root
+
+
+_SUPPORTED_LCM_CONFIG_YAML_KEYS = {
+    "context_threshold",
+    "model_thresholds",
+    "summary_reasoning_effort",
+    "expansion_reasoning_effort",
+}
+
+
+def _ignored_lcm_config_yaml_keys(cfg: dict[str, Any] | None = None) -> list[str]:
+    cfg = cfg if cfg is not None else _load_hermes_config_yaml()
+    lcm_section = cfg.get("lcm") if isinstance(cfg, dict) else None
+    if not isinstance(lcm_section, dict):
+        return []
+    return sorted(
+        str(key)
+        for key in lcm_section
+        if str(key) not in _SUPPORTED_LCM_CONFIG_YAML_KEYS
+    )
+
+
+def _load_model_thresholds_from_yaml() -> dict[str, float]:
+    """Read ``lcm.model_thresholds`` from config.yaml.
+
+    Returns a dict mapping model-name substrings to threshold fractions.
+    Empty dict if not set or invalid.
+    """
+    cfg = _load_hermes_config_yaml()
+    try:
+        lcm_section = cfg.get("lcm") or {}
+        if not isinstance(lcm_section, dict):
+            return {}
+        raw = lcm_section.get("model_thresholds")
+        if not isinstance(raw, dict):
+            return {}
+        result: dict[str, float] = {}
+        for key, val in raw.items():
+            normalized_key = str(key).strip()
+            if not normalized_key or isinstance(val, bool):
+                continue
+            if isinstance(val, (int, float)):
+                threshold = float(val)
+                if _is_valid_context_threshold(threshold):
+                    result[normalized_key] = threshold
+        return result
+    except Exception:
+        return {}
+
+
+def _is_valid_context_threshold(value: float) -> bool:
+    return (
+        value == value
+        and value not in (float("inf"), float("-inf"))
+        and 0.0 < value <= 1.0
+    )
+
+
+def _parse_model_thresholds_env(raw: str, *, warnings: list[str] | None = None) -> dict[str, float]:
+    """Parse ``LCM_MODEL_THRESHOLDS`` env var.
+
+    Format: ``"glm-5.2:0.70,glm-5.2-1M:0.25"``. An optional warning sink
+    reports dropped pairs; callers without it retain the dictionary-only result.
+    """
+    result: dict[str, float] = {}
+    dropped = []
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if ":" not in pair:
+            dropped.append(pair)
+            continue
+        key, _, val = pair.rpartition(":")
+        key = key.strip()
+        if not key:
+            dropped.append(pair)
+            continue
+        try:
+            threshold = float(val.strip())
+        except ValueError:
+            dropped.append(pair)
+            continue
+        if _is_valid_context_threshold(threshold):
+            result[key] = threshold
+        else:
+            dropped.append(pair)
+    _warn_dropped_env_items(warnings, "LCM_MODEL_THRESHOLDS", dropped, result)
+    return result
+
+
+_FLOORED_COMPRESSION_THRESHOLD_SOURCE = "config_yaml:compression.threshold(floored)"
+
+
+def _hermes_compression_threshold_with_source(default: float) -> tuple[float, str]:
+    value, source, _warning = _hermes_compression_threshold_with_source_and_warning(default)
+    return value, source
+
+
+def _hermes_compression_threshold_with_source_and_warning(default: float) -> tuple[float, str, str | None]:
+    """Resolve the non-env threshold; an inherited host value is raised to at least ``default`` (#1013).
+
+    ``lcm.context_threshold`` is the explicit way to go lower and is not floored.
+    """
+    cfg = _load_hermes_config_yaml()
+    try:
+        lcm_section = cfg.get("lcm") or {}
+        if isinstance(lcm_section, dict):
+            lcm_val = lcm_section.get("context_threshold")
+            if lcm_val is not None:
+                return float(lcm_val), "config_yaml:lcm.context_threshold", None
+        compression = cfg.get("compression") or {}
+        if not isinstance(compression, dict):
+            return default, "default", None
+        if _config_bool_disabled(compression.get("enabled")):
+            return default, "default", None
+        comp_val = compression.get("threshold")
+        if comp_val is not None:
+            inherited = float(comp_val)
+            if inherited < default:
+                return default, _FLOORED_COMPRESSION_THRESHOLD_SOURCE, (
+                    f"inherited compression.threshold={inherited:g} raised to the LCM default {default:g}; "
+                    "set lcm.context_threshold or LCM_CONTEXT_THRESHOLD to go lower"
+                )
+            return inherited, "config_yaml:compression.threshold", None
+    except Exception:
+        return default, "default", None
+    return default, "default", None
+
+
+def _hermes_auxiliary_compression_timeout_ms(default: int) -> int:
+    """Read Hermes auxiliary.compression.timeout when no LCM override is present.
+
+    Hermes uses seconds for the auxiliary compression timeout, while LCM stores
+    the summary timeout in milliseconds. Aligning the default keeps LCM summary
+    calls from timing out earlier than the host compression route unless
+    ``LCM_SUMMARY_TIMEOUT_MS`` is explicitly configured.
+    """
+    value, _source = _hermes_auxiliary_compression_timeout_ms_with_source(default)
+    return value
+
+
+def _hermes_auxiliary_compression_timeout_ms_with_source(default: int) -> tuple[int, str]:
+    cfg = _load_hermes_config_yaml()
+    try:
+        auxiliary = cfg.get("auxiliary") or {}
+        if not isinstance(auxiliary, dict):
+            return default, "default"
+        compression = auxiliary.get("compression") or {}
+        if not isinstance(compression, dict):
+            return default, "default"
+        value = compression.get("timeout")
+        if value is None:
+            return default, "default"
+        return int(float(value) * 1000), "config_yaml:auxiliary.compression.timeout"
+    except Exception:
+        return default, "default"
+
+
+def hermes_auxiliary_compression_max_concurrency(hermes_home: str = "") -> int | None:
+    """#787: the profile's auxiliary.compression.max_concurrency; None when unset or not a number."""
+    path = Path(hermes_home) / "config.yaml" if hermes_home else None
+    try:
+        compression = (_load_hermes_config_yaml(path).get("auxiliary") or {}).get("compression") or {}
+        value = compression.get("max_concurrency") if isinstance(compression, dict) else None
+        return None if value is None or isinstance(value, bool) else int(value)
+    except Exception:
+        return None
+
+
+def _lcm_config_string_with_source(env_name: str, yaml_key: str, default: str) -> tuple[str, str]:
+    env_value = lcm_env_get(env_name)
+    if env_value is not None:
+        return env_value, "env"
+    cfg = _load_hermes_config_yaml()
+    try:
+        lcm_section = cfg.get("lcm") or {}
+        if isinstance(lcm_section, dict):
+            value = lcm_section.get(yaml_key)
+            if value is not None:
+                return str(value), f"config_yaml:lcm.{yaml_key}"
+    except Exception:
+        return default, "default"
+    return default, "default"
+
+
+_SUPPORTED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+
+
+def _normalize_reasoning_effort(value: str) -> str:
+    """Return a supported reasoning-effort token, or "" when unset/unsupported."""
+    normalized = value.strip().lower()
+    return normalized if normalized in _SUPPORTED_REASONING_EFFORTS else ""
+
+
+def _lcm_reasoning_effort_with_source(
+    env_name: str, yaml_key: str, default: str
+) -> tuple[str, str, str | None]:
+    """Resolve a reasoning-effort setting, ignoring unsupported values.
+
+    An unsupported configured value falls back to the safe default (empty = the
+    task/provider default) and reports a warning that ``/lcm doctor`` and
+    ``lcm_status`` surface, rather than failing the whole config load over one
+    misspelled setting.
+    """
+    raw, source = _lcm_config_string_with_source(env_name, yaml_key, default)
+    if raw.strip() and not _normalize_reasoning_effort(raw):
+        logger.warning(
+            "unsupported %s=%r ignored; using the task/provider reasoning default",
+            yaml_key,
+            raw,
+        )
+        return default, "default", f"invalid {yaml_key}={raw!r} ignored"
+    return _normalize_reasoning_effort(raw), source, None
+
+
+def _hermes_codex_gpt55_autoraise_with_source(default: bool) -> tuple[bool, str]:
+    cfg = _load_hermes_config_yaml()
+    try:
+        compression = cfg.get("compression") or {}
+        if not isinstance(compression, dict):
+            return default, "default"
+        value = compression.get("codex_gpt55_autoraise")
+        if value is None:
+            return default, "default"
+        return (not _config_bool_disabled(value)), "config_yaml:compression.codex_gpt55_autoraise"
+    except Exception:
+        return default, "default"
+
+
+# Diagnostic bounds only: (minimum, maximum, minimum inclusive). Maximum is
+# inclusive when present. Consumers retain their existing clamping/use rules.
+_ENV_RANGES = {
+    "context_threshold": (0.0, 1.0, False),
+    "survival_reserve": (0.0, 0.9, True),
+    "leaf_chunk_tokens": (1, None, True),
+    "summary_timeout_ms": (0, None, False),
+}
+
+
+def _warn_env_range(name: str, value: Any, warnings: list[str]) -> None:
+    if name not in _ENV_RANGES:
+        return
+    minimum, maximum, inclusive = _ENV_RANGES[name]
+    if (value >= minimum if inclusive else value > minimum) and (maximum is None or value <= maximum):
+        return
+    key = f"LCM_{name.upper()}"
+    raw = lcm_env_get(key)
+    bounds = f"{'>=' if inclusive else '>'} {minimum}"
+    if maximum is not None:
+        bounds += f" and <= {maximum}"
+    effect = f"using {value!r} unchanged"
+    if name == "survival_reserve":
+        effect += f"; survival reserve clamped to {min(maximum, max(minimum, value))!r}"
+    elif name == "leaf_chunk_tokens":
+        effect += f"; treated as {minimum} for leaf sizing"
+    elif name == "summary_timeout_ms":
+        effect += "; summary calls receive a timeout of <=0 s; only pre-compaction extraction is floored at 0.001 s"
+    warnings.append(f"out-of-range env {key}={repr(raw)[:40]} (must be {bounds}); {effect}")
+
+
+# Accepted spellings, in configuration-reference and diagnostic display order.
+EMBEDDING_PROVIDER_SPELLINGS: dict[str, tuple[str, ...]] = {
+    "voyage": ("voyage", "voyageai"),
+    "ollama": ("ollama",),
+    "fastembed": ("fastembed", "fast-embed"),
+    "openai-compatible": ("openai-compatible", "openai", "siliconflow"),
+}
+PREANSWER_EVIDENCE_MODES = ("off", "legacy_selective", "requirements_v1")
+EMBEDDING_STORAGE_DTYPES = ("float32", "int8")
+
+
+def embedding_provider_id(spelling: str) -> str:
+    """Map an already-normalized spelling to its id; preserve unknown values."""
+    return next((provider for provider, spellings in EMBEDDING_PROVIDER_SPELLINGS.items()
+                 if spelling in spellings), spelling)
+
+
+_ENV_CHOICES = {
+    "embedding_provider": (
+        tuple(spelling for spellings in EMBEDDING_PROVIDER_SPELLINGS.values() for spelling in spellings),
+        str.lower, "provider resolution raises ProviderUnavailable when requested",
+    ),
+    "preanswer_evidence_mode": (
+        PREANSWER_EVIDENCE_MODES, str.casefold, "ignored; using 'off'",
+    ),
+    "embedding_storage_dtype": (EMBEDDING_STORAGE_DTYPES, str.lower, "ignored; using 'float32'"),
+}
+
+# Deprecation/removal versions shared by the loader and generated reference.
+ENV_FIELD_DEPRECATIONS: dict[str, tuple[str, str]] = {
+    "cache_friendly_condensation_enabled": ("v0.28.0", "v0.29.0"),
+    "large_output_transcript_gc_enabled": ("v0.28.0", "v0.29.0"),
+}
+
+
+def _warn_env_choice(name: str, raw: str, warnings: list[str]) -> None:
+    if name not in _ENV_CHOICES or not raw.strip():
+        return
+    choices, normalize, effect = _ENV_CHOICES[name]
+    if normalize(raw.strip()) not in choices:
+        key = f"LCM_{name.upper()}"
+        warnings.append(f"unsupported env {key}={repr(raw)[:40]}; accepted {choices!r}; {effect}")
+
+
+@dataclass(frozen=True)
+class _EnvFieldSpec:
+    """One scalar ``LCM_*`` environment override: which config field it sets,
+    its environment variable, and the Python type used to parse it."""
+
+    name: str
+    env_key: str
+    py_type: type
+
+
+# Single source of truth for the scalar LCM_* env overrides. ``from_env`` applies
+# the non-source-tracked entries uniformly, and ``presets`` derives its
+# preset-field lookups from the same list so the field/env/type mapping is not
+# duplicated. Order mirrors the historical ``from_env`` order for readability.
+ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
+    _EnvFieldSpec("fresh_tail_count", "LCM_FRESH_TAIL_COUNT", int),
+    _EnvFieldSpec("fresh_tail_max_tokens", "LCM_FRESH_TAIL_MAX_TOKENS", int),
+    _EnvFieldSpec("fresh_tail_pressure_yield_enabled", "LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED", bool),
+    _EnvFieldSpec(
+        "fresh_tail_pressure_yield_min_observations",
+        "LCM_FRESH_TAIL_PRESSURE_YIELD_MIN_OBSERVATIONS",
+        int,
+    ),
+    _EnvFieldSpec("leaf_chunk_tokens", "LCM_LEAF_CHUNK_TOKENS", int),
+    _EnvFieldSpec("leaf_target_ratio", "LCM_LEAF_TARGET_RATIO", float),
+    _EnvFieldSpec("leaf_target_min_tokens", "LCM_LEAF_TARGET_MIN_TOKENS", int),
+    _EnvFieldSpec("leaf_target_max_tokens", "LCM_LEAF_TARGET_MAX_TOKENS", int),
+    _EnvFieldSpec("context_threshold", "LCM_CONTEXT_THRESHOLD", float),
+    _EnvFieldSpec("incremental_max_depth", "LCM_INCREMENTAL_MAX_DEPTH", int),
+    _EnvFieldSpec("condensation_fanin", "LCM_CONDENSATION_FANIN", int),
+    _EnvFieldSpec("dynamic_leaf_chunk_enabled", "LCM_DYNAMIC_LEAF_CHUNK_ENABLED", bool),
+    _EnvFieldSpec("dynamic_leaf_chunk_max", "LCM_DYNAMIC_LEAF_CHUNK_MAX", int),
+    _EnvFieldSpec("cache_friendly_condensation_enabled", "LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED", bool),
+    _EnvFieldSpec("cache_friendly_min_debt_groups", "LCM_CACHE_FRIENDLY_MIN_DEBT_GROUPS", int),
+    _EnvFieldSpec("deferred_maintenance_enabled", "LCM_DEFERRED_MAINTENANCE_ENABLED", bool),
+    _EnvFieldSpec("deferred_maintenance_max_passes", "LCM_DEFERRED_MAINTENANCE_MAX_PASSES", int),
+    _EnvFieldSpec("critical_budget_pressure_ratio", "LCM_CRITICAL_BUDGET_PRESSURE_RATIO", float),
+    _EnvFieldSpec("threshold_full_sweep_enabled", "LCM_THRESHOLD_FULL_SWEEP_ENABLED", bool),
+    _EnvFieldSpec("summary_prefix_target_tokens", "LCM_SUMMARY_PREFIX_TARGET_TOKENS", int),
+    _EnvFieldSpec("foreground_soft_seconds", "LCM_FOREGROUND_SOFT_SECONDS", float),
+    _EnvFieldSpec("foreground_hard_seconds", "LCM_FOREGROUND_HARD_SECONDS", float),
+    _EnvFieldSpec("l2_budget_ratio", "LCM_L2_BUDGET_RATIO", float),
+    _EnvFieldSpec("l3_truncate_tokens", "LCM_L3_TRUNCATE_TOKENS", int),
+    _EnvFieldSpec("max_assembly_tokens", "LCM_MAX_ASSEMBLY_TOKENS", int),
+    _EnvFieldSpec("reserve_tokens_floor", "LCM_RESERVE_TOKENS_FLOOR", int),
+    _EnvFieldSpec("custom_instructions", "LCM_CUSTOM_INSTRUCTIONS", str),
+    _EnvFieldSpec("summary_prompt_version", "LCM_SUMMARY_PROMPT_VERSION", int),
+    _EnvFieldSpec("extraction_enabled", "LCM_EXTRACTION_ENABLED", bool),
+    _EnvFieldSpec("extraction_model", "LCM_EXTRACTION_MODEL", str),
+    _EnvFieldSpec("extraction_output_path", "LCM_EXTRACTION_OUTPUT_PATH", str),
+    _EnvFieldSpec("assertions_enabled", "LCM_ASSERTIONS_ENABLED", bool),
+    _EnvFieldSpec("query_views_enabled", "LCM_QUERY_VIEWS_ENABLED", bool),
+    _EnvFieldSpec(
+        "adaptive_retrieval_enabled", "LCM_ADAPTIVE_RETRIEVAL_ENABLED", bool
+    ),
+    _EnvFieldSpec(
+        "assertion_extraction_enabled", "LCM_ASSERTION_EXTRACTION_ENABLED", bool
+    ),
+    _EnvFieldSpec("assertion_extraction_model", "LCM_ASSERTION_EXTRACTION_MODEL", str),
+    _EnvFieldSpec(
+        "assertion_extraction_max_sources_per_pass",
+        "LCM_ASSERTION_EXTRACTION_MAX_SOURCES_PER_PASS",
+        int,
+    ),
+    _EnvFieldSpec(
+        "assertion_extraction_timeout_seconds",
+        "LCM_ASSERTION_EXTRACTION_TIMEOUT_SECONDS",
+        float,
+    ),
+    _EnvFieldSpec("sensitive_patterns_enabled", "LCM_SENSITIVE_PATTERNS_ENABLED", bool),
+    _EnvFieldSpec("embedding_privacy_enabled", "LCM_EMBEDDING_PRIVACY_ENABLED", bool),
+    _EnvFieldSpec("large_output_externalization_enabled", "LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED", bool),
+    _EnvFieldSpec("large_output_externalization_threshold_chars", "LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS", int),
+    _EnvFieldSpec("large_output_externalization_path", "LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH", str),
+    _EnvFieldSpec("large_output_active_replay_stubbing_enabled", "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED", bool),
+    _EnvFieldSpec("large_output_active_replay_stub_threshold_tokens", "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS", int),
+    _EnvFieldSpec(
+        "large_output_active_replay_stub_aged_threshold_tokens",
+        "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS",
+        int,
+    ),
+    _EnvFieldSpec("large_output_transcript_gc_enabled", "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED", bool),
+    _EnvFieldSpec("stub_first_exit_target_ratio", "LCM_STUB_FIRST_EXIT_TARGET_RATIO", float),
+    _EnvFieldSpec("summary_model", "LCM_SUMMARY_MODEL", str),
+    _EnvFieldSpec("native_recovery", "LCM_NATIVE_RECOVERY", bool),
+    _EnvFieldSpec("survival_fit", "LCM_SURVIVAL_FIT", bool),
+    _EnvFieldSpec("survival_reserve", "LCM_SURVIVAL_RESERVE", float),
+    _EnvFieldSpec("summary_circuit_breaker_failure_threshold", "LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD", int),
+    _EnvFieldSpec("summary_circuit_breaker_cooldown_seconds", "LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS", int),
+    _EnvFieldSpec("summary_circuit_breaker_rejection_threshold", "LCM_SUMMARY_CIRCUIT_BREAKER_REJECTION_THRESHOLD", int),
+    _EnvFieldSpec("summary_spend_max_calls", "LCM_SUMMARY_SPEND_MAX_CALLS", int),
+    _EnvFieldSpec("summary_spend_window_seconds", "LCM_SUMMARY_SPEND_WINDOW_SECONDS", float),
+    _EnvFieldSpec("summary_spend_backoff_seconds", "LCM_SUMMARY_SPEND_BACKOFF_SECONDS", float),
+    _EnvFieldSpec("expansion_model", "LCM_EXPANSION_MODEL", str),
+    _EnvFieldSpec("expansion_context_tokens", "LCM_EXPANSION_CONTEXT_TOKENS", int),
+    _EnvFieldSpec("summary_timeout_ms", "LCM_SUMMARY_TIMEOUT_MS", int),
+    _EnvFieldSpec("expansion_timeout_ms", "LCM_EXPANSION_TIMEOUT_MS", int),
+    _EnvFieldSpec("database_path", "LCM_DATABASE_PATH", str),
+    _EnvFieldSpec("embeddings_enabled", "LCM_EMBEDDINGS_ENABLED", bool),
+    _EnvFieldSpec("rerank_enabled", "LCM_RERANK_ENABLED", bool),
+    _EnvFieldSpec("rerank_model", "LCM_RERANK_MODEL", str),
+    _EnvFieldSpec("rerank_window_limit", "LCM_RERANK_WINDOW_LIMIT", int),
+    _EnvFieldSpec("rerank_margin", "LCM_RERANK_MARGIN", float),
+    _EnvFieldSpec("recall_scan_rows", "LCM_RECALL_SCAN_ROWS", int),
+    _EnvFieldSpec("recall_scan_max_rows", "LCM_RECALL_SCAN_MAX_ROWS", int),
+    _EnvFieldSpec("recall_scan_budget_s", "LCM_RECALL_SCAN_BUDGET_S", float),
+    _EnvFieldSpec("recall_reference_strict", "LCM_RECALL_REFERENCE_STRICT", bool),
+    _EnvFieldSpec("recall_fts_anchor", "LCM_RECALL_FTS_ANCHOR", bool),
+    _EnvFieldSpec("proactive_recall_enabled", "LCM_PROACTIVE_RECALL_ENABLED", bool),
+    _EnvFieldSpec("proactive_recall_min_score", "LCM_PROACTIVE_RECALL_MIN_SCORE", float),
+    _EnvFieldSpec("proactive_recall_budget_tokens", "LCM_PROACTIVE_RECALL_BUDGET_TOKENS", int),
+    _EnvFieldSpec("proactive_recall_provider", "LCM_PROACTIVE_RECALL_PROVIDER", str),
+    _EnvFieldSpec("preanswer_evidence_enabled", "LCM_PREANSWER_EVIDENCE_ENABLED", bool),
+    _EnvFieldSpec("preanswer_evidence_mode", "LCM_PREANSWER_EVIDENCE_MODE", str),
+    _EnvFieldSpec("selective_compiler_enabled", "LCM_SELECTIVE_COMPILER_ENABLED", bool),
+    _EnvFieldSpec("selective_compiler_model", "LCM_SELECTIVE_COMPILER_MODEL", str),
+    _EnvFieldSpec("embedding_bounded_scan_rows", "LCM_EMBEDDING_BOUNDED_SCAN_ROWS", int),
+    _EnvFieldSpec("embedding_storage_dtype", "LCM_EMBEDDING_STORAGE_DTYPE", str),
+    _EnvFieldSpec("embedding_store_dim", "LCM_EMBEDDING_STORE_DIM", int),
+    _EnvFieldSpec("embedding_binary_prescreen", "LCM_EMBEDDING_BINARY_PRESCREEN", bool),
+    _EnvFieldSpec("knn_prescreen_multiplier", "LCM_KNN_PRESCREEN_MULTIPLIER", int),
+    _EnvFieldSpec("embedding_provider", "LCM_EMBEDDING_PROVIDER", str),
+    _EnvFieldSpec("embedding_model", "LCM_EMBEDDING_MODEL", str),
+    _EnvFieldSpec("embedding_content_policy", "LCM_EMBED_CONTENT_POLICY", str),
+    _EnvFieldSpec("ollama_base_url", "LCM_OLLAMA_BASE_URL", str),
+    _EnvFieldSpec(
+        "embedding_base_url", "LCM_EMBEDDING_BASE_URL", str
+    ),
+    _EnvFieldSpec(
+        "embedding_api_key_env", "LCM_EMBEDDING_API_KEY_ENV", str
+    ),
+    _EnvFieldSpec("embedding_query_timeout_s", "LCM_EMBEDDING_QUERY_TIMEOUT_S", float),
+    _EnvFieldSpec("recall_query_timeout_s", "LCM_RECALL_QUERY_TIMEOUT_S", float),
+    _EnvFieldSpec("embedding_backfill_timeout_s", "LCM_EMBEDDING_BACKFILL_TIMEOUT_S", float),
+    _EnvFieldSpec("embedding_max_batch_items", "LCM_EMBEDDING_MAX_BATCH_ITEMS", int),
+    _EnvFieldSpec("embedding_query_spend_max_calls", "LCM_EMBEDDING_QUERY_SPEND_MAX_CALLS", int),
+    _EnvFieldSpec("embedding_query_spend_window_seconds", "LCM_EMBEDDING_QUERY_SPEND_WINDOW_SECONDS", float),
+    _EnvFieldSpec("embedding_query_spend_backoff_seconds", "LCM_EMBEDDING_QUERY_SPEND_BACKOFF_SECONDS", float),
+    _EnvFieldSpec("new_session_retain_depth", "LCM_NEW_SESSION_RETAIN_DEPTH", int),
+    _EnvFieldSpec("doctor_clean_apply_enabled", "LCM_DOCTOR_CLEAN_APPLY_ENABLED", bool),
+    _EnvFieldSpec("empty_lifecycle_gc_enabled", "LCM_EMPTY_LIFECYCLE_GC_ENABLED", bool),
+    _EnvFieldSpec("empty_lifecycle_gc_threshold", "LCM_EMPTY_LIFECYCLE_GC_THRESHOLD", int),
+    _EnvFieldSpec("temporal_rollups_enabled", "LCM_TEMPORAL_ROLLUPS_ENABLED", bool),
+    _EnvFieldSpec("rollup_daily_target_tokens", "LCM_ROLLUP_DAILY_TARGET_TOKENS", int),
+    _EnvFieldSpec("rollup_daily_max_tokens", "LCM_ROLLUP_DAILY_MAX_TOKENS", int),
+    _EnvFieldSpec("rollup_aggregate_max_tokens", "LCM_ROLLUP_AGGREGATE_MAX_TOKENS", int),
+    _EnvFieldSpec("rollup_builds_per_pass", "LCM_ROLLUP_BUILDS_PER_PASS", int),
+    _EnvFieldSpec("rollup_maintenance_budget_ms", "LCM_ROLLUP_MAINTENANCE_BUDGET_MS", int),
+    _EnvFieldSpec("background_leaf_prep_enabled", "LCM_BACKGROUND_LEAF_PREP_ENABLED", bool),
+    _EnvFieldSpec("background_leaf_prep_max_calls", "LCM_BACKGROUND_LEAF_PREP_MAX_CALLS", int),
+    _EnvFieldSpec("background_leaf_prep_window_s", "LCM_BACKGROUND_LEAF_PREP_WINDOW_S", float),
+)
+
+_PARSER_BY_TYPE = {
+    int: _parse_int_env,
+    float: _parse_float_env,
+    bool: _parse_bool_env,
+    str: _parse_str_env,
+}
+
+# Fields whose env reading needs provenance tracking or a computed default;
+# ``from_env`` handles these explicitly, so the uniform loop skips them.
+_SOURCE_TRACKED_ENV_FIELDS = frozenset({
+    "fresh_tail_count",
+    "fresh_tail_max_tokens",
+    "leaf_chunk_tokens",
+    "leaf_target_ratio",
+    "leaf_target_min_tokens",
+    "leaf_target_max_tokens",
+    "context_threshold",
+    "summary_spend_max_calls",
+    "summary_spend_window_seconds",
+    "summary_spend_backoff_seconds",
+    "summary_timeout_ms",
+    "summary_prompt_version",
+    "stub_first_exit_target_ratio",
+})
+
+# Fields exposed as runtime preset overrides (consumed by presets.py).
+_PRESET_ENV_FIELDS = frozenset({
+    "context_threshold",
+    "fresh_tail_count",
+    "leaf_chunk_tokens",
+    "condensation_fanin",
+    "incremental_max_depth",
+})
+
+
+@dataclass
+class LCMConfig:
+    """All tunables for the LCM engine."""
+
+    # -- Fresh tail: recent messages never compacted ---
+    fresh_tail_count: int = 24
+    # Token cap for the protected suffix (0 = no explicit cap; the engine then
+    # derives one from the context window, see _effective_fresh_tail_max_tokens)
+    fresh_tail_max_tokens: int = 24_000
+    # Let the count-protected tail yield to a derived token bound when the
+    # host reports sustained over-threshold pressure and the tail is the only
+    # reason compaction cannot make progress. Fires only in a state that
+    # otherwise ends at the provider hard limit (see #441).
+    fresh_tail_pressure_yield_enabled: bool = True
+    # How many consecutive blocked entry-point invocations (preflight or
+    # compress observing over-threshold pressure with the tail as the only
+    # blocker) it takes before the yield arms. This is what "sustained" means:
+    # below this count fresh_tail_count stays a hard suffix. 1 yields on the
+    # first blocked observation; the evidence streak resets whenever pressure
+    # drops below threshold, a compaction pass succeeds, or the session resets.
+    fresh_tail_pressure_yield_min_observations: int = 3
+
+    # -- Compaction thresholds ---
+    # Max source tokens in a leaf chunk before summarization triggers
+    leaf_chunk_tokens: int = 24_000
+    # Fraction of context window that triggers compaction (0.0–1.0)
+    context_threshold: float = 0.75
+    # Per-model threshold overrides. Keys are matched as substrings against
+    # the model name (longest match wins). When a key matches, its value
+    # replaces context_threshold for that model. Loaded from
+    # ``lcm.model_thresholds`` in config.yaml or ``LCM_MODEL_THRESHOLDS``
+    # env var ("key1:0.25,key2:0.70"). Empty dict = use context_threshold
+    # for all models.
+    model_thresholds: dict[str, float] = field(default_factory=dict)
+    # Mirror Hermes Agent's Codex gpt-5.5 route-specific threshold auto-raise
+    # when LCM is inheriting the host compression threshold. Explicit LCM
+    # threshold overrides remain authoritative.
+    codex_gpt55_autoraise_enabled: bool = True
+    # Max condensation depth (-1 = unlimited, 0 = leaf only)
+    incremental_max_depth: int = 3
+    # How many same-depth summaries trigger condensation
+    condensation_fanin: int = 4
+    # When enabled, leaf compaction may use a larger working chunk size based on backlog pressure
+    dynamic_leaf_chunk_enabled: bool = False
+    # Upper bound for the working dynamic leaf chunk threshold
+    dynamic_leaf_chunk_max: int = 40_000
+    # When enabled, suppress follow-on condensation after a leaf pass unless
+    # debt/pressure says the extra churn is worth it
+    cache_friendly_condensation_enabled: bool = False
+    # Minimum number of same-depth fanin groups before one follow-on
+    # condensation pass is allowed in cache-friendly mode
+    cache_friendly_min_debt_groups: int = 2
+    # When enabled, turns can persist raw-backlog maintenance debt and use
+    # later bounded catch-up passes to reduce it.
+    deferred_maintenance_enabled: bool = False
+    # Maximum extra leaf passes a debt-triggered later turn may spend on
+    # catch-up work.
+    deferred_maintenance_max_passes: int = 4
+    # Disabled at 0.0. When set, only bypass cache-friendly/deferred polite
+    # gates once prompt pressure reaches this fraction of the context window.
+    critical_budget_pressure_ratio: float = 0.0
+    # Run one bounded synchronous sweep after threshold pressure is reached.
+    threshold_full_sweep_enabled: bool = True
+    # Target frontier-summary size after a sweep (0 = one leaf budget, capped at a quarter of the compaction threshold).
+    summary_prefix_target_tokens: int = 0
+    # #605: from compress() entry, after the first stored leaf or condensed node no summariser call starts unless it is expected
+    # to end by this many seconds (0 = no soft target; at most the hard bound).
+    foreground_soft_seconds: float = 60.0
+    # #605: no summariser call starts unless it is expected to end, with the finalize reserve, by this many
+    # seconds from compress() entry (0, a negative or an invalid value = the built-in 120).
+    foreground_hard_seconds: float = 0.0
+
+    # -- Escalation ---
+    # L2 bullet budget as fraction of L1
+    l2_budget_ratio: float = 0.50
+    # L3 deterministic truncate token limit
+    l3_truncate_tokens: int = 512
+
+    # -- Assembly guardrails ---
+    # Hard cap for the assembled active context (0 = disabled). Exception (#1162): keep the newest visible
+    # assistant reply beyond the cap when it would otherwise be dropped before being summarised.
+    # Hermes re-adds that reply after compaction anyway; keeping it here puts it in the right place.
+    max_assembly_tokens: int = 0
+    # Reserve this many tokens from the model context window before assembly
+    # (0 = disabled). Effective cap becomes context_length - reserve_tokens_floor.
+    reserve_tokens_floor: int = 0
+
+    # -- Session and message filtering ---
+    # Sessions to exclude from LCM storage entirely.
+    ignore_session_patterns: list[str] = field(default_factory=list)
+    # Sessions that may read carried-over LCM state but never write new data.
+    stateless_session_patterns: list[str] = field(default_factory=list)
+    # Per-message regex patterns; matching messages are skipped before LCM storage.
+    ignore_message_patterns: list[str] = field(default_factory=list)
+    # Diagnostics: where each pattern list came from.
+    ignore_session_patterns_source: str = "default"
+    stateless_session_patterns_source: str = "default"
+    ignore_message_patterns_source: str = "default"
+
+    # -- Summary instructions ---
+    # Custom instructions injected into all summarization prompts
+    custom_instructions: str = ""
+
+    # -- Pre-compaction extraction ---
+    # Extract decisions/commitments to files before compaction
+    extraction_enabled: bool = False
+    # Model for extraction (empty = fall back to summary_model)
+    extraction_model: str = ""
+    # Directory for daily extraction files (empty = auto: ~/.hermes/lcm-extractions/)
+    extraction_output_path: str = ""
+
+    # -- V4 assertion sidecar --
+    # Materializes the rebuildable assertion tables in the same profile lcm.db.
+    # This does not enable extraction or backfill; it only binds schema/read APIs.
+    assertions_enabled: bool = False
+    # Materializes demand-shaped query evidence views in the same profile DB.
+    # Default off; enabling this store does not invoke a model or retrieval provider.
+    query_views_enabled: bool = False
+    # Exposes the bounded single-turn retrieval controller. Enabling it also
+    # binds the same-database query-view store needed for warm evidence reuse.
+    # The controller itself never invokes a model or provider.
+    adaptive_retrieval_enabled: bool = False
+    # Enables the separate structured exact-row extractor. Default off: merely
+    # enabling the assertion store never performs a model/provider call.
+    assertion_extraction_enabled: bool = False
+    # Empty falls back to extraction_model, then summary_model.
+    assertion_extraction_model: str = ""
+    # Per pre-compaction batch. Runtime clamps to [1, 8].
+    assertion_extraction_max_sources_per_pass: int = 4
+    # Per exact source provider call. Runtime clamps to [0.1, 120] seconds.
+    assertion_extraction_timeout_seconds: float = 30.0
+
+    # -- Sensitive-pattern handling ---
+    # Durable redaction is opt-in. When enabled, named patterns redact matching
+    # secrets before LCM storage, FTS indexing, summarization, or externalization.
+    sensitive_patterns_enabled: bool = False
+    # Provider-bound embedding copies have an independent privacy posture.
+    # None means automatic: enabled for recognized cloud providers and skipped
+    # for local providers. False is an explicit cloud-privacy opt-out whose
+    # distinguished revision keeps vector identities posture-bound.
+    embedding_privacy_enabled: bool | None = None
+    # Named catalog entries shared by durable redaction and provider-copy privacy.
+    sensitive_patterns: list[str] = field(
+        default_factory=lambda: ["api_key", "bearer_token", "password_assignment", "private_key"]
+    )
+    # Diagnostics: where the sensitive pattern list came from.
+    sensitive_patterns_source: str = "default"
+
+    # -- Large tool-output externalization ---
+    # When enabled, oversized tool results are written to plugin-managed storage
+    # and replaced with compact references in pre-compaction serializer input.
+    large_output_externalization_enabled: bool = True
+    # Character threshold above which tool results are externalized.
+    large_output_externalization_threshold_chars: int = 12_000
+    # Explicit storage directory for externalized payloads (empty = auto under hermes home).
+    large_output_externalization_path: str = ""
+    # Replace eligible textual tool results with durable compact refs in
+    # provider-visible replay. Current-turn ingest is intercepted immediately;
+    # historical assembly separately respects the protected fresh tail. This
+    # is on by default and requires large-output externalization.
+    large_output_active_replay_stubbing_enabled: bool = True
+    # Token-aware active-replay threshold. The character threshold above still
+    # controls ordinary ingest externalization; this threshold controls when a
+    # provider-visible textual tool result is replaced by its durable ref.
+    # It applies at first sight (the live interceptor at ingest) (#671).
+    large_output_active_replay_stub_threshold_tokens: int = 10_000
+    # Aged tier (#671): at a compaction, a tool result outside the fresh tail is
+    # stubbed from this many tokens. 0 = use the first-sight threshold above; a
+    # value above the first-sight threshold is capped at it.
+    large_output_active_replay_stub_aged_threshold_tokens: int = 2_000
+    # When enabled, already-externalized summarized tool-result transcript rows may
+    # be rewritten to compact GC placeholders after successful leaf compaction.
+    large_output_transcript_gc_enabled: bool = False
+
+    # -- Models ---
+    summary_model: str = ""       # empty = use Hermes auxiliary model
+    # Optional reasoning override for summary LLM calls. Empty = use task/default routing.
+    summary_reasoning_effort: str = ""
+    # Optional fallback summary models tried after summary_model/task default.
+    summary_fallback_models: list[str] = field(default_factory=list)
+    # Consecutive failed summary calls before a route is skipped temporarily.
+    summary_circuit_breaker_failure_threshold: int = 2
+    # Seconds to skip an open summary route before allowing a retry.
+    summary_circuit_breaker_cooldown_seconds: int = 300
+    # Consecutive rejected summary results (no usable text, or not shorter than
+    # the source) before a route is skipped temporarily; minimum 1.
+    summary_circuit_breaker_rejection_threshold: int = 6
+    # Sliding-window cap for paid/auxiliary summarizer calls before falling
+    # back to deterministic L3 truncation. 0 disables the spend guard.
+    summary_spend_max_calls: int = 24
+    # Window, in seconds, over which summary spend calls are counted.
+    summary_spend_window_seconds: float = 600.0
+    # Backoff, in seconds, after the spend window is exhausted.
+    summary_spend_backoff_seconds: float = 1800.0
+    expansion_model: str = ""     # empty = fall back to summary_model / Hermes auxiliary model
+    # Optional reasoning override for lcm_expand_query synthesis calls.
+    expansion_reasoning_effort: str = ""
+    # Serialized summary/raw/child-source/externalized context budget fed to lcm_expand_query's auxiliary LLM before it returns a bounded answer.
+    expansion_context_tokens: int = 32_000
+
+    # -- Timeouts ---
+    # One summariser call; matches the host's own auxiliary.compression default (120 s). The foreground budget still
+    # cuts a call short when less time is left.
+    summary_timeout_ms: int = 120_000
+    expansion_timeout_ms: int = 120_000
+
+    # -- Storage ---
+    database_path: str = ""       # empty = HERMES_HOME/lcm.db; LCM_DATABASE_PATH may override
+
+    # -- Embeddings (default-off until a provider/model are configured) ---
+    embeddings_enabled: bool = False
+    # lcm_recall cross-encoder rerank stage over the top fused candidates.
+    # Default-off: recall ships value on RRF order alone, and rerank is one extra
+    # billable API call the operator opts into. The lite default preserves the
+    # established latency/cost posture; operators may explicitly select Voyage's
+    # quality-oriented rerank-2.5 model.
+    rerank_enabled: bool = False
+    # Voyage rerank model for the lcm_recall rerank stage. The default equals
+    # the provider-side literal, so unset == historical behavior byte-for-byte;
+    # a non-default value is a NEW declared config owing its own A/A' run
+    # (architect ruling, eval-queue #252).
+    rerank_model: str = "rerank-2.5-lite"
+    # Optional product clamp for the lcm_recall rerank window. Zero preserves
+    # the historical ``min(50, max(1, limit * 4))`` window byte-for-byte.
+    rerank_window_limit: int = 0
+    # Optional rank-1 margin gate for the lcm_recall rerank stage. Zero
+    # preserves the historical rerank ordering byte-for-byte.
+    rerank_margin: float = 0.0
+    embedding_bounded_scan_rows: int = 2_000
+    # Vector storage dtype for NEWLY-registered embedding profiles: float32
+    # (default; a stock install keeps summary vectors byte-identical) or int8
+    # (per-vector symmetric quantization + a binary sign-bit prescreen column,
+    # unlocking full-corpus two-stage KNN). dtype is part of the profile identity
+    # hash, so an int8 identity never mixes with existing float32 vectors.
+    embedding_storage_dtype: str = "float32"
+    # Optional Matryoshka store dimension for newly-registered profiles (0 =
+    # full profile dim). When >0 and < the provider dim, vectors are truncated
+    # to this many leading dims and renormalized before storage/quantization.
+    # Also a profile-identity component (the stored dim is hashed), so truncated
+    # vectors never mix with full-dim ones.
+    embedding_store_dim: int = 0
+    # Write the sign-bit prescreen for float32 identities too (int8 always writes
+    # it). float32-vec + prescreen = the full-corpus two-stage KNN with EXACT
+    # float rescore of survivors (highest recall, ~10x less query RAM than a full
+    # float32 scan). Default-off keeps stock float32 identities byte-identical and
+    # binary-free (legacy bounded path); enable it on a DISTINCT identity so
+    # prescreen rows never mix into a legacy float32 identity.
+    embedding_binary_prescreen: bool = False
+    # Stage-1 prescreen breadth for the two-stage (binary Hamming -> int8/float
+    # rescore) KNN: M = knn_prescreen_multiplier x k survivors are rescored.
+    # Larger widens the approximate prescreen toward exact recall at more cost.
+    knn_prescreen_multiplier: int = 4
+    # lcm_recall candidate-scan BATCH SIZE. lcm_recall promises "all
+    # conversations, all time", so it must NOT inherit the small
+    # recency-truncating grep bound above (that structurally hides the oldest
+    # memories). It used to be a hard bound, which made the promise false at
+    # scale: at 185k vectors it scored only the 25k most-recent and recall for
+    # ageing content went to zero (FINDING-F31 §2). The scan now covers the
+    # WHOLE corpus and this value bounds only how many vectors are resident per
+    # batch (a running top-k spans the batches), so it trades peak memory, not
+    # coverage.
+    recall_scan_rows: int = 25_000
+    # Hard candidate cap for the lcm_recall scan; 0 = unlimited (the default:
+    # cover everything). Set it only for a pathological corpus -- a capped scan
+    # reports coverage='bounded' and discloses the scanned/total ratio, exactly
+    # as the old recency window did.
+    recall_scan_max_rows: int = 0
+    # Optional hard latency budget for the lcm_recall scan, in seconds; 0 = no
+    # early stop (the default). When set, a scan that overruns it stops between
+    # batches and degrades to coverage='bounded' rather than silently paying an
+    # unbounded cost. This is the ONLY thing that truncates a default scan.
+    recall_scan_budget_s: float = 0.0
+    # Per-arm RRF fusion weights for lcm_recall's 3-arm hybrid (fts/summary/chunk).
+    # Down-weighting the weak FTS arm keeps naive equal-weight fusion from dragging
+    # fused recall below its best (vector) arm — measured −21 R@5 on LongMemEval.
+    # Override via LCM_RECALL_ARM_WEIGHTS ("fts=0.5,summary=1.0,chunk=1.0").
+    recall_arm_weights: dict[str, float] = field(
+        default_factory=lambda: dict(_DEFAULT_RECALL_ARM_WEIGHTS)
+    )
+    # Reference-strict delivery for detail='answer_ready' (FINDING-F35 §2): a hit
+    # that cannot carry a truthful (store_id, char_start, char_end) source span is
+    # never delivered as evidence; the next-ranked citable hit takes its slot and
+    # the omission count is surfaced in provenance.answer_ready. ON by default --
+    # delivering evidence the product cannot cite is a correctness defect, and the
+    # consumers that validate references fail CLOSED on an unreferenced card, so a
+    # single uncitable hit destroys the whole response. Set False only for a host
+    # that renders recall without citations and wants summary hits back; disabled,
+    # the answer_ready response is byte-identical to the pre-F35 delivery.
+    recall_reference_strict: bool = True
+    # lcm_recall FTS anchor slot: with two or more arms, the FTS arm's best
+    # message is kept inside the delivered window (at most one session evicted).
+    # Evidence (#950): frozen LongMemEval-M LOCAL replay, R@10 0.898 -> 0.905 (470 q).
+    # FTS-only (embeddings-off) output is unchanged; False restores the previous order.
+    recall_fts_anchor: bool = True
+    # -- Proactive memory injection (SPEC F, default-OFF) ---
+    # At active-context assembly, embed the newest user message and run the
+    # lcm_recall pipeline to surface cross-session memories the model would
+    # otherwise have to lcm_recall by hand. Default-off => byte-identical
+    # assembly; when disabled the whole path is skipped before any work.
+    proactive_recall_enabled: bool = False
+    # Relevance floor on lcm_recall's RRF/composite score (~0.014-0.05); a single
+    # top-ranked arm hit is ~0.016, so this floor mainly drops ancient or
+    # low-ranked hits. Reranking only reorders the bounded candidate window and
+    # deliberately does not replace this score with Voyage's incompatible 0..1
+    # relevance scale, so this threshold keeps the same meaning in both modes.
+    proactive_recall_min_score: float = 0.01
+    # Hard token budget for the single injected "relevant memories" block.
+    proactive_recall_budget_tokens: int = 500
+    # Optional embedding-provider override for the injection query only (e.g.
+    # keep a local fastembed provider for the offline injection path even when
+    # interactive search uses voyage). Empty => reuse the main provider/model.
+    proactive_recall_provider: str = ""
+    # Product-owned automatic evidence validation at the official
+    # ``pre_llm_call`` seam. Default-off preserves the exact ordinary hook
+    # context and performs no retrieval or computation work.
+    preanswer_evidence_enabled: bool = False
+    # Empty preserves the historical boolean-only behavior: when the master
+    # flag is true it resolves to ``legacy_selective``. Explicit values are
+    # off | legacy_selective | requirements_v1. The master flag remains the
+    # default-off activation boundary.
+    preanswer_evidence_mode: str = ""
+    # Optional minimal semantic selector for code-derived closed operations.
+    # It is independent and default-off; enabling pre-answer evidence alone
+    # still performs only the provider-free session-bundle path.
+    selective_compiler_enabled: bool = False
+    selective_compiler_model: str = ""
+    embedding_provider: str = ""
+    embedding_model: str = ""
+    # Content-aware chunk policy for the raw-history chunk corpus:
+    # conversational (default) | heads | full. Unknown values degrade to the
+    # default in the chunker's normalize_content_policy.
+    embedding_content_policy: str = "conversational"
+    ollama_base_url: str = "http://localhost:11434"
+    embedding_base_url: str = ""
+    embedding_api_key_env: str = "LCM_EMBEDDING_API_KEY"
+    embedding_query_timeout_s: float = 3.0
+    # Dedicated deadline for lcm_recall. It fans out three sequential arms (FTS +
+    # summary KNN + chunk KNN) plus fusion, hydration, and an optional rerank, so
+    # it needs more headroom than lcm_grep's single-arm query deadline above
+    # (which stays 3.0s). sprint-opt-2.
+    recall_query_timeout_s: float = 8.0
+    # Per-provider-operation deadline for bulk document embedding. This is
+    # deliberately separate from the latency-sensitive query deadline; the
+    # whole backfill invocation is additionally governed by
+    # LCM_EMBEDDING_BACKFILL_BUDGET_S (0 = unlimited, checked between batches).
+    embedding_backfill_timeout_s: float = 120.0
+    # Voyage caps a single embeddings request at 1000 input items; document
+    # batches split at this many items in addition to the token budget.
+    embedding_max_batch_items: int = 1000
+    # Sliding-window spend guard for the latency-sensitive QUERY embedding path
+    # (resolve_provider(for_backfill=False)). The historical hardcoded default
+    # was 60 calls / 60s window / 60s backoff -- a backfill-economy control that
+    # silently gutted retrieval when a tight query loop (e.g. a benchmark firing
+    # hundreds of query embeds in a minute) crossed 60 calls and every further
+    # call was rejected pre-network with ProviderRateLimited (~9k tokens for 451
+    # query embeds is negligible spend, so the low ceiling bought nothing). The
+    # default is now generous; max_calls=0 disables the guard entirely. Backfill
+    # keeps its own bulk contract (max_calls=0) and is unaffected.
+    embedding_query_spend_max_calls: int = 600
+    embedding_query_spend_window_seconds: float = 60.0
+    embedding_query_spend_backoff_seconds: float = 60.0
+
+    # -- Session carry-over ---
+    # Depth retained after /new (-1 = all, 0 = nothing, 2 = keep d2+)
+    new_session_retain_depth: int = 2
+    # Safety gate: destructive `/lcm doctor clean apply` workflow is disabled by default.
+    doctor_clean_apply_enabled: bool = False
+
+    # -- Lifecycle GC ---
+    # Enables automatic pruning of lifecycle rows for sessions that never
+    # ingested any messages or nodes (gateway restart orphans, ephemeral
+    # cron ticks, etc.).  Runs at session-start when the lifecycle table
+    # exceeds ``empty_lifecycle_gc_threshold`` rows.
+    empty_lifecycle_gc_enabled: bool = True
+    # Number of lifecycle rows at which the GC pass fires.  Default 200
+    # so fresh installs skip the work until enough churn has occurred.
+    empty_lifecycle_gc_threshold: int = 200
+    # Age guard for automatic lifecycle GC. Startup GC must not delete
+    # recently-bound empty rows because another live engine may not have
+    # ingested its first message yet. Set to 0 only in trusted/test
+    # environments that intentionally want immediate empty-row pruning.
+    empty_lifecycle_gc_max_age_hours: float | None = 24.0
+
+    # -- Temporal rollups ---
+    # Enabled by default; the engine's ingest/build hooks are flag-gated.
+    temporal_rollups_enabled: bool = True
+    rollup_daily_target_tokens: int = 5_000
+    rollup_daily_max_tokens: int = 15_000
+    rollup_aggregate_max_tokens: int = 20_000
+    rollup_builds_per_pass: int = 2
+    # Best-effort wall-clock budget checked between builds. A slow summarizer
+    # may finish its current build and leave later rollups lagging until a future pass.
+    rollup_maintenance_budget_ms: int = 5_000
+
+    # -- Diagnostics ---
+    # Field-level provenance for values loaded through from_env(). Manual
+    # LCMConfig(...) instances leave this empty and status treats them as manual/default.
+    config_sources: dict[str, str] = field(default_factory=dict)
+    config_source_warnings: list[str] = field(default_factory=list)
+    ignored_config_yaml_lcm_keys: list[str] = field(default_factory=list)
+
+    # Appended for positional-constructor compatibility with every field that
+    # predates native recovery. Keyword construction remains preferred.
+    # Removed in v0.25.0; parsed and ignored.
+    native_recovery: bool = False
+    # #582: fit an over-window compress() result by dropping the oldest stored user turns (never a row).
+    survival_fit: bool = True
+    # Share of the model window the survival fit keeps free for the response and host overhead.
+    survival_reserve: float = 0.15
+    # #614: leaf summary target = min(max, max(min, int(source_tokens * ratio))); the L1 call
+    # receives twice the target as max_tokens. Defaults reproduce the historical constants.
+    leaf_target_ratio: float = 0.20
+    leaf_target_min_tokens: int = 2_000
+    leaf_target_max_tokens: int = 2_000
+    # Summariser prompt version (#646): 1 = original prompts and 2x output
+    # ceiling; 2 = v2 prompts, focus directives in the policy, 3x ceiling.
+    summary_prompt_version: int = 1
+    # #787 slice 1: prepare leaf summaries off-turn and publish them at the threshold crossing (default off).
+    background_leaf_prep_enabled: bool = False
+    # #787: the background preparation's own spend guard: at most this many summariser calls per window.
+    background_leaf_prep_max_calls: int = 8
+    background_leaf_prep_window_s: float = 600.0
+    # #671 stub-first exit: a share of the threshold that lowers the exit's target to
+    # min(threshold - leaf chunk, 0.95 x threshold, int(ratio x threshold)); 0 = the built-in target.
+    stub_first_exit_target_ratio: float = 0.0
+
+    @classmethod
+    def from_env(cls) -> "LCMConfig":
+        """Build config from environment variables (LCM_ prefix)."""
+        env = lcm_env()
+        pinned = env is not os.environ and bool(env.get("HERMES_HOME"))
+        if pinned:
+            _profile_envs[env["HERMES_HOME"]] = MappingProxyType(dict(env))
+        c = cls()
+        c._absolute_threshold_tokens = env.get("LCM_ABSOLUTE_THRESHOLD_TOKENS", "0") if pinned else None
+        config_sources: dict[str, str] = {}
+        config_source_warnings: list[str] = []
+
+        def _record(field: str, source: str, warning: str | None = None) -> None:
+            config_sources[field] = source
+            if warning:
+                config_source_warnings.append(warning)
+            elif source == f"env:LCM_{field.upper()}":
+                _warn_env_range(field, getattr(c, field), config_source_warnings)
+
+        c.ignored_config_yaml_lcm_keys = _ignored_lcm_config_yaml_keys()
+
+        # Source-tracked fields (provenance recording and/or a computed default)
+        # stay explicit; the uniform loop below skips them.
+        c.fresh_tail_count, source, warning = _parse_int_env_with_source(
+            "LCM_FRESH_TAIL_COUNT", c.fresh_tail_count
+        )
+        _record("fresh_tail_count", source, warning)
+        c.fresh_tail_max_tokens, source, warning = _parse_int_env_with_source(
+            "LCM_FRESH_TAIL_MAX_TOKENS", c.fresh_tail_max_tokens
+        )
+        c.fresh_tail_max_tokens = max(0, c.fresh_tail_max_tokens)
+        _record("fresh_tail_max_tokens", source, warning)
+        c.leaf_chunk_tokens, source, warning = _parse_int_env_with_source(
+            "LCM_LEAF_CHUNK_TOKENS", c.leaf_chunk_tokens
+        )
+        _record("leaf_chunk_tokens", source, warning)
+        # #614 leaf summary target; an out-of-range value falls back to its default with a warning.
+        c.leaf_target_ratio, source, warning = _parse_float_env_with_source(
+            "LCM_LEAF_TARGET_RATIO", c.leaf_target_ratio
+        )
+        if not 0 < c.leaf_target_ratio <= 1:
+            warning = f"invalid env LCM_LEAF_TARGET_RATIO={c.leaf_target_ratio!r} ignored (must be > 0 and <= 1)"
+            c.leaf_target_ratio, source = LCMConfig.leaf_target_ratio, "default"
+        _record("leaf_target_ratio", source, warning)
+        c.leaf_target_min_tokens, min_source, warning = _parse_int_env_with_source(
+            "LCM_LEAF_TARGET_MIN_TOKENS", c.leaf_target_min_tokens
+        )
+        if c.leaf_target_min_tokens < 1:
+            warning = f"invalid env LCM_LEAF_TARGET_MIN_TOKENS={c.leaf_target_min_tokens!r} ignored (must be >= 1)"
+            c.leaf_target_min_tokens, min_source = LCMConfig.leaf_target_min_tokens, "default"
+        _record("leaf_target_min_tokens", min_source, warning)
+        c.leaf_target_max_tokens, source, warning = _parse_int_env_with_source(
+            "LCM_LEAF_TARGET_MAX_TOKENS", c.leaf_target_max_tokens
+        )
+        if c.leaf_target_max_tokens < c.leaf_target_min_tokens and source != "default":
+            warning = (f"invalid env LCM_LEAF_TARGET_MAX_TOKENS={c.leaf_target_max_tokens!r} ignored "
+                       f"(must be >= leaf_target_min_tokens={c.leaf_target_min_tokens})")
+            c.leaf_target_max_tokens, source = LCMConfig.leaf_target_max_tokens, "default"
+        _record("leaf_target_max_tokens", source, warning)
+        if c.leaf_target_max_tokens < c.leaf_target_min_tokens:
+            # Only the minimum was set, above the default maximum: the minimum is the offending key.
+            _record("leaf_target_min_tokens", "default",
+                    f"invalid env LCM_LEAF_TARGET_MIN_TOKENS={c.leaf_target_min_tokens!r} ignored "
+                    f"(must be <= leaf_target_max_tokens={c.leaf_target_max_tokens}; "
+                    "set LCM_LEAF_TARGET_MAX_TOKENS to raise the maximum)")
+            c.leaf_target_min_tokens = LCMConfig.leaf_target_min_tokens
+        if (config_sources.get("leaf_target_ratio") == "env:LCM_LEAF_TARGET_RATIO"
+                and c.leaf_target_min_tokens == c.leaf_target_max_tokens):
+            config_source_warnings.append(
+                "LCM_LEAF_TARGET_RATIO has no effect while the minimum equals the maximum; "
+                "set LCM_LEAF_TARGET_MAX_TOKENS")
+        context_default, context_source, floor_warning = _hermes_compression_threshold_with_source_and_warning(
+            c.context_threshold
+        )
+        c.context_threshold, source, warning = _parse_float_env_with_source(
+            "LCM_CONTEXT_THRESHOLD",
+            context_default,
+            default_source=context_source,
+        )
+        _record("context_threshold", source, warning)
+        if source == _FLOORED_COMPRESSION_THRESHOLD_SOURCE and floor_warning:
+            config_source_warnings.append(floor_warning)
+        # Per-model threshold overrides: load from lcm.model_thresholds in
+        # config.yaml, then LCM_MODEL_THRESHOLDS env var (comma-separated
+        # key:value pairs). Env overrides config.yaml.
+        c.model_thresholds = _load_model_thresholds_from_yaml()
+        _raw_env_thresholds = lcm_env_get("LCM_MODEL_THRESHOLDS")
+        if _raw_env_thresholds is not None:
+            c.model_thresholds = _parse_model_thresholds_env(
+                _raw_env_thresholds, warnings=config_source_warnings
+            )
+        c.codex_gpt55_autoraise_enabled, source = _hermes_codex_gpt55_autoraise_with_source(
+            c.codex_gpt55_autoraise_enabled
+        )
+        _record("codex_gpt55_autoraise_enabled", source)
+        c.summary_spend_max_calls, source, warning = _parse_int_env_with_source(
+            "LCM_SUMMARY_SPEND_MAX_CALLS",
+            c.summary_spend_max_calls,
+        )
+        _record("summary_spend_max_calls", source, warning)
+        c.summary_spend_window_seconds, source, warning = _parse_float_env_with_source(
+            "LCM_SUMMARY_SPEND_WINDOW_SECONDS",
+            c.summary_spend_window_seconds,
+        )
+        _record("summary_spend_window_seconds", source, warning)
+        c.summary_spend_backoff_seconds, source, warning = _parse_float_env_with_source(
+            "LCM_SUMMARY_SPEND_BACKOFF_SECONDS",
+            c.summary_spend_backoff_seconds,
+        )
+        _record("summary_spend_backoff_seconds", source, warning)
+        c.summary_reasoning_effort, source, warning = _lcm_reasoning_effort_with_source(
+            "LCM_SUMMARY_REASONING_EFFORT", "summary_reasoning_effort", c.summary_reasoning_effort
+        )
+        _record("summary_reasoning_effort", source, warning)
+        c.expansion_reasoning_effort, source, warning = _lcm_reasoning_effort_with_source(
+            "LCM_EXPANSION_REASONING_EFFORT", "expansion_reasoning_effort", c.expansion_reasoning_effort
+        )
+        _record("expansion_reasoning_effort", source, warning)
+        summary_timeout_default, summary_timeout_source = _hermes_auxiliary_compression_timeout_ms_with_source(
+            c.summary_timeout_ms
+        )
+        c.summary_timeout_ms, source, warning = _parse_int_env_with_source(
+            "LCM_SUMMARY_TIMEOUT_MS",
+            summary_timeout_default,
+            default_source=summary_timeout_source,
+        )
+        _record("summary_timeout_ms", source, warning)
+        c.summary_prompt_version, source, warning = _parse_int_env_with_source(
+            "LCM_SUMMARY_PROMPT_VERSION", c.summary_prompt_version
+        )
+        if c.summary_prompt_version not in (1, 2):
+            warning = f"unsupported env LCM_SUMMARY_PROMPT_VERSION={c.summary_prompt_version!r} ignored; using 1"
+            c.summary_prompt_version, source = 1, "default"
+        _record("summary_prompt_version", source, warning)
+        # #671 stub-first exit target; an out-of-range value falls back to the built-in target with a warning.
+        c.stub_first_exit_target_ratio, source, warning = _parse_float_env_with_source(
+            "LCM_STUB_FIRST_EXIT_TARGET_RATIO", c.stub_first_exit_target_ratio
+        )
+        if not 0 <= c.stub_first_exit_target_ratio <= 1:
+            warning = (f"invalid env LCM_STUB_FIRST_EXIT_TARGET_RATIO={c.stub_first_exit_target_ratio!r} ignored "
+                       "(must be >= 0 and <= 1)")
+            c.stub_first_exit_target_ratio, source = LCMConfig.stub_first_exit_target_ratio, "default"
+        _record("stub_first_exit_target_ratio", source, warning)
+
+        # Every other scalar LCM_* override is applied uniformly from the spec.
+        for spec in ENV_FIELD_SPECS:
+            if spec.name in _SOURCE_TRACKED_ENV_FIELDS:
+                continue
+            parser = _PARSER_BY_TYPE[spec.py_type]
+            default = getattr(c, spec.name)
+            warning_count = len(config_source_warnings)
+            if spec.py_type is str:
+                value = parser(spec.env_key, default)
+                if lcm_env_get(spec.env_key) is not None:
+                    _warn_env_choice(spec.name, value, config_source_warnings)
+            else:
+                value = parser(spec.env_key, default, warnings=config_source_warnings)
+                if lcm_env_get(spec.env_key, "").strip() and len(config_source_warnings) == warning_count:
+                    _warn_env_range(spec.name, value, config_source_warnings)
+            setattr(c, spec.name, value)
+            if value is True and spec.name in ENV_FIELD_DEPRECATIONS:
+                _since, removal = ENV_FIELD_DEPRECATIONS[spec.name]
+                config_source_warnings.append(
+                    f"deprecated: {spec.env_key} is set; this experiment is removed in {removal} (#1246). "
+                    "Until then it behaves as before."
+                )
+
+        # Pattern-list overrides carry a source sidecar and stay explicit.
+        raw_sensitive_patterns = lcm_env_get("LCM_SENSITIVE_PATTERNS")
+        if raw_sensitive_patterns is not None:
+            c.sensitive_patterns = _parse_pattern_list(raw_sensitive_patterns)
+            c.sensitive_patterns_source = "env"
+        raw_summary_fallback_models = lcm_env_get("LCM_SUMMARY_FALLBACK_MODELS")
+        if raw_summary_fallback_models is not None:
+            c.summary_fallback_models = _parse_pattern_list(raw_summary_fallback_models)
+
+        raw_max_age = lcm_env_get("LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS")
+        if raw_max_age is not None:
+            try:
+                c.empty_lifecycle_gc_max_age_hours = float(raw_max_age)
+            except (TypeError, ValueError):
+                _warn_invalid_env(
+                    config_source_warnings, "LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS",
+                    raw_max_age, c.empty_lifecycle_gc_max_age_hours,
+                )
+
+        raw_arm_weights = lcm_env_get("LCM_RECALL_ARM_WEIGHTS")
+        if raw_arm_weights is not None:
+            c.recall_arm_weights = _parse_arm_weights(
+                raw_arm_weights, _DEFAULT_RECALL_ARM_WEIGHTS, warnings=config_source_warnings
+            )
+
+        raw_ignore = lcm_env_get("LCM_IGNORE_SESSION_PATTERNS")
+        if raw_ignore is not None:
+            c.ignore_session_patterns = _parse_pattern_list(raw_ignore)
+            c.ignore_session_patterns_source = "env"
+
+        raw_stateless = lcm_env_get("LCM_STATELESS_SESSION_PATTERNS")
+        if raw_stateless is not None:
+            c.stateless_session_patterns = _parse_pattern_list(raw_stateless)
+            c.stateless_session_patterns_source = "env"
+
+        raw_ignore_messages = lcm_env_get("LCM_IGNORE_MESSAGE_PATTERNS")
+        if raw_ignore_messages is not None:
+            c.ignore_message_patterns = _parse_pattern_list(raw_ignore_messages)
+            c.ignore_message_patterns_source = "env"
+
+        c.config_sources = config_sources
+        c.config_source_warnings = config_source_warnings
+        return c
