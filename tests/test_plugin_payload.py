@@ -216,7 +216,8 @@ def assert_reviewed_sites(payload):
                                        "list(map(import_module, names))", "_load = importlib.import_module",
                                        "functools.partial(importlib.util.spec_from_file_location, name)",
                                        "_load = __import__"])
-def test_new_unreviewed_site_mutation_fails(builder, tmp_path, site):
+def test_new_unreviewed_site_mutation_fails(builder, tmp_path, monkeypatch, site):
+    monkeypatch.chdir(ROOT)
     payload = tmp_path / "payload"
     builder.build(git(ROOT, "rev-parse", "HEAD"), payload, tmp_path / "manifest.json")
     assert_reviewed_sites(payload)
@@ -229,7 +230,8 @@ def test_new_unreviewed_site_mutation_fails(builder, tmp_path, site):
 
 @pytest.mark.parametrize("module,prefix", [("runtime_identity.py", ""),
                                                 ("guidance.py", "from .runtime_identity import _PLUGIN_ROOT\n")])
-def test_reviewed_root_data_flow_mutations_fail(builder, tmp_path, module, prefix):
+def test_reviewed_root_data_flow_mutations_fail(builder, tmp_path, monkeypatch, module, prefix):
+    monkeypatch.chdir(ROOT)
     payload = tmp_path / "payload"
     builder.build(git(ROOT, "rev-parse", "HEAD"), payload, tmp_path / "manifest.json")
     assert_reviewed_sites(payload)
@@ -259,7 +261,8 @@ def assert_payload_markdown_paths(payload):
     return checked
 
 
-def test_payload_markdown_link_integrity(builder, tmp_path):
+def test_payload_markdown_link_integrity(builder, tmp_path, monkeypatch):
+    monkeypatch.chdir(ROOT)
     payload = tmp_path / "payload"
     builder.build(git(ROOT, "rev-parse", "HEAD"), payload, tmp_path / "manifest.json")
     assert "references/configuration.md" in assert_payload_markdown_paths(payload)  # Positive control.
