@@ -4,6 +4,15 @@ Semantic and hybrid retrieval are **opt-in** and need an embedding provider. You
 options, two of which cost nothing. If you configure nothing, nothing changes — retrieval stays
 FTS-only exactly as before.
 
+When local embeddings are enabled by the product default, hosts with at most
+2 effective CPUs use full-text recall immediately, including summaries-only
+requests. Recall reports `degraded=true`, reason `cpu_limited`, and the arms'
+actual coverage; doctor explains the limit. Effective capacity respects affinity
+and cgroup quotas (including ancestor limits and fractional CPUs), cached per
+process. Background catch-up continues. An explicit `LCM_EMBEDDINGS_ENABLED`
+value or programmatic config keeps control; explicit semantic `lcm_grep` is
+unchanged. Today's product default is still off, so this policy is inert.
+
 ## TL;DR
 
 | Option | Cost | Signup | Install | Best for |

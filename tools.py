@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, TYPE_CHECKING
 
 from . import recall_delivery
+from .cpu_capacity import effective_cpus
 from .externalize import (
     _inspect_top_level_json_string_fields_before_content as _externalized_top_level_fields_before_content,
     extract_externalized_ref,
@@ -3993,6 +3994,14 @@ def _lcm_recall_has_usable_vector_corpus(
             conn.close()
 
 
+def default_semantic_cpu_limited(config) -> bool:
+    """Only the local product default may adapt; explicit callers retain control."""
+    return (bool(getattr(config, "embeddings_enabled", False))
+            and not getattr(config, "embeddings_enabled_explicit", True)
+            and embedding_provider_id(str(getattr(config, "embedding_provider", ""))) == "fastembed"
+            and effective_cpus() <= 2)
+
+
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     """Search the agent's entire memory (all conversations, all time) by meaning.
 
@@ -4080,6 +4089,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         rerank_window = min(rerank_window, rerank_window_limit)
 
     embeddings_enabled = bool(getattr(engine._config, "embeddings_enabled", False))
+    cpu_limited = default_semantic_cpu_limited(engine._config)
+    embeddings_enabled = embeddings_enabled and not cpu_limited
     # FTS runs for verbatim/all normally, but ALSO whenever embeddings are
     # disabled -- including for include='summaries', whose only vector arm is dead
     # in that state. Without this, include='summaries' + embeddings-off returns
@@ -4094,7 +4105,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     # here as non-evidence drill-down leads instead of as hits.
     summary_leads: list[dict[str, Any]] = []
     coverage: dict[str, str] = {}
-    degraded_reasons: list[str] = []
+    degraded_reasons: list[str] = ["cpu_limited"] if cpu_limited else []
     embedding_query_metrics: list[dict[str, Any]] = []
     timed_out = False
     provider: Any = None
@@ -4216,7 +4227,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 arm_hits["chunk"] = []
                 coverage["chunk"] = "full"
         elif not embeddings_enabled:
-            degraded_reasons.append("semantic retrieval is disabled")
+            if not cpu_limited:
+                degraded_reasons.append("semantic retrieval is disabled")
             if run_summary:
                 coverage["summary"] = "disabled"
             if run_chunk:
@@ -4626,6 +4638,11 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
     """
     config = engine._config
     enabled = bool(getattr(config, "embeddings_enabled", False))
+    if default_semantic_cpu_limited(config):
+        return {
+            "check": "embedding_provider_health", "status": "warn",
+            "detail": f"semantic recall limited on this host ({effective_cpus():g} effective CPUs); full-text recall is active",
+        }
     profile_active = _active_embedding_profile_exists(engine)
 
     if not enabled:
