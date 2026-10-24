@@ -78,8 +78,9 @@ with sqlite3.connect(db) as conn:
     vectors = [dict(row) for row in conn.execute(
         'SELECT embedded_id, identity_hash, hex(vec) AS vec FROM lcm_embedding_vectors ORDER BY identity_hash, embedded_id')]
     meta = [dict(row) for row in conn.execute('SELECT * FROM lcm_embedding_meta ORDER BY identity_hash, embedded_id')]
+    summaries = [dict(row) for row in conn.execute('SELECT * FROM summary_nodes ORDER BY node_id')]
 print(json.dumps(dict(calls=calls, profiles=profiles, vectors=vectors, meta=meta,
-                     resolution=resolution, outcome=outcome)))
+                     summaries=summaries, resolution=resolution, outcome=outcome)))
 '''
 
 
@@ -129,6 +130,32 @@ def test_prefix_unset_rows_and_hashes_identical_to_main(tmp_path, old_tree, host
     actual = cycle(tree, old, tmp_path / 'current', host_root, '')
     expected = cycle(baseline, old, tmp_path / 'main', host_root, '')
     assert actual == expected
+
+
+def test_rc1_mixed_profile_is_quarantined_and_reembedded(tmp_path, old_tree, host_root):
+    baseline = old_tree('rc1-encoding', {'rc1-encoding': BASE})
+    old = old_tree(PREVIOUS_GA)
+    first = run_old(baseline, tmp_path, host_root, SCENARIO, 'initial', 'prefix')
+    mixed = run_old(old, tmp_path, host_root, SCENARIO, 'rollback', '')
+    assert mixed['calls'] == ['find summary', 'new summary']
+    assert {row['vec'] for row in mixed['vectors']} == {'0000803F00000000', '000000000000803F'}
+    tree = Path(__file__).resolve().parents[2]
+    repaired = run_old(tree, tmp_path, host_root, SCENARIO, 'upgrade', 'prefix')
+    assert repaired['calls'][0] == QUERY + 'warmup'
+    assert sorted(repaired['calls'][1:]) == sorted([DOCUMENT + 'first summary', DOCUMENT + 'new summary'])
+    assert repaired['summaries'] == mixed['summaries']
+    retired = [row for row in repaired['profiles'] if row['task'].startswith('retired:')]
+    assert len(retired) == 2 and all(row['active'] == 0 and row['archived_at'] for row in retired)
+    previous_hashes = {row['identity_hash'] for row in first['profiles']}
+    assert not previous_hashes & {row['identity_hash'] for row in repaired['profiles']}
+    assert [row for row in repaired['vectors'] if row['identity_hash'] in previous_hashes] == mixed['vectors']
+    new_vectors = [row for row in repaired['vectors'] if row['identity_hash'] not in previous_hashes]
+    assert len(new_vectors) == 2 and all(row['vec'] == '0000803F00000000' for row in new_vectors)
+    again = run_old(tree, tmp_path, host_root, SCENARIO, 'upgrade', 'prefix')
+    assert again['calls'] == [QUERY + 'warmup']
+    assert again['profiles'] == repaired['profiles'] and again['vectors'] == repaired['vectors']
+    rollback = run_old(old, tmp_path, host_root, SCENARIO, 'rollback', '')
+    assert rollback['outcome'] == 'no_profile' and rollback['vectors'] == repaired['vectors']
 
 
 @pytest.mark.parametrize('provider', ('ollama', 'openai-compatible'))

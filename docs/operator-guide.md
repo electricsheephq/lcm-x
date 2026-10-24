@@ -323,6 +323,20 @@ coverage and scan records; re-upgrade revalidates short-turn coverage (#1536, #1
 Raw rows and FTS remain available during rollback. Keep a SQLite-safe backup and
 verify ordered messages and the summary DAG through rollback and re-upgrade.
 
+**Embedding prefixes and rollback (#1942).** After warming up on the updated build,
+prefixed identities are isolated from v0.28.1: old recall and incremental maintenance
+cannot select or write into them. During rollback, recall uses an available unprefixed
+corpus or full text. If you need semantic coverage on v0.28.1, run `/lcm embed warmup`
+and `/lcm embed backfill --apply` there to build its separate unprefixed corpus.
+After re-upgrade, restore your prefix settings, restart Hermes, and run warmup and
+backfill again (for chunks, add `--corpus chunks --confirm-raw-text` and your policy).
+
+Prefix testers upgrading from v0.29.0-rc1 must run those steps before another rollback.
+Warmup archives and retires the old revision-only profiles and backfill re-embeds
+their sources under the new identities; possibly mixed rc1 vectors are never reused.
+Retirement changes only profile metadata; historical derived vector rows, raw messages
+and the summary DAG remain untouched. Prefix-unset installations keep their identities.
+
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
 best-effort git identity:

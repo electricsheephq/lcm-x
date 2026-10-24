@@ -150,7 +150,7 @@ def test_set_identity_digest(provider_name, task, pair, tmp_path, monkeypatch):
         actual = store.register_profile("prefix-test", provider_name, 2, task=task,
                                         revision_suffix=provider.identity_revision_suffix)
         expected = EmbeddingIdentity.canonical(
-            provider_name, "prefix-test", "+prefix:" + digest(*pair), 2, "float32", "little", task,
+            provider_name, "prefix-test", "+prefix:" + digest(*pair), 2, "float32", "little", task + "+prefix",
         )
         assert actual == expected.identity_hash
         assert captured(store, provider_name, task) == expected
