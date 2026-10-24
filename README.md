@@ -233,15 +233,29 @@ From an existing checkout, install a symlink:
 HERMES_PROFILE=myprofile ./scripts/install.sh
 ```
 
+The installer requires canonical lowercase, unpadded ASCII profile names
+(1–64 letters/digits, with `_` or `-` allowed after the first character).
+Use `HERMES_PROFILE=default ./scripts/install.sh` for `Default`, or
+`HERMES_PROFILE=work ./scripts/install.sh` for padded `Work`. Other spellings
+are refused before links or host calls; the native Hermes CLI still accepts its aliases.
+
 Run `scripts/install.sh` even when the checkout already lives at the canonical
 plugin path. It leaves that checkout in place and exposes the bundled
 `hermes-lcm` skill in the matching global/profile `skills/` directory. The
 installer preflights both paths and refuses conflicts before creating links.
 When it finds a pre-0.24 install (`plugins/hermes-lcm`, or a `config.yaml` that
 enables `hermes-lcm` / selects `context.engine: lcm`), it prints the migration
-steps below. It never edits `config.yaml` and never deletes the old directory.
+steps below and never deletes the old directory. With Hermes available it enables
+the core through the host (which updates `config.yaml`) and natively installs the
+optional local-embeddings companion with host-owned consent. A separate older copy
+prevents automatic core enablement until migration. `HERMES_PROFILE` selects a named
+profile; with a root-shaped home, unset or `default` selects the root, even with a sticky active profile.
+`HERMES_HOME` sets that install root. Printed host commands preserve both selections.
+A profile-shaped `HERMES_HOME=<root>/profiles/<name>` selects that profile; a conflicting `HERMES_PROFILE` is refused before links.
+Companion failure leaves a successful core install usable with full-text recall
+and prints a retry command; context-engine selection remains manual.
 
-Semantic retrieval is optional; its dependency and recovery after a host update are described in the [embedding setup doc](docs/embeddings-setup.md#a-host-update-can-remove-fastembed).
+Semantic retrieval is optional; its dependency and recovery after a host update are described in the [embedding setup doc](docs/embeddings-setup.md#install-consent-updates-and-recovery).
 
 ### Activate it
 
@@ -414,7 +428,8 @@ change the config while Hermes is stopped:
    its `skills/hermes-lcm` link). Keep it until then for rollback (a rollback
    also needs the steps in the
    [operator guide](docs/operator-guide.md#rollback)). The installer never
-   edits `config.yaml` or deletes anything.
+   deletes anything. Host-owned core enablement updates `config.yaml`, except
+   when a separate older copy requires the manual migration above first.
 
 **If the config is not updated:** Hermes logs
 `Context engine 'lcm' not found — falling back to built-in compressor` and runs

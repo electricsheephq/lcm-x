@@ -43,8 +43,20 @@ safe to run from a checkout already cloned into the canonical plugin path and
 refuses a conflicting plugin or skill path before creating either link. When it
 finds a pre-0.24 install (`plugins/hermes-lcm`, or a `config.yaml` that enables
 `hermes-lcm` / selects `context.engine: lcm`) it prints the migration steps in
-[Migrate from hermes-lcm](#migrate-from-hermes-lcm-v023x-and-earlier); it never
-edits `config.yaml` and never deletes the old directory.
+[Migrate from hermes-lcm](#migrate-from-hermes-lcm-v023x-and-earlier) and never
+deletes the old directory. With Hermes available it enables core through the host,
+which updates `config.yaml`, unless a separate older copy requires migration first.
+It installs the optional local-embeddings companion through native host consent;
+companion failure prints a retry and preserves successful core installation and
+full-text recall. Context-engine selection remains manual. `HERMES_PROFILE` selects
+the named profile; with a root-shaped home, unset or `default` explicitly selects the root, overriding sticky
+profile selection. `HERMES_HOME` sets the install root, also used in printed commands.
+A profile-shaped `HERMES_HOME=<root>/profiles/<name>` selects that profile; a conflicting `HERMES_PROFILE` is refused before links.
+The installer accepts only canonical lowercase, unpadded ASCII profile names
+(1–64 letters/digits, `_` or `-` after the first character). Use
+`HERMES_PROFILE=default ./scripts/install.sh` for `Default` and
+`HERMES_PROFILE=work ./scripts/install.sh` for padded `Work`; aliases are refused
+before links or host calls and remain available through the native Hermes CLI.
 
 ## Activate
 
@@ -1195,7 +1207,7 @@ base64-looking rows, and aggregate externalized-payload stats.
 Doctor output is metadata-only for these scans; it intentionally does not print
 raw payload previews.
 
-The `embedding_provider_health` check warns when the configured provider cannot run in this process; see the [embedding-dependency recovery note](embeddings-setup.md#a-host-update-can-remove-fastembed).
+The `embedding_provider_health` check warns when the configured provider cannot run in this process; see the [embedding-dependency recovery note](embeddings-setup.md#install-consent-updates-and-recovery).
 
 `lcm_doctor` JSON includes a top-level `guidance` array for every warning or
 failure. The slash-command text also reports `triage_guidance` for the warning

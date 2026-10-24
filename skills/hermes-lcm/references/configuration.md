@@ -43,7 +43,19 @@ The installer exposes both:
 
 It refuses conflicting paths rather than overwriting an existing install, reuses
 an existing `plugins/hermes-lcm` link to the same checkout, and prints migration
-steps for a legacy install without editing config or deleting anything.
+steps for a legacy install without deleting anything. With Hermes available, it
+enables core through the host (updating `config.yaml`) unless a separate older copy
+requires migration first. It natively installs the optional local-embeddings
+companion with host-owned consent; failure prints a retry while core stays usable
+with full-text recall. Context-engine selection remains manual. `HERMES_PROFILE`
+selects the named profile; with a root-shaped home, unset or `default` selects the root despite a sticky
+active profile. `HERMES_HOME` sets that root; printed commands preserve both choices.
+A profile-shaped `HERMES_HOME=<root>/profiles/<name>` selects that profile; a conflicting `HERMES_PROFILE` is refused before links.
+The installer requires canonical lowercase, unpadded ASCII profile names
+(1–64 letters/digits, `_` or `-` after the first character). Use
+`HERMES_PROFILE=default ./scripts/install.sh` for `Default` or
+`HERMES_PROFILE=work ./scripts/install.sh` for padded `Work`; other spellings are
+refused before links or host calls. Native Hermes CLI aliases remain available.
 
 ## High-impact controls
 
