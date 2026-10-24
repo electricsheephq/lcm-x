@@ -70,6 +70,7 @@ def test_shipped_rollups_rollback(
     try:
         bind(engine)
         seed_history(engine, "candidate")
+        assert engine.drain_embedding_maintenance(timeout=10)
         rebuild_rollup(engine)
         if policy == "fleet":
             assert engine.drain_embedding_maintenance(timeout=10)
