@@ -205,7 +205,7 @@ class Qualification:
         self.run(home, ["git", "-C", str(self.fixture), "checkout", "-b", "qualification-update"])
 
     def install(self, home: Path, route: str, *, tty: bool = True, decline: bool = False) -> str:
-        home.mkdir(parents=True)
+        home.mkdir(parents=True, exist_ok=True)
         if route == "installer":
             text = self.run(home, ["bash", str(REPO / "scripts/install.sh")], tty=tty, decline=decline)
         else:

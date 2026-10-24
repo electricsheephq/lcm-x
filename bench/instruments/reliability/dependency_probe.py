@@ -42,19 +42,23 @@ def main() -> None:
         import os
         from pm.install import ensure
         from pm.paths import store_root
+        from pm.store import Store
         assert os.environ.get("LCM_1186_HOSTED") == "1", "hosted CI only"
         expected = {"python": "0ab3305457051cd3e7c031857e005f1bda17c218a1990567dacaaac6dd1d14f0",
                     "uv": "600cf9a742aca00d292673b16b5acffaa7b8c269a364ad0c2e79498dcb1fe101"}
         lock = json.loads((Path(__import__("pm").__file__).parent / "lock.json").read_text())
         for name, digest in expected.items():
             assert lock["packages"][name]["artifacts"]["linux-x64"]["sha256"] == digest
-        for name in expected:
-            ensure(name, explicit=True)
         verified = []
+        store = Store(store_root())
         for name, digest in expected.items():
-            archives = list((store_root() / f"fetch-{digest}").iterdir())
-            assert len(archives) == 1
-            assert hashlib.sha256(archives[0].read_bytes()).hexdigest() == digest
+            artifact = lock["packages"][name]["artifacts"]["linux-x64"]
+            with store.scratch() as scratch:
+                archive = store.fetch(artifact["url"], digest, scratch)
+                assert hashlib.sha256(archive.read_bytes()).hexdigest() == digest
+            # Host ensure consumes the verified fetch entry and removes its
+            # archive after publication; hash before use, not after cleanup.
+            ensure(name, explicit=True)
             verified.append({"tool": name, "sha256": digest, "verified": True})
         print(json.dumps({"archives": verified}))
         return
