@@ -84,7 +84,7 @@ class EntityBridgeMachine(RuleBasedStateMachine):
         if len(events := self.store.events_after()) == before:
             return
         override = json.loads(events[-1]["payload_json"])["override"]
-        if owner is not None:
+        if override["global_override"] and owner is not None:
             for source in set(override["scope_store_ids"]) & self.evaluated:
                 assert self.gates.get(source) == (owner, True, True), ("failed-source citation", override, self.gates)
 
@@ -156,7 +156,7 @@ def test_entity_bridge_stateful(tmp_path):
     run_state_machine_as_test(lambda: EntityBridgeMachine(tmp_path / f"example-{next(sequence)}"), settings=PROFILE)
 
 
-def test_scoped_override_after_empty_rebuild_never_cites_failed_source(bridge):
+def test_scoped_override_after_empty_rebuild_cites_only_named_source_and_owner(bridge):
     """Shrunk machine case: publish; rebuild(dropped); scoped override(owner)."""
     api, ops, store, _, _ = bridge
     owner, sister, pin = [ops.create_entity(name) for name in ("owner", "sister", "pin")]
@@ -167,4 +167,12 @@ def test_scoped_override_after_empty_rebuild_never_cites_failed_source(bridge):
     assert list(store.connection.iterdump()) == before  # No durable gate snapshot exists.
     ops.override_key("person:sister", pin, owner_entity_id=owner, scope_store_ids=[source])
     override = json.loads(store.events_after()[-1]["payload_json"])["override"]
-    assert source not in override["scope_store_ids"]
+    assert override["scope_store_ids"] == [source]
+    sibling = publish(bridge, "person:sister")
+    other_owner = ops.create_entity("other owner")
+    assert api.resolve_key(store, "person:sister", source, owner_entity_id=owner) == pin
+    assert api.resolve_key(store, "person:sister", sibling, owner_entity_id=owner) is None
+    assert api.resolve_key(store, "person:sister", source, owner_entity_id=other_owner) is None
+    assert api.resolve_key(store, "person:sister", source) is None
+    rebuild(bridge, sender_lookup={}.get)
+    assert api.resolve_key(store, "person:sister", source, owner_entity_id=owner) == pin
