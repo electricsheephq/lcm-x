@@ -7,7 +7,7 @@
   "owner_lane": "1186-s1-dependency",
   "claim_class": "advisory",
   "created": "2026-10-24T11:27:02Z",
-  "settled": "2026-10-24T11:27:03Z",
+  "settled": "2026-10-24T11:34:35Z",
   "code": {
     "repo": "electricsheephq/lcm-x",
     "sha": "af7994c5d631f0d95e80789069aa3481dd920b2a",
@@ -40,14 +40,20 @@
     {
       "path": "SCANNER-FLAGS.md",
       "role": "receipt",
-      "sha256": "d7e21cee80cfc857143ec46784e460d9e8aa97fbe9505f44bc6a45244f8f6c91",
-      "bytes": 16731
+      "sha256": "4048cb3c5ca3cb0c2fd4ef6dad16bc4e28a451806956fecfc0e79eb37aab64af",
+      "bytes": 16860
     },
     {
       "path": "rescore.py",
       "role": "receipt",
       "sha256": "deec616a2595fd4f5159906a1ffcd6e9f6099503ce84a319efca1d53180393ed",
       "bytes": 731
+    },
+    {
+      "path": "REVIEW-r3.md",
+      "role": "receipt",
+      "sha256": "1e20cd6a56e5d4526c56697300c8da153502b3fbca0f25f0bdf917fda78dcdeb",
+      "bytes": 2374
     }
   ],
   "rescore": {
@@ -64,6 +70,7 @@
   ],
   "keep": [
     "RESULT.md",
+    "REVIEW-r3.md",
     "SCANNER-FLAGS.md",
     "arms",
     "arms/dependency-1186-upstream-main-native/rebuild-measurements.json",

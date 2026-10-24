@@ -1,9 +1,11 @@
 # Core development-checkout scanner flags
 
-Hosts: reference `f97608f178d1ffeca59860195ab7da295f7c8e5f` and PM `6f7a7991bb069db07ae74a479823ce8310f8c7e0`. Both default scanners returned dangerous and identical file/rule pairs.
-Candidate merge tree `939a5e59b5064004420483a9c777fdf71646470c` from hosted [run 40088911604](https://github.com/electricsheephq/lcm-x/actions/runs/40088911604), PR head `dda050688c53d14db533e010bfcb044b244df206`.
+Exact hosts: reference `f97608f178d1ffeca59860195ab7da295f7c8e5f` and PM `6f7a7991bb069db07ae74a479823ce8310f8c7e0`.
+Candidate merge tree `af7994c5d631f0d95e80789069aa3481dd920b2a`, PR head `4be7e931d4e1a3450114fda4c57ad0ff39e9e761`, [hosted run40089321305](https://github.com/electricsheephq/lcm-x/actions/runs/40089321305).
 
-Default scanner enabled; verdict **dangerous**. File/rule metadata only; repeated matches grouped. This records scanner output, not a finding that these files are malicious. The supported core routes remain catalog and install.sh. The S1-C.3 scanner-off exception is used only for synthetic native core installation; companion scanner remains on.
+Both default scanners were enabled and returned **dangerous**, with identical file/rule pairs. Repeated matches are grouped below. This is scanner metadata, not a claim that the files are malicious. No source content is included.
+
+The S1-C.3 scanner-off exception is confined to synthetic native core installation. Every companion install retains scanning and passed safe. The PM unattended core update (b) remains blocked by its default scan; no update exception was assumed. Supported core routes remain catalog and install.sh under the ruling.
 
 | File | Rule(s) |
 | --- | --- |
