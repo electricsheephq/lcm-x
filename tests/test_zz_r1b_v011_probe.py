@@ -79,7 +79,8 @@ def test_zz_r1b_v011_trusted_vs_principal_owner_none(env):
     api, store, s, uma, martha, jones = setup(env, True)
     trusted = api.resolve_key(store, "person:mom", s)
     principal = api.resolve_key(store, "person:mom", s, access_scope="P2", principal_is_owner=False)
-    print("owner=None trusted", trusted, "principal", principal, "jones", jones)
+    assert trusted is None
+    assert principal is None
 
 
 def test_zz_r1b_v011_owner_principal_sees_relation_control(env):
