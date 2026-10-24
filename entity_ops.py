@@ -736,12 +736,15 @@ def resolve_key(store, subject_key, store_id, *, owner_entity_id=None,
         events, undone, _, _ = _history(store)
         for override in reversed(_overrides(events, undone)):
             if (override["subject_key"], override["owner_entity_id"]) == (subject_key, owner_entity_id) and store_id in override["scope_store_ids"]:
+                target = view["canonical"].get(override["entity_id"])
+                if not _override_compatible(view, subject_key, target):
+                    # Superseded choices stay superseded; use the alias fallback.
+                    break
                 if override["global_override"] and owner_entity_id is not None and not any(
                         (r["subject_key"], r["owner_entity_id"], r["method"]) == (subject_key, owner_entity_id, "override")
                         and store_id in json.loads(r["source_store_ids"]) for r in _active_keys(store)):
-                    continue
-                target = view["canonical"].get(override["entity_id"])
-                return target if _override_compatible(view, subject_key, target) else None
+                    break
+                return target
         rows = [r for r in view.get("keys", []) if (r["subject_key"], r["owner_entity_id"], r["method"]) ==
                 (subject_key, owner_entity_id, "alias_match") and store_id in r["source_store_ids"]]
         if owner_entity_id is not None and not rows:

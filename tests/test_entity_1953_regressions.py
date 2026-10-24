@@ -155,6 +155,40 @@ def test_item6_incompatible_latest_override_does_not_revive_older(bridge, scoped
     assert api.resolve_key(store, "person:alex", source) == newer
 
 
+@pytest.mark.parametrize("owned", [False, True])
+@pytest.mark.parametrize("scopes", [(True, False), (False, True), (False, False), (True, True)])
+def test_item6_latest_incompatible_override_uses_alias_fallback(bridge, owned, scopes):
+    api, ops, store, _, _ = bridge
+    original, older, newer = [ops.create_entity(name) for name in
+                              ("Alias target", "Older choice", "Newer choice")]
+    owner = ops.create_entity("Owner") if owned else None
+    key = "person:sister" if owned else "person:alex"
+    source = publish(bridge, key)
+    if owned:
+        ops.add_alias(original, "sister", "relation_phrase", owner_entity_id=owner)
+    else:
+        ops.add_alias(original, "alex")
+
+    def lookup(sid):
+        return (owner, True, True) if owned else None
+
+    rebuild(bridge, sender_lookup=lookup)
+    assert api.resolve_key(store, key, source, owner_entity_id=owner) == original
+    for target, scoped in zip((older, newer), scopes):
+        ops.override_key(key, target, owner_entity_id=owner,
+                         scope_store_ids=[source] if scoped else None)
+    assert api.resolve_key(store, key, source, owner_entity_id=owner) == newer
+    change = ops.change_kind(newer, "org")
+    before = api.resolve_key(store, key, source, owner_entity_id=owner)
+    rebuild(bridge, sender_lookup=lookup)
+    after = api.resolve_key(store, key, source, owner_entity_id=owner)
+    # ADR D6: without a compatible override, the unique compatible alias answers.
+    assert (before, after) == (original, original)
+    ops.undo(change)
+    rebuild(bridge, sender_lookup=lookup)
+    assert api.resolve_key(store, key, source, owner_entity_id=owner) == newer
+
+
 @pytest.mark.parametrize("scoped", [False, True])
 def test_item7_relation_requires_owner_before_override_replay(bridge, scoped):
     api, ops, store, _, _ = bridge
