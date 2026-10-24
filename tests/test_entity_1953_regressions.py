@@ -228,3 +228,61 @@ def test_item9_import_guard_ignores_generated_trees(tmp_path, directory):
     module.parent.mkdir(parents=True)
     module.write_text("print 'python two'\n")
     assert_no_production_imports(tmp_path)
+
+
+@pytest.mark.parametrize("restore", ["person", "other", "topic", "undo"])
+@pytest.mark.parametrize("shape", ["owned_global", "owned_scoped_then_global", "owned_global_global",
+                                   "owned_scoped", "unowned_global"])
+def test_item6_recompatible_override_same_sender_rebuild(bridge, shape, restore):
+    """Permanent reviewer recompat shapes: restoration is checked BEFORE rebuild."""
+    api, ops, store, _, _ = bridge
+    original, older, newer = [ops.create_entity(name) for name in ("S", "A", "B")]
+    owned = shape.startswith("owned")
+    owner = ops.create_entity("Owner") if owned else None
+    key = "person:sister" if owned else "person:alex"
+    source = publish(bridge, key)
+    if owned:
+        ops.add_alias(original, "sister", "relation_phrase", owner_entity_id=owner)
+    else:
+        ops.add_alias(original, "alex")
+    def lookup(sid):
+        return (owner, True, True) if owned else None
+    rebuild(bridge, sender_lookup=lookup)
+    if shape in {"owned_scoped_then_global", "owned_global_global"}:
+        ops.override_key(key, older, owner_entity_id=owner,
+                         scope_store_ids=[source] if shape == "owned_scoped_then_global" else None)
+    ops.override_key(key, newer, owner_entity_id=owner,
+                     scope_store_ids=[source] if shape == "owned_scoped" else None)
+    change = ops.change_kind(newer, "org")
+    rebuild(bridge, sender_lookup=lookup)
+    assert api.resolve_key(store, key, source, owner_entity_id=owner) == original
+    if restore == "undo":
+        ops.undo(change)
+    else:
+        ops.change_kind(newer, restore)
+    before = api.resolve_key(store, key, source, owner_entity_id=owner)
+    rebuild(bridge, sender_lookup=lookup)
+    after = api.resolve_key(store, key, source, owner_entity_id=owner)
+    rebuild(bridge, sender_lookup=lookup)
+    assert (before, after, api.resolve_key(store, key, source, owner_entity_id=owner)) == (newer,) * 3
+
+
+@pytest.mark.parametrize("seed,member,restore", [(2169, 1, "topic"), (1951, 2, "other")])
+def test_item6_minimized_recompatible_seed(bridge, seed, member, restore):
+    """Port the reviewer's minimized eight-op traces, not its scratch generator."""
+    api, ops, store, _, _ = bridge
+    owner = ops.create_entity("O1")
+    targets = [ops.create_entity(f"T{i}") for i in range(3)]
+    source = publish(bridge, "person:sister")
+    ops.add_alias(targets[0], "sister", "relation_phrase", owner_entity_id=owner)
+    def lookup(sid):
+        return owner, True, True
+    rebuild(bridge, sender_lookup=lookup)
+    ops.override_key("person:sister", targets[member], owner_entity_id=owner)
+    ops.change_kind(targets[member], "org")
+    rebuild(bridge, sender_lookup=lookup)
+    ops.change_kind(targets[member], restore)
+    before = api.resolve_key(store, "person:sister", source, owner_entity_id=owner)
+    rebuild(bridge, sender_lookup=lookup)
+    after = api.resolve_key(store, "person:sister", source, owner_entity_id=owner)
+    assert (before, after) == (targets[member], targets[member]), seed
