@@ -573,8 +573,11 @@ def _active_keys(store):
 
 def _owner_alias_rows(store, subject, owner):
     return [dict(r) for r in store.connection.execute(
-        "SELECT * FROM lcm_entity_keys WHERE scope_key=? AND subject_key=? "
-        "AND owner_entity_id=? AND method='alias_match' ORDER BY rowid DESC",
+        "SELECT a.* FROM lcm_entity_keys a WHERE scope_key=? AND subject_key=? "
+        "AND owner_entity_id=? AND method='alias_match' AND (retired_at IS NULL OR EXISTS ("
+        "SELECT 1 FROM lcm_entity_keys o WHERE o.scope_key=a.scope_key AND o.subject_key=a.subject_key "
+        "AND o.owner_entity_id=a.owner_entity_id AND o.method='override' AND o.retired_at IS NULL)) "
+        "ORDER BY a.rowid DESC",
         (store.scope_key, subject, owner))]
 
 
@@ -587,7 +590,7 @@ def rebuild_entity_keys(store, *, sender_lookup=None, profile_entities=None):
     """Reconcile the derived index without appending memory events."""
     with store.transaction():
         sources = _key_sources(store)
-        view, desired = resolved_view(store), {}
+        view, desired, owner_sources = resolved_view(store), {}, {}
         profiles = profile_entities(store) if profile_entities else None
         for subject, source in sources:
             namespace, _, value = subject.partition(":")
@@ -598,6 +601,7 @@ def rebuild_entity_keys(store, *, sender_lookup=None, profile_entities=None):
                 sender = sender_lookup(source) if sender_lookup else None
                 if sender and sender[1] and sender[2] and sender[0] in view["canonical"]:
                     owner = sender[0]
+                    owner_sources.setdefault((subject, owner), set()).add(source)
                     candidates = [view["canonical"][owner]] if namespace == "user" else _key_candidates(view, subject, owner)
                 elif namespace != "user" or not profiles:
                     candidates = []
@@ -614,9 +618,15 @@ def rebuild_entity_keys(store, *, sender_lookup=None, profile_entities=None):
                 continue
             subject, owner = override["subject_key"], override["owner_entity_id"]
             bound = {source for key, source in sources if key == subject} & set(override["scope_store_ids"])
+            if owner is not None:
+                bound &= owner_sources.get((subject, owner), set())
             target = view["canonical"].get(override["entity_id"])
             if bound and target in view["cards"]:
                 alias = alias_desired.get((subject, owner))
+                # Sender attribution can change even when aliases no longer resolve.
+                prior = _owner_alias_rows(store, subject, owner)[:1] if owner is not None else []
+                if alias is None and prior:
+                    alias = [prior[0]["entity_id"], "alias_match", owner_sources[(subject, owner)]]
                 # Keep the owner/source derivation even while the unique active
                 # slot holds an override. Uncited evidence still uses aliases.
                 if owner is not None and alias and not any(
@@ -661,6 +671,10 @@ def resolve_key(store, subject_key, store_id, *, owner_entity_id=None,
         events, undone, _, _ = _history(store)
         for override in reversed(_overrides(events, undone)):
             if (override["subject_key"], override["owner_entity_id"]) == (subject_key, owner_entity_id) and store_id in override["scope_store_ids"]:
+                if override["global_override"] and owner_entity_id is not None and not any(
+                        (r["subject_key"], r["owner_entity_id"], r["method"]) == (subject_key, owner_entity_id, "override")
+                        and store_id in json.loads(r["source_store_ids"]) for r in _active_keys(store)):
+                    continue
                 target = view["canonical"].get(override["entity_id"])
                 return target if target in view["cards"] else None
         rows = [r for r in view.get("keys", []) if (r["subject_key"], r["owner_entity_id"], r["method"]) ==
