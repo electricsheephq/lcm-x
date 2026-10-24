@@ -233,3 +233,120 @@ def test_guard_from_same_tree(tmp_path):
     assert d.guard_from(root) is g
     with pytest.raises(ValueError, match="STOP: instruments import outside bound tree"):
         d.guard_from(tmp_path)
+
+
+@pytest.mark.parametrize("role", ["answererProvenance", "judgeProvenance"])
+@pytest.mark.parametrize("field,value", [
+    ("model", "executing-model"), ("configuredModel", "configured-model"),
+    ("provider", "openai"), ("reasoningEffort", "high"), ("transport", "codex-cli"),
+    ("transportVersion", "1.0"), ("modelExplicit", True), ("serviceTier", "priority"),
+    ("isolated", True), ("modelPinSource", "explicit-cli-argv"),
+    ("eventUsageCapture", "codex-jsonl"), ("eventModelField", "not-emitted-by-codex-jsonl"),
+    ("tokenizerModel", "tokenizer"), ("executionIdentityCount", 1),
+    ("mixedExecutionIdentity", False), ("callLedgerComplete", True),
+])
+@pytest.mark.parametrize("source", ["report", "checkpoint"])
+def test_execution_provenance_mismatch(run, role, field, value, source):
+    report, cp = fixture()
+    report["evaluations"][0]["recallHealth"] = BAD
+    report[role] = {field: value}
+    cp[role] = {field: value}
+
+    def change(rr, cc):
+        (rr if source == "report" else cc)[role][field] = "changed"
+
+    with pytest.raises(ValueError, match=r"STOP: .*" + role + r"\." + field):
+        run.apply(report, cp, mutate=change)
+    assert not run.out.exists()
+
+
+@pytest.mark.parametrize("field", [
+    "datasetPath", "datasetSha256", "promptVersion", "readerPromptVersion",
+    "scoringPath", "answerPresentationMode",
+])
+def test_dataset_scorer_pin_mismatch(run, field):
+    report, cp = fixture()
+    report["evaluations"][0]["recallHealth"] = BAD
+    report[field] = cp[field] = "original"
+    with pytest.raises(ValueError, match="STOP: .*" + field):
+        run.apply(report, cp, mutate=lambda rr, cc: cc.update({field: "changed"}))
+
+
+@pytest.mark.parametrize("recorded_attempt", ["first", "replacement"])
+def test_provenance_present_on_only_one_attempt(run, recorded_attempt):
+    report, cp = fixture()
+    report["evaluations"][0]["recallHealth"] = BAD
+    if recorded_attempt == "first":
+        report["answererProvenance"] = {"model": "reader"}
+
+    def change(rr, cc):
+        rr.pop("answererProvenance", None)
+        if recorded_attempt == "replacement":
+            cc["answererProvenance"] = {"model": "reader"}
+
+    with pytest.raises(ValueError, match=r"STOP: .*answererProvenance\.model"):
+        run.apply(report, cp, mutate=change)
+
+
+def test_matching_provenance_with_subset_counters(run):
+    report, cp = fixture(2)
+    report["evaluations"][0]["recallHealth"] = BAD
+    report["answererProvenance"] = cp["answererProvenance"] = {
+        "model": "reader", "reasoningEffort": "high", "callCount": 2, "retryCount": 1}
+    for field in ("questionSetSha256", "normalizedInputsSha256", "loaderOrderSha256"):
+        report[field] = cp[field] = "full-population"
+
+    def subset(rr, cc):
+        for doc in (rr, cc):
+            doc["answererProvenance"].update(callCount=1, retryCount=0)
+            for field in ("questionSetSha256", "normalizedInputsSha256", "loaderOrderSha256"):
+                doc[field] = "selected-population"
+
+    receipt, merged = run.apply(report, cp, mutate=subset)
+    assert receipt["status"] == "COMPLETE"
+    assert merged["answererProvenance"]["model"] == "reader"
+
+
+@pytest.mark.parametrize("marker", ["report-id", "checkpoint-id", "checkpoint-marker", "merged-report"])
+def test_replacement_input_stops_before_command(run, monkeypatch, marker):
+    report, cp = fixture()
+    report["evaluations"][0]["recallHealth"] = BAD
+    if marker.endswith("-id"):
+        (report if marker == "report-id" else cp)["runId"] += "-health-rerun1"
+    else:
+        (cp if marker == "checkpoint-marker" else report)["healthReplacement"] = {}
+
+    def no_command(*args, **kwargs):
+        pytest.fail("replacement command built for replacement input")
+
+    monkeypatch.setattr(d, "replacement_command", no_command)
+    with pytest.raises(ValueError, match="STOP: input is already a health replacement"):
+        run.apply(report, cp)
+    assert run.calls == []
+    assert not run.out.exists()
+
+
+@pytest.mark.parametrize("healthy", [True, False])
+def test_writer_category_aggregates_follow_merged_rows(run, healthy):
+    pair = FIXTURES.parent / "d8_writer_pair/a"
+    report = json.loads((pair / "report.json").read_text())
+    cp = json.loads((pair / "checkpoint.json").read_text())
+    report["runId"] = cp["runId"] = "X"
+    row = report["evaluations"][1]
+    row.update(score=int(not healthy), label="incorrect" if healthy else "correct", recallHealth=BAD)
+    report["byQuestionType"]["knowledge-update"].update(correct=int(not healthy), accuracy=int(not healthy))
+    def timings(rr, cc):
+        rr["evaluations"][0].update(searchDurationMs=25, answerDurationMs=50, totalDurationMs=100,
+                                    retrievalMetrics={key: 1 for key in
+                                        ("hitAtK", "precisionAtK", "recallAtK", "f1AtK", "mrr", "ndcg", "k")})
+
+    _, merged = run.apply(report, cp, replacement_health=HEALTH if healthy else BAD, mutate=timings)
+    category = merged["byQuestionType"]["knowledge-update"]
+    assert category["correct"] == int(healthy)
+    assert category["accuracy"] == float(healthy)
+    assert category["total"] == 1
+    assert category["latency"]["search"] == {
+        "min": 25, "max": 25, "mean": 25, "median": 25, "p95": 25, "p99": 25, "stdDev": 0, "count": 1}
+    assert category["retrieval"]["hitAtK"] == 1
+    assert "latency" not in merged
+    assert merged["aggregatesRemoved"] == ["latency"]

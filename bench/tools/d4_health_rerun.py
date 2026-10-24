@@ -6,6 +6,7 @@ import copy
 import hashlib
 import importlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -56,6 +57,50 @@ def outside_recall_error(question, row, guard):
             row.get("explanation") == "Failed to parse judge response")
 
 
+def check_provenance(first, second, guard):
+    # These hashes describe the selected subset; counters describe its call volume.
+    subset = {"questionSetSha256", "normalizedInputsSha256", "loaderOrderSha256"}
+    fields = set(guard.IDENTITY_FIELDS) - subset
+    for role in ("answererProvenance", "judgeProvenance"):
+        fields.update(role + "." + key for doc in (*first, *second)
+                      for key in (doc.get(role) or {}) if key not in {"callCount", "retryCount"})
+    def values(docs, field):
+        found = []
+        for doc in docs:
+            value = doc
+            for key in field.split("."):
+                value = value.get(key) if isinstance(value, dict) else None
+            if value is not None:
+                found.append(canonical(value))
+        return found
+    for field in sorted(fields | subset):
+        a, b = values(first, field), values(second, field)
+        if (field not in subset and bool(a) != bool(b)) or len(set(a + b if field not in subset else a)) > 1 or len(set(b)) > 1:
+            raise ValueError("STOP: replacement provenance mismatch: " + field)
+
+
+def category_stats(rows):
+    def latency(values):
+        v = sorted(x for x in values if x)
+        n, mean = len(v), sum(v) / len(v) if v else 0
+        return dict(min=v[0] if v else 0, max=v[-1] if v else 0, mean=math.floor(mean + .5),
+                    median=v[len(v)//2] if v else 0, p95=v[min(math.floor(n*.95), n-1)] if v else 0,
+                    p99=v[min(math.floor(n*.99), n-1)] if v else 0,
+                    stdDev=math.floor(math.sqrt(sum((x-mean)**2 for x in v)/n) + .5) if v else 0, count=n)
+    result = {}
+    for kind in dict.fromkeys(r.get("questionType") for r in rows):
+        group = [r for r in rows if r.get("questionType") == kind]
+        correct = sum(r.get("score") == 1 for r in group)
+        result[kind] = dict(total=len(group), correct=correct, accuracy=correct/len(group), latency={
+            phase: latency(r.get(phase + "DurationMs", 0) for r in group) for phase in ("search", "answer", "total")})
+        metrics = [r["retrievalMetrics"] for r in group if r.get("retrievalMetrics")]
+        if metrics:
+            result[kind]["retrieval"] = {key: sum(m[key] for m in metrics)/len(metrics)
+                                        for key in ("hitAtK", "precisionAtK", "recallAtK", "f1AtK", "mrr", "ndcg")}
+            result[kind]["retrieval"]["k"] = metrics[-1]["k"]
+    return result
+
+
 def process(report_path, checkpoint_path, output, receipt_path, config, guard,
             bridge, *, workers=4, execute=None):
     report_path, checkpoint_path, output, receipt_path = map(
@@ -64,6 +109,8 @@ def process(report_path, checkpoint_path, output, receipt_path, config, guard,
         raise ValueError("STOP: output/receipt already exists")
     original = {str(p): digest(p) for p in (report_path, checkpoint_path)}
     r1, cp = (json.loads(p.read_text()) for p in (report_path, checkpoint_path))
+    if any(str(doc.get("runId", "")).endswith("-health-rerun1") or "healthReplacement" in doc for doc in (r1, cp)):
+        raise ValueError("STOP: input is already a health replacement")
     receipt = {"status": "INCOMPLETE", "inputs": original, "replacement_command": None}
     def finish(status, merged=None):
         receipt["status"] = status
@@ -140,6 +187,7 @@ def process(report_path, checkpoint_path, output, receipt_path, config, guard,
         for key in ("provider", "benchmark", "judge", "answeringModel", "recallConfig"):
             if cp2.get(key) != r1[key] or replacement.get(key) != r1[key]:
                 raise ValueError("STOP: replacement identity mismatch: " + key)
+        check_provenance((r1, cp), (replacement, cp2), guard)
         if cp2.get("status") != "completed":
             receipt["reason"] = "partial_replacement_no_second_attempt"
             return finish("INCOMPLETE")
@@ -170,6 +218,16 @@ def process(report_path, checkpoint_path, output, receipt_path, config, guard,
         ("inputs", "selected_ids", "still_unhealthy", "degradedReasons", "replacement_checkpoint", "replacement_checkpoint_sha256") if k in receipt}
     merged["summary"] = {"totalQuestions": len(ids), "correctCount": sum(r.get("score") == 1 for r in merged_rows.values())}
     merged["summary"]["accuracy"] = merged["summary"]["correctCount"] / len(ids)
+    if "byQuestionType" in merged:
+        merged["byQuestionType"] = category_stats(merged["evaluations"])
+    if "retrieval" in merged:
+        merged["retrieval"] = category_stats([dict(r, questionType="all") for r in merged["evaluations"]])["all"].get("retrieval")
+    # The report rows lack ingest/indexing/evaluate durations and token/call ledgers.
+    removed = [key for key in ("latency", "tokens", "memscore", "memscoreComponents", "cliLedger") if key in merged]
+    for key in removed:
+        del merged[key]
+    if removed:
+        merged["aggregatesRemoved"] = removed
     return finish("INCONCLUSIVE" if len(remaining) * 100 > len(ids) else "COMPLETE", merged)
 
 
