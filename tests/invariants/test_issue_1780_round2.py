@@ -9,11 +9,12 @@ from types import SimpleNamespace
 import pytest
 
 from tests.harness import engine_context
+from tests.invariants.host_uid_fixtures import non_uid_host
 from tests.invariants.test_issue_1519_alias_uid_conflict import (
     CASES, TEXT, bindings, deterministic_host, digest, message, prepare, rows, targets,
 )
 
-__all__ = ["deterministic_host"]
+__all__ = ["deterministic_host", "non_uid_host"]
 BASE_BYTES = json.loads((Path(__file__).parents[1] / "fixtures/issue_1519_observational_base.json").read_text())["cases"]
 
 

@@ -22,16 +22,51 @@ def test_flag_off_schema_and_turn_path(tmp_path):
         assert engine._entities is None
     finally:
         engine.shutdown()
-    root = Path(__file__).resolve().parents[1]
-    for path in root.glob("*.py"):
-        if path.name == "entity_ops.py":
+    assert_no_production_imports(Path(__file__).resolve().parents[1])
+
+
+def assert_no_production_imports(root):
+    """Recursively reject every static/dynamic production import of the dark API."""
+    for path in root.rglob("*.py"):
+        if "tests" in path.relative_to(root).parts:
             continue
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
-                assert node.module != "entity_ops", path
+                assert "entity_ops" not in (node.module or "").split("."), path
+                assert not any(n.name == "entity_ops" for n in node.names), path
             elif isinstance(node, ast.Import):
-                assert not any(n.name.endswith("entity_ops") for n in node.names), path
+                assert not any("entity_ops" in n.name.split(".") for n in node.names), path
+            elif isinstance(node, ast.Call) and (getattr(node.func, "attr", None) == "import_module"
+                                                or getattr(node.func, "id", None) == "import_module"):
+                assert not any(isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                               and "entity_ops" in arg.value.split(".")
+                               for arg in node.args + [keyword.value for keyword in node.keywords]), path
+
+
+@pytest.mark.parametrize("form", [
+    "import hermes_lcm.entity_ops", "from hermes_lcm.entity_ops import EntityOps",
+    "from hermes_lcm import entity_ops", "from . import entity_ops",
+    "from .entity_ops import EntityOps", "importlib.import_module('hermes_lcm.entity_ops')",
+    "import_module('.entity_ops', package='hermes_lcm')",
+    "import_module(name='hermes_lcm.entity_ops')",
+    "importlib.import_module(name='.entity_ops', package='hermes_lcm')",
+])
+@pytest.mark.parametrize("nested", [False, True])
+def test_every_production_import_form_is_killed(tmp_path, form, nested):
+    module = tmp_path / ("nested/module.py" if nested else "module.py")
+    module.parent.mkdir(exist_ok=True)
+    production = Path(__file__).resolve().parents[1] / "entity_store.py"
+    module.write_text(production.read_text() + "\n" + form + "\n")
+    with pytest.raises(AssertionError):
+        assert_no_production_imports(tmp_path)
+
+
+def test_import_guard_excludes_test_tree(tmp_path):
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_consumer.py").write_text("from hermes_lcm.entity_ops import EntityOps\n")
+    assert_no_production_imports(tmp_path)
 
 
 def test_s_r4_event_only_kind_requires_trusted_reduction(tmp_path):

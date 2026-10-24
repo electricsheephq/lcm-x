@@ -21,6 +21,9 @@ import pytest
 from tests.harness import engine_context, pin_char_counter
 from tests.messages_snapshot import messages_snapshot_columns
 from tests.invariants import test_issue_1519_alias_uid_conflict as uid_fixture
+from tests.invariants.host_uid_fixtures import non_uid_host
+
+__all__ = ["non_uid_host"]
 
 
 def digest(value):

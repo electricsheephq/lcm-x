@@ -1703,7 +1703,7 @@ def _lcm_embedding_profile_revision(
     try:
         rows = conn.execute(
             "SELECT revision FROM lcm_embedding_profile "
-            "WHERE active=1 AND archived_at IS NULL AND task=? "
+            "WHERE active=1 AND archived_at IS NULL AND replace(task, '+prefix', '')=? "
             "AND provider=? AND model_name=? "
             "ORDER BY registered_at DESC, identity_hash DESC",
             (task, provider, model),
@@ -3484,7 +3484,7 @@ def _lcm_recall_catchup_reason(engine, provider, task: str) -> str | None:
             row = conn.execute(
                 "SELECT value, key FROM metadata WHERE key = ? || ("
                 "SELECT identity_hash FROM lcm_embedding_profile "
-                "WHERE model_name=? AND provider=? AND task=? "
+                "WHERE model_name=? AND provider=? AND replace(task, '+prefix', '')=? "
                 "AND CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ? "
                 "ORDER BY (active=1 AND archived_at IS NULL) DESC, "
                 "registered_at DESC, identity_hash DESC LIMIT 1)",
@@ -3918,7 +3918,7 @@ def _lcm_recall_has_usable_vector_corpus(
                 """
                 SELECT identity_hash
                 FROM lcm_embedding_profile
-                WHERE model_name = ? AND provider = ? AND task = ?
+                WHERE model_name = ? AND provider = ? AND replace(task, '+prefix', '') = ?
                   AND CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ?
                 ORDER BY (active = 1 AND archived_at IS NULL) DESC,
                          registered_at DESC, identity_hash DESC
@@ -4544,7 +4544,7 @@ def _active_embedding_profile_exists(engine: "LCMEngine") -> bool:
             """
             SELECT 1
             FROM lcm_embedding_profile
-            WHERE active = 1 AND archived_at IS NULL AND task = 'summary'
+            WHERE active = 1 AND archived_at IS NULL AND task IN ('summary', 'summary+prefix')
             LIMIT 1
             """
         ).fetchone()

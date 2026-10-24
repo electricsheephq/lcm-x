@@ -43,8 +43,20 @@ safe to run from a checkout already cloned into the canonical plugin path and
 refuses a conflicting plugin or skill path before creating either link. When it
 finds a pre-0.24 install (`plugins/hermes-lcm`, or a `config.yaml` that enables
 `hermes-lcm` / selects `context.engine: lcm`) it prints the migration steps in
-[Migrate from hermes-lcm](#migrate-from-hermes-lcm-v023x-and-earlier); it never
-edits `config.yaml` and never deletes the old directory.
+[Migrate from hermes-lcm](#migrate-from-hermes-lcm-v023x-and-earlier) and never
+deletes the old directory. With Hermes available it enables core through the host,
+which updates `config.yaml`, unless a separate older copy requires migration first.
+It installs the optional local-embeddings companion through native host consent;
+companion failure prints a retry and preserves successful core installation and
+full-text recall. Context-engine selection remains manual. `HERMES_PROFILE` selects
+the named profile; with a root-shaped home, unset or `default` explicitly selects the root, overriding sticky
+profile selection. `HERMES_HOME` sets the install root, also used in printed commands.
+A profile-shaped `HERMES_HOME=<root>/profiles/<name>` selects that profile; a conflicting `HERMES_PROFILE` is refused before links.
+The installer accepts only canonical lowercase, unpadded ASCII profile names
+(1–64 letters/digits, `_` or `-` after the first character). Use
+`HERMES_PROFILE=default ./scripts/install.sh` for `Default` and
+`HERMES_PROFILE=work ./scripts/install.sh` for padded `Work`; aliases are refused
+before links or host calls and remain available through the native Hermes CLI.
 
 ## Activate
 
@@ -302,7 +314,7 @@ On the `main` line, output with all three opt-in flags enabled is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.28.1 (16 tools)
+  ✓ hermes-lcm-x v0.29.0 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -310,7 +322,11 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. The current stable release is
+and tag. `0.29.0` is the forward identity of the next minor release: the `v0.29.0-rc1`
+tag carries it first, the gauntlet runs at the last rc tag, and the GA tree must be
+that rc tree plus the GA release-notes file. The rollback target for this candidate
+is `v0.28.1`; take a SQLite-safe backup and verify ordered messages and summary
+provenance through rollback and re-upgrade. The current stable release is
 [v0.28.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.28.1)
 at `77b2b4f795fb6a4f84c55abf6d0441da4469971e` (2026-10-20); see [project status](project-status.md).
 The rollback target for v0.28.1 is `v0.28.0`. Chunk gap-fill bookkeeping
@@ -318,6 +334,20 @@ is additive metadata, not a SQL schema migration. An old reader ignores the new
 coverage and scan records; re-upgrade revalidates short-turn coverage (#1536, #1548).
 Raw rows and FTS remain available during rollback. Keep a SQLite-safe backup and
 verify ordered messages and the summary DAG through rollback and re-upgrade.
+
+**Embedding prefixes and rollback (#1942).** After warming up on the updated build,
+prefixed identities are isolated from v0.28.1: old recall and incremental maintenance
+cannot select or write into them. During rollback, recall uses an available unprefixed
+corpus or full text. If you need semantic coverage on v0.28.1, run `/lcm embed warmup`
+and `/lcm embed backfill --apply` there to build its separate unprefixed corpus.
+After re-upgrade, restore your prefix settings, restart Hermes, and run warmup and
+backfill again (for chunks, add `--corpus chunks --confirm-raw-text` and your policy).
+
+Prefix testers upgrading from v0.29.0-rc1 must run those steps before another rollback.
+Warmup archives and retires the old revision-only profiles and backfill re-embeds
+their sources under the new identities; possibly mixed rc1 vectors are never reused.
+Retirement changes only profile metadata; historical derived vector rows, raw messages
+and the summary DAG remain untouched. Prefix-unset installations keep their identities.
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
@@ -1177,7 +1207,7 @@ base64-looking rows, and aggregate externalized-payload stats.
 Doctor output is metadata-only for these scans; it intentionally does not print
 raw payload previews.
 
-The `embedding_provider_health` check warns when the configured provider cannot run in this process; see the [embedding-dependency recovery note](embeddings-setup.md#a-host-update-can-remove-fastembed).
+The `embedding_provider_health` check warns when the configured provider cannot run in this process; see the [embedding-dependency recovery note](embeddings-setup.md#install-consent-updates-and-recovery).
 
 `lcm_doctor` JSON includes a top-level `guidance` array for every warning or
 failure. The slash-command text also reports `triage_guidance` for the warning

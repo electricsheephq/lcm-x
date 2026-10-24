@@ -117,6 +117,7 @@ def test_embedding_forward(
 @pytest.mark.parametrize("binary", (False, True), ids=("empty-binary", "populated-binary"))
 def test_embedding_rollback(
     reader: str, binary: bool, tmp_path: Path, old_tree: Callable[..., Path], host_root: Path,
+    prefix_revision: str = "",
 ) -> None:
     path = tmp_path / "lcm.db"
     with closing(SummaryDAG(path)) as dag:
@@ -124,8 +125,8 @@ def test_embedding_rollback(
             assert dag.add_node(SummaryNode(session_id="fixture", summary="synthetic", source_token_count=10,
                                             created_at=1.0, earliest_at=1.0, latest_at=1.0)) == i
     with closing(VectorStore(path, config=LCMConfig(embeddings_enabled=False))) as store:
-        store.register_profile("fixture-model", "fixture", 2)
-        identity = EmbeddingIdentity.canonical("fixture", "fixture-model", "", 2, "float32", "little", "summary")
+        profile_hash = store.register_profile("fixture-model", "fixture", 2, revision_suffix=prefix_revision)
+        identity = store._identity_from_profile(store._profile_by_identity(profile_hash))
         for key, vector in (("1", [1.0, 0.0]), ("2", [0.0, 1.0])):
             store.record_embedding(key, "summary", "fixture-model", vector, identity=identity)
         if binary:
@@ -135,8 +136,23 @@ def test_embedding_rollback(
                 "fixture", "binary-fixture-model", "", 2, "int8", "little", "summary",
             )
             store.record_embedding("1", "summary", "binary-fixture-model", [1.0, 0.0], identity=binary_identity)
-            store.register_profile("fixture-model", "fixture", 2)
+            store.register_profile("fixture-model", "fixture", 2, revision_suffix=prefix_revision)
     before = snapshot(path)
+    if prefix_revision:
+        script = '''
+store = VectorStore(db, config=LCMConfig(embeddings_enabled=False))
+assert store._resolve_profile('fixture-model', provider='fixture') is None
+assert store._current_profile() is None
+assert verify_embedding_schema(store._conn) == []
+store.close()
+print(json.dumps(True))
+'''
+        assert run_reader(old_tree(reader, EMBEDDING_READERS), tmp_path, host_root,
+                          "from hermes_lcm.vector_store import VectorStore\n"
+                          "from hermes_lcm.db_bootstrap import verify_embedding_schema\n" + script,
+                          bootstrap=OLD_EMBEDDING_BOOTSTRAP)
+        assert snapshot(path) == before
+        return
     assert run_reader(old_tree(reader, EMBEDDING_READERS), tmp_path, host_root, OLD_ROLLBACK,
                       bootstrap=OLD_EMBEDDING_BOOTSTRAP) == {
         "verifier": [], "read": 2, "after_write": 3,
@@ -181,6 +197,12 @@ def test_embedding_rollback(
                 assert current[key] == expected, (table, key)
             for key, row in expected_new[table].items():
                 assert current[key] == row, (table, key)
+
+
+@pytest.mark.parametrize("binary", (False, True), ids=("empty-binary", "populated-binary"))
+def test_embedding_rollback_prefix_revision(binary, tmp_path, old_tree, host_root):
+    test_embedding_rollback(PREVIOUS_GA, binary, tmp_path, old_tree, host_root,
+                            prefix_revision="+prefix:0123456789ab")
 
 
 def test_embedding_schema_findings_type_hints() -> None:

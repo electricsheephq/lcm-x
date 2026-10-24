@@ -2462,7 +2462,7 @@ def _embedding_current_profile(conn: sqlite3.Connection) -> sqlite3.Row | None:
             SELECT identity_hash, model_name, provider, revision, dim, dtype,
                    byteorder, task, registered_at
             FROM lcm_embedding_profile
-            WHERE active = 1 AND archived_at IS NULL AND task = 'summary'
+            WHERE active = 1 AND archived_at IS NULL AND task IN ('summary', 'summary+prefix')
             ORDER BY registered_at DESC, identity_hash DESC
             LIMIT 1
             """
@@ -4257,7 +4257,7 @@ def _chunk_current_profile(conn: sqlite3.Connection) -> sqlite3.Row | None:
             SELECT identity_hash, model_name, provider, revision, dim, dtype,
                    byteorder, task, registered_at
             FROM lcm_embedding_profile
-            WHERE active = 1 AND archived_at IS NULL AND task = 'chunk'
+            WHERE active = 1 AND archived_at IS NULL AND task IN ('chunk', 'chunk+prefix')
             ORDER BY registered_at DESC, identity_hash DESC
             LIMIT 1
             """
@@ -5547,7 +5547,7 @@ def _chunk_backfill_run(
             profile_dim,
             profile_dtype,
             str(profile["byteorder"] or "little"),
-            "chunk",
+            str(profile["task"]),
         )
         if captured_identity.identity_hash != identity:
             raise ValueError(

@@ -476,11 +476,10 @@ def _warn_if_embedding_provider_unavailable(config) -> None:
             "unavailable: %s (provider=%s, model=%s). Semantic retrieval is "
             "degraded to full-text: lcm_recall reports degraded=true and "
             "lcm_grep mode=semantic falls back to FTS. Stored history is intact "
-            "and nothing is lost. Fix what the detail names (a missing dependency "
-            "or provider credential); a dependency installed by hand, such as "
-            "fastembed, can be dropped by a Hermes update. Then run `/lcm doctor` "
-            "to confirm. No restart is needed once the dependency is present "
-            "(the import is lazy).",
+            "and nothing is lost. Follow the detail's host plugin-manager "
+            "command for the local-embeddings companion, or fix the named "
+            "provider credential. Restart Hermes after companion enable, then "
+            "run `/lcm doctor` to confirm.",
             probe.get("detail"),
             probe.get("provider"),
             probe.get("model"),
