@@ -7,12 +7,13 @@ import random
 import pytest
 
 from tests.harness import engine_context
+from tests.invariants.host_uid_fixtures import non_uid_host
 from tests.invariants.test_issue_1519_alias_uid_conflict import (
     TEXT, bindings, deterministic_host, message, prepare, targets,
 )
 
 # Register the deterministic clock/host fixture in this module too.
-__all__ = ["deterministic_host"]
+__all__ = ["deterministic_host", "non_uid_host"]
 
 _rng = random.Random(1780)
 RANDOM_UIDS = [tuple(f"{_rng.getrandbits(128):032x}" for _ in range(3)) for _ in range(24)]

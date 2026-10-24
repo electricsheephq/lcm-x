@@ -172,8 +172,17 @@ def run_old(old: Path, directory: Path, host_root: Path, script: str,
             mode: str = "read", data: str = "", *, bootstrap: str = OLD_BOOTSTRAP) -> Any:
     env = {key: value for key, value in os.environ.items() if not key.startswith("LCM_")}
     env.update(HERMES_HOME=str(directory / "home"), PYTHONDONTWRITEBYTECODE="1")
+    # The host also has a tests package. Bind ours by absolute package path,
+    # independently of cwd/PYTHONPATH, without importing this tree's product.
+    tests = Path(__file__).resolve().parents[1]
+    test_bootstrap = (
+        "import sys, types\n"
+        "_tests = types.ModuleType('tests')\n"
+        f"_tests.__path__ = [{str(tests)!r}]\n"
+        "sys.modules['tests'] = _tests\n"
+    )
     result = subprocess.run(
-        [sys.executable, "-B", "-c", bootstrap + script, str(old), str(directory / "lcm.db"),
+        [sys.executable, "-B", "-c", test_bootstrap + bootstrap + script, str(old), str(directory / "lcm.db"),
          str(directory / "home"), str(host_root), mode, str(data)],
         cwd=directory, env=env, capture_output=True, text=True, timeout=45)
     assert result.returncode == 0, result.stderr[-6000:]
