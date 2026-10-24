@@ -157,12 +157,13 @@ def test_absent_prepare_state_schedules_without_turn_model_load(recall_engine, m
     target = engine._store.append("old", {"role": "user", "content": "cobalt preserved memory"})
     scheduled = []
     monkeypatch.setattr(embedding_maintenance, "local_model_state", lambda config: None)
-    monkeypatch.setattr(embedding_maintenance, "start_local_model_prepare",
-                        lambda path, config, **kwargs: scheduled.append((path, config)) or False)
     monkeypatch.setattr(tools, "probe_provider_availability", lambda config: {"available": True})
     monkeypatch.setattr(FastembedProvider, "_ensure_local", lambda self: pytest.fail("turn model construction"))
     monkeypatch.setattr(tools, "_lcm_grep_embed_query", lambda *a, **k: pytest.fail("turn semantic query"))
-    result = json.loads(tools.lcm_recall({"query": "cobalt", "include": include}, engine=engine))
+    with monkeypatch.context() as prepare_patch:
+        prepare_patch.setattr(embedding_maintenance, "start_local_model_prepare",
+                              lambda path, config, **kwargs: scheduled.append((path, config)) or False)
+        result = json.loads(tools.lcm_recall({"query": "cobalt", "include": include}, engine=engine))
     assert len(scheduled) == 1 and str(scheduled[0][0]) == str(engine._store.db_path)
     assert result["degraded"] is True and "local model preparing" in result["degraded_reason"]
     assert result["provenance"]["coverage"]["fts"] == "ok"
