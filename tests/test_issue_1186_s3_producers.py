@@ -42,6 +42,7 @@ def test_bridge_reads_tree_default_and_records_it(bridge_module, tmp_path, monke
     result = bridge.initialize({})
     assert result["embeddings_enabled"] is enabled
     assert result["model"] == "tree-specific-model"
+    assert result["provider_source"] == "tree_default"
     assert calls == ([("fastembed", "tree-specific-model")] if enabled else [])
     assert json.loads((tmp_path / "effective-config.json").read_text())["model"] == result["model"]
     assert bridge._config(tmp_path / "store.db").embeddings_enabled is enabled
@@ -58,6 +59,37 @@ def test_bridge_reads_tree_default_and_records_it(bridge_module, tmp_path, monke
 def test_qa_caller_does_not_invent_an_explicit_arm():
     source = (BRIDGE.parents[1] / "index.ts").read_text()
     assert 'HERMES_MB_PROVIDER: process.env.HERMES_MB_PROVIDER || "fastembed"' not in source
+
+
+@pytest.mark.parametrize("preflip", [True, False], ids=["preflip-tree", "current-tree"])
+@pytest.mark.parametrize("provider,model", [(None, None), (None, "fixture-local-model"),
+                                           ("voyage", "fixture-cloud-model")],
+                         ids=["omitted", "model-only", "explicit-provider"])
+def test_bridge_constructor_preserves_input_meaning(
+        bridge_module, tmp_path, monkeypatch, preflip, provider, model):
+    """Pre-flip config API fixture; constructor only, never load a provider."""
+    if preflip:
+        original = config_module.LCMConfig
+        monkeypatch.delattr(config_module, "effective_embedding_model")
+        monkeypatch.setattr(config_module, "LCMConfig", lambda **kwargs: original(**{
+            "embeddings_enabled": False, "embedding_provider": "", "embedding_model": "", **kwargs}))
+    monkeypatch.setenv("HERMES_LCM_REPO", str(ROOT))
+    monkeypatch.setenv("HERMES_MB_WORKDIR", str(tmp_path))
+    for name, value in [("HERMES_MB_PROVIDER", provider), ("HERMES_MB_MODEL", model)]:
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    bridge = bridge_module.Bridge()
+    expected_provider = provider or ("fastembed" if model or not preflip else "")
+    expected_model = model or ("" if preflip else "BAAI/bge-small-en-v1.5")
+    assert (bridge.provider_name, bridge.model, bridge.embeddings_enabled) == (
+        expected_provider, expected_model, bool(provider or model or not preflip))
+    assert bridge.embedding_settings_explicit is bool(provider or model)
+    assert bridge.provider_source == (
+        "explicit" if provider else "model_only_historical_fastembed" if model else "tree_default")
+    assert not bridge.initialized and bridge.embedder is None
+    assert not (tmp_path / "effective-config.json").exists()
 
 
 @pytest.mark.parametrize("provider,model,enabled", [("", "", False), ("fastembed", "", True),
@@ -79,6 +111,7 @@ def test_bridge_preflip_config_api(bridge_module, tmp_path, monkeypatch, provide
     assert result["embeddings_enabled"] is enabled
     expected_model = model or ("BAAI/bge-small-en-v1.5" if provider == "fastembed" else "")
     assert result["model"] == expected_model
+    assert result["provider_source"] == ("explicit" if provider else "tree_default")
     assert calls == ([(provider, expected_model)] if enabled else [])
     assert json.loads((tmp_path / "effective-config.json").read_text()) == result
 

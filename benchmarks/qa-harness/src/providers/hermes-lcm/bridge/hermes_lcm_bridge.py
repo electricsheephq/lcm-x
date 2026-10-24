@@ -30,7 +30,7 @@ Environment:
     HERMES_LCM_REPO                path to the hermes-lcm checkout (required)
     HERMES_MB_WORKDIR              base dir for per-container LCM dbs (required)
     HERMES_MB_PROVIDER            embedding arm: tree default (omitted) | fastembed | voyage | off
-    HERMES_MB_MODEL              embedding model id (default per provider)
+    HERMES_MB_MODEL              embedding model id (alone selects historical fastembed arm)
     LCM_LONGMEMEVAL_FASTEMBED_CACHE  fastembed model cache dir
     VOYAGE_API_KEY               required when HERMES_MB_PROVIDER=voyage
 """
@@ -98,7 +98,10 @@ class Bridge:
         self.embedding_settings_explicit = bool(explicit or requested_model)
         self.embeddings_enabled = explicit not in {"off", "none"} and (
             bool(explicit or requested_model) or defaults.embeddings_enabled)
-        self.provider_name = explicit if explicit and self.embeddings_enabled else defaults.embedding_provider
+        self.provider_source = ("explicit" if explicit else
+                                "model_only_historical_fastembed" if requested_model else "tree_default")
+        self.provider_name = (explicit if explicit and self.embeddings_enabled else
+                              "fastembed" if requested_model and not explicit else defaults.embedding_provider)
         configured_model = requested_model or (
             _DEFAULT_MODELS.get(explicit, "") if explicit else defaults.embedding_model)
         resolve_model = getattr(config_module, "effective_embedding_model", None)
@@ -134,6 +137,7 @@ class Bridge:
         effective = {
             "ok": True,
             "provider": self.provider_name,
+            "provider_source": self.provider_source,
             "model": self.model,
             "dim": self.dim,
             "embeddings_enabled": self.embeddings_enabled,
