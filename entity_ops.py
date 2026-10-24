@@ -668,6 +668,12 @@ def rebuild_entity_keys(store, *, sender_lookup=None, profile_entities=None):
             if owner is not None:
                 bound &= owner_sources.get((subject, owner), set())
             target = view["canonical"].get(override["entity_id"])
+            if bound and not _override_compatible(view, subject, target):
+                # A newer invalid choice still supersedes older explicit choices.
+                desired.pop((subject, owner), None)
+                if (subject, owner) in alias_desired:
+                    desired[(subject, owner)] = alias_desired[(subject, owner)]
+                continue
             if bound and _override_compatible(view, subject, target):
                 alias = alias_desired.get((subject, owner))
                 # Sender attribution can change even when aliases no longer resolve.
@@ -735,8 +741,7 @@ def resolve_key(store, subject_key, store_id, *, owner_entity_id=None,
                         and store_id in json.loads(r["source_store_ids"]) for r in _active_keys(store)):
                     continue
                 target = view["canonical"].get(override["entity_id"])
-                if _override_compatible(view, subject_key, target):
-                    return target
+                return target if _override_compatible(view, subject_key, target) else None
         rows = [r for r in view.get("keys", []) if (r["subject_key"], r["owner_entity_id"], r["method"]) ==
                 (subject_key, owner_entity_id, "alias_match") and store_id in r["source_store_ids"]]
         if owner_entity_id is not None and not rows:

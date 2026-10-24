@@ -138,6 +138,24 @@ def test_item6_override_replay_rechecks_current_kind(bridge, scoped, owned):
 
 
 @pytest.mark.parametrize("scoped", [False, True])
+def test_item6_incompatible_latest_override_does_not_revive_older(bridge, scoped):
+    api, ops, store, _, _ = bridge
+    older, newer = ops.create_entity("Older choice"), ops.create_entity("Newer choice")
+    source = publish(bridge, "person:alex")
+    options = dict(scope_store_ids=[source]) if scoped else {}
+    ops.override_key("person:alex", older, **options)
+    ops.override_key("person:alex", newer, **options)
+    change = ops.change_kind(newer, "org")
+    assert api.resolve_key(store, "person:alex", source) is None
+    rebuild(bridge)
+    assert not any(r["method"] == "override" for r in active(store))
+    assert api.resolve_key(store, "person:alex", source) is None
+    ops.undo(change)
+    rebuild(bridge)
+    assert api.resolve_key(store, "person:alex", source) == newer
+
+
+@pytest.mark.parametrize("scoped", [False, True])
 def test_item7_relation_requires_owner_before_override_replay(bridge, scoped):
     api, ops, store, _, _ = bridge
     named, target = ops.create_entity("Sister"), ops.create_entity("Chosen")
