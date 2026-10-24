@@ -115,7 +115,8 @@ def test_cpu_limited_proactive_matches_off_unless_overridden(default_engine, mon
         return json.dumps({"hits": [{"snippet": "older cobalt memory", "score": 0.5}]})
     monkeypatch.setattr(tools, "lcm_recall", recall)
     message = engine._build_proactive_recall_message([{"role": "user", "content": "cobalt"}], "user", set())
-    if override.strip():
+    # R4: only a local override bypasses CPU limits without explicit cloud consent.
+    if override.strip() == "fastembed":
         assert called and message is not None
         assert "older cobalt memory" in message["content"]
     else:

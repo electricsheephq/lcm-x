@@ -48,7 +48,8 @@ ROWS = [
         ("", default, True, True),
     ]
 ] + [
-    (key, field, raw, default if raw is None else raw, False, warns)
+    (key, field, raw,
+     default if raw is None or (key == "EMBEDDING_PROVIDER" and not raw.strip()) else raw, False, warns)
     for key, field, default, values in [
         ("EMBEDDING_PROVIDER", "embedding_provider", "fastembed", [
             (None, False), ("", False), (" \t", False), (" VoYaGeAI ", False),
