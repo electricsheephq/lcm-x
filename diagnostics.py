@@ -217,14 +217,14 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             warning_only = True
             rationale = "informational: semantic recall is CPU-limited as expected on this host; full-text recall is active"
             readiness = str(detail.get("readiness", ""))
-            if readiness.startswith("model: preparing;"):
-                action = DOCTOR_ACTION_INSPECT
-                command = "inspect background model preparation; run `/lcm embed warmup` if preparation fails, then re-run `/lcm doctor`"
-                rationale = "local model preparation is in progress; full-text recall is active"
-            elif "coverage: unavailable" in readiness:
+            if "coverage: unavailable" in readiness:
                 action = DOCTOR_ACTION_INSPECT
                 command = "inspect embedding coverage SQLite read errors and database access, then re-run `/lcm doctor`"
                 rationale = "embedding coverage could not be read; full-text recall is active"
+            elif readiness.startswith("model: preparing;"):
+                action = DOCTOR_ACTION_INSPECT
+                command = "inspect background model preparation; run `/lcm embed warmup` if preparation fails, then re-run `/lcm doctor`"
+                rationale = "local model preparation is in progress; full-text recall is active"
         elif status == "warn":
             action = DOCTOR_ACTION_INSPECT
             command = (
