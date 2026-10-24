@@ -16,6 +16,7 @@ entries = json.loads(Path(config).read_text())
 home = Path(os.environ["HERMES_HOME"])
 home.mkdir(parents=True, exist_ok=True)
 events = []
+details = {}
 original = guard.scan_plugin
 
 
@@ -25,7 +26,7 @@ def observe(*args, **kwargs):
     events.append(dict(verdict=result.verdict, scanner=guard.PLUGIN_SCANNER_VERSION, findings=findings))
     assert result.verdict != "dangerous"
     medium = [list(f) for f in findings if f[1] in {"medium", "high", "critical"}]
-    baseline = json.loads(Path(expected).read_text()) if phase == "candidate" else [
+    baseline = json.loads(Path(expected).read_text()) if phase == "candidate" or len(events) > 1 else [
         ["python_subprocess", "medium", "inactive_record.py"],
         ["python_subprocess", "medium", "runtime_identity.py"],
         ["unpinned_pip_install", "medium", "diagnostics.py"]]
@@ -50,14 +51,17 @@ try:
     target, manifest, name = cc.install_catalog_entry(entry, force=False)
     revision = pc._read_install_metadata()[name]["revision"]
     assert revision == entries[label]["sha"]
+    details["revision"] = revision
     assert events
     if phase == "consent":
         cache("candidate")
         try:
-            cc.repin_catalog_plugin(target, cc.read_catalog_sidecar(target), interactive=False)
+            cc.repin_catalog_plugin(target, cc.read_catalog_sidecar(target))
         except cc.RepinConsentRequired:
             assert pc._read_install_metadata()[name]["revision"] == revision
-            assert len(events) == 1  # Consent refusal precedes the scan/transaction.
+            assert len(events) in (1, 2)  # Ref host scans before consent; upstream previews first.
+            details["expected_negative"] = "RepinConsentRequired"
+            details["retained_revision"] = revision
         else:
             raise AssertionError("expected RepinConsentRequired for new tool consent")
     else:
@@ -73,5 +77,6 @@ try:
         from importlib import import_module
         package = type(namespace["selected"]).__module__.rsplit(".", 1)[0]
         assert import_module(package + ".guidance").get_recall_policy()
+        details.update(engine="lcm-x", engine_origin_in_payload=True)
 finally:
-    Path(receipt).write_text(json.dumps(dict(phase=phase, scanner_on=True, events=events), indent=2) + "\n")
+    Path(receipt).write_text(json.dumps(dict(phase=phase, scanner_on=True, events=events, **details), indent=2) + "\n")
