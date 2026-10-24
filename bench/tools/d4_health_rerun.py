@@ -77,6 +77,9 @@ def check_provenance(first, second, guard):
         a, b = values(first, field), values(second, field)
         if (field not in subset and bool(a) != bool(b)) or len(set(a + b if field not in subset else a)) > 1 or len(set(b)) > 1:
             raise ValueError("STOP: replacement provenance mismatch: " + field)
+        if a:
+            parent, _, key = field.rpartition(".")
+            (first[0].setdefault(parent, {}) if parent else first[0]).setdefault(key, json.loads(a[0]))
 
 
 def category_stats(rows):
@@ -133,6 +136,7 @@ def process(report_path, checkpoint_path, output, receipt_path, config, guard,
             raise ValueError("STOP: first report/checkpoint identity mismatch: " + key)
     if r1["recallConfig"] != config:
         raise ValueError("STOP: first recallConfig mismatch")
+    check_provenance((r1, cp), (r1, cp), guard)
     questions, rows = cp["questions"], rows_by_id(r1)
     ids = cp.get("targetQuestionIds") or list(questions)
     if len(ids) != len(set(ids)) or set(ids) != set(questions) or set(rows) - set(ids):
@@ -173,7 +177,6 @@ def process(report_path, checkpoint_path, output, receipt_path, config, guard,
         cwd = report_path.parent.parents[2]
         if execute is None:
             def execute(command, cwd, run_dir):
-                # Exact inherited env: caller uses the same tree-read defaults for X and this call.
                 with (report_path.parent / "health-rerun-launch.log").open("x") as log:
                     subprocess.run(command, cwd=cwd, env=os.environ.copy(), stdout=log,
                                    stderr=subprocess.STDOUT, check=True)
@@ -222,7 +225,6 @@ def process(report_path, checkpoint_path, output, receipt_path, config, guard,
         merged["byQuestionType"] = category_stats(merged["evaluations"])
     if "retrieval" in merged:
         merged["retrieval"] = category_stats([dict(r, questionType="all") for r in merged["evaluations"]])["all"].get("retrieval")
-    # The report rows lack ingest/indexing/evaluate durations and token/call ledgers.
     removed = [key for key in ("latency", "tokens", "memscore", "memscoreComponents", "cliLedger") if key in merged]
     for key in removed:
         del merged[key]

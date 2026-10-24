@@ -350,3 +350,28 @@ def test_writer_category_aggregates_follow_merged_rows(run, healthy):
     assert category["retrieval"]["hitAtK"] == 1
     assert "latency" not in merged
     assert merged["aggregatesRemoved"] == ["latency"]
+
+
+@pytest.mark.parametrize("field", ["datasetSha256", "questionSetSha256", "promptVersion", "answererProvenance"])
+def test_healthy_original_provenance_conflict_stops(run, field):
+    report, cp = fixture()
+    report[field] = {"model": "reader"} if field == "answererProvenance" else "original"
+    cp[field] = {"model": "other-reader"} if field == "answererProvenance" else "different"
+    with pytest.raises(ValueError, match="STOP: .*" + field):
+        run.apply(report, cp)
+    assert run.calls == []
+    assert not run.out.exists()
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_checkpoint_only_provenance_survives_merge(run, replacement):
+    report, cp = fixture()
+    if replacement:
+        report["evaluations"][0]["recallHealth"] = BAD
+    cp.update(datasetSha256="dataset-pin", questionSetSha256="selection-pin",
+              scoringPath="scorer-pin", answererProvenance={"model": "actual-reader", "reasoningEffort": "high"})
+    _, merged = run.apply(report, cp)
+    for field in ("datasetSha256", "questionSetSha256", "scoringPath", "answererProvenance"):
+        assert merged[field] == cp[field]
+    assert run.before == ((run.run / "report.json").read_bytes(),
+                          (run.run / "checkpoint.json").read_bytes())
