@@ -19,7 +19,7 @@ CONFIG_FILE="$TARGET_ROOT/config.yaml"
 # LCM-X 0.23.x and earlier installed as plugins/hermes-lcm (#471). Hermes
 # matches plugins.enabled against the manifest name, not the directory, so an
 # existing link to this checkout is reused instead of adding a second copy that
-# would register the engine twice. Nothing here edits config or deletes files.
+# would register the engine twice. The link setup never deletes files; host verbs own enablement.
 LEGACY_PLUGIN_TARGET="$TARGET_ROOT/plugins/hermes-lcm"
 LEGACY_SKILL_TARGET="$TARGET_ROOT/skills/hermes-lcm"
 LEGACY_LEFTOVERS=()
@@ -97,6 +97,32 @@ if [[ ! -e "$SKILL_TARGET" && ! -L "$SKILL_TARGET" ]]; then
   ln -s "$SKILL_SOURCE" "$SKILL_TARGET"
 fi
 
+# Core stays linked and dependency-free. Only the native install verb owns the
+# companion's dependency-consent prompt; neither a TTY nor this script is consent.
+COMPANION="hermes-lcm-x-local-embeddings"
+COMPANION_SOURCE="electricsheephq/lcm-x/companions/$COMPANION"
+if command -v hermes >/dev/null 2>&1; then
+  hermes plugins enable hermes-lcm-x
+  LCM_X_REF="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  if [[ ! "$LCM_X_REF" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "Cannot pin the companion: this checkout needs a full Git commit SHA." >&2
+    exit 1
+  fi
+  # Both supported host pins accept repository subdirectories, not local dirs.
+  # An explicit pinned install moves with install --force --ref, never update.
+  COMPANION_TARGET="$TARGET_ROOT/plugins/$COMPANION"
+  if [[ -e "$COMPANION_TARGET" || -L "$COMPANION_TARGET" ]]; then
+    echo "Companion already present; preserving $COMPANION_TARGET. To replace explicitly:"
+    echo "  hermes plugins install $COMPANION_SOURCE --force --ref $LCM_X_REF"
+  else
+    hermes plugins install "$COMPANION_SOURCE" --ref "$LCM_X_REF"
+  fi
+else
+  echo "Hermes CLI unavailable; run hermes plugins enable hermes-lcm-x after installing Hermes."
+  echo "Then run: hermes plugins install $COMPANION_SOURCE --ref <LCM-X-40-character-SHA>"
+fi
+echo "If the companion is disabled, run: hermes plugins enable $COMPANION"
+
 cat <<EOF
 Installed hermes-lcm-x at:
   $PLUGIN_TARGET
@@ -124,7 +150,7 @@ if [[ "$LEGACY_CONFIG" == 1 || "$PLUGIN_TARGET" == "$LEGACY_PLUGIN_TARGET" || ${
   cat <<EOF
 
 MIGRATION from hermes-lcm (LCM-X 0.23.x and earlier) - BREAKING in 0.24.0.
-install.sh does not edit config.yaml and does not delete anything.
+install.sh enables the core through Hermes and does not delete anything.
 Run exactly one LCM copy, and change the config while Hermes is stopped:
   1. Stop Hermes.
   2. In $CONFIG_FILE replace hermes-lcm with hermes-lcm-x

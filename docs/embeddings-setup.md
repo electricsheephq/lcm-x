@@ -9,7 +9,7 @@ FTS-only exactly as before.
 | Option | Cost | Signup | Install | Best for |
 |---|---|---|---|---|
 | Voyage AI | free tier (200M tokens for the voyage-4 group), then ~$0.02–0.12 per million tokens | yes (no credit card) | none | best quality, zero local footprint |
-| fastembed | $0 | no | `pip install "fastembed>=0.8.0,<1.0"` (ONNX, no torch) | local default — no accounts, no daemon |
+| fastembed | $0 | no | Host-managed dependency companion (ONNX, no torch) | local default — no accounts, no daemon |
 | Ollama | $0 | no | Ollama app/daemon | you already run Ollama |
 | OpenAI-compatible | provider pricing | yes (per provider) | none | reuse an existing `/v1/embeddings` service (SiliconFlow, llama.cpp, vLLM) |
 
@@ -65,10 +65,12 @@ worker slots).
 ## Option 2 — fastembed (local, no signup, recommended local default)
 
 [fastembed](https://github.com/qdrant/fastembed) runs ONNX models on CPU with no PyTorch and no
-external service — just a pip package.
+external service. The host installs its Python package through the stable companion plugin.
 
 ```bash
-pip install "fastembed>=0.8.0,<1.0"          # or: pip install -r requirements-semantic.txt
+# Use the same full commit SHA as your installed LCM-X core.
+LCM_X_REF=<LCM-X-40-character-SHA>
+hermes plugins install electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings --ref "$LCM_X_REF"
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=fastembed
 export LCM_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5   # 384-dim, compact and quick on CPU
@@ -86,31 +88,48 @@ The model runs with 2 threads. To load it from another cache, for example one sh
 cache for several profiles, set fastembed's own `FASTEMBED_CACHE_PATH` (default: the user cache directory).
 Pre-seed a read-only cache: `warmup` cannot download into it.
 
-### A host update can remove fastembed
+### Install consent, updates and recovery
 
-`fastembed` lives in the virtualenv that runs Hermes, not in LCM-X (which is installed by symlink
-and pulls in no Python packages of its own). `hermes update` can build a **new** environment under
-`installs/<id>/environments/<hash>/venv`. It carries over the dependencies Hermes itself records
-(its extras and the dependencies plugins declare), but a package installed by hand with
-`pip install "fastembed>=0.8.0,<1.0"` is not recorded, so **a hand-installed embedding dependency can be dropped
-by a host update**.
+`scripts/install.sh` links LCM-X core and its skill as before, enables the core
+through `hermes plugins enable hermes-lcm-x`, then runs the companion install
+command above. It never links the companion or runs pip. Both qualified host
+pins require a repository subdirectory identifier rather than a local directory;
+`--ref` pins it to the installer's checkout commit. Native-route core users run
+the same companion command with their installed core's full SHA.
 
-Nothing about your LCM data changes when this happens — the store stays lossless and existing
-vectors are untouched — but new content stops being embedded and semantic retrieval quietly falls
-back to full-text (`lcm_recall` returns `degraded: true`, `lcm_grep mode=semantic` degrades to FTS).
-
-To recover, reinstall into the active environment and confirm:
+On hosts with the shared plugin manager, the native install owns the questions.
+Noninteractive installation or a decline leaves the companion installed but
+**disabled**. LCM-X stays enabled and full-text recall stays available. To consent
+later, run the host's printed command:
 
 ```bash
-pip install -r requirements-semantic.txt
-/lcm doctor                 # embedding_provider_health must report pass
-/lcm embed backfill --apply # embed anything written while the provider was missing
+hermes plugins enable hermes-lcm-x-local-embeddings
 ```
 
-No restart and no re-warmup are needed: the provider import is lazy and the downloaded model cache
-survives in the user cache directory. The plugin also logs a `WARNING` at startup when embeddings are
-enabled but the configured provider is unavailable, and `/lcm doctor` reports it through the
-`embedding_provider_health` check — so this no longer fails silently.
+The reference Hermes 0.21.5 pin uses its legacy dependency installer, without a
+separate dependency-consent question on enable. Its first session may need a
+restart before fastembed becomes available. Restart Hermes after enable on either
+host, then run `/lcm doctor` to check provider health. No model download is part
+of companion installation; warmup and backfill remain explicit in this slice.
+
+The companion is a normal host-managed plugin: use host verbs to enable, disable
+or uninstall it. A pinned install does not move with `hermes plugins update`.
+To deliberately replace an existing companion (including an old symlink), use:
+
+```bash
+hermes plugins install electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings --force --ref "$LCM_X_REF"
+```
+
+The installer prints this command instead of forcing replacement. Keep the
+companion selected across host updates: the host records its dependency, while
+ordinary LCM-X version updates leave the stable carrier manifest unchanged.
+Disabling or uninstalling the carrier may remove fastembed on the next sync.
+
+If fastembed is missing after an update, install or enable the companion, restart
+Hermes and run `/lcm doctor`, then `/lcm embed backfill --apply` for the gap. The
+store and existing vectors are preserved while recall degrades to full text.
+As a last resort on an unmanaged host, `pip install -r requirements-semantic.txt`
+installs into its active environment; manual installs can be dropped on update.
 
 ## Option 3 — Ollama (trusted local daemon)
 

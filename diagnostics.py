@@ -211,12 +211,12 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
         elif status == "warn":
             action = DOCTOR_ACTION_INSPECT
             command = (
-                "semantic retrieval is configured but not runnable: reinstall the optional "
-                "embedding dependency (e.g. `pip install fastembed` into the active Hermes "
-                "virtualenv) or fix LCM_EMBEDDING_PROVIDER/LCM_EMBEDDING_MODEL and the "
-                "provider credentials, then run `/lcm embed warmup` and re-run `/lcm doctor`. "
-                "A dependency installed by hand can be dropped by a Hermes update, so "
-                "recheck this after an update. Nothing is lost meanwhile -- the lossless "
+                "semantic retrieval is configured but not runnable: install the local dependency "
+                "companion with `hermes plugins install electricsheephq/lcm-x/companions/"
+                "hermes-lcm-x-local-embeddings --ref <LCM-X-40-character-SHA>`; if installed, run `hermes plugins "
+                "enable hermes-lcm-x-local-embeddings`. Otherwise fix "
+                "LCM_EMBEDDING_PROVIDER/LCM_EMBEDDING_MODEL and provider credentials. Restart Hermes "
+                "after enable and re-run `/lcm doctor`. Nothing is lost meanwhile -- the lossless "
                 "store is intact and recall falls back to full-text"
             )
             warning_only = True

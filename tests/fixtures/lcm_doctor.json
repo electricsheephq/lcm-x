@@ -7706,7 +7706,7 @@
           "check": "embedding_provider_health",
           "status": "warn",
           "action": "inspect",
-          "operator_action": "semantic retrieval is configured but not runnable: reinstall the optional embedding dependency (e.g. `pip install fastembed` into the active Hermes virtualenv) or fix LCM_EMBEDDING_PROVIDER/LCM_EMBEDDING_MODEL and the provider credentials, then run `/lcm embed warmup` and re-run `/lcm doctor`. A dependency installed by hand can be dropped by a Hermes update, so recheck this after an update. Nothing is lost meanwhile -- the lossless store is intact and recall falls back to full-text",
+          "operator_action": "semantic retrieval is configured but not runnable: install the local dependency companion with `hermes plugins install electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings --ref <LCM-X-40-character-SHA>`; if installed, run `hermes plugins enable hermes-lcm-x-local-embeddings`. Otherwise fix LCM_EMBEDDING_PROVIDER/LCM_EMBEDDING_MODEL and provider credentials. Restart Hermes after enable and re-run `/lcm doctor`. Nothing is lost meanwhile -- the lossless store is intact and recall falls back to full-text",
           "warning_only": true,
           "rationale": "an unavailable embedding provider degrades semantic recall to full-text; it is a retrieval-capability problem, not persisted-state corruption"
         }

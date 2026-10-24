@@ -2102,9 +2102,12 @@ def probe_provider_availability(config: LCMConfig) -> dict[str, Any]:
         if importlib.util.find_spec("fastembed") is None:
             return result(
                 False,
-                "FastEmbed is not installed; install the optional fastembed "
-                "dependency (a dependency installed by hand can be dropped by a "
-                "Hermes update; see docs/embeddings-setup.md)",
+                "FastEmbed is not installed; install the dependency companion with "
+                "`hermes plugins install electricsheephq/lcm-x/companions/"
+                "hermes-lcm-x-local-embeddings --ref <LCM-X-40-character-SHA>`; "
+                "if already installed, run `hermes plugins enable "
+                "hermes-lcm-x-local-embeddings`. Restart Hermes after enable; "
+                "see docs/embeddings-setup.md",
             )
         return result(True, "fastembed is importable")
 
