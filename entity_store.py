@@ -181,6 +181,24 @@ class EntityStore:
     def set_note_superseded(self, note_id, superseded_by_or_None, *, log_event: bool = True, **event):
         self._project("lcm_memory_notes", "note_id", note_id, {"superseded_by": superseded_by_or_None}, "supersede_note", log_event=log_event, **event)
 
+    def add_key(self, subject_key, entity_id, method, source_store_ids, *, owner_entity_id=None, now=None):
+        if not self._depth:
+            raise RuntimeError("derived keys require transaction()")
+        return self._insert("lcm_entity_keys", dict(subject_key=subject_key, entity_id=entity_id,
+            method=method, source_store_ids=json.dumps(list(source_store_ids)), owner_entity_id=owner_entity_id,
+            created_at=(now or self._now)()))
+
+    def retire_key(self, key_id, *, now=None):
+        if not self._depth:
+            raise RuntimeError("derived keys require transaction()")
+        self._project("lcm_entity_keys", "key_id", key_id, {"retired_at": (now or self._now)()},
+                      "override_key", log_event=False)
+
+    def restore_key(self, key_id):
+        if not self._depth:
+            raise RuntimeError("derived keys require transaction()")
+        self._project("lcm_entity_keys", "key_id", key_id, {"retired_at": None}, "override_key", log_event=False)
+
     def append_event(self, op, payload, *, actor="agent", target_event_id=None, now=None, log_event: bool = True):
         with self._lock:
             if not log_event and not self._depth:
