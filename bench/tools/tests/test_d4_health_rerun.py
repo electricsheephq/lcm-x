@@ -242,8 +242,7 @@ def test_guard_from_same_tree(tmp_path):
     ("transportVersion", "1.0"), ("modelExplicit", True), ("serviceTier", "priority"),
     ("isolated", True), ("modelPinSource", "explicit-cli-argv"),
     ("eventUsageCapture", "codex-jsonl"), ("eventModelField", "not-emitted-by-codex-jsonl"),
-    ("tokenizerModel", "tokenizer"), ("executionIdentityCount", 1),
-    ("mixedExecutionIdentity", False), ("callLedgerComplete", True),
+    ("tokenizerModel", "tokenizer"), ("mixedExecutionIdentity", False),
 ])
 @pytest.mark.parametrize("source", ["report", "checkpoint"])
 def test_execution_provenance_mismatch(run, role, field, value, source):
@@ -299,8 +298,7 @@ def test_matching_provenance_with_subset_counters(run):
     def subset(rr, cc):
         for doc in (rr, cc):
             doc["answererProvenance"].update(callCount=1, retryCount=0)
-            for field in ("questionSetSha256", "normalizedInputsSha256", "loaderOrderSha256"):
-                doc[field] = "selected-population"
+            doc["questionSetSha256"] = "selected-population"
 
     receipt, merged = run.apply(report, cp, mutate=subset)
     assert receipt["status"] == "COMPLETE"
@@ -375,3 +373,108 @@ def test_checkpoint_only_provenance_survives_merge(run, replacement):
         assert merged[field] == cp[field]
     assert run.before == ((run.run / "report.json").read_bytes(),
                           (run.run / "checkpoint.json").read_bytes())
+
+
+@pytest.mark.parametrize("field", ["normalizedInputsSha256", "loaderOrderSha256"])
+@pytest.mark.parametrize("variation", ["different", "first-only", "replacement-only"])
+@pytest.mark.parametrize("source", ["report", "checkpoint"])
+def test_r2_full_dataset_pins(run, field, variation, source):
+    report, cp = fixture()
+    report["evaluations"][0]["recallHealth"] = BAD
+    if variation != "replacement-only":
+        (report if source == "report" else cp)[field] = "full-dataset"
+
+    def change(rr, cc):
+        for doc in (rr, cc):
+            doc.pop(field, None)
+        if variation != "first-only":
+            (rr if source == "report" else cc)[field] = "different-dataset"
+
+    with pytest.raises(ValueError, match="STOP: .*" + field):
+        run.apply(report, cp, mutate=change)
+    assert not run.out.exists()
+
+
+@pytest.mark.parametrize("role", ["answererProvenance", "judgeProvenance"])
+def test_r2_run_counters_may_differ(run, role):
+    report, cp = fixture(2)
+    report["evaluations"][0]["recallHealth"] = BAD
+    report[role] = cp[role] = {"model": "reader", "callCount": 3, "retryCount": 1,
+                               "executionIdentityCount": 2, "callLedgerComplete": False}
+
+    def change(rr, cc):
+        for doc in (rr, cc):
+            doc[role].update(callCount=1, retryCount=0, executionIdentityCount=1, callLedgerComplete=True)
+
+    receipt, _ = run.apply(report, cp, mutate=change)
+    assert receipt["status"] == "COMPLETE"
+
+
+@pytest.mark.parametrize("role", ["answererProvenance", "judgeProvenance"])
+@pytest.mark.parametrize("source", ["report", "checkpoint"])
+@pytest.mark.parametrize("value", [None, [], "invalid", 3])
+@pytest.mark.parametrize("attempt", ["first", "replacement"])
+def test_r2_malformed_provenance_stops(run, capsys, role, source, value, attempt):
+    report, cp = fixture()
+    report["evaluations"][0]["recallHealth"] = BAD
+    report[role] = cp[role] = {"model": "reader"}
+
+    def change(rr, cc):
+        (rr if source == "report" else cc)[role] = value
+
+    if attempt == "first":
+        change(report, cp)
+    with pytest.raises(ValueError, match="STOP: .*" + role):
+        run.apply(report, cp, mutate=change if attempt == "replacement" else None)
+    root = Path(d.__file__).resolve().parents[2]
+    code = d.main(["--report", str(run.run / "report.json"), "--checkpoint", str(run.run / "checkpoint.json"),
+                   "--output", str(run.out), "--receipt", str(run.receipt), "--config", "OFF",
+                   "--instruments", str(root), "--", "bun", "run", "bridge.ts"])
+    assert code == 2
+    assert capsys.readouterr().err.startswith("STOP:")
+    assert not run.out.exists()
+    if attempt == "first":
+        assert run.calls == []
+
+
+@pytest.mark.parametrize("source", ["report", "checkpoint"])
+def test_r2_copied_replacement_stops_before_builder(run, monkeypatch, source):
+    report, cp = fixture()
+    report["evaluations"][0]["recallHealth"] = BAD
+    (report if source == "report" else cp)["dataSourceRunId"] = "W-health-rerun1"
+
+    def no_command(*args, **kwargs):
+        pytest.fail("replacement command built for copied replacement input")
+
+    monkeypatch.setattr(d, "replacement_command", no_command)
+    with pytest.raises(ValueError, match="STOP: input is already a health replacement"):
+        run.apply(report, cp)
+    assert run.calls == []
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+@pytest.mark.parametrize("recorded", [False, True])
+def test_r2_receipt_provenance_disclosure(run, replacement, recorded):
+    report, cp = fixture()
+    if replacement:
+        report["evaluations"][0]["recallHealth"] = BAD
+    if recorded:
+        cp.update(normalizedInputsSha256="dataset", loaderOrderSha256="order",
+                  answererProvenance={"model": "reader"})
+    receipt, _ = run.apply(report, cp)
+    assert json.loads(run.receipt.read_text()) == receipt
+    proof = receipt["provenance"]
+    assert proof["scope"] == ("across-attempts" if replacement else "original-report-checkpoint")
+    for field in ("normalizedInputsSha256", "loaderOrderSha256", "answererProvenance.model"):
+        assert (field in proof["comparedFields"]) is recorded
+        assert (field in proof["absentOnBoth"]) is (not recorded)
+    assert "judgeProvenance.transport" in proof["absentOnBoth"]
+    assert "questionSetSha256" not in proof["comparedFields"]
+    assert not set(proof["comparedFields"]) & set(proof["absentOnBoth"])
+
+
+def test_r2_incomplete_receipt_discloses_unchecked(run):
+    report, cp = fixture()
+    cp["status"] = "failed"
+    receipt, _ = run.apply(report, cp)
+    assert receipt["provenance"] == {"scope": "not-checked", "comparedFields": [], "absentOnBoth": []}

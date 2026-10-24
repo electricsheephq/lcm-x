@@ -58,12 +58,21 @@ def outside_recall_error(question, row, guard):
 
 
 def check_provenance(first, second, guard):
-    # These hashes describe the selected subset; counters describe its call volume.
-    subset = {"questionSetSha256", "normalizedInputsSha256", "loaderOrderSha256"}
-    fields = set(guard.IDENTITY_FIELDS) - subset
+    # Only questionSetSha256 describes the selection; the other hashes pin the full dataset.
+    subset = {"questionSetSha256"}
+    fields = set(guard.IDENTITY_FIELDS) | {"normalizedInputsSha256", "loaderOrderSha256"}
+    counters = {"callCount", "retryCount", "executionIdentityCount", "callLedgerComplete"}
+    known = {"transport", "transportVersion", "model", "modelExplicit", "configuredModel",
+             "reasoningEffort", "provider", "serviceTier", "isolated", "modelPinSource",
+             "eventUsageCapture", "eventModelField", "tokenizerModel", "mixedExecutionIdentity"}
     for role in ("answererProvenance", "judgeProvenance"):
+        for doc in (*first, *second):
+            if role in doc and not isinstance(doc[role], dict):
+                raise ValueError("STOP: invalid provenance block: " + role)
+        fields.update(role + "." + key for key in known)
         fields.update(role + "." + key for doc in (*first, *second)
-                      for key in (doc.get(role) or {}) if key not in {"callCount", "retryCount"})
+                      for key in doc.get(role, {}) if key not in counters)
+    proof = {"comparedFields": [], "absentOnBoth": []}
     def values(docs, field):
         found = []
         for doc in docs:
@@ -77,9 +86,12 @@ def check_provenance(first, second, guard):
         a, b = values(first, field), values(second, field)
         if (field not in subset and bool(a) != bool(b)) or len(set(a + b if field not in subset else a)) > 1 or len(set(b)) > 1:
             raise ValueError("STOP: replacement provenance mismatch: " + field)
+        if field not in subset:
+            proof["comparedFields" if a else "absentOnBoth"].append(field)
         if a:
             parent, _, key = field.rpartition(".")
             (first[0].setdefault(parent, {}) if parent else first[0]).setdefault(key, json.loads(a[0]))
+    return proof
 
 
 def category_stats(rows):
@@ -112,9 +124,11 @@ def process(report_path, checkpoint_path, output, receipt_path, config, guard,
         raise ValueError("STOP: output/receipt already exists")
     original = {str(p): digest(p) for p in (report_path, checkpoint_path)}
     r1, cp = (json.loads(p.read_text()) for p in (report_path, checkpoint_path))
-    if any(str(doc.get("runId", "")).endswith("-health-rerun1") or "healthReplacement" in doc for doc in (r1, cp)):
+    if any(any(str(doc.get(key, "")).endswith("-health-rerun1") for key in ("runId", "dataSourceRunId"))
+           or "healthReplacement" in doc for doc in (r1, cp)):
         raise ValueError("STOP: input is already a health replacement")
-    receipt = {"status": "INCOMPLETE", "inputs": original, "replacement_command": None}
+    receipt = {"status": "INCOMPLETE", "inputs": original, "replacement_command": None,
+               "provenance": {"scope": "not-checked", "comparedFields": [], "absentOnBoth": []}}
     def finish(status, merged=None):
         receipt["status"] = status
         if any(digest(p) != h for p, h in receipt["inputs"].items()):
@@ -136,7 +150,7 @@ def process(report_path, checkpoint_path, output, receipt_path, config, guard,
             raise ValueError("STOP: first report/checkpoint identity mismatch: " + key)
     if r1["recallConfig"] != config:
         raise ValueError("STOP: first recallConfig mismatch")
-    check_provenance((r1, cp), (r1, cp), guard)
+    receipt["provenance"] = dict(scope="original-report-checkpoint", **check_provenance((r1, cp), (r1, cp), guard))
     questions, rows = cp["questions"], rows_by_id(r1)
     ids = cp.get("targetQuestionIds") or list(questions)
     if len(ids) != len(set(ids)) or set(ids) != set(questions) or set(rows) - set(ids):
@@ -190,7 +204,7 @@ def process(report_path, checkpoint_path, output, receipt_path, config, guard,
         for key in ("provider", "benchmark", "judge", "answeringModel", "recallConfig"):
             if cp2.get(key) != r1[key] or replacement.get(key) != r1[key]:
                 raise ValueError("STOP: replacement identity mismatch: " + key)
-        check_provenance((r1, cp), (replacement, cp2), guard)
+        receipt["provenance"] = dict(scope="across-attempts", **check_provenance((r1, cp), (replacement, cp2), guard))
         if cp2.get("status") != "completed":
             receipt["reason"] = "partial_replacement_no_second_attempt"
             return finish("INCOMPLETE")
