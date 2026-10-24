@@ -93,3 +93,77 @@ jobs:
           path: diag-1753-captures/*.json
           retention-days: 7
           if-no-files-found: ignore
+
+  # Separate fresh host environments keep the legacy pin's in-venv dependency
+  # installation from making the second route a false fresh-install pass.
+  dependency-qualification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [ref-0.21.5, upstream-main]
+        route: [native, installer]
+    env:
+      HERMES_DISABLE_LAZY_INSTALLS: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      LCM_1186_QUALIFY: "1"
+      LCM_1186_HOST: ${{ matrix.host }}
+      LCM_1186_ROUTE: ${{ matrix.route }}
+      # Default fail-closed: exact host-locked tool downloads need recorded
+      # authority. A pre-provisioned verified PM store also satisfies preflight.
+      LCM_1186_ALLOW_LOCKED_TOOLS: "0"
+      LCM_1186_ARTIFACTS: ${{ github.workspace }}/1186-qualification
+      LCM_1186_SCRATCH: ${{ runner.temp }}/1186-${{ matrix.host }}-${{ matrix.route }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          # Native companion --ref must resolve to this published candidate.
+          ref: ${{ github.sha }}
+
+      - name: Set up Python (qualification harness)
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install qualification harness
+        run: pip install uv==0.11.26 pytest
+
+      - name: Prepare exact pinned host
+        run: |
+          mkdir -p 1186-qualification
+          nice -n 19 python -m bench.instruments.reliability.ci prep \
+            --host "${{ matrix.host }}" --root "$RUNNER_TEMP/1186-hosts" \
+            --out "$RUNNER_TEMP/1186-hosts.json" > 1186-qualification/prep.stdout 2> 1186-qualification/prep.stderr
+
+      - name: Export exact host paths
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          host = json.loads((Path(os.environ["RUNNER_TEMP"]) / "1186-hosts.json").read_text())["hosts"]["${{ matrix.host }}"]
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"LCM_REAL_HERMES_PYTHON={host['python']}\n")
+              env.write(f"LCM_REAL_HERMES_SRC={host['src']}\n")
+          Path("1186-qualification/prepared-host.json").write_text(json.dumps(host, indent=2) + "\n")
+          PY
+
+      - name: Qualify native dependency carrier cells
+        run: |
+          pwd
+          git rev-parse HEAD
+          nice -n 19 python -m pytest -p no:cacheprovider -q -ra \
+            tests/test_issue_1186_host_dependencies.py \
+            --junitxml=1186-qualification/results.xml \
+            > 1186-qualification/pytest.stdout 2> 1186-qualification/pytest.stderr
+
+      - name: Upload raw qualification receipts even on failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-1186-${{ matrix.host }}-${{ matrix.route }}
+          path: 1186-qualification/
+          if-no-files-found: warn
