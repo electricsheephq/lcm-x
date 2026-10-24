@@ -327,6 +327,13 @@ class EntityOps:
             for row in _active_keys(self.store):
                 if (row["subject_key"], row["owner_entity_id"]) == (subject_key, owner_entity_id):
                     self._project(p, "keys", row["key_id"], retired_at=True)
+                    if row["method"] == "alias_match" and owner_entity_id is not None:
+                        # Undo may have restored an older row. Snapshot the current
+                        # derivation before this slot starts admitting retired shadows.
+                        shadow = self.store.add_key(subject_key, row["entity_id"], "alias_match",
+                            json.loads(row["source_store_ids"]), owner_entity_id=owner_entity_id)
+                        self.store.retire_key(shadow)
+                        p["created"]["keys"].append(shadow)
             p["created"]["keys"].append(self.store.add_key(subject_key, entity_id, "override", cited,
                                                         owner_entity_id=owner_entity_id))
 
@@ -361,6 +368,8 @@ class EntityOps:
                          and r["entity_id"] == _canonical(self._entities(), override["entity_id"])
                          and set(json.loads(r["source_store_ids"])) <= set(override["scope_store_ids"])]
                 p = dict(p, created=dict(p["created"], keys=list(set(p["created"].get("keys", []) + owned))))
+            derivation = (_owner_alias_rows(self.store, override["subject_key"], override["owner_entity_id"])[:1]
+                          if override and override["global_override"] and override["owner_entity_id"] is not None else [])
             safe_changes = []
             for change in p["changes"]:
                 if change["family"] == "keys" and change["before"]["retired_at"] is None:
@@ -394,6 +403,17 @@ class EntityOps:
                                   "touches": {f: [] for f in FAMILIES}}
             try:
                 inverse(self, p)
+                if derivation:
+                    latest = derivation[0]
+                    for row in _active_keys(self.store):
+                        if (row["subject_key"], row["owner_entity_id"], row["method"]) == (
+                                latest["subject_key"], latest["owner_entity_id"], "alias_match") and (
+                                row["entity_id"], row["source_store_ids"]) != (latest["entity_id"], latest["source_store_ids"]):
+                            # Undo restores identity, not a pre-rebuild source snapshot.
+                            self._project(self._undo_payload, "keys", row["key_id"], retired_at=True)
+                            key = self.store.add_key(latest["subject_key"], latest["entity_id"], "alias_match",
+                                json.loads(latest["source_store_ids"]), owner_entity_id=latest["owner_entity_id"])
+                            self._undo_payload["created"]["keys"].append(key)
             except sqlite3.IntegrityError as error:
                 if target["op"] != "override_key":
                     raise
@@ -593,7 +613,7 @@ def _owner_alias_rows(store, subject, owner):
         "SELECT 1 FROM lcm_entity_keys o WHERE o.scope_key=a.scope_key AND o.subject_key=a.subject_key "
         "AND o.owner_entity_id=a.owner_entity_id AND o.method='override' AND o.retired_at IS NULL "
         "AND o.source_store_ids!='[]')) "
-        "ORDER BY a.rowid DESC",
+        "ORDER BY a.retired_at IS NULL DESC, a.rowid DESC",
         (store.scope_key, subject, owner))]
 
 
