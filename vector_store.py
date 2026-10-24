@@ -19,7 +19,7 @@ import time
 import uuid
 from collections import OrderedDict
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -120,7 +120,7 @@ _CHUNK_TASK = "chunk"
 # Tasks this store can encode. Summary and chunk corpora coexist in the shared
 # profile table, each keyed by its own canonical identity (task is part of the
 # identity hash), so their vectors never collide.
-_SUPPORTED_TASKS = frozenset({_DEFAULT_TASK, _CHUNK_TASK})
+_SUPPORTED_TASKS = frozenset({_DEFAULT_TASK, _CHUNK_TASK, "summary+prefix", "chunk+prefix"})
 
 # Candidate-enumeration sentinel: SQLite reads a negative LIMIT as "no limit",
 # so a full-corpus scan enumerates every live candidate for the identity.
@@ -553,7 +553,7 @@ class VectorStore:
                 SELECT identity_hash, model_name, provider, revision, dim, dtype,
                        byteorder, task, registered_at, active, archived_at, data_version
                 FROM lcm_embedding_profile
-                WHERE model_name = ? AND provider = ? AND task = ? AND (? IS NULL OR CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ?)
+                WHERE model_name = ? AND provider = ? AND task IN (?, 'summary+prefix') AND (? IS NULL OR CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ?)
                 ORDER BY (active = 1 AND archived_at IS NULL) DESC,
                          registered_at DESC, identity_hash DESC
                 LIMIT 1
@@ -565,7 +565,7 @@ class VectorStore:
             SELECT identity_hash, model_name, provider, revision, dim, dtype,
                    byteorder, task, registered_at, active, archived_at, data_version
             FROM lcm_embedding_profile
-            WHERE model_name = ? AND task = ? AND (? IS NULL OR CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ?)
+            WHERE model_name = ? AND task IN (?, 'summary+prefix') AND (? IS NULL OR CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ?)
             ORDER BY (active = 1 AND archived_at IS NULL) DESC,
                      registered_at DESC, identity_hash DESC
             LIMIT 1
@@ -600,7 +600,7 @@ class VectorStore:
             SELECT identity_hash, model_name, provider, revision, dim, dtype,
                    byteorder, task, registered_at, active, archived_at, data_version
             FROM lcm_embedding_profile
-            WHERE active = 1 AND archived_at IS NULL AND task = ?
+            WHERE active = 1 AND archived_at IS NULL AND task IN (?, 'summary+prefix')
             ORDER BY registered_at DESC, identity_hash DESC
             LIMIT 1
             """,
@@ -614,7 +614,7 @@ class VectorStore:
         base = (
             "SELECT identity_hash, model_name, provider, revision, dim, dtype, "
             "byteorder, task, registered_at, active, archived_at, data_version "
-            "FROM lcm_embedding_profile WHERE model_name = ? AND task = ?"
+            "FROM lcm_embedding_profile WHERE model_name = ? AND task IN (?, 'chunk+prefix')"
             " AND (? IS NULL OR CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ?)"
         )
         order = (
@@ -706,7 +706,8 @@ class VectorStore:
         """
         revision = self._prescreen_revision(revision, dtype=dtype) + revision_suffix
         canonical = EmbeddingIdentity.canonical(
-            provider, model_name, revision, dim, dtype, byteorder, task
+            provider, model_name, revision, dim, dtype, byteorder,
+            task + ("+prefix" if revision_suffix else ""),
         )
         if not canonical.model_name:
             raise ValueError("model_name must not be empty")
@@ -718,6 +719,18 @@ class VectorStore:
 
         identity = canonical.identity_hash
         with self._write_transaction():
+            # rc1's revision-only profiles may contain unprefixed rollback writes.
+            # Quarantine only profile metadata; never copy those derived vectors.
+            for row in self._conn.execute(
+                "SELECT * FROM lcm_embedding_profile WHERE task IN ('summary', 'chunk') "
+                "AND instr(revision, '+prefix:') > 0"
+            ).fetchall():
+                retired = replace(self._identity_from_profile(row), task="retired:" + row["task"])
+                self._conn.execute(
+                    "UPDATE lcm_embedding_profile SET identity_hash=?, task=?, active=0, archived_at=? "
+                    "WHERE identity_hash=?",
+                    (retired.identity_hash, retired.task, self._now(), row["identity_hash"]),
+                )
             existing = self._profile_by_identity(identity)
             if existing is None:
                 self._conn.execute(
@@ -760,8 +773,8 @@ class VectorStore:
             # its own active profile.
             self._conn.execute(
                 "UPDATE lcm_embedding_profile SET active = 0 "
-                "WHERE identity_hash != ? AND task = ?",
-                (identity, canonical.task),
+                "WHERE identity_hash != ? AND replace(task, '+prefix', '') = ?",
+                (identity, task),
             )
         return identity
 
@@ -2999,7 +3012,7 @@ class VectorStore:
             SELECT identity_hash, model_name, provider, revision, dim, dtype,
                    byteorder, task, registered_at, active, archived_at, data_version
             FROM lcm_embedding_profile
-            WHERE active = 1 AND archived_at IS NULL AND task = ?
+            WHERE active = 1 AND archived_at IS NULL AND task IN (?, 'chunk+prefix')
             ORDER BY registered_at DESC, identity_hash DESC
             LIMIT 1
             """,

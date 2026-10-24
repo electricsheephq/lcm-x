@@ -273,6 +273,19 @@ an existing history in one go.
 
 A prefix change (including removal) registers a new identity: restart Hermes, then run `/lcm embed warmup` and `/lcm embed backfill --apply` (add corpus/consent options for chunks). Provider caches keep their existing provider/model keys.
 
+Prefixed profiles use distinct `summary+prefix` / `chunk+prefix` tasks as well as the
+revision digest. v0.28.1 cannot select these profiles or write into them on rollback;
+it uses an existing unprefixed corpus or falls back to full text. Empty prefixes keep
+the original requests, tasks and identity hashes.
+
+If you tested prefixes on v0.29.0-rc1, restart on the updated build and run
+`/lcm embed warmup`, then `/lcm embed backfill --apply`. Warmup retires rc1's
+revision-only profiles, even if you have since removed the prefixes. Their derived
+vectors are retained but never reused: an earlier rollback may have mixed them with
+unprefixed vectors. Backfill rebuilds the selected corpus from the unchanged source
+rows. For chunks, also run `/lcm embed backfill --apply --corpus chunks --confirm-raw-text`
+with your existing chunk policy. No raw messages or summary DAG nodes are migrated.
+
 Change provider/model → run `/lcm embed warmup` (registers the new profile as the current identity)
 → `/lcm embed backfill --apply` (embeds under the new identity; the previous model's vectors are
 kept separate and never mixed). Every vector is published under the exact identity that produced it
