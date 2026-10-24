@@ -20,6 +20,8 @@ def test_preparing_with_coverage_error_keeps_coverage_remedy(default_engine, mon
     assert check["status"] == "warn"
     assert "model: preparing; coverage: unavailable" in check["detail"]["readiness"]
     guidance = doctor_guidance_for_check(check)
+    assert not any(marker in guidance["operator_action"] for marker in (
+        "configured but not runnable", "hermes-lcm-x-local-embeddings",
+    ))
     assert guidance["action"] == "inspect"
     assert "coverage" in guidance["operator_action"] and "SQLite" in guidance["operator_action"]
-    assert "reinstall" not in guidance["operator_action"]

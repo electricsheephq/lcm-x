@@ -31,7 +31,9 @@ def test_not_prepared_guidance_with_real_readiness(default_engine, monkeypatch, 
         assert check["status"] == "pass" and guidance is None
     else:
         assert check["status"] == "warn"
-        assert "reinstall" not in guidance["operator_action"]
+        assert not any(marker in guidance["operator_action"] for marker in (
+            "configured but not runnable", "hermes-lcm-x-local-embeddings",
+        ))
         if coverage_error:
             assert guidance["action"] == "inspect"
             assert "coverage" in guidance["operator_action"] and "SQLite" in guidance["operator_action"]
@@ -46,7 +48,7 @@ def test_not_prepared_guidance_with_real_readiness(default_engine, monkeypatch, 
     ("present", True, "safe/ignore", "LCM_EMBEDDINGS_ENABLED=true"),
     ("preparing", True, "inspect", "prepar"),
     ("unavailable(download failed)", True, "inspect", "warmup"),
-    ("unavailable(missing fastembed)", False, "inspect", "reinstall"),
+    ("unavailable(missing fastembed)", False, "inspect", "hermes-lcm-x-local-embeddings"),
 ])
 def test_cpu_limited_readiness_remedies(default_engine, monkeypatch, model, available, action, remedy):
     monkeypatch.setattr(tools, "effective_cpus", lambda: 1)
@@ -55,9 +57,13 @@ def test_cpu_limited_readiness_remedies(default_engine, monkeypatch, model, avai
     })
     monkeypatch.setattr(tools, "_embedding_readiness", lambda *args: f"model: {model}; coverage: 0/0 summaries")
     guidance = doctor_guidance_for_check(tools._embedding_provider_health_check(default_engine))
-    assert guidance["action"] == action and remedy in guidance["operator_action"]
     if available and not model.startswith("unavailable("):
-        assert "reinstall" not in guidance["operator_action"]
+        assert not any(marker in guidance["operator_action"] for marker in (
+            "configured but not runnable", "hermes-lcm-x-local-embeddings",
+        ))
+    assert guidance["action"] == action and remedy in guidance["operator_action"]
+    if not available:
+        assert "configured but not runnable" in guidance["operator_action"]
 
 
 @pytest.mark.parametrize("override", ["", " ", "voyage", " fastembed "])

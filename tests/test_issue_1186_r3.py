@@ -80,11 +80,13 @@ def test_cpu_limited_doctor_keeps_provider_and_readiness(recall_engine, monkeypa
     assert "semantic recall limited on this host (1 effective CPUs); full-text recall is active" in detail["cpu_limit_reason"]
     guidance = doctor_guidance_for_check(check)
     if state == "healthy":
+        assert not any(marker in guidance["operator_action"] for marker in (
+            "configured but not runnable", "hermes-lcm-x-local-embeddings",
+        ))
         assert guidance["action"] == "safe/ignore"
         assert "expected on this host" in guidance["rationale"]
         assert "set LCM_EMBEDDINGS_ENABLED=true" in guidance["operator_action"]
         assert "more than 2 effective CPUs" in guidance["operator_action"]
-        assert "reinstall" not in guidance["operator_action"]
     else:
         assert guidance["action"] == "inspect"
         assert "warmup" in guidance["operator_action"]
@@ -163,4 +165,5 @@ def test_cpu_limited_slash_doctor_reports_missing_fastembed(default_engine, monk
     assert "FastEmbed is not installed" in text
     assert "semantic recall limited on this host (1 effective CPUs); full-text recall is active" in text
     assert "embedding_readiness: model: unavailable(" in text
-    assert "pip install fastembed" in text
+    assert "configured but not runnable" in text
+    assert "hermes-lcm-x-local-embeddings" in text
