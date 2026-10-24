@@ -302,12 +302,46 @@ class Qualification:
             "from pathlib import Path; from hermes_cli import plugins_cmd as pc; "
             f"print(pc._pull_plugin_update(Path({str(target)!r}), 'pinned', 'not git'))"
         )
-        self.run(home, [str(self.python), "-c", code])
+        if self.pm:
+            # S1-C.4: retain the default-scanner refusal beside the exception
+            # arm. This is the real update transaction, before publication.
+            assert os.environ.get("GITHUB_ACTIONS") == "true", "update scan exception: hosted CI only"
+            assert home.resolve().is_relative_to(self.scratch.resolve()), "synthetic home only"
+            refusal = (
+                "import json; from hermes_cli.plugins_cmd import PluginScanBlocked, _scan_on_install_enabled; "
+                "assert _scan_on_install_enabled();\n"
+                "try:\n " + code + "\n"
+                "except PluginScanBlocked:\n print(json.dumps({'scanner_enabled': True, 'update_refused': True}))\n"
+                "else:\n raise AssertionError('expected full-core scanner refusal; revisit exception')"
+            )
+            refused = json.loads(self.run(home, [str(self.python), "-c", refusal]).strip().splitlines()[-1])
+            assert refused["scanner_enabled"] and refused["update_refused"], refused
+            assert "999.1186.1" not in (target / "plugin.yaml").read_text()
+            assert self.probe(home, "state") == before
+            self.record("b-scanner-on-refusal", status="EXPECTED_NEGATIVE", **refused)
+            setting = (
+                "from hermes_cli.config import load_config, save_config; "
+                "c=load_config(); c.setdefault('plugins', {})['scan_on_install']={enabled}; save_config(c)"
+            )
+            try:
+                self.run(home, [str(self.python), "-c", setting.replace("{enabled}", "False")])
+                self.run(home, [str(self.python), "-c", code])
+            finally:
+                self.run(home, [str(self.python), "-c", setting.replace("{enabled}", "True")])
+            scanned = self.run(home, [str(self.python), str(PROBE), "scan",
+                                     str(home / "plugins" / COMPANION)])
+            scan = json.loads(scanned.strip().splitlines()[-1])
+            assert scan["scanner_enabled"] and scan["verdict"] == "safe", scan
+            self.record("companion-scan", route="after-core-update", **scan)
+        else:
+            self.run(home, [str(self.python), "-c", code])
         assert "999.1186.1" in (target / "plugin.yaml").read_text()
         result = self.probe(home, "import")
         after = self.probe(home, "state") if self.pm else None
         assert after == before, (before, after)
         self.record("b", interactive=False, before=before, after=after, **result)
+        if self.pm:
+            self.record("e-core-version-no-rebuild", update_cell="b", before=before, after=after)
 
     def rebuilds(self, home: Path) -> None:
         before = self.probe(home, "state")
