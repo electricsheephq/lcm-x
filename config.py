@@ -1404,7 +1404,8 @@ class LCMConfig:
         if pinned:
             _profile_envs[env["HERMES_HOME"]] = MappingProxyType(dict(env))
         c = cls()
-        c.embeddings_enabled_explicit = env.get("LCM_EMBEDDINGS_ENABLED") is not None
+        c.embeddings_enabled_explicit = env.get("LCM_EMBEDDINGS_ENABLED", "").strip().lower() in (
+            "1", "true", "yes", "on", "0", "false", "no", "off")
         c._absolute_threshold_tokens = env.get("LCM_ABSOLUTE_THRESHOLD_TOKENS", "0") if pinned else None
         config_sources: dict[str, str] = {}
         config_source_warnings: list[str] = []

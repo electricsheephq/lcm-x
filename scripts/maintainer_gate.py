@@ -90,6 +90,7 @@ NON_TURN_PATH_FILES = {
     "command_doctor.py",  # Read-only /lcm doctor text diagnostics only.
     "command_router.py",  # Explicit slash-command grammar only.
     "command_status.py",  # Operator status rendering only.
+    "cpu_capacity.py",  # Explicit recall/doctor policy; no ingest or context shaping.
     "embedding_maintenance.py",  # Default-off embedding maintenance.
     "embedding_provider.py",  # Default-off embedding provider path.
     "evidence_compiler.py",  # Default-off hook or explicit evidence tool.
