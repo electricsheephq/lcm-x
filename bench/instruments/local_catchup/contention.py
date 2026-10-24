@@ -11,6 +11,7 @@ import dataclasses
 import hashlib
 import inspect
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -36,6 +37,8 @@ def main():
     p.add_argument('--n', type=int, default=100)
     p.add_argument('--profile', action='store_true')
     p.add_argument('--busy-threads', type=int, choices=(0, 1, 2), default=0)
+    p.add_argument('--recall-timeout-s', type=float,
+                   help='Harness-only override of recall_query_timeout_s for uncensored exactness')
     a = p.parse_args()
     from bench.instruments.local_catchup.common import product, isolated, config, safe_paths
     paths = (a.repo, a.hermes_source, a.model_cache, a.store, a.home, a.out)
@@ -44,6 +47,9 @@ def main():
         p.error('live .hermes paths forbidden')
     if a.n < 1 or a.offset < 0:
         p.error('--n must be positive and --offset must be nonnegative')
+    if a.recall_timeout_s is not None and (
+            not math.isfinite(a.recall_timeout_s) or a.recall_timeout_s <= 0):
+        p.error('--recall-timeout-s must be finite and positive')
     if any(path.exists() or path.is_symlink() for path in (a.home, a.out)):
         p.error('--home and --out must not exist')
     if a.home.resolve() == a.out.resolve():
@@ -83,6 +89,8 @@ def main():
     socket.gethostbyaddr = socket.getnameinfo = deny
     mod = product(a.repo, a.hermes_source)
     cfg = config(mod, a.store / 'store.db')
+    if a.recall_timeout_s is not None:
+        cfg = dataclasses.replace(cfg, recall_query_timeout_s=a.recall_timeout_s)
     provider = mod('embedding_provider').resolve_provider(cfg)
     ensure = provider._ensure_local
     ensure(**({'allow_download': False} if 'allow_download' in inspect.signature(ensure).parameters else {}))

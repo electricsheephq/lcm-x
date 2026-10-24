@@ -26,9 +26,13 @@ after warmup. Run only one measured process at a time. The caller must apply the
 run's declared load-admission rule and retain `uptime` before and after every
 block; the script does not enforce or measure host load. The default quiet-host
 rule is load1 below 4. An explicit run amendment may permit current-load ABAB
-measurement. For #1586 P1, C1 keeps its relative bar under load; a C2 PASS counts,
-while a C2 failure at load1 >=4 is PENDING-QUIET. That exception does not waive
-an exactness difference: stop the run on any top-k ID or score-tolerance mismatch.
+measurement. For #1586 P2, exactness and RSS may run at any load, while every
+C1/C2/C3 ABAB block requires load1 below 4 immediately before admission. Wait
+in 10-minute checks for up to 3 hours, then record PENDING-QUIET if necessary.
+Score ranking exactness only on paired queries where both arms have full
+summary and chunk coverage, no timeout and no error. Preserve censored pairs
+as latency events, never silently discard them from latency results. Stop on
+any ordered top-k ID or score-tolerance mismatch in a full/full pair.
 Follow the operator's disk and CPU budgets;
 the retained per-query 40 GiB disk stop is not permission to bypass a stricter
 launch budget.
@@ -38,7 +42,15 @@ values) with class `b` (the original three broad natural-language queries).
 `--n` is the number per class and `--offset` indexes that same repeating sequence.
 One canary warmup runs first and is recorded separately, excluded from summaries.
 The product's default config, recall deadline, model, and ORT thread count remain
-unchanged. BLAS/OMP environment thread counts are explicitly 1; socket network
+unchanged by default. For P2's additional no-deadline exactness pass, repeat the
+same paired queries with `--recall-timeout-s 3600`, a harness-only override of
+the existing `recall_query_timeout_s` config field. This equals the existing
+`LCM_RECALL_QUERY_TIMEOUT_S` knob; the isolated instrument builds config directly
+and clears ambient LCM environment variables. Require full coverage for every
+pair in that pass and identical ordered top-k IDs within four float32 ULP
+(`4 * 2**-23`); an incomplete pass cannot prove uncensored exactness. Never
+combine raised-deadline timings with C1/C2/C3. BLAS/OMP environment thread
+counts are explicitly 1; socket network
 operations are denied and model preparation disallows downloads when supported.
 
 Outputs:
