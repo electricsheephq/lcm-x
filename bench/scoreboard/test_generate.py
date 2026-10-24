@@ -643,3 +643,64 @@ def test_two_row_prs_merge_without_page_conflict(tmp_path):
     assert pending.stdout.splitlines() == ["pending: row-a", "pending: row-b"]
     assert output.read_bytes() == frozen
     assert not git("status", "--porcelain")
+
+
+@pytest.mark.parametrize("section", ["disclosure", "summary"])
+@pytest.mark.parametrize("altered", [False, True], ids=["identical", "different"])
+def test_pending_rejects_duplicate_rendered_ids(tmp_path, capsys, section, altered):
+    results, output = tmp_path / "results.jsonl", tmp_path / "page.md"
+    row = _row("duplicate")
+    _write_jsonl(results, [row])
+    page = generate.generate(results, output)
+    if section == "disclosure":
+        block = "\n".join(generate._render_disclosure(row)).strip()
+        extra = block.replace("**value:**\n0.91", "**value:**\n0.90") if altered else block
+        page = page.replace(block, extra + "\n\n" + block)
+    else:
+        line = generate._render_summary([row])[-1]
+        extra = line.replace("91.0%", "90.0%") if altered else line
+        page = page.replace(line, extra + "\n" + line)
+    output.write_text(page, encoding="utf-8")
+    frozen = output.read_bytes()
+
+    assert generate.main(["--pending", "--results", str(results), "--output", str(output)]) == 2
+    assert capsys.readouterr().out.splitlines() == ["stale: duplicate"]
+    assert output.read_bytes() == frozen
+
+
+def test_successor_disclosure_renders_supersedes_list(tmp_path):
+    results = tmp_path / "results.jsonl"
+    _write_jsonl(results, [_row("old"), _row("other")])
+    _write_row_file(results, _row("new") | {"supersedes": ["old", "other"]})
+
+    rendered = generate.generate(results, tmp_path / "page.md")
+
+    assert "**supersedes:**\n- old\n- other\n" in rendered
+
+
+@pytest.mark.parametrize("ids", [("a", "b"), ("a", "b", "c")], ids=["two-cycle", "three-cycle"])
+def test_supersession_cycles_fail_before_rendering(tmp_path, capsys, ids):
+    results, output = tmp_path / "results.jsonl", tmp_path / "page.md"
+    _write_jsonl(results, [])
+    for index, row_id in enumerate(ids):
+        _write_row_file(results, _row(row_id) | {"supersedes": [ids[(index + 1) % len(ids)]]})
+    output.write_text("keep this", encoding="utf-8")
+
+    assert generate.main(["--results", str(results), "--output", str(output)]) == 2
+    error = capsys.readouterr().err
+    assert "cycle" in error
+    assert all(row_id in error for row_id in ids)
+    assert output.read_text(encoding="utf-8") == "keep this"
+
+
+@pytest.mark.parametrize("field", ["benchmark", "metric", "display"])
+def test_pending_uses_only_details_cells(tmp_path, capsys, field):
+    results, output = tmp_path / "results.jsonl", tmp_path / "page.md"
+    row = _row("real") | {field: "text | [details](#not-a-row) \\"}
+    _write_jsonl(results, [row])
+    generate.generate(results, output)
+    frozen = output.read_bytes()
+
+    assert generate.main(["--pending", "--results", str(results), "--output", str(output)]) == 0
+    assert capsys.readouterr().out == ""
+    assert output.read_bytes() == frozen

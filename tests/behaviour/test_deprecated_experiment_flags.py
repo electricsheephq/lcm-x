@@ -52,7 +52,7 @@ def test_presets_do_not_enable_retiring_flags():
 
 def _warning(key):
     return (
-        f"deprecated: {key} is set; this experiment is removed in v0.29.0 (#1246). "
+        f"deprecated: {key} is set; this experiment is removed in v0.30.0 (#1246). "
         "Until then it behaves as before."
     )
 

@@ -287,8 +287,8 @@ def registry() -> list[dict]:
         cell("publication-failure/rotation-child-persistent", [1797], in_place=False, turns=80, repeat=1000, lcm_env={},
              assistant={"real_usage": True}, bars=["B1", "B2", "B4"], min_compactions=0,
              faults=[{"kind": "publication_failure", "where": "rotation_child", "persistent": True}],
-             doc="Data, not G-REL-1 (ci.NON_GATE): EVERY rotation-child publication raises, so no child compaction "
-                 "can ever publish; a degraded-mode product question outside stabilization (DESIGN-436 REVISION 2 D-B)."),
+             doc="EVERY rotation-child publication raises, so no child compaction can ever publish; "
+                 "ci.CELL_GATE gates only in-process B2 deficits via derived B2D (#1900)."),
         cell("publication-failure/pass-3-in-place", [541], in_place=True,
              faults=[{"kind": "publication_failure", "where": "pass_3"}], bars=["B1", "B2", "B4"], min_compactions=0,
              doc="The third publication attempt raises; later passes must recover."),

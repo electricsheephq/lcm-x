@@ -18,12 +18,13 @@ Requirements:
      Sort: benchmark asc, then date desc. Superseded rows struck through
      (~~...~~) with link to successor.
    - Per-row disclosure sections (anchor = row id): every schema field rendered
-     under bold labels; `evidence` as a list; `caveats` as a list.
+     under bold labels; `evidence`, `caveats`, and optional `supersedes` as lists.
 3. `--check`: require page == render(all sources), no write; exit 0/2.
    `--pending`: list source rows absent from the committed page as `pending: <id>` (exit 0),
    supersession-only changes from an unrendered successor as `pending: <id> (superseded by <successor>)` (exit 0),
    removed or otherwise mismatched rendered rows as `stale: <id>` (exit 2). Compare disclosures and summary values, ignoring the header.
    Supersession mismatches remain fatal if the successor is already rendered or removing supersession alone does not restore an exact match.
+   Count IDs only in summary Details cells and disclosure anchors; each rendered ID must occur exactly once in each. Duplicates are stale. Reject supersession cycles before rendering, naming the cycle.
 4. Tests in `bench/scoreboard/test_generate.py` (pytest): golden render of a
    2-row fixture; missing-field refusal; malformed-line refusal; supersession
    strike-through; byte-stable (two runs identical output).

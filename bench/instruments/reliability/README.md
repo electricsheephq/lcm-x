@@ -122,7 +122,7 @@ asks it to publish. R1 only.
 publication; the next child compaction must commit. `publication-failure/rotation-child-persistent` fails every
 rotation-child publication: a data cell for the degraded mode where no child compaction can ever publish. It targets
 #1797 (exact content preserved under permanent child-publication failure; publication success is never required) and
-stays in `ci.NON_GATE`, so it never gates.
+gates only B2 deficits through the exact-cell gate described below.
 
 Native cells: native recovery was removed (#777), so the native-only cells (`native-short-prefix/*`,
 `native-long-prefix/*`) were retired with it. `native-on-off/*` remain: an older lcm-x runs with native recovery ON,
@@ -354,6 +354,8 @@ on every pinned host at B1/B2/B3/B4/B8/F4, plus B9 on `upstream-uid`; R1 `native
 at B3/B4/B8; and R1 `overflow-recovery-restart/{in-place,rotation}` and `upgrade-crash-after-rotation/rotation`
 at B1/B2. The last three gate on UID-capable hosts; stamp-only failures remain excused by open #534/#1508
 and #1501/#1506 targets via `ISSUE_HOSTS`. Other continuity cells remain outside the gate.
+On runtime hosts, R1 `publication-failure/rotation-child-persistent` gates only on derived `B2D`: a B2 FAIL
+with a positive or missing deficit count; B1 mismatches and B2 surplus remain accepted under #1588, independently of #1797's open state.
 
 ### Claim boundary
 R2 proves the plugin's behaviour through a real `hermes acp` process on the pinned host shas, with every model route
