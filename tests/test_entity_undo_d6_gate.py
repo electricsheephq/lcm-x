@@ -1,5 +1,5 @@
 # ruff: noqa: F811
-"""U1 r3 independent verifier probes (written before reading the lane's added tests).
+"""Undo must not revive keys whose cited sources fail the D6 sender gate (#1862).
 
 Rule: after ANY undo, a restored alias_match row is active only if every source it cites
 still passes D6 now; otherwise it stays retired and the key reads unresolved. A later
