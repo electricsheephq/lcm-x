@@ -361,12 +361,27 @@ class EntityOps:
                          and r["entity_id"] == _canonical(self._entities(), override["entity_id"])
                          and set(json.loads(r["source_store_ids"])) <= set(override["scope_store_ids"])]
                 p = dict(p, created=dict(p["created"], keys=list(set(p["created"].get("keys", []) + owned))))
+            safe_changes = []
             for change in p["changes"]:
                 if change["family"] == "keys" and change["before"]["retired_at"] is None:
                     row = self._get("keys", change["id"])
                     if any(k["subject_key"] == row["subject_key"] and k["owner_entity_id"] == row["owner_entity_id"]
                            and k["key_id"] not in p["created"].get("keys", []) for k in _active_keys(self.store)):
                         raise EntityOpRefused("key_held")
+                    # The inverse cannot re-check injected sender attribution.
+                    # Require its surviving derived binding before retiring it;
+                    # otherwise keep the old row retired until a fresh rebuild.
+                    cited = set(json.loads(row["source_store_ids"]))
+                    bound = {source for k in _active_keys(self.store)
+                             if k["key_id"] in p["created"].get("keys", [])
+                             and (k["subject_key"], k["owner_entity_id"]) ==
+                             (row["subject_key"], row["owner_entity_id"])
+                             for source in json.loads(k["source_store_ids"])}
+                    current = {source for subject, source in _key_sources(self.store) if subject == row["subject_key"]}
+                    if not cited or not cited <= bound & current:
+                        continue
+                safe_changes.append(change)
+            p = dict(p, changes=safe_changes)
             for change in p["changes"]:
                 if change["family"] == "aliases" and change["before"]["retired_at"] is None:
                     alias = self._get("aliases", change["id"])

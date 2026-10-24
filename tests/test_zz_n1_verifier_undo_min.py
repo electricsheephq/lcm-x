@@ -1,3 +1,4 @@
+# ruff: noqa: F811  # Imported pytest fixture is intentionally injected by name.
 """Minimal repro: override before D6 gate failure, then undo without rebuild."""
 import json
 import pytest

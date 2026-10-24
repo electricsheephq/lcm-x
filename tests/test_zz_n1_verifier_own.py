@@ -1,3 +1,4 @@
+# ruff: noqa: F811  # Imported pytest fixture is intentionally injected by name.
 """N1 verifier probes (independent, written before reading the lane's ported tests).
 
 Rule (a): with no active override, a key that rebuild retired for failing a D6 gate never
