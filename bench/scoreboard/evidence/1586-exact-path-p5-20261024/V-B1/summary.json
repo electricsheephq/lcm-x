@@ -1,0 +1,47 @@
+{
+  "a": {
+    "n": 4,
+    "p50": 0.9983042920357548,
+    "p90": 1.0100625000195578,
+    "max": 1.0100625000195578,
+    "timeouts": 0,
+    "errors": 0,
+    "coverage": {
+      "{\"chunk\": \"full\", \"fts\": \"ok\", \"summary\": \"full\"}": 4
+    },
+    "fts_none": 0,
+    "fts_hits": 4,
+    "fts_latency": {
+      "n": 4,
+      "p50": 0.0012327919830568135,
+      "p90": 0.00209575000917539,
+      "max": 0.00209575000917539
+    }
+  },
+  "b": {
+    "n": 4,
+    "p50": 1.2403672499931417,
+    "p90": 1.2895523749757558,
+    "max": 1.2895523749757558,
+    "timeouts": 0,
+    "errors": 0,
+    "coverage": {
+      "{\"chunk\": \"full\", \"fts\": \"ok\", \"summary\": \"full\"}": 4
+    },
+    "fts_none": 0,
+    "fts_hits": 200,
+    "fts_latency": {
+      "n": 4,
+      "p50": 0.24450083298143,
+      "p90": 0.2649338329792954,
+      "max": 0.2649338329792954
+    }
+  },
+  "_process": {
+    "peak_rss_bytes": 887144448,
+    "peak_rss_native": 887144448,
+    "peak_rss_native_unit": "bytes",
+    "busy_threads": 0,
+    "profile": false
+  }
+}

@@ -1,0 +1,316 @@
+{
+  "method": "RCA-v1 transfer stages; one separate untimed raised-deadline query",
+  "acceptance_latency": false,
+  "acceptance_rss": false,
+  "events": [
+    {
+      "group": "chunk",
+      "function": "_fetch_exact_rows",
+      "stage": "aggregate",
+      "line": 1493,
+      "rss_bytes": 926023680,
+      "traced_bytes": [
+        16145618,
+        39689550
+      ],
+      "objects": {
+        "metadata": {
+          "type": "str",
+          "length": 41894,
+          "shallow_bytes": 41935
+        },
+        "transferred": {
+          "type": "bytes",
+          "length": 1536000,
+          "shallow_bytes": 1536033
+        }
+      }
+    },
+    {
+      "group": "chunk",
+      "function": "_fetch_exact_rows",
+      "stage": "metadata",
+      "line": 1494,
+      "rss_bytes": 926023680,
+      "traced_bytes": [
+        16457761,
+        39689550
+      ],
+      "objects": {
+        "metadata": {
+          "type": "str",
+          "length": 41894,
+          "shallow_bytes": 41935
+        },
+        "transferred": {
+          "type": "bytes",
+          "length": 1536000,
+          "shallow_bytes": 1536033
+        },
+        "rows": {
+          "type": "list",
+          "length": 1000,
+          "shallow_bytes": 8856
+        }
+      }
+    },
+    {
+      "group": "chunk",
+      "function": "_fetch_exact_rows",
+      "stage": "raw",
+      "line": 1497,
+      "rss_bytes": 926023680,
+      "traced_bytes": [
+        16458854,
+        39689550
+      ],
+      "objects": {
+        "metadata": {
+          "type": "str",
+          "length": 41894,
+          "shallow_bytes": 41935
+        },
+        "transferred": {
+          "type": "bytes",
+          "length": 1536000,
+          "shallow_bytes": 1536033
+        },
+        "raw": {
+          "type": "bytes",
+          "length": 1536000,
+          "shallow_bytes": 1536033
+        },
+        "rows": {
+          "type": "list",
+          "length": 1000,
+          "shallow_bytes": 8856
+        }
+      }
+    },
+    {
+      "group": "chunk",
+      "function": "_fetch_exact_rows",
+      "stage": "decoded",
+      "line": 1504,
+      "rss_bytes": 927842304,
+      "traced_bytes": [
+        18038010,
+        39689550
+      ],
+      "objects": {
+        "metadata": {
+          "type": "str",
+          "length": 41894,
+          "shallow_bytes": 41935
+        },
+        "raw": {
+          "type": "bytes",
+          "length": 1536000,
+          "shallow_bytes": 1536033
+        },
+        "rows": {
+          "type": "list",
+          "length": 1000,
+          "shallow_bytes": 8856
+        },
+        "decoded": {
+          "type": "list",
+          "length": 1000,
+          "shallow_bytes": 8856
+        }
+      }
+    },
+    {
+      "group": "chunk",
+      "function": "_load_chunk_matrix",
+      "stage": "metadata",
+      "line": 2808,
+      "rss_bytes": 927842304,
+      "traced_bytes": [
+        16265313,
+        39689550
+      ],
+      "objects": {
+        "rows": {
+          "type": "list",
+          "length": 1000,
+          "shallow_bytes": 8856
+        },
+        "blobs": {
+          "type": "list",
+          "length": 0,
+          "shallow_bytes": 56
+        }
+      }
+    },
+    {
+      "group": "chunk",
+      "function": "_load_chunk_matrix",
+      "stage": "matrix",
+      "line": 2842,
+      "rss_bytes": 927907840,
+      "traced_bytes": [
+        17822164,
+        39689550
+      ],
+      "objects": {
+        "rows": {
+          "type": "list",
+          "length": 1000,
+          "shallow_bytes": 8856
+        },
+        "blobs": {
+          "type": "list",
+          "length": 1000,
+          "shallow_bytes": 8856
+        },
+        "matrix": {
+          "shape": [
+            1000,
+            384
+          ],
+          "dtype": "float32",
+          "nbytes": 1536000,
+          "owns": false,
+          "base_type": "ndarray"
+        }
+      }
+    }
+  ],
+  "settled": {
+    "rss_bytes": 649117696,
+    "traced_bytes": [
+      455307,
+      39689550
+    ]
+  },
+  "settled_sites": [
+    {
+      "file": "vector_store.py",
+      "line": 1167,
+      "bytes": 67872,
+      "count": 32
+    },
+    {
+      "file": "vector_store.py",
+      "line": 1481,
+      "bytes": 23040,
+      "count": 32
+    },
+    {
+      "file": "vector_store.py",
+      "line": 1443,
+      "bytes": 20160,
+      "count": 360
+    },
+    {
+      "file": "memory_sites.py",
+      "line": 56,
+      "bytes": 18970,
+      "count": 19
+    },
+    {
+      "file": "decoder.py",
+      "line": 361,
+      "bytes": 15669,
+      "count": 216
+    },
+    {
+      "file": "tools.py",
+      "line": 1057,
+      "bytes": 14019,
+      "count": 2
+    },
+    {
+      "file": "vector_store.py",
+      "line": 1556,
+      "bytes": 11520,
+      "count": 160
+    },
+    {
+      "file": "tools.py",
+      "line": 3996,
+      "bytes": 11319,
+      "count": 2
+    },
+    {
+      "file": "recall_delivery.py",
+      "line": 21,
+      "bytes": 9756,
+      "count": 2
+    },
+    {
+      "file": "vector_store.py",
+      "line": 1166,
+      "bytes": 9744,
+      "count": 50
+    },
+    {
+      "file": "retrieval_core.py",
+      "line": 706,
+      "bytes": 8880,
+      "count": 74
+    },
+    {
+      "file": "vector_store.py",
+      "line": 1649,
+      "bytes": 7920,
+      "count": 99
+    },
+    {
+      "file": "retrieval_core.py",
+      "line": 715,
+      "bytes": 6609,
+      "count": 74
+    },
+    {
+      "file": "vector_store.py",
+      "line": 1158,
+      "bytes": 6096,
+      "count": 70
+    },
+    {
+      "file": "vector_store.py",
+      "line": 1172,
+      "bytes": 5776,
+      "count": 73
+    },
+    {
+      "file": "_linalg.py",
+      "line": 2615,
+      "bytes": 4347,
+      "count": 2
+    },
+    {
+      "file": "retrieval_core.py",
+      "line": 640,
+      "bytes": 3708,
+      "count": 95
+    },
+    {
+      "file": "retrieval_core.py",
+      "line": 567,
+      "bytes": 3696,
+      "count": 66
+    },
+    {
+      "file": "store.py",
+      "line": 1983,
+      "bytes": 3453,
+      "count": 2
+    },
+    {
+      "file": "retrieval_core.py",
+      "line": 643,
+      "bytes": 3384,
+      "count": 52
+    }
+  ],
+  "diagnostic_peak_rss_native": 928055296,
+  "coverage": {
+    "fts": "ok",
+    "summary": "full",
+    "chunk": "full"
+  },
+  "timeout": false
+}
