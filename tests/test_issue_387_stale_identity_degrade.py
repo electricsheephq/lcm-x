@@ -496,7 +496,7 @@ def test_doctor_reports_unavailable_provider_before_stale_identity(engine, monke
     assert check["status"] == "warn"
     assert check["detail"]["available"] is False
     assert "embedding_identity_stale" not in check["detail"]
-    assert "semantic retrieval is degraded" in check["detail"]["impact"]
+    assert "Local semantic recall unavailable" in check["detail"]["impact"]
 
 
 @pytest.mark.parametrize("state", ["old", "missing"])

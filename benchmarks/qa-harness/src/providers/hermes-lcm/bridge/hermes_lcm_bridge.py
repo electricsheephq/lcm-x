@@ -95,6 +95,7 @@ class Bridge:
         explicit = (os.environ.get("HERMES_MB_PROVIDER") or "").strip().lower()
         explicit = "fastembed" if explicit == "fast-embed" else explicit
         requested_model = os.environ.get("HERMES_MB_MODEL", "")
+        self.embedding_settings_explicit = bool(explicit or requested_model)
         self.embeddings_enabled = explicit not in {"off", "none"} and (
             bool(explicit or requested_model) or defaults.embeddings_enabled)
         self.provider_name = explicit if explicit and self.embeddings_enabled else defaults.embedding_provider
@@ -132,6 +133,7 @@ class Bridge:
             "model": self.model,
             "dim": self.dim,
             "embeddings_enabled": self.embeddings_enabled,
+            "embeddings_enabled_explicit": self.embedding_settings_explicit,
         }
         (self.workdir / "effective-config.json").write_text(json.dumps(effective), encoding="utf-8")
         return effective
@@ -167,6 +169,7 @@ class Bridge:
             embeddings_enabled=self.embeddings_enabled,
             embedding_provider=self.provider_name,
             embedding_model=self.model,
+            embeddings_enabled_explicit=self.embedding_settings_explicit,
         )
 
     # -- ingest ---------------------------------------------------------------

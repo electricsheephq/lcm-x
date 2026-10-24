@@ -80,12 +80,14 @@ class Stores:
                          "dataset_sha256": dataset_sha, "summaries": summaries,
                          "provider": self.provider_name, "model": self.model,
                          "embedding_privacy": "raw-public-benchmark", "format": 3, "store_text": store_text}
-        lme._ensure_hermes_lcm_package()
-        from hermes_lcm import config as config_module
-        resolve_model = getattr(config_module, "effective_embedding_model", lambda provider, model: model)
-        self.identity["effective_config"] = {"embeddings_enabled": self.base != "off",
-            "embedding_provider": self.provider_name or "fastembed",
-            "embedding_model": resolve_model(self.provider_name or "fastembed", self.model)}
+        self.identity["effective_config"] = None  # Identity-only callers do not run a product tree.
+        if lme is not None:
+            lme._ensure_hermes_lcm_package()
+            from hermes_lcm import config as config_module
+            resolve_model = getattr(config_module, "effective_embedding_model", lambda provider, model: model)
+            self.identity["effective_config"] = {"embeddings_enabled": self.base != "off",
+                "embedding_provider": self.provider_name or "fastembed",
+                "embedding_model": resolve_model(self.provider_name or "fastembed", self.model)}
         # D8: the path names every build input, so no build is reused across inputs.
         self.generation = "-".join([self.base, summaries, self.identity["lcmx_commit"][:12],
                                     sha(json.dumps(self.identity, sort_keys=True).encode())[:12]])

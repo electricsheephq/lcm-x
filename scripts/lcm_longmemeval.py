@@ -197,7 +197,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     probe.add_argument("--seed", type=int, default=0)
     probe.add_argument("--timeout", type=float, default=300.0)
     args = parser.parse_args(argv)
-    if args.command == "run" and args.shipped_default and (args.provider != "stub" or args.model or args.embeddings != "on"):
+    if args.command == "run" and args.shipped_default and any(token.partition("=")[0] in {"--provider", "--model", "--embeddings"} for token in argv):
         parser.error("--shipped-default cannot override explicit embedding settings")
     if args.command == "run" and args.embeddings == "off" and args.provider != "stub":
         parser.error("--embeddings off requires --provider stub")

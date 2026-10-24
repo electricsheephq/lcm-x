@@ -2656,6 +2656,7 @@ def evaluate_question(
     provider_name: str,
     tmp_dir: Path,
     embeddings_enabled: bool,
+    embeddings_enabled_explicit: bool = True,
     top_k: int = 10,
     use_rerank: bool = False,
     recall_rerank: bool = False,
@@ -2748,6 +2749,7 @@ def evaluate_question(
     config = LCMConfig(
         database_path=str(db_path),
         embeddings_enabled=embeddings_enabled,
+        embeddings_enabled_explicit=embeddings_enabled_explicit,
         embedding_provider=summary_name,
         embedding_model=model,
         rerank_enabled=recall_rerank,
@@ -4199,6 +4201,9 @@ def run_harness(
         manifest_sha256=manifest_sha256,
     )
 
+    if shipped_default:
+        expected_checkpoint_header[_CHECKPOINT_HEADER_KEY]["embeddings_enabled_explicit"] = False
+        expected_dump_header[_DUMP_HEADER_KEY]["embeddings_enabled_explicit"] = False
     if resume and checkpoint_path is None:
         raise ValueError("resume=True requires a checkpoint_path")
     checkpoint_records: list[dict[str, Any]] = []
@@ -4334,6 +4339,7 @@ def run_harness(
                     embeddings_enabled=embeddings_enabled,
                     embedding_provider=provider_set.summary_binding[0],
                     embedding_model=provider_set.summary_binding[1],
+                    embeddings_enabled_explicit=not shipped_default,
                     # Match the per-question lossless/provider-copy split.
                     sensitive_patterns_enabled=False,
                     embedding_privacy_enabled=None,
@@ -4419,6 +4425,7 @@ def run_harness(
                         provider_name=provider_name,
                         tmp_dir=tmp_dir,
                         embeddings_enabled=embeddings_enabled,
+                        **({"embeddings_enabled_explicit": False} if shipped_default else {}),
                         use_rerank=use_rerank,
                         recall_rerank=recall_rerank,
                         recall_rerank_window=recall_rerank_window,

@@ -50,7 +50,7 @@ ROWS = [
 ] + [
     (key, field, raw, default if raw is None else raw, False, warns)
     for key, field, default, values in [
-        ("EMBEDDING_PROVIDER", "embedding_provider", "", [
+        ("EMBEDDING_PROVIDER", "embedding_provider", "fastembed", [
             (None, False), ("", False), (" \t", False), (" VoYaGeAI ", False),
             ("voyage", False), ("ollama", False), ("fastembed", False),
             ("fast-embed", False), ("openai-compatible", False),

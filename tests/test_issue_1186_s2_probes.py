@@ -113,6 +113,7 @@ def test_p5_fleet_env_never_adapted(recall_engine, monkeypatch, cpus):
     monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "true")
     recall_engine._config = DefaultOnConfig.from_env()
     monkeypatch.setattr(tools, "effective_cpus", lambda: cpus)
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda config: {"available": True, "detail": "synthetic backend"})
     called = []
     monkeypatch.setattr(tools, "_resolve_recall_provider", lambda *a, **k: called.append(True))
     result = tools.lcm_recall({"query": "cobalt"}, engine=recall_engine)
@@ -120,9 +121,10 @@ def test_p5_fleet_env_never_adapted(recall_engine, monkeypatch, cpus):
     assert "cpu_limited" not in result
 
 
-def test_p5_shipped_default_off_inert(monkeypatch):
+def test_p5_explicit_off_inert(monkeypatch):
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
     config = LCMConfig.from_env()
     assert config.embeddings_enabled is False
-    assert config.embeddings_enabled_explicit is False
+    assert config.embeddings_enabled_explicit is True
     monkeypatch.setattr(tools, "effective_cpus", lambda: pytest.fail("OFF must not probe CPU"))
     assert tools.default_semantic_cpu_limited(config) is False
