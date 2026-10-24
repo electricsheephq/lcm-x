@@ -59,9 +59,15 @@ def main():
         p.error('peak RSS conversion supports macOS and Linux only')
     code = {}
     for name, repo in (('product', a.repo), ('hermes', a.hermes_source)):
-        code[name] = dict(sha=subprocess.check_output(
-            ['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip(),
-            dirty=bool(subprocess.check_output(
+        head = subprocess.run(['git', '-C', str(repo), 'rev-parse', 'HEAD'],
+                              capture_output=True, text=True)
+        if head.returncode:
+            if name != 'hermes':
+                raise RuntimeError('product must be a Git checkout')
+            stub = repo / 'agent' / 'context_engine.py'
+            code[name] = dict(sha=None, contract_sha256=hashlib.sha256(stub.read_bytes()).hexdigest())
+        else:
+            code[name] = dict(sha=head.stdout.strip(), dirty=bool(subprocess.check_output(
                 ['git', '-C', str(repo), 'status', '--porcelain'], text=True)))
     code['instrument_sha256'] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     isolated(a.home, a.model_cache)

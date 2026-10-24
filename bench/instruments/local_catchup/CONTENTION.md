@@ -38,7 +38,7 @@ operations are denied and model preparation disallows downloads when supported.
 
 Outputs:
 
-- `identity.json`: product/Hermes Git SHAs and dirty flags, instrument SHA-256,
+- `identity.json`: product/Hermes Git SHAs and dirty flags (or a contract digest for a host stub), instrument SHA-256,
   full effective config, product ORT threads, environment, seed, offset, and arm.
 - `warmup.json`: warmup timing and complete recall payload.
 - `recalls.jsonl`: each query, latency, timeout, error, coverage, FTS hit count,

@@ -121,26 +121,33 @@ def _run_pooled_knn(
 ) -> Any:
     """Run ``query(store)`` on a pooled/transient store under its deadline guard.
 
-    The per-call progress handler is installed for this deadline and cleared in a
-    finally so a pooled connection never carries a stale/expired deadline into the
-    next caller.
+    The lease owns the connection until its interrupt watchdog has drained, so
+    cancellation cannot leak into the next borrower. Transient doubles retain
+    the progress-handler guard.
     """
+    from .vector_store import _interrupt_read_on_deadline
+
     store, store_lock, transient = _acquire_vector_store(
         engine, vector_store_cls=vector_store_cls, scan_rows=scan_rows
     )
     try:
         with (store_lock if store_lock is not None else nullcontext()):
             vector_conn = getattr(store, "_conn", None)
-            if vector_conn is not None:
+            watchdog = vector_conn is not None and not transient
+            if vector_conn is not None and not watchdog:
                 vector_conn.set_progress_handler(
                     lambda: 1 if time.monotonic() >= deadline else 0, 1000
                 )
             try:
                 if time.monotonic() >= deadline:
                     raise TimeoutError("semantic vector search deadline exhausted")
-                return query(store)
+                guard = (_interrupt_read_on_deadline(
+                    vector_conn, deadline if deadline != float("inf") else None
+                ) if watchdog else nullcontext())
+                with guard:
+                    return query(store)
             finally:
-                if vector_conn is not None:
+                if vector_conn is not None and not watchdog:
                     vector_conn.set_progress_handler(None, 1000)
     finally:
         if transient:
