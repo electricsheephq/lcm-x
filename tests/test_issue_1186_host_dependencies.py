@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from pathlib import Path
 
 import pytest
@@ -69,17 +70,24 @@ def test_core_scanner_exception_requires_hosted_synthetic_home(tmp_path, monkeyp
 def test_decline_cell_requires_host_hint_independent_of_installer_echo(tmp_path, monkeypatch, route, host_hint):
     qualification = Qualification("upstream-main", Path("python"), REPO,
                                   tmp_path / "scratch", tmp_path / "out", route=route)
-    text = "If the companion is disabled, run: hermes -p default plugins enable hermes-lcm-x-local-embeddings"
+    home = qualification.scratch / "noninteractive"
+    command = f"HERMES_HOME={shlex.quote(str(home))} hermes -p default plugins enable hermes-lcm-x-local-embeddings"
+    text = "If the companion is disabled, run: " + command
     if host_hint:
         text += "\nPlugin installed but not enabled. Run `hermes plugins enable hermes-lcm-x-local-embeddings` to activate."
     if host_hint == "wrapped":
         text = text.replace("Run `hermes plugins enable ", "Run `hermes plugins enable \r\n")
     monkeypatch.setattr(qualification, "install", lambda *a, **k: text)
     monkeypatch.setattr(qualification, "probe", lambda home, mode: {"companion_enabled": mode == "import"})
-    monkeypatch.setattr(qualification, "cli", lambda *a: "")
+    executed = []
+    monkeypatch.setattr(qualification, "cli", lambda *a: executed.append(("cli", a)))
+    monkeypatch.setattr(qualification, "run", lambda home, args: executed.append((home, args)))
     if host_hint:
         qualification.decline_routes()
         assert any(cell["cell"] == "d" for cell in qualification.cells)
+        if route == "installer":
+            assert executed == [(home, ["bash", "-c", command])]
+            assert next(cell for cell in qualification.cells if cell["cell"] == "f")["printed_command"] == command
     else:
         # Deleting only the host's hint must fail even if install.sh echoes enable.
         with pytest.raises(AssertionError, match="host.*hint"):
@@ -101,3 +109,24 @@ def test_exact_host_dependency_cells():
         qualification.save()
     cells = json.loads((out / "cells.json").read_text())["cells"]
     assert any(cell["cell"] == "a" and cell["status"] == "COMPLETE" for cell in cells)
+
+
+@pytest.mark.skipif(not os.environ.get("LCM_REAL_HERMES_SRC"), reason="exact pinned source on hosted CI")
+@pytest.mark.parametrize("case", ["profile-home", "matching", "conflict", "named", "sticky", "custom", "default"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_installer_uses_real_pinned_profile_resolution(tmp_path, case, existing, monkeypatch):
+    from tests.test_issue_1186_dependency_companion import (
+        test_installer_targets_explicit_profile_and_root,
+        test_profile_shaped_home_targets_one_profile_or_refuses_conflict,
+    )
+
+    monkeypatch.setenv("LCM_1186_PROFILE_SOURCE", str(Path(os.environ["LCM_REAL_HERMES_SRC"]) / "hermes_cli/profiles.py"))
+    if case in {"profile-home", "matching", "conflict"}:
+        profile = {"profile-home": None, "matching": "work", "conflict": "p1"}[case]
+        test_profile_shaped_home_targets_one_profile_or_refuses_conflict(tmp_path, profile, existing)
+    else:
+        profile, sticky, custom = {
+            "named": ("p1", "p2", False), "sticky": (None, "p2", False),
+            "custom": (None, None, True), "default": ("default", "p2", False),
+        }[case]
+        test_installer_targets_explicit_profile_and_root(tmp_path, profile, sticky, custom, existing)

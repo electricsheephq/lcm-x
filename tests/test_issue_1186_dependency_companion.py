@@ -96,11 +96,12 @@ def test_installer_targets_explicit_profile_and_root(tmp_path, profile, sticky, 
 
 
 def run_resolving_installer(tmp_path, *, profile=None, sticky=None, custom=True,
-                            existing=False, failure=None, legacy=False):
+                            existing=False, failure=None, legacy=False, profile_home=False, resolution_source=None):
     """Stub the two pinned hosts' -p/root/sticky resolution and native verbs."""
     home = tmp_path / ("custom root" if custom else "user/.hermes")
     canonical = profile.strip().casefold() if profile else "default"
-    target = home / "profiles" / canonical if canonical != "default" else home
+    target = home / "profiles/work" if profile_home else (
+        home / "profiles" / canonical if canonical != "default" else home)
     target.mkdir(parents=True)
     if sticky:
         (home / "active_profile").write_text(sticky)
@@ -121,7 +122,7 @@ def run_resolving_installer(tmp_path, *, profile=None, sticky=None, custom=True,
     log = tmp_path / "calls.jsonl"
     hermes = bindir / "hermes"
     hermes.write_text("""#!/usr/bin/env python3
-import json, os, sys
+import ast, json, os, sys
 from pathlib import Path
 root = Path(os.environ['HERMES_HOME'])
 args = sys.argv[1:]
@@ -130,7 +131,22 @@ if args[:1] == ['-p']:
 else:
     sticky = root / 'active_profile'
     profile = sticky.read_text().strip() if sticky.exists() else 'default'
-home = root if profile == 'default' else root / 'profiles' / profile
+source = os.environ.get('LCM_1186_PROFILE_SOURCE')
+if source:
+    # Execute the real pin's resolution; only validation/liveness and verbs are stubbed.
+    namespace = {'os': os, 'Path': Path,
+                 '_canon_valid': lambda name: name.strip().casefold(),
+                 '_get_default_hermes_home': lambda: Path.home() / '.hermes',
+                 'named_profile_is_live': lambda path: path.is_dir()}
+    functions = [node for node in ast.parse(Path(source).read_text()).body
+                 if isinstance(node, ast.FunctionDef) and node.name in
+                 {'profile_root_for_env_home', 'resolve_profile_env'}]
+    assert len(functions) == 2
+    exec(compile(ast.Module(body=functions, type_ignores=[]), source, 'exec'), namespace)
+    home = Path(namespace['resolve_profile_env'](profile))
+else:
+    root = root.parent.parent if root.parent.name == 'profiles' else root
+    home = root if profile == 'default' else root / 'profiles' / profile
 with open(os.environ['CALL_LOG'], 'a') as f:
     f.write(json.dumps({'home': str(home), 'args': args}) + '\\n')
 if args[1] == 'enable' and not (home / 'plugins' / args[2]).exists():
@@ -148,15 +164,50 @@ if args[1] == 'install':
         (checkout / "skills/hermes-lcm").mkdir(parents=True)
         script = checkout / "scripts/install.sh"
         script.write_text((ROOT / "scripts/install.sh").read_text())
-    env = {**os.environ, "HOME": str(tmp_path / "user"), "HERMES_HOME": str(home),
+    env = {**os.environ, "HOME": str(tmp_path / "user"), "HERMES_HOME": str(target if profile_home else home),
            "PATH": f"{bindir}:{os.environ['PATH']}", "CALL_LOG": str(log),
            "FAIL_COMPANION": "1" if failure == "install" else "0"}
     env.pop("HERMES_PROFILE", None)
+    if resolution_source is not None:
+        env["LCM_1186_PROFILE_SOURCE"] = str(resolution_source)
     if profile:
         env["HERMES_PROFILE"] = profile
     result = subprocess.run(["bash", str(script)], env=env, input="", text=True, capture_output=True)
     calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
     return result, home, target, calls
+
+
+@pytest.mark.parametrize("profile", [None, "work", "p1"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_profile_shaped_home_targets_one_profile_or_refuses_conflict(tmp_path, profile, existing):
+    result, home, target, calls = run_resolving_installer(
+        tmp_path, profile=profile, profile_home=True, existing=existing)
+    if profile == "p1":
+        assert result.returncode != 0
+        assert "work" in result.stderr and "p1" in result.stderr
+        assert f"HERMES_HOME={home}" in shlex.split(result.stderr)
+        assert "HERMES_PROFILE=p1" in result.stderr
+        assert f"HERMES_HOME={target}" in shlex.split(result.stderr)
+        assert not calls
+        assert not list(home.rglob("hermes-lcm-x"))
+        assert not list(home.rglob("skills"))
+        return
+    assert result.returncode == 0, result.stderr
+    assert (target / "plugins/hermes-lcm-x").resolve() == ROOT
+    assert (target / "skills/hermes-lcm-x").resolve() == ROOT / "skills/hermes-lcm"
+    assert all(call["home"] == str(target) for call in calls)
+    assert calls[0]["args"] == ["plugins", "enable", "hermes-lcm-x"]
+    assert len(calls) == (1 if existing else 2)
+    if existing:
+        assert (target / "plugins" / NAME / "keep").read_text() == "preserve"
+        assert "--force --ref" in result.stdout
+    else:
+        assert calls[1]["args"][:3] == ["plugins", "install", SOURCE]
+    for line in result.stdout.splitlines():
+        if "HERMES_HOME=" in line:
+            command = shlex.split(line[line.index("HERMES_HOME="):])
+            assert command[:4] == [f"HERMES_HOME={home}", "hermes", "-p", "work"]
+    assert not (home / "plugins").exists()
 
 
 @pytest.mark.parametrize("profile", ["Default", " default ", "P1", " p1 ", "\u2003P1\u2003", "p/1", " ", "p" * 65])

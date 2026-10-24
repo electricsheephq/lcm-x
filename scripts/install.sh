@@ -6,6 +6,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 
 HERMES_HOME_DIR="${HERMES_HOME:-$HOME/.hermes}"
 INSTALL_PROFILE="${HERMES_PROFILE:-default}"
+if [[ "$(basename "$(dirname "$HERMES_HOME_DIR")")" == profiles ]]; then
+  HOME_PROFILE="$(basename "$HERMES_HOME_DIR")"
+  INSTALL_ROOT="$(dirname "$(dirname "$HERMES_HOME_DIR")")"
+  if [[ "${HERMES_PROFILE+x}" && "$HERMES_PROFILE" != "$HOME_PROFILE" ]]; then
+    printf 'Conflicting profile selection: HERMES_HOME=%q selects %q but HERMES_PROFILE=%q. Use HERMES_HOME=%q HERMES_PROFILE=%q ./scripts/install.sh, or HERMES_HOME=%q ./scripts/install.sh alone.\n' "$HERMES_HOME_DIR" "$HOME_PROFILE" "$HERMES_PROFILE" "$INSTALL_ROOT" "$HERMES_PROFILE" "$HERMES_HOME_DIR" >&2
+    exit 2
+  fi
+  HERMES_HOME_DIR="$INSTALL_ROOT"
+  INSTALL_PROFILE="$HOME_PROFILE"
+fi
 # Native hosts strip/casefold aliases; require their canonical ASCII spelling
 # before choosing paths so enablement and the legacy guard use the same home.
 if [[ ! "$INSTALL_PROFILE" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789_-]{0,63}$ ]]; then

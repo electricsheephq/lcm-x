@@ -12,7 +12,8 @@ git clone https://github.com/electricsheephq/lcm-x \
   ~/.hermes/plugins/hermes-lcm-x
 ```
 
-For profile-specific installs, clone under `~/.hermes/profiles/<profile>/plugins/hermes-lcm-x`. For development checkouts, `scripts/install.sh` links core and its skill under the `HERMES_HOME` root (default `~/.hermes`), or its named `HERMES_PROFILE`. Unset or `default` explicitly targets the root despite sticky host profile selection. It refuses conflicting paths, enables core through the host unless a separate older copy needs migration, and natively installs the optional companion with host-owned consent. Companion failure prints a retry and preserves core full-text operation; context-engine selection stays manual. It never deletes legacy files.
+For profile-specific installs, clone under `~/.hermes/profiles/<profile>/plugins/hermes-lcm-x`. For development checkouts, `scripts/install.sh` links core and its skill under the `HERMES_HOME` root (default `~/.hermes`), or its named `HERMES_PROFILE`. With a root-shaped home, unset or `default` explicitly targets the root despite sticky host profile selection. It refuses conflicting paths, enables core through the host unless a separate older copy needs migration, and natively installs the optional companion with host-owned consent. Companion failure prints a retry and preserves core full-text operation; context-engine selection stays manual. It never deletes legacy files.
+A profile-shaped `HERMES_HOME=<root>/profiles/<name>` selects that profile; a conflicting `HERMES_PROFILE` is refused before links.
 
 Installer profile names must be canonical lowercase, unpadded ASCII (1–64
 letters/digits, `_` or `-` after the first character). Use `default` for `Default`

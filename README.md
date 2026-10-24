@@ -249,8 +249,9 @@ steps below and never deletes the old directory. With Hermes available it enable
 the core through the host (which updates `config.yaml`) and natively installs the
 optional local-embeddings companion with host-owned consent. A separate older copy
 prevents automatic core enablement until migration. `HERMES_PROFILE` selects a named
-profile; unset or `default` selects the root, even with a sticky active profile.
+profile; with a root-shaped home, unset or `default` selects the root, even with a sticky active profile.
 `HERMES_HOME` sets that install root. Printed host commands preserve both selections.
+A profile-shaped `HERMES_HOME=<root>/profiles/<name>` selects that profile; a conflicting `HERMES_PROFILE` is refused before links.
 Companion failure leaves a successful core install usable with full-text recall
 and prints a retry command; context-engine selection remains manual.
 

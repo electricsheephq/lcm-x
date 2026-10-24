@@ -268,9 +268,10 @@ class Qualification:
             assert not result["companion_enabled"], result
             self.record("d", route=route, **result)
             if not tty:
-                command = f"hermes -p default plugins enable {COMPANION}"
-                assert command in text, text
-                self.cli(home, "plugins", "enable", COMPANION)
+                prefix = "If the companion is disabled, run: "
+                command = next(line[len(prefix):] for line in text.splitlines() if line.startswith(prefix))
+                assert f"hermes -p default plugins enable {COMPANION}" in command, text
+                self.run(home, ["bash", "-c", command])
                 enabled = self.probe(home, "import")
                 assert enabled["companion_enabled"], enabled
                 self.record("f", printed_command=command, **enabled)

@@ -49,8 +49,9 @@ which updates `config.yaml`, unless a separate older copy requires migration fir
 It installs the optional local-embeddings companion through native host consent;
 companion failure prints a retry and preserves successful core installation and
 full-text recall. Context-engine selection remains manual. `HERMES_PROFILE` selects
-the named profile; unset or `default` explicitly selects the root, overriding sticky
+the named profile; with a root-shaped home, unset or `default` explicitly selects the root, overriding sticky
 profile selection. `HERMES_HOME` sets the install root, also used in printed commands.
+A profile-shaped `HERMES_HOME=<root>/profiles/<name>` selects that profile; a conflicting `HERMES_PROFILE` is refused before links.
 The installer accepts only canonical lowercase, unpadded ASCII profile names
 (1–64 letters/digits, `_` or `-` after the first character). Use
 `HERMES_PROFILE=default ./scripts/install.sh` for `Default` and
