@@ -1,0 +1,7 @@
+.............                                                            [100%]
+============================= slowest 25 durations =============================
+238.44s call     tests/test_issue_1186_host_dependencies.py::test_exact_host_dependency_cells
+1.18s setup    tests/test_issue_1186_host_dependencies.py::test_test_user_declines_only_the_actual_host_dependency_question
+
+(23 durations < 0.005s hidden.  Use -vv to show these durations.)
+13 passed in 239.90s (0:03:59)

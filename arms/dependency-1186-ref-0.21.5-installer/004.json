@@ -1,0 +1,17 @@
+{
+  "command": [
+    "git",
+    "-C",
+    "/home/runner/work/_temp/1186-ref-0.21.5-installer/core-source",
+    "checkout",
+    "-b",
+    "qualification-update"
+  ],
+  "home": "/home/runner/work/_temp/1186-ref-0.21.5-installer/native",
+  "profile": null,
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 0.003354947999994806
+}

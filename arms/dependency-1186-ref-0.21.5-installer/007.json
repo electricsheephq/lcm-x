@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/home/runner/work/_temp/1186-hosts/ref-0.21.5/venv/bin/python",
+    "/home/runner/work/lcm-x/lcm-x/bench/instruments/reliability/dependency_probe.py",
+    "scan",
+    "/home/runner/work/_temp/1186-ref-0.21.5-installer/installer/plugins/hermes-lcm-x-local-embeddings"
+  ],
+  "home": "/home/runner/work/_temp/1186-ref-0.21.5-installer/installer",
+  "profile": null,
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 0.6028154439999867
+}

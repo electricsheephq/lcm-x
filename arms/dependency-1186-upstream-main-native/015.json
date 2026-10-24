@@ -1,0 +1,22 @@
+{
+  "command": [
+    "/home/runner/work/_temp/1186-hosts/upstream-main/venv/bin/python",
+    "-m",
+    "hermes_cli.main",
+    "plugins",
+    "install",
+    "file:///home/runner/work/_temp/1186-upstream-main-native/core-source"
+  ],
+  "home": "/home/runner/work/_temp/1186-upstream-main-native/native",
+  "profile": null,
+  "tty": true,
+  "prompts": [
+    {
+      "prompt": "  Enable 'hermes-lcm-x' now? [y/N]: ",
+      "answer": "y"
+    }
+  ],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 12.03010735800001
+}

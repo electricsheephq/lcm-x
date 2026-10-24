@@ -1,0 +1,14 @@
+{
+  "command": [
+    "/home/runner/work/_temp/1186-hosts/ref-0.21.5/venv/bin/python",
+    "-c",
+    "import sys; print('.'.join(map(str,sys.version_info[:2])))"
+  ],
+  "home": "/home/runner/work/_temp/1186-ref-0.21.5-installer/native",
+  "profile": null,
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 0.09208126199999356
+}

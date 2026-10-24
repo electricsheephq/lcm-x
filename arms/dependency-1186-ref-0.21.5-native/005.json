@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/home/runner/work/_temp/1186-hosts/ref-0.21.5/venv/bin/python",
+    "/home/runner/work/lcm-x/lcm-x/bench/instruments/reliability/dependency_probe.py",
+    "scan",
+    "/home/runner/work/_temp/1186-ref-0.21.5-native/core-source"
+  ],
+  "home": "/home/runner/work/_temp/1186-ref-0.21.5-native/native",
+  "profile": null,
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 36.695894194000005
+}

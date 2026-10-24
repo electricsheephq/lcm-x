@@ -1,0 +1,21 @@
+Warning: custom (unreviewed) source — not from the Hermes catalog.
+Cloning https://github.com/electricsheephq/lcm-x.git (subdir: 
+companions/hermes-lcm-x-local-embeddings)...
+  Enable 'hermes-lcm-x-local-embeddings' now? [y/N]: y
+
+hermes-lcm-x-local-embeddings declares Python dependencies:
+  - fastembed>=0.8.0,<1.0
+  Prepare these with Hermes through PM now? [y/N]: y
+
+╭──────────────────────────────── ✓ Installed ─────────────────────────────────╮
+│ Plugin installed:                                                            │
+│ electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings               │
+│ Location:                                                                    │
+│ /home/runner/work/_temp/1186-upstream-main-native/native/plugins/hermes-lcm- │
+│ x-local-embeddings                                                           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+  → Resolving Python dependencies…  → Resolving Python dependencies… Resolving despite existing lockfile due to removal of global exclude newer  → Resolving Python dependencies… Updating https://github.com/giampaolo/psutil.git (380bd2b59c67b0e1b04bbf3a90b11744f4f96644)  → Resolving Python dependencies… Updated https://github.com/giampaolo/psutil.git (380bd2b59c67b0e1b04bbf3a90b11744f4f96644)   → Resolving Python dependencies… Resolved 337 packages in 5.37s                                                                                                                               ✓ Resolving Python dependencies
+  → Installing Python dependencies…  → Installing Python dependencies… Building hermes-agent @ file:///home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/92bc101118b0451484b85d7fc7a34534/workspace  → Installing Python dependencies… Downloading hf-xet (4.3MiB)                                                                                                                                                → Installing Python dependencies… Downloaded tokenizers        → Installing Python dependencies… Downloaded hf-xet      → Installing Python dependencies… Downloaded onnxruntime  → Installing Python dependencies… Downloaded numpy        → Installing Python dependencies… Built hermes-agent @ file:///home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/92bc101118b0451484b85d7fc7a34534/workspace  → Installing Python dependencies… Installed 78 packages in 40ms                                                                                                                                           → Installing Python dependencies… Bytecode compiled 4019 files in 2.18s                                                                           ✓ Installing Python dependencies
+✓ Plugin hermes-lcm-x-local-embeddings enabled.
+

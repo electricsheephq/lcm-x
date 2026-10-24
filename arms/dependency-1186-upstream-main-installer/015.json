@@ -1,0 +1,22 @@
+{
+  "command": [
+    "bash",
+    "/home/runner/work/lcm-x/lcm-x/scripts/install.sh"
+  ],
+  "home": "/home/runner/work/_temp/1186-upstream-main-installer/installer",
+  "profile": null,
+  "tty": true,
+  "prompts": [
+    {
+      "prompt": "  Enable 'hermes-lcm-x-local-embeddings' now? [y/N]: ",
+      "answer": "y"
+    },
+    {
+      "prompt": "  Prepare these with Hermes through PM now? [y/N]: ",
+      "answer": "y"
+    }
+  ],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 33.90472520200001
+}

@@ -1,0 +1,21 @@
+{
+  "command": [
+    "git",
+    "-C",
+    "/home/runner/work/_temp/1186-ref-0.21.5-native/core-source",
+    "-c",
+    "user.name=Qualification Fixture",
+    "-c",
+    "user.email=fixture@example.invalid",
+    "commit",
+    "-am",
+    "Synthetic core version bump"
+  ],
+  "home": "/home/runner/work/_temp/1186-ref-0.21.5-native/native",
+  "profile": null,
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 0.08989883999998938
+}

@@ -1,0 +1,19 @@
+{
+  "command": [
+    "/home/runner/work/_temp/1186-hosts/upstream-main/venv/bin/python",
+    "-m",
+    "hermes_cli.main",
+    "profile",
+    "create",
+    "qualification-one",
+    "--no-alias",
+    "--no-skills"
+  ],
+  "home": "/home/runner/work/_temp/1186-upstream-main-native/native",
+  "profile": null,
+  "tty": false,
+  "prompts": [],
+  "status": "COMPLETE",
+  "returncode": 0,
+  "wall_seconds": 1.9589338029999794
+}

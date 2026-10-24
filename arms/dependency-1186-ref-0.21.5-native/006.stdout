@@ -1,0 +1,17 @@
+Warning: custom (unreviewed) source — not from the Hermes catalog.
+Warning: Using insecure/local URL scheme. Consider using https:// or git@ for 
+production installs.
+Cloning file:///home/runner/work/_temp/1186-ref-0.21.5-native/core-source...
+
+╭──────────────────────────────── ✓ Installed ─────────────────────────────────╮
+│ Plugin installed:                                                            │
+│ file:///home/runner/work/_temp/1186-ref-0.21.5-native/core-source            │
+│ Location:                                                                    │
+│ /home/runner/work/_temp/1186-ref-0.21.5-native/native/plugins/hermes-lcm-x   │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+  Enable 'hermes-lcm-x' now? [y/N]: y
+✓ Plugin hermes-lcm-x enabled.
+Restart the gateway for the plugin to take effect:
+  hermes gateway restart
+

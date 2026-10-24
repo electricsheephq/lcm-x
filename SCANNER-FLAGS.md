@@ -1,0 +1,233 @@
+# Core development-checkout scanner flags
+
+Exact hosts: reference `f97608f178d1ffeca59860195ab7da295f7c8e5f` and PM `6f7a7991bb069db07ae74a479823ce8310f8c7e0`.
+Candidate merge tree `af7994c5d631f0d95e80789069aa3481dd920b2a`, PR head `4be7e931d4e1a3450114fda4c57ad0ff39e9e761`, [hosted run40089321305](https://github.com/electricsheephq/lcm-x/actions/runs/40089321305).
+
+Both default scanners were enabled and returned **dangerous**, with identical file/rule pairs. Repeated matches are grouped below. This is scanner metadata, not a claim that the files are malicious. No source content is included.
+
+The S1-C.3 scanner-off exception is confined to synthetic native core installation. Every companion install retains scanning and passed safe. The PM unattended core update (b) remains blocked by its default scan; no update exception was assumed. Supported core routes remain catalog and install.sh under the ruling.
+
+| File | Rule(s) |
+| --- | --- |
+| `(directory)` | `oversized_bundle`, `too_many_files` |
+| `.agents/skills/land-pr/SKILL.md` | `agent_config_ref` |
+| `.agents/skills/review-pr/SKILL.md` | `agent_config_ref` |
+| `.agents/skills/triage-backlog/SKILL.md` | `agent_config_ref` |
+| `.github/actions/sqlite-runtime/action.yml` | `echo_pipe_exec`, `python_os_environ` |
+| `.github/workflows/ci.yml` | `python_import_os` |
+| `.github/workflows/differential.yml` | `unpinned_pip_install` |
+| `.github/workflows/host-suite.yml` | `python_os_environ` |
+| `.github/workflows/lcmx-1586-covered-store.yml` | `destructive_root_rm`, `sudo_usage`, `unpinned_pip_install` |
+| `.github/workflows/lcmx-1586-floor.yml` | `destructive_root_rm`, `sudo_usage`, `unpinned_pip_install` |
+| `.github/workflows/real-host.yml` | `dns_exfil`, `python_os_environ` |
+| `CHANGELOG.md` | `agent_config_ref` |
+| `CLAUDE.md` | `agent_config_ref` |
+| `CONTRIBUTING.md` | `agent_config_ref`, `git_clone` |
+| `README.md` | `agent_config_ref`, `git_clone`, `unpinned_pip_install` |
+| `bench/aml/README.md` | `hardcoded_ip_port` |
+| `bench/aml/aml_server.py` | `python_subprocess` |
+| `bench/aml/test_aml_server.py` | `python_subprocess` |
+| `bench/fmp/common.py` | `python_subprocess` |
+| `bench/fmp/derived.py` | `python_subprocess`, `string_reversal` |
+| `bench/fmp/dev.py` | `python_subprocess`, `string_reversal` |
+| `bench/fmp/dev_cache.py` | `python_subprocess` |
+| `bench/fmp/mcp_reader.py` | `python_subprocess` |
+| `bench/fmp/models.py` | `agent_config_ref`, `python_subprocess`, `remote_fetch` |
+| `bench/fmp/run.py` | `python_subprocess` |
+| `bench/fmp/run.sh` | `path_traversal` |
+| `bench/fmp/run_smoke.sh` | `path_traversal` |
+| `bench/fmp/tests/test_995.py` | `python_subprocess` |
+| `bench/fmp/tests/test_995_r1.py` | `python_subprocess` |
+| `bench/fmp/tests/test_fmp.py` | `agent_config_ref`, `python_import_os`, `python_subprocess`, `string_reversal` |
+| `bench/fmp/tests/test_glm.py` | `python_subprocess` |
+| `bench/fmp/tests/test_r4_identity.py` | `python_subprocess` |
+| `bench/fmp/tests/test_reader_retry.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/bgprep/run.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/drive_codex.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/drive_hermes.py` | `hex_encoded_string`, `python_subprocess` |
+| `bench/instruments/compaction_probe/drive_hermes_acp.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/drive_hermes_oneshot.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/test_bot1_sandbox.py` | `agent_config_ref`, `python_subprocess` |
+| `bench/instruments/compaction_probe/test_deep_material.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/decision/d2_driver.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/decision/score_decision.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/decision/tests/test_analyze_paired.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/decision/tests/test_d2_integrity.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/decision/tests/test_d2_replays.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/decision/tests/test_d2_robustness.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/decision/tests/test_d2_signal_round1.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/decision/tests/test_d2_signal_round2.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/decision/tests/test_glm_throttle.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/decision/tests/test_pmw_read.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/harness/lanes/claude.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/harness/lanes/codex_exec.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/s1/run.sh` | `dump_all_env` |
+| `bench/instruments/compaction_probe/track_s/s2/run_c1.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/s2/s2lib/c1_budget.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/s2/s2lib/seam.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/s4/run_s_codex.py` | `agent_config_ref`, `other_agent_config_ref`, `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/scorer/score_s.py` | `agent_config_ref` |
+| `bench/instruments/compaction_probe/track_s/scorer/tests/test_eval2_harness.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/track_s/scorer/tests/test_fix2.py` | `python_subprocess` |
+| `bench/instruments/compaction_probe/verify_material.py` | `string_reversal` |
+| `bench/instruments/local_catchup/calibration.py` | `python_import_os` |
+| `bench/instruments/local_catchup/catchup.py` | `python_subprocess` |
+| `bench/instruments/local_catchup/cpu.py` | `python_import_os`, `python_subprocess` |
+| `bench/instruments/local_catchup/floor.py` | `proc_access`, `python_subprocess` |
+| `bench/instruments/local_catchup/measurement.py` | `python_subprocess` |
+| `bench/instruments/local_catchup/tests/test_1586_v23.py` | `python_subprocess` |
+| `bench/instruments/local_catchup/tests/test_1653_round3.py` | `python_subprocess` |
+| `bench/instruments/local_catchup/tests/test_1660_bot1.py` | `python_subprocess` |
+| `bench/instruments/local_catchup/tests/test_1664.py` | `python_subprocess` |
+| `bench/instruments/local_catchup/tests/test_1669_item8.py` | `proc_access` |
+| `bench/instruments/local_catchup/tests/test_1760.py` | `python_subprocess` |
+| `bench/instruments/local_catchup/tests/test_1767.py` | `python_subprocess` |
+| `bench/instruments/local_catchup/tests/test_corpus_audit.py` | `python_import_os` |
+| `bench/instruments/release_gauntlet/phase_a_tool_matrix.py` | `python_subprocess` |
+| `bench/instruments/reliability/README.md` | `uv_run` |
+| `bench/instruments/reliability/acp_driver.py` | `python_subprocess` |
+| `bench/instruments/reliability/ci.py` | `python_subprocess` |
+| `bench/instruments/reliability/dependency_qualification.py` | `python_subprocess` |
+| `bench/instruments/reliability/hosts.py` | `python_subprocess` |
+| `bench/instruments/reliability/plugin_tree.py` | `python_subprocess` |
+| `bench/instruments/reliability/run_matrix.py` | `python_subprocess` |
+| `bench/instruments/scale389/phase1a.py` | `python_subprocess` |
+| `bench/instruments/scale389/run_scale.py` | `python_subprocess` |
+| `bench/instruments/scale389/tests/test_scale389_cli_help.py` | `python_subprocess` |
+| `bench/scoreboard/SPEC-GENERATOR.md` | `uv_run` |
+| `bench/scoreboard/test_generate.py` | `path_traversal`, `python_subprocess` |
+| `bench/tools/pinverify.py` | `python_subprocess` |
+| `bench/tools/tests/test_cli_help.py` | `python_subprocess` |
+| `bench/tools/tests/test_d8_guard.py` | `python_subprocess` |
+| `bench/tools/tests/test_issue_1782_failed_baseline.py` | `python_subprocess` |
+| `bench/tools/tests/test_pinverify.py` | `python_subprocess` |
+| `bench/tools/v1m-rebank/corpus_privacy_inventory.py` | `python_subprocess` |
+| `benchmarking/longmemeval.py` | `hex_encoded_string` |
+| `benchmarking/stress.py` | `python_subprocess` |
+| `benchmarks/README.md` | `unpinned_pip_install`, `uv_run` |
+| `benchmarks/qa-harness/REPLICATION.md` | `git_clone`, `unpinned_pip_install` |
+| `benchmarks/qa-harness/src/providers/hermes-lcm/README.md` | `unpinned_pip_install` |
+| `benchmarks/qa-harness/src/providers/hermes-lcm/index.ts` | `path_traversal` |
+| `benchmarks/qa-harness/src/providers/hermes-lcm/prompts.ts` | `path_traversal` |
+| `command.py` | `string_reversal` |
+| `dag.py` | `string_reversal` |
+| `docs/agent-config-profiles.md` | `hardcoded_ip_port`, `hermes_config_ref` |
+| `docs/architecture.md` | `unpinned_pip_install` |
+| `docs/architecture.png` | `oversized_file` |
+| `docs/async-background-compaction.md` | `dump_all_env` |
+| `docs/embeddings-setup.md` | `unpinned_pip_install` |
+| `docs/identity-ledger.md` | `context_exfil` |
+| `docs/invariants/receipts.md` | `python_os_environ`, `python_subprocess` |
+| `docs/lcm_compression.png` | `oversized_file` |
+| `docs/media/banner.png` | `oversized_file` |
+| `docs/operations/store-wedge-inspect.md` | `context_exfil` |
+| `docs/operator-guide.md` | `git_clone` |
+| `docs/packaging.md` | `git_clone` |
+| `docs/pr-283-ignored-backlog-compaction.png` | `oversized_file` |
+| `docs/process/1880-persisted-hold-probes.md` | `fake_policy` |
+| `docs/release-validation.md` | `agent_config_ref` |
+| `docs/standard_compression.png` | `oversized_file` |
+| `engine.py` | `string_reversal` |
+| `inactive_record.py` | `python_subprocess` |
+| `runtime_identity.py` | `python_subprocess` |
+| `scripts/ci/check_tests_ran.py` | `python_subprocess` |
+| `scripts/maintainability/baseline.json` | `oversized_file` |
+| `scripts/maintainability/report.py` | `python_subprocess` |
+| `scripts/maintainer_gate.py` | `agent_config_ref` |
+| `scripts/validate_release.sh` | `unpinned_pip_install` |
+| `tests/behaviour/test_assembly_trace.py` | `python_subprocess` |
+| `tests/behaviour/test_compress_clock_isolation.py` | `python_subprocess` |
+| `tests/behaviour/test_recall_pipeline_matrix.py` | `string_reversal` |
+| `tests/behaviour/test_reconcile_trace.py` | `python_subprocess` |
+| `tests/compat/conftest.py` | `python_subprocess` |
+| `tests/compat/helpers.py` | `python_subprocess` |
+| `tests/compat/test_occurrence_snapshot_upgrade.py` | `python_subprocess` |
+| `tests/diag_1753_capture.py` | `python_subprocess` |
+| `tests/differential/run.py` | `python_subprocess` |
+| `tests/differential/test_differential_vs_ga.py` | `python_subprocess` |
+| `tests/differential/trees.py` | `python_subprocess` |
+| `tests/fixtures/compress_trace.json` | `unicode_escape_chain` |
+| `tests/fixtures/e1a_default_bytes.json` | `unicode_escape_chain` |
+| `tests/fixtures/expand_family_contract.json` | `unicode_escape_chain` |
+| `tests/fixtures/expand_query_contract.json` | `unicode_escape_chain` |
+| `tests/fixtures/ingest_trace.json` | `oversized_file` |
+| `tests/fixtures/issue_1880_preflight_cost/measurement-source.txt` | `python_compile_exec`, `python_os_environ`, `python_subprocess` |
+| `tests/fixtures/issue_1880_preflight_cost_final/measurement-source.txt` | `python_compile_exec`, `python_os_environ`, `python_subprocess` |
+| `tests/fixtures/session_end_attribution_cost/measure.py` | `python_compile_exec`, `python_subprocess` |
+| `tests/invariants/issue_1718_nonmedia_base.json` | `unicode_escape_chain` |
+| `tests/invariants/test_identity_seeds.py` | `python_subprocess` |
+| `tests/test_ci_tests_ran.py` | `path_traversal`, `path_traversal_deep`, `python_subprocess` |
+| `tests/test_db_bootstrap_fts.py` | `python_subprocess` |
+| `tests/test_diag_1753_capture.py` | `python_subprocess` |
+| `tests/test_differential_workflow.py` | `python_subprocess` |
+| `tests/test_embedding_privacy.py` | `embedded_private_key` |
+| `tests/test_embedding_search_modes.py` | `python_subprocess` |
+| `tests/test_fd_lifecycle.py` | `proc_access` |
+| `tests/test_fulltext_sql_cost.py` | `python_compile_exec` |
+| `tests/test_governance_policy.py` | `agent_config_ref` |
+| `tests/test_historical_externalization_backfill.py` | `hardcoded_secret` |
+| `tests/test_host_uid_rollback_reader.py` | `python_subprocess` |
+| `tests/test_host_uid_shadow.py` | `python_subprocess` |
+| `tests/test_ingest_protection.py` | `embedded_private_key`, `hardcoded_secret`, `openai_key_leaked` |
+| `tests/test_inspect_contract.py` | `python_subprocess` |
+| `tests/test_issue_1014_incremental_embedding.py` | `hardcoded_ip_port` |
+| `tests/test_issue_1016_nontool_externalization_floor.py` | `embedded_private_key`, `unicode_escape_chain` |
+| `tests/test_issue_1124_copy_exclusion.py` | `python_compile_exec`, `python_subprocess` |
+| `tests/test_issue_1160_session_end_flush_recovery.py` | `python_subprocess` |
+| `tests/test_issue_1186_dependency_companion.py` | `python_subprocess` |
+| `tests/test_issue_1201_summary_model_only.py` | `python_subprocess` |
+| `tests/test_issue_1330_retire_embedding_maintenance.py` | `python_subprocess` |
+| `tests/test_issue_1397_orphan_exit.py` | `python_subprocess` |
+| `tests/test_issue_1652_catchup_disclosure.py` | `hardcoded_ip_port` |
+| `tests/test_issue_1659_catchup.py` | `hardcoded_ip_port` |
+| `tests/test_issue_1659_differential.py` | `hardcoded_ip_port` |
+| `tests/test_issue_1659_inflight_cycle.py` | `hardcoded_ip_port` |
+| `tests/test_issue_1659_r4.py` | `hardcoded_ip_port` |
+| `tests/test_issue_1742_inspector.py` | `python_compile_exec` |
+| `tests/test_issue_1765_gapwalk.py` | `python_subprocess` |
+| `tests/test_issue_1828_retry_rollback.py` | `python_compile_exec` |
+| `tests/test_issue_488_emission_proof.py` | `python_subprocess` |
+| `tests/test_issue_4_restart_safe_fail_open.py` | `hardcoded_secret`, `openai_key_leaked` |
+| `tests/test_issue_513_hermes_root_isolation.py` | `python_subprocess` |
+| `tests/test_issue_519_replaced_tail.py` | `python_subprocess` |
+| `tests/test_issue_524_gen2_replay.py` | `python_subprocess` |
+| `tests/test_issue_534_recovery_descriptors.py` | `python_subprocess` |
+| `tests/test_issue_535_retained_row_merge.py` | `string_reversal` |
+| `tests/test_issue_559_tool_group_boundary.py` | `python_subprocess` |
+| `tests/test_issue_622_slow_load.py` | `python_subprocess` |
+| `tests/test_issue_631_not_a_pm_member.py` | `python_subprocess` |
+| `tests/test_issue_651_below_threshold_cleanup_only.py` | `python_subprocess` |
+| `tests/test_issue_759_privacy_blocked_backfill.py` | `hardcoded_secret` |
+| `tests/test_issue_921_objective_survives_reassembly.py` | `python_subprocess` |
+| `tests/test_lcm_core.py` | `hardcoded_ip_port`, `system_passwd_access` |
+| `tests/test_lcm_engine.py` | `oversized_file`, `proc_access` |
+| `tests/test_lcm_memory.py` | `python_compile_exec` |
+| `tests/test_lcm_recall.py` | `hardcoded_secret`, `unicode_escape_chain` |
+| `tests/test_longmemeval_harness.py` | `embedded_private_key` |
+| `tests/test_longmemeval_medium.py` | `uv_run` |
+| `tests/test_maintainability_report.py` | `python_subprocess` |
+| `tests/test_maintainer_gate.py` | `agent_config_ref`, `python_subprocess` |
+| `tests/test_message_origin_migration.py` | `python_subprocess` |
+| `tests/test_packaging_install.py` | `python_subprocess` |
+| `tests/test_phase0_hygiene.py` | `python_subprocess` |
+| `tests/test_public_results_page.py` | `python_subprocess` |
+| `tests/test_real_host_bypass_cooldown_wire.py` | `python_subprocess` |
+| `tests/test_real_host_config_resolution.py` | `python_subprocess` |
+| `tests/test_real_long_session.py` | `python_subprocess` |
+| `tests/test_real_plugin_manager_compaction.py` | `python_subprocess` |
+| `tests/test_real_plugin_manager_identity.py` | `python_subprocess` |
+| `tests/test_real_turn_loop_acp_override.py` | `python_subprocess` |
+| `tests/test_recall_row_handoff.py` | `hex_encoded_string`, `python_compile_exec`, `python_subprocess` |
+| `tests/test_recall_search_query.py` | `unicode_escape_chain` |
+| `tests/test_release_gauntlet_phase_a.py` | `embedded_private_key`, `python_subprocess` |
+| `tests/test_reliability_r2.py` | `python_subprocess` |
+| `tests/test_reliability_scorers.py` | `python_subprocess` |
+| `tests/test_reliability_stderr_tail.py` | `unpinned_pip_install` |
+| `tests/test_rollback_v0262_store.py` | `python_subprocess` |
+| `tests/test_session_end_attribution_host.py` | `python_subprocess` |
+| `tests/test_store_wedge_inspect.py` | `python_compile_exec` |
+| `tests/test_track_s_integrity.py` | `python_compile_exec`, `python_subprocess` |
+| `tests/test_track_s_phase_d_paired.py` | `path_traversal`, `python_subprocess` |
+| `tests/test_trajectory_semantic_retrieval.py` | `hardcoded_secret` |
+| `tests/test_trajectory_store.py` | `hardcoded_secret` |
+| `tests/tool_registry_schema_bytes.json` | `unicode_escape_chain` |

@@ -1,0 +1,13 @@
+
+Profile 'qualification-one' created at /home/runner/work/_temp/1186-upstream-main-native/native/profiles/qualification-one
+No bundled skills seeded (--no-skills). Delete .no-bundled-skills in the profile to opt back in.
+
+Next steps:
+  qualification-one setup              Configure API keys and model
+  qualification-one chat               Start chatting
+  qualification-one gateway start      Start the messaging gateway
+
+  ⚠ This profile has no API keys yet. Run 'qualification-one setup' first,
+    or it will inherit keys from your shell environment.
+  Edit /home/runner/work/_temp/1186-upstream-main-native/native/profiles/qualification-one/SOUL.md to customize personality
+

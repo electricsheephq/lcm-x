@@ -1,0 +1,19 @@
+Warning: custom (unreviewed) source — not from the Hermes catalog.
+Warning: Using insecure/local URL scheme. Consider using https:// or git@ for 
+production installs.
+Cloning file:///home/runner/work/_temp/1186-upstream-main-native/core-source...
+Preparing the isolated Hermes runtime…
+  → Installing Python dependencies…  → Installing Python dependencies… Resolved 5 packages in 0.53ms  → Installing Python dependencies… Prepared 4 packages in 58ms    → Installing Python dependencies… Bytecode compiled 57 files in 276ms                                                                         ✓ Installing Python dependencies
+  Enable 'hermes-lcm-x' now? [y/N]: y
+
+╭──────────────────────────────── ✓ Installed ─────────────────────────────────╮
+│ Plugin installed:                                                            │
+│ file:///home/runner/work/_temp/1186-upstream-main-native/core-source         │
+│ Location:                                                                    │
+│ /home/runner/work/_temp/1186-upstream-main-native/native/plugins/hermes-lcm- │
+│ x                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+  → Installing Python dependencies…  → Installing Python dependencies… Building hermes-agent @ file:///home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/91c5a6b553ff456ea4c822d488b56fb9/workspace  → Installing Python dependencies… Downloading openai (1.1MiB)                                                                                                                                                → Installing Python dependencies… Downloaded resvg-py          → Installing Python dependencies… Downloaded pydantic-core  → Installing Python dependencies… Downloaded firecrawl-anydoc  → Installing Python dependencies… Downloaded pillow-heif       → Installing Python dependencies… Downloaded cryptography  → Installing Python dependencies… Downloaded pygments      → Installing Python dependencies… Downloaded openai    → Installing Python dependencies… Built hermes-agent @ file:///home/runner/work/_temp/1186-upstream-main-native/native/installs/224dc9693023d5e7/environments/91c5a6b553ff456ea4c822d488b56fb9/workspace  → Installing Python dependencies… Installed 64 packages in 51ms                                                                                                                                           → Installing Python dependencies… Bytecode compiled 2864 files in 1.28s                                                                           ✓ Installing Python dependencies
+✓ Plugin hermes-lcm-x enabled.
+

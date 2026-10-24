@@ -1,0 +1,48 @@
+Preparing the isolated Hermes runtime…
+  → Installing Python dependencies…  → Installing Python dependencies… Resolved 5 packages in 0.66ms  → Installing Python dependencies… Prepared 4 packages in 114ms   → Installing Python dependencies… Bytecode compiled 57 files in 378ms                                                                         ✓ Installing Python dependencies
+  → Installing Python dependencies…  → Installing Python dependencies… Building hermes-agent @ file:///home/runner/work/_temp/1186-upstream-main-installer/installer/installs/224dc9693023d5e7/environments/3c88548f91114726adb41cd8f7e864eb/workspace  → Installing Python dependencies… Downloading pygments (1.2MiB)                                                                                                                                                    → Installing Python dependencies… Downloaded resvg-py            → Installing Python dependencies… Downloaded pydantic-core  → Installing Python dependencies… Downloaded firecrawl-anydoc  → Installing Python dependencies… Downloaded pillow-heif       → Installing Python dependencies… Downloaded cryptography  → Installing Python dependencies… Downloaded pygments      → Installing Python dependencies… Downloaded nemo-relay  → Installing Python dependencies… Downloaded openai      → Installing Python dependencies… Built hermes-agent @ file:///home/runner/work/_temp/1186-upstream-main-installer/installer/installs/224dc9693023d5e7/environments/3c88548f91114726adb41cd8f7e864eb/workspace  → Installing Python dependencies… Installed 64 packages in 62ms                                                                                                                                                 → Installing Python dependencies… Bytecode compiled 2864 files in 1.67s                                                                           ✓ Installing Python dependencies
+✓ Plugin hermes-lcm-x enabled. Takes effect on next session.
+Restart the gateway for the plugin to take effect:
+  hermes gateway restart
+Warning: custom (unreviewed) source — not from the Hermes catalog.
+Cloning https://github.com/electricsheephq/lcm-x.git (subdir: 
+companions/hermes-lcm-x-local-embeddings)...
+  Enable 'hermes-lcm-x-local-embeddings' now? [y/N]: y
+
+hermes-lcm-x-local-embeddings declares Python dependencies:
+  - fastembed>=0.8.0,<1.0
+  Prepare these with Hermes through PM now? [y/N]: y
+
+╭──────────────────────────────── ✓ Installed ─────────────────────────────────╮
+│ Plugin installed:                                                            │
+│ electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings               │
+│ Location:                                                                    │
+│ /home/runner/work/_temp/1186-upstream-main-installer/installer/plugins/herme │
+│ s-lcm-x-local-embeddings                                                     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+  → Resolving Python dependencies…  → Resolving Python dependencies… Resolving despite existing lockfile due to removal of global exclude newer  → Resolving Python dependencies… Updating https://github.com/giampaolo/psutil.git (380bd2b59c67b0e1b04bbf3a90b11744f4f96644)  → Resolving Python dependencies… Updated https://github.com/giampaolo/psutil.git (380bd2b59c67b0e1b04bbf3a90b11744f4f96644)   → Resolving Python dependencies… Resolved 337 packages in 6.11s                                                                                                                               ✓ Resolving Python dependencies
+  → Installing Python dependencies…  → Installing Python dependencies… Building hermes-agent @ file:///home/runner/work/_temp/1186-upstream-main-installer/installer/installs/224dc9693023d5e7/environments/a53ffc7748514554948761d7af24a166/workspace  → Installing Python dependencies… Downloaded tokenizers                                                                                                                                                            → Installing Python dependencies… Downloaded onnxruntime  → Installing Python dependencies… Downloaded numpy        → Installing Python dependencies… Built hermes-agent @ file:///home/runner/work/_temp/1186-upstream-main-installer/installer/installs/224dc9693023d5e7/environments/a53ffc7748514554948761d7af24a166/workspace  → Installing Python dependencies… Installed 78 packages in 134ms                                                                                                                                                → Installing Python dependencies… Bytecode compiled 4019 files in 2.74s                                                                           ✓ Installing Python dependencies
+✓ Plugin hermes-lcm-x-local-embeddings enabled.
+
+If the companion is disabled, run: HERMES_HOME=/home/runner/work/_temp/1186-upstream-main-installer/installer hermes -p default plugins enable hermes-lcm-x-local-embeddings
+Installed hermes-lcm-x at:
+  /home/runner/work/_temp/1186-upstream-main-installer/installer/plugins/hermes-lcm-x
+
+Discoverable skill:
+  /home/runner/work/_temp/1186-upstream-main-installer/installer/skills/hermes-lcm-x
+
+Activation requires both:
+
+plugins:
+  enabled:
+    - hermes-lcm-x
+
+context:
+  engine: lcm-x
+
+Verification:
+  1. Restart Hermes.
+  2. Run: HERMES_HOME=/home/runner/work/_temp/1186-upstream-main-installer/installer hermes -p default plugins list
+  3. Confirm the plugin list includes hermes-lcm-x and the selected context engine is lcm-x.
+  4. Confirm the available skills include hermes-lcm.
