@@ -22,9 +22,14 @@ python -m bench.instruments.local_catchup.contention \
 
 Use `--busy-threads 0`, `1`, or `2` in separate processes with new homes and
 outputs. Each busy thread runs the original `sum(range(10000))` loop, starting
-after warmup. Run only one measured process at a time. The caller must externally
-gate each block on quiet host load below 4 and retain that observation; the script
-does not enforce or measure quietness. Follow the operator's disk and CPU budgets;
+after warmup. Run only one measured process at a time. The caller must apply the
+run's declared load-admission rule and retain `uptime` before and after every
+block; the script does not enforce or measure host load. The default quiet-host
+rule is load1 below 4. An explicit run amendment may permit current-load ABAB
+measurement. For #1586 P1, C1 keeps its relative bar under load; a C2 PASS counts,
+while a C2 failure at load1 >=4 is PENDING-QUIET. That exception does not waive
+an exactness difference: stop the run on any top-k ID or score-tolerance mismatch.
+Follow the operator's disk and CPU budgets;
 the retained per-query 40 GiB disk stop is not permission to bypass a stricter
 launch budget.
 

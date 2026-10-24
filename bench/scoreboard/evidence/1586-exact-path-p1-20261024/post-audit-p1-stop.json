@@ -1,0 +1,41 @@
+{
+  "changed_metadata": [],
+  "changed_vectors": [],
+  "classes": {
+    "chunks": {
+      "covered": 250000,
+      "covered_tokens": 19858000,
+      "expected": 250000,
+      "missing_count": 0,
+      "missing_first20": []
+    },
+    "leaves": {
+      "covered": 500,
+      "covered_tokens": 10000,
+      "expected": 500,
+      "missing_count": 0,
+      "missing_first20": []
+    }
+  },
+  "complete": true,
+  "covered_rows": 250000,
+  "integrity": "ok",
+  "raw_unchanged": true,
+  "residue": {},
+  "scan": [
+    [
+      "chunk_gapfill_scan:e933fb7cbde00d9881ef2eb2f638e098494fe663e92f24ef5e2fa308035e5a60",
+      "{\"revision\": 2, \"policy\": \"conversational\", \"high\": 250000, \"pending\": [], \"epoch\": \"8316fdba9b674cf3bfb427450248ba05\", \"turn\": 3}"
+    ],
+    [
+      "chunk_gapfill_scan:e933fb7cbde00d9881ef2eb2f638e098494fe663e92f24ef5e2fa308035e5a60:low",
+      "{\"revision\": 2, \"policy\": \"conversational\", \"high\": 4000, \"pending\": [], \"epoch\": \"8316fdba9b674cf3bfb427450248ba05\", \"turn\": 3}"
+    ],
+    [
+      "chunk_policy_revision_through:e933fb7cbde00d9881ef2eb2f638e098494fe663e92f24ef5e2fa308035e5a60",
+      "{\"from\":2001,\"through\":250000,\"policy\":\"conversational\"}"
+    ]
+  ],
+  "unexpected_rows": [],
+  "unpaired_rows": []
+}

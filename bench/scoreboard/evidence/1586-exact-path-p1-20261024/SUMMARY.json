@@ -1,0 +1,84 @@
+{
+  "status": "EXACTNESS_STOP",
+  "base_completed": 200,
+  "candidate_completed": 36,
+  "paired_queries": 36,
+  "matched": 32,
+  "differences": [
+    {
+      "paired_row": 6,
+      "i": 3,
+      "query_class": "a",
+      "base_timeout": false,
+      "candidate_timeout": true,
+      "base_coverage": {
+        "fts": "ok",
+        "summary": "full",
+        "chunk": "full"
+      },
+      "candidate_coverage": {
+        "fts": "ok",
+        "summary": "full",
+        "chunk": "none"
+      }
+    },
+    {
+      "paired_row": 16,
+      "i": 8,
+      "query_class": "a",
+      "base_timeout": false,
+      "candidate_timeout": true,
+      "base_coverage": {
+        "fts": "ok",
+        "summary": "full",
+        "chunk": "full"
+      },
+      "candidate_coverage": {
+        "fts": "ok",
+        "summary": "full",
+        "chunk": "none"
+      }
+    },
+    {
+      "paired_row": 22,
+      "i": 11,
+      "query_class": "a",
+      "base_timeout": false,
+      "candidate_timeout": true,
+      "base_coverage": {
+        "fts": "ok",
+        "summary": "full",
+        "chunk": "full"
+      },
+      "candidate_coverage": {
+        "fts": "ok",
+        "summary": "full",
+        "chunk": "none"
+      }
+    },
+    {
+      "paired_row": 29,
+      "i": 14,
+      "query_class": "b",
+      "base_timeout": false,
+      "candidate_timeout": true,
+      "base_coverage": {
+        "fts": "ok",
+        "summary": "full",
+        "chunk": "full"
+      },
+      "candidate_coverage": {
+        "fts": "ok",
+        "summary": "full",
+        "chunk": "none"
+      }
+    }
+  ],
+  "C1": "NOT RUN",
+  "C2": "NOT RUN; not PENDING-QUIET",
+  "C3": "NOT RUN",
+  "memory": "INCOMPLETE",
+  "score_tolerance": 4.76837158203125e-07,
+  "representative_failure": "E-B1 query index3/classa: base full chunks, candidate timeout/chunk none",
+  "caveat": "Partial preflight under load; no completed-cell latency comparison or accuracy estimate."
+}

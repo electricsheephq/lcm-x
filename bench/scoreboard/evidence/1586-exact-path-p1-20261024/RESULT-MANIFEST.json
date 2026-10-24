@@ -1,0 +1,98 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "20261024-1586-exact-path-p1",
+  "project": "lcm-x",
+  "kind": "benchmark",
+  "status": "settled",
+  "owner_lane": "lcmx-1586-perf-exact-path",
+  "claim_class": "advisory",
+  "created": "2026-10-24T11:35:05Z",
+  "settled": "2026-10-24T11:35:06Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "76abda9fcce73706c2656a038098532be4a8e0e7",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python3 -B rescore-partial.py (public projection of stopped P1 preflight)",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "1586-exact-path-p1-stopped-preflight",
+      "metric": "observed_topk_differences",
+      "value": 4.0,
+      "n": 36,
+      "source": "SUMMARY.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "SUMMARY.json",
+      "role": "receipt",
+      "sha256": "8b0d4987b479d910b9678a250eb8aa1966063b3e767d5ab8f1c1f7ea8fb4efcd",
+      "bytes": 1925
+    },
+    {
+      "path": "partial-recalls.jsonl",
+      "role": "per-item",
+      "sha256": "971ff4bbc78b274692e1129c01c1fc1232b24f69a23227eca482d8784df4505c",
+      "bytes": 357270
+    },
+    {
+      "path": "rescore-partial.py",
+      "role": "receipt",
+      "sha256": "f18648e42f9818d26602ad7c755f181354bd1b57eea3e30416c052a2d0318a80",
+      "bytes": 1846
+    },
+    {
+      "path": "load.json",
+      "role": "receipt",
+      "sha256": "3ac44e609e918b1a25c2affdd07a83b46472711b926b74a197e359e539cad919",
+      "bytes": 1187
+    },
+    {
+      "path": "exactness-stop.json",
+      "role": "receipt",
+      "sha256": "e897e280bb2f09d0c812edf9fa4c53eb07000eee06236dcef1227f6677242301",
+      "bytes": 2491
+    },
+    {
+      "path": "pre-audit-p1.json",
+      "role": "receipt",
+      "sha256": "3c3c9edb50c107404740d29ca4bfd85f6df8801e941a6232fd6ee36e946e985b",
+      "bytes": 1275
+    },
+    {
+      "path": "post-audit-p1-stop.json",
+      "role": "receipt",
+      "sha256": "3c3c9edb50c107404740d29ca4bfd85f6df8801e941a6232fd6ee36e946e985b",
+      "bytes": 1275
+    }
+  ],
+  "rescore": {
+    "command": "python3 -B rescore-partial.py",
+    "inputs": [
+      "partial-recalls.jsonl",
+      "rescore-partial.py"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "SUMMARY.json",
+    "exactness-stop.json",
+    "load.json",
+    "partial-recalls.jsonl",
+    "post-audit-p1-stop.json",
+    "pre-audit-p1.json",
+    "rescore-partial.py"
+  ],
+  "owner_verdict": "EXACTNESS_STOP. Preserve every result and re-score input. T2 publication belongs to RM because SPEC forbids tags/releases. No cleanup authorized."
+}
