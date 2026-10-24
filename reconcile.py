@@ -2328,6 +2328,21 @@ class ReconcileMixin:
             has_durable_compacted_snapshot_replay = candidate.has_durable_compacted_snapshot_replay
             candidate_ends_with_replayed_tool_result = candidate.candidate_ends_with_replayed_tool_result
             matches_tool_anchored_stale_window = candidate.matches_tool_anchored_stale_window
+            # #1838: a partial raw-tail match can borrow a pruned result's
+            # payload, but cannot explain a positively new user occurrence.
+            # Keep full literal replays on #1511's stamp-witness/UID rules.
+            if (matches_raw_tail and cursor < len(messages) and stored_tail_rows
+                    and not has_durable_compacted_snapshot_replay
+                    and not self._active_emission_proof()
+                    and self._durable_commit_proof_payload() is None
+                    and any(
+                        message.get("role") == "user"
+                        and self._host_occurrence_changed(
+                            message, {"timestamp": row.get("observed_at")})
+                        for message, row in zip(
+                            candidate_identity_messages, stored_tail_rows[-len(candidate_prefix):])
+                    )):
+                continue
             matches_visible_sanitized_tail = (
                 filtered_candidate_placeholders
                 and bool(candidate_visible_prefix)
