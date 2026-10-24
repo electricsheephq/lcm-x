@@ -29,6 +29,10 @@ rule is load1 below 4. An explicit run amendment may permit current-load ABAB
 measurement. For #1586 P2, exactness and RSS may run at any load, while every
 C1/C2/C3 ABAB block requires load1 below 4 immediately before admission. Wait
 in 10-minute checks for up to 3 hours, then record PENDING-QUIET if necessary.
+For the P5 continuation, that historical P2 wait is replaced by 60 minutes from
+the width fixture's PASS. Record that UTC clock once; do not reset it after a
+prototype, commit, fixture refresh, or CI run. Admit C1/C2 only at load1 below 4
+and before the recorded cutoff, otherwise retain PENDING-QUIET.
 Score ranking exactness only on paired queries where both arms have full
 summary and chunk coverage, no timeout and no error. Preserve censored pairs
 as latency events, never silently discard them from latency results. Stop on
@@ -65,6 +69,11 @@ Outputs:
   and `_process` peak RSS. `ru_maxrss` is converted from bytes on macOS or KiB
   on Linux into `peak_rss_bytes`. This is the process high-water mark including
   startup and warmup, not an incremental query allocation or system memory total.
+- `memory-attribution.json`: a separate untimed, raised-deadline recall after
+  acceptance summaries are saved and busy threads stop. It records transfer
+  object sizes, matrix shape/dtype/ownership, traced sites and settled RSS using
+  the RCA recipe. Its tracing and diagnostic peak must not enter acceptance
+  latency or RSS. A warm summary cache may produce no summary allocation event.
 
 For a separate diagnostic of failed C2, add `--profile` and use a new output/home.
 It retains only class `b` after warmup, and writes `profile.pstats`, `profile.txt`,

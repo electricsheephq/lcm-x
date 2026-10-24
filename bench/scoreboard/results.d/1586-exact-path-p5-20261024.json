@@ -1,0 +1,33 @@
+{
+  "id": "1586-exact-path-p5-20261024",
+  "run_id": "20261024-1586-perf-r5",
+  "t2_tag": "lcm-x/20261024-1586-perf-r5",
+  "benchmark": "Synthetic exact recall: P5 byte-width correction and bounded raw transfer",
+  "metric": "candidate_peak_rss_bytes",
+  "value": 882573312,
+  "display": "Exactness400/400 and RSS PASS; quiet C1/C2 pending",
+  "tier": "F",
+  "date": "2026-10-24",
+  "system_commit": "base849da257b52fc9833955928816dd1585184988b1; measured candidate6ef9b824c6b49fef5f52c08e3881c6eef88d94ee; later fixture/docs/evidence only",
+  "harness_commit": "6ef9b824c6b49fef5f52c08e3881c6eef88d94ee bench/instruments/local_catchup/contention.py",
+  "judge": "deterministic ordered top-k IDs and absolute score tolerance4*2**-23; observed max difference0",
+  "reader": "BAAI/bge-small-en-v1.5 query embedding; no answering model",
+  "retrieval_config": "Exact float32/384;250000chunks/500leaves;1000-row chunk batches; BLAS/VECLIB/OMP1; productORT2; nice19; <=8 observed threads; ABAB; N uses harness-only3600s deadline; C1/C2 not admitted",
+  "dataset_exposure": "Synthetic instrument-built fixture only; no customer data or provider traffic",
+  "breakdown": "https://github.com/electricsheephq/lcm-x/blob/8800585ad633cc47292ce72e78f78689ddb1de05/bench/scoreboard/evidence/1586-exact-path-p5-20261024/SCORE.json",
+  "variance": "N:200/class/arm,400 full/full pairs. V:8/class/arm,16 full/full pairs. Current-load diagnostic only; no quiet latency verdict or confidence interval.",
+  "failclose": "No exactness difference. Candidate882573312B vs base935690240B; memory bar +256MiB passed. Both store audits passed. New quiet cutoff16:20:15.735858Z remains fixed.",
+  "evidence": [
+    "https://github.com/electricsheephq/lcm-x/blob/8800585ad633cc47292ce72e78f78689ddb1de05/bench/scoreboard/evidence/1586-exact-path-p5-20261024/RESULT-MANIFEST.json",
+    "https://github.com/electricsheephq/lcm-x/blob/8800585ad633cc47292ce72e78f78689ddb1de05/bench/scoreboard/evidence/1586-exact-path-p5-20261024/RESULT.md",
+    "https://github.com/electricsheephq/lcm-x/blob/8800585ad633cc47292ce72e78f78689ddb1de05/bench/scoreboard/evidence/1586-exact-path-p5-20261024/SCORE.json",
+    "https://github.com/electricsheephq/lcm-x/blob/8800585ad633cc47292ce72e78f78689ddb1de05/bench/scoreboard/evidence/1586-exact-path-p5-20261024/SOURCE.json"
+  ],
+  "caveats": [
+    "C1/C2 quiet-only latency acceptance remains pending; raised-deadline timings cannot substitute.",
+    "384d882573312B and conditional768d980877312B same-policy RCA projection; actual768d/16GB RSS not measured.",
+    "UTF8 removes hex; UTF16 keeps corrected coalesced hex. One raw-transfer prototype only.",
+    "Not2-vCPU floor, saturation compaction, fresh GA, final review, merge, release, runtime or customer proof.",
+    "Archival publication incomplete: intended tag only; release manager owns publication under lane tag/release prohibition."
+  ]
+}
