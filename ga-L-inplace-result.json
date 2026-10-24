@@ -1,0 +1,891 @@
+{
+  "cell": "long-80/in-place",
+  "host": "ref-0.21.5",
+  "host_sha": "f97608f178d1ffeca59860195ab7da295f7c8e5f",
+  "plugin_sha": "77b2b4f795fb6a4f84c55abf6d0441da4469971e",
+  "verdict": "PASS",
+  "applicable_bars": [
+    "B1",
+    "B2",
+    "B3",
+    "B4",
+    "B5",
+    "B8"
+  ],
+  "B4": {
+    "verdict": "PASS",
+    "failed_turns": [],
+    "final_check": {
+      "entry": "compress_now",
+      "host_status": "compressed",
+      "engine_calls": 1,
+      "engine_status": "compacted",
+      "noop_reason": "",
+      "session": "S0",
+      "tail_observations": [
+        {
+          "session": "S0",
+          "boundary": {
+            "start": 11,
+            "count": 23,
+            "tokens": 63515,
+            "count_limit": 32,
+            "token_limit": 64000,
+            "token_limited": true,
+            "tool_group_extended": false
+          },
+          "rows": [
+            {
+              "role": "user",
+              "sha256": "b52d8cc3dd2f0edcbbc557d196740e00e89f34880e37cb99eed5c192f1ddf588"
+            },
+            {
+              "role": "assistant",
+              "sha256": "92519f285b643c386802b7c2c6a5f56d13966b2d6da22f35a19782432cb9248c"
+            },
+            {
+              "role": "user",
+              "sha256": "6968f6035a38770239a220da464f83836c4510c6d4ea8aa5824388b2de6db1e4"
+            },
+            {
+              "role": "assistant",
+              "sha256": "e23581b89e3dec60359b75f2074e4f1bf2144dc2c75f8862bc66bb0e92481cdd"
+            },
+            {
+              "role": "user",
+              "sha256": "983d0c510fad3f04904a213f458ce9f3bb022aca55e90ea9db8c48c9e0cb1271"
+            },
+            {
+              "role": "assistant",
+              "sha256": "0a5025de27de7f8e1b55fcab53512944e18516c1d9050f2f0109aa076acce8ab"
+            },
+            {
+              "role": "user",
+              "sha256": "d3518acc9b0805f1de00b107dc65b4981131d98dd4d30dc8a6e1d837a3e84bf4"
+            },
+            {
+              "role": "assistant",
+              "sha256": "c698ba1356c7dd118b1b825fb1263ef1fd031ffcfd808c8b0b43e39d1c52348f"
+            },
+            {
+              "role": "user",
+              "sha256": "33ddeafaefe51c202230ad39cd9ef8136e5d83b71de3febd7171f64802c7bb87"
+            },
+            {
+              "role": "assistant",
+              "sha256": "666e4336248baf89c83102c17f8dcdfca254527a36cef5ff1bf80cc9e6d875b2"
+            },
+            {
+              "role": "user",
+              "sha256": "9ab19988c727a2cd2e964f6fe25319c6902c6d1fc4c24febf0b778caae2b3f9c"
+            },
+            {
+              "role": "assistant",
+              "sha256": "941f5545f75bba8756b7d8a6fa175e829e0f1f9f599685f4b4c39ad4cc1f386f"
+            },
+            {
+              "role": "user",
+              "sha256": "5a7dad54d2fe13f209c9684c3ec881dafd92d5d4e6f31241c2d0c881e79d6cc5"
+            },
+            {
+              "role": "assistant",
+              "sha256": "fa3ae05dc8f50b03ff4ea614df787a9eb40481a0717a6a022d50e4b54fd451d3"
+            },
+            {
+              "role": "user",
+              "sha256": "661f7fcae59ed5290abe9e82371b36de6df711ecc41a69257a15c010d47ecfe6"
+            },
+            {
+              "role": "assistant",
+              "sha256": "9122041cff4469b01115990aca9bc1eaf9b4b5ce723555b6ae7f9f0f18dae1b2"
+            },
+            {
+              "role": "user",
+              "sha256": "f241fc07180c79ca4d164018824fbaa12d39b24563e0074819cd6798ddd64ae8"
+            },
+            {
+              "role": "assistant",
+              "sha256": "4932138e14e1e5e0bf3728c5d11d216a25ae3842fc3c47649642483d5acede73"
+            },
+            {
+              "role": "user",
+              "sha256": "584ff0460c3638bf2343463eb5a986b20229a75df0ec71095627e0f088839c3b"
+            },
+            {
+              "role": "assistant",
+              "sha256": "bef1a6c8935ca74b663364d61a2a013444ffe8c47753e099fe6e444d848c60c1"
+            },
+            {
+              "role": "user",
+              "sha256": "be27ee95faf6dbd547d14612555b996803f92786ddcd8ec108f5ec6cc38a39ab"
+            },
+            {
+              "role": "assistant",
+              "sha256": "a51d4dfaf30b16c4d73711f3164e9bfbcc525dbb7a4bdbc003ffebcdb9173b1f"
+            },
+            {
+              "role": "user",
+              "sha256": "b3c6dbf4880ca47938e8d85e7c5818fd2ab97c52cbd79233824efbf7ae8f5fbd"
+            },
+            {
+              "role": "assistant",
+              "sha256": "f2e058368f516703be1e89abb0b70573b4d2b97533fca7ecd175c8c9747d2094"
+            },
+            {
+              "role": "user",
+              "sha256": "9773efd72885452f0fcaf28b6ebd0adf86a8087d648851fd286bbfe80d3d33a0"
+            },
+            {
+              "role": "assistant",
+              "sha256": "5ebb94d475ce1caf8224378d99e0d1c3979ee0611704e1c693a9690ee57fe871"
+            },
+            {
+              "role": "user",
+              "sha256": "de1543a23a89df433115f4ef6fa1a6734938b904b9fde12c8012a05071f8bc03"
+            },
+            {
+              "role": "assistant",
+              "sha256": "03f67ade2196160d5fcfee201f2c5630fc9babe2e65a13a5d551f5419d058a87"
+            },
+            {
+              "role": "user",
+              "sha256": "5a621f2de3602e2629f42264d88d6dcbd3d4eb6ba51bab2ccffe60b0210f23a7"
+            },
+            {
+              "role": "assistant",
+              "sha256": "0db44756b4251cce24eab3a32bd7d4ab41c3fce6d1ced6999d39f5a9ef3b4881"
+            },
+            {
+              "role": "user",
+              "sha256": "b8d778202cdc327ce28a23ae5e55b84065a849357e38793b487ff422ee5809ab"
+            },
+            {
+              "role": "assistant",
+              "sha256": "714cb4ebf1102c7019bdc3f998f151d06611c61c40a2038cf589e23c5e5e8948"
+            },
+            {
+              "role": "user",
+              "sha256": "77ebd689ab37d52c22d7dfeeaf9d203e108175f31a2e3bfafdc40c79c4f27a1a"
+            },
+            {
+              "role": "assistant",
+              "sha256": "6c2d503dd7f04b51f655110dc2ca0692664359a415881746a4c3a6ebcfdea1d9"
+            }
+          ]
+        },
+        {
+          "session": "S0",
+          "boundary": {
+            "start": 10,
+            "count": 23,
+            "tokens": 63515,
+            "count_limit": 32,
+            "token_limit": 64000,
+            "token_limited": true,
+            "tool_group_extended": false
+          },
+          "rows": [
+            {
+              "role": "assistant",
+              "sha256": "92519f285b643c386802b7c2c6a5f56d13966b2d6da22f35a19782432cb9248c"
+            },
+            {
+              "role": "user",
+              "sha256": "6968f6035a38770239a220da464f83836c4510c6d4ea8aa5824388b2de6db1e4"
+            },
+            {
+              "role": "assistant",
+              "sha256": "e23581b89e3dec60359b75f2074e4f1bf2144dc2c75f8862bc66bb0e92481cdd"
+            },
+            {
+              "role": "user",
+              "sha256": "983d0c510fad3f04904a213f458ce9f3bb022aca55e90ea9db8c48c9e0cb1271"
+            },
+            {
+              "role": "assistant",
+              "sha256": "0a5025de27de7f8e1b55fcab53512944e18516c1d9050f2f0109aa076acce8ab"
+            },
+            {
+              "role": "user",
+              "sha256": "d3518acc9b0805f1de00b107dc65b4981131d98dd4d30dc8a6e1d837a3e84bf4"
+            },
+            {
+              "role": "assistant",
+              "sha256": "c698ba1356c7dd118b1b825fb1263ef1fd031ffcfd808c8b0b43e39d1c52348f"
+            },
+            {
+              "role": "user",
+              "sha256": "33ddeafaefe51c202230ad39cd9ef8136e5d83b71de3febd7171f64802c7bb87"
+            },
+            {
+              "role": "assistant",
+              "sha256": "666e4336248baf89c83102c17f8dcdfca254527a36cef5ff1bf80cc9e6d875b2"
+            },
+            {
+              "role": "user",
+              "sha256": "9ab19988c727a2cd2e964f6fe25319c6902c6d1fc4c24febf0b778caae2b3f9c"
+            },
+            {
+              "role": "assistant",
+              "sha256": "941f5545f75bba8756b7d8a6fa175e829e0f1f9f599685f4b4c39ad4cc1f386f"
+            },
+            {
+              "role": "user",
+              "sha256": "5a7dad54d2fe13f209c9684c3ec881dafd92d5d4e6f31241c2d0c881e79d6cc5"
+            },
+            {
+              "role": "assistant",
+              "sha256": "fa3ae05dc8f50b03ff4ea614df787a9eb40481a0717a6a022d50e4b54fd451d3"
+            },
+            {
+              "role": "user",
+              "sha256": "661f7fcae59ed5290abe9e82371b36de6df711ecc41a69257a15c010d47ecfe6"
+            },
+            {
+              "role": "assistant",
+              "sha256": "9122041cff4469b01115990aca9bc1eaf9b4b5ce723555b6ae7f9f0f18dae1b2"
+            },
+            {
+              "role": "user",
+              "sha256": "f241fc07180c79ca4d164018824fbaa12d39b24563e0074819cd6798ddd64ae8"
+            },
+            {
+              "role": "assistant",
+              "sha256": "4932138e14e1e5e0bf3728c5d11d216a25ae3842fc3c47649642483d5acede73"
+            },
+            {
+              "role": "user",
+              "sha256": "584ff0460c3638bf2343463eb5a986b20229a75df0ec71095627e0f088839c3b"
+            },
+            {
+              "role": "assistant",
+              "sha256": "bef1a6c8935ca74b663364d61a2a013444ffe8c47753e099fe6e444d848c60c1"
+            },
+            {
+              "role": "user",
+              "sha256": "be27ee95faf6dbd547d14612555b996803f92786ddcd8ec108f5ec6cc38a39ab"
+            },
+            {
+              "role": "assistant",
+              "sha256": "a51d4dfaf30b16c4d73711f3164e9bfbcc525dbb7a4bdbc003ffebcdb9173b1f"
+            },
+            {
+              "role": "user",
+              "sha256": "b3c6dbf4880ca47938e8d85e7c5818fd2ab97c52cbd79233824efbf7ae8f5fbd"
+            },
+            {
+              "role": "assistant",
+              "sha256": "f2e058368f516703be1e89abb0b70573b4d2b97533fca7ecd175c8c9747d2094"
+            },
+            {
+              "role": "user",
+              "sha256": "9773efd72885452f0fcaf28b6ebd0adf86a8087d648851fd286bbfe80d3d33a0"
+            },
+            {
+              "role": "assistant",
+              "sha256": "5ebb94d475ce1caf8224378d99e0d1c3979ee0611704e1c693a9690ee57fe871"
+            },
+            {
+              "role": "user",
+              "sha256": "de1543a23a89df433115f4ef6fa1a6734938b904b9fde12c8012a05071f8bc03"
+            },
+            {
+              "role": "assistant",
+              "sha256": "03f67ade2196160d5fcfee201f2c5630fc9babe2e65a13a5d551f5419d058a87"
+            },
+            {
+              "role": "user",
+              "sha256": "5a621f2de3602e2629f42264d88d6dcbd3d4eb6ba51bab2ccffe60b0210f23a7"
+            },
+            {
+              "role": "assistant",
+              "sha256": "0db44756b4251cce24eab3a32bd7d4ab41c3fce6d1ced6999d39f5a9ef3b4881"
+            },
+            {
+              "role": "user",
+              "sha256": "b8d778202cdc327ce28a23ae5e55b84065a849357e38793b487ff422ee5809ab"
+            },
+            {
+              "role": "assistant",
+              "sha256": "714cb4ebf1102c7019bdc3f998f151d06611c61c40a2038cf589e23c5e5e8948"
+            },
+            {
+              "role": "user",
+              "sha256": "77ebd689ab37d52c22d7dfeeaf9d203e108175f31a2e3bfafdc40c79c4f27a1a"
+            },
+            {
+              "role": "assistant",
+              "sha256": "6c2d503dd7f04b51f655110dc2ca0692664359a415881746a4c3a6ebcfdea1d9"
+            }
+          ]
+        },
+        {
+          "session": "S0",
+          "boundary": {
+            "start": 0,
+            "count": 24,
+            "tokens": 63585,
+            "count_limit": 32,
+            "token_limit": 64000,
+            "token_limited": false,
+            "tool_group_extended": false
+          },
+          "rows": [
+            {
+              "role": "user",
+              "sha256": "65011b6f4f439bfbc404676cb215dadc9eabc1cc9ebc00df1561102797c617ca"
+            },
+            {
+              "role": "assistant",
+              "sha256": "941f5545f75bba8756b7d8a6fa175e829e0f1f9f599685f4b4c39ad4cc1f386f"
+            },
+            {
+              "role": "user",
+              "sha256": "5a7dad54d2fe13f209c9684c3ec881dafd92d5d4e6f31241c2d0c881e79d6cc5"
+            },
+            {
+              "role": "assistant",
+              "sha256": "fa3ae05dc8f50b03ff4ea614df787a9eb40481a0717a6a022d50e4b54fd451d3"
+            },
+            {
+              "role": "user",
+              "sha256": "661f7fcae59ed5290abe9e82371b36de6df711ecc41a69257a15c010d47ecfe6"
+            },
+            {
+              "role": "assistant",
+              "sha256": "9122041cff4469b01115990aca9bc1eaf9b4b5ce723555b6ae7f9f0f18dae1b2"
+            },
+            {
+              "role": "user",
+              "sha256": "f241fc07180c79ca4d164018824fbaa12d39b24563e0074819cd6798ddd64ae8"
+            },
+            {
+              "role": "assistant",
+              "sha256": "4932138e14e1e5e0bf3728c5d11d216a25ae3842fc3c47649642483d5acede73"
+            },
+            {
+              "role": "user",
+              "sha256": "584ff0460c3638bf2343463eb5a986b20229a75df0ec71095627e0f088839c3b"
+            },
+            {
+              "role": "assistant",
+              "sha256": "bef1a6c8935ca74b663364d61a2a013444ffe8c47753e099fe6e444d848c60c1"
+            },
+            {
+              "role": "user",
+              "sha256": "be27ee95faf6dbd547d14612555b996803f92786ddcd8ec108f5ec6cc38a39ab"
+            },
+            {
+              "role": "assistant",
+              "sha256": "a51d4dfaf30b16c4d73711f3164e9bfbcc525dbb7a4bdbc003ffebcdb9173b1f"
+            },
+            {
+              "role": "user",
+              "sha256": "b3c6dbf4880ca47938e8d85e7c5818fd2ab97c52cbd79233824efbf7ae8f5fbd"
+            },
+            {
+              "role": "assistant",
+              "sha256": "f2e058368f516703be1e89abb0b70573b4d2b97533fca7ecd175c8c9747d2094"
+            },
+            {
+              "role": "user",
+              "sha256": "9773efd72885452f0fcaf28b6ebd0adf86a8087d648851fd286bbfe80d3d33a0"
+            },
+            {
+              "role": "assistant",
+              "sha256": "5ebb94d475ce1caf8224378d99e0d1c3979ee0611704e1c693a9690ee57fe871"
+            },
+            {
+              "role": "user",
+              "sha256": "de1543a23a89df433115f4ef6fa1a6734938b904b9fde12c8012a05071f8bc03"
+            },
+            {
+              "role": "assistant",
+              "sha256": "03f67ade2196160d5fcfee201f2c5630fc9babe2e65a13a5d551f5419d058a87"
+            },
+            {
+              "role": "user",
+              "sha256": "5a621f2de3602e2629f42264d88d6dcbd3d4eb6ba51bab2ccffe60b0210f23a7"
+            },
+            {
+              "role": "assistant",
+              "sha256": "0db44756b4251cce24eab3a32bd7d4ab41c3fce6d1ced6999d39f5a9ef3b4881"
+            },
+            {
+              "role": "user",
+              "sha256": "b8d778202cdc327ce28a23ae5e55b84065a849357e38793b487ff422ee5809ab"
+            },
+            {
+              "role": "assistant",
+              "sha256": "714cb4ebf1102c7019bdc3f998f151d06611c61c40a2038cf589e23c5e5e8948"
+            },
+            {
+              "role": "user",
+              "sha256": "77ebd689ab37d52c22d7dfeeaf9d203e108175f31a2e3bfafdc40c79c4f27a1a"
+            },
+            {
+              "role": "assistant",
+              "sha256": "6c2d503dd7f04b51f655110dc2ca0692664359a415881746a4c3a6ebcfdea1d9"
+            }
+          ]
+        }
+      ],
+      "rejection": null,
+      "conflicts": 0,
+      "attempts": [
+        {
+          "entry": "compress_now",
+          "host_status": "compressed",
+          "engine_calls": 1,
+          "engine_status": "compacted",
+          "noop_reason": "",
+          "session": "S0",
+          "tail_observations": [
+            {
+              "session": "S0",
+              "boundary": {
+                "start": 11,
+                "count": 23,
+                "tokens": 63515,
+                "count_limit": 32,
+                "token_limit": 64000,
+                "token_limited": true,
+                "tool_group_extended": false
+              },
+              "rows": [
+                {
+                  "role": "user",
+                  "sha256": "b52d8cc3dd2f0edcbbc557d196740e00e89f34880e37cb99eed5c192f1ddf588"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "92519f285b643c386802b7c2c6a5f56d13966b2d6da22f35a19782432cb9248c"
+                },
+                {
+                  "role": "user",
+                  "sha256": "6968f6035a38770239a220da464f83836c4510c6d4ea8aa5824388b2de6db1e4"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "e23581b89e3dec60359b75f2074e4f1bf2144dc2c75f8862bc66bb0e92481cdd"
+                },
+                {
+                  "role": "user",
+                  "sha256": "983d0c510fad3f04904a213f458ce9f3bb022aca55e90ea9db8c48c9e0cb1271"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "0a5025de27de7f8e1b55fcab53512944e18516c1d9050f2f0109aa076acce8ab"
+                },
+                {
+                  "role": "user",
+                  "sha256": "d3518acc9b0805f1de00b107dc65b4981131d98dd4d30dc8a6e1d837a3e84bf4"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "c698ba1356c7dd118b1b825fb1263ef1fd031ffcfd808c8b0b43e39d1c52348f"
+                },
+                {
+                  "role": "user",
+                  "sha256": "33ddeafaefe51c202230ad39cd9ef8136e5d83b71de3febd7171f64802c7bb87"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "666e4336248baf89c83102c17f8dcdfca254527a36cef5ff1bf80cc9e6d875b2"
+                },
+                {
+                  "role": "user",
+                  "sha256": "9ab19988c727a2cd2e964f6fe25319c6902c6d1fc4c24febf0b778caae2b3f9c"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "941f5545f75bba8756b7d8a6fa175e829e0f1f9f599685f4b4c39ad4cc1f386f"
+                },
+                {
+                  "role": "user",
+                  "sha256": "5a7dad54d2fe13f209c9684c3ec881dafd92d5d4e6f31241c2d0c881e79d6cc5"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "fa3ae05dc8f50b03ff4ea614df787a9eb40481a0717a6a022d50e4b54fd451d3"
+                },
+                {
+                  "role": "user",
+                  "sha256": "661f7fcae59ed5290abe9e82371b36de6df711ecc41a69257a15c010d47ecfe6"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "9122041cff4469b01115990aca9bc1eaf9b4b5ce723555b6ae7f9f0f18dae1b2"
+                },
+                {
+                  "role": "user",
+                  "sha256": "f241fc07180c79ca4d164018824fbaa12d39b24563e0074819cd6798ddd64ae8"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "4932138e14e1e5e0bf3728c5d11d216a25ae3842fc3c47649642483d5acede73"
+                },
+                {
+                  "role": "user",
+                  "sha256": "584ff0460c3638bf2343463eb5a986b20229a75df0ec71095627e0f088839c3b"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "bef1a6c8935ca74b663364d61a2a013444ffe8c47753e099fe6e444d848c60c1"
+                },
+                {
+                  "role": "user",
+                  "sha256": "be27ee95faf6dbd547d14612555b996803f92786ddcd8ec108f5ec6cc38a39ab"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "a51d4dfaf30b16c4d73711f3164e9bfbcc525dbb7a4bdbc003ffebcdb9173b1f"
+                },
+                {
+                  "role": "user",
+                  "sha256": "b3c6dbf4880ca47938e8d85e7c5818fd2ab97c52cbd79233824efbf7ae8f5fbd"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "f2e058368f516703be1e89abb0b70573b4d2b97533fca7ecd175c8c9747d2094"
+                },
+                {
+                  "role": "user",
+                  "sha256": "9773efd72885452f0fcaf28b6ebd0adf86a8087d648851fd286bbfe80d3d33a0"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "5ebb94d475ce1caf8224378d99e0d1c3979ee0611704e1c693a9690ee57fe871"
+                },
+                {
+                  "role": "user",
+                  "sha256": "de1543a23a89df433115f4ef6fa1a6734938b904b9fde12c8012a05071f8bc03"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "03f67ade2196160d5fcfee201f2c5630fc9babe2e65a13a5d551f5419d058a87"
+                },
+                {
+                  "role": "user",
+                  "sha256": "5a621f2de3602e2629f42264d88d6dcbd3d4eb6ba51bab2ccffe60b0210f23a7"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "0db44756b4251cce24eab3a32bd7d4ab41c3fce6d1ced6999d39f5a9ef3b4881"
+                },
+                {
+                  "role": "user",
+                  "sha256": "b8d778202cdc327ce28a23ae5e55b84065a849357e38793b487ff422ee5809ab"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "714cb4ebf1102c7019bdc3f998f151d06611c61c40a2038cf589e23c5e5e8948"
+                },
+                {
+                  "role": "user",
+                  "sha256": "77ebd689ab37d52c22d7dfeeaf9d203e108175f31a2e3bfafdc40c79c4f27a1a"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "6c2d503dd7f04b51f655110dc2ca0692664359a415881746a4c3a6ebcfdea1d9"
+                }
+              ]
+            },
+            {
+              "session": "S0",
+              "boundary": {
+                "start": 10,
+                "count": 23,
+                "tokens": 63515,
+                "count_limit": 32,
+                "token_limit": 64000,
+                "token_limited": true,
+                "tool_group_extended": false
+              },
+              "rows": [
+                {
+                  "role": "assistant",
+                  "sha256": "92519f285b643c386802b7c2c6a5f56d13966b2d6da22f35a19782432cb9248c"
+                },
+                {
+                  "role": "user",
+                  "sha256": "6968f6035a38770239a220da464f83836c4510c6d4ea8aa5824388b2de6db1e4"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "e23581b89e3dec60359b75f2074e4f1bf2144dc2c75f8862bc66bb0e92481cdd"
+                },
+                {
+                  "role": "user",
+                  "sha256": "983d0c510fad3f04904a213f458ce9f3bb022aca55e90ea9db8c48c9e0cb1271"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "0a5025de27de7f8e1b55fcab53512944e18516c1d9050f2f0109aa076acce8ab"
+                },
+                {
+                  "role": "user",
+                  "sha256": "d3518acc9b0805f1de00b107dc65b4981131d98dd4d30dc8a6e1d837a3e84bf4"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "c698ba1356c7dd118b1b825fb1263ef1fd031ffcfd808c8b0b43e39d1c52348f"
+                },
+                {
+                  "role": "user",
+                  "sha256": "33ddeafaefe51c202230ad39cd9ef8136e5d83b71de3febd7171f64802c7bb87"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "666e4336248baf89c83102c17f8dcdfca254527a36cef5ff1bf80cc9e6d875b2"
+                },
+                {
+                  "role": "user",
+                  "sha256": "9ab19988c727a2cd2e964f6fe25319c6902c6d1fc4c24febf0b778caae2b3f9c"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "941f5545f75bba8756b7d8a6fa175e829e0f1f9f599685f4b4c39ad4cc1f386f"
+                },
+                {
+                  "role": "user",
+                  "sha256": "5a7dad54d2fe13f209c9684c3ec881dafd92d5d4e6f31241c2d0c881e79d6cc5"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "fa3ae05dc8f50b03ff4ea614df787a9eb40481a0717a6a022d50e4b54fd451d3"
+                },
+                {
+                  "role": "user",
+                  "sha256": "661f7fcae59ed5290abe9e82371b36de6df711ecc41a69257a15c010d47ecfe6"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "9122041cff4469b01115990aca9bc1eaf9b4b5ce723555b6ae7f9f0f18dae1b2"
+                },
+                {
+                  "role": "user",
+                  "sha256": "f241fc07180c79ca4d164018824fbaa12d39b24563e0074819cd6798ddd64ae8"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "4932138e14e1e5e0bf3728c5d11d216a25ae3842fc3c47649642483d5acede73"
+                },
+                {
+                  "role": "user",
+                  "sha256": "584ff0460c3638bf2343463eb5a986b20229a75df0ec71095627e0f088839c3b"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "bef1a6c8935ca74b663364d61a2a013444ffe8c47753e099fe6e444d848c60c1"
+                },
+                {
+                  "role": "user",
+                  "sha256": "be27ee95faf6dbd547d14612555b996803f92786ddcd8ec108f5ec6cc38a39ab"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "a51d4dfaf30b16c4d73711f3164e9bfbcc525dbb7a4bdbc003ffebcdb9173b1f"
+                },
+                {
+                  "role": "user",
+                  "sha256": "b3c6dbf4880ca47938e8d85e7c5818fd2ab97c52cbd79233824efbf7ae8f5fbd"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "f2e058368f516703be1e89abb0b70573b4d2b97533fca7ecd175c8c9747d2094"
+                },
+                {
+                  "role": "user",
+                  "sha256": "9773efd72885452f0fcaf28b6ebd0adf86a8087d648851fd286bbfe80d3d33a0"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "5ebb94d475ce1caf8224378d99e0d1c3979ee0611704e1c693a9690ee57fe871"
+                },
+                {
+                  "role": "user",
+                  "sha256": "de1543a23a89df433115f4ef6fa1a6734938b904b9fde12c8012a05071f8bc03"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "03f67ade2196160d5fcfee201f2c5630fc9babe2e65a13a5d551f5419d058a87"
+                },
+                {
+                  "role": "user",
+                  "sha256": "5a621f2de3602e2629f42264d88d6dcbd3d4eb6ba51bab2ccffe60b0210f23a7"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "0db44756b4251cce24eab3a32bd7d4ab41c3fce6d1ced6999d39f5a9ef3b4881"
+                },
+                {
+                  "role": "user",
+                  "sha256": "b8d778202cdc327ce28a23ae5e55b84065a849357e38793b487ff422ee5809ab"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "714cb4ebf1102c7019bdc3f998f151d06611c61c40a2038cf589e23c5e5e8948"
+                },
+                {
+                  "role": "user",
+                  "sha256": "77ebd689ab37d52c22d7dfeeaf9d203e108175f31a2e3bfafdc40c79c4f27a1a"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "6c2d503dd7f04b51f655110dc2ca0692664359a415881746a4c3a6ebcfdea1d9"
+                }
+              ]
+            },
+            {
+              "session": "S0",
+              "boundary": {
+                "start": 0,
+                "count": 24,
+                "tokens": 63585,
+                "count_limit": 32,
+                "token_limit": 64000,
+                "token_limited": false,
+                "tool_group_extended": false
+              },
+              "rows": [
+                {
+                  "role": "user",
+                  "sha256": "65011b6f4f439bfbc404676cb215dadc9eabc1cc9ebc00df1561102797c617ca"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "941f5545f75bba8756b7d8a6fa175e829e0f1f9f599685f4b4c39ad4cc1f386f"
+                },
+                {
+                  "role": "user",
+                  "sha256": "5a7dad54d2fe13f209c9684c3ec881dafd92d5d4e6f31241c2d0c881e79d6cc5"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "fa3ae05dc8f50b03ff4ea614df787a9eb40481a0717a6a022d50e4b54fd451d3"
+                },
+                {
+                  "role": "user",
+                  "sha256": "661f7fcae59ed5290abe9e82371b36de6df711ecc41a69257a15c010d47ecfe6"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "9122041cff4469b01115990aca9bc1eaf9b4b5ce723555b6ae7f9f0f18dae1b2"
+                },
+                {
+                  "role": "user",
+                  "sha256": "f241fc07180c79ca4d164018824fbaa12d39b24563e0074819cd6798ddd64ae8"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "4932138e14e1e5e0bf3728c5d11d216a25ae3842fc3c47649642483d5acede73"
+                },
+                {
+                  "role": "user",
+                  "sha256": "584ff0460c3638bf2343463eb5a986b20229a75df0ec71095627e0f088839c3b"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "bef1a6c8935ca74b663364d61a2a013444ffe8c47753e099fe6e444d848c60c1"
+                },
+                {
+                  "role": "user",
+                  "sha256": "be27ee95faf6dbd547d14612555b996803f92786ddcd8ec108f5ec6cc38a39ab"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "a51d4dfaf30b16c4d73711f3164e9bfbcc525dbb7a4bdbc003ffebcdb9173b1f"
+                },
+                {
+                  "role": "user",
+                  "sha256": "b3c6dbf4880ca47938e8d85e7c5818fd2ab97c52cbd79233824efbf7ae8f5fbd"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "f2e058368f516703be1e89abb0b70573b4d2b97533fca7ecd175c8c9747d2094"
+                },
+                {
+                  "role": "user",
+                  "sha256": "9773efd72885452f0fcaf28b6ebd0adf86a8087d648851fd286bbfe80d3d33a0"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "5ebb94d475ce1caf8224378d99e0d1c3979ee0611704e1c693a9690ee57fe871"
+                },
+                {
+                  "role": "user",
+                  "sha256": "de1543a23a89df433115f4ef6fa1a6734938b904b9fde12c8012a05071f8bc03"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "03f67ade2196160d5fcfee201f2c5630fc9babe2e65a13a5d551f5419d058a87"
+                },
+                {
+                  "role": "user",
+                  "sha256": "5a621f2de3602e2629f42264d88d6dcbd3d4eb6ba51bab2ccffe60b0210f23a7"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "0db44756b4251cce24eab3a32bd7d4ab41c3fce6d1ced6999d39f5a9ef3b4881"
+                },
+                {
+                  "role": "user",
+                  "sha256": "b8d778202cdc327ce28a23ae5e55b84065a849357e38793b487ff422ee5809ab"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "714cb4ebf1102c7019bdc3f998f151d06611c61c40a2038cf589e23c5e5e8948"
+                },
+                {
+                  "role": "user",
+                  "sha256": "77ebd689ab37d52c22d7dfeeaf9d203e108175f31a2e3bfafdc40c79c4f27a1a"
+                },
+                {
+                  "role": "assistant",
+                  "sha256": "6c2d503dd7f04b51f655110dc2ca0692664359a415881746a4c3a6ebcfdea1d9"
+                }
+              ]
+            }
+          ],
+          "rejection": null,
+          "conflicts": 0
+        }
+      ],
+      "published": true,
+      "outcome": "published",
+      "backlog_checks": [
+        {
+          "after_turn": 80,
+          "last_pass_turn": 75,
+          "turns_since_pass": 5
+        }
+      ]
+    },
+    "coverage": {
+      "stored_ids": [],
+      "covered_ids": [],
+      "protected_ids": [],
+      "uncovered_ids": [],
+      "valid": false
+    }
+  },
+  "B1": {
+    "user_tags": 80,
+    "reply_tags": 80,
+    "mismatched": 0,
+    "per_session": {
+      "chat": 0
+    }
+  },
+  "B2": {
+    "expected_items": 160,
+    "missing_keys": 0,
+    "deficit_rows": 0,
+    "duplicated_keys": 0,
+    "surplus_rows": 0,
+    "stored_rows_not_expected": 0,
+    "split_keys": 0
+  },
+  "instrument_sha": "6efbee1427db764ad2a967704f4040294d46f6f0"
+}

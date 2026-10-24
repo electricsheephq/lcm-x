@@ -1,0 +1,102 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "20261024-b4-drained-coverage-public",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "b4-drained-coverage",
+  "claim_class": "advisory",
+  "created": "2026-10-24T13:43:24Z",
+  "settled": "2026-10-24T13:43:25Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "6efbee1427db764ad2a967704f4040294d46f6f0",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "Public-safe export of executed six-cell SPEC acceptance; full DB/payload re-score inputs retained by the lane.",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "B4-drained-SPEC",
+      "metric": "acceptance_cells",
+      "value": 6.0,
+      "n": 6,
+      "baseline_run": "lcmx-v0290-b4-rca-20261024",
+      "source": "summary.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "ga-L-inplace-result.json",
+      "role": "per-item",
+      "sha256": "ec1764ce0751a645b6bcc641fd0bcf176a751d19e7530e94cbc3b3e9ff632fbc",
+      "bytes": 33106
+    },
+    {
+      "path": "ga-L-rotation-result.json",
+      "role": "per-item",
+      "sha256": "ddf5169fea54df9806ee6ced85445975ea252f9b632bc6c79d6f9fd66e902120",
+      "bytes": 33266
+    },
+    {
+      "path": "rc1-L-inplace-result.json",
+      "role": "per-item",
+      "sha256": "807d592c3851e607dd6f7d4ee6db241900737c0a90d52198c3c38ebb9d0de6eb",
+      "bytes": 31667
+    },
+    {
+      "path": "rc1-L-rotation-result.json",
+      "role": "per-item",
+      "sha256": "6b11a572e8e0daca0c7d7c408f52360048ee70510a35c233aaca433a53af46b2",
+      "bytes": 31847
+    },
+    {
+      "path": "rc1-P-persistent-result.json",
+      "role": "per-item",
+      "sha256": "5a8bf4a8a64e285f75730befd9875e4b626d1efe574f1abca34ca37362935e46",
+      "bytes": 12611
+    },
+    {
+      "path": "rc1-P-sibling-result.json",
+      "role": "per-item",
+      "sha256": "ce88e09413e220ad837a227027c56a4bf1917f15d80238353fc036084e1a3d32",
+      "bytes": 27088
+    },
+    {
+      "path": "summary.json",
+      "role": "per-item",
+      "sha256": "c6af373dee111ded9fa9dbde912eaec8c6d43980ea04fa7c064ca18b26536a83",
+      "bytes": 20698
+    },
+    {
+      "path": "independent-review.md",
+      "role": "per-item",
+      "sha256": "ff8095309644eece0570a3015102586a3abbfceff50637f8c9832458b7bfc729",
+      "bytes": 899
+    }
+  ],
+  "rescore": {
+    "command": null,
+    "inputs": [],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "ga-L-inplace-result.json",
+    "ga-L-rotation-result.json",
+    "independent-review.md",
+    "rc1-L-inplace-result.json",
+    "rc1-L-rotation-result.json",
+    "rc1-P-persistent-result.json",
+    "rc1-P-sibling-result.json",
+    "summary.json"
+  ]
+}
