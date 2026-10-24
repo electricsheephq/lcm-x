@@ -60,6 +60,29 @@ def test_qa_caller_does_not_invent_an_explicit_arm():
     assert 'HERMES_MB_PROVIDER: process.env.HERMES_MB_PROVIDER || "fastembed"' not in source
 
 
+@pytest.mark.parametrize("provider,model,enabled", [("", "", False), ("fastembed", "", True),
+                                                 ("voyage", "explicit-cloud", True)])
+def test_bridge_preflip_config_api(bridge_module, tmp_path, monkeypatch, provider, model, enabled):
+    original = config_module.LCMConfig
+    monkeypatch.delattr(config_module, "effective_embedding_model")
+    monkeypatch.setattr(config_module, "LCMConfig", lambda **kwargs: original(**{
+        "embeddings_enabled": False, "embedding_provider": "", "embedding_model": "", **kwargs}))
+    monkeypatch.setenv("HERMES_LCM_REPO", str(ROOT))
+    monkeypatch.setenv("HERMES_MB_WORKDIR", str(tmp_path))
+    monkeypatch.setenv("HERMES_MB_PROVIDER", provider)
+    monkeypatch.setenv("HERMES_MB_MODEL", model)
+    bridge = bridge_module.Bridge()
+    calls = []
+    bridge._resolve_harness_provider = lambda p, m: calls.append((p, m)) or SimpleNamespace(dim=2, model_id=m)
+    monkeypatch.setenv("VOYAGE_API_KEY", "fixture")
+    result = bridge.initialize({})
+    assert result["embeddings_enabled"] is enabled
+    expected_model = model or ("BAAI/bge-small-en-v1.5" if provider == "fastembed" else "")
+    assert result["model"] == expected_model
+    assert calls == ([(provider, expected_model)] if enabled else [])
+    assert json.loads((tmp_path / "effective-config.json").read_text()) == result
+
+
 @pytest.mark.parametrize("enabled", [True, False])
 def test_longmemeval_shipped_default_records_effective_model(tmp_path, monkeypatch, enabled):
     import benchmarking.longmemeval as lme

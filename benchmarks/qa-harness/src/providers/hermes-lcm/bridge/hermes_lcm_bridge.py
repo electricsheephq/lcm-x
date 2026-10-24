@@ -90,8 +90,8 @@ class Bridge:
         )
 
         _ensure_hermes_lcm_package()
-        from hermes_lcm.config import LCMConfig, effective_embedding_model
-        defaults = LCMConfig()
+        from hermes_lcm import config as config_module
+        defaults = config_module.LCMConfig()
         explicit = (os.environ.get("HERMES_MB_PROVIDER") or "").strip().lower()
         explicit = "fastembed" if explicit == "fast-embed" else explicit
         requested_model = os.environ.get("HERMES_MB_MODEL", "")
@@ -99,8 +99,12 @@ class Bridge:
         self.embeddings_enabled = explicit not in {"off", "none"} and (
             bool(explicit or requested_model) or defaults.embeddings_enabled)
         self.provider_name = explicit if explicit and self.embeddings_enabled else defaults.embedding_provider
-        self.model = effective_embedding_model(self.provider_name, requested_model or (
-            _DEFAULT_MODELS.get(explicit, "") if explicit else defaults.embedding_model))
+        configured_model = requested_model or (
+            _DEFAULT_MODELS.get(explicit, "") if explicit else defaults.embedding_model)
+        resolve_model = getattr(config_module, "effective_embedding_model", None)
+        # A pinned bridge can measure a pre-flip tree with the old explicit LOCAL preset.
+        self.model = (resolve_model(self.provider_name, configured_model) if resolve_model else
+                      configured_model or ("BAAI/bge-small-en-v1.5" if explicit == "fastembed" else ""))
         self.initialized = False
         self._deterministic_session_summary = deterministic_session_summary
         self._resolve_harness_provider = resolve_harness_provider
