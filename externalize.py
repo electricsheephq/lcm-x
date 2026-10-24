@@ -701,8 +701,7 @@ def _media_payload_text_part(part: Dict[str, Any]) -> str | None:
     return None
 
 
-# A media repr above this is never parsed or previewed (it only bounds a pathological AST); a few MiB
-# of media bytes in a repr parse in milliseconds.
+# A media repr above this is never parsed or previewed; opaque literals below it are removed first.
 _MEDIA_REPR_PARSE_LIMIT = 64 * 1_048_576
 # Parse memory and time grow with the number of tokens, not bytes: a repr holding more than this many
 # significant tokens (separators, operators, numbers, adjacent string literals) is never parsed. A string
@@ -732,6 +731,64 @@ def _media_repr_exceeds_element_limit(content: str) -> bool:
     return False
 
 
+def _media_repr_reduced(content: str) -> str:
+    """Drop opaque literal spans without decoding or copying their media-sized bodies."""
+    import ast
+
+    opening = re.compile(r"(?i:[bru]{0,2})(?:'''|\"\"\"|'|\")")
+    backslashes = re.compile(r"\\*$")
+    escapes = re.compile(r"\\(?:N\{[^}]*\}?|u.{0,4}|U.{0,8}|x.{0,2}|[0-7]{1,3}|.)", re.DOTALL)
+    pieces, pos = [], 0
+    while match := opening.search(content, pos):
+        if len(pieces) >= 2 * _MEDIA_REPR_ELEMENT_LIMIT:
+            raise ValueError("too many media repr literals")
+        pieces.append(content[pos:match.start()])
+        token_start = match.group()
+        quote = "'" if token_start.endswith("'") else '"'
+        delimiter = quote * (3 if token_start.endswith(quote * 3) else 1)
+        end = match.end()
+        while (stop := content.find(delimiter, end)) >= 0:
+            # Count the preceding run in C, once per quote, rather than once per escaped byte.
+            slash_start = backslashes.search(content, end, stop).start()
+            if (stop - slash_start) % 2 == 0:
+                end = stop + len(delimiter)
+                break
+            end = stop + 1
+        else:
+            raise ValueError("unterminated media repr literal")
+        if "b" in token_start.lower():
+            # Distinct opaque values also preserve distinct bytes dict keys; no body is decoded.
+            pieces.append(f"b'{match.start()}'")
+        elif end - match.start() > _MEDIA_REPR_ELEMENT_LIMIT:
+            # Retain enough text for any stub's head/tail scans, including redaction context.
+            needed = _PLACEHOLDER_MAX_CHARS * _RAW_PAYLOAD_PREVIEW_SCAN_FACTOR + _RAW_PAYLOAD_PREVIEW_CONTEXT
+            window = needed
+            while True:
+                head_end, tail_start = min(stop, match.end() + window), max(match.end(), stop - window)
+                overlap = head_end >= tail_start
+                if overlap:
+                    head_end = tail_start = (match.end() + stop) // 2
+                for escape in escapes.finditer(content, match.end(), stop):
+                    if overlap and escape.start() < head_end < escape.end():
+                        head_end = tail_start = escape.end()
+                    elif not overlap:
+                        if escape.start() < head_end <= escape.end():
+                            head_end = escape.start()
+                        if escape.start() < tail_start < escape.end():
+                            tail_start = escape.end()
+                head = ast.literal_eval(token_start + content[match.end():head_end] + delimiter)
+                tail = ast.literal_eval(token_start + content[tail_start:stop] + delimiter)
+                if overlap or min(len(head), len(tail)) >= needed:
+                    break
+                window *= 2  # Escapes may encode one text character with many source characters.
+            pieces.append(repr(head + ("" if overlap else " ... ") + tail))
+        else:
+            pieces.append(content[match.start():end])
+        pos = end
+    pieces.append(content[pos:])
+    return "".join(pieces)
+
+
 def _media_payload_preview_content(content: str) -> str:
     """Extract text only; remove opaque media before the bounded preview slices it."""
     import ast
@@ -746,38 +803,48 @@ def _media_payload_preview_content(content: str) -> str:
     }
     media_descriptor_keys = media_keys | (descriptor_keys - {"format", "encoding", "detail"})
     text_types = {"text", "input_text", "output_text"}
+    media_types = {"image", "image_url", "input_image", "audio", "input_audio", "audio_url",
+                   "video", "video_url", "input_video"}
     containers = (dict, list, tuple, set, frozenset)
     generic_repr = False
+    failed_repr = False
 
     try:
         value = json.loads(content)
     except json.JSONDecodeError:
         value = content
-        stripped = content.strip()
+        candidate = content
+        # Empty-container scaffolding only loses its prefix when the remainder is itself a repr.
+        remainder = re.sub(r"^(?:\s*(?:\[\s*\]|\{\s*\})\s*)+", "", content)
+        if re.match(r"\s*[\[\{(]", remainder):
+            candidate = remainder
+        stripped = candidate.strip()
         # A dict repr may start with any key type (0, None, a tuple), but always spans {...}; an empty
         # {} or [] followed by prose cannot be a container repr.
-        repr_like = re.match(r"\s*(?:\[\s*(?:[\{\('\"]|b['\"])|\{\s*(?:['\"]|b['\"]))", content)
+        repr_like = re.match(r"\s*(?:[\[(]\s*(?:[\{\[\('\"]|b['\"])|\{\s*(?:['\"]|b['\"]))", candidate)
         if repr_like or (stripped.startswith("{") and stripped.endswith("}")):
             # Normalization may have used repr for non-JSON media parts. Never preview that repr, and
             # never preview an oversized candidate unparsed: it may be a repr with a non-string first key.
             if len(content) > _MEDIA_REPR_PARSE_LIMIT:
                 return ""
-            if _media_repr_exceeds_element_limit(content):
-                return ""
             parsed, ok = None, False
             try:
-                parsed, ok = ast.literal_eval(content), True
+                reduced = _media_repr_reduced(candidate)
+                if _media_repr_exceeds_element_limit(reduced):
+                    return ""
+                parsed, ok = ast.literal_eval(reduced), True
             except (ValueError, SyntaxError, RecursionError, TypeError, MemoryError):
                 pass
-            if repr_like and not ok:
+            failed_repr = not ok
+            if not ok and re.search(r"(?i:(?<![A-Za-z0-9_])(?:br?|rb)['\"])|\\(?:x[0-9a-fA-F]{2}|[0-7]{3})", candidate):
                 return ""
-            # A brace-spanned string is a repr only when it parses to a dict; otherwise it is prose.
-            if repr_like or isinstance(parsed, dict):
+            # Successfully parsed containers all use the same media-filtered walk.
+            if ok and isinstance(parsed, containers):
                 value = parsed
                 # A parsed repr dict is a generic mapping unless it is a text part: walk it untyped so a
                 # caption beside a non-text "type" field survives, as the unparsed repr text did on main.
                 kind = parsed.get("type") if isinstance(parsed, dict) else None
-                generic_repr = isinstance(parsed, dict) and not (isinstance(kind, str) and kind in text_types)
+                generic_repr = not (isinstance(kind, str) and kind in text_types)
                 # A top-level set or tuple repr holds its text directly, like a list.
                 if isinstance(parsed, (set, frozenset)):
                     value = sorted(parsed, key=repr)
@@ -790,8 +857,12 @@ def _media_payload_preview_content(content: str) -> str:
         for part in value:
             if isinstance(part, str):
                 parts.append(part)
-            elif isinstance(part, dict):
-                if "type" in part and not generic_repr:
+            elif isinstance(part, containers):
+                kind = part.get("type") if isinstance(part, dict) else None
+                if isinstance(part, dict) and "type" in part and (
+                    isinstance(kind, str) and kind in text_types
+                    or not generic_repr and not (isinstance(kind, str) and kind in media_types)
+                ):
                     if isinstance(part.get("type"), str) and part["type"] in text_types:
                         text = _media_payload_text_part(part)
                         if text:
@@ -803,11 +874,13 @@ def _media_payload_preview_content(content: str) -> str:
                         if depth > 32:
                             continue
                         if isinstance(leaf, str):
-                            parts.append(leaf)
+                            if isinstance(part, dict) or not re.fullmatch(r"[A-Za-z0-9+/]{64,}={0,2}", leaf):
+                                parts.append(leaf)
                         elif isinstance(leaf, dict):
                             media_descriptor = any(str(k).lower() in media_descriptor_keys for k in leaf)
                             stack.extend((v, depth + 1) for k, v in reversed(list(leaf.items()))
                                          if (key := str(k).lower()) not in media_keys
+                                         and not (key == "type" and isinstance(v, str) and v in media_types)
                                          and (not media_descriptor or key not in descriptor_keys
                                               or isinstance(v, containers)))
                         elif isinstance(leaf, (list, tuple)):
@@ -826,6 +899,9 @@ def _media_payload_preview_content(content: str) -> str:
     # Bare media-sized runs only: retain shorter identifiers, hashes and filenames.
     text = re.sub(r"[A-Za-z0-9+/_-]{256,}={0,2}", "", text)
     text = _replace_wrapped_base64_blocks(text, lambda _: "").strip()
+    # A failed structure can contain a cut media literal shorter than the normal bare-body bound.
+    if failed_repr and re.search(r"[A-Za-z0-9+/]{64,}={0,2}", text):
+        return ""
     text = re.sub(r"<img\s+src\s*=\s*(['\"])\s*\1\s*/?>|background\s*:\s*url\(\s*\)",
                   "", text, flags=re.IGNORECASE)
     return text if any(ch.isalnum() for ch in text) else ""

@@ -218,8 +218,9 @@ def test_untyped_object_leaf_depth_bound(depth):
 
 @pytest.mark.parametrize("content, expected", [
     ("[b'opaque bytes', 'zebracluster']", "zebracluster"),
-    ("[  {'broken'", ""), ("[('broken'", ""), ("[b'broken", ""),
-    ("['broken", ""), ('["broken', ""),
+    # Failed parses without bytes follow the clarified prose fallback rule.
+    ("[  {'broken'", "[  {'broken'"), ("[('broken'", "[('broken'"), ("[b'broken", ""),
+    ("['broken", "['broken"), ('["broken', '["broken'),
     # An empty list's repr is the whole string; [] followed by text is plain prose.
     ("[] broken", "[] broken"),
     ("[note] zebracluster", "[note] zebracluster"),
