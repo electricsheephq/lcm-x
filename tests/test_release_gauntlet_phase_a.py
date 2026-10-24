@@ -536,7 +536,8 @@ def test_engine_threads_embedding_privacy_setting(tmp_path, privacy_setting, exp
     assert captured["assertions_enabled"] is True
     assert captured["adaptive_retrieval_enabled"] is True
     assert captured["entities_enabled"] is True
-    assert len(phase_a.SCENARIOS) == 16
+    assert len(phase_a.SCENARIOS - {"lcm_doctor (prepared)"}) == 16
+    assert "lcm_doctor (prepared)" in phase_a.SCENARIOS
 
 
 def test_noop_scenario_is_a_runner_failure(tmp_path):
