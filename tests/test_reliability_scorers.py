@@ -1267,3 +1267,132 @@ def test_default_window_trailing_commit_without_request_is_inconclusive(tmp_path
     out = make(tmp_path, rows=clean_rows(), events=events, passes=0, bars=["F4"])
     assert out["verdict"] == "INCONCLUSIVE"
     assert out["numbers"]["F4"] == {"observed": 1, "present": 1, "absent": 0, "unknown": 1}
+
+
+# B4 drained-store proof: a noop needs actual final-call tail observations and DB coverage.
+def drained_final():
+    rows = clean_rows()
+    observed = [{"role": role, "sha256": hashlib.sha256(text.encode()).hexdigest()}
+                for role, text in rows]
+    boundary = {"session": "S0", "boundary": {"start": 4, "count": 2}, "rows": observed}
+    return {"outcome": "inconclusive", "engine_status": "noop", "engine_calls": 1,
+            "noop_reason": "no eligible raw backlog outside fresh tail", "conflicts": 0,
+            "rejection": None, "session": "S0", "tail_observations": [boundary, boundary],
+            "attempts": [], "backlog_checks": [{"turns_since_pass": 0}] * 3}
+
+
+def test_b4_witnessed_drained_store_passes(tmp_path):
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), nodes=[[1, 2, 3, 4]],
+               phase={"final_check": drained_final()}, bars=["B4"])
+    assert out["verdict"] == "PASS"
+    proof = out["numbers"]["B4"]["coverage"]
+    assert proof["covered_ids"] == [1, 2, 3, 4]
+    assert proof["protected_ids"] == [5, 6] and proof["uncovered_ids"] == []
+    assert proof["stored_ids"] == [1, 2, 3, 4, 5, 6]
+
+
+@pytest.mark.parametrize("broken", ["uncovered", "absent", "unobserved", "different", "lineage",
+                                  "wrong_session", "ambiguous", "count", "calls", "reason", "rejection"])
+def test_b4_drained_proof_fails_closed(tmp_path, broken):
+    final, nodes, rows = drained_final(), [[1, 2, 3, 4]], clean_rows()
+    if broken == "uncovered":
+        nodes = [[1, 2, 3]]
+    elif broken == "absent":
+        final.pop("tail_observations")
+    elif broken == "unobserved":
+        final["tail_observations"] = []
+    elif broken == "different":
+        final["tail_observations"][1] = {**final["tail_observations"][1], "session": "other"}
+    elif broken == "lineage":
+        final["session"] = "other"
+    elif broken == "wrong_session":
+        final["session"] = "other"
+        final["tail_observations"] = [{**final["tail_observations"][0], "session": "other"}]
+    elif broken == "ambiguous":
+        rows += [rows[-1]]
+    elif broken == "count":
+        final["tail_observations"] = [{**final["tail_observations"][0], "boundary": {"start": 4, "count": 1}}]
+    elif broken == "calls":
+        final["engine_calls"] = 0
+    elif broken == "reason":
+        final["noop_reason"] = "retained occurrence unproven"
+    elif broken == "rejection":
+        final["rejection"] = "unresolved retained occurrence"
+    out = make(tmp_path, rows=rows, events=clean_events(), nodes=nodes,
+               phase={"final_check": final}, bars=["B4"])
+    assert out["verdict"] == "INCONCLUSIVE"
+
+
+@pytest.mark.parametrize("failure", ["error", "conflict", "exception", "turn"])
+def test_b4_drained_proof_never_overrides_failure(tmp_path, failure):
+    final = drained_final()
+    phase = {"final_check": final}
+    if failure == "turn":
+        phase["counters"] = {"failed": ["T03"]}
+    else:
+        final["outcome"] = "failed"
+        final.update({"engine_status": "error"} if failure == "error" else
+                     {"conflicts": 1} if failure == "conflict" else {"exception": "injected"})
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), nodes=[[1, 2, 3, 4]],
+               phase=phase, bars=["B4"])
+    assert out["verdict"] == "FAIL"
+
+
+def test_b4_persistent_fault_applicability_keeps_diagnostic(tmp_path):
+    cell = cells.select("publication-failure/rotation-child-persistent")[0]
+    assert cell["bars"] == ["B1", "B2"]
+    assert "B4 is an expected-negative publication diagnostic; final_check and numbers.B4 remain recorded, " \
+           "but B4 is not applicable to this persistent-fault cell." in cell["doc"]
+    assert "B4" in cells.select("publication-failure/rotation-child")[0]["bars"]
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(),
+               phase={"final_check": {"outcome": "failed", "engine_status": "error"}}, bars=cell["bars"])
+    assert out["verdict"] == "PASS" and "B4" not in out["applicable_bars"]
+    assert out["numbers"]["B4"]["final_check"]["engine_status"] == "error"
+
+
+def test_b4_observer_records_actual_boundary_without_changing_result():
+    class Engine:
+        _session_id = "S0"
+        def _fresh_tail_boundary(self, messages):
+            return types.SimpleNamespace(start=1, count=len(messages) - 1)
+    engine = Engine()
+    rows = [{"role": "system", "content": "anchor"}, {"role": "user", "content": "tail"}]
+    probe.trace_final_tail(Engine, lambda: True)
+    boundary = engine._fresh_tail_boundary(rows)
+    assert boundary.start == 1 and boundary.count == 1
+    observed = engine._probe_tail_observations[0]
+    assert observed["session"] == "S0" and observed["boundary"] == {"start": 1, "count": 1}
+    assert observed["rows"][1] == {"role": "user", "sha256": hashlib.sha256(b"tail").hexdigest()}
+
+
+@pytest.mark.parametrize("crossing", [True, False])
+def test_b4_summary_lineage_mismatch_is_not_coverage(tmp_path, crossing):
+    make(tmp_path, rows=clean_rows(), events=clean_events(), nodes=[[1, 2, 3, 4]],
+         phase={"final_check": drained_final()}, bars=["B4"])
+    db = tmp_path / "cell/db/lcm.db"
+    with sqlite3.connect(db) as con:
+        if crossing:
+            con.execute("update summary_nodes set session_id='other'")
+        else:
+            con.execute("update messages set session_id='other' where store_id=1")
+    assert bars.score({"bars": ["B4"]}, tmp_path / "cell")["verdict"] == "INCONCLUSIVE"
+
+
+def test_b4_tail_observer_is_passive_and_fails_closed():
+    active = False
+    class Engine:
+        _session_id = "S0"
+        def _fresh_tail_boundary(self, messages):
+            if messages is None:
+                raise RuntimeError("product error")
+            return types.SimpleNamespace(start=0, count=len(messages))
+    engine = Engine()
+    probe.trace_final_tail(Engine, lambda: active)
+    engine._fresh_tail_boundary([])
+    assert not hasattr(engine, "_probe_tail_observations")
+    active = True
+    with pytest.raises(RuntimeError, match="product error"):
+        engine._fresh_tail_boundary(None)
+    del Engine._session_id  # observer failure must not change the real return
+    assert engine._fresh_tail_boundary([]).start == 0
+    assert engine._probe_tail_observations == [{"error": "unobserved"}]

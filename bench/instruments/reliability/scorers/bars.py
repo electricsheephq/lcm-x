@@ -14,6 +14,7 @@ ran (tool dispatch, native attempts, tool groups) is UNSUPPORTED, never PASS.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -191,6 +192,45 @@ def source_ids(src) -> list:
     return ids if isinstance(ids, list) else []
 
 
+def drained_coverage(final, stored, nodes, group):
+    """Join a witnessed final tail to committed source IDs, failing closed on ambiguity."""
+    proof = {"stored_ids": [], "covered_ids": [], "protected_ids": [], "uncovered_ids": [], "valid": False}
+    observations = (final or {}).get("tail_observations") or []
+    if not observations or any(o != observations[0] for o in observations):
+        return proof
+    try:
+        observed = observations[0]
+        boundary, rows, sid = observed["boundary"], observed["rows"], observed["session"]
+        start = boundary["start"]
+        if (not sid or sid != final["session"] or group(sid) != "chat" or final.get("engine_calls") != 1
+                or type(start) is not int or not 0 <= start <= len(rows)
+                or type(boundary["count"]) is not int or boundary["count"] != len(rows) - start):
+            return proof
+        raw = {i: (s, r, c) for i, s, r, c in stored if group(s) == "chat"}
+        covered, protected = set(), set()
+        for _nid, session, src in nodes:
+            ids = source_ids(src)
+            if group(session) != "chat":
+                if any(type(i) is int and i in raw for i in ids):
+                    return proof
+                continue
+            if not ids or any(type(i) is not int or i not in raw for i in ids):
+                return proof
+            covered.update(ids)
+        for row in rows[start:]:
+            matches = [i for i, (_s, role, content) in raw.items() if role == row["role"]
+                       and hashlib.sha256((content or "").encode()).hexdigest() == row["sha256"]]
+            if len(matches) > 1:
+                return proof
+            protected.update(matches)
+        proof.update(stored_ids=sorted(raw), covered_ids=sorted(covered), protected_ids=sorted(protected),
+                     uncovered_ids=sorted(set(raw) - covered - protected), boundary=boundary,
+                     session=sid, valid=bool(raw))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        pass  # absent/malformed observer evidence never licenses a noop
+    return proof
+
+
 def tag_counts(texts, pattern):
     counts = Counter()
     for text in texts:
@@ -317,11 +357,18 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     failed_turns = [t for p in phases for t in p.get("counters", {}).get("failed", [])]
     final = next((p["final_check"] for p in reversed(phases) if "final_check" in p), None)
     numbers["B4"] = {"failed_turns": failed_turns, "final_check": final}
+    coverage = numbers["B4"]["coverage"] = drained_coverage(final, stored, nodes, group)
+    drained = (coverage["valid"] and not coverage["uncovered_ids"]
+               and (final or {}).get("engine_status") == "noop" and not final.get("conflicts")
+               and not final.get("exception") and not final.get("rejection")
+               and final.get("noop_reason") == "no eligible raw backlog outside fresh tail"
+               and not any(a.get("conflicts") or a.get("exception") or a.get("engine_status") == "error"
+                           for a in final.get("attempts", [])))
     inconclusive = {}
     outcome = (final or {}).get("outcome", "published" if (final or {}).get("published") else "failed")
     if failed_turns or (cell.get("final_compaction_check", True) and outcome == "failed"):
         failed["B4"] = numbers["B4"]
-    elif cell.get("final_compaction_check", True) and outcome == "inconclusive":
+    elif cell.get("final_compaction_check", True) and outcome == "inconclusive" and not drained:
         inconclusive["B4"] = f"forced compaction ended {final.get('engine_status')!r} ({final.get('noop_reason')!r}) " \
                              f"after {len(final.get('attempts', []))} attempt(s) of {final.get('entry')}; backlog checks " \
                              f"{[c.get('turns_since_pass') for c in final.get('backlog_checks') or []]}"
