@@ -110,9 +110,8 @@ jobs:
       LCM_1186_QUALIFY: "1"
       LCM_1186_HOST: ${{ matrix.host }}
       LCM_1186_ROUTE: ${{ matrix.route }}
-      # Default fail-closed: exact host-locked tool downloads need recorded
-      # authority. A pre-provisioned verified PM store also satisfies preflight.
-      LCM_1186_ALLOW_LOCKED_TOOLS: "0"
+      # S1-C.3: only the two SHA-256-locked Linux tools in isolated CI.
+      LCM_1186_ALLOW_LOCKED_TOOLS: "1"
       LCM_1186_ARTIFACTS: ${{ github.workspace }}/1186-qualification
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

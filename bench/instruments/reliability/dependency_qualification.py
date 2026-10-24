@@ -76,6 +76,7 @@ class Qualification:
             "LCM_EMBEDDINGS_ENABLED": "true", "LCM_EMBEDDING_PROVIDER": "fastembed",
             "LCM_EMBEDDING_MODEL": "BAAI/bge-small-en-v1.5", "LCM_RERANK_ENABLED": "false",
             "NO_COLOR": "1", "TERM": "dumb", "COLUMNS": "240",
+            "LCM_1186_HOSTED": "1" if os.environ.get("GITHUB_ACTIONS") == "true" else "0",
         }
 
     def guard(self) -> None:
@@ -189,6 +190,9 @@ class Qualification:
         version = self.run(home, [str(self.python), "-c", "import sys; print('.'.join(map(str,sys.version_info[:2])))"]).strip()
         assert version == spec["python_version"], (version, spec["python_version"])
         if self.pm:
+            if self.allow_locked_tools:
+                assert os.environ.get("GITHUB_ACTIONS") == "true", "locked archives: isolated hosted CI only"
+                self.record("locked-tools", **self.probe(home, "locked-tools"))
             ready = self.probe(home, "preflight")["locked_tools_ready"]
             assert ready or self.allow_locked_tools, (
                 "ENVIRONMENT_BLOCKED: PM requires lock-verified uv/Python archives; "
@@ -207,8 +211,26 @@ class Qualification:
         else:
             # This public host source type permits a deterministic local Git
             # upstream for the subsequent real unattended-update transaction.
-            self.cli(home, "plugins", "install", self.fixture.as_uri(), tty=True)
+            # S1-C.3 allows scanner-off for this core native install only.
+            # Restore before EVERY companion install, including decline cells.
+            (home / "config.yaml").write_text("plugins:\n  scan_on_install: false\n")
+            try:
+                self.cli(home, "plugins", "install", self.fixture.as_uri(), tty=True)
+            finally:
+                self.run(home, [str(self.python), "-c",
+                                "from hermes_cli.config import load_config, save_config; "
+                                "c=load_config(); c.setdefault('plugins', {})['scan_on_install']=True; save_config(c)"])
+            scanned = self.run(home, [str(self.python), str(PROBE), "scan",
+                                     str(self.fixture / "companions" / COMPANION)])
+            scan = json.loads(scanned.strip().splitlines()[-1])
+            assert scan["scanner_enabled"] and scan["verdict"] == "safe", scan
+            self.record("companion-scan", route=route, **scan)
             text = self.cli(home, "plugins", "install", SOURCE, "--ref", self.head, tty=tty, decline=decline)
+        scanned = self.run(home, [str(self.python), str(PROBE), "scan",
+                                 str(home / "plugins" / COMPANION)])
+        scan = json.loads(scanned.strip().splitlines()[-1])
+        assert scan["scanner_enabled"] and scan["verdict"] == "safe", scan
+        self.record("companion-scan", route=route, **scan)
         assert (home / "plugins" / COMPANION / "plugin.yaml").is_file()
         assert not (home / "plugins" / COMPANION).is_symlink()
         return text
@@ -341,6 +363,9 @@ class Qualification:
         home = self.scratch / "native"
         self.preflight(home)
         self.fixture_source(home)
+        scanned = self.run(home, [str(self.python), str(PROBE), "scan", str(self.fixture)])
+        scan = json.loads(scanned.strip().splitlines()[-1])
+        (self.out / "core-scanner-flags.json").write_text(json.dumps(scan, indent=2) + "\n")
         # Prove missing-provider behavior before any home consents to the
         # carrier; shared host selections must not pre-populate fastembed.
         self.decline_routes()

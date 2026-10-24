@@ -28,6 +28,36 @@ def state() -> dict:
 
 def main() -> None:
     mode = sys.argv[1]
+    if mode == "scan":
+        from hermes_cli.plugins_cmd import _scan_on_install_enabled
+        from tools.plugin_guard import scan_plugin
+        result = scan_plugin(Path(sys.argv[2]), source="qualification")
+        print(json.dumps({"scanner_enabled": _scan_on_install_enabled(),
+                          "verdict": result.verdict,
+                          "findings": [{"file": f.file, "rule": f.pattern_id}
+                                       for f in result.findings]}))
+        return
+    if mode == "locked-tools":
+        import hashlib
+        import os
+        from pm.install import ensure
+        from pm.paths import store_root
+        assert os.environ.get("LCM_1186_HOSTED") == "1", "hosted CI only"
+        expected = {"python": "0ab3305457051cd3e7c031857e005f1bda17c218a1990567dacaaac6dd1d14f0",
+                    "uv": "600cf9a742aca00d292673b16b5acffaa7b8c269a364ad0c2e79498dcb1fe101"}
+        lock = json.loads((Path(__import__("pm").__file__).parent / "lock.json").read_text())
+        for name, digest in expected.items():
+            assert lock["packages"][name]["artifacts"]["linux-x64"]["sha256"] == digest
+        for name in expected:
+            ensure(name, explicit=True)
+        verified = []
+        for name, digest in expected.items():
+            archives = list((store_root() / f"fetch-{digest}").iterdir())
+            assert len(archives) == 1
+            assert hashlib.sha256(archives[0].read_bytes()).hexdigest() == digest
+            verified.append({"tool": name, "sha256": digest, "verified": True})
+        print(json.dumps({"archives": verified}))
+        return
     if mode == "preflight":
         from pm._uv import _toolchain
         from pm.runtime import _resident_runtime
