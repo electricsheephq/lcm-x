@@ -2,12 +2,24 @@
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` + `results.d/*.json` (combined sha256: `52cad333b794a3f1fa2c2864aedfae91119d6e9f14e6975ce5f48a99052f1933`, rows: 63)
+Generated from `results.jsonl` + `results.d/*.json` (combined sha256: `64cac77fde034e41353e87b3e0155b69e70bc941335828c44a9ff24429f8a898`, rows: 82)
 
 ## Summary
 
 | Benchmark | Metric | Result | Tier | Date | Details |
 |---|---|---|---|---|---|
+| #1451 PR-A occurrence snapshot synthetic acceptance | new_loss_checkpoints | 0 new loss checkpoints across1296 cells; error cells172->0 | P | 2026-10-23 | [details](#occurrence-1451-pra-2026-10-23) |
+| #1451 PR-A r1 snapshot and positional proof acceptance | new_or_increased_loss_cells | 0/1296 new loss; error cells0; changed vs r0=0 | P | 2026-10-23 | [details](#occurrence-1451-pra-r1-2026-10-23) |
+| #1451 PR-A r2 publication-fault occurrence acceptance | new_or_increased_loss_cells | 0/1296 new loss; errors0; changed vsr1=0; calibrated fault regression fixed | P | 2026-10-23 | [details](#occurrence-1451-pra-r2-2026-10-23) |
+| ~~#1880 part A Amendment 1 synthetic preflight (10000 stored rows)~~ | ~~candidate_median_ms~~ | ~~0.1621250 -> 0.1664170 ms; PASS max(+10%, +0.05ms)~~ | ~~P~~ | ~~2026-10-23~~ | ~~[details](#issue-1880-preflight-cost-r2-10000-2026-10-23)~~ → [successor](#issue-1880-preflight-cost-r2-final-10000-2026-10-23) |
+| ~~#1880 part A Amendment 1 synthetic preflight (100000 stored rows)~~ | ~~candidate_median_ms~~ | ~~0.1662505 -> 0.1691875 ms; PASS max(+10%, +0.05ms)~~ | ~~P~~ | ~~2026-10-23~~ | ~~[details](#issue-1880-preflight-cost-r2-100000-2026-10-23)~~ → [successor](#issue-1880-preflight-cost-r2-final-100000-2026-10-23) |
+| #1880 part A final synthetic preflight (10000 stored rows) | candidate_median_ms | 0.1789795 -> 0.1924790 ms; PASS max(+10%, +0.05ms) | P | 2026-10-23 | [details](#issue-1880-preflight-cost-r2-final-10000-2026-10-23) |
+| #1880 part A final synthetic preflight (100000 stored rows) | candidate_median_ms | 0.1626040 -> 0.1726250 ms; PASS max(+10%, +0.05ms) | P | 2026-10-23 | [details](#issue-1880-preflight-cost-r2-final-100000-2026-10-23) |
+| #1880 persisted hold hosted synthetic admission | unheld_cells_within_cost_bar | 2/4 paired UNHELD cells PASS; both mismatch cells FAIL cost bar | P | 2026-10-23 | [details](#lcmx-1880-hold-cost-h2-linux-20261023) |
+| #1880 persisted hold hosted synthetic admission | unheld_cells_within_cost_bar | 4/4 paired UNHELD cells PASS; held paths zero model calls/scans/writes | P | 2026-10-23 | [details](#lcmx-1880-hold-cost-h3-hosted-20261023) |
+| #1880 persisted hold synthetic admission | unheld_cells_within_cost_bar | 4/4 steady unheld cells within the paired median cost bar | P | 2026-10-23 | [details](#1880-persisted-hold-cost-20261023) |
+| #1880 persisted hold synthetic admission | unheld_cells_within_cost_bar | 4/4 steady unheld cells within the paired median cost bar | P | 2026-10-23 | [details](#1880-persisted-hold-cost-integration-delta-20261023) |
+| #1880 persisted hold synthetic admission | unheld_cells_within_cost_bar | 4/4 steady unheld cells within the paired median cost bar | P | 2026-10-23 | [details](#1880-persisted-hold-cost-review-delta-20261023) |
 | AMA-Bench (open-ended, 208 episodes) | strict judged accuracy, fail-closed denominator | 1180/2496 = 47.3% (scored-only 1180/2460 = 48.0%) | F | 2026-08-02 | [details](#ama208-full-2026-08-02) |
 | BEAM-10M (200q) | nugget_score | 0.6332 ± 0.4002 (200 questions) | F | 2026-10-22 | [details](#beam-10m-v0280-20261022) |
 | Coverage marker round 3 (#1624 items 1-2, #1853) | cloud_status_after_one_pass_p50_ms | 12.578187 -> 0.585375 ms after one cloud maintenance pass | P | 2026-10-22 | [details](#coverage-marker-round3-2026-10-22) |
@@ -18,10 +30,14 @@ Generated from `results.jsonl` + `results.d/*.json` (combined sha256: `52cad333b
 | D5-B (c2, live integration) | slowest_compaction_s | 55.2 s | P | 2026-10-16 | [details](#d5b-c2-slowest-v0270-2026-10-16) |
 | D5-C (reference-agent real-use window) | max_lcm_owned_s | 116.3 | P | 2026-10-16 | [details](#d5c-max-v0270-2026-10-16) |
 | D5-C (reference-agent real-use window) | real_use_hours | 11.9 | P | 2026-10-16 | [details](#d5c-window-v0270-2026-10-16) |
+| E1b S0 sender capture: paired 200-message ingest | candidate_median_ms | 7.2074585 ms BASE to 7.236625 ms candidate (+0.405%); hook plus UPDATE 0.203125 ms | P | 2026-10-23 | [details](#e1b-s0-sender-capture-resume2-2026-10-23) |
 | Internal scale instrument (389×, 19,829 sessions / 199,641 messages) | p50_ms | 263.6 ms @ 19,829 sessions (24× vs pre-fix; 125 ms @ 8k) | P | 2026-07-30 | [details](#scale-curve-fastscan-2026-07-30) |
 | ~~Issue #1828 synthetic delivery acceptance (not a board score)~~ | ~~head_subset_cells~~ | ~~0 strict-subset regressions / 1502 cap cells~~ | ~~F~~ | ~~2026-10-23~~ | ~~[details](#issue-1828-refit-20261023)~~ → [successor](#issue-1828-refit-20261023-r2) |
 | Issue #1828 synthetic delivery acceptance (not a board score) | head_subset_cells | 0 strict-subset regressions / 1502 cap cells | F | 2026-10-23 | [details](#issue-1828-refit-20261023-r2) |
+| ~~Issue #1879 synthetic pinned-host reliability instrument acceptance~~ | ~~B2_deficit_rows~~ | ~~0 B2 deficits / 528 expected items; runtime B1 and surplus remain FAIL~~ | ~~F~~ | ~~2026-10-23~~ | ~~[details](#issue-1879-reliability-20261023)~~ → [successor](#issue-1879-reliability-20261023-delta1) |
+| Issue #1879 synthetic pinned-host reliability instrument acceptance | B2_deficit_rows | 0 B2 deficits / 528 expected items; runtime B1 and surplus remain FAIL | F | 2026-10-23 | [details](#issue-1879-reliability-20261023-delta1) |
 | LOCAL catch-up gap discovery (#1748; synthetic 250k store) | sqlite_vm_work_amplification_240k_vs_empty | 1.744911x VM work; 2x eligible-row visits; live max 1.000263x steady | P | 2026-10-21 | [details](#issue1748-gapwalk-2026-10-21) |
+| LOCAL catch-up idle duty (2-vCPU floor surrogate) | max_mean_cpu_cores | 0.551 cores (max mean across four 0.82 cells) | F | 2026-10-23 | [details](#local-idle-duty-floor-probe-2026-10-23) |
 | LoCoMo (1,986q, QA, OFF) | correct_count | 1,014/1,986 vs 987/1,986 | P | 2026-10-16 | [details](#locomo-qa-off-v0270-2026-10-16) |
 | LoCoMo (locomo10, 1,986q) | accuracy | 54.9% (1,091/1,986); OFF on the same release 49.7% | P | 2026-10-08 | [details](#locomo10-1986-qa-local-v0261-2026-10-08) |
 | LoCoMo (locomo10, 1,986q) | accuracy | 49.7% (987/1,986) | P | 2026-10-07 | [details](#locomo10-1986-qa-off-v0261-2026-10-07) |
@@ -50,12 +66,15 @@ Generated from `results.jsonl` + `results.d/*.json` (combined sha256: `52cad333b
 | LongMemEval-V2 (451q, agentic) | accuracy | 298/451 (66.1%) | P | 2026-07-27 | [details](#longmemeval-v2-451-agentic-2026-07-27) |
 | LongMemEval-V2 (451q, static) | accuracy | 123/451 (27.3%) — official static protocol, fixed weak reader | P | 2026-07-31 | [details](#longmemeval-v2-451-static-2026-07-31) |
 | LongMemEval-V2 static (451q) | judged accuracy, full set | 143/451 = 31.7% (web 97/240 = 40.4%, enterprise 46/211 = 21.8%) | F | 2026-08-03 | [details](#v2-static-451-sota-luna-2026-08-03) |
+| Occurrence retry three-way revert proof | cells_worse_than_main_on_loss | 0/1296 cells worse than main on loss; 25 named cells equal GA at every checkpoint | P | 2026-10-23 | [details](#revert-1637-occurrence-2026-10-23) |
 | PR #1860 fix-round acceptance | steady_status_p50_ms | 0.2709 -> 0.2622 ms certified-steady status | P | 2026-10-23 | [details](#coverage-marker-fix-r1c-2026-10-23) |
 | PR #1860 r2 initial read-only backlog acceptance | harmful_probe_differences | 0 harmful differences in 304 field comparisons; d3 initial backlog 1 (gap-fill) | P | 2026-10-23 | [details](#coverage-marker-fix-r2-2026-10-23) |
 | Phase C (four live host cells) | slowest_compaction_s | 93.0 s; bar <=145 s | P | 2026-10-16 | [details](#phase-c-max-v0270-2026-10-16) |
 | Recall row handoff (sessions) | busy_median_s | 3.297513 -> 0.112816 s | P | 2026-10-21 | [details](#row-handoff-v1-1749-sessions) |
 | Recall row handoff (vector.chunk) | busy_median_s | 8.160382 -> 0.335681 s | P | 2026-10-21 | [details](#row-handoff-v1-1749-vector.chunk) |
 | Recall row handoff (vector.summary) | busy_median_s | 1.656694 -> 0.117894 s | P | 2026-10-21 | [details](#row-handoff-v1-1749-vector.summary) |
+| Session-end attribution ordinary-turn overhead | maximum_paired_median_delta_ms | 4/4 scoped cells pass; INFO preflight +0.004043ms, ingest +0.003702ms | P | 2026-10-23 | [details](#session-end-attribution-cost-2026-10-23) |
+| Synthetic LOCAL exact chunk recall (#1586) | recall_250k_p50_s | 250k p50/p90 1.535/1.914s; selected-25k VM steps constant1,025,602 | P | 2026-10-23 | [details](#issue1586-chunk-load-20261023) |
 | Track S v3 (GLM summary route) | admission_proven_losses | 0; D3 PASS; 60/60 admitted at all 24 checkpoints | P | 2026-10-16 | [details](#track-s-admission-losses-v0270-2026-10-16) |
 | Track S v3 (GLM summary route) | compactions_per_100_messages | 12.3; bar <= 25 | P | 2026-10-16 | [details](#track-s-compactions-v0270-2026-10-16) |
 | Track S v3 (GLM summary route) | facts_kept_cp176 | 0.942 vs 0.933 (reported only) | P | 2026-10-16 | [details](#track-s-facts-cp176-v0270-2026-10-16) |
@@ -73,6 +92,190 @@ Generated from `results.jsonl` + `results.d/*.json` (combined sha256: `52cad333b
 | Track S v3 (slow summary route, #1128) | compaction_wall_p90_s | 45.8 s | P | 2026-10-16 | [details](#slow-route-wall-p90-v0270-2026-10-16) |
 
 ## Row disclosures
+
+### <a id="1880-persisted-hold-cost-20261023"></a>1880-persisted-hold-cost-20261023
+
+**id:**
+1880-persisted-hold-cost-20261023
+
+**benchmark:**
+#1880 persisted hold synthetic admission
+
+**metric:**
+unheld_cells_within_cost_bar
+
+**value:**
+4
+
+**display:**
+4/4 steady unheld cells within the paired median cost bar
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+cd68a230e5d78cf7a8ad372e338cfd89acb528c6
+
+**harness_commit:**
+0b907f5c6b8f36dc1fcbd81e7a45febb73611b41
+
+**judge:**
+n/a; deterministic timing and query-plan probes
+
+**reader:**
+n/a; synthetic SQLite stores
+
+**retrieval_config:**
+10k/100k rows, absent and static valid nonmatching record, paired interleaved 200 admissions/arm after20 warmups; held warm n200 and reconstructed admission n20, construction/ingest excluded
+
+**dataset_exposure:**
+Synthetic only; no real-profile access or model traffic
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/0b907f5c6b8f36dc1fcbd81e7a45febb73611b41/docs/process/evidence/1880-persisted-hold/cost/RESULT.md
+
+**variance:**
+One run; raw paired timings retained; p50/p95 reported, no cross-run statistical claim
+
+**failclose:**
+All4 steady unheld cells satisfy max(base*1.10,base+0.05ms); held gates zero model calls/full-history scans/metadata writes; bounded indexed SQL plans
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/0b907f5c6b8f36dc1fcbd81e7a45febb73611b41/docs/process/evidence/1880-persisted-hold/cost/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/0b907f5c6b8f36dc1fcbd81e7a45febb73611b41/docs/process/evidence/1880-persisted-hold/cost/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/0b907f5c6b8f36dc1fcbd81e7a45febb73611b41/docs/process/evidence/1880-persisted-hold/cost/samples.jsonl
+- https://github.com/electricsheephq/lcm-x/blob/0b907f5c6b8f36dc1fcbd81e7a45febb73611b41/docs/process/evidence/1880-persisted-hold/cost/summary.json
+
+**caveats:**
+- T2 not published; no results disposed.
+- Separate preserved trials rewrote metadata per sample and measured additional writer churn; first trial used invalid timestamp fixture. Final specified steady-workload protocol is disclosed in the card.
+- Admission only; no engine construction, ingest, live latency, retained-occurrence repair, merge, release, runtime or customer claim.
+
+### <a id="1880-persisted-hold-cost-integration-delta-20261023"></a>1880-persisted-hold-cost-integration-delta-20261023
+
+**id:**
+1880-persisted-hold-cost-integration-delta-20261023
+
+**benchmark:**
+#1880 persisted hold synthetic admission
+
+**metric:**
+unheld_cells_within_cost_bar
+
+**value:**
+4
+
+**display:**
+4/4 steady unheld cells within the paired median cost bar
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+8fc7b6a5eb7fc2e9415e07636c6266b50f0758af
+
+**harness_commit:**
+df5359fdd25d621c091bec2e463c452ec36b3307
+
+**judge:**
+n/a; deterministic timing and query-plan probes
+
+**reader:**
+n/a; synthetic SQLite stores
+
+**retrieval_config:**
+10k/100k rows, absent and static valid nonmatching record, paired interleaved 200 admissions/arm after20 warmups; held warm n200 and reconstructed admission n20, construction/ingest excluded
+
+**dataset_exposure:**
+Synthetic only; no real-profile access or model traffic
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/df5359fdd25d621c091bec2e463c452ec36b3307/docs/process/evidence/1880-persisted-hold/cost-integration-delta/RESULT.md
+
+**variance:**
+One run; raw paired timings retained; p50/p95 reported, no cross-run statistical claim
+
+**failclose:**
+All4 steady unheld cells satisfy max(base*1.10,base+0.05ms); held gates zero model calls/full-history scans/metadata writes; bounded indexed SQL plans
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/df5359fdd25d621c091bec2e463c452ec36b3307/docs/process/evidence/1880-persisted-hold/cost-integration-delta/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/df5359fdd25d621c091bec2e463c452ec36b3307/docs/process/evidence/1880-persisted-hold/cost-integration-delta/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/df5359fdd25d621c091bec2e463c452ec36b3307/docs/process/evidence/1880-persisted-hold/cost-integration-delta/samples.jsonl
+- https://github.com/electricsheephq/lcm-x/blob/df5359fdd25d621c091bec2e463c452ec36b3307/docs/process/evidence/1880-persisted-hold/cost-integration-delta/summary.json
+
+**caveats:**
+- Recheck after consolidated local-versus-durable pacing, exact-pressure/settings and current-ingest public-cache correction; earlier runs retained separately.
+- Completed-proof setup explicitly passes persist=True outside measured admission; otherwise same steady protocol.
+- T2 not published; no results disposed.
+- Admission only; no construction/ingest, live latency, retained-occurrence repair, merge, release, runtime or customer claim.
+
+### <a id="1880-persisted-hold-cost-review-delta-20261023"></a>1880-persisted-hold-cost-review-delta-20261023
+
+**id:**
+1880-persisted-hold-cost-review-delta-20261023
+
+**benchmark:**
+#1880 persisted hold synthetic admission
+
+**metric:**
+unheld_cells_within_cost_bar
+
+**value:**
+4
+
+**display:**
+4/4 steady unheld cells within the paired median cost bar
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+970e47f9b5ee33cd6cca2c71a27d777683eb412e
+
+**harness_commit:**
+657b6a784f3da023efba1b1499cda44ace761462
+
+**judge:**
+n/a; deterministic timing and query-plan probes
+
+**reader:**
+n/a; synthetic SQLite stores
+
+**retrieval_config:**
+10k/100k rows, absent and static valid nonmatching record, paired interleaved 200 admissions/arm after20 warmups; held warm n200 and reconstructed admission n20, construction/ingest excluded
+
+**dataset_exposure:**
+Synthetic only; no real-profile access or model traffic
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/657b6a784f3da023efba1b1499cda44ace761462/docs/process/evidence/1880-persisted-hold/cost-review-delta/RESULT.md
+
+**variance:**
+One run; raw paired timings retained; p50/p95 reported, no cross-run statistical claim
+
+**failclose:**
+All4 steady unheld cells satisfy max(base*1.10,base+0.05ms); held gates zero model calls/full-history scans/metadata writes; bounded indexed SQL plans
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/657b6a784f3da023efba1b1499cda44ace761462/docs/process/evidence/1880-persisted-hold/cost-review-delta/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/657b6a784f3da023efba1b1499cda44ace761462/docs/process/evidence/1880-persisted-hold/cost-review-delta/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/657b6a784f3da023efba1b1499cda44ace761462/docs/process/evidence/1880-persisted-hold/cost-review-delta/samples.jsonl
+- https://github.com/electricsheephq/lcm-x/blob/657b6a784f3da023efba1b1499cda44ace761462/docs/process/evidence/1880-persisted-hold/cost-review-delta/summary.json
+
+**caveats:**
+- Recheck after completed-proof/settings/route review correction; prior steady row retained separately.
+- T2 not published; no results disposed.
+- Admission only; no engine construction, ingest, live latency, retained-occurrence repair, merge, release, runtime or customer claim.
 
 ### <a id="ama208-full-2026-08-02"></a>ama208-full-2026-08-02
 
@@ -791,6 +994,70 @@ one real-use window; volume about two compactions/day, so volume latency bars ju
 - Backfill date is the release publication date; the scorecard does not state the run completion day.
 - Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
 
+### <a id="e1b-s0-sender-capture-resume2-2026-10-23"></a>e1b-s0-sender-capture-resume2-2026-10-23
+
+**id:**
+e1b-s0-sender-capture-resume2-2026-10-23
+
+**benchmark:**
+E1b S0 sender capture: paired 200-message ingest
+
+**metric:**
+candidate_median_ms
+
+**value:**
+7.236625
+
+**display:**
+7.2074585 ms BASE to 7.236625 ms candidate (+0.405%); hook plus UPDATE 0.203125 ms
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+1e506eb7f1454e4ded7b65f9712e59214e003e09
+
+**harness_commit:**
+a8e6481e115bb544a3f8e0d7401f8d5a78315a75
+
+**judge:**
+n/a (deterministic fixture timing and re-score; no model judge)
+
+**reader:**
+n/a (synthetic SQLite sessions)
+
+**retrieval_config:**
+200 serial interleaved pairs of fresh 200-message sessions; fallback token counter; embeddings and temporal rollups off in both arms. Baseline5df5a3c2736c01b46acf26906a510e41e367e73e.
+
+**dataset_exposure:**
+Synthetic fixtures only; no customer data or provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/a8e6481e115bb544a3f8e0d7401f8d5a78315a75/cost--RESULT.md
+
+**variance:**
+IQR BASE0.52371875ms/candidate0.54056225ms; hook0.0359685ms. Paired-delta median+0.078103ms. No confidence interval claimed.
+
+**failclose:**
+PASS: difference of arm medians+0.0291665ms within max(+10%,+0.05ms)=+0.72074585ms;600 timing rows retained and re-score passes.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/a8e6481e115bb544a3f8e0d7401f8d5a78315a75/cost--RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/a8e6481e115bb544a3f8e0d7401f8d5a78315a75/cost--summary.json
+- https://github.com/electricsheephq/lcm-x/blob/a8e6481e115bb544a3f8e0d7401f8d5a78315a75/acceptance--RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/a8e6481e115bb544a3f8e0d7401f8d5a78315a75/EVIDENCE-MAP.json
+
+**caveats:**
+- Measured dirty working aggregate554c626a2a7ce760577118343a5fe71ca4999241b84ee6d25080e8eaccb7daf3; all33 file hashes later verified exact in product commit1e506eb7f1454e4ded7b65f9712e59214e003e09. This registry-only commit does not change measured code.
+- Full local suite19940 passed,141 skipped,66 xfailed,38 deselected,zero failures/errors; exact62-test RED/GREEN/RED and8-file restoration recorded in acceptance card.
+- Unit/integration/compat and local fixture costs only; does not prove live-host sender correctness, native inbound verification, admitted-turn semantics, release or runtime readiness.
+- No private T2 publication or result disposal; all original local evidence retained.
+
+[registry row](results.d/e1b-s0-sender-capture-resume2-2026-10-23.json)
+
 ### <a id="issue-1828-refit-20261023"></a>issue-1828-refit-20261023
 
 **id:**
@@ -911,6 +1178,425 @@ deterministic cap scan; separate 300-run interleaved timing arms in the linked r
 - Delivery correctness only; no board-score, quality, runtime or customer claim
 - T2 not published; original results retained
 
+### <a id="issue-1879-reliability-20261023"></a>issue-1879-reliability-20261023
+
+**id:**
+issue-1879-reliability-20261023
+
+**benchmark:**
+Issue #1879 synthetic pinned-host reliability instrument acceptance
+
+**metric:**
+B2_deficit_rows
+
+**value:**
+0
+
+**display:**
+0 B2 deficits / 528 expected items; runtime B1 and surplus remain FAIL
+
+**tier:**
+F
+
+**date:**
+2026-10-23
+
+**system_commit:**
+4ec4d25d8ef08fcd681d0641ba3ffab3b6cbc26d; r2 baseline 03e53281065bb560a170a6cb642b8aef8ada5586
+
+**harness_commit:**
+4ec4d25d8ef08fcd681d0641ba3ffab3b6cbc26d
+
+**judge:**
+none; deterministic witness, hash, lineage and occurrence rules
+
+**reader:**
+none; scripted provider on pinned runtime and reference hosts
+
+**retrieval_config:**
+Three publication-failure/rotation-child-persistent cells plus reference-host continuity/survival-fit in-place and rotation; serial jobs=1, phase timeout=180, retained DBs; reference cells acp-process turn-timeout=60; unchanged declared targets.
+
+**dataset_exposure:**
+Synthetic scripted conversations; no customer data or real provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/9e3cc254d94503e0368da72f60ee8bed51356d1d/bench/instruments/reliability/results/issue-1879/summary.json
+
+**variance:**
+One fresh run per cell; both r2 and candidate scorers agree on each preserved new snapshot. Synthetic generated-carrier digests can differ across runs. No quality or performance claim.
+
+**failclose:**
+Missing witness, deleted/altered bytes, foreign lineage, forged views, future witnesses and span reuse remain negative. No movement toward PRODUCT_LOSS or UNRESOLVED.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/9e3cc254d94503e0368da72f60ee8bed51356d1d/bench/instruments/reliability/results/issue-1879/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/9e3cc254d94503e0368da72f60ee8bed51356d1d/bench/instruments/reliability/results/issue-1879/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/9e3cc254d94503e0368da72f60ee8bed51356d1d/bench/instruments/reliability/results/issue-1879/summary.json
+
+**caveats:**
+- Each runtime cell retains 18 B1 mismatches and 28 B2 surplus rows; reference cells PASS. Classification counts 0/55/0/0 cover previously diagnosed instrument discrepancies, not every residual surplus.
+- Instrument correctness only; no live-host, historical-product-preservation, runtime, customer or release claim.
+- T2 raw publication outside this ready-PR lane; full raw snapshots retained and no results disposed.
+
+**superseded_by:**
+issue-1879-reliability-20261023-delta1
+
+### <a id="issue-1879-reliability-20261023-delta1"></a>issue-1879-reliability-20261023-delta1
+
+**id:**
+issue-1879-reliability-20261023-delta1
+
+**benchmark:**
+Issue #1879 synthetic pinned-host reliability instrument acceptance
+
+**metric:**
+B2_deficit_rows
+
+**value:**
+0
+
+**display:**
+0 B2 deficits / 528 expected items; runtime B1 and surplus remain FAIL
+
+**tier:**
+F
+
+**date:**
+2026-10-23
+
+**system_commit:**
+4b6de87a66a16960c8739c6521741b0e8ed76f15; r2 baseline 03e53281065bb560a170a6cb642b8aef8ada5586
+
+**harness_commit:**
+4b6de87a66a16960c8739c6521741b0e8ed76f15
+
+**judge:**
+none; deterministic witness, hash, lineage and occurrence rules
+
+**reader:**
+none; scripted provider on pinned runtime and reference hosts
+
+**retrieval_config:**
+Three publication-failure/rotation-child-persistent cells plus reference-host continuity/survival-fit in-place and rotation; serial jobs=1, phase timeout=180, retained DBs; reference cells acp-process turn-timeout=60; unchanged declared targets.
+
+**dataset_exposure:**
+Synthetic scripted conversations; no customer data or real provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/d42408748b2c045b40534b004396565c07813924/bench/instruments/reliability/results/issue-1879/summary.json
+
+**variance:**
+One fresh run per cell; both r2 and candidate scorers agree on each preserved new snapshot. Synthetic generated-carrier digests can differ across runs. No quality or performance claim.
+
+**failclose:**
+Missing witness, deleted/altered bytes, foreign lineage, forged views, future witnesses and span reuse remain negative. No movement toward PRODUCT_LOSS or UNRESOLVED.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/d42408748b2c045b40534b004396565c07813924/bench/instruments/reliability/results/issue-1879/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/d42408748b2c045b40534b004396565c07813924/bench/instruments/reliability/results/issue-1879/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/d42408748b2c045b40534b004396565c07813924/bench/instruments/reliability/results/issue-1879/summary.json
+
+**caveats:**
+- Each runtime cell retains 18 B1 mismatches and 28 B2 surplus rows; reference cells PASS. Classification counts 0/55/0/0 cover previously diagnosed instrument discrepancies, not every residual surplus.
+- Instrument correctness only; no live-host, historical-product-preservation, runtime, customer or release claim.
+- T2 raw publication outside this ready-PR lane; full raw snapshots retained and no results disposed.
+- One verified conservative mixed span/parts regression corrected; final cells use nine disjoint observed-parts receipts per runtime cell, with unchanged credited keys and metrics.
+
+### <a id="issue-1880-preflight-cost-r2-10000-2026-10-23"></a>issue-1880-preflight-cost-r2-10000-2026-10-23
+
+**id:**
+issue-1880-preflight-cost-r2-10000-2026-10-23
+
+**benchmark:**
+#1880 part A Amendment 1 synthetic preflight (10000 stored rows)
+
+**metric:**
+candidate_median_ms
+
+**value:**
+0.16641699999999998
+
+**display:**
+0.1621250 -> 0.1664170 ms; PASS max(+10%, +0.05ms)
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+2cbb01e37e461ab439620514ecb05f92020620ae
+
+**harness_commit:**
+r2 synthetic full-preflight instrument retained with raw paired samples under T2 tag
+
+**judge:**
+n/a (deterministic timing)
+
+**reader:**
+n/a (CI host stub)
+
+**retrieval_config:**
+10 warmup pairs, 200 measured pairs; alternating base/candidate order, same synthetic session. Swap both changed engine methods and both compaction methods; baseline 10407e12e33c1d7b09fe0e05141153555aec5d62.
+
+**dataset_exposure:**
+Synthetic fixtures only; no customer or reference-agent data.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/93db6d73104b40ee30d8149f3599ec74667fde94/tests/fixtures/issue_1880_preflight_cost/RESULT.md
+
+**variance:**
+Single paired run; p10/p90 across measured pairs, no model judge or run-to-run variance estimate.
+
+**failclose:**
+Both marginal-median and paired-median increases pass max(base*10%, 0.05ms). No sample omissions after declared warmup.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/2cbb01e37e461ab439620514ecb05f92020620ae/tests/test_issue_1880_defer_size_cleanup.py
+
+**caveats:**
+- Synthetic engine preflight only. Does not prove the reference agent's host boundary latency is removed, part B hold behavior, merge, release, runtime or customer readiness.
+
+**superseded_by:**
+issue-1880-preflight-cost-r2-final-10000-2026-10-23
+
+### <a id="issue-1880-preflight-cost-r2-100000-2026-10-23"></a>issue-1880-preflight-cost-r2-100000-2026-10-23
+
+**id:**
+issue-1880-preflight-cost-r2-100000-2026-10-23
+
+**benchmark:**
+#1880 part A Amendment 1 synthetic preflight (100000 stored rows)
+
+**metric:**
+candidate_median_ms
+
+**value:**
+0.1691875
+
+**display:**
+0.1662505 -> 0.1691875 ms; PASS max(+10%, +0.05ms)
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+2cbb01e37e461ab439620514ecb05f92020620ae
+
+**harness_commit:**
+r2 synthetic full-preflight instrument retained with raw paired samples under T2 tag
+
+**judge:**
+n/a (deterministic timing)
+
+**reader:**
+n/a (CI host stub)
+
+**retrieval_config:**
+10 warmup pairs, 200 measured pairs; alternating base/candidate order, same synthetic session. Swap both changed engine methods and both compaction methods; baseline 10407e12e33c1d7b09fe0e05141153555aec5d62.
+
+**dataset_exposure:**
+Synthetic fixtures only; no customer or reference-agent data.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/93db6d73104b40ee30d8149f3599ec74667fde94/tests/fixtures/issue_1880_preflight_cost/RESULT.md
+
+**variance:**
+Single paired run; p10/p90 across measured pairs, no model judge or run-to-run variance estimate.
+
+**failclose:**
+Both marginal-median and paired-median increases pass max(base*10%, 0.05ms). No sample omissions after declared warmup.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/2cbb01e37e461ab439620514ecb05f92020620ae/tests/test_issue_1880_defer_size_cleanup.py
+
+**caveats:**
+- Synthetic engine preflight only. Does not prove the reference agent's host boundary latency is removed, part B hold behavior, merge, release, runtime or customer readiness.
+
+**superseded_by:**
+issue-1880-preflight-cost-r2-final-100000-2026-10-23
+
+### <a id="issue-1880-preflight-cost-r2-final-10000-2026-10-23"></a>issue-1880-preflight-cost-r2-final-10000-2026-10-23
+
+**id:**
+issue-1880-preflight-cost-r2-final-10000-2026-10-23
+
+**benchmark:**
+#1880 part A final synthetic preflight (10000 stored rows)
+
+**metric:**
+candidate_median_ms
+
+**value:**
+0.192479
+
+**display:**
+0.1789795 -> 0.1924790 ms; PASS max(+10%, +0.05ms)
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+8d71947d164346609fc0b59782ee01d0532e2646
+
+**harness_commit:**
+r2 final synthetic full-preflight instrument retained with raw paired samples under T2 tag
+
+**judge:**
+n/a (deterministic timing)
+
+**reader:**
+n/a (CI host stub)
+
+**retrieval_config:**
+10 warmup pairs, 200 measured pairs; alternating base/candidate order, same synthetic session. Swap both changed engine methods and both compaction methods; baseline 10407e12e33c1d7b09fe0e05141153555aec5d62.
+
+**dataset_exposure:**
+Synthetic fixtures only; no customer or reference-agent data.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/2a13447cc2ad4591a6d2f76a60a583d22cae12e8/tests/fixtures/issue_1880_preflight_cost_final/RESULT.md
+
+**variance:**
+Single paired run; p10/p90 across measured pairs, no model judge or run-to-run variance estimate.
+
+**failclose:**
+Both marginal-median and paired-median increases pass max(base*10%, 0.05ms). No sample omissions after declared warmup.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/2a13447cc2ad4591a6d2f76a60a583d22cae12e8/tests/fixtures/issue_1880_preflight_cost_final/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/2a13447cc2ad4591a6d2f76a60a583d22cae12e8/tests/fixtures/issue_1880_preflight_cost_final/RESULT.md
+
+**caveats:**
+- Synthetic engine preflight only. Does not prove the reference agent's host boundary latency is removed, part B hold behavior, merge, release, runtime or customer readiness.
+
+### <a id="issue-1880-preflight-cost-r2-final-100000-2026-10-23"></a>issue-1880-preflight-cost-r2-final-100000-2026-10-23
+
+**id:**
+issue-1880-preflight-cost-r2-final-100000-2026-10-23
+
+**benchmark:**
+#1880 part A final synthetic preflight (100000 stored rows)
+
+**metric:**
+candidate_median_ms
+
+**value:**
+0.172625
+
+**display:**
+0.1626040 -> 0.1726250 ms; PASS max(+10%, +0.05ms)
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+8d71947d164346609fc0b59782ee01d0532e2646
+
+**harness_commit:**
+r2 final synthetic full-preflight instrument retained with raw paired samples under T2 tag
+
+**judge:**
+n/a (deterministic timing)
+
+**reader:**
+n/a (CI host stub)
+
+**retrieval_config:**
+10 warmup pairs, 200 measured pairs; alternating base/candidate order, same synthetic session. Swap both changed engine methods and both compaction methods; baseline 10407e12e33c1d7b09fe0e05141153555aec5d62.
+
+**dataset_exposure:**
+Synthetic fixtures only; no customer or reference-agent data.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/2a13447cc2ad4591a6d2f76a60a583d22cae12e8/tests/fixtures/issue_1880_preflight_cost_final/RESULT.md
+
+**variance:**
+Single paired run; p10/p90 across measured pairs, no model judge or run-to-run variance estimate.
+
+**failclose:**
+Both marginal-median and paired-median increases pass max(base*10%, 0.05ms). No sample omissions after declared warmup.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/2a13447cc2ad4591a6d2f76a60a583d22cae12e8/tests/fixtures/issue_1880_preflight_cost_final/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/2a13447cc2ad4591a6d2f76a60a583d22cae12e8/tests/fixtures/issue_1880_preflight_cost_final/RESULT.md
+
+**caveats:**
+- Synthetic engine preflight only. Does not prove the reference agent's host boundary latency is removed, part B hold behavior, merge, release, runtime or customer readiness.
+
+### <a id="issue1586-chunk-load-20261023"></a>issue1586-chunk-load-20261023
+
+**id:**
+issue1586-chunk-load-20261023
+
+**benchmark:**
+Synthetic LOCAL exact chunk recall (#1586)
+
+**metric:**
+recall_250k_p50_s
+
+**value:**
+1.534937896009069
+
+**display:**
+250k p50/p90 1.535/1.914s; selected-25k VM steps constant1,025,602
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+measured59b2289558521289a71a0c959ce7a7b9854d0639; finalcdd4c2629ebca159de3f3093227206935d4ee06b removes only one SQL whitespace character; BASE2ce2de7ff93a6d2d8b60321033fdce5c117f59c4
+
+**harness_commit:**
+2ce2de7ff93a6d2d8b60321033fdce5c117f59c4 local_catchup instrument; RCA-derived adapter SHA256 d094bfd417a21e0cd30dbddbd4ed1a7c29ddbe8decb60e33121700456a54da0e retained in the result card
+
+**judge:**
+none; exact deterministic ID/score/coverage and matrix-byte comparison
+
+**reader:**
+BAAI/bge-small-en-v1.5 query embedding; no answer model
+
+**retrieval_config:**
+Generated covered store from run39768769622; float32/384; 25k exact batch; local FastEmbed/ORT2threads; no binary mirror; unchanged8sdeadline; canary+broadNL; two-arm interleaving; standard single-batch cache policy
+
+**dataset_exposure:**
+Synthetic generated stores only; no customer data or external provider traffic
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/4595b9fa7633dfd1048fe44a96f2695bd0740b3d/RESULT.md
+
+**variance:**
+One local window per size; ten measured public calls/arm after four declared warmups; same25k selected IDs twentypairedloads/arm/size;1k/10k cost200pairs per cold/warm cell. Host contention occurred; raw min/max/p90 retained. No cross-run absolute-performance claim.
+
+**failclose:**
+Candidate fullcoverage10/10 at62.5k,125k,250k; no measured calls omitted. BASE half/full ten deadline-censored calls each. Comparable completed results exact; half broadNL has no completed BASE comparison. VM regression RED1475->123393, GREEN819->817; all four small-cost cells within max(BASE*1.10,BASE+0.05ms).
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/4595b9fa7633dfd1048fe44a96f2695bd0740b3d/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/4595b9fa7633dfd1048fe44a96f2695bd0740b3d/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/4595b9fa7633dfd1048fe44a96f2695bd0740b3d/SUMMARY.json
+
+**caveats:**
+- Local synthetic only; not #1586 2-CPU floor, concurrent compaction/publication, release, runtime or customer proof.
+- BASE deadline-censored request latency is not successful exact-recall latency.
+- Indexed VM work for the fixed25kbatch is constant; observed wallclock medians60/70/79ms include cache/host variation.
+- Measured source and final SQL-serialization-only delta are explicit;95affectedtrace tests pass after preserving the existing trace. Full final-source CI is a separate PR gate.
+
+[registry row](results.d/issue1586-chunk-load-20261023.json)
+
 ### <a id="issue1748-gapwalk-2026-10-21"></a>issue1748-gapwalk-2026-10-21
 
 **id:**
@@ -970,6 +1656,189 @@ Matching cost base <=2x RED, candidate GREEN. Pre-fix live-arrival bound RED; ca
 - VM counts include traversal before instrumented eligible-row predicates. One deterministic observation per fill level and pass; no variance estimate; wall time supplementary.
 - The plain-text prior T2 tag covers the earlier run only. Fix-round remeasurement remains local; no new T2 publication was authorized.
 - Pre-token intermediate remeasurement is excluded; candidate values cover the final first-selection CAS token.
+
+### <a id="lcmx-1880-hold-cost-h2-linux-20261023"></a>lcmx-1880-hold-cost-h2-linux-20261023
+
+**id:**
+lcmx-1880-hold-cost-h2-linux-20261023
+
+**benchmark:**
+#1880 persisted hold hosted synthetic admission
+
+**metric:**
+unheld_cells_within_cost_bar
+
+**value:**
+2
+
+**display:**
+2/4 paired UNHELD cells PASS; both mismatch cells FAIL cost bar
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+849697b9e5eb24b921ea35799f94da55af3f2dcc
+
+**harness_commit:**
+29266c776d27fdf980c7e58f2cbfb74c12d6a519
+
+**judge:**
+n/a deterministic timing/query probes
+
+**reader:**
+n/a synthetic SQLite
+
+**retrieval_config:**
+Paired interleaved200 admissions per arm after20warmups; absent/static nonmatching record at10k/100k; held200,rebuilt-held20; genuine clean ingest/pressure setup and construction excluded. BASE10407e12e33c1d7b09fe0e05141153555aec5d62.
+
+**dataset_exposure:**
+Synthetic only; no real profile or model traffic
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-h2-failed-hosted/RESULT.md
+
+**variance:**
+One GitHub-hosted Ubuntu Python3.13 run; raw timings and p50/p95 retained. No cross-run/cross-machine speedup inference.
+
+**failclose:**
+Original max(BASE*1.10,BASE+0.05ms), no bounds change or dropped measured samples.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-h2-failed-hosted/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-h2-failed-hosted/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-h2-failed-hosted/samples.jsonl
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-h2-failed-hosted/summary.json
+
+**caveats:**
+- T2 not published; all results preserved.
+- Admission cost only; construction/ingest, live latency, #1162 repair and merge/release/runtime/customer readiness not proven.
+
+### <a id="lcmx-1880-hold-cost-h3-hosted-20261023"></a>lcmx-1880-hold-cost-h3-hosted-20261023
+
+**id:**
+lcmx-1880-hold-cost-h3-hosted-20261023
+
+**benchmark:**
+#1880 persisted hold hosted synthetic admission
+
+**metric:**
+unheld_cells_within_cost_bar
+
+**value:**
+4
+
+**display:**
+4/4 paired UNHELD cells PASS; held paths zero model calls/scans/writes
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+441c338ff49d3d1bd64a864a9191ce2723c509bb
+
+**harness_commit:**
+29266c776d27fdf980c7e58f2cbfb74c12d6a519
+
+**judge:**
+n/a deterministic timing/query probes
+
+**reader:**
+n/a synthetic SQLite
+
+**retrieval_config:**
+Paired interleaved200 admissions per arm after20warmups; absent/static nonmatching record at10k/100k; held200,rebuilt-held20; genuine clean ingest/pressure setup and construction excluded. BASE10407e12e33c1d7b09fe0e05141153555aec5d62.
+
+**dataset_exposure:**
+Synthetic only; no real profile or model traffic
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-final-hosted/RESULT.md
+
+**variance:**
+One GitHub-hosted Ubuntu Python3.13 run; raw timings and p50/p95 retained. No cross-run/cross-machine speedup inference.
+
+**failclose:**
+Original max(BASE*1.10,BASE+0.05ms), no bounds change or dropped measured samples.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-final-hosted/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-final-hosted/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-final-hosted/samples.jsonl
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-final-hosted/summary.json
+
+**caveats:**
+- T2 not published; all results preserved.
+- Admission cost only; construction/ingest, live latency, #1162 repair and merge/release/runtime/customer readiness not proven.
+
+### <a id="local-idle-duty-floor-probe-2026-10-23"></a>local-idle-duty-floor-probe-2026-10-23
+
+**id:**
+local-idle-duty-floor-probe-2026-10-23
+
+**benchmark:**
+LOCAL catch-up idle duty (2-vCPU floor surrogate)
+
+**metric:**
+max_mean_cpu_cores
+
+**value:**
+0.5505486880915895
+
+**display:**
+0.551 cores (max mean across four 0.82 cells)
+
+**tier:**
+F
+
+**date:**
+2026-10-23
+
+**system_commit:**
+0.82: 777f6756c3dd7f9976a45b4040d1f6697f0f5474; 1.0: 7f82e84b25d00fe8a5abcb38590c2b129abe4a8f. This PR applies the measured multiplier to current main; unrelated intervening changes were not remeasured.
+
+**harness_commit:**
+777f6756c3dd7f9976a45b4040d1f6697f0f5474 (0.82); 7f82e84b25d00fe8a5abcb38590c2b129abe4a8f (1.0)
+
+**judge:**
+No model judge; deterministic CPU sampling and coverage-pair gates in bench/instruments/local_catchup at the harness commits.
+
+**reader:**
+No answering model; one background FastEmbed process per cell.
+
+**retrieval_config:**
+Synthetic 250000-row mixed/short stores, upgrade/empty coverage pairs; embeddings enabled explicitly, fastembed BAAI/bge-small-en-v1.5, one ORT intra-op thread, float32, conversational chunks, embedding_max_batch_items=1000; idle multiplier 1.0 vs 0.82; at least two hours per cell with backlog throughout. No retrieval/recall latency claim.
+
+**dataset_exposure:**
+Synthetic corpus; no benchmark gold answers or customer data.
+
+**breakdown:**
+Eight per-cell summaries (four at 1.0, four at 0.82), CPU mean/p95 and labeled coverage projections: https://github.com/electricsheephq/lcm-x/blob/5147f75305b5d262dcb30a13a194f2c89e4a109c/bench/scoreboard/evidence/1586-idle-duty-probe-2026-10-23.json
+
+**variance:**
+One run per multiplier/shape, two baseline cells per run; no repeats, confidence intervals or A/A noise estimate.
+
+**failclose:**
+No cells excluded. The 1.0 mixed upgrade cell fails the coverage projection bar; CPU sampling is reported for every cell. Catch-up stops at the two-hour measurement bound with incomplete coverage.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/5147f75305b5d262dcb30a13a194f2c89e4a109c/bench/scoreboard/evidence/1586-idle-duty-probe-2026-10-23.json
+
+**caveats:**
+- Claim class: advisory; floor-surrogate only. The scoreboard value is measured CPU, never projected completion time.
+- At 0.82, maximum per-cell mean CPU 0.5505486880915895 and p95 rolling-60s CPU 0.6336526290227705 are under the 0.6/0.75-core bars.
+- Coverage projections are disclosed in the evidence only; they do not establish completed 72-hour catch-up. Mixed margin is about 6%; the full floor rerun is the judge.
+- Fault-finding yield: 1.0 fails one mixed coverage cell; 0.82 passes the probe coverage/CPU bars. No full-floor, recall-latency, customer-box or Mac 24-hour proof.
+- Source decision: https://github.com/electricsheephq/lcm-x/issues/1586#issuecomment-6359031801
+- Runs: https://github.com/electricsheephq/lcm-x/actions/runs/39888055698 ; https://github.com/electricsheephq/lcm-x/actions/runs/39888063665 ; https://github.com/electricsheephq/lcm-x/actions/runs/39888076007 ; https://github.com/electricsheephq/lcm-x/actions/runs/39888085612
+
+[registry row](results.d/local-idle-duty-floor-probe-2026-10-23.json)
 
 ### <a id="locomo-qa-off-v0270-2026-10-16"></a>locomo-qa-off-v0270-2026-10-16
 
@@ -1989,6 +2858,202 @@ paired vs control (prior main @ e5acbbf) in the same run: net +3 (b=29/c=26, n=4
 - static-protocol numbers on V2 are low-absolute by design (fixed weak reader); the agentic protocol row (298/451) is the capability surface
 - treatment arm completed via a documented append-only continuation after a transient EINTR fail-close (AMENDMENT-2; dataset freeze byte-identical across the gap, independently verified)
 
+### <a id="occurrence-1451-pra-2026-10-23"></a>occurrence-1451-pra-2026-10-23
+
+**id:**
+occurrence-1451-pra-2026-10-23
+
+**benchmark:**
+#1451 PR-A occurrence snapshot synthetic acceptance
+
+**metric:**
+new_loss_checkpoints
+
+**value:**
+0
+
+**display:**
+0 new loss checkpoints across1296 cells; error cells172->0
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+0eb95e50f4bae6ef0bcc305efde49c83f3d41fca; cost/compat e6e4f0e5586245e0cf87bb0fec52745c82f17fd0, same product tree
+
+**harness_commit:**
+Inherited occurrence matrix/scorer; public summary 5bd18e57921248a68029688c5c4efb583d3d4f2b
+
+**judge:**
+n/a (deterministic row-multiset and checkpoint comparison)
+
+**reader:**
+n/a (synthetic SQLite host histories)
+
+**retrieval_config:**
+1296 supplied reachable cells, every checkpoint; supplied baseline5df5a3c; requested implementation BASE10407e12; no carry rebind. Cost20warmup+200paired AB/BA, proof-commit path only.
+
+**dataset_exposure:**
+Synthetic fixtures only; no customer data, model judge or provider calls.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/5bd18e57921248a68029688c5c4efb583d3d4f2b/bench/results/occurrence-1451-pra-20261023/CHANGED-CELLS.md
+
+**variance:**
+One matrix execution; cost paired median delta -0.200084ms vs max(+10%,+0.05ms), pass. No cross-machine latency claim.
+
+**failclose:**
+No increased loss, duplicate or positive restart-growth checkpoint. Errors0; rollback reader v0.28.1 opens candidate store and ingests/replays with integrity ok.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/5bd18e57921248a68029688c5c4efb583d3d4f2b/bench/results/occurrence-1451-pra-20261023/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/5bd18e57921248a68029688c5c4efb583d3d4f2b/bench/results/occurrence-1451-pra-20261023/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/5bd18e57921248a68029688c5c4efb583d3d4f2b/bench/results/occurrence-1451-pra-20261023/SUMMARY.json
+- https://github.com/electricsheephq/lcm-x/blob/5bd18e57921248a68029688c5c4efb583d3d4f2b/bench/results/occurrence-1451-pra-20261023/cost-samples.json
+- https://github.com/electricsheephq/lcm-x/blob/334abbd926310340ff2bf1354b872e47bcd6b1b8/bench/results/occurrence-1451-pra-20261023/DELTA.md
+
+**caveats:**
+- Advisory source evidence; final remote CI and independent review tracked by PR. No merge/release/runtime/customer proof.
+- Inherited594 loss cells,482 duplicate cells and298 restart-growth cells remain PR-B scope.176 changed cells listed; no cell-average cancellation.
+- Supplied matrix baseline5df5a3c differs from requested BASE10407e12 by an unrelated ingest-ignore optimization; no fresh matrix on10407e12 claimed.
+- Public summary only; complete raw inputs preserved. T2 unpublished; no result disposal.
+- Legacy-only system-anchor correction: named1RED->1GREEN; legacy subset6passed. All5184preserved matrix snapshots include output_length, so changed legacy-only branch is outside every measured cell; matrix/cost not rerun. Measurement identities preserved.
+
+[registry row](results.d/occurrence-1451-pra-2026-10-23.json)
+
+### <a id="occurrence-1451-pra-r1-2026-10-23"></a>occurrence-1451-pra-r1-2026-10-23
+
+**id:**
+occurrence-1451-pra-r1-2026-10-23
+
+**benchmark:**
+#1451 PR-A r1 snapshot and positional proof acceptance
+
+**metric:**
+new_or_increased_loss_cells
+
+**value:**
+0
+
+**display:**
+0/1296 new loss; error cells0; changed vs r0=0
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+f1df74ca5a051e33fca221fee06a5ba9c12b4f25
+
+**harness_commit:**
+Inherited occurrence runner; independent per-checkpoint raw row-multiset scorer
+
+**judge:**
+deterministic; no model judge
+
+**reader:**
+synthetic SQLite host histories
+
+**retrieval_config:**
+Same1296 reachable cells as r0, everycheckpoint; 96 separate fired faults; actual v0.28.1 upgrade340/351
+
+**dataset_exposure:**
+Synthetic only; no customer data or provider calls
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/CHANGED-CELLS-base.md
+
+**variance:**
+One full matrix rerun; 200 paired AB/BA cost samples; paired median delta -0.372313ms vs allowed +0.2273625ms
+
+**failclose:**
+0 new loss-row multisets or duplicate/restart-growth rises; errors0; all96 atomic failures unavailable to durable reader
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/SUMMARY.json
+- https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/CONSUMERS.md
+- https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/CHANGED-CELLS-r0.md
+
+**caveats:**
+- Advisory; full final-head remote CI recorded separately in PR. No merge/release/runtime/customer proof.
+- 594 inherited loss cells remain; supplied BASE matrix5df5a3c differs from implementationBASE10407e12; no fresh10407 matrix claimed.
+- Focused census606 valid publications,0 rejects across8 affected files, including all6 original counterexamples; not a full-corpus census.
+- Public summary; full raw and re-score inputs retained; T2 unpublished; no result disposal.
+
+[registry row](results.d/occurrence-1451-pra-r1-2026-10-23.json)
+
+### <a id="occurrence-1451-pra-r2-2026-10-23"></a>occurrence-1451-pra-r2-2026-10-23
+
+**id:**
+occurrence-1451-pra-r2-2026-10-23
+
+**benchmark:**
+#1451 PR-A r2 publication-fault occurrence acceptance
+
+**metric:**
+new_or_increased_loss_cells
+
+**value:**
+0
+
+**display:**
+0/1296 new loss; errors0; changed vsr1=0; calibrated fault regression fixed
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+a2f5158972d9cd736a77c03fd23bf22fa399e683
+
+**harness_commit:**
+Inherited matrix/scorer; r2 expanded publication fault grid; permanent tests at measured source
+
+**judge:**
+deterministic; no model judge
+
+**reader:**
+synthetic SQLite host histories
+
+**retrieval_config:**
+Same1296 reachable cells as r1; 264 separate grid runs/192 fired faults,96 with timestamp+UID replacement; identity anchor off for replacement arm
+
+**dataset_exposure:**
+Synthetic only; no customer data or provider calls
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/CHANGED-CELLS-base.md
+
+**variance:**
+200 paired AB/BA; delta -0.17143750000000002ms; allowed +0.15781035000000002ms
+
+**failclose:**
+0 new/increased loss;0 errors;0 changed cells vsr1; all192 fired faults unchanged keys/one postrollback warning/unavailable durable reader;0 escaped exceptions
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/SUMMARY.json
+- https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/CONSUMERS.md
+- https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/CHANGED-CELLS-r1.md
+
+**caveats:**
+- Advisory synthetic proof; remote final-head CI tracked separately in PR. No merge/release/runtime/customer proof.
+- 594 inherited loss cells remain; supplied BASE matrix5df5a3c retained, calibration/cost BASEddf04556.
+- Focused census372 valid publications,0 rejected across8 selected files including all6 original counterexample files; not a full-corpus census.
+- Public summary only; full raw and re-score inputs retained; T2 unpublished; no result disposal.
+
+[registry row](results.d/occurrence-1451-pra-r2-2026-10-23.json)
+
 ### <a id="phase-c-max-v0270-2026-10-16"></a>phase-c-max-v0270-2026-10-16
 
 **id:**
@@ -2630,6 +3695,69 @@ A/A prime: 0 discordant rows; 260 recall flips all attributed to stemmed recall 
 - Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
 - The instrument changed; the v0.26.2 row equals the pre-#1035 tree under the current instrument (0 flips), so the harness change moves nothing.
 
+### <a id="revert-1637-occurrence-2026-10-23"></a>revert-1637-occurrence-2026-10-23
+
+**id:**
+revert-1637-occurrence-2026-10-23
+
+**benchmark:**
+Occurrence retry three-way revert proof
+
+**metric:**
+cells_worse_than_main_on_loss
+
+**value:**
+0
+
+**display:**
+0/1296 cells worse than main on loss; 25 named cells equal GA at every checkpoint
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+07dd79d185b1e4968f5e3d94267e5417a4f2c26c
+
+**harness_commit:**
+4148a09d9ec57e9b0c049720c6cacf16eb21e938
+
+**judge:**
+n/a (deterministic identity projection and multiset host-ledger oracle)
+
+**reader:**
+n/a (synthetic host histories)
+
+**retrieval_config:**
+Warm/cold; compaction none/before/after; stamped/unstamped; six UID shapes; 0/1/3 restarts; snapshot present/missing/malformed/stale; identical/plus-one-user replay. 1296 reachable cells.
+
+**dataset_exposure:**
+Generated synthetic rows only; no customer text or provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/4148a09d9ec57e9b0c049720c6cacf16eb21e938/comparison.md
+
+**variance:**
+N/A: deterministic generated cells, one execution per tree/cell; checkpoint-wise comparison without cancellation.
+
+**failclose:**
+Zero checkpoint loss increases over main; all25 named cells equal GA on loss. All190 duplicate increases over main and four restart-growth increases match GA.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/4148a09d9ec57e9b0c049720c6cacf16eb21e938/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/4148a09d9ec57e9b0c049720c6cacf16eb21e938/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/4148a09d9ec57e9b0c049720c6cacf16eb21e938/three-way-comparison.json
+
+**caveats:**
+- Advisory synthetic evidence; no live-host, fleet, merge, release or customer claim.
+- 190 cells increase duplicates versus main; all increases match GA. Four cells increase restart-1 growth 0 to 2, also matching GA.
+- GA is not lossless: occ-0002 retry deficit is main4/revert2/GA2.
+- Raw inputs retained; T2 unpublished, no result disposal. Remote full suite pending.
+
+[registry row](results.d/revert-1637-occurrence-2026-10-23.json)
+
 ### <a id="row-handoff-v1-1749-sessions"></a>row-handoff-v1-1749-sessions
 
 **id:**
@@ -2884,6 +4012,71 @@ six gate executions, five root causes, mandatory confirmation-run protocol (F42 
 
 **caveats:**
 - uncontended latency is reported separately (P1/L4); this is the published cost-curve instrument
+
+### <a id="session-end-attribution-cost-2026-10-23"></a>session-end-attribution-cost-2026-10-23
+
+**id:**
+session-end-attribution-cost-2026-10-23
+
+**benchmark:**
+Session-end attribution ordinary-turn overhead
+
+**metric:**
+maximum_paired_median_delta_ms
+
+**value:**
+0.02470599999999995
+
+**display:**
+4/4 scoped cells pass; INFO preflight +0.004043ms, ingest +0.003702ms
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+ec11b30a3a96ac27fe2f81021a3a6254a2a6ef72
+
+**harness_commit:**
+ec11b30a3a96ac27fe2f81021a3a6254a2a6ef72
+
+**judge:**
+deterministic; no model judge
+
+**reader:**
+synthetic warm 24-row SQLite history
+
+**retrieval_config:**
+Full warm preflight and post_llm_call ingest span at INFO and DEBUG; defaults with embeddings and temporal rollups disabled; no provider calls
+
+**dataset_exposure:**
+Synthetic only; no customer data
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/summary.json
+
+**variance:**
+200 alternating AB/BA pairs per cell; 10 warmups; paired medians and p10/p90 retained
+
+**failclose:**
+Marginal and paired median deltas must each be at most max(10% of baseline,0.05ms); 4/4 pass
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/pairs.jsonl
+- https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/measurement-source.py
+- https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/score.py
+
+**caveats:**
+- Scopes exclude hook dispatch, turn-complete notification, leaf preparation and all host/model work.
+- Later shallow-copy correction restores the base contract and does not alter either measured path.
+- No live slow-commit attribution, speedup, release, runtime or customer claim.
+- Public raw pairs and re-score inputs retained. T2 unpublished; no result disposal.
+
+[registry row](results.d/session-end-attribution-cost-2026-10-23.json)
 
 ### <a id="slow-route-compactions-v0270-2026-10-16"></a>slow-route-compactions-v0270-2026-10-16
 
