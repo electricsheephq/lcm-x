@@ -128,7 +128,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install qualification harness
-        run: pip install uv==0.11.26 pytest
+        run: pip install uv==0.11.26 pytest numpy
 
       - name: Prepare exact pinned host
         run: |

@@ -68,7 +68,9 @@ class Qualification:
             "HOME": str(self.scratch / "native-home"), "HERMES_HOME": str(home),
             "PATH": os.pathsep.join((str(self.python.parent), os.environ.get("PATH", "/usr/bin:/bin"))),
             "PYTHONPATH": str(self.src), "PYTHONDONTWRITEBYTECODE": "1",
-            "HERMES_DISABLE_LAZY_INSTALLS": "1", "HF_HUB_OFFLINE": "1",
+            # Native dependency installation must use the host's normal policy;
+            # a sealed legacy venv would refuse the requested plugin install.
+            "HF_HUB_OFFLINE": "1",
             "TRANSFORMERS_OFFLINE": "1", "FASTEMBED_CACHE_PATH": str(self.scratch / "models-empty"),
             "XDG_CACHE_HOME": str(self.scratch / "cache"), "UV_CACHE_DIR": str(self.scratch / "uv-cache"),
             "LCM_EMBEDDINGS_ENABLED": "true", "LCM_EMBEDDING_PROVIDER": "fastembed",
