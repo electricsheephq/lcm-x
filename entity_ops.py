@@ -741,7 +741,8 @@ def resolve_key(store, subject_key, store_id, *, owner_entity_id=None,
                     # Superseded choices stay superseded; use the alias fallback.
                     break
                 if override["global_override"] and owner_entity_id is not None and not any(
-                        (r["subject_key"], r["owner_entity_id"], r["method"]) == (subject_key, owner_entity_id, "override")
+                        # An alias fallback retains sender admission while the target is incompatible.
+                        (r["subject_key"], r["owner_entity_id"]) == (subject_key, owner_entity_id)
                         and store_id in json.loads(r["source_store_ids"]) for r in _active_keys(store)):
                     break
                 return target
