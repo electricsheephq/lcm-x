@@ -4638,11 +4638,6 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
     """
     config = engine._config
     enabled = bool(getattr(config, "embeddings_enabled", False))
-    if default_semantic_cpu_limited(config):
-        return {
-            "check": "embedding_provider_health", "status": "warn",
-            "detail": f"semantic recall limited on this host ({effective_cpus():g} effective CPUs); full-text recall is active",
-        }
     profile_active = _active_embedding_profile_exists(engine)
 
     if not enabled:
@@ -4679,6 +4674,10 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
     }
     if embedding_provider_id(str(probe.get("provider") or "")) == "fastembed":
         detail["readiness"] = _embedding_readiness(engine, probe)
+    cpu_limited = default_semantic_cpu_limited(config)
+    if cpu_limited:
+        detail.update(cpu_limited=True, effective_cpus=effective_cpus(), cpu_limit_reason=(
+            f"semantic recall limited on this host ({effective_cpus():g} effective CPUs); full-text recall is active"))
     if str(detail.get("readiness", "")).startswith("model: preparing;"):
         detail["impact"] = (
             "semantic retrieval is degraded while the local model prepares in the background; "
@@ -4769,7 +4768,7 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
             }
     return {
         "check": "embedding_provider_health",
-        "status": "pass",
+        "status": "warn" if cpu_limited else "pass",
         "detail": detail,
     }
 

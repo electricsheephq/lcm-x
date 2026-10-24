@@ -702,6 +702,8 @@ def render_doctor(facts: DoctorFacts) -> str:
         readiness = detail.get("readiness") if isinstance(detail, dict) else None
         if readiness:
             lines.append(f"embedding_readiness: {readiness}")
+        if isinstance(detail, dict) and detail.get("cpu_limited"):
+            lines.append(str(detail["cpu_limit_reason"]))
     if issues:
         lines.append(f"issues: {', '.join(issues)}")
     else:

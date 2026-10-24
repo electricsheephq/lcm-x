@@ -11,7 +11,7 @@ actual coverage; doctor explains the limit. Effective capacity respects affinity
 and cgroup quotas (including ancestor limits and fractional CPUs), cached per
 process. Background catch-up continues. An explicit `LCM_EMBEDDINGS_ENABLED`
 value or programmatic config keeps control; explicit semantic `lcm_grep` is
-unchanged. Today's product default is still off, so this policy is inert.
+unchanged. Today's product default is still off, so this policy is inert. Proactive recall stays inert on these hosts unless a nonblank provider override is set. Doctor still checks provider availability and readiness; a healthy CPU-limited host needs only an explicit opt-in if semantic recall is wanted.
 
 ## TL;DR
 

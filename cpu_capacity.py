@@ -18,7 +18,7 @@ def effective_cpus() -> float:
     def read(path):
         try:
             return Path(path).read_text()
-        except OSError:
+        except (OSError, ValueError):
             return ""
 
     groups = []
@@ -56,9 +56,12 @@ def effective_cpus() -> float:
                     quota, period = map(int, values)
                     if quota > 0 and period > 0:
                         capacities.append(quota / period)
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, OverflowError):
                     pass  # unlimited, missing or malformed; try the parent
                 if current == base:
                     break
                 current = current.parent
-    return min(capacities) if capacities else float(os.cpu_count() or 1)
+    host = os.cpu_count()
+    if host:
+        capacities.append(float(host))
+    return min(capacities) if capacities else 1.0

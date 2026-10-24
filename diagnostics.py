@@ -208,6 +208,14 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             )
             warning_only = True
             rationale = "stale stored vectors affect only semantic recall, which is switched off"
+        elif (status == "warn" and isinstance(detail, dict) and detail.get("cpu_limited")
+              and detail.get("available") and str(detail.get("readiness", "")).startswith("model: present;")
+              and "coverage: unavailable" not in str(detail.get("readiness", ""))):
+            action = DOCTOR_ACTION_SAFE_IGNORE
+            command = ("set LCM_EMBEDDINGS_ENABLED=true (or use a host with more than 2 "
+                       "effective CPUs) if semantic recall is wanted")
+            warning_only = True
+            rationale = "informational: semantic recall is CPU-limited as expected on this host; full-text recall is active"
         elif status == "warn":
             action = DOCTOR_ACTION_INSPECT
             command = (

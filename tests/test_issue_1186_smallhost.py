@@ -139,10 +139,11 @@ def test_small_host_fts_failure_is_honest(recall_engine, monkeypatch):
 def test_doctor_small_host(recall_engine, monkeypatch):
     recall_engine._config = DefaultOnConfig.from_env()
     monkeypatch.setattr(tools, "effective_cpus", lambda: 1.5, raising=False)
-    monkeypatch.setattr(tools, "probe_provider_availability", lambda *a: pytest.fail("unneeded model probe"))
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda *a: {"provider": "fastembed", "available": True})
+    monkeypatch.setattr(tools, "_embedding_readiness", lambda *a: "model: present; coverage: 0/0 summaries")
     check = tools._embedding_provider_health_check(recall_engine)
     assert check["status"] == "warn"
-    assert check["detail"] == "semantic recall limited on this host (1.5 effective CPUs); full-text recall is active"
+    assert check["detail"]["cpu_limit_reason"] == "semantic recall limited on this host (1.5 effective CPUs); full-text recall is active"
 
 
 @pytest.mark.parametrize("raw", ["true", "false"])
@@ -166,7 +167,7 @@ def test_local_provider_spellings_share_policy(recall_engine, monkeypatch, provi
     recall_engine._config = config
     monkeypatch.setattr(tools, "effective_cpus", lambda: 2)
     assert tools.default_semantic_cpu_limited(config) is True
-    assert tools._embedding_provider_health_check(recall_engine)["detail"] == (
+    assert tools._embedding_provider_health_check(recall_engine)["detail"]["cpu_limit_reason"] == (
         "semantic recall limited on this host (2 effective CPUs); full-text recall is active"
     )
 

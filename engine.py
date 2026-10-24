@@ -9211,6 +9211,9 @@ class LCMEngine(
         # are disabled/unwarmed (no provider to embed the newest message).
         if not getattr(config, "embeddings_enabled", False):
             return None
+        provider_override = str(getattr(config, "proactive_recall_provider", "") or "").strip()
+        if not provider_override and lcm_tools.default_semantic_cpu_limited(config):
+            return None
 
         query = self._newest_user_message_text(tail_messages)
         if not query:
@@ -9224,7 +9227,6 @@ class LCMEngine(
         budget_tokens = int(getattr(config, "proactive_recall_budget_tokens", 500) or 0)
         if budget_tokens <= 0:
             return None
-        provider_override = getattr(config, "proactive_recall_provider", "") or ""
 
         try:
             raw = lcm_tools.lcm_recall(
