@@ -233,6 +233,12 @@ From an existing checkout, install a symlink:
 HERMES_PROFILE=myprofile ./scripts/install.sh
 ```
 
+The installer requires canonical lowercase, unpadded ASCII profile names
+(1–64 letters/digits, with `_` or `-` allowed after the first character).
+Use `HERMES_PROFILE=default ./scripts/install.sh` for `Default`, or
+`HERMES_PROFILE=work ./scripts/install.sh` for padded `Work`. Other spellings
+are refused before links or host calls; the native Hermes CLI still accepts its aliases.
+
 Run `scripts/install.sh` even when the checkout already lives at the canonical
 plugin path. It leaves that checkout in place and exposes the bundled
 `hermes-lcm` skill in the matching global/profile `skills/` directory. The
@@ -421,7 +427,8 @@ change the config while Hermes is stopped:
    its `skills/hermes-lcm` link). Keep it until then for rollback (a rollback
    also needs the steps in the
    [operator guide](docs/operator-guide.md#rollback)). The installer never
-   edits `config.yaml` or deletes anything.
+   deletes anything. Host-owned core enablement updates `config.yaml`, except
+   when a separate older copy requires the manual migration above first.
 
 **If the config is not updated:** Hermes logs
 `Context engine 'lcm' not found — falling back to built-in compressor` and runs

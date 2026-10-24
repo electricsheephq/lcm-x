@@ -94,7 +94,10 @@ Pre-seed a read-only cache: `warmup` cannot download into it.
 through the host's enable verb, then runs the companion install command above.
 It passes `-p "${HERMES_PROFILE:-default}"` to every host command with `HERMES_HOME`
 set to the install root: a named profile targets `root/profiles/<name>`, and
-unset or `default` targets the root even with a sticky active profile. Printed
+unset or `default` targets the root even with a sticky active profile. The installer
+requires canonical lowercase, unpadded ASCII profile names and
+refuses other spellings before links or host calls (use `default` for `Default`
+and `work` for padded `Work`). Printed
 retry/enable commands retain that root and profile. A separate older copy prevents
 automatic core enablement until the printed migration is completed. Optional
 companion failure preserves successful core installation and full-text recall;

@@ -261,8 +261,9 @@ class Qualification:
         for route, tty in ((self.route, self.route == "native"),):
             home = self.scratch / ("decline" if tty else "noninteractive")
             text = self.install(home, route, tty=tty, decline=True)
-            assert "Plugin installed but not enabled." in text, "missing host-owned hint: " + text
-            assert f"Run `hermes plugins enable {COMPANION}` to activate." in text, text
+            hint = " ".join(text.split())  # Rich may wrap the host's activation sentence.
+            assert "Plugin installed but not enabled." in hint, "missing host-owned hint: " + text
+            assert f"Run `hermes plugins enable {COMPANION}` to activate." in hint, text
             result = self.probe(home, "fts")
             assert not result["companion_enabled"], result
             self.record("d", route=route, **result)

@@ -6,6 +6,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 
 HERMES_HOME_DIR="${HERMES_HOME:-$HOME/.hermes}"
 INSTALL_PROFILE="${HERMES_PROFILE:-default}"
+# Native hosts strip/casefold aliases; require their canonical ASCII spelling
+# before choosing paths so enablement and the legacy guard use the same home.
+if [[ ! "$INSTALL_PROFILE" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789_-]{0,63}$ ]]; then
+  echo "HERMES_PROFILE must be canonical: 1-64 lowercase ASCII letters/digits, with _ or - after the first character; no padding." >&2
+  echo "Use HERMES_PROFILE=default ./scripts/install.sh instead of Default; use HERMES_PROFILE=work ./scripts/install.sh instead of padded Work." >&2
+  exit 2
+fi
 export HERMES_HOME="$HERMES_HOME_DIR"
 printf -v HERMES_COMMAND 'HERMES_HOME=%q hermes -p %q' "$HERMES_HOME_DIR" "$INSTALL_PROFILE"
 if [[ "$INSTALL_PROFILE" != default ]]; then

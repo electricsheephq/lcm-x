@@ -65,13 +65,15 @@ def test_core_scanner_exception_requires_hosted_synthetic_home(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("route", ["native", "installer"])
-@pytest.mark.parametrize("host_hint", [False, True])
+@pytest.mark.parametrize("host_hint", [False, True, "wrapped"])
 def test_decline_cell_requires_host_hint_independent_of_installer_echo(tmp_path, monkeypatch, route, host_hint):
     qualification = Qualification("upstream-main", Path("python"), REPO,
                                   tmp_path / "scratch", tmp_path / "out", route=route)
     text = "If the companion is disabled, run: hermes -p default plugins enable hermes-lcm-x-local-embeddings"
     if host_hint:
         text += "\nPlugin installed but not enabled. Run `hermes plugins enable hermes-lcm-x-local-embeddings` to activate."
+    if host_hint == "wrapped":
+        text = text.replace("Run `hermes plugins enable ", "Run `hermes plugins enable \r\n")
     monkeypatch.setattr(qualification, "install", lambda *a, **k: text)
     monkeypatch.setattr(qualification, "probe", lambda home, mode: {"companion_enabled": mode == "import"})
     monkeypatch.setattr(qualification, "cli", lambda *a: "")

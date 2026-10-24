@@ -14,6 +14,10 @@ git clone https://github.com/electricsheephq/lcm-x \
 
 For profile-specific installs, clone under `~/.hermes/profiles/<profile>/plugins/hermes-lcm-x`. For development checkouts, `scripts/install.sh` links core and its skill under the `HERMES_HOME` root (default `~/.hermes`), or its named `HERMES_PROFILE`. Unset or `default` explicitly targets the root despite sticky host profile selection. It refuses conflicting paths, enables core through the host unless a separate older copy needs migration, and natively installs the optional companion with host-owned consent. Companion failure prints a retry and preserves core full-text operation; context-engine selection stays manual. It never deletes legacy files.
 
+Installer profile names must be canonical lowercase, unpadded ASCII (1–64
+letters/digits, `_` or `-` after the first character). Use `default` for `Default`
+and `work` for padded `Work`; other spellings are refused before links or host calls.
+
 ## Why not pip-style packaging yet?
 
 The repository is a Hermes plugin, not a standalone Python application. Runtime discovery currently depends on:

@@ -51,6 +51,11 @@ companion failure prints a retry and preserves successful core installation and
 full-text recall. Context-engine selection remains manual. `HERMES_PROFILE` selects
 the named profile; unset or `default` explicitly selects the root, overriding sticky
 profile selection. `HERMES_HOME` sets the install root, also used in printed commands.
+The installer accepts only canonical lowercase, unpadded ASCII profile names
+(1–64 letters/digits, `_` or `-` after the first character). Use
+`HERMES_PROFILE=default ./scripts/install.sh` for `Default` and
+`HERMES_PROFILE=work ./scripts/install.sh` for padded `Work`; aliases are refused
+before links or host calls and remain available through the native Hermes CLI.
 
 ## Activate
 

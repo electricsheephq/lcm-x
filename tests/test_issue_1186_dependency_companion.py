@@ -99,7 +99,8 @@ def run_resolving_installer(tmp_path, *, profile=None, sticky=None, custom=True,
                             existing=False, failure=None, legacy=False):
     """Stub the two pinned hosts' -p/root/sticky resolution and native verbs."""
     home = tmp_path / ("custom root" if custom else "user/.hermes")
-    target = home / "profiles" / profile if profile and profile != "default" else home
+    canonical = profile.strip().casefold() if profile else "default"
+    target = home / "profiles" / canonical if canonical != "default" else home
     target.mkdir(parents=True)
     if sticky:
         (home / "active_profile").write_text(sticky)
@@ -114,6 +115,7 @@ def run_resolving_installer(tmp_path, *, profile=None, sticky=None, custom=True,
         old.mkdir(parents=True)
         (old / "keep").write_text("legacy")
         (target / "config.yaml").write_text("plugins:\n  enabled: [hermes-lcm]\n")
+        (target / "plugins/hermes-lcm-x").symlink_to(ROOT)
     bindir = tmp_path / "bin"
     bindir.mkdir()
     log = tmp_path / "calls.jsonl"
@@ -124,7 +126,7 @@ from pathlib import Path
 root = Path(os.environ['HERMES_HOME'])
 args = sys.argv[1:]
 if args[:1] == ['-p']:
-    profile, args = args[1], args[2:]
+    profile, args = args[1].strip().casefold(), args[2:]
 else:
     sticky = root / 'active_profile'
     profile = sticky.read_text().strip() if sticky.exists() else 'default'
@@ -153,8 +155,34 @@ if args[1] == 'install':
     if profile:
         env["HERMES_PROFILE"] = profile
     result = subprocess.run(["bash", str(script)], env=env, input="", text=True, capture_output=True)
-    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
     return result, home, target, calls
+
+
+@pytest.mark.parametrize("profile", ["Default", " default ", "P1", " p1 ", "\u2003P1\u2003", "p/1", " ", "p" * 65])
+def test_noncanonical_profile_is_refused_before_links_or_host_calls(tmp_path, profile):
+    result, home, target, calls = run_resolving_installer(tmp_path, profile=profile)
+    assert result.returncode == 2, result.stderr
+    assert "canonical" in result.stderr
+    assert "HERMES_PROFILE=default ./scripts/install.sh" in result.stderr
+    assert not calls
+    assert not (target / "plugins/hermes-lcm-x").exists()
+    assert not (target / "skills/hermes-lcm-x").exists()
+    assert not (home / "profiles" / profile / "plugins/hermes-lcm-x").exists()
+
+
+@pytest.mark.parametrize("profile", ["Default", " default ", "default", " P1 ", "p1"])
+def test_canonical_legacy_target_cannot_be_bypassed_by_profile_spelling(tmp_path, profile):
+    result, _, target, calls = run_resolving_installer(tmp_path, profile=profile, legacy=True)
+    assert result.returncode == (0 if profile in {"default", "p1"} else 2), result.stderr
+    assert not any(call["args"][:3] == ["plugins", "enable", "hermes-lcm-x"] for call in calls)
+    assert (target / "plugins/hermes-lcm-x").resolve() == ROOT
+    assert (target / "plugins/hermes-lcm/keep").read_text() == "legacy"
+    assert (target / "config.yaml").read_text() == "plugins:\n  enabled: [hermes-lcm]\n"
+    if result.returncode == 0:
+        assert "BREAKING" in result.stdout
+    else:
+        assert not calls
 
 
 @pytest.mark.parametrize("failure", ["install", "non-git"])
@@ -182,7 +210,7 @@ def test_separate_legacy_copy_is_preserved_without_auto_enable(tmp_path):
 def test_install_documentation_matches_host_owned_activation_and_live_anchor():
     for path in [ROOT / "README.md", ROOT / "docs/operator-guide.md",
                  ROOT / "skills/hermes-lcm/references/configuration.md"]:
-        text = path.read_text()
+        text = " ".join(path.read_text().split())
         assert "never edits `config.yaml`" not in text
         assert "without editing config" not in text
         assert "a-host-update-can-remove-fastembed" not in text
