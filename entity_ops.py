@@ -704,6 +704,11 @@ def resolve_key(store, subject_key, store_id, *, owner_entity_id=None,
         if (subject_key, store_id) not in _key_sources(store, access_scope, principal_is_owner):
             return None
         view = resolved_view(store, access_scope, principal_is_owner)
+        # Relation membership changes immediately; sender admission is rebuilt.
+        namespace, _, value = subject_key.partition(":")
+        if owner_entity_id is not None and namespace not in {"user", "assistant"} and not (
+                _relation_groups(view, value).get(owner_entity_id, {}).get("candidates")):
+            return None
         events, undone, _, _ = _history(store)
         for override in reversed(_overrides(events, undone)):
             if (override["subject_key"], override["owner_entity_id"]) == (subject_key, owner_entity_id) and store_id in override["scope_store_ids"]:

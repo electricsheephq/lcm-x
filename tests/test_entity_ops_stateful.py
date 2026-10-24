@@ -1,5 +1,5 @@
 # ruff: noqa: F811
-"""D6 oracle: every intermediate answer must agree with a fresh copied-store rebuild."""
+"""D6 safety and liveness against copied and empty-derived-index rebuilds."""
 from contextlib import ExitStack, closing
 import importlib
 import json
@@ -18,8 +18,8 @@ from tests.test_entity_bridge import bridge, publish, rebuild  # noqa: F401
 from tests.test_entity_ops_identity import test_flag_off_schema_and_turn_path as check_default_off
 
 
-for name, examples in (("ci", 25), ("nightly", 500)):
-    settings.register_profile(name, max_examples=examples, stateful_step_count=12,
+for name, examples, steps in (("ci", 25, 20), ("nightly", 500, 30)):
+    settings.register_profile(name, max_examples=examples, stateful_step_count=steps,
         derandomize=True, deadline=None, database=None,
         phases=tuple(p for p in Phase if p is not Phase.explain))
 PROFILE = settings.get_profile(os.environ.get("LCM_HYPOTHESIS_PROFILE", "ci"))
@@ -42,6 +42,7 @@ class EntityBridgeMachine(RuleBasedStateMachine):
         self.assertions = self.stack.enter_context(closing(AssertionStore(path)))
         self.store = self.stack.enter_context(closing(EntityStore(path, profile_key="A")))
         self.reference = self.stack.enter_context(closing(EntityStore(root / "reference.db", profile_key="A")))
+        self.independent = self.stack.enter_context(closing(EntityStore(root / "independent.db", profile_key="A")))
         self.api = importlib.import_module("hermes_lcm.entity_ops")
         self.ops = self.api.EntityOps(self.store)
         self.bridge = self.api, self.ops, self.store, self.messages, self.assertions
@@ -53,6 +54,9 @@ class EntityBridgeMachine(RuleBasedStateMachine):
         self.ops.add_alias(self.pins[0], "alex")
         self.sources, self.gates, self.seen, self.message_bytes = [], {}, {}, {}
         self.evaluated = set()
+        self.resolved_at_rebuild = set()
+        self.oracle_stamp = None
+        self.setup_event_id = self.store.events_after()[-1]["event_id"]
 
     def teardown(self):
         self.stack.close()
@@ -74,6 +78,7 @@ class EntityBridgeMachine(RuleBasedStateMachine):
                       for i, (_, source) in enumerate(self.sources)
                       if (g := outcomes[i % len(outcomes)]) is not None}
         self.api.rebuild_entity_keys(self.store, sender_lookup=self.gates.get)
+        self.check_rebuild_oracle(record_rebuild=True)
 
     @rule(key=st.sampled_from(KEYS), owner=st.integers(0, 2), member=st.integers(0, 1), scoped=st.booleans())
     def override(self, key, owner, member, scoped):
@@ -90,9 +95,47 @@ class EntityBridgeMachine(RuleBasedStateMachine):
 
     @rule(choice=CHOICE)
     def undo(self, choice):
-        events = [e for e in self.store.events_after() if e["op"] != "undo"]
+        events = self.undo_candidates()
         if events:
             self.attempt(lambda: self.ops.undo(events[choice % len(events)]["event_id"]))
+
+    def undo_candidates(self):
+        events = self.store.events_after()
+        undone = {e["target_event_id"] for e in events if e["op"] == "undo"}
+        return [e for e in reversed(events) if e["op"] != "undo"
+                and e["event_id"] > self.setup_event_id and e["event_id"] not in undone][:8]
+
+    @rule(key=st.sampled_from(KEYS[:2]), owner=st.integers(0, 1), member=st.integers(0, 1),
+          failure=st.sampled_from(("none", "unverified", "reported", "dropped")))
+    def g1_cycle(self, key, owner, member, failure):
+        """Generate the entire G1 family without waiting for rare rule interleavings."""
+        sender = self.owners[owner]
+        self.publish_key(key)
+        self.gates[self.sources[-1][1]] = (sender, True, True)
+        self.rebuild_current_gates()
+        before = len(self.store.events_after())
+        self.override(key, owner + 1, member, False)
+        if len(events := self.store.events_after()) == before:
+            return  # Alias ambiguity or an unavailable canonical entity is a typed refusal.
+        event_id = events[-1]["event_id"]
+        self.publish_key(key)
+        source = self.sources[-1][1]
+        self.gates[source] = (sender, True, True)
+        self.rebuild_current_gates()
+        self.attempt(lambda: self.ops.undo(event_id))
+        self.fresh_rebuild_oracle()
+        if failure != "none":
+            self.gates.pop(source)
+            if failure != "dropped":
+                self.gates[source] = (sender, failure != "unverified", failure != "reported")
+            self.rebuild_current_gates()
+        self.override(key, owner + 1, 1 - member, False)
+        self.fresh_rebuild_oracle()
+
+    def rebuild_current_gates(self):
+        self.evaluated = {source for _, source in self.sources}
+        self.api.rebuild_entity_keys(self.store, sender_lookup=self.gates.get)
+        self.check_rebuild_oracle(record_rebuild=True)
 
     @rule(owner=st.integers(0, 1), member=st.integers(0, 1), remove=st.booleans())
     def relation_alias(self, owner, member, remove):
@@ -139,21 +182,74 @@ class EntityBridgeMachine(RuleBasedStateMachine):
     @precondition(lambda self: bool(self.sources))
     @invariant()
     def fresh_rebuild_oracle(self):
-        # SQLite backup, not a second live connection to the candidate. Reuse one
-        # reference DB per example so nightly does not retain thousands of stores.
-        self.store.connection.backup(self.reference.connection)
-        self.api.rebuild_entity_keys(self.reference, sender_lookup=self.gates.get)
-        for key, source in self.sources:
-            for owner in (None, *self.owners):
-                answer = self.answer(self.store, key, source, owner)
-                expected = self.answer(self.reference, key, source, owner)
-                assert answer is None or answer == expected, (key, source, owner, answer, expected, self.gates)
+        self.check_rebuild_oracle()
+
+    def check_rebuild_oracle(self, record_rebuild=False):
+        stamp = self.oracle_inputs()
+        if not record_rebuild and stamp == self.oracle_stamp:
+            return  # Every fixture writer and sender/source input is unchanged.
+        events = self.store.events_after()
+        undone = {e["target_event_id"] for e in events if e["op"] == "undo"}
+        overridden = {(p["subject_key"], p["owner_entity_id"]) for e in events
+                      if e["op"] == "override_key" and e["event_id"] not in undone
+                      for p in [json.loads(e["payload_json"])["override"]]}
+        resolved = set()
+        observed = {(key, source, owner): self.answer(self.store, key, source, owner)
+                    for key, source in self.sources for owner in (None, *self.owners)}
+        for label, reference in (("copied", self.reference), ("empty-index", self.independent)):
+            # Only disposable reference copies lose derived rows. Curated entities,
+            # aliases, assertions and override/undo events remain the same inputs.
+            self.store.connection.backup(reference.connection)
+            if reference is self.independent:
+                reference.connection.execute("DELETE FROM lcm_entity_keys")
+                reference.connection.commit()
+            self.api.rebuild_entity_keys(reference, sender_lookup=self.gates.get)
+            view = self.api.resolved_view(reference) if record_rebuild else None
+            for key, source in self.sources:
+                for owner in (None, *self.owners):
+                    answer = observed[key, source, owner]
+                    expected = self.answer(reference, key, source, owner)
+                    detail = (label, key, source, owner, answer, expected, self.gates)
+                    assert answer is None or answer == expected, ("safety", detail)
+                    if record_rebuild and expected is not None and (
+                            key.partition(":")[0] in {"user", "assistant"} or
+                            len(self.api._key_candidates(view, key, owner)) == 1):
+                        resolved.add((key, owner))
+                    # R5-Q: ambiguity at the last rebuild admits no sender fact.
+                    # Safety remains strict even for those unadmitted slots.
+                    if (key, owner) not in overridden and expected is not None and (
+                            record_rebuild or (key, owner) in self.resolved_at_rebuild):
+                        assert answer == expected, ("liveness", detail)
+        if record_rebuild:
+            self.resolved_at_rebuild = resolved
+        self.oracle_stamp = self.oracle_inputs()
+
+    def oracle_inputs(self):
+        return (tuple(s.connection.total_changes for s in (self.store, self.messages, self.assertions)),
+                tuple(self.sources), tuple(sorted(self.gates.items())), frozenset(self.resolved_at_rebuild))
+
 
 
 def test_entity_bridge_stateful(tmp_path):
     check_default_off(tmp_path / "default-off")
     sequence = iter(range(PROFILE.max_examples * 1000))
     run_state_machine_as_test(lambda: EntityBridgeMachine(tmp_path / f"example-{next(sequence)}"), settings=PROFILE)
+
+
+@pytest.mark.parametrize("key", KEYS[:2])
+@pytest.mark.parametrize("failure", ["none", "unverified", "reported", "dropped"])
+def test_forced_g1_cycle(tmp_path, key, failure):
+    """The generated macro's deterministic seed includes the no-rebuild sibling."""
+    machine = EntityBridgeMachine(tmp_path / "forced")
+    try:
+        machine.g1_cycle(key, 0, 0, failure)
+        events = machine.store.events_after()
+        assert [e["op"] for e in events if e["event_id"] > machine.setup_event_id] == [
+            "override_key", "undo", "override_key"]
+        assert all(e["event_id"] > machine.setup_event_id for e in machine.undo_candidates())
+        machine.retained_rows_and_default_off_bytes()
+    finally:
+        machine.teardown()
 
 
 def test_scoped_override_after_empty_rebuild_cites_only_named_source_and_owner(bridge):
@@ -176,3 +272,57 @@ def test_scoped_override_after_empty_rebuild_cites_only_named_source_and_owner(b
     assert api.resolve_key(store, "person:sister", source) is None
     rebuild(bridge, sender_lookup={}.get)
     assert api.resolve_key(store, "person:sister", source, owner_entity_id=owner) == pin
+
+
+@pytest.mark.parametrize("case", ["last-support-retired", "ambiguity-removed"])
+def test_r5q_relation_alias_safety_and_rebuild_liveness(tmp_path, case):
+    """F1 is immediate; previously ambiguous F2 waits for admitted sender evidence."""
+    machine = EntityBridgeMachine(tmp_path / "r5p")
+    try:
+        machine.g1_cycle("person:sister", 0, 0, "none")
+        if case == "last-support-retired":
+            machine.g1_cycle("person:sister", 0, 0, "none")
+            machine.relation_alias(1, 1, True)
+            machine.relation_alias(0, 0, True)
+            for _, source in machine.sources:
+                assert machine.answer(machine.store, "person:sister", source, machine.owners[0]) is None
+        else:
+            machine.relation_alias(1, 0, False)
+            machine.g1_cycle("person:sister", 1, 0, "none")
+            machine.relation_alias(1, 0, True)
+            source = machine.sources[-1][1]
+            assert machine.answer(machine.store, "person:sister", source, machine.owners[1]) is None
+            machine.fresh_rebuild_oracle()
+            machine.rebuild_current_gates()
+            assert machine.answer(machine.store, "person:sister", source, machine.owners[1]) == machine.targets[1]
+            machine.gates.pop(source)
+            machine.rebuild_current_gates()
+            assert machine.answer(machine.store, "person:sister", source, machine.owners[1]) is None
+        machine.fresh_rebuild_oracle()
+        machine.retained_rows_and_default_off_bytes()
+    finally:
+        machine.teardown()
+
+
+def test_r5q_scoped_override_does_not_admit_an_ambiguous_slot(tmp_path):
+    machine = EntityBridgeMachine(tmp_path / "ambiguous-scoped")
+    try:
+        key, owner = "person:sister", machine.owners[0]
+        machine.relation_alias(0, 1, False)
+        machine.publish_key(key)
+        source = machine.sources[-1][1]
+        machine.gates[source] = (owner, True, True)
+        machine.rebuild_current_gates()
+        machine.override(key, 1, 0, True)
+        event = machine.store.events_after()[-1]["event_id"]
+        machine.rebuild_current_gates()
+        assert (key, owner) not in machine.resolved_at_rebuild
+        machine.ops.undo(event)
+        machine.relation_alias(0, 1, True)
+        assert machine.answer(machine.store, key, source, owner) is None
+        machine.fresh_rebuild_oracle()
+        machine.rebuild_current_gates()
+        assert machine.answer(machine.store, key, source, owner) == machine.targets[0]
+        machine.retained_rows_and_default_off_bytes()
+    finally:
+        machine.teardown()
