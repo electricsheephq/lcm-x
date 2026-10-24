@@ -7079,6 +7079,37 @@ class LCMEngine(
                 # An explicit carrier already has the engine uid, not its user's.
                 result[index] = {**result[index], "_retained_message_uid": target[matched].get("message_uid")}
             matched += 1
+        # #1837: keep the sliced map's legacy coverage. Complete-list salvage
+        # may expose a missing row, but only two differing known UIDs can add
+        # occurrence evidence; unknown/equal metadata must not widen suppression.
+        missing_uid_indexes = {
+            idx for idx, message in enumerate(messages[:cursor])
+            if idx not in result and self._host_occurrence_metadata(message)["message_uid"] is not None
+        }
+        # A cursor at the list end re-walks identical identities: nothing to add,
+        # so skip the second projection and its store reads (frozen traces).
+        if missing_uid_indexes and cursor < len(messages):
+            projection, identities = self._occurrence_replay_identities(messages, proof)
+            matched = 0
+            snapshot = proof.get("output_metadata", ())
+            for index, identity in enumerate(identities[:cursor]):
+                if identity is None:
+                    continue
+                digest = _commit_proof_identity_digest(_proof_user_identity(identity))
+                while matched < len(target) and target[matched]["identity_sha256"] != digest:
+                    matched += 1
+                if matched == len(target):
+                    break
+                entry = projection.entries[index]
+                output_index = entry.output_index
+                previous = (snapshot[output_index] if entry.generated_span is not None
+                            and output_index is not None and output_index < len(snapshot)
+                            else target[matched])
+                uid = self._host_occurrence_metadata(messages[index])["message_uid"]
+                old_uid = previous.get("message_uid")
+                if index in missing_uid_indexes and _valid_uid(old_uid) and uid != old_uid:
+                    result[index] = previous
+                matched += 1
         return result
 
     def _ingest_messages(
@@ -7121,6 +7152,7 @@ class LCMEngine(
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
         new_prefix_occurrences = set()
+        occurrence_metadata = {}
         unchanged_prefix_occurrences = set()
         proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.
         accepted_compaction_prefix = 0
@@ -7165,6 +7197,7 @@ class LCMEngine(
                 # Content proves position, but a known metadata conflict proves
                 # a new occurrence. Use the output snapshot, not the input cache.
                 proven_cursor = self._ingest_cursor
+                occurrence_metadata = dict(enumerate(proof.get("output_metadata", ())))
                 new_prefix_occurrences = {
                     idx for idx, previous in enumerate(proof.get("output_metadata", ()))
                     if self._host_occurrence_changed(messages[idx], previous)
@@ -7192,6 +7225,7 @@ class LCMEngine(
                 if remapped is not None:
                     proven_cursor = remapped
                     metadata = self._remapped_output_metadata(messages, proof, remapped)
+                    occurrence_metadata = metadata
                     new_prefix_occurrences = {
                         idx for idx, previous in metadata.items()
                         if self._host_occurrence_changed(messages[idx], previous)
@@ -7273,6 +7307,7 @@ class LCMEngine(
             proven_cursor = self._cursor_from_durable_commit_proof(reconcile_messages) if durable else None
             if proven_cursor is not None:
                 metadata = self._remapped_output_metadata(messages, durable, min(cursor, proven_cursor))
+                occurrence_metadata = metadata
                 new_prefix_occurrences = {
                     idx for idx, previous in metadata.items()
                     if self._host_occurrence_changed(messages[idx], previous)
@@ -7349,6 +7384,28 @@ class LCMEngine(
                         unchanged_prefix_occurrences.update(idx for idx in unknown if idx < (proven_cursor or 0))
                     else:
                         unchanged_prefix_occurrences.difference_update(unknown)
+        if accepted_compaction_prefix or reconciled_existing_session:
+            # A positively new result UID reopens its entire issuing segment.
+            # Collect every parallel result before deciding, including siblings
+            # after the changed result. Timestamp-only retries keep BASE rules.
+            known_uid_changes = {
+                idx for idx in new_prefix_occurrences
+                if (uid := self._host_occurrence_metadata(messages[idx])["message_uid"]) is not None
+                and _valid_uid(old_uid := occurrence_metadata.get(idx, {}).get("message_uid"))
+                and uid != old_uid
+            }
+            for call_index, message in enumerate(messages):
+                if str(message.get("role") or "") != "assistant" or not message.get("tool_calls"):
+                    continue
+                end = call_index + 1
+                while end < n and str(messages[end].get("role") or "") == "tool":
+                    end += 1
+                if not any(idx in known_uid_changes for idx in range(call_index + 1, end)):
+                    continue
+                segment = set(range(call_index, end))
+                new_prefix_occurrences.update(segment)
+                replayed_tool_segment_indexes.difference_update(segment)
+                cursor = self._ingest_cursor = min(cursor, call_index)
         unchanged_prefix_occurrences -= new_prefix_occurrences
         anchor_plan = None
         unaudited_from = None
