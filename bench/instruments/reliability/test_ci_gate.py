@@ -1,7 +1,7 @@
 """#1588 exact-cell gate promotions; no host process or message payloads needed."""
 import pytest
 
-from bench.instruments.reliability import cells, ci
+from bench.instruments.reliability import cells, ci, report
 
 
 def rows_for(cell, host, transport, failed):
@@ -70,3 +70,52 @@ def test_promoted_failure_attribution_and_bar_scope(failed):
     cell = "overflow-recovery-restart/in-place"
     problems = ci.gate(rows_for(cell, "upstream-uid", "in-process", failed), set())
     assert bool(problems) is (not failed)
+
+
+PERSISTENT = "publication-failure/rotation-child-persistent"
+
+
+@pytest.mark.parametrize("open_issues", [{1797}, set()])
+@pytest.mark.parametrize("numbers", [None, {}, {"B2": {}}, {"B2": {"deficit_rows": 1, "surplus_rows": 28}}])
+def test_persistent_b2_deficit_or_missing_receipt_gates(numbers, open_issues):
+    rows = rows_for(PERSISTENT, "fixture", "in-process", ["B2"])
+    row = next(r for r in rows if r["cell"] == PERSISTENT)
+    if numbers is not None:
+        row["numbers"] = numbers
+    problems = ci.gate(rows, open_issues)
+    assert len(problems) == 1 and "uncovered bars ['B2D']" in problems[0]
+
+
+@pytest.mark.parametrize("failed", [["B2"], ["B1", "B2"], ["B1"]])
+@pytest.mark.parametrize("open_issues", [{1797}, set()])
+def test_persistent_surplus_and_b1_never_gate(failed, open_issues):
+    rows = rows_for(PERSISTENT, "fixture", "in-process", failed)
+    next(r for r in rows if r["cell"] == PERSISTENT)["numbers"] = {
+        "B2": {"deficit_rows": 0, "surplus_rows": 28}}
+    assert ci.gate(rows, open_issues) == []
+
+
+def test_persistent_b1_alone_needs_no_b2_receipt():
+    assert ci.gate(rows_for(PERSISTENT, "fixture", "in-process", ["B1"]), set()) == []
+
+
+def test_persistent_deficit_gate_is_in_process_only():
+    assert ci.gate(rows_for(PERSISTENT, "fixture", "acp-process", ["B2"]), set()) == []
+
+
+def test_existing_b2_declaration_still_excuses_a_deficit():
+    cell = "baseline/in-place/acp"
+    rows = rows_for(cell, "fixture", "in-process", ["B2"])
+    next(r for r in rows if r["cell"] == cell).update(
+        targets=[7], numbers={"B2": {"deficit_rows": 1}})
+    assert "B2" in cells.ISSUES[7][0]
+    assert len(ci.gate(rows, set())) == 1
+    assert ci.gate(rows, {7}) == []
+
+
+@pytest.mark.parametrize("deficit,view", [(0, "PASS"), (1, "FAIL")])
+def test_b2_signature_reports_deficit_view_with_surplus(deficit, view):
+    signature = report.signature({"verdict": "FAIL", "failed_bars": {"B2": {}},
+                                  "numbers": {"B2": {"deficit_rows": deficit, "surplus_rows": 28}}})
+    assert f"surplus/deficit=28/{deficit}" in signature
+    assert f"deficit-only {view}" in signature

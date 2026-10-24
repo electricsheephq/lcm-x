@@ -1063,11 +1063,12 @@ def test_r2a4_reports_licences_visibly(tmp_path):
     assert "lcm [3, 7] host rows [3, 7]" in im and "tags T02" in im
 
 
-def test_r2a4_541_gate_cell_injects_once_and_the_persistent_cell_is_data():
+def test_r2a4_541_gate_cell_injects_once_and_the_persistent_cell_gates_deficits():
     by = {c["id"]: c for c in cells.select("publication-failure/*")}
     once, always = by["publication-failure/rotation-child"], by["publication-failure/rotation-child-persistent"]
     assert not once["faults"][0].get("persistent") and always["faults"][0]["persistent"] and always["targets"] == [1797]
-    assert ci.in_gate_set(once["id"]) and not ci.in_gate_set(always["id"])
+    assert ci.in_gate_set(once["id"]) and ci.in_gate_set(always["id"])
+    assert ci.CELL_GATE[always["id"]] == ("in-process", ("B2D",))
     for transport in (None, "acp-process"):
         assert always["id"] in ci.expected_cells(transport)
     src = Path(probe.__file__).read_text()

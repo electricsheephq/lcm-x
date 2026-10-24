@@ -23,7 +23,7 @@ G_REL_1 = ("baseline", "acp-trailing", "preflight-continue", "repeat-identical-r
            "pressure-disagreement", "lcm-tool-mid-turn", "parallel-tool-group", "crash-", "gateway-second-restart",
            "cancel-retry", "publication-failure")
 # Data cells inside a gate family that never gate (still expected rows for completeness).
-NON_GATE = ("publication-failure/rotation-child-persistent", "drain/hidden-backlog/in-place", "drain/hidden-backlog/rotation",
+NON_GATE = ("drain/hidden-backlog/in-place", "drain/hidden-backlog/rotation",
             "stop-after-tool/no-retry/in-place",
             "drain/hidden-backlog-large/in-place", "drain/hidden-backlog-large/rotation",
             *(f"continuity/{shape}/{mode}" for shape in
@@ -31,6 +31,8 @@ NON_GATE = ("publication-failure/rotation-child-persistent", "drain/hidden-backl
               for mode in ("in-place", "rotation")))
 # #1588: exact cells, transport and bars proven by nightly 39539195029; never whole families.
 CELL_GATE = {
+    # #1900 / #1588: permanent loss gate; accepted surplus and B1 multiplicity never gate.
+    "publication-failure/rotation-child-persistent": ("in-process", ("B2D",)),
     **{f"continuity/forced-compaction-then-turn/{m}": ("acp-process", ("B1", "B2", "B3", "B4", "B8", "F4"))
        for m in ("in-place", "rotation")},
     **{f"native-on-off/{v}/in-place": ("in-process", ("B3", "B4", "B8")) for v in ("v0.23.3", "v0.24.3")},
@@ -123,6 +125,11 @@ def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[di
                 lane, bars = CELL_GATE[r["cell"]]
                 if transport != lane:
                     continue
+                if "B2D" in bars and "B2" in failed:
+                    b2 = (r.get("numbers") or {}).get("B2") or {}
+                    deficit = b2.get("deficit_rows")
+                    if deficit is None or deficit > 0:
+                        failed.add("B2D")
                 if failed:
                     failed &= set(bars) | ({"B9"} if lane == "acp-process" and r["host"] == "upstream-uid" else set())
                     if not failed:
