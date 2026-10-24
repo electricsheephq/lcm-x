@@ -99,6 +99,26 @@ def observe(emit, seam, action):
                 pass
 
 
+def trace_final_tail(etype, is_final):
+    """Observe the engine's actual boundary; never recompute it outside its invocation."""
+    original = getattr(etype, "_fresh_tail_boundary", None)
+    if original is None:
+        return  # older products without the seam cannot provide drained proof
+    def traced(self, messages, *args, **kwargs):
+        boundary = original(self, messages, *args, **kwargs)
+        if is_final():
+            def record():
+                observations = getattr(self, "_probe_tail_observations", [])
+                observations.append({"session": self._session_id, "boundary": dict(vars(boundary)),
+                                     "rows": [{"role": m.get("role"), "sha256": hashlib.sha256(
+                                         str(m.get("content") or "").encode()).hexdigest()} for m in messages]})
+                self._probe_tail_observations = observations
+            observe(lambda **kw: setattr(self, "_probe_tail_observations", [{"error": "unobserved"}]),
+                    "final_tail", record)
+        return boundary
+    etype._fresh_tail_boundary = traced
+
+
 def trace_occurrences(etype, emit, context):
     """Observe actual engine ingress without changing arguments, return values or exceptions."""
     def carriers(engine, messages):
@@ -682,6 +702,7 @@ def main():
             return None
 
     etype = type(engine)
+    trace_final_tail(etype, lambda: cur["final"])
     trace_occurrences(etype, event, lambda: {"turn": cur["turn"], "session_prefix": cur["prefix"]})
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
     orig_start, orig_end = etype.on_session_start, getattr(etype, "on_session_end", None)
@@ -1177,6 +1198,7 @@ def final_check(agent, history, buf):
         entry = "_compress_context(force=True)"
     for _ in range(2):
         before, rec = buf.getvalue().count("publication_invariant_conflict"), {}
+        engine._probe_tail_observations = []
         calls0 = getattr(engine, "_probe_calls", 0)
         saved = getattr(agent, "_session_db", None)
         try:
@@ -1199,6 +1221,8 @@ def final_check(agent, history, buf):
         rec["engine_calls"] = getattr(engine, "_probe_calls", 0) - calls0  # a compress() inside THIS invocation
         rec["engine_status"] = getattr(engine, "_probe_status", None) if rec["engine_calls"] else None
         rec["noop_reason"] = getattr(engine, "last_compression_noop_reason", getattr(engine, "_last_compression_noop_reason", None))
+        rec["session"] = getattr(engine, "_session_id", None)
+        rec["tail_observations"] = engine._probe_tail_observations
         rec["rejection"] = rejection(engine)
         rec["conflicts"] = buf.getvalue().count("publication_invariant_conflict") - before
         attempts.append(rec)
