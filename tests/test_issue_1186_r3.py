@@ -136,10 +136,12 @@ def test_cpu_limited_default_still_arms_maintenance(default_engine, monkeypatch)
     monkeypatch.setattr(tools, "effective_cpus", lambda: 1)
     assert tools.default_semantic_cpu_limited(default_engine._config)
     scheduled, prepared = [], []
-    monkeypatch.setattr(maintenance, "start_local_model_prepare", lambda *args, **kwargs: prepared.append(args))
-    monkeypatch.setattr(engine_mod._EMBEDDING_MAINTENANCE_SCHEDULER, "schedule",
-                        lambda *args, **kwargs: scheduled.append((args, kwargs)))
-    default_engine._schedule_embedding_maintenance()
+    # Restore before conftest's own model-preparation isolation context exits.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(maintenance, "start_local_model_prepare", lambda *args, **kwargs: prepared.append(args))
+        patch.setattr(engine_mod._EMBEDDING_MAINTENANCE_SCHEDULER, "schedule",
+                      lambda *args, **kwargs: scheduled.append((args, kwargs)))
+        default_engine._schedule_embedding_maintenance()
     assert prepared and scheduled
     assert scheduled[0][0][0][1] == "embeddings"
     assert default_engine._config.embeddings_enabled is True
