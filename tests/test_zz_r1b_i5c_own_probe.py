@@ -46,3 +46,14 @@ def test_override_after_retire_cites_no_stale_source(bridge):
     assert cited in ([], [[]]), f"o1 override cites stale sources {cited} (a={a})"
     rebuild(bridge, sender_lookup={a: (o1, False, True), b: (o2, True, True)}.get)
     assert api.resolve_key(store, "person:sister", a, owner_entity_id=o1) != pin
+
+
+def test_repeated_empty_override_cannot_revive_retired_owner_evidence(bridge):
+    api, ops, store, o1, o2, s1, s2, a, b = _setup(bridge)
+    rebuild(bridge, sender_lookup={a: (o1, False, True), b: (o2, True, True)}.get)
+    pin = ops.create_entity("pinned")
+    for _ in range(2):
+        ops.override_key("person:sister", pin, owner_entity_id=o1)
+        payload = json.loads(store.events_after()[-1]["payload_json"])["override"]
+        assert payload["scope_store_ids"] == []
+        assert api.resolve_key(store, "person:sister", a, owner_entity_id=o1) is None
