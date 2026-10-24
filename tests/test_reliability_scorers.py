@@ -1291,6 +1291,42 @@ def test_b4_witnessed_drained_store_passes(tmp_path):
     assert proof["stored_ids"] == [1, 2, 3, 4, 5, 6]
 
 
+@pytest.mark.parametrize("duplicate", ["prefix", "tail"])
+def test_b4_drained_input_duplicate_is_invalid(tmp_path, duplicate):
+    final = drained_final()
+    observed = final["tail_observations"][0]
+    # Prefix case: id 4 is uncovered at index 3; its unstored copy cannot protect it.
+    # Tail case: two observed copies cannot both identify the single stored id 5.
+    observed["rows"].append(dict(observed["rows"][3 if duplicate == "prefix" else 4]))
+    observed["boundary"]["count"] = 3
+    final["tail_observations"] = [observed]
+    nodes = [[1, 2, 3]] if duplicate == "prefix" else [[1, 2, 3, 4]]
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), nodes=nodes,
+               phase={"final_check": final}, bars=["B4"])
+    assert out["verdict"] == "INCONCLUSIVE"
+    assert out["numbers"]["B4"]["coverage"]["valid"] is False
+
+
+@pytest.mark.parametrize("duplicate_prefix", [False, True])
+def test_b4_drained_unmatched_tail_duplicate_preserves_pass(tmp_path, duplicate_prefix):
+    final = drained_final()
+    observed = final["tail_observations"][0]
+    unmatched = {"role": "assistant", "sha256": hashlib.sha256(b"unstored input").hexdigest()}
+    observed["rows"].append(unmatched)
+    if duplicate_prefix:
+        observed["rows"].insert(0, dict(unmatched))
+        observed["boundary"]["start"] += 1
+    observed["boundary"]["count"] = 3
+    final["tail_observations"] = [observed]
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), nodes=[[1, 2, 3, 4]],
+               phase={"final_check": final}, bars=["B4"])
+    assert out["verdict"] == "PASS"
+    proof = out["numbers"]["B4"]["coverage"]
+    assert proof["valid"] is True
+    assert proof["covered_ids"] == [1, 2, 3, 4]
+    assert proof["protected_ids"] == [5, 6] and proof["uncovered_ids"] == []
+
+
 @pytest.mark.parametrize("broken", ["uncovered", "absent", "unobserved", "different", "lineage",
                                   "wrong_session", "ambiguous", "count", "calls", "reason", "rejection"])
 def test_b4_drained_proof_fails_closed(tmp_path, broken):

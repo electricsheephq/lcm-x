@@ -217,10 +217,12 @@ def drained_coverage(final, stored, nodes, group):
             if not ids or any(type(i) is not int or i not in raw for i in ids):
                 return proof
             covered.update(ids)
+        non_tail = Counter((row["role"], row["sha256"]) for row in rows[:start])
         for row in rows[start:]:
             matches = [i for i, (_s, role, content) in raw.items() if role == row["role"]
                        and hashlib.sha256((content or "").encode()).hexdigest() == row["sha256"]]
-            if len(matches) > 1:
+            if len(matches) > 1 or (matches and (non_tail[(row["role"], row["sha256"])]
+                                                or matches[0] in protected)):
                 return proof
             protected.update(matches)
         proof.update(stored_ids=sorted(raw), covered_ids=sorted(covered), protected_ids=sorted(protected),
