@@ -175,6 +175,7 @@ EXTRA_CONFIG_ROWS = (
 # from_env has validation after the primitive reader for these fields.
 SPECIAL = {
     "embeddings_enabled": FLAG,  # R3: unset local ON; invalid/blank stays OFF.
+    "embedding_provider": (D, D, *VALUES[2:]),  # R4: blank provider follows unset local default.
     "recall_delivery_unit": ("hits",) * 16,
     "fresh_tail_max_tokens": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, HUGE),
     "leaf_target_ratio": (D, D, D, D, 1.0, D, D, D, D, D, D, D, D, D, 0.5, D),

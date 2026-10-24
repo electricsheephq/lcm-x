@@ -9212,6 +9212,10 @@ class LCMEngine(
         if not getattr(config, "embeddings_enabled", False):
             return None
         provider_override = str(getattr(config, "proactive_recall_provider", "") or "").strip()
+        if (provider_override.lower() not in {"", "fastembed", "fast-embed"}
+                and not (getattr(config, "embeddings_enabled_explicit", False)
+                         and getattr(config, "_embeddings_enabled_supplied", True))):
+            return None
         if not provider_override and lcm_tools.default_semantic_cpu_limited(config):
             return None
 

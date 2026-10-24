@@ -137,7 +137,20 @@ def start_local_model_prepare(
             target=profile_bound(_prepare_local_model), args=(key, db_path, config),
             name="lcm-embedding-prepare", daemon=True,
         )
-        _PREPARE_THREAD.start()
+        try:
+            _PREPARE_THREAD.start()
+        except Exception:
+            _PREPARE_THREAD = None
+            if state is None:
+                _PREPARE.pop(key, None)
+            else:
+                _PREPARE[key] = state
+            if not attempts:
+                _PREPARE_RETRY.pop(key, None)
+            else:
+                _PREPARE_RETRY[key] = (attempts, retry_at)
+            logger.warning("LCM local model prepare could not start; retrieval uses full text", exc_info=True)
+            return False
     return True
 
 
@@ -251,19 +264,21 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any, slice_state=None) 
     provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
     local = embedding_provider_id(provider) == "fastembed"
     sliced = local and slice_state is not None
+    read_conn = command._embedding_read_connection(db_path)
+    try:
+        profile = command._embedding_current_profile(read_conn)
+        if (local and not getattr(config, "embeddings_enabled_explicit", True) and profile is not None
+                and embedding_provider_id(str(profile["provider"])) != "fastembed"):
+            return f"profile_held:{profile['provider']}", None
+        no_profile = profile is None or (local and command._chunk_current_profile(read_conn) is None)
+    finally:
+        read_conn.close()
     state = local_model_state(config) if local else None
     if state is not None and state[0] == "preparing":
         return "model_preparing", None
     if state is not None and state[0] == "unavailable":
         attempts = _PREPARE_RETRY.get(_local_model_key(config), (0, 0.0))[0]
         return ("model_prepare_exhausted" if attempts >= 6 else "model_unavailable"), None
-    read_conn = command._embedding_read_connection(db_path)
-    try:
-        no_profile = command._embedding_current_profile(read_conn) is None
-        # Registration commits each profile separately; finish a partial one.
-        no_profile = no_profile or (local and command._chunk_current_profile(read_conn) is None)
-    finally:
-        read_conn.close()
     if no_profile:
         if not local:
             return "no_profile", None  # `/lcm embed warmup` has not run yet

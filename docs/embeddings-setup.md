@@ -7,6 +7,8 @@ model stays empty: only FastEmbed supplies this built-in default. An explicit
 the historical missing-provider rejection and stays inert when enable is unset.
 Non-local providers (including Ollama) require `LCM_EMBEDDINGS_ENABLED=true` and
 their own explicit model, retaining their privacy and consent requirements.
+This consent rule also applies to a non-local proactive recall override and to
+programmatic constructors; an omitted enable boolean never consents to cloud use.
 Unrecognized enable values resolve OFF with a warning. The ignored config.yaml
 key `lcm.embeddings_enabled` does not opt out; use `LCM_EMBEDDINGS_ENABLED=false`.
 Set `LCM_EMBEDDINGS_ENABLED=false` to opt out: no provider load or model download,
@@ -107,6 +109,9 @@ actual coverage. Full-text coverage of `none` is not a successful fallback.
 with separate summary coverage and chunk coverage/backlog. Model ready does not
 mean index ready. Manual `/lcm embed warmup` and `/lcm embed backfill --apply`
 remain operator tools, rather than prerequisites for the default local path.
+An existing cloud profile stays held when returning to the local default. Doctor
+names its provider: restore that provider's settings with `LCM_EMBEDDINGS_ENABLED=true`,
+or switch to the local model with `/lcm embed warmup`. Existing vectors stay intact.
 Queries use the model's query-specific encoding (distinct from document encoding) so query/passage asymmetry is
 preserved. When `LCM_EMBEDDINGS_ENABLED=false`, `warmup` is inert: it does not resolve a provider,
 download a model, create embedding tables, or create the configured database.

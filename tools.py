@@ -1813,10 +1813,13 @@ def _lcm_embedding_query_metric(provider: Any) -> dict[str, Any]:
 def _lcm_grep_resolve_provider(
     engine: "LCMEngine", *, deadline: float | None = None
 ) -> Any:
-    from .embedding_maintenance import local_model_state
+    from .embedding_maintenance import local_model_state, start_local_model_prepare
 
     config = engine._config
     state = local_model_state(config)
+    if state is None and embedding_provider_id(normalize_embedding_provider(config.embedding_provider)) == "fastembed":
+        start_local_model_prepare(engine._store.db_path, config)
+        raise RuntimeError("local embedding model is preparing; retrieval uses full text")
     if state is not None and state[0] in {"preparing", "unavailable"}:
         reason = f" ({state[1]})" if state[1] else ""
         raise RuntimeError(f"local embedding model is {state[0]}{reason}; retrieval uses full text")
@@ -3479,6 +3482,12 @@ def _lcm_recall_catchup_reason(engine, provider, task: str) -> str | None:
         conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True, timeout=0.05)
         try:
             expected = getattr(provider, "identity_revision_suffix", "")
+            held = conn.execute("SELECT provider FROM lcm_embedding_profile WHERE active=1 AND archived_at IS NULL "
+                                "AND task IN ('summary', 'summary+prefix') LIMIT 1").fetchone()
+            if (embedding_provider_id(provider.provider_id) == "fastembed" and held
+                    and not getattr(engine._config, "embeddings_enabled_explicit", True)
+                    and embedding_provider_id(str(held[0])) != "fastembed"):
+                return f"store's profile belongs to {held[0]}"
             if (_lcm_embedding_profile_revision(conn, provider=provider.provider_id, model=provider.model_id, task=task, revision_suffix=None) is not None
                     and _lcm_embedding_profile_revision(conn, provider=provider.provider_id, model=provider.model_id, task=task, revision_suffix=expected) is None):
                 return _EMBEDDING_PREFIX_STALE_REASON
@@ -4115,12 +4124,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                          if active and (reason := _lcm_recall_catchup_reason(engine, selected, task))]
         probe, state = probe_provider_availability(selected_config), local_model_state(selected_config)
         if not probe.get("available"):
-            local_fallback_reasons.append(f"local dependency unavailable: {probe.get('detail')}")
+            local_fallback_reasons.insert(0, f"local dependency unavailable: {probe.get('detail')}")
         elif state is None:
             start_local_model_prepare(engine._store.db_path, selected_config)
-            local_fallback_reasons.append("local model preparing")
+            local_fallback_reasons.insert(0, "local model preparing")
         elif state and state[0] != "present":
-            local_fallback_reasons.append(f"local model {state[0]}: {state[1]}")
+            local_fallback_reasons.insert(0, f"local model {state[0]}" + (f": {state[1]}" if state[1] else ""))
         run_fts = run_fts or bool(local_fallback_reasons)
 
     arm_hits: dict[str, list[dict[str, Any]]] = {}
@@ -4703,6 +4712,11 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
     }
     if embedding_provider_id(str(probe.get("provider") or "")) == "fastembed":
         detail["readiness"] = _embedding_readiness(engine, probe)
+        held = _lcm_recall_catchup_reason(engine, SimpleNamespace(provider_id="fastembed", model_id=probe.get("model")), "summary")
+        if held and held.startswith("store's profile belongs to "):
+            detail["reason"] = (f"{held}; restore that provider's settings with LCM_EMBEDDINGS_ENABLED=true, "
+                                "or switch to the local model with /lcm embed warmup")
+            return {"check": "embedding_provider_health", "status": "warn", "detail": detail}
     cpu_limited = default_semantic_cpu_limited(config)
     if cpu_limited:
         detail.update(cpu_limited=True, effective_cpus=effective_cpus(), cpu_limit_reason=(

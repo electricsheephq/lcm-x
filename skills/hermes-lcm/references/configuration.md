@@ -65,6 +65,9 @@ model remains empty; only fastembed supplies the effective default
 model-only input stays unconfigured. Non-local providers require an explicit
 model and `LCM_EMBEDDINGS_ENABLED=true`. Invalid enable values resolve OFF with a
 warning. config.yaml `lcm.embeddings_enabled` is ignored; use the environment key.
+Non-local proactive overrides also require explicit enablement. A held cloud
+profile requires restoring its settings with `LCM_EMBEDDINGS_ENABLED=true`, or
+switching to the local model with `/lcm embed warmup`; no automatic takeover occurs.
 Set `LCM_EMBEDDINGS_ENABLED=false` to opt out without loading/downloading a model.
 Preparation and catch-up run in the background; until ready, recall uses full
 text with `degraded=true`, the reason and actual coverage, including summaries-only requests.
