@@ -36,7 +36,8 @@ disclosure fields does not render** — the schema IS the seven-point standard
   home-relative paths starting with `~` are rejected for every row.
 - `superseded_by`: id of the successor row.
 - `supersedes`: list of old row IDs on a new `results.d` row. The loader applies `superseded_by: <new id>` in memory; legacy JSONL stays frozen and the old row strikes through as before.
-  Unknown IDs, self-reference, two different successors for one row, or disagreement with an existing `superseded_by` are errors.
+  Rendered as a list in the successor's disclosure. Unknown IDs, self-reference,
+  supersession cycles, two different successors for one row, or disagreement with an existing `superseded_by` are errors.
 
 ## Rules
 - Only the frozen 18 IDs in `generate.py`'s `LEGACY_ROW_IDS` (the registry at
@@ -54,6 +55,7 @@ disclosure fields does not render** — the schema IS the seven-point standard
 - Row PRs add only their row file and their own evidence; do NOT regenerate `SCOREBOARD.md`.
   Run `python -m bench.scoreboard.generate --pending`: missing source rows and supersession-only changes from unrendered successors are pending (exit 0); the old row is listed with its successor ID.
   Removed rows, other rendered-value changes, supersession mismatches with already-rendered successors, and mismatches not explained by supersession alone are stale (exit 2).
+  Each rendered ID must occur exactly once in the summary's Details cells and exactly once in the disclosures; duplicates are stale. Link-like text in other summary cells is not an ID reference.
   The release manager regenerates in a separate batched PR at a release/showcase step or any time, then requires strict `--check` equality.
 - Tier-F rows carry their fault-finding yield in `caveats`/`evidence` — a low
   number with its decomposition is a feature of this page, not an embarrassment.

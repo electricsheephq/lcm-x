@@ -9,6 +9,7 @@ import json
 import math
 import re
 import sys
+from collections import Counter
 from datetime import date
 from html import escape as html_escape, unescape as html_unescape
 from pathlib import Path, PureWindowsPath
@@ -233,7 +234,24 @@ def load_rows(path: str | Path = RESULTS_PATH) -> list[dict[str, Any]]:
             raise ScoreboardError(
                 f"row '{row['id']}' references missing successor '{successor}'"
             )
+    _validate_supersession_cycles(by_id)
     return rows
+
+
+def _validate_supersession_cycles(by_id: dict[str, dict[str, Any]]) -> None:
+    visited: set[str] = set()
+    for row_id in by_id:
+        chain: list[str] = []
+        positions: dict[str, int] = {}
+        current = row_id
+        while current is not None and current not in visited:
+            if current in positions:
+                cycle = chain[positions[current]:] + [current]
+                raise ScoreboardError(f"supersession cycle: {' -> '.join(cycle)}")
+            positions[current] = len(chain)
+            chain.append(current)
+            current = by_id[current].get("superseded_by")
+        visited.update(chain)
 
 
 def _row_files(source: Path) -> list[Path]:
@@ -305,11 +323,13 @@ def _render_summary(rows: Iterable[dict[str, Any]]) -> list[str]:
 def _render_disclosure(row: dict[str, Any]) -> list[str]:
     lines = [f"### <a id=\"{html_escape(row['id'], quote=True)}\"></a>{_inline(row['id'])}", ""]
     fields = list(REQUIRED_FIELDS) + (["superseded_by"] if "superseded_by" in row else [])
+    if "supersedes" in row:
+        fields.append("supersedes")
     if "local_raw" in row:
         fields.insert(fields.index("caveats"), "local_raw")
     for field in fields:
         lines.append(f"**{field}:**")
-        if field in ("evidence", "caveats", "local_raw"):
+        if field in ("evidence", "caveats", "local_raw", "supersedes"):
             values = row[field]
             lines.extend(f"- {_inline(item)}" for item in values or ["none"])
         else:
@@ -366,15 +386,23 @@ def pending(rows: list[dict[str, Any]], page: str) -> int:
     summary, marker, disclosures = page.partition("## Row disclosures\n\n")
     if not marker:
         raise ScoreboardError("page has no row disclosures")
-    blocks = re.finditer(r'(?ms)^### <a id="([^"]*)"></a>.*?(?=^### <a id="|\Z)', disclosures)
+    blocks = list(re.finditer(r'(?ms)^### <a id="([^"]*)"></a>.*?(?=^### <a id="|\Z)', disclosures))
     rendered = {html_unescape(block[1]): block[0].strip() for block in blocks}
-    summary_ids = set(re.findall(r"\[details\]\(#([^)]*)\)", summary))
-    page_ids = set(rendered) | summary_ids
+    disclosure_counts = Counter(html_unescape(block[1]) for block in blocks)
+    summary_ids: Counter[str] = Counter()
+    for line in summary.splitlines():
+        # A separator follows an even number of backslashes; escaped pipes
+        # belong to their cell. The sixth cell is Details in this fixed table.
+        cells = re.split(r"(?<!\\)(?:\\\\)*\|", line)
+        if line.startswith("|") and len(cells) == 8:
+            summary_ids.update(re.findall(r"\[details\]\(#([^)]*)\)", cells[6]))
+    page_ids = set(rendered) | set(summary_ids)
     source_ids = {row["id"] for row in rows}
     pending_ids, stale = source_ids - page_ids, page_ids - source_ids
 
     def matches(row: dict[str, Any]) -> bool:
-        return (rendered.get(row["id"]) == "\n".join(_render_disclosure(row)).strip()
+        return (disclosure_counts[row["id"]] == summary_ids[row["id"]] == 1
+                and rendered.get(row["id"]) == "\n".join(_render_disclosure(row)).strip()
                 and summary.splitlines().count(_render_summary([row])[-1]) == 1)
 
     for row in rows:
