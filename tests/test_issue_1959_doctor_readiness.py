@@ -62,6 +62,18 @@ def test_loaded_model_coverage_error_is_a_separate_issue(default_engine, monkeyp
     assert "Model ready" in text and "synthetic coverage read failure" in text
     line = next(line for line in text.splitlines() if line.startswith("embedding_readiness:"))
     assert line.count("summaries") == 1 and "maintenance" not in line
+    probe(monkeypatch, "preparing")
+    text = render_doctor(collect_doctor(default_engine))
+    assert "Local semantic recall preparing; full-text recall is active" in text
+    assert "synthetic coverage read failure" in text
+    probe(monkeypatch, "unavailable")
+    text = render_doctor(collect_doctor(default_engine))
+    assert "Local semantic recall unavailable (offline); full-text recall is active" in text
+    assert "synthetic coverage read failure" in text
+    probe(monkeypatch, "unavailable", available=False, reason="FastEmbed is not installed")
+    text = render_doctor(collect_doctor(default_engine))
+    assert "Local semantic recall unavailable (FastEmbed is not installed); full-text recall is active" in text
+    assert "synthetic coverage read failure" in text and companion_enable_command() in text
 
 
 def test_text_uses_three_spec_states(default_engine, monkeypatch):
