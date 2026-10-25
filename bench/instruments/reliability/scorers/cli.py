@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 from bench.instruments.reliability.scorers import bars, dupes, multiset  # noqa: E402
+from bench.instruments.reliability.run_matrix import unfired_reason  # noqa: E402
 
 
 def gauntlet_transcript(run: Path) -> list[tuple[str, str]]:
@@ -69,19 +71,42 @@ def main(argv=None) -> int:
     if a.plugin_tree is not None and not a.cell_dir:
         ap.error("--plugin-tree requires --cell-dir")
     if a.cell_dir:
+        if not (a.cell_dir / "cell.json").is_file():
+            ap.error("cannot re-score: no cell.json (pre-run cells have no scoring inputs)")
         cell = json.loads((a.cell_dir / "cell.json").read_text())
+        uploaded = json.loads((a.cell_dir / "verdict.json").read_text()) if (a.cell_dir / "verdict.json").is_file() else {}
+        if cell.get("stop_after_tool"):
+            ap.error("cannot re-score stop_after_tool: verdict requires in-memory stop-turn state")
+        if cell.get("id", "").startswith("continuity/") and (
+                "F4" in (uploaded.get("failed_bars") or {})
+                or str(uploaded.get("reason", "")).startswith("continuity F4:")
+                or (uploaded.get("verdict") == "FAIL" and not uploaded.get("failed_bars"))):
+            ap.error("cannot re-score continuity F4 decisions or continuity FAIL with no failed bars: in-memory state required")
+        if cell.get("transport") == "acp-process" or "acp_session" in uploaded:
+            if not uploaded.get("acp_session"):
+                ap.error("cannot re-score acp-process: verdict.json has no acp_session")
+            cell.update(chat_root=uploaded["acp_session"], transport=uploaded.get("transport") or "acp-process")
         if a.plugin_tree is not None:
             expected = cell["plugin"]["sha"]
+            tree = a.plugin_tree.resolve()
+            env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
             try:
                 identity = subprocess.check_output(
-                    ["git", "-C", str(a.plugin_tree), "rev-parse", "--is-inside-work-tree", "HEAD"],
-                    text=True, stderr=subprocess.DEVNULL).splitlines()
+                    ["git", "-C", str(tree), "rev-parse", "--is-inside-work-tree", "--show-toplevel", "HEAD"],
+                    env=env, text=True, stderr=subprocess.DEVNULL).splitlines()
+                dirty = subprocess.check_output(
+                    ["git", "-C", str(tree), "status", "--porcelain", "--untracked-files=no"],
+                    env=env, text=True, stderr=subprocess.DEVNULL)
             except (OSError, subprocess.CalledProcessError):
                 ap.error(f"--plugin-tree must be a git checkout with HEAD equal to {expected}")
-            if identity != ["true", expected]:
-                ap.error(f"--plugin-tree must be a git checkout with HEAD equal to {expected}; got {identity}")
-            cell["plugin"]["tree"] = str(a.plugin_tree)
-        report = bars.score(cell, a.cell_dir)
+            if identity != ["true", str(tree), expected] or dirty:
+                ap.error(f"--plugin-tree must be a clean checkout root with HEAD equal to {expected}; got {identity}")
+            cell["plugin"]["tree"] = str(tree)
+        fired_path, phase_path = a.cell_dir / "faults-fired.jsonl", a.cell_dir / "phase-A.json"
+        fired = {json.loads(line)["kind"] for line in fired_path.read_text().splitlines() if line.strip()} if fired_path.is_file() else set()
+        citations = json.loads(phase_path.read_text()).get("citations", {}) if phase_path.is_file() else {}
+        reason = unfired_reason({**cell, "faults": cell.get("faults", [])}, fired, citations)
+        report = {"verdict": "UNSUPPORTED", "reason": reason} if reason else bars.score(cell, a.cell_dir)
     else:
         if not (a.db and a.gauntlet_run):
             ap.error("--db and --gauntlet-run are required without --cell-dir")

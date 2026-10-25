@@ -31,11 +31,19 @@ uv run --no-project python bench/instruments/reliability/run_matrix.py \
 - Debugging: `--keep-dbs fail` keeps the `db/` copies of non-PASS cells and of a PASS that carries host-parity
   licences, `--keep-dbs all` those of every cell, and `--keep-homes` the hermes-home; each is moved into the cell
   dir (`<cell>/db/`, `<cell>/hermes-home/`); offline re-scoring needs the kept `db/` and the cell's plugin source.
-  Download the host artifact (`gh run download <run-id> -n reliability-<host> -D <artifact-dir>`), find the
+  Download the host artifact (`gh run download <run-id> -R electricsheephq/lcm-x -n <artifact> -D <artifact-dir>`), find the
   cell directory, and read its `cell.json` `plugin.sha`. From a repository containing that commit, create
   a detached checkout with `git worktree add --detach <plugin-checkout> <plugin-sha>`, then run
-  `python -m bench.instruments.reliability.scorers.cli --cell-dir <cell-dir> --plugin-tree <plugin-checkout>`.
-  The override applies only to this call; a non-checkout or a different HEAD is refused with exit 2.
+  `cd <scorer-plugin-checkout>` (the LCM-X checkout containing the scorer to run). With Python 3.10+, run
+  `python -m bench.instruments.reliability.scorers.cli --cell-dir <cell-dir> --plugin-tree <plugin-checkout>`
+  using absolute input paths. The scorer and its imported product modules (`externalize`, `config`) come from
+  the current checkout; `--plugin-tree` relocates only the artifact's plugin-source lookup, in memory.
+  That tree must be a clean tracked checkout root at the recorded SHA; subdirectories and dirty trees are
+  refused with exit 2, and exported `GIT_DIR`/`GIT_WORK_TREE` are ignored.
+  R1 and R2 scorer-decided cells with retained DBs re-score, including the harness's never-fired gate.
+  ACP-process cells take their session root from `verdict.json`; a missing `acp_session` is refused.
+  Exit 2 also refuses pre-run cells without `cell.json`, `stop_after_tool` cells, and continuity F4 failures
+  (including continuity FAIL with no failed bars): their scoring inputs or in-memory decisions are unavailable.
   Diagnostic records are sorted before sampling, so different `PYTHONHASHSEED` values produce the same
   scoring report; absolute paths and runner timings are not portable scoring fields.
   If a move fails, nothing is deleted and the error names both dirs. A caller that sandboxes host writes to one
