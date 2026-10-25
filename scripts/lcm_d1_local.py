@@ -89,7 +89,10 @@ def run_child(command, *, timeout, interrupt=None, **kwargs):
                 child.wait()
                 return {"exit_code": 124, "timed_out": True}
             try:
-                return {"exit_code": child.wait(timeout=min(remaining, 0.1)), "timed_out": False}
+                exit_code = child.wait(timeout=min(remaining, 0.1))
+                if interrupt and interrupt[0]:
+                    continue  # Clean the group even though its leader has exited.
+                return {"exit_code": exit_code, "timed_out": False}
             except subprocess.TimeoutExpired:
                 continue
 

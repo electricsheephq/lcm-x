@@ -4203,26 +4203,52 @@ def _accumulate_question_checkpoint(
     return 1, 0
 
 
+def _d1_normalization_insensitive(parent):
+    # Prefer an existing Unicode name, just as the case probe uses an ancestor.
+    for entry in (parent, *parent.parents):
+        if entry.stat().st_dev != parent.stat().st_dev:
+            break
+        nfc = unicodedata.normalize("NFC", entry.name)
+        nfd = unicodedata.normalize("NFD", entry.name)
+        if nfc != nfd:
+            alternate = entry.with_name(nfd if entry.name == nfc else nfc)
+            return alternate.exists() and os.path.samefile(entry, alternate)
+    # Probe only our own temporary directory, outside the output directory.
+    scratch = parent.parent
+    if scratch.stat().st_dev != parent.stat().st_dev:
+        scratch = Path(tempfile.gettempdir())
+    if scratch.stat().st_dev != parent.stat().st_dev or scratch == parent or parent in scratch.parents:
+        raise ValueError("cannot probe normalization outside output on the same volume")
+    with tempfile.TemporaryDirectory(prefix="lcm-d1-normalization-", dir=scratch) as directory:
+        composed = Path(directory) / "caf\u00e9"
+        composed.touch()
+        decomposed = composed.with_name("cafe\u0301")
+        return decomposed.exists() and os.path.samefile(composed, decomposed)
+
+
 def _validate_d1_sidecar_alias(checkpoint_path, dump_path):
     if checkpoint_path is None or dump_path is None or os.environ.get("LCM_D1_CACHE_MODE") != "read":
         return
     sidecar = Path(checkpoint_path).with_name("embedding-metrics.jsonl").resolve()
     dump = Path(dump_path).resolve()
-    # APFS ignores Unicode normalization, so NFC and NFD spellings name the same file.
-    alias = unicodedata.normalize("NFC", str(dump)) == unicodedata.normalize("NFC", str(sidecar))
+    alias = dump == sidecar
     if dump.exists() and sidecar.exists():
-        alias |= os.path.samefile(dump, sidecar)
+        alias = os.path.samefile(dump, sidecar)
     else:
         parent = sidecar.parent
         while not parent.exists():
             parent = parent.parent
+        dump_name, sidecar_name = str(dump), str(sidecar)
+        if _d1_normalization_insensitive(parent):
+            dump_name = unicodedata.normalize("NFC", dump_name)
+            sidecar_name = unicodedata.normalize("NFC", sidecar_name)
+        alias |= dump_name == sidecar_name
         while parent.name and parent.name == parent.name.swapcase():
             parent = parent.parent
         alternate = parent.with_name(parent.name.swapcase()) if parent.name else parent
         insensitive = alternate.exists() and alternate != parent and os.path.samefile(parent, alternate)
         if insensitive:
-            alias |= (unicodedata.normalize("NFC", str(dump)).casefold()
-                      == unicodedata.normalize("NFC", str(sidecar)).casefold())
+            alias |= dump_name.casefold() == sidecar_name.casefold()
     if alias:
         raise ValueError("--dump-candidates must not alias embedding-metrics.jsonl in D1 read mode")
 
