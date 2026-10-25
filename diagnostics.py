@@ -225,6 +225,12 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             command = "inspect background model preparation; run `/lcm embed warmup` if preparation fails, then re-run `/lcm doctor`"
             warning_only = True
             rationale = "local model preparation is in progress or needs retry; full-text recall is active"
+        elif (status == "warn" and isinstance(detail, dict)
+              and str(detail.get("reason", "")).startswith(("summary catch-up stalled", "summary catch-up failing"))):
+            action = DOCTOR_ACTION_INSPECT
+            command = f"{detail['reason']}; run `/lcm embed backfill --apply`, then check `/lcm doctor` again"
+            warning_only = True
+            rationale = "summary catch-up needs attention; full-text recall is active"
         elif (status == "warn" and isinstance(detail, dict) and detail.get("cpu_limited")
               and detail.get("available")
               and not str(detail.get("readiness", "")).startswith("model: unavailable(")):

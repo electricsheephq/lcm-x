@@ -258,7 +258,8 @@ def test_1063_b_uncached_warns_once_retries_and_preserves_ingest(
             _drain(engine)
         last, _ = maintenance_mod.incremental_embedding_state(engine._config.database_path)
         print(f"B: outcome={last[1]}; construct_allow_download={calls}")
-        assert last[1] == "auto_register_unavailable"
+        assert last[1].startswith("auto_register_unavailable:")
+        assert "offline fake model is not cached" in last[1]
         assert calls == [False, False]
         assert _profiles(engine) == []
         assert [r.levelno for r in caplog.records if r.name == maintenance_mod.__name__] == [

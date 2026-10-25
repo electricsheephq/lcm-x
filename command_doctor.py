@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .config import companion_enable_command
 from .diagnostics import fresh_sqlite_check
 
 
@@ -703,6 +704,22 @@ def render_doctor(facts: DoctorFacts) -> str:
         lines.append(f"embedding_provider_health: {facts.embedding_check['status']}{suffix}")
         readiness = detail.get("readiness") if isinstance(detail, dict) else None
         if readiness:
+            if "; coverage: unavailable" in readiness:
+                coverage = readiness.split("; coverage: ", 1)[1].split("; chunks: ", 1)[0]
+                lines.append(f"embedding_coverage: {coverage}")
+            if readiness.startswith("model: preparing;"):
+                readiness = "Local semantic recall preparing; full-text recall is active"
+            elif readiness.startswith("model: unavailable("):
+                model_reason = readiness[len("model: unavailable("):].split("); coverage: ", 1)[0]
+                if "FastEmbed is not installed" in model_reason:
+                    lines.append(f"embedding_enable_command: {companion_enable_command()}")
+                model_reason = model_reason.split(";", 1)[0]
+                readiness = f"Local semantic recall unavailable ({model_reason}); full-text recall is active"
+            elif readiness.startswith("model: present;"):
+                coverage, _, chunks = readiness.split("; coverage: ", 1)[1].partition("; chunks: ")
+                coverage = coverage.split(";", 1)[0].removesuffix(" summaries")
+                chunks = chunks.split("; maintenance:", 1)[0] or "unknown"
+                readiness = f"Model ready; summaries {coverage}; chunks {chunks}"
             lines.append(f"embedding_readiness: {readiness}")
         if isinstance(detail, dict) and detail.get("cpu_limited"):
             lines.append(str(detail["cpu_limit_reason"]))

@@ -55,10 +55,18 @@ def incremental_embedding_state(db_path: str | Path) -> tuple[tuple[float, str] 
         return _LAST_PASS.get(identity), _FAILURES.get(identity, 0)
 
 
+def clear_incremental_embedding_failures(db_path: str | Path) -> None:
+    """Forget recorded pass failures once an operator backfill makes progress."""
+    with _STATE_LOCK:
+        identity = database_identity(db_path)
+        _FAILURES.pop(identity, None)
+        _FAILURE_WARNED.pop(identity, None)
+
+
 def _record(db_path: str | Path, outcome: str, failure: str | None) -> None:
     with _STATE_LOCK:
         identity = database_identity(db_path)
-        _LAST_PASS[identity] = (time.time(), outcome)
+        _LAST_PASS[identity] = (time.time(), f"{outcome}: {failure}" if failure else outcome)
         if failure is None:
             parts = [part.split("=", 1)[-1].split(":") for part in outcome.split()]
             wrote = any(len(part) == 2 and part[1].isdigit() and int(part[1]) > 0 for part in parts)
@@ -110,7 +118,8 @@ def start_local_model_prepare(
     The thread runs the warmup path, the only one allowed to download, and
     leaves profile registration to owner-tracked jobs. Recall never waits on it:
     until the model is ready it serves full text and reports degraded. Failures
-    retry at ten-minute intervals, up to six attempts per model per process. A model requested
+    retry at ten-minute intervals for six attempts, then background triggers retry
+    after five minutes, doubling to a thirty-minute cap. A model requested
     while another is preparing is admitted by a later trigger.
     ``on_ready`` only enqueues maintenance; it must never run a pass inline.
     """
@@ -123,11 +132,12 @@ def start_local_model_prepare(
         state = _PREPARE.get(key)
         attempts, retry_at = _PREPARE_RETRY.get(key, (0, 0.0))
         exhausted = attempts >= 6 and (state is None or state[0] != "preparing")
-        if on_ready is not None and not exhausted and (state is None or state[0] != "present"):
+        if on_ready is not None and (state is None or state[0] != "present"):
             if state is not None or _PREPARE_THREAD is None or not _PREPARE_THREAD.is_alive():
                 token = on_ready if owner is None else owner
                 _PREPARE_READY.setdefault(key, {})[(database_identity(db_path), token)] = on_ready
-        if (state is not None and state[0] != "unavailable") or attempts >= 6 or time.monotonic() < retry_at:
+        if ((state is not None and state[0] != "unavailable") or (exhausted and on_ready is None)
+                or time.monotonic() < retry_at):
             return False
         if _PREPARE_THREAD is not None and _PREPARE_THREAD.is_alive():
             return False
@@ -178,14 +188,15 @@ def _prepare_local_model(key: tuple[str, str, int], db_path: str | Path, config:
     reason = str(result).rsplit("error: ", 1)[-1].strip()
     with _STATE_LOCK:
         _PREPARE[key] = ("unavailable", reason)
-        if _PREPARE_RETRY.get(key, (0, 0.0))[0] >= 6:
-            _PREPARE_READY.pop(key, None)
+        attempts = _PREPARE_RETRY.get(key, (0, 0.0))[0]
+        if attempts >= 6:
+            _PREPARE_RETRY[key] = (attempts, time.monotonic() + min(1800.0, 300.0 * 2 ** min(attempts - 6, 3)))
         identity = database_identity(db_path)
         first = not _FAILURE_WARNED.get(identity, False)
         _FAILURE_WARNED[identity] = True
     (logger.warning if first else logger.debug)(
         "LCM local embedding model %s is unavailable (%s); recall uses full text. "
-        "Check `/lcm doctor` (embedding_provider_health); retry is bounded to six attempts per model per process",
+        "Check `/lcm doctor` (embedding_provider_health); background retries use bounded backoff",
         key,
         reason,
     )
@@ -213,9 +224,10 @@ def run_incremental_embedding_pass(
         outcome, failure = "error", str(exc)
     if slice_state is not None:
         active = time.monotonic() - started
-        deferred = outcome in {"lease_held", "circuit_open", "model_preparing", "model_unavailable"}
+        deferred = outcome in {"lease_held", "circuit_open", "model_preparing", "model_unavailable", "model_prepare_exhausted"}
+        retry_at = _PREPARE_RETRY.get(_local_model_key(config), (0, 0.0))[1]
         slice_state.update(active_s=active, overrun_s=max(0.0, active - 1.0),
-                           delay=max(_LOCAL_IDLE_MULTIPLIER * active, (600.0 if outcome == "model_unavailable" else 1.0) if deferred else 0.0))
+                           delay=max(_LOCAL_IDLE_MULTIPLIER * active, (max(60.0, retry_at - time.monotonic()) if outcome in {"model_unavailable", "model_prepare_exhausted"} else 1.0) if deferred else 0.0))
         if slice_state.pop("retry_wait", False):
             slice_state["delay"] = max(600.0, slice_state["delay"])
         slice_state["continue"] = deferred or (not failure and slice_state.get("continue", False))

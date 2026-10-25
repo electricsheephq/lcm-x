@@ -118,7 +118,7 @@ def test_sixth_attempt_still_accepts_callbacks_while_preparing(local_store, monk
 
 
 @pytest.mark.parametrize("other_attempts", [0, 6])
-def test_six_failures_exhaust_only_this_key_and_drop_callbacks(local_store, monkeypatch, other_attempts):
+def test_six_failures_back_off_only_this_key_and_keep_live_callbacks(local_store, monkeypatch, other_attempts):
     engine, _ = local_store
     key = maintenance._local_model_key(engine._config)
     other = maintenance._local_model_key(dataclasses.replace(engine._config, embedding_model="other-model"))
@@ -133,15 +133,16 @@ def test_six_failures_exhaust_only_this_key_and_drop_callbacks(local_store, monk
     monkeypatch.setattr(maintenance, "time", clock)
     monkeypatch.setattr(command, "resolve_provider", lambda c, **kw: Unavailable(c.embedding_provider, c.embedding_model))
     for attempt in range(6):
-        assert REAL_PREPARE(engine._store.db_path, engine._config, on_ready=lambda: callbacks.append(1))
+        assert REAL_PREPARE(engine._store.db_path, engine._config, on_ready=lambda: callbacks.append(1), owner="fixture-owner")
         maintenance._PREPARE_THREAD.join(3)
         assert not maintenance._PREPARE_THREAD.is_alive()
         assert maintenance._PREPARE_RETRY[key][0] == attempt + 1
         if attempt < 5:
             assert maintenance._PREPARE_READY[key]
-        clock.now += 600.0
-    assert key not in maintenance._PREPARE_READY
-    assert not REAL_PREPARE(engine._store.db_path, engine._config, on_ready=lambda: callbacks.append(2))
-    assert key not in maintenance._PREPARE_READY
+            clock.now += 600.0
+    assert maintenance._PREPARE_RETRY[other] == (other_attempts, 0.0)
+    assert len(maintenance._PREPARE_READY[key]) == 1
+    assert not REAL_PREPARE(engine._store.db_path, engine._config, on_ready=lambda: callbacks.append(2), owner="fixture-owner")
+    assert len(maintenance._PREPARE_READY[key]) == 1
     assert len(calls) == 6 and not callbacks
     assert maintenance.run_incremental_embedding_pass(engine._store.db_path, engine._config) == "model_prepare_exhausted"

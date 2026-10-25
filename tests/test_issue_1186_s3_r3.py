@@ -165,7 +165,7 @@ def test_absent_prepare_state_schedules_without_turn_model_load(recall_engine, m
                               lambda path, config, **kwargs: scheduled.append((path, config)) or False)
         result = json.loads(tools.lcm_recall({"query": "cobalt", "include": include}, engine=engine))
     assert len(scheduled) == 1 and str(scheduled[0][0]) == str(engine._store.db_path)
-    assert result["degraded"] is True and "local model preparing" in result["degraded_reason"]
+    assert result["degraded"] is True and "local semantic recall preparing" in result["degraded_reason"]
     assert result["provenance"]["coverage"]["fts"] == "ok"
     assert result["provenance"]["coverage"]["summary"] == "none"
     assert any(hit.get("store_id") == target for hit in result["hits"])

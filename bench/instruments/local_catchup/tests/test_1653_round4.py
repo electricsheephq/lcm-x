@@ -79,6 +79,7 @@ def test_reader_shares_late_engine_provider_resolution(corpus, tmp_path, monkeyp
     db, _, mod = corpus
     # This fixture exercises ready-provider cache sharing, not startup preparation.
     monkeypatch.setattr(mod("embedding_maintenance"), "local_model_state", lambda config: ("present", ""))
+    monkeypatch.setattr(mod("tools"), "probe_provider_availability", lambda config: {"available": True})
     engine = NS(_config=common.config(mod, db))
     reader = recall.recall_reader(engine, mod, db, tmp_path)
     try:

@@ -221,6 +221,7 @@ def test_prepare_start_failure_degrades_and_can_retry(tmp_path, monkeypatch, tra
 
 @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
 def test_stateless_grep_schedules_slow_model_off_turn(tmp_path, monkeypatch, transport, mode):
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda _c: {"available": True})
     config = LCMConfig(embeddings_enabled=True, embedding_provider="fastembed", embedding_query_timeout_s=0.25)
     config.stateless_session_patterns = ["ephemeral-*"]
     engine = _engine(tmp_path, config)
@@ -268,11 +269,11 @@ def test_blank_provider_is_unset_local(monkeypatch, raw):
 
 
 @pytest.mark.parametrize("state,available,prefix", [
-    (None, False, "local dependency unavailable:"),
-    (("preparing", ""), True, "local model preparing;"),
-    (("unavailable", "fixture uncached"), True, "local model unavailable: fixture uncached;"),
+    (None, False, "local semantic recall unavailable;"),
+    (("preparing", ""), True, "local semantic recall preparing;"),
+    (("unavailable", "fixture uncached"), True, "local semantic recall unavailable;"),
 ])
-def test_readiness_cause_precedes_catchup(tmp_path, monkeypatch, transport, state, available, prefix):
+def test_unready_recall_has_single_readiness_sentence(tmp_path, monkeypatch, transport, state, available, prefix):
     engine = _engine(tmp_path, LCMConfig(embeddings_enabled=True, embedding_provider="fastembed"))
     try:
         _seed(engine)
@@ -311,6 +312,16 @@ def test_held_cloud_profile_preserved_and_explained(tmp_path, monkeypatch, trans
         doctor = json.dumps(tools._embedding_provider_health_check(engine))
         assert "voyage" in doctor and "LCM_EMBEDDINGS_ENABLED=true" in doctor
         assert "/lcm embed warmup" in doctor
+        # Another database may have prepared this process-wide local model,
+        # while this database still holds its explicit cloud identity.
+        monkeypatch.setattr(maintenance, "local_model_state", lambda config: ("present", ""))
+        monkeypatch.setattr(tools, "probe_provider_availability", lambda config: {
+            "available": True, "provider": "fastembed", "model": "BAAI/bge-small-en-v1.5", "detail": "configured"})
+        text = command.handle_lcm_command("doctor", engine)
+        line = next(line for line in text.splitlines() if line.startswith("embedding_readiness:"))
+        assert line.startswith("embedding_readiness: Model ready; summaries 0/1; chunks ")
+        assert line.count("summaries") == 1 and "maintenance" not in line
+        assert "status: issues-found" in text and "profile belongs to voyage" in text
         assert {table: list(conn.execute(f"SELECT * FROM {table}")) for table in tables} == before
         assert sent == [] and sockets == []
     finally:
