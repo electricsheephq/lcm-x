@@ -219,3 +219,48 @@ def test_local_producer_has_real_vectors_and_full_recall(tmp_path, monkeypatch, 
     assert captured
     _assert_health(captured[-1])
     assert transport == ([], [])
+
+
+def _reset_to_omitted(config, form):
+    if form == "replace_none":
+        return replace(config, embeddings_enabled=None)
+    return LCMConfig(**{**asdict(config), "embeddings_enabled": None})
+
+
+@pytest.mark.parametrize("form", ["replace_none", "asdict_none"])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("provider,model,warmed", [("voyage", "voyage-3", True), ("ollama", "nomic-embed-text", False)])
+def test_reset_to_omitted_drops_consent(tmp_path, monkeypatch, transport, form, enabled, provider, model, warmed):
+    from hermes_lcm import command
+    monkeypatch.setenv("VOYAGE_API_KEY", "synthetic-fixture-key")
+    warm = LCMConfig(embeddings_enabled=True, embedding_provider=provider, embedding_model=model)
+    engine = _engine(tmp_path, warm)
+    try:
+        _seed(engine)
+        if warmed:
+            assert isinstance(command._embedding_register_profiles(warm, warm.database_path, allow_download=False), dict)
+            assert "error" not in str(maintenance.run_incremental_embedding_pass(warm.database_path, warm))
+        fields = dict(embedding_provider="fastembed", embedding_model=model,
+                      proactive_recall_enabled=True, proactive_recall_provider=provider)
+        cloned = _reset_to_omitted(LCMConfig(**fields, embeddings_enabled=enabled), form)
+        engine._config = cloned
+        sent, sockets = transport
+        sent.clear()
+        engine._assemble_context(None, [{"role": "user", "content": MARK}])
+        assert sockets == []
+        assert sent == []
+        assert asdict(cloned) == asdict(LCMConfig(**fields))
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("form", ["replace_none", "asdict_none"])
+@pytest.mark.parametrize("enabled", ["false", "true"])
+def test_env_reset_to_omitted_drops_consent(monkeypatch, form, enabled):
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", enabled)
+    config = LCMConfig.from_env()
+    assert config._embeddings_enabled_supplied is True
+    cloned = _reset_to_omitted(config, form)
+    assert cloned._embeddings_enabled_supplied is False
+    assert cloned.embeddings_enabled == LCMConfig(embedding_provider=config.embedding_provider,
+                                                  embedding_model=config.embedding_model).embeddings_enabled

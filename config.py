@@ -1416,7 +1416,8 @@ class LCMConfig:
     _embeddings_enabled_supplied: bool | None = field(default=None, repr=False)
 
     def __post_init__(self):
-        if self._embeddings_enabled_supplied is None:
+        # A copy keeps its consent marker; a copy reset to None is an omitted setting again.
+        if self._embeddings_enabled_supplied is None or self.embeddings_enabled is None:
             self._embeddings_enabled_supplied = self.embeddings_enabled is not None
         model_only = not str(self.embedding_provider or "").strip() and bool(self.embedding_model)
         if not str(self.embedding_provider or "").strip():
