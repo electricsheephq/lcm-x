@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
+from .config import host_message_uid_mode
 # Keep this facade: runtime callers and patch seams resolve projection here.
 from .emission_projection import (
     EmissionProjectionEntry as EmissionProjectionEntry,
@@ -43,6 +44,7 @@ from .externalize import (
     find_externalized_tool_result_content_for_call,
     load_externalized_payload,
 )
+from .identity_anchor import identity_anchor_enabled
 from .ingest_protection import (
     _add_inline_persisted_output_generation_metadata,
     _add_inline_persisted_output_identity_metadata,
@@ -3045,11 +3047,7 @@ class ReconcileMixin:
         if not self._session_id or not messages:
             return 0
 
-        try:
-            session_count = self._store.get_session_count(self._session_id)
-        except Exception as exc:  # pragma: no cover - defensive only
-            logger.debug("LCM ingest cursor reconciliation count failed: %s", exc)
-            return 0
+        session_count = self._store.get_session_count(self._session_id)
         run = _StoreCursorRun(
             messages=messages, session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
@@ -3136,7 +3134,36 @@ class ReconcileMixin:
             )
             return lossy_at
         if cursor is not None and cursor > 0:
+            rewound = False
+            # #1511: full literal replay proves position, not a later user occurrence.
+            # Keep partial/adopted views and UID-bound occurrences on their existing proofs.
+            if (identity_anchor_enabled() and cursor == len(messages) == len(stored_tail_rows)
+                    and stored_tail == [self._message_replay_identity(m) for m in messages]):
+                stamps = [_normalize_observed_at(m.get("timestamp")) for m in messages]
+                changed = [i for i, (stamp, row) in enumerate(zip(stamps, stored_tail_rows))
+                           if stamp is not None and row.get("observed_at") is not None
+                           and stamp != row["observed_at"]]
+                rewind = changed[0] if len(changed) == 1 else cursor
+                if (rewind < cursor and proof_cursor is None and not self._active_emission_proof()
+                        and messages[rewind].get("role") == "user" and not messages[rewind].get("message_uid")
+                        and stamps[rewind] > stored_tail_rows[rewind]["observed_at"]
+                        and all(stamps[i] is not None and stamps[i] == stored_tail_rows[i].get("observed_at")
+                                for i in range(rewind + 1, len(messages)))):
+                    # A durable stamp witness explains the row even beyond its recorded stamp.
+                    explained = {rel["store_id"] for kind in ("carried_stamp", "alt_stamp")
+                                 for rel in self._store.get_message_relations(
+                                     [stored_tail_rows[rewind]["store_id"]], kind)}
+                    bound = {}
+                    if host_message_uid_mode() != "off" and self._store._host_uid_table_exists():
+                        lineage, _problem = self._host_uid_lineage_key()
+                        bound = self._store.host_uid_uids_of_stores(
+                            lineage, [stored_tail_rows[rewind]["store_id"]], ("canonical",)
+                        ) if lineage is not None else {r["store_id"]: True for r in stored_tail_rows}
+                    if stored_tail_rows[rewind]["store_id"] not in explained and not bound.get(stored_tail_rows[rewind]["store_id"]):
+                        cursor = rewind
+                        rewound = True
             reason = (
+                "replayed durable tail before a later user occurrence" if rewound else
                 "skipped scaffold-only prefix"
                 if not self._effective_replay_identities(messages[:cursor])
                 else "replayed durable tail"
@@ -3199,6 +3226,8 @@ class ReconcileMixin:
         matches by construction, not by occurrence. It cannot prove segment
         replay: a fresh same-id call can genuinely return the placeholder text.
         Prefer a duplicate ambiguous salvage pair over losing a fresh pair.
+        #1540 exception: a borrowed pair bound to a unique stamped user occurrence,
+        with proven UIDs, can be suppressed.
         """
         if not self._session_id or cursor >= len(messages):
             return set()
@@ -3217,6 +3246,10 @@ class ReconcileMixin:
             if not _has_lossy_redacted_identity(identity)
         )
         replayed: set[int] = set()
+        metadata = None  # Loaded once, only when a borrowed pair binds.
+        users = None  # Lazily index both views once per replay scan.
+        protected = set()
+        stored_uids: set[str] = set()
         index = max(0, cursor)
         while index < len(messages):
             assistant = messages[index]
@@ -3232,6 +3265,7 @@ class ReconcileMixin:
                 for call in assistant.get("tool_calls") or []
                 if isinstance(call, dict) and str(call.get("id") or "")
             }
+            bound_replays: set[int] = set()
             result_indexes: dict[str, int] = {}
             # What this segment would consume from the durable multiset: its
             # assistant plus one occurrence per matched result.
@@ -3245,12 +3279,45 @@ class ReconcileMixin:
                 result_identity = self._message_replay_identity(result)
                 borrows = (content == _HERMES_PRUNED_TOOL_PLACEHOLDER
                            and result_identity[1] != _HERMES_PRUNED_TOOL_PLACEHOLDER)
+                if borrows and users is None:
+                    users = ({}, {})
+                    for rows, stored, positions in ((stored_rows, True, users[0]), (messages, False, users[1])):
+                        for pos, row in enumerate(rows):
+                            if str(row.get("role") or "") == "user":
+                                key = (_normalize_observed_at(row.get("observed_at" if stored else "timestamp")),
+                                       self._message_replay_identity(row, stored_row=stored, allow_pruned_tool_alias=False))
+                                positions.setdefault(key, []).append(pos)
+                    protected = _hermes_salvage_protected_positions(messages)
+                if borrows and self._bound_retry_placeholder_replay(messages, index, probe, stored_rows, users, protected):
+                    if metadata is None:
+                        try:
+                            proof = self._durable_commit_proof_payload()
+                            metadata = self._remapped_output_metadata(messages, proof, len(messages)) if proof else False
+                            # A prefix edit can end the forward remap before this
+                            # occurrence. Resolve its UID by membership, not position.
+                            stored_uids = {row["message_uid"] for row in (proof or {}).get("output_metadata", ())
+                                           if row.get("message_uid")}
+                        except Exception:
+                            logger.debug("LCM replayed tool-segment proof load failed", exc_info=True)
+                            metadata = False  # Unprovable: borrowed pairs stay unbound (base behaviour).
+                    user_uid = self._host_occurrence_metadata(messages[index - 1])["message_uid"]
+                    stored_uid = (metadata or {}).get(index - 1, {}).get("message_uid")
+                    # Pair UIDs, when known, outrank the user's: the row-level check below governs them.
+                    pair_uid = any(self._host_occurrence_metadata(messages[i])["message_uid"] for i in (index, probe))
+                    new_user_uid = metadata is not False and user_uid and (
+                        user_uid != stored_uid if stored_uid is not None else (
+                            index - 1 < len((proof or {}).get("output_metadata", ()))
+                            and user_uid not in stored_uids
+                        )
+                    )
+                    if metadata is not False and not (new_user_uid and not pair_uid):
+                        bound_replays.update((index, probe))
                 if (
                     tool_call_id in call_ids
                     and not _is_hermes_persisted_output_marker(content)
                     and not _has_lossy_redacted_identity(result_identity)
                     and result_identity in stored_identity_counts
-                    and not borrows
+                    and (not borrows or probe in bound_replays)
                 ):
                     result_indexes[tool_call_id] = probe
                     segment_needs[result_identity] += 1
@@ -3258,6 +3325,12 @@ class ReconcileMixin:
             if (
                 call_ids
                 and call_ids.issubset(result_indexes)
+                and (not bound_replays or all(
+                    (uid := self._host_occurrence_metadata(messages[idx])["message_uid"]) is None
+                    or uid == ((metadata or {}).get(idx, {}).get("message_uid")
+                               or (uid if uid in stored_uids else None))
+                    for idx in (index, *result_indexes.values())
+                ))
                 and all(
                     stored_identity_counts[identity] >= needed
                     for identity, needed in segment_needs.items()
@@ -3268,6 +3341,44 @@ class ReconcileMixin:
                 replayed.update(result_indexes.values())
             index = max(index + 1, probe)
         return replayed
+
+    def _bound_retry_placeholder_replay(self, messages, call_index, result_index, stored_rows, users, protected) -> bool:
+        """Bind a borrowed pair to the durable occurrence of its stamped user."""
+        if not identity_anchor_enabled():
+            return False
+        user_index = call_index - 1
+        if user_index < 0 or str(messages[user_index].get("role") or "") != "user":
+            return False
+        stamp = _normalize_observed_at(messages[user_index].get("timestamp"))
+        if stamp is None:
+            return False  # Unknown metadata is not proof of replay (nor a conflict).
+        user_identity = self._message_replay_identity(messages[user_index], allow_pruned_tool_alias=False)
+        call_identity = self._message_replay_identity(messages[call_index], allow_pruned_tool_alias=False)
+        result_literal = self._message_replay_identity(messages[result_index], allow_pruned_tool_alias=False)
+        result_id = str(messages[result_index].get("tool_call_id") or "")
+        protected = result_index in protected
+        matches = [(j, stored_rows[j]) for j in users[0].get((stamp, user_identity), ())]
+        if len(matches) != 1:
+            return False  # An ambiguous or absent stored occurrence cannot prove replay.
+        # The stored side is a tail window; host duplicates may be fresh occurrences.
+        if len(users[1].get((stamp, user_identity), ())) != 1:
+            return False
+        for j, row in matches:
+            if not (str(row.get("role") or "") == "user" and j + 2 < len(stored_rows)
+                    and _normalize_observed_at(row.get("observed_at")) == stamp
+                    and self._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False) == user_identity):
+                continue
+            stored_call, stored_result = stored_rows[j + 1], stored_rows[j + 2]
+            if self._message_replay_identity(stored_call, stored_row=True, allow_pruned_tool_alias=False) != call_identity:
+                continue
+            stored_literal = self._message_replay_identity(stored_result, stored_row=True, allow_pruned_tool_alias=False)
+            stored_text = str(stored_result.get("content") or "")
+            if stored_literal == result_literal or (
+                    not protected and str(stored_result.get("role") or "") == "tool"
+                    and str(stored_result.get("tool_call_id") or "") == result_id
+                    and len(stored_text) > _HERMES_PRUNE_MIN_CHARS and not _is_stored_nonstring_content(stored_text)):
+                return True
+        return False
 
     def _raw_externalized_placeholder_replay_identity(self, msg: Dict[str, Any]) -> tuple[str, str, str, str]:
         return (

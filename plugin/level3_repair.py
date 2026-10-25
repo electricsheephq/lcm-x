@@ -173,9 +173,9 @@ def _commit_group(engine, rows, group, new) -> str:
     with engine._dag._db_lock:
         conn.execute("BEGIN IMMEDIATE")
         try:
-            current = dict(conn.execute(
-                "SELECT node_id, summary FROM summary_nodes WHERE node_id IN (SELECT value FROM json_each(?))",
-                (group_json,)).fetchall())
+            current = {node_id: (owner, text) for node_id, owner, text in conn.execute(
+                "SELECT node_id, session_id, summary FROM summary_nodes WHERE node_id IN (SELECT value FROM json_each(?))",
+                (group_json,)).fetchall()}
             new_parent = conn.execute(
                 "SELECT 1 FROM summary_nodes p, json_each(p.source_ids) j WHERE p.source_type = 'nodes' "
                 "AND CAST(j.value AS INTEGER) IN (SELECT value FROM json_each(?)) "
@@ -186,7 +186,7 @@ def _commit_group(engine, rows, group, new) -> str:
                 conn.rollback()
                 return (f"a condensation in flight uses node {in_flight[0]}; "
                         "run apply again when the agent is idle")
-            if new_parent or any(current.get(i) != rows[i][3] for i in group):
+            if new_parent or any(current.get(i) != (rows[i][1], rows[i][3]) for i in group):
                 conn.rollback()
                 return "a node changed or a new parent linked in during the repair"
             for node_id in group:
@@ -213,6 +213,10 @@ def _commit_group(engine, rows, group, new) -> str:
                     conn.execute("INSERT INTO nodes_fts(nodes_fts, rowid, summary) VALUES('delete', ?, ?)",
                                  (node_id, rows[node_id][3]))
                     conn.execute("INSERT INTO nodes_fts(rowid, summary) VALUES(?, ?)", (node_id, text))
+            # In-place text changes keep node IDs: invalidate only this repaired
+            # group's session proofs, atomically with the existing repair.
+            for session_id in {rows[node_id][1] for node_id in group}:
+                conn.execute("DELETE FROM metadata WHERE key = ?", (f"compaction_no_progress:v1:{session_id}",))
             for start in range(0, len(group), 256):
                 VectorStore.purge_embedding_batch_on_connection(conn, group[start:start + 256])
             conn.commit()

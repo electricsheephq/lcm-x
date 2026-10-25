@@ -56,3 +56,14 @@ COMPAT_REGISTRY: dict[str, SchemaFamily] = {
         removal_version=None,
     ),
 }
+
+for _name, _prefix, _tables in (
+    ("entity", "lcm_entit", ("lcm_entities", "lcm_entity_aliases", "lcm_entity_keys")),
+    ("memory", "lcm_memory_", ("lcm_memory_notes", "lcm_memory_events", "lcm_memory_host_file_revisions")),
+):
+    COMPAT_REGISTRY[_name] = SchemaFamily(
+        name=_name, prefix=_prefix, marker="entity_memory_v1", tables=_tables,
+        indexes=(("idx_lcm_entity_platform_id", "idx_lcm_entity_key_active") if _name == "entity"
+                 else ("idx_lcm_memory_host_file_rev_content",)),
+        oldest_reader="v0.25.0-rc1", removal_version=None,
+    )

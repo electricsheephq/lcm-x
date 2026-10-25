@@ -7,7 +7,7 @@ from sqlite3 import connect
 from pathlib import Path
 from typing import Any
 
-from .config import containment_base_dir
+from .config import companion_enable_command, containment_base_dir
 
 
 DOCTOR_ACTION_SAFE_IGNORE = "safe/ignore"
@@ -208,15 +208,48 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             )
             warning_only = True
             rationale = "stale stored vectors affect only semantic recall, which is switched off"
+        elif isinstance(detail, dict) and str(detail.get("reason", "")).startswith("store's profile belongs to "):
+            action = DOCTOR_ACTION_INSPECT
+            command = detail["reason"]
+            warning_only = True
+            rationale = "the stored profile is held; full-text recall is active"
+        elif isinstance(detail, dict) and "coverage: unavailable" in str(detail.get("readiness", "")):
+            action = DOCTOR_ACTION_INSPECT
+            command = "inspect embedding coverage SQLite read errors and database access, then re-run `/lcm doctor`"
+            warning_only = True
+            rationale = "embedding coverage could not be read; full-text recall is active"
+        elif (isinstance(detail, dict) and detail.get("available") and
+              str(detail.get("readiness", "")).startswith(("model: preparing;", "model: unavailable("))):
+            action = DOCTOR_ACTION_INSPECT
+            command = "inspect background model preparation; run `/lcm embed warmup` if preparation fails, then re-run `/lcm doctor`"
+            warning_only = True
+            rationale = "local model preparation is in progress or needs retry; full-text recall is active"
+        elif (status == "warn" and isinstance(detail, dict) and detail.get("cpu_limited")
+              and detail.get("available")
+              and not str(detail.get("readiness", "")).startswith("model: unavailable(")):
+            action = DOCTOR_ACTION_SAFE_IGNORE
+            command = ("set LCM_EMBEDDINGS_ENABLED=true (or use a host with more than 2 "
+                       "effective CPUs) if semantic recall is wanted")
+            warning_only = True
+            rationale = "informational: semantic recall is CPU-limited as expected on this host; full-text recall is active"
+            readiness = str(detail.get("readiness", ""))
+            if "coverage: unavailable" in readiness:
+                action = DOCTOR_ACTION_INSPECT
+                command = "inspect embedding coverage SQLite read errors and database access, then re-run `/lcm doctor`"
+                rationale = "embedding coverage could not be read; full-text recall is active"
+            elif readiness.startswith("model: preparing;"):
+                action = DOCTOR_ACTION_INSPECT
+                command = "inspect background model preparation; run `/lcm embed warmup` if preparation fails, then re-run `/lcm doctor`"
+                rationale = "local model preparation is in progress; full-text recall is active"
         elif status == "warn":
             action = DOCTOR_ACTION_INSPECT
             command = (
-                "semantic retrieval is configured but not runnable: reinstall the optional "
-                "embedding dependency (e.g. `pip install fastembed` into the active Hermes "
-                "virtualenv) or fix LCM_EMBEDDING_PROVIDER/LCM_EMBEDDING_MODEL and the "
-                "provider credentials, then run `/lcm embed warmup` and re-run `/lcm doctor`. "
-                "A dependency installed by hand can be dropped by a Hermes update, so "
-                "recheck this after an update. Nothing is lost meanwhile -- the lossless "
+                "semantic retrieval is configured but not runnable: install the local fastembed dependency "
+                "companion with `hermes plugins install electricsheephq/lcm-x/companions/"
+                "hermes-lcm-x-local-embeddings --ref <LCM-X-40-character-SHA>`; if installed, run "
+                f"`{companion_enable_command()}`. Otherwise fix "
+                "LCM_EMBEDDING_PROVIDER/LCM_EMBEDDING_MODEL and provider credentials. Restart Hermes "
+                "after enable, then run `/lcm embed warmup` and re-run `/lcm doctor`. Nothing is lost meanwhile -- the lossless "
                 "store is intact and recall falls back to full-text"
             )
             warning_only = True
@@ -248,7 +281,8 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
     elif name == "compaction_progress":
         command = ("inspect lcm_status zero_leaf_streak and the 'LCM compaction stop' lines: reason= names what stops "
                    "the leaf, and for a retained occurrence blocked= gives its store_id, role and kind; stored rows stay intact and "
-                   "reachable (lcm_grep / lcm_expand); a new session clears a stop that persists")
+                   "reachable (lcm_grep / lcm_expand); a new session clears a stop that persists; "
+                   "offline diagnosis: docs/operations/store-wedge-inspect.md")
         warning_only = True
         rationale = ("over-threshold passes that store no leaf leave the session over its threshold, so every turn pays "
                      "for the whole prompt; this is an operating state, not persisted-state corruption")

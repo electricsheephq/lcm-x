@@ -307,6 +307,7 @@ def lcm_compute(args: Dict[str, Any], **kwargs: Any) -> str:
             assertions=getattr(engine, "_assertions", None),
             as_of=as_of,
             session_dates=getattr(engine, "_session_occurrence_dates", None),
+            withhold_mixed=plan.temporal_window is not None or plan.operation in {"date_filter", "order", "date_interval"},
         )
     except (TypeError, ValueError, sqlite3.Error) as exc:
         grounding = None
@@ -335,7 +336,13 @@ def lcm_compute(args: Dict[str, Any], **kwargs: Any) -> str:
                 )
             },
         })
-    alignment_error = validate_selector_alignment(question, plan, grounding.operands)
+    from .evidence_compiler import uncertain_observation_operands
+
+    alignment_error = (
+        "uncertain_source_observation_time"
+        if uncertain_observation_operands(grounding.operands, engine._store, as_of)
+        else validate_selector_alignment(question, plan, grounding.operands)
+    )
     if alignment_error:
         stages["selector"] = _compute_stage(
             "host_tool_arguments",
@@ -477,7 +484,7 @@ def lcm_evidence_pack(args: Dict[str, Any], **kwargs: Any) -> str:
     return build_evidence_pack(
         args,
         engine=engine,
-        retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine),
+        retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits"),
     )
 
 
@@ -493,15 +500,22 @@ def lcm_compile_evidence(args: Dict[str, Any], **kwargs: Any) -> str:
     if mode not in {"proposal", "auto"}:
         return json.dumps({"error": "mode must be one of: proposal, auto"})
     if mode == "auto":
-        result = compile_preanswer_evidence(  # type: ignore[no-untyped-call]
-            args.get("question"),
-            engine=engine,
-            baseline_refs=args.get("baseline_refs") or (),
-            question_as_of=args.get("question_date"),
-            retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine),
-            enabled=True,
-            budgets=args.get("budgets"),
-        )
+        try:
+            result = compile_preanswer_evidence(  # type: ignore[no-untyped-call]
+                args.get("question"),
+                engine=engine,
+                baseline_refs=args.get("baseline_refs") or (),
+                question_as_of=args.get("question_date"),
+                retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits"),
+                enabled=True,
+                budgets=args.get("budgets"),
+            )
+        except sqlite3.Error:
+            result = {"status": "fallback", "state": "unknown",
+                      "reason": "store_unavailable",
+                      "reason_code": "store_unavailable",
+                      "next_path": "evidence_only", "context": None,
+                      "computation": None, "evidence": []}
         return json.dumps(result, ensure_ascii=False)
 
     proposal = args.get("proposal")
@@ -511,7 +525,7 @@ def lcm_compile_evidence(args: Dict[str, Any], **kwargs: Any) -> str:
         baseline_refs=args.get("baseline_refs") or (),
         question_date=args.get("question_date"),
         selector=lambda _request: proposal,
-        retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine),
+        retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits"),
         enabled=True,
         persist_view=args.get("persist_view") is True,
         budgets=args.get("budgets"),
@@ -552,7 +566,8 @@ def lcm_retrieve(args: Dict[str, Any], **kwargs: Any) -> str:
 
     action = str(args.get("action") or "").strip().casefold()
     def dispatch(name: str, payload: dict[str, Any]) -> str:
-        return engine.handle_tool_call(name, payload)
+        return engine.handle_tool_call(name, payload,
+            **({"delivery_unit": "hits"} if name == "lcm_recall" else {}))
     try:
         if action == "start":
             result = controller.start(

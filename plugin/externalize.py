@@ -686,9 +686,161 @@ def _raw_payload_preview(content: str, room: int) -> str:
     return f"{text[:head]}{_RAW_PAYLOAD_PREVIEW_JOINER}{text[len(text) - (keep - head):]}"
 
 
+def _media_payload_text_part(part: Dict[str, Any]) -> str | None:
+    """Match the text field shapes accepted by assistant structured-part cleanup."""
+    from .message_content import _extract_text_part_value
+
+    for key in ("text", "content", "value"):
+        value = part.get(key)
+        text = _extract_text_part_value(value)
+        if text is None and isinstance(value, dict):
+            nested = value.get("text")
+            text = nested if isinstance(nested, str) else None
+        if text is not None:
+            return text
+    return None
+
+
+# A media repr above this is never parsed or previewed (it only bounds a pathological AST); a few MiB
+# of media bytes in a repr parse in milliseconds.
+_MEDIA_REPR_PARSE_LIMIT = 64 * 1_048_576
+# Parse memory and time grow with the number of tokens, not bytes: a repr holding more than this many
+# significant tokens (separators, operators, numbers, adjacent string literals) is never parsed. A string
+# or bytes literal is one token however large, so a caption beside MiBs of image bytes is still parsed.
+_MEDIA_REPR_ELEMENT_LIMIT = 50_000
+_MEDIA_REPR_IGNORED_TOKENS = {"NEWLINE", "NL", "COMMENT", "INDENT", "DEDENT", "ENDMARKER", "ENCODING"}
+
+
+def _media_repr_exceeds_element_limit(content: str) -> bool:
+    import io
+    import tokenize
+
+    # Every token spans at least one character, so short content never needs the tokenizer.
+    if len(content) <= _MEDIA_REPR_ELEMENT_LIMIT:
+        return False
+    ignored = {getattr(tokenize, name) for name in _MEDIA_REPR_IGNORED_TOKENS}
+    count = 0
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(content).readline):
+            if token.type not in ignored:
+                count += 1
+                if count > _MEDIA_REPR_ELEMENT_LIMIT:
+                    return True
+    except (tokenize.TokenError, SyntaxError):
+        # The parser rejects untokenizable input at the same point, before building an AST.
+        return False
+    return False
+
+
+def _media_payload_preview_content(content: str) -> str:
+    """Extract text only; remove opaque media before the bounded preview slices it."""
+    import ast
+
+    from .ingest_content import _MEDIA_VALUE_KEYS, _replace_wrapped_base64_blocks
+
+    media_keys = set(_MEDIA_VALUE_KEYS)
+    # Descriptor fields hold one opaque leaf; a dict or list under them is an envelope and is walked.
+    descriptor_keys = {
+        "data", "mime_type", "mimetype", "mime", "content_type", "content-type", "contenttype",
+        "media_type", "media-type", "mediatype", "format", "encoding", "detail",
+    }
+    media_descriptor_keys = media_keys | (descriptor_keys - {"format", "encoding", "detail"})
+    text_types = {"text", "input_text", "output_text"}
+    containers = (dict, list, tuple, set, frozenset)
+    generic_repr = False
+
+    try:
+        value = json.loads(content)
+    except json.JSONDecodeError:
+        value = content
+        stripped = content.strip()
+        # A dict repr may start with any key type (0, None, a tuple), but always spans {...}; an empty
+        # {} or [] followed by prose cannot be a container repr.
+        repr_like = re.match(r"\s*(?:\[\s*(?:[\{\('\"]|b['\"])|\{\s*(?:['\"]|b['\"]))", content)
+        if repr_like or (stripped.startswith("{") and stripped.endswith("}")):
+            # Normalization may have used repr for non-JSON media parts. Never preview that repr, and
+            # never preview an oversized candidate unparsed: it may be a repr with a non-string first key.
+            if len(content) > _MEDIA_REPR_PARSE_LIMIT:
+                return ""
+            if _media_repr_exceeds_element_limit(content):
+                return ""
+            parsed, ok = None, False
+            try:
+                parsed, ok = ast.literal_eval(content), True
+            except (ValueError, SyntaxError, RecursionError, TypeError, MemoryError):
+                pass
+            if repr_like and not ok:
+                return ""
+            # A brace-spanned string is a repr only when it parses to a dict; otherwise it is prose.
+            if repr_like or isinstance(parsed, dict):
+                value = parsed
+                # A parsed repr dict is a generic mapping unless it is a text part: walk it untyped so a
+                # caption beside a non-text "type" field survives, as the unparsed repr text did on main.
+                kind = parsed.get("type") if isinstance(parsed, dict) else None
+                generic_repr = isinstance(parsed, dict) and not (isinstance(kind, str) and kind in text_types)
+                # A top-level set or tuple repr holds its text directly, like a list.
+                if isinstance(parsed, (set, frozenset)):
+                    value = sorted(parsed, key=repr)
+                elif isinstance(parsed, tuple):
+                    value = list(parsed)
+    if isinstance(value, dict):
+        value = [value]
+    if isinstance(value, list):
+        parts = []
+        for part in value:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                if "type" in part and not generic_repr:
+                    if isinstance(part.get("type"), str) and part["type"] in text_types:
+                        text = _media_payload_text_part(part)
+                        if text:
+                            parts.append(text)
+                else:
+                    stack = [(part, 0)]
+                    while stack:
+                        leaf, depth = stack.pop()
+                        if depth > 32:
+                            continue
+                        if isinstance(leaf, str):
+                            parts.append(leaf)
+                        elif isinstance(leaf, dict):
+                            media_descriptor = any(str(k).lower() in media_descriptor_keys for k in leaf)
+                            stack.extend((v, depth + 1) for k, v in reversed(list(leaf.items()))
+                                         if (key := str(k).lower()) not in media_keys
+                                         and (not media_descriptor or key not in descriptor_keys
+                                              or isinstance(v, containers)))
+                        elif isinstance(leaf, (list, tuple)):
+                            stack.extend((v, depth + 1) for v in reversed(leaf))
+                        elif isinstance(leaf, (set, frozenset)):
+                            # Parsed reprs can hold sets; sort them so the preview is deterministic.
+                            stack.extend((v, depth + 1) for v in sorted(leaf, key=repr, reverse=True))
+        text = "\n".join(parts)
+    else:
+        text = value if isinstance(value, str) else ""
+    # Strip even short media bodies with lenient headers; the header bound keeps scanning linear.
+    text = re.sub(
+        r"data:[^,\n]{0,256}?;base64,(?:[A-Za-z0-9+/=_-]|\\/|\\u002[fF])*",
+        "", text or "", flags=re.IGNORECASE,
+    )
+    # Bare media-sized runs only: retain shorter identifiers, hashes and filenames.
+    text = re.sub(r"[A-Za-z0-9+/_-]{256,}={0,2}", "", text)
+    text = _replace_wrapped_base64_blocks(text, lambda _: "").strip()
+    text = re.sub(r"<img\s+src\s*=\s*(['\"])\s*\1\s*/?>|background\s*:\s*url\(\s*\)",
+                  "", text, flags=re.IGNORECASE)
+    return text if any(ch.isalnum() for ch in text) else ""
+
+
 def _build_externalized_placeholder(summary: Dict[str, Any], *, content: str | None = None) -> str:
     kind = _placeholder_metadata(summary.get("kind", "tool_result") or "tool_result")
-    if kind == "raw_payload" and content:
+    if kind == "media_payload" and content:
+        try:
+            content = _media_payload_preview_content(content)
+        except MemoryError:
+            raise
+        except Exception:
+            return _build_externalized_placeholder(summary)
+    if kind in {"raw_payload", "media_payload"} and content:
         # #1016: say what the payload holds and how to read it, within the 512 rule; ``ref=`` stays last.
         ref = summary.get("ref", "")
         head = (
@@ -699,7 +851,14 @@ def _build_externalized_placeholder(summary: Dict[str, Any], *, content: str | N
         # Strictly under the 512 rule, as raw_payload stubs always were.
         room = _PLACEHOLDER_MAX_CHARS - 1 - len(head) - len(rest) - len('preview=""; ')
         if room >= _RAW_PAYLOAD_PREVIEW_MIN_CHARS:
-            return f'{head}preview="{_raw_payload_preview(content, room)}"; {rest}'
+            try:
+                return f'{head}preview="{_raw_payload_preview(content, room)}"; {rest}'
+            except MemoryError:
+                raise
+            except Exception:
+                if kind != "media_payload":
+                    raise
+                return _build_externalized_placeholder(summary)
         if len(head) + len(rest) < _PLACEHOLDER_MAX_CHARS:
             return f"{head}{rest}"
     if kind != "tool_result":

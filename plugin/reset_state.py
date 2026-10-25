@@ -58,6 +58,7 @@ class ResetStateMixin:
         # A commit proof is valid only through the compression handoff of the
         # session that produced it (#483); any other reset drops it.
         self._frontier_holder().reset_proofs()
+        self._compress_commit_reason, self._compress_commit_publication = "no_proof", "local"
         self._retired_durable_proof = None  # #671: a stale durable proof retired by reconcile, by created_at
         self._clear_fresh_tail_pressure_yield_state()
         self._generated_ignored_active_replay_placeholder_hashes = set()
@@ -69,6 +70,9 @@ class ResetStateMixin:
         self._compression_boundary_stored_placeholder_digest_counts = {}
         # #651: a hold armed by the previous binding never holds the next one. #618: nor does the #608 hold.
         self._no_progress_hold, self._no_progress_candidate = None, False
+        self._no_progress_replay = None  # Reload the scoped durable hold only after current ingest proof.
+        self._no_progress_observed_tokens = self._no_progress_ingest_generation = None
+        self._no_progress_hold_persisted = False
         self._zero_leaf_streaks = {}  # #1162: nor does its zero-leaf streak (a kept conversation id included)
         self._objective_only_noop = False
         self._sweep_budget_hold_until, self._sweep_budget_hold_conversation = 0.0, ""

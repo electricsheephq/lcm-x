@@ -625,7 +625,9 @@ def render_doctor(facts: DoctorFacts) -> str:
     if facts.inactive_process:
         issues.append("inactive_process")
         recommended_actions.append(facts.inactive_action)
-    if facts.embedding_check and facts.embedding_check["status"] in {"warn", "fail"}:
+    if (facts.embedding_check and facts.embedding_check["status"] in {"warn", "fail"}
+            and not (isinstance(facts.embedding_check.get("detail"), dict)
+                     and facts.embedding_check["detail"].get("informational"))):
         issues.append("embedding_provider_health")
         recommended_actions.append(facts.embedding_action)
 
@@ -699,6 +701,11 @@ def render_doctor(facts: DoctorFacts) -> str:
         if isinstance(detail, str):
             suffix = f" {detail}"
         lines.append(f"embedding_provider_health: {facts.embedding_check['status']}{suffix}")
+        readiness = detail.get("readiness") if isinstance(detail, dict) else None
+        if readiness:
+            lines.append(f"embedding_readiness: {readiness}")
+        if isinstance(detail, dict) and detail.get("cpu_limited"):
+            lines.append(str(detail["cpu_limit_reason"]))
     if issues:
         lines.append(f"issues: {', '.join(issues)}")
     else:
@@ -727,4 +734,9 @@ def render_doctor(facts: DoctorFacts) -> str:
 
 
 def _doctor_text(engine: Any) -> str:
-    return render_doctor(collect_doctor(engine))
+    from .ingest_policy import embedding_prefix_status
+    prefix = embedding_prefix_status(engine._config)
+    note = ("\nconfig_note: config.yaml lcm.embeddings_enabled is ignored; use LCM_EMBEDDINGS_ENABLED=true/false"
+            if "embeddings_enabled" in getattr(engine._config, "ignored_config_yaml_lcm_keys", []) else "")
+    return render_doctor(collect_doctor(engine)) + note + "".join(
+        f"\nembedding_prefix_{key}: {value}" for key, value in prefix.get("embedding_prefix", {}).items())

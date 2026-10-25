@@ -322,6 +322,7 @@ _V5_CORE_TABLE_COLUMNS: dict[str, frozenset[str]] = {
 # the v5 core-shape classifier because a legitimate pre-V4.2 database will not
 # have them until MessageStore opens it. Their presence is recognised, but an
 # unrelated extra core column still fails closed as a genuinely newer shape.
+_V5_CORE_TOLERATED_COLUMNS = {"messages": frozenset({"sender_id", "sender_source"})}
 _V5_CORE_OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
     "messages": frozenset({"ingested_at", "observed_at", "observed_at_source"}),
 }
@@ -341,6 +342,7 @@ _KNOWN_FEATURE_TABLE_PREFIXES = (
     "lcm_assertion",
     "lcm_query",
     "lcm_trajectory",
+    "lcm_entit", "lcm_memory_",
     "summary_node_provenance",  # #441 per-node level/model sidecar, not a derived cache
 )
 
@@ -373,7 +375,7 @@ _INTERIM_FEATURE_FAMILIES: tuple[dict[str, str], ...] = (
     },
 )
 
-_PRESERVED_FEATURE_FAMILIES = ("lcm_query", "lcm_trajectory")
+_PRESERVED_FEATURE_FAMILIES = ("lcm_query", "lcm_trajectory", "lcm_entit", "lcm_memory_")
 
 
 def _family_verifier(prefix: str):
@@ -386,6 +388,8 @@ def _family_verifier(prefix: str):
         return verify_embedding_schema
     if prefix == "lcm_chunk":
         return verify_chunk_schema
+    if prefix in ("lcm_entit", "lcm_memory_"):
+        return verify_entity_schema
     if prefix == "lcm_assertion":
         return verify_assertion_schema
     if prefix == "lcm_query":
@@ -491,7 +495,7 @@ def classify_version_mismatch(conn: sqlite3.Connection) -> str:
             }
         except sqlite3.DatabaseError:
             return VERSION_MISMATCH_GENUINELY_NEWER
-        optional = set(_V5_CORE_OPTIONAL_COLUMNS.get(table, ()))
+        optional = set(_V5_CORE_OPTIONAL_COLUMNS.get(table, ())) | set(_V5_CORE_TOLERATED_COLUMNS.get(table, ()))
         if not set(expected).issubset(actual) or not actual.issubset(set(expected) | optional):
             return VERSION_MISMATCH_GENUINELY_NEWER
 
@@ -966,17 +970,29 @@ def ensure_temporal_rollup_tables(conn: sqlite3.Connection) -> None:
         )
 
     def ensure_index(name: str, create_sql: str) -> None:
-        existing = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
-            (name,),
-        ).fetchone()
         def normalize(value: object) -> str:
             return " ".join(str(value or "").lower().split())
-        if existing is not None and normalize(existing[0]) == normalize(create_sql):
-            return
-        if existing is not None:
-            conn.execute(f"DROP INDEX {name}")
-        conn.execute(create_sql)
+        for attempt in range(5):  # A delayed peer DROP can remove a winning index.
+            existing = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (name,),
+            ).fetchone()
+            if existing is not None and normalize(existing[0]) == normalize(create_sql):
+                return
+            if existing is not None:
+                conn.execute(f"DROP INDEX IF EXISTS {name}")
+            try:
+                conn.execute(create_sql)
+                return
+            except sqlite3.OperationalError as exc:
+                if str(exc) != f"index {name} already exists":
+                    raise
+                concurrent = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (name,),
+                ).fetchone()
+                if concurrent is not None and normalize(concurrent[0]) == normalize(create_sql):
+                    return
+                if attempt == 4:
+                    raise
 
     ensure_index(
         "idx_lcm_rollups_ready_period",
@@ -1127,16 +1143,31 @@ def ensure_temporal_rollup_invalidation_triggers(conn: sqlite3.Connection) -> No
     def normalized(sql: object) -> str:
         return re.sub(r"\s+", "", str(sql or "").lower()).rstrip(";")
 
-    for trigger_name, expected_sql in trigger_sql.items():
-        row = conn.execute(
+    # Healthy opens must remain read-only behind another WAL writer (#622).
+    # A repair still re-reads every definition after acquiring write ownership.
+    if all(
+        (row := conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
             (trigger_name,),
-        ).fetchone()
-        if row is not None and normalized(row[0]) != normalized(expected_sql):
-            conn.execute(f"DROP TRIGGER {trigger_name}")
-            row = None
-        if row is None:
-            conn.execute(expected_sql)
+        ).fetchone()) is not None
+        and normalized(row[0]) == normalized(expected_sql)
+        for trigger_name, expected_sql in trigger_sql.items()
+    ):
+        return
+
+    # Reuse schema-repair ownership: BEGIN IMMEDIATE before the decisive read,
+    # or a savepoint that leaves an existing caller transaction uncommitted.
+    with _fts_repair_ownership(conn):
+        for trigger_name, expected_sql in trigger_sql.items():
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                (trigger_name,),
+            ).fetchone()
+            if row is not None and normalized(row[0]) != normalized(expected_sql):
+                conn.execute(f"DROP TRIGGER {trigger_name}")
+                row = None
+            if row is None:
+                conn.execute(expected_sql)
 
 
 REQUIRED_TEMPORAL_ROLLUP_TABLES = (
@@ -1715,6 +1746,16 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
     vectors, keyed on ``(chunk_id, identity_hash)`` where ``chunk_id`` is
     ``store_id:chunk_index``.
     """
+    ensure_metadata_table(conn)
+    has_messages = conn.execute("SELECT 1 FROM sqlite_master WHERE name='messages' AND type='table'").fetchone()
+    observed = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
+        "AND name IN ('lcm_chunk_gapfill_delete', 'lcm_chunk_gapfill_update', 'lcm_chunk_gapfill_message')",
+    ).fetchone()[0]
+    if observed != (3 if has_messages else 2):
+        # Legacy proof predates mutation observation; revalidate it once.
+        conn.execute("DELETE FROM metadata WHERE key LIKE 'chunk_gapfill_scan:%' "
+                     "OR key LIKE 'chunk_policy_revision_through:%'")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS lcm_chunk_meta (
@@ -1750,8 +1791,41 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
             bits BLOB NOT NULL,
             PRIMARY KEY(chunk_id, identity_hash)
         );
+
+        -- A skip proof certifies derived coverage, never immutable source data.
+        -- Raw SQL repair and chunk replacement must invalidate it atomically.
+        CREATE TRIGGER IF NOT EXISTS lcm_chunk_gapfill_delete
+        AFTER DELETE ON lcm_chunk_meta BEGIN
+            DELETE FROM metadata WHERE key IN (
+                'chunk_gapfill_scan:' || OLD.identity_hash,
+                'chunk_policy_revision_through:' || OLD.identity_hash);
+        END;
+        CREATE TRIGGER IF NOT EXISTS lcm_chunk_gapfill_update
+        AFTER UPDATE OF store_id, identity_hash, chunk_id, char_start, char_end ON lcm_chunk_meta BEGIN
+            DELETE FROM metadata WHERE key IN (
+                'chunk_gapfill_scan:' || OLD.identity_hash,
+                'chunk_policy_revision_through:' || OLD.identity_hash,
+                'chunk_gapfill_scan:' || NEW.identity_hash,
+                'chunk_policy_revision_through:' || NEW.identity_hash);
+        END;
         """
     )
+    if has_messages:
+        conn.executescript("""
+        CREATE TRIGGER IF NOT EXISTS lcm_chunk_gapfill_message
+        AFTER UPDATE OF role, content ON messages
+        WHEN lower(trim(OLD.role)) IN ('user', 'assistant')
+          OR lower(trim(NEW.role)) IN ('user', 'assistant')
+          OR (OLD.role IS NOT NEW.role AND
+              (lower(trim(OLD.role)) = 'tool' OR lower(trim(NEW.role)) = 'tool'))
+          OR (lower(trim(OLD.role)) = 'tool' AND lower(trim(NEW.role)) = 'tool'
+              AND (trim(COALESCE(OLD.content, ''), char(9,10,11,12,13,32)) = '')
+                  != (trim(COALESCE(NEW.content, ''), char(9,10,11,12,13,32)) = ''))
+        BEGIN
+            DELETE FROM metadata WHERE key LIKE 'chunk_gapfill_scan:%'
+                OR key LIKE 'chunk_policy_revision_through:%';
+        END;
+        """)
 
 
 # The tables and indexes ``ensure_chunk_tables`` owns. Verified on chunk-corpus
@@ -3721,3 +3795,108 @@ def run_versioned_migrations(conn: sqlite3.Connection) -> None:
     # lets parallel engine clones coexist with legitimate WAL writers.
     if current_version != initial_version:
         set_schema_version(conn, current_version)
+# Entity source records are preserved even when the feature is disabled.
+ENTITY_MIGRATION_STEP = "entity_memory_v1"
+
+
+@lru_cache(maxsize=1)
+def _entity_schema_statements() -> dict[str, str]:
+    sql = """
+CREATE TABLE IF NOT EXISTS lcm_entities (
+ entity_id TEXT PRIMARY KEY CHECK(length(entity_id)=36 AND substr(entity_id,1,4)='ent_' AND substr(entity_id,5) NOT GLOB '*[^0-9a-f]*'),
+ scope_key TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('person','agent','org','project','place','thing','topic','other')),
+ display_name TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('active','merged','forgotten')),
+ merged_into TEXT, created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS lcm_entity_aliases (
+ alias_id INTEGER PRIMARY KEY AUTOINCREMENT, entity_id TEXT NOT NULL, scope_key TEXT NOT NULL,
+ alias_norm TEXT NOT NULL, alias_display TEXT NOT NULL,
+ alias_kind TEXT NOT NULL CHECK(alias_kind IN ('name','nickname','relation_phrase','platform_id')),
+ owner_entity_id TEXT, source_store_ids TEXT NOT NULL CHECK(json_type(source_store_ids)='array'),
+ created_at REAL NOT NULL, retired_at REAL);
+CREATE TABLE IF NOT EXISTS lcm_entity_keys (
+ key_id INTEGER PRIMARY KEY AUTOINCREMENT, subject_key TEXT NOT NULL, owner_entity_id TEXT,
+ entity_id TEXT NOT NULL, method TEXT NOT NULL CHECK(method IN ('alias_match','override')),
+ source_store_ids TEXT NOT NULL CHECK(json_type(source_store_ids)='array'), scope_key TEXT NOT NULL,
+ created_at REAL NOT NULL, retired_at REAL);
+CREATE TABLE IF NOT EXISTS lcm_memory_notes (
+ note_id TEXT PRIMARY KEY CHECK(length(note_id)=37 AND substr(note_id,1,5)='note_' AND substr(note_id,6) NOT GLOB '*[^0-9a-f]*'),
+ scope_key TEXT NOT NULL, entity_id TEXT, about_entity_id TEXT,
+ kind TEXT NOT NULL CHECK(kind IN ('relationship','preference','fact','context','instruction','retraction','history')),
+ text TEXT NOT NULL, asserted_by_entity_id TEXT,
+ cites TEXT NOT NULL CHECK(json_type(cites)='array'),
+ cites_file_revisions TEXT NOT NULL CHECK(json_type(cites_file_revisions)='array'),
+ author TEXT NOT NULL CHECK(author IN ('agent','consolidator','user','host_memory_file','detector')),
+ superseded_by TEXT, retracts_note_id TEXT, retracts_store_ids TEXT NOT NULL CHECK(json_type(retracts_store_ids)='array'),
+ created_at REAL NOT NULL, CHECK(json_array_length(cites)>0 OR json_array_length(cites_file_revisions)>0));
+CREATE TABLE IF NOT EXISTS lcm_memory_events (
+ event_id INTEGER PRIMARY KEY AUTOINCREMENT, scope_key TEXT NOT NULL,
+ op TEXT NOT NULL CHECK(op IN ('create_entity','add_alias','retire_alias','change_kind','merge','split','add_note','supersede_note','forget','override_key','undo','host_file_revision','restore_alias','set_entity_status')),
+ payload_json TEXT NOT NULL, actor TEXT NOT NULL, created_at REAL NOT NULL,
+ target_event_id INTEGER CHECK(target_event_id IS NULL OR op='undo'));
+CREATE TABLE IF NOT EXISTS lcm_memory_host_file_revisions (
+ revision_id TEXT PRIMARY KEY CHECK(length(revision_id)=36 AND substr(revision_id,1,4)='rev_' AND substr(revision_id,5) NOT GLOB '*[^0-9a-f]*'),
+ scope_key TEXT NOT NULL, path TEXT NOT NULL, revision_sha TEXT NOT NULL, content_hash TEXT NOT NULL,
+ captured_at REAL NOT NULL, profile_key TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lcm_entity_platform_id ON lcm_entity_aliases(scope_key,alias_norm)
+ WHERE alias_kind='platform_id' AND retired_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lcm_entity_key_active ON lcm_entity_keys(scope_key,subject_key,ifnull(owner_entity_id,'')) WHERE retired_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lcm_memory_host_file_rev_content ON lcm_memory_host_file_revisions(profile_key,path,content_hash);
+CREATE TRIGGER IF NOT EXISTS lcm_memory_events_no_update BEFORE UPDATE ON lcm_memory_events
+ BEGIN SELECT RAISE(ABORT, 'lcm_memory_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS lcm_memory_events_no_delete BEFORE DELETE ON lcm_memory_events
+ BEGIN SELECT RAISE(ABORT, 'lcm_memory_events is append-only'); END;
+"""
+    statements, statement = {}, ""
+    for line in sql.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            name = re.search(r"(?:TABLE|INDEX|TRIGGER) IF NOT EXISTS (\w+)", statement)[1]
+            statements[name] = statement.strip()
+            statement = ""
+    return statements
+
+
+@lru_cache(maxsize=1)
+def _expected_entity_schema_contract():
+    with closing(sqlite3.connect(":memory:")) as scratch:
+        for sql in _entity_schema_statements().values():
+            scratch.execute(sql)
+        return {name: (kind, _normalize_trigger_sql(sql)) for kind, name, sql in scratch.execute(
+            "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name!='sqlite_sequence'")}
+
+
+_ENTITY_TABLE_COLUMNS = {name: frozenset(re.findall(r"(?:^|[,\n])\s*(\w+) (?:TEXT|INTEGER|REAL)", sql))
+                         for name, sql in _entity_schema_statements().items() if sql.startswith("CREATE TABLE")}
+_ENTITY_INDEX_SHAPES = {name: sql for name, sql in _entity_schema_statements().items() if " INDEX " in sql}
+_ENTITY_TRIGGER_FRAGMENTS = {name: ("lcm_memory_events is append-only",) for name, sql in
+                             _entity_schema_statements().items() if sql.startswith("CREATE TRIGGER")}
+
+
+def ensure_entity_tables(conn: sqlite3.Connection) -> None:
+    statements = _entity_schema_statements()
+
+    def pending():
+        present = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        return [name for name in statements if name not in present]
+
+    if not pending():
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for name in pending():
+            conn.execute(statements[name])
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def verify_entity_schema(conn: sqlite3.Connection) -> list[str]:
+    expected = _expected_entity_schema_contract()
+    actual = {name: (kind, _normalize_trigger_sql(sql)) for kind, name, sql in conn.execute(
+        "SELECT type,name,sql FROM sqlite_master WHERE name LIKE 'lcm_entit%' OR name LIKE 'lcm_memory_%' "
+        "OR name LIKE 'idx_lcm_entit%' OR name LIKE 'idx_lcm_memory_%'")}
+    return sorted([f"unexpected-{actual[name][0]}:{name}" for name in actual.keys() - expected.keys()]
+                  + [f"{expected[name][0]}:{name}" for name in expected.keys() - actual.keys()]
+                  + [f"malformed {expected[name][0]}:{name}" for name in expected.keys() & actual.keys()
+                     if expected[name] != actual[name]])

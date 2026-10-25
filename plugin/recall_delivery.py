@@ -15,7 +15,7 @@ from typing import Any
 from .reasoning import resolve_occurrence_time
 from .retrieval_core import _hit_identity
 
-_EVENT_TIME_KEYS = ("event_time", "event_time_source")
+_EVENT_TIME_KEYS = ("event_time", "event_time_source", "time_uncertain")
 
 
 def deliver_recall(
@@ -57,8 +57,18 @@ def deliver_recall(
     event_time_fields: Callable[[dict[str, Any] | None], dict[str, str]],
     read_occurrence_source: Callable[[int], tuple[dict, dict | None]],
     rerank_enabled: Callable[[], bool],
+    session_delivery: Callable[..., str] | None = None,
 ) -> str:
     """Deliver ranked entries without changing retrieval or host-read policy."""
+    if session_delivery is not None:
+        # Reuse the existing empty envelope/metrics; only the opt-in branch pays
+        # for it. The hits branch below retains its exact read/serialization order.
+        options = dict(locals())
+        options.pop("ordered")
+        options.pop("session_delivery")
+        response = json.loads(_deliver_hits([], **options))
+        response["provenance"].pop("answer_ready", None)
+        return session_delivery(ordered, response)
     # -- Response shaping (char-capped). The default snippets path retains the
     # historical order and serialized response exactly. answer_ready applies
     # stable post-rank diversity before bounded exact-ref hydration.
@@ -162,8 +172,6 @@ def deliver_recall(
         for entry in selected_entries[:limit]
         if entry["hit"].get("kind") != "summary"
         and entry["hit"].get("store_id") is not None
-        and _hit_identity(entry["hit"]) not in answer_ready_content
-        and int(entry["hit"]["store_id"]) not in event_time_rows
     ]
     # A skipped or failed read never blocks past the deadline and never looks
     # like "no event time": a delivered hit it covered sets the response-level
@@ -176,6 +184,7 @@ def deliver_recall(
         )
         event_time_rows.update(fetched_rows)
         if event_time_unavailable_reason is not None:
+            event_time_rows.clear()
             event_time_unread_ids = set(event_time_ids)
     event_time_unavailable = False
     hits_out: list[dict[str, Any]] = []
@@ -204,10 +213,12 @@ def deliver_recall(
                 item["store_id"] = hit.get("store_id")
         else:
             item["store_id"] = hit.get("store_id")
+            if hit.get("duplicate_store_ids"):
+                item["duplicate_store_ids"] = hit["duplicate_store_ids"]
             if hit.get("chunk_span"):
                 item["chunk_span"] = hit["chunk_span"]
             if _hit_identity(hit) not in answer_ready_content and hit.get("store_id") is not None:
-                item.update(event_time_fields(event_time_rows.get(int(hit["store_id"]))))
+                item.update(event_time_fields(event_time_rows.get(int(hit.get("store_id") or 0))))
         if detail == "answer_ready":
             item["role"] = hit.get("role")
             item["source"] = hit.get("source") or (
@@ -215,7 +226,8 @@ def deliver_recall(
             )
             hydrated = answer_ready_content.get(_hit_identity(hit))
             if hydrated is not None:
-                item.update(hydrated)
+                item.update({k: v for k, v in hydrated.items() if k not in _EVENT_TIME_KEYS})
+                item.update(event_time_fields(event_time_rows.get(int(hit.get("store_id") or 0))))
             if delta_requested:
                 exact_ref = _exact_ref(hit, hydrated)
                 if exact_ref is not None:
@@ -223,6 +235,7 @@ def deliver_recall(
             if include_occurrence_time and hit.get("kind") != "summary":
                 session_dates, source_row = read_occurrence_source(int(hit.get("store_id") or 0))
                 source_row = source_row or {}
+                source_row = {**source_row, **event_time_rows.get(int(hit.get("store_id") or 0), {})}
                 source_observed_at = source_row.get("observed_at")
                 session_date = session_dates.get(str(hit.get("session_id")))
                 if session_date is None and source_observed_at is not None:
@@ -250,6 +263,13 @@ def deliver_recall(
                         else "ingest_fallback"
                     ),
                 }
+                if source_row.get("time_uncertain") == "carried":
+                    item["time_uncertain"] = "carried"
+                    occurrence["time_uncertain"] = "carried"
+                    item["observation_time"]["time_uncertain"] = "carried"
+                if int(hit.get("store_id") or 0) in event_time_unread_ids:
+                    for key in (*_EVENT_TIME_KEYS, "observation_time", "occurrence_time"):
+                        item.pop(key, None)
         if reference_strict:
             # Selection already proved this candidate against its row, so there
             # is nothing left to re-check here -- only the proven span to
@@ -509,8 +529,9 @@ def _strip_hit_event_time(
         if event_time_total <= response_char_cap:
             break
         if event_time_chars[index]:
-            for key in _EVENT_TIME_KEYS:
-                hits_out[index].pop(key, None)
+            stripped = _without_event_time(hits_out[index])
+            hits_out[index].clear()
+            hits_out[index].update(stripped)
             event_time_total -= event_time_chars[index]
             # A ``deadline`` or ``read_error`` marker keeps its reason.
             if not event_time_unavailable:
@@ -558,7 +579,8 @@ def _without_event_time(item: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in item.items()
-        if key not in _EVENT_TIME_KEYS
+        if key not in _EVENT_TIME_KEYS and not (
+            item.get("time_uncertain") and key in ("observation_time", "occurrence_time"))
     }
 
 
@@ -582,8 +604,9 @@ def _fit_event_time(response: dict[str, Any], *, response_char_cap: int) -> tupl
             return encoded, None
         if not any(key in hit for key in _EVENT_TIME_KEYS):
             continue
-        for key in _EVENT_TIME_KEYS:
-            hit.pop(key, None)
+        stripped = _without_event_time(hit)
+        hit.clear()
+        hit.update(stripped)
         if not response.get("event_time_unavailable"):
             response["event_time_unavailable"] = True
             response["event_time_unavailable_reason"] = "response_cap"
@@ -615,4 +638,13 @@ def _fts_anchor_delivered(
 ) -> bool:
     """Whether the FTS arm's anchored hit is among the returned ``hits`` (#950)."""
     anchor = _hit_identity(arm_hits["fts"][0])
-    return any(_hit_identity(hit) == anchor for hit in hits)
+    return any(
+        _hit_identity(hit) == anchor
+        or (anchor[0] == "message" and anchor[1] in hit.get("duplicate_store_ids", []))
+        for hit in hits
+    )
+
+
+# The opt-in empty-envelope call must not re-enter observer wrappers installed
+# on deliver_recall (FMP observes the real tools.py caller's effective K caps).
+_deliver_hits = deliver_recall

@@ -9,12 +9,14 @@ import re
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, TYPE_CHECKING
 
 from . import recall_delivery
+from .cpu_capacity import effective_cpus
 from .externalize import (
     _inspect_top_level_json_string_fields_before_content as _externalized_top_level_fields_before_content,
     extract_externalized_ref,
@@ -46,6 +48,7 @@ from .db_bootstrap import (
 from .extraction import sanitize_pre_compaction_content
 from .inactive_record import inactive_record_notice
 from .level3_repair import scan_level3_fragments
+from .ingest_policy import embedding_prefix_suffix, split_prefix_revision, embedding_prefix_status
 from .ingest_protection import (
     EmbeddingIdentityStaleError,
     EmbeddingPrivacyPolicyError,
@@ -60,6 +63,7 @@ from .ingest_protection import (
     sensitive_pattern_status,
     validate_embedding_privacy_dispatch,
 )
+from . import memory_tools as _memory_tools
 from . import evidence_tools as _evidence_tools
 from . import inspect_tools as _inspect_tools
 from . import expansion_evidence
@@ -74,6 +78,9 @@ from .retrieval_core import (
     _lcm_recall_recency_boost as _lcm_recall_recency_boost,  # re-export for direct imports; the prior runs it in retrieval_core
     apply_prior,
     fuse_candidates,
+    collapse_duplicate_candidates,
+    collapse_duplicate_hits,
+    duplicate_identity_rows,
     place_fts_anchor,
     _lcm_grep_confidence,
     _lcm_grep_deadline_error,
@@ -87,12 +94,13 @@ from .retrieval_core import (
     run_knn,
 )
 from .search_query import (
-    AGE_DECAY_RATE, build_recall_or_query, contains_emoji, normalize_search_sort, recall_content_terms,
+    AGE_DECAY_RATE, build_recall_or_query, contains_emoji, is_identifier_shaped_query,
+    normalize_search_sort, recall_content_terms,
     requires_like_fallback, sanitize_fts5_query,
 )
 from .store import _normalize_observed_at, build_message_fts_spec
-from .vector_store import VectorStore
-from .config import LCMConfig, embedding_provider_id, profile_bound
+from .vector_store import VectorStore, _interrupt_read_on_deadline
+from .config import effective_embedding_model, LCMConfig, embedding_provider_id, normalize_embedding_provider, profile_bound
 
 if TYPE_CHECKING:
     from .engine import LCMEngine
@@ -352,16 +360,8 @@ def _retrieval_candidate_session_ids(
     if deadline is not None and time.monotonic() >= deadline:
         return [], True
     sessions: set[str] = set()
-    # A progress handler is CONNECTION-GLOBAL, and ``MessageStore._conn`` is
-    # explicitly shared across threads (opened ``check_same_thread=False``).
-    # Installing this request's deadline there would let it interrupt a
-    # concurrent read/ingest on the same connection, and the `finally` teardown
-    # would clear a concurrent request's handler -- silently disabling ITS
-    # timeout. So the enumeration gets a private read-only connection and owns
-    # its handler alone: the same idiom every other deadline-guarded read path
-    # here uses (``_lcm_recall_summary_sources``, the chunk/summary hydrators in
-    # ``retrieval_core``). Python's sqlite3 exposes no getter for the installed
-    # handler, so save/restore on the shared connection is not expressible.
+    # Deadline ownership stays on a private connection; the shared store may
+    # already carry another operation's connection-global progress handler.
     connection: sqlite3.Connection | None = None
     try:
         db_path = Path(engine._store.db_path).resolve()
@@ -375,15 +375,23 @@ def _retrieval_candidate_session_ids(
             ),
         )
         connection.execute("PRAGMA query_only=ON")
-        if deadline is not None:
-            connection.set_progress_handler(
-                lambda: 1 if time.monotonic() >= deadline else 0, 1000
-            )
-        for table in _RETRIEVAL_SESSION_SCOPE_TABLES:
-            rows = connection.execute(
-                _RETRIEVAL_DISTINCT_SESSIONS_SQL.format(table=table)
-            ).fetchall()
-            sessions.update(str(row[0]) for row in rows if row[0] is not None)
+        with _interrupt_read_on_deadline(connection, deadline):
+            for table in _RETRIEVAL_SESSION_SCOPE_TABLES:
+                sql = _RETRIEVAL_DISTINCT_SESSIONS_SQL.format(table=table)
+                try:
+                    row = connection.execute(
+                        f"SELECT json_group_array(session_id) FROM ({sql})"
+                    ).fetchone()
+                    sessions.update(json.loads(row[0]))
+                except (sqlite3.Error, MemoryError) as exc:
+                    if not isinstance(exc, MemoryError) and getattr(exc, "sqlite_errorcode", None) not in (
+                        sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM,
+                    ):
+                        raise
+                    rows = connection.execute(sql).fetchall()
+                    sessions.update(str(row[0]) for row in rows if row[0] is not None)
+            if deadline is not None and time.monotonic() >= deadline:
+                return [], True
     except sqlite3.OperationalError:
         if deadline is not None and time.monotonic() >= deadline:
             return [], True
@@ -408,6 +416,8 @@ def _parse_strict_int(value: Any, name: str) -> tuple[int | None, str | None]:
 
 _LCM_GREP_VALID_SCOPES = frozenset({"current", "all", "session"})
 _LCM_GREP_VALID_CONTENT_SCOPES = frozenset({"history", "externalized", "both"})
+_LCM_MEMORY_LOOKUP_LIMITS = (20, 50)
+_LCM_MEMORY_LIST_LIMITS = (50, 200)
 _LCM_GREP_HARD_LIMIT_CAP = 200
 _LCM_GREP_EXTERNALIZED_FILE_CAP = 256
 _LCM_GREP_EXTERNALIZED_DISCOVERY_CAP = 4096
@@ -472,6 +482,11 @@ _LCM_INSPECT_REF_SCAN_MESSAGE_LIMIT = 10_000
 _LCM_INSPECT_PAYLOAD_METADATA_READ_BYTES = 16_384
 _LCM_INSPECT_MAX_RESPONSE_CHARS = 20_000
 _OPERATOR_TEXT_FIELD_MAX_CHARS = 1_000
+
+
+def lcm_memory(args: Dict[str, Any], **kwargs) -> str:
+    """Read a cited entity card or assertion subject registry."""
+    return _memory_tools.lcm_memory(args, **kwargs)
 
 
 def lcm_query_state(args: Dict[str, Any], **kwargs) -> str:
@@ -1196,8 +1211,11 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 exclude_session_ids=excluded_session_ids,
                 allow_operators=bool(args.get("_allow_operators", False)),
                 **({"stemmed": True} if args.get("_stemmed") else {}),
+                **({"_include_like_excerpt": True} if args.get("mode") == "recall" else {}),
                 **({"agent_operators": True} if args.get("_agent_operators") else {}),
             )
+            if args.get("mode") != "recall":
+                msg_hits = collapse_duplicate_hits(msg_hits)
             for hit in msg_hits:
                 if hit.get("session_id") in excluded_session_ids:
                     continue
@@ -1208,6 +1226,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                         has_current_session=has_current_session,
                     )
                 )
+                if args.get("mode") == "recall" and "_like_excerpt" in hit:
+                    results[-1]["_like_excerpt"] = hit["_like_excerpt"]
         except Exception as exc:
             # Grep degrades to whatever the other stages produce, but the
             # failure must reach the PAYLOAD, not just the log: lcm_recall's
@@ -1569,7 +1589,9 @@ def _lcm_grep_full_text_with_deadline(
     def invoke() -> dict[str, Any]:
         message_conn: sqlite3.Connection | None = None
         dag_conn: sqlite3.Connection | None = None
-        expired = [False]
+        stop = threading.Event()
+        close_lock = threading.Lock()
+        watchdog: threading.Thread | None = None
 
         def require_remaining(stage: str) -> float:
             stage_remaining = deadline - time.monotonic()
@@ -1577,11 +1599,21 @@ def _lcm_grep_full_text_with_deadline(
                 raise TimeoutError(f"lcm full-text deadline exhausted before {stage}")
             return stage_remaining
 
-        def interrupt_if_expired() -> int:
-            if time.monotonic() >= deadline:
-                expired[0] = True
-                return 1
-            return 0
+        def interrupt_when_expired() -> None:
+            if stop.wait(max(0.0, deadline - time.monotonic())):
+                return
+            while not stop.is_set():
+                with close_lock:
+                    if stop.is_set():
+                        return
+                    for conn in (message_conn, dag_conn):
+                        if conn is not None:
+                            try:
+                                conn.interrupt()
+                            except sqlite3.ProgrammingError:
+                                pass
+                # Sticky cancellation also covers statements begun after an interrupt.
+                stop.wait(0.01)
 
         try:
             require_remaining("database path resolution")
@@ -1607,8 +1639,10 @@ def _lcm_grep_full_text_with_deadline(
                 conn.row_factory = sqlite3.Row
                 conn.execute("PRAGMA query_only=ON")
                 require_remaining("connection setup")
-                conn.set_progress_handler(interrupt_if_expired, 1000)
-                require_remaining("connection setup")
+            watchdog = threading.Thread(
+                target=interrupt_when_expired, name="full-text-deadline", daemon=True,
+            )
+            watchdog.start()
             read_engine = copy.copy(engine)
             read_io = RetrievalContext(engine._store, engine._dag).bind(
                 message_conn, dag_conn,
@@ -1623,16 +1657,20 @@ def _lcm_grep_full_text_with_deadline(
                     _limit_cap=limit_cap,
                 )
             )
-            if expired[0] or time.monotonic() >= deadline:
+            if time.monotonic() >= deadline:
                 return _lcm_grep_deadline_error(
                     str(args.get("mode") or "semantic").lower(), "full_text"
                 )
             return payload
         finally:
-            if message_conn is not None:
-                message_conn.close()
-            if dag_conn is not None:
-                dag_conn.close()
+            stop.set()
+            with close_lock:
+                if message_conn is not None:
+                    message_conn.close()
+                if dag_conn is not None:
+                    dag_conn.close()
+            if watchdog is not None:
+                watchdog.join()
 
     try:
         return _run_within_deadline(
@@ -1652,6 +1690,8 @@ def _lcm_grep_full_text_with_deadline(
         }
 
 
+_EMBEDDING_PREFIX_STALE_REASON = "embedding prefix settings changed; run /lcm embed warmup, then backfill"
+
 _EMBEDDING_IDENTITY_STALE_REASON = (
     "embedding_identity_stale: stored vectors use an older embedding privacy "
     "revision; run /lcm embed warmup, then /lcm embed backfill --apply"
@@ -1659,21 +1699,22 @@ _EMBEDDING_IDENTITY_STALE_REASON = (
 
 
 def _lcm_embedding_profile_revision(
-    conn: sqlite3.Connection, *, provider: str, model: str, task: str
+    conn: sqlite3.Connection, *, provider: str, model: str, task: str, revision_suffix: str | None = ""
 ) -> str | None:
     try:
-        row = conn.execute(
+        rows = conn.execute(
             "SELECT revision FROM lcm_embedding_profile "
-            "WHERE active=1 AND archived_at IS NULL AND task=? "
+            "WHERE active=1 AND archived_at IS NULL AND replace(task, '+prefix', '')=? "
             "AND provider=? AND model_name=? "
-            "ORDER BY registered_at DESC, identity_hash DESC LIMIT 1",
+            "ORDER BY registered_at DESC, identity_hash DESC",
             (task, provider, model),
-        ).fetchone()
+        ).fetchall()
     except sqlite3.OperationalError as exc:
         if "no such table: lcm_embedding_profile" not in str(exc):
             raise
         return None
-    return str(row[0] or "") if row is not None else None
+    return next((base for row in rows for base, suffix in [split_prefix_revision(str(row[0] or ""))]
+                 if revision_suffix is None or suffix == revision_suffix), None)
 
 
 def _lcm_active_embedding_revision(
@@ -1687,7 +1728,11 @@ def _lcm_active_embedding_revision(
             task=str(task),
             provider=str(getattr(provider, "provider_id", "") or "").strip().lower(),
             model=str(getattr(provider, "model_id", "") or "").strip(),
+            revision_suffix=getattr(provider, "identity_revision_suffix", ""),
         )
+        if revision is None and _lcm_embedding_profile_revision(conn, task=str(task),
+                provider=provider.provider_id, model=provider.model_id, revision_suffix=None) is not None:
+            raise EmbeddingIdentityStaleError(_EMBEDDING_PREFIX_STALE_REASON)
     finally:
         conn.close()
     if revision is None:
@@ -1768,10 +1813,19 @@ def _lcm_embedding_query_metric(provider: Any) -> dict[str, Any]:
 def _lcm_grep_resolve_provider(
     engine: "LCMEngine", *, deadline: float | None = None
 ) -> Any:
+    from .embedding_maintenance import local_model_state, start_local_model_prepare
+
     config = engine._config
+    state = local_model_state(config)
+    if state is None and embedding_provider_id(normalize_embedding_provider(config.embedding_provider)) == "fastembed":
+        start_local_model_prepare(engine._store.db_path, config)
+        raise RuntimeError("local embedding model is preparing; retrieval uses full text")
+    if state is not None and state[0] in {"preparing", "unavailable"}:
+        reason = f" ({state[1]})" if state[1] else ""
+        raise RuntimeError(f"local embedding model is {state[0]}{reason}; retrieval uses full text")
     cache_key = (
         str(getattr(config, "embedding_provider", "") or "").strip().lower(),
-        str(getattr(config, "embedding_model", "") or "").strip(),
+        effective_embedding_model(getattr(config, "embedding_provider", ""), getattr(config, "embedding_model", "")),
     )
     cached = getattr(engine, "_lcm_embedding_provider_cache", None)
     if cached is not None and cached[0] == cache_key:
@@ -1807,7 +1861,7 @@ def _resolve_recall_provider(
     config = engine._config
     cache_key = (
         override.lower(),
-        str(getattr(config, "embedding_model", "") or "").strip(),
+        effective_embedding_model(override, getattr(config, "embedding_model", "")),
     )
     cached = getattr(engine, "_lcm_proactive_provider_cache", None)
     if cached is not None and cached[0] == cache_key:
@@ -2035,8 +2089,8 @@ def _lcm_grep_semantic(
             task="summary",
             remaining_s=deadline - time.monotonic(),
         )
-    except EmbeddingIdentityStaleError:
-        return degraded(_EMBEDDING_IDENTITY_STALE_REASON)
+    except EmbeddingIdentityStaleError as exc:
+        return degraded(_EMBEDDING_PREFIX_STALE_REASON if str(exc) == _EMBEDDING_PREFIX_STALE_REASON else _EMBEDDING_IDENTITY_STALE_REASON)
     except VoyageError as exc:
         if exc.kind == "auth":
             return {
@@ -2440,6 +2494,33 @@ def _lcm_recall_verified_span(
     return offset, len(text)
 
 
+def _lcm_recall_fts_match_span(
+    snippet: Any, content: str,
+) -> tuple[int, int] | None:
+    """Map a marked FTS snippet to an unambiguous span in the raw row.
+
+    SQLite's ellipses and highlight delimiters are presentation, not source
+    bytes. Use a contiguous snippet fragment as the anchor, and decline stale,
+    ambiguous or delimiter-colliding text rather than inventing an offset.
+    """
+    if ">>>" in content or "<<<" in content:
+        return None
+    for fragment in str(snippet or "").split("..."):
+        # Recall clips previews at 300 chars, possibly inside a highlight.
+        if fragment.count(">>>") > fragment.count("<<<"):
+            fragment = fragment[:fragment.rfind(">>>")]
+        match = re.search(r">>>(.+?)<<<", fragment, re.DOTALL)
+        if match is None:
+            continue
+        plain = fragment.replace(">>>", "").replace("<<<", "")
+        offset = content.find(plain)
+        if offset < 0 or content.find(plain, offset + 1) >= 0:
+            continue
+        start = offset + len(fragment[:match.start()].replace(">>>", "").replace("<<<", ""))
+        return start + len(match[1]) - len(match[1].lstrip(">")), start + len(match[1])
+    return None
+
+
 def _lcm_recall_citable_entries(
     ordered: list[dict[str, Any]],
     *,
@@ -2584,9 +2665,9 @@ class _LcmRecallStrictSelector:
     proof and the same snapshot is handed to hydration. Past that budget the hit
     ships its own excerpt, so the excerpt must be found at its offset. When a row
     surfaced through several arms, each arm's representation is tried in turn: an
-    FTS match window is not a verbatim prefix and will not verify, but the chunk
-    or summary-source representation of the same row does, and delivering that is
-    not a swap -- it is the same row, quoted somewhere it really says.
+    FTS match window is mapped back to the raw row before verification; a chunk
+    or summary-source representation can also supply a verified excerpt. Each
+    representation quotes the same row somewhere it really says the text.
     """
 
     def __init__(
@@ -2743,13 +2824,37 @@ class _LcmRecallStrictSelector:
                 "content_offset": candidate.get("content_offset"),
             }
             span = _lcm_recall_verified_span(probe, row)
+            used_like_excerpt = False
+            if span is None and candidate.get("_like_excerpt"):
+                # LIKE's ellipses are presentation too. Keep its producer's
+                # exact span, then check the original excerpt against this row.
+                probe.update(candidate["_like_excerpt"])
+                probe["snippet"] = probe["snippet"][:_LCM_RECALL_SNIPPET_CHARS]
+                span = _lcm_recall_verified_span(probe, row)
+                used_like_excerpt = span is not None
+            used_fts_window = False
+            if span is None:
+                match_span = _lcm_recall_fts_match_span(
+                    candidate.get("_fts_snippet", candidate.get("snippet")),
+                    str(row.get("content") or ""),
+                )
+                if match_span is not None:
+                    window = _lcm_recall_content_window(
+                        row["content"], match_start=match_span[0], match_end=match_span[1],
+                        char_cap=_LCM_RECALL_SNIPPET_CHARS,
+                    )
+                    probe.update(snippet=window["content"], content_offset=window["content_offset"])
+                    span = _lcm_recall_verified_span(probe, row)
+                    used_fts_window = span is not None
             if span is None:
                 continue
-            if candidate is not hit:
+            if used_fts_window or used_like_excerpt or candidate is not hit or probe["snippet"] != hit.get("snippet"):
                 # Same row, quoted where it really says it.
-                hit["snippet"] = candidate.get("snippet")
-                hit["content_offset"] = candidate.get("content_offset")
-                if candidate.get("chunk_span"):
+                hit["snippet"] = probe["snippet"]
+                hit["content_offset"] = probe["content_offset"]
+                if used_fts_window or used_like_excerpt:
+                    hit.pop("chunk_span", None)
+                elif candidate.get("chunk_span"):
                     hit["chunk_span"] = candidate["chunk_span"]
                 hit["expand_hint"] = _lcm_recall_excerpt_expand_hint(hit)
             entry["_strict_span"] = span
@@ -2918,6 +3023,8 @@ def _lcm_recall_event_time(stored: dict[str, Any] | None) -> dict[str, str]:
     source = stored.get("observed_at_source")
     if source:
         fields["event_time_source"] = str(source)
+    if stored.get("time_uncertain") == "carried":
+        fields["time_uncertain"] = "carried"
     return fields
 
 
@@ -2934,8 +3041,8 @@ def _lcm_recall_event_time_rows(
     optional, so the read gets a private read-only connection whose busy wait
     and statement run are bounded by the remaining budget, the idiom of
     ``_lcm_recall_summary_source_hits``; the shared store connection's 30 s busy
-    timeout is never used and never changed. It selects only the three columns
-    the field needs, never ``content`` or ``tool_calls``, and a read that ends
+    timeout is never used and never changed. It selects only time metadata and
+    carried relation IDs, never ``content`` or ``tool_calls``, and a read that ends
     past the deadline is dropped rather than returned late (#995).
     """
     if time.monotonic() >= deadline:
@@ -2964,6 +3071,12 @@ def _lcm_recall_event_time_rows(
             f"WHERE store_id IN ({placeholders})",
             store_ids,
         ).fetchall()
+        # The writer cannot mark an unstamped row, and recall shows no event
+        # time for one. Avoid adding relation reads to that ordinary path.
+        timed_ids = [int(sid) for sid, observed, _source in rows if observed is not None]
+        carried_ids = (
+            engine._store.get_carried_stamp_ids(timed_ids, connection=conn) if timed_ids else set()
+        )
     except (sqlite3.Error, OSError) as exc:
         logger.debug("lcm_recall event_time read failed: %s", exc)
         if expired[0] or time.monotonic() >= deadline:
@@ -2975,7 +3088,10 @@ def _lcm_recall_event_time_rows(
     if time.monotonic() >= deadline:
         return {}, "deadline"
     return {
-        int(store_id): {"observed_at": observed_at, "observed_at_source": source}
+        int(store_id): {
+            "observed_at": observed_at, "observed_at_source": source,
+            **({"time_uncertain": "carried"} if int(store_id) in carried_ids else {}),
+        }
         for store_id, observed_at, source in rows
     }, None
 
@@ -3040,6 +3156,29 @@ def _lcm_recall_answer_ready_content(
             continue
         content = str(stored.get("content") or "")
         span = hit.get("chunk_span") or {}
+        if not span and len(content) > _LCM_RECALL_ANSWER_READY_CONTENT_CHARS:
+            # Short rows keep their legacy evidence_span and output bytes.
+            # Emoji has no lexical hydration terms; use LIKE's verified span.
+            for candidate in [hit, *entry.get("_alternates", [])]:
+                excerpt = candidate.get("_like_excerpt")
+                if not excerpt:
+                    continue
+                probe = {**candidate, **excerpt}
+                probe["snippet"] = probe["snippet"][:_LCM_RECALL_SNIPPET_CHARS]
+                like_span = _lcm_recall_verified_span(probe, stored)
+                if like_span is not None:
+                    span = {"char_start": like_span[0], "char_end": sum(like_span)}
+                    break
+        if not span and fts_arm_index is not None and fts_arm_index in entry.get("ranks", {}):
+            # Fusion may retain a chunk preview; use the FTS representation of
+            # this same row when it is available, before the literal fallback.
+            for candidate in [hit, *entry.get("_alternates", [])]:
+                match_span = _lcm_recall_fts_match_span(
+                    candidate.get("_fts_snippet", candidate.get("snippet")), content,
+                )
+                if match_span is not None:
+                    span = {"char_start": match_span[0], "char_end": match_span[1]}
+                    break
         try:
             match_start = int(span["char_start"])
             match_end = int(span["char_end"])
@@ -3129,21 +3268,35 @@ def _lcm_recall_fts_arm(
     """FTS arm: raw messages across all eligible sessions."""
     # Emoji cannot reach MATCH: keep the raw query on the existing LIKE route.
     or_query = "" if contains_emoji(query) else build_recall_or_query(query)
-    payload = _lcm_grep_full_text_with_deadline(
-        {
-            "query": or_query or query,
-            "_allow_operators": bool(or_query),
-            "_stemmed": True,
-            "sort": "relevance" if or_query or contains_emoji(query) else "recency",
-            "mode": "recall",
-            "session_scope": "all",
-            "limit": candidate_limit,
-            "_excluded_session_ids": excluded_session_ids,
-        },
-        engine=engine,
-        deadline=deadline,
-        limit_cap=_LCM_GREP_HYBRID_CANDIDATE_CAP,
-    )
+    args = {
+        "query": or_query or query,
+        "_allow_operators": bool(or_query),
+        "_stemmed": True,
+        "sort": "relevance" if or_query or contains_emoji(query) else "recency",
+        "mode": "recall",
+        "session_scope": "all",
+        "limit": candidate_limit,
+        "_excluded_session_ids": excluded_session_ids,
+    }
+    payload = None
+    if is_identifier_shaped_query(query):
+        payload = _lcm_grep_full_text_with_deadline(
+            {**args, "query": f'"{query}"', "_allow_operators": True, "sort": "relevance"},
+            engine=engine,
+            deadline=deadline,
+            limit_cap=_LCM_GREP_HYBRID_CANDIDATE_CAP,
+        )
+        # A clean literal miss alone may broaden; errors keep their disclosure
+        # and never spend the semantic reservation on a second full-text query.
+        if not payload.get("results") and "error" not in payload and not payload.get("message_search_error"):
+            payload = None
+    if payload is None:
+        payload = _lcm_grep_full_text_with_deadline(
+            args,
+            engine=engine,
+            deadline=deadline,
+            limit_cap=_LCM_GREP_HYBRID_CANDIDATE_CAP,
+        )
     if "error" in payload:
         return [], payload
     # Grep survives a message-search crash on its other stages, but THIS arm
@@ -3168,8 +3321,11 @@ def _lcm_recall_fts_arm(
             "timestamp": row.get("timestamp") or 0,
             "content_offset": 0,
             "snippet": (row.get("snippet") or "")[:_LCM_RECALL_SNIPPET_CHARS],
+            "_fts_snippet": row.get("snippet") or "",
             "from_current_session": bool(row.get("from_current_session")),
         }
+        if "_like_excerpt" in row:
+            hit["_like_excerpt"] = row["_like_excerpt"]
         hit["expand_hint"] = _lcm_recall_excerpt_expand_hint(hit)
         hits.append(hit)
     return hits, None
@@ -3317,6 +3473,58 @@ def _lcm_recall_summary_source_hits(
     finally:
         if conn is not None:
             conn.close()
+
+
+def _lcm_recall_catchup_reason(engine, provider, task: str) -> str | None:
+    """One keyed advisory read per requested identity, never a corpus count."""
+    try:
+        db_path = Path(engine._store.db_path).resolve()
+        conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True, timeout=0.05)
+        try:
+            expected = getattr(provider, "identity_revision_suffix", "")
+            held = conn.execute("SELECT provider FROM lcm_embedding_profile WHERE active=1 AND archived_at IS NULL "
+                                "AND task IN ('summary', 'summary+prefix') LIMIT 1").fetchone()
+            if (embedding_provider_id(provider.provider_id) == "fastembed" and held
+                    and not getattr(engine._config, "embeddings_enabled_explicit", True)
+                    and embedding_provider_id(str(held[0])) != "fastembed"):
+                return f"store's profile belongs to {held[0]}"
+            if (_lcm_embedding_profile_revision(conn, provider=provider.provider_id, model=provider.model_id, task=task, revision_suffix=None) is not None
+                    and _lcm_embedding_profile_revision(conn, provider=provider.provider_id, model=provider.model_id, task=task, revision_suffix=expected) is None):
+                return _EMBEDDING_PREFIX_STALE_REASON
+            row = conn.execute(
+                "SELECT value, key FROM metadata WHERE key = ? || ("
+                "SELECT identity_hash FROM lcm_embedding_profile "
+                "WHERE model_name=? AND provider=? AND replace(task, '+prefix', '')=? "
+                "AND CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ? "
+                "ORDER BY (active=1 AND archived_at IS NULL) DESC, "
+                "registered_at DESC, identity_hash DESC LIMIT 1)",
+                (f"embedding_catchup:{task}:", str(provider.model_id).strip(),
+                 str(provider.provider_id).strip().lower(), task, expected),
+            ).fetchone()
+            if row is None and embedding_provider_id(provider.provider_id) == "fastembed":
+                return f"{task} semantic index catching up (coverage not certified; catch-up receipt missing)"
+            record = json.loads(row[0]) if row else {}
+            if record.get("remaining") or record.get("operator_retry"):
+                record["operator_retry"] = 0
+                if embedding_provider_id(provider.provider_id) != "fastembed":
+                    from .command import _embedding_inflight_counts
+                    _, record["operator_retry"] = _embedding_inflight_counts(conn, row[1].split(":", 2)[2])
+        finally:
+            conn.close()
+        remaining = record.get("remaining", 0)
+        reasons = []
+        if remaining > 0:
+            detail = "" if isinstance(remaining, bool) else f" ({remaining} rows not yet embedded)"
+            reasons.append(f"{task} semantic index catching up{detail}")
+        if (operator_retry := record.get("operator_retry", 0)) > 0:
+            corpus = "chunks" if task == "chunk" else "summary"
+            reasons.append(f"{task} semantic index has {operator_retry} rows awaiting /lcm embed backfill --apply --retry-uncertain --corpus {corpus}")
+        return "; ".join(reasons) or None
+    except Exception:
+        logger.debug("Could not read embedding catch-up state", exc_info=True)
+        if embedding_provider_id(getattr(provider, "provider_id", "")) == "fastembed":
+            return f"{task} semantic index catching up (coverage not certified; metadata unavailable)"
+    return None
 
 
 def _lcm_recall_summary_arm(
@@ -3716,19 +3924,21 @@ def _lcm_recall_has_usable_vector_corpus(
             if time.monotonic() >= scan_deadline:
                 return False
             if privacy_revision is not None and _lcm_embedding_profile_revision(
-                conn, provider=provider_name, model=selected_model, task=task
+                conn, provider=provider_name, model=selected_model, task=task,
+                revision_suffix=embedding_prefix_suffix(engine._config, provider_name),
             ) != privacy_revision:
                 return False
             profile = conn.execute(
                 """
                 SELECT identity_hash
                 FROM lcm_embedding_profile
-                WHERE model_name = ? AND provider = ? AND task = ?
+                WHERE model_name = ? AND provider = ? AND replace(task, '+prefix', '') = ?
+                  AND CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ?
                 ORDER BY (active = 1 AND archived_at IS NULL) DESC,
                          registered_at DESC, identity_hash DESC
                 LIMIT 1
                 """,
-                (selected_model, provider_name, task),
+                (selected_model, provider_name, task, embedding_prefix_suffix(engine._config, provider_name)),
             ).fetchone()
             if profile is None:
                 return False
@@ -3796,6 +4006,14 @@ def _lcm_recall_has_usable_vector_corpus(
     finally:
         if conn is not None:
             conn.close()
+
+
+def default_semantic_cpu_limited(config) -> bool:
+    """Only the local product default may adapt; explicit callers retain control."""
+    return (bool(getattr(config, "embeddings_enabled", False))
+            and not getattr(config, "embeddings_enabled_explicit", True)
+            and embedding_provider_id(normalize_embedding_provider(getattr(config, "embedding_provider", ""))) == "fastembed"
+            and effective_cpus() <= 2)
 
 
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
@@ -3885,6 +4103,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         rerank_window = min(rerank_window, rerank_window_limit)
 
     embeddings_enabled = bool(getattr(engine._config, "embeddings_enabled", False))
+    provider_override = str(kwargs.get("provider_override") or "").strip()
+    cpu_limited = not provider_override and default_semantic_cpu_limited(engine._config)
+    embeddings_enabled = embeddings_enabled and not cpu_limited
     # FTS runs for verbatim/all normally, but ALSO whenever embeddings are
     # disabled -- including for include='summaries', whose only vector arm is dead
     # in that state. Without this, include='summaries' + embeddings-off returns
@@ -3892,6 +4113,24 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     run_fts = include in {"all", "verbatim"} or not embeddings_enabled
     run_summary = include in {"all", "summaries"}
     run_chunk = include in {"all", "verbatim"}
+    selected_provider = provider_override or getattr(engine._config, "embedding_provider", "")
+    local_fallback_reasons = []
+    if embeddings_enabled and embedding_provider_id(normalize_embedding_provider(selected_provider)) == "fastembed":
+        from .embedding_maintenance import local_model_state, start_local_model_prepare
+        selected_config = copy.copy(engine._config)
+        selected_config.embedding_provider = selected_provider
+        selected = SimpleNamespace(provider_id="fastembed", model_id=effective_embedding_model(selected_provider, getattr(engine._config, "embedding_model", "")))
+        local_fallback_reasons = [reason for task, active in (("summary", run_summary), ("chunk", run_chunk))
+                         if active and (reason := _lcm_recall_catchup_reason(engine, selected, task))]
+        probe, state = probe_provider_availability(selected_config), local_model_state(selected_config)
+        if not probe.get("available"):
+            local_fallback_reasons.insert(0, f"local dependency unavailable: {probe.get('detail')}")
+        elif state is None:
+            start_local_model_prepare(engine._store.db_path, selected_config)
+            local_fallback_reasons.insert(0, "local model preparing")
+        elif state and state[0] != "present":
+            local_fallback_reasons.insert(0, f"local model {state[0]}" + (f": {state[1]}" if state[1] else ""))
+        run_fts = run_fts or bool(local_fallback_reasons)
 
     arm_hits: dict[str, list[dict[str, Any]]] = {}
     # Node handles from the summary arm. Reference-strict delivery routes summary
@@ -3899,11 +4138,10 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     # here as non-evidence drill-down leads instead of as hits.
     summary_leads: list[dict[str, Any]] = []
     coverage: dict[str, str] = {}
-    degraded_reasons: list[str] = []
+    degraded_reasons: list[str] = (["cpu_limited"] if cpu_limited else []) + local_fallback_reasons
     embedding_query_metrics: list[dict[str, Any]] = []
     timed_out = False
     provider: Any = None
-    provider_override = str(kwargs.get("provider_override") or "").strip()
 
     served_fts_index = "plain"
     # -- FTS arm (the default-on value: works with embeddings disabled) --
@@ -3914,14 +4152,13 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         configured_provider = provider_override or str(
             getattr(engine._config, "embedding_provider", "") or ""
         ).strip()
-        configured_model = str(
-            getattr(engine._config, "embedding_model", "") or ""
-        ).strip()
+        configured_model = effective_embedding_model(configured_provider, getattr(engine._config, "embedding_model", ""))
         # A fallback runs because the semantic arm already failed, so it gets the
         # whole remaining budget rather than the cap reserved for that arm (#887).
         semantic_available = (
             not fallback
             and embeddings_enabled
+            and not local_fallback_reasons
             and (run_summary or run_chunk)
             # A timed-out scope resolution drops the vector arms (fail closed)
             # and an empty whitelist leaves them nothing eligible to return;
@@ -4021,11 +4258,17 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 arm_hits["chunk"] = []
                 coverage["chunk"] = "full"
         elif not embeddings_enabled:
-            degraded_reasons.append("semantic retrieval is disabled")
+            if not cpu_limited:
+                degraded_reasons.append("semantic retrieval is disabled")
             if run_summary:
                 coverage["summary"] = "disabled"
             if run_chunk:
                 coverage["chunk"] = "disabled"
+        elif local_fallback_reasons:
+            if run_summary:
+                coverage["summary"] = "none"
+            if run_chunk:
+                coverage["chunk"] = "none"
         elif time.monotonic() >= deadline:
             timed_out = True
         else:
@@ -4056,9 +4299,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     embedding_query_metrics.append(
                         _lcm_embedding_query_metric(provider)
                     )
-            except EmbeddingIdentityStaleError:
+            except EmbeddingIdentityStaleError as exc:
                 coverage["summary"] = "none"
-                degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
+                degraded_reasons.append(_EMBEDDING_PREFIX_STALE_REASON if str(exc) == _EMBEDDING_PREFIX_STALE_REASON else _EMBEDDING_IDENTITY_STALE_REASON)
                 summary_fts_fallback = not run_fts and run_summary
             except EmbeddingPrivacyPolicyError:
                 # Deterministic configuration error — never degrade (#367).
@@ -4112,9 +4355,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         embedding_query_metrics.append(
                             _lcm_embedding_query_metric(chunk_provider)
                         )
-                except EmbeddingIdentityStaleError:
+                except EmbeddingIdentityStaleError as exc:
                     coverage["chunk"] = "none"
-                    degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
+                    degraded_reasons.append(_EMBEDDING_PREFIX_STALE_REASON if str(exc) == _EMBEDDING_PREFIX_STALE_REASON else _EMBEDDING_IDENTITY_STALE_REASON)
                 except EmbeddingPrivacyPolicyError:
                     # Deterministic configuration error — never degrade (#367).
                     raise
@@ -4129,6 +4372,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
             if query_vector is not None:
                 if run_summary:
+                    reason = _lcm_recall_catchup_reason(engine, provider, "summary")
+                    if reason:
+                        degraded_reasons.append(reason)
                     try:
                         hits, cov, scanned, total, summary_leads = _lcm_recall_summary_arm(
                             engine,
@@ -4157,9 +4403,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         timed_out = True
                         coverage["summary"] = "none"
                         summary_fts_fallback = not run_fts and run_summary
-                    except EmbeddingIdentityStaleError:
+                    except EmbeddingIdentityStaleError as exc:
                         coverage["summary"] = "none"
-                        degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
+                        degraded_reasons.append(_EMBEDDING_PREFIX_STALE_REASON if str(exc) == _EMBEDDING_PREFIX_STALE_REASON else _EMBEDDING_IDENTITY_STALE_REASON)
                         summary_fts_fallback = not run_fts and run_summary
                     except EmbeddingPrivacyPolicyError:
                         # Deterministic configuration error — never degrade (#367).
@@ -4173,6 +4419,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 _run_fts_arm(fallback=True)
             if chunk_query_vector is not None:
                 if run_chunk:
+                    reason = _lcm_recall_catchup_reason(engine, chunk_provider, "chunk")
+                    if reason:
+                        degraded_reasons.append(reason)
                     try:
                         hits, cov, scanned, total = _lcm_recall_chunk_arm(
                             engine,
@@ -4197,9 +4446,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     except TimeoutError:
                         timed_out = True
                         coverage["chunk"] = "none"
-                    except EmbeddingIdentityStaleError:
+                    except EmbeddingIdentityStaleError as exc:
                         coverage["chunk"] = "none"
-                        degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
+                        degraded_reasons.append(_EMBEDDING_PREFIX_STALE_REASON if str(exc) == _EMBEDDING_PREFIX_STALE_REASON else _EMBEDDING_IDENTITY_STALE_REASON)
                     except EmbeddingPrivacyPolicyError:
                         # Deterministic configuration error — never degrade (#367).
                         raise
@@ -4209,6 +4458,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
     ordered, arm_order, arm_weights = fuse_candidates(
         arm_hits, getattr(engine._config, "recall_arm_weights", None)
+    )
+    ordered = collapse_duplicate_candidates(
+        ordered, duplicate_identity_rows(engine, ordered, deadline=deadline)
     )
     fts_arm_index = arm_order.index("fts") if "fts" in arm_order else None
     now = time.time()
@@ -4234,6 +4486,16 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
         )
 
+    session_delivery = None
+    if kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) == "session":
+        from .recall_session import deliver_session
+        session_delivery = partial(
+            deliver_session, engine=engine, deadline=deadline, excluded=excluded_session_ids,
+            allowed=candidate_session_ids, seen_refs=seen_refs, delta_requested=delta_requested,
+            event_time_fields=_lcm_recall_event_time,
+            occurrence=include_occurrence_time,
+            summary_leads=summary_leads,
+        )
     return recall_delivery.deliver_recall(
         ordered,
         query=query,
@@ -4275,6 +4537,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             engine._store.get(store_id),
         ),
         rerank_enabled=lambda: bool(getattr(engine._config, "rerank_enabled", False)),
+        session_delivery=session_delivery,
     )
 
 
@@ -4317,7 +4580,7 @@ def _active_embedding_profile_exists(engine: "LCMEngine") -> bool:
             """
             SELECT 1
             FROM lcm_embedding_profile
-            WHERE active = 1 AND archived_at IS NULL AND task = 'summary'
+            WHERE active = 1 AND archived_at IS NULL AND task IN ('summary', 'summary+prefix')
             LIMIT 1
             """
         ).fetchone()
@@ -4345,6 +4608,57 @@ def _lcm_store_has_live_chunk_vectors(conn: sqlite3.Connection) -> bool:
         if "no such table" not in str(exc):
             raise
         return False
+
+
+def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
+    """#1186 readiness: model present / preparing / unavailable(reason), and summary coverage."""
+    from . import command
+    from .embedding_maintenance import local_model_state
+
+    state = local_model_state(engine._config)
+    if state is not None and state[0] == "preparing":
+        # Background preparation owns this window; a cached-only probe is expected to fail until it ends.
+        model = "preparing"
+    elif not probe.get("available"):
+        model = f"unavailable({probe.get('detail')})"
+    elif state is not None and state[0] == "unavailable":
+        model = f"unavailable({state[1]})"
+    else:
+        # Process state is shared by every database on this model: "present" needs this database's profile too.
+        model = None
+    try:
+        conn = command._embedding_read_connection(engine._store.db_path)
+        try:
+            command._register_summary_has_text(conn)
+            profile = command._embedding_current_profile(conn)
+            wanted = effective_embedding_model(probe.get("provider", ""), probe.get("model") or getattr(engine._config, "embedding_model", ""))
+            if profile is not None and not (embedding_provider_id(str(profile["provider"] or "")) == "fastembed"
+                                            and str(profile["model_name"] or "") == wanted):
+                profile = None  # another model's vectors are not coverage for the configured one
+            if model is None:
+                model = "present" if state and state[0] == "present" else "preparing"
+            vectors = "SELECT 1 WHERE 0" if profile is None else (
+                "SELECT 1 FROM lcm_embedding_meta AS m WHERE m.embedded_id = CAST(n.node_id AS TEXT) "
+                "AND m.embedded_kind = 'summary' AND m.identity_hash = :identity"
+            )
+            counts = command._embedding_inflight_counts(conn, profile["identity_hash"]) if profile is not None else (0, 0)
+            eligible, embedded = conn.execute(
+                f"SELECT COUNT(*), COALESCE(SUM(EXISTS ({vectors})), 0) FROM summary_nodes AS n "
+                "WHERE n.depth = 0 AND lcm_summary_has_text(n.summary) = 1",
+                {"identity": str(profile["identity_hash"]) if profile is not None else ""},
+            ).fetchone()
+        finally:
+            conn.close()
+        coverage = f"{embedded}/{eligible} summaries"
+        coverage += "".join(f"; {label} {count}" for label, count in zip(("in flight", "uncertain"), counts) if count)
+    except sqlite3.Error as exc:
+        coverage = f"unavailable ({exc})"
+        if model is None:
+            model = "present" if _active_embedding_profile_exists(engine) else "preparing"
+    last, _ = command.incremental_embedding_state(engine._store.db_path)
+    provider = SimpleNamespace(provider_id="fastembed", model_id=probe.get("model"), identity_revision_suffix="")
+    chunks = _lcm_recall_catchup_reason(engine, provider, "chunk") or "caught up (coverage certified)"
+    return f"model: {model}; coverage: {coverage}; chunks: {chunks}" + (f"; maintenance: {last[1]}" if last else "")
 
 
 def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
@@ -4396,10 +4710,43 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
         "reachability_probed": bool(probe.get("probed")),
         "reason": probe.get("detail"),
     }
-    # An unavailable provider is the prerequisite blocker: warmup cannot succeed until it is fixed.
-    if not probe.get("available"):
+    override = str(getattr(config, "proactive_recall_provider", "") or "").strip()
+    if (override.lower() not in {"", "fastembed", "fast-embed"}
+            and not (config.embeddings_enabled_explicit and config._embeddings_enabled_supplied)):
+        detail["proactive_recall_note"] = f"proactive override {override} is inert; set LCM_EMBEDDINGS_ENABLED=true to enable it"
+    if embedding_provider_id(str(probe.get("provider") or "")) == "fastembed":
+        detail["readiness"] = _embedding_readiness(engine, probe)
+        held = _lcm_recall_catchup_reason(engine, SimpleNamespace(provider_id="fastembed", model_id=probe.get("model")), "summary")
+        if held and held.startswith("store's profile belongs to "):
+            detail["reason"] = (f"{held}; restore that provider's settings with LCM_EMBEDDINGS_ENABLED=true, "
+                                "or switch to the local model with /lcm embed warmup")
+            return {"check": "embedding_provider_health", "status": "warn", "detail": detail}
+    cpu_limited = default_semantic_cpu_limited(config)
+    if cpu_limited:
+        detail.update(cpu_limited=True, effective_cpus=effective_cpus(), cpu_limit_reason=(
+            f"semantic recall limited on this host ({effective_cpus():g} effective CPUs); full-text recall is active"))
+    readiness = str(detail.get("readiness", ""))
+    if "coverage: unavailable" in readiness:
+        detail["reason"] = "embedding coverage could not be read"
+        return {"check": "embedding_provider_health", "status": "warn", "detail": detail}
+    if str(detail.get("readiness", "")).startswith("model: preparing;"):
+        detail["informational"] = True
         detail["impact"] = (
-            "semantic retrieval is degraded: lcm_recall reports degraded=true and "
+            "Local semantic recall preparing; full-text recall is active; "
+            "lcm_recall keeps answering from full text while the local model prepares in the background"
+        )
+        return {
+            "check": "embedding_provider_health",
+            "status": "warn",
+            "detail": detail,
+        }
+    # An unavailable provider is the prerequisite blocker: warmup cannot succeed until it is fixed.
+    if not probe.get("available") or str(detail.get("readiness", "")).startswith("model: unavailable("):
+        if readiness.startswith("model: unavailable(") and probe.get("available"):
+            detail["reason"] = readiness.split("unavailable(", 1)[1].split(");", 1)[0]
+        detail["impact"] = (
+            f"Local semantic recall unavailable ({detail['reason']}); full-text recall is active; "
+            "lcm_recall reports degraded=true and "
             "lcm_grep mode=semantic falls back to full-text"
         )
         return {
@@ -4426,15 +4773,17 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
             stale_tasks = []
             if _lcm_embedding_profile_revision(
                 conn, provider=provider_id, model=model, task="summary",
+                revision_suffix=embedding_prefix_suffix(config, provider_id),
             ) != current_revision:
                 stale_tasks.append("summary")
             # The chunk corpus is opt-in, so its identity matters only once the
             # store holds live chunk vectors (#888).
             if _lcm_store_has_live_chunk_vectors(conn) and _lcm_embedding_profile_revision(
                 conn, provider=provider_id, model=default_chunk_model(provider_id, model),
-                task="chunk",
+                task="chunk", revision_suffix=embedding_prefix_suffix(config, provider_id),
             ) != current_revision:
                 stale_tasks.append("chunk")
+            prefix_stale = any(_lcm_embedding_profile_revision(conn, provider=provider_id, model=model if task == "summary" else default_chunk_model(provider_id, model), task=task, revision_suffix=None) == current_revision for task in stale_tasks)
         finally:
             conn.close()
         if stale_tasks:
@@ -4465,14 +4814,19 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
                 "impact": "lcm_recall skips the stale semantic arm until the profile is re-registered",
                 "remedy": remedy,
             })
+            if prefix_stale:
+                detail["reason"] = _EMBEDDING_PREFIX_STALE_REASON
             return {
                 "check": "embedding_provider_health",
                 "status": "warn",
                 "detail": detail,
             }
+    detail["informational"] = cpu_limited or readiness.startswith("model: present;")
+    if readiness.startswith("model: present;"):
+        detail["impact"] = "Model ready; summaries " + readiness.split("coverage: ", 1)[1]
     return {
         "check": "embedding_provider_health",
-        "status": "pass",
+        "status": "warn" if cpu_limited else "pass",
         "detail": detail,
     }
 
@@ -4739,6 +5093,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
     side_channel_active = engine.side_channel_active
 
     return json.dumps({
+        **embedding_prefix_status(engine._config),
         "session_id": session_id,
         "compression_count": engine.compression_count,
         "total_compactions": full_status.get("total_compactions", 0),
@@ -4791,6 +5146,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
             "fresh_tail_count": engine._config.fresh_tail_count,
             "fresh_tail_max_tokens": engine._config.fresh_tail_max_tokens,
             "leaf_chunk_tokens": engine._config.leaf_chunk_tokens,
+            "recall_delivery_unit": getattr(engine._config, "recall_delivery_unit", "hits"),
             "leaf_target_ratio": getattr(
                 engine._config, "leaf_target_ratio", LCMConfig.leaf_target_ratio
             ),
@@ -5188,7 +5544,9 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
         config_warnings.append(warning)
     for key in getattr(c, "ignored_config_yaml_lcm_keys", []) or []:
         config_warnings.append(
-            f"config.yaml lcm.{key} is not a supported LCM config.yaml key and was ignored; use the matching LCM_* env var if this setting is intentional"
+            f"config.yaml lcm.{key} is not a supported LCM config.yaml key and was ignored; "
+            + ("use LCM_EMBEDDINGS_ENABLED=true/false" if key == "embeddings_enabled"
+               else "use the matching LCM_* env var if this setting is intentional")
         )
 
     checks.append({
@@ -5278,7 +5636,7 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     overall = "healthy"
     if any(ch["status"] == "fail" for ch in checks):
         overall = "unhealthy"
-    elif any(ch["status"] == "warn" for ch in checks):
+    elif any(ch["status"] == "warn" and not (isinstance(ch.get("detail"), dict) and ch["detail"].get("informational")) for ch in checks):
         overall = "warnings"
 
     return json.dumps({

@@ -29,12 +29,9 @@ Restart Hermes after changing plugin or context-engine configuration. Verify wit
 
 ## Installation
 
-An existing checkout can install profile-aware plugin and skill links:
-
-```bash
-./scripts/install.sh
-HERMES_PROFILE=myprofile ./scripts/install.sh
-```
+An existing source checkout can install profile-aware plugin and skill links with
+the [source installer](https://github.com/electricsheephq/lcm-x/blob/main/scripts/install.sh). Run it from that checkout;
+set `HERMES_PROFILE=myprofile` to select a named profile.
 
 The installer exposes both:
 
@@ -43,11 +40,49 @@ The installer exposes both:
 
 It refuses conflicting paths rather than overwriting an existing install, reuses
 an existing `plugins/hermes-lcm` link to the same checkout, and prints migration
-steps for a legacy install without editing config or deleting anything.
+steps for a legacy install without deleting anything. With Hermes available, it
+enables core through the host (updating `config.yaml`) unless a separate older copy
+requires migration first. It natively installs the optional local-embeddings
+companion with host-owned consent; failure prints a retry while core stays usable
+with full-text recall. Context-engine selection remains manual. `HERMES_PROFILE`
+selects the named profile; with a root-shaped home, unset or `default` selects the root despite a sticky
+active profile. `HERMES_HOME` sets that root; printed commands preserve both choices.
+A profile-shaped `HERMES_HOME=<root>/profiles/<name>` selects that profile; a conflicting `HERMES_PROFILE` is refused before links.
+The installer requires canonical lowercase, unpadded ASCII profile names
+(1–64 letters/digits, `_` or `-` after the first character). Use
+`HERMES_PROFILE=default` with the source installer for `Default` or
+`HERMES_PROFILE=work` with the source installer for padded `Work`; other spellings are
+refused before links or host calls. Native Hermes CLI aliases remain available.
 
 ## High-impact controls
 
-Use `docs/operator-guide.md` as the complete current source. Start with:
+Local embeddings are on by default, with provider `fastembed`. The configured
+model remains empty; only fastembed supplies the effective default
+`BAAI/bge-small-en-v1.5`. Explicit models win with an explicit provider; runtime
+model-only input stays unconfigured. Non-local providers require an explicit
+model and `LCM_EMBEDDINGS_ENABLED=true`. Invalid enable values resolve OFF with a
+warning; a set-but-blank value also resolves OFF, without a warning. config.yaml `lcm.embeddings_enabled` is ignored; use the environment key.
+Non-local proactive overrides also require explicit enablement. A held cloud
+profile requires restoring its settings with `LCM_EMBEDDINGS_ENABLED=true`, or
+switching to the local model with `/lcm embed warmup`; no automatic takeover occurs.
+Set `LCM_EMBEDDINGS_ENABLED=false` to opt out without loading/downloading a model.
+Preparation and catch-up run in the background; until ready, recall uses full
+text with `degraded=true`, the reason and actual coverage, including summaries-only requests.
+Local embeddings enabled by the product default adapt `lcm_recall` to full-text
+immediately on hosts with at most 2 effective CPUs (affinity and cgroup quotas).
+This includes summaries-only fallback, reports `cpu_limited`, and keeps background
+catch-up running. Explicit `LCM_EMBEDDINGS_ENABLED` values and programmatic
+configs take precedence. `embeddings_enabled_explicit` is internal loader
+provenance, not an environment/YAML setting. Neither recall timeout nor scan budget changes.
+Proactive recall stays inert on these hosts unless a nonblank provider override is set. Doctor
+separates model readiness from index coverage and treats preparation/healthy CPU limits as
+information. For an explicit opt-in on a small host:
+
+```bash
+export LCM_EMBEDDINGS_ENABLED=true
+```
+
+Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/operator-guide.md) as the complete current source. Start with:
 
 - `LCM_CONTEXT_THRESHOLD` (default `0.75`): when normal context pressure triggers compaction;
 - `LCM_FRESH_TAIL_COUNT` (default `24`) and `LCM_FRESH_TAIL_MAX_TOKENS` (default `24000`): newest messages kept raw, and their token cap;
@@ -60,12 +95,23 @@ Use `docs/operator-guide.md` as the complete current source. Start with:
 - `LCM_DATABASE_PATH`: profile-local SQLite path when the default is unsuitable;
 - `LCM_NATIVE_RECOVERY` (default `false`): removed in v0.25.0; ignored if set
 - `LCM_SURVIVAL_FIT` (default `true`) and `LCM_SURVIVAL_RESERVE` (default `0.15`): when compaction cannot bring the list under the model window, the oldest whole user turns leave live context (an oversized newest turn is projected) so the session survives; rows stay stored and searchable, a WARNING `LCM survival fit applied` is logged, the user is warned once and `/lcm doctor` reports `survival_fit` as history without changing its status. The `lcm_doctor` tool returns that history in its top-level `survival_fit` field (null when no fit is recorded); it is not a health check and does not affect `overall`. `lcm_status.last_survival_fit` describes the latest fit in the current session, or null, including `cause` when recorded; doctor history retains `last_cause`. The reserve is the share of the window kept free;
-- `LCM_HOST_MESSAGE_UID` (default `shadow`; `off`, `shadow`, `on`; env only): on a host whose messages carry `message_uid`, record which stored row each uid was bound to in the droppable `host_uid_bindings` table and count agreement with the existing identity matching; ingest decisions are unchanged. `/lcm doctor` reports `host_uid_*` counts. `off`: no capture, no table writes, no counts, no log line. Under `shadow` and `on`, canonical uid evidence can also exclude a proven hidden re-ingest copy of an assistant message from leaf summary input (the row stays stored and searchable); `off` disables that. `on` (reserved) and unknown values behave as `shadow` (an unknown value warns once). No-op on hosts without uids;
-- `FASTEMBED_CACHE_PATH` (fastembed's own variable, not an `LCM_*` key): the model cache the local `fastembed` provider loads from (default `~/.cache/fastembed`); it may be a shared, read-only cache. A read-only cache must be pre-seeded, because `/lcm embed warmup` cannot download into it. The model runs with 2 threads;
+- `LCM_HOST_MESSAGE_UID` (default `shadow`; `off`, `shadow`, `on`; env only): on a host whose messages carry `message_uid`, record which stored row each uid was bound to in the droppable `host_uid_bindings` table and count agreement with the existing identity matching; ingest decisions are unchanged. `/lcm doctor` reports `host_uid_*` counts. `off`: no capture, no table writes, no counts, no log line. Under `shadow` and `on`, canonical uid evidence can also exclude a proven hidden re-ingest copy of an assistant message from leaf summary input (the row stays stored and searchable); `off` disables that. `on` behaves exactly like `shadow`: both record count-only would-reject alias UID-conflict diagnostics in the debug log without changing matching, stored rows, bindings, or ingest writes. `off` performs no UID/binding reads on this diagnostic path. Unknown values behave as `shadow` and warn once. No-op on hosts without uids;
+- `FASTEMBED_CACHE_PATH` (fastembed's own variable, not an `LCM_*` key): the model cache the local `fastembed` provider loads from (default: the user cache directory); it may be a shared, read-only cache. A read-only cache must be pre-seeded, because preparation cannot download into it. Bge-small uses one ONNX Runtime intra-op thread; other models use two;
 - `LCM_IGNORE_SESSION_PATTERNS` and `LCM_STATELESS_SESSION_PATTERNS`: storage ownership boundaries;
-- summary/embedding provider settings only after confirming credentials, cost, and data handling; see `docs/embeddings-setup.md`, section "A host update can remove fastembed", for the embedding-dependency recovery note. Known cloud providers protect provider-bound copies automatically with the configured nonempty known pattern list while durable storage stays raw. `LCM_SENSITIVE_PATTERNS_ENABLED=true` is a separate irreversible durable-ingest opt-in. `LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly sends raw cloud copies under the `privacy:off` vector revision; warmup binds the chosen posture and later query/backfill calls fail closed on identity drift.
+- summary/embedding provider settings only after confirming credentials, cost, and data handling; see [docs/embeddings-setup.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/embeddings-setup.md), section "A host update can remove fastembed", for the embedding-dependency recovery note. Known cloud providers protect provider-bound copies automatically with the configured nonempty known pattern list while durable storage stays raw. `LCM_SENSITIVE_PATTERNS_ENABLED=true` is a separate irreversible durable-ingest opt-in. `LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly sends raw cloud copies under the `privacy:off` vector revision; warmup binds the chosen posture and later query/backfill calls fail closed on identity drift.
+
+`LCM_EMBEDDING_QUERY_PREFIX` / `LCM_EMBEDDING_DOCUMENT_PREFIX` default to `""` and apply only to Ollama and OpenAI-compatible embeddings.
+Environment values override `lcm.embedding_query_prefix` and `lcm.embedding_document_prefix` in YAML; quote values such as `"search_query: "` to keep whitespace.
+The provider announces a 12-hex SHA-256 digest of the JSON pair as an identity suffix; status and doctor show active sides and the digest only.
+After a change or removal, restart Hermes, run `/lcm embed warmup`, then `/lcm embed backfill --apply`; include chunk corpus/consent options as needed.
 
 Optional slash commands are disabled by default with `LCM_ENABLE_SLASH_COMMAND=false`. Destructive cleanup apply is separately guarded. Do not enable mutation surfaces merely to diagnose a problem.
+
+`LCM_SENDER_CAPTURE` is a non-field, profile-aware boolean toggle (default
+`true`). Set `LCM_SENDER_CAPTURE=0` to disable pending sender associations;
+the nullable sender columns are still added and historical rows are never
+backfilled. Capture stores an unverified gateway session principal without
+changing stored or delivered text.
 
 `LCM_SQLITE_MMAP_SIZE` sets SQLite mapped-read bytes (default `268435456`,
 unchanged). Set `LCM_SQLITE_MMAP_SIZE=0` on SD-card or single-board hosts: a
@@ -81,24 +127,31 @@ values and reports them through `config_source_warnings` in `lcm_status`,
 `/lcm status`, and the `lcm_doctor` configuration check. For example,
 `LCM_SURVIVAL_FIT=flase` keeps `true`; the warning names the key, shows the raw
 value's representation limited to 40 characters, and states the value used.
-Empty or whitespace-only values in this loader keep the default without warnings.
+Empty or whitespace-only values in this loader keep the default without warnings,
+except `LCM_EMBEDDINGS_ENABLED`: a blank value there turns embeddings off instead of
+keeping the local default.
 Range warnings (`LCM_CONTEXT_THRESHOLD`, `LCM_SURVIVAL_RESERVE`, `LCM_LEAF_CHUNK_TOKENS`, `LCM_SUMMARY_TIMEOUT_MS`), choice warnings (`LCM_EMBEDDING_PROVIDER`, `LCM_PREANSWER_EVIDENCE_MODE`, `LCM_EMBEDDING_STORAGE_DTYPE`), and dropped-input warnings (`LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS`, `LCM_RECALL_ARM_WEIGHTS`, `LCM_MODEL_THRESHOLDS`) use the same channel without changing values or consumer fallbacks.
 
-`LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` and `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` are deprecated in v0.28.0 and removed in v0.29.0 (#1246). Each enabled flag adds one `config_source_warnings` entry without changing behavior; false or unset flags and direct `LCMConfig(...)` construction add no deprecation warning. These flags are environment-only; their `lcm.*` YAML keys are ignored and shipped presets do not set them.
+`LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` and `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` are deprecated in v0.28.0 and removed in v0.30.0 (#1246). Each enabled flag adds one `config_source_warnings` entry without changing behavior; false or unset flags and direct `LCMConfig(...)` construction add no deprecation warning. These flags are environment-only; their `lcm.*` YAML keys are ignored and shipped presets do not set them.
 
 ### Tool exposure
 
 Both native context-engine schemas and plugin-registry registration advertise
 13 tools by default. `LCM_ASSERTIONS_ENABLED=true` exposes `lcm_query_state`;
-`LCM_ADAPTIVE_RETRIEVAL_ENABLED=true` exposes `lcm_retrieve`. Restart after
+`LCM_ADAPTIVE_RETRIEVAL_ENABLED=true` exposes `lcm_retrieve`;
+`LCM_ENTITIES_ENABLED=1` exposes read-only `lcm_memory` and creates the
+`entity_memory_v1` family (six tables) on first flag-on open. The tables stay
+after the flag is turned off; see the [ADR rollback and forget boundary](https://github.com/electricsheephq/lcm-x/blob/main/docs/entities-adr.md#d11-forget-e2).
+Entity scope follows the Hermes profile name, falling back to the resolved home
+path. Renaming a profile starts a new entity scope; rekey is a follow-up. Restart after
 changing these loaded process flags. `LCM_DISABLED_TOOLS` (comma-separated
 names) hides any tool, including a flag-enabled one, and refuses direct calls.
 Calls through a cached dormant schema retain the existing disabled response.
-The manifest continues to declare all 15 tools.
+The manifest continues to declare all 16 tools.
 
 ### Recall ranking
 
-- `LCM_RECALL_ARM_WEIGHTS` (default `fts=0.5,summary=1.0,chunk=1.0`): per-arm RRF weights for `lcm_recall`; see `docs/retrieval-tools.md`.
+- `LCM_RECALL_ARM_WEIGHTS` (default `fts=0.5,summary=1.0,chunk=1.0`): per-arm RRF weights for `lcm_recall`; see [docs/retrieval-tools.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/retrieval-tools.md).
 - `LCM_RECALL_FTS_ANCHOR` (default `true`, #950): with two or more arms, keeps the full-text arm's best match inside the `lcm_recall` ranked window when fusion pushed it out (at most one session displaced). The hit keeps its own score; `provenance.fts_anchor = {fired, position, delivered}` reports the move and whether the anchored hit is in the returned hits after `answer_ready` selection and the response cap (`delivered` is `null` when the anchor did not fire). Embeddings-off output is unchanged, and an `fts` weight of `0` turns it off. It is inert for `limit` below `4` (displacing one of three or fewer hits costs more than it gains; frozen in #950), and proactive recall does not use it. Set `false` to restore the previous order. Managed (evaOS fleet) profiles can set it only after a provisioning release adds it to the environment allowlist.
 
 ### Summary circuit
@@ -113,15 +166,16 @@ A 400 or 404 saying the route cannot serve its model (unknown model, model not f
 - `LCM_SUMMARY_TIMEOUT_MS` (default `120000`, the host's own compression default; when unset, Hermes `auxiliary.compression.timeout` applies if configured): how long one summary call may run before it counts as a failure. The foreground time budget can cut a call shorter.
 - `LCM_FOREGROUND_SOFT_SECONDS` (default `60`; `0` = none) and `LCM_FOREGROUND_HARD_SECONDS` (default `120`; `0` or invalid = `120`) (#605): one time budget for a threshold sweep, counted from `compress()` entry. The progress call (a condensation when the summary frontier is over its target, else the first leaf) is tried while 15 s of usable time is left before the hard bound less a finalize reserve; after a stored leaf or condensed node a call starts only if its route's recent duration says it ends, with the reserve, by the hard bound and by the soft target (stop reason `soft_target_reached`). Each call's timeout is at most the usable time left. A step already running is not interrupted, so a compaction can end past the hard bound: read the INFO line `LCM compaction stop:` for the seconds. On `reason=error`, a trailing `failure=` field names the known cause as one token, such as `publication_invariant_conflict` or `exception:RuntimeError` (#1180). A call cut by the budget does not count against the route's circuit, and a compaction takes one spend-guard slot; rollups use their own guard. The budget covers the sweep-off, manual `/compress`, forced overflow and recovery paths too (manual and forced use the hard bound only), and a leaf or condensation source within `LCM_L3_TRUNCATE_TOKENS` is written whole as level 3 with no call.
 - `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` (default `true` from v0.27.0): a large tool result or inline media payload is stored as a payload file under the Hermes home and its row holds an `[Externalized payload: ...]` reference; `lcm_expand(externalized_ref=...)` returns the original bytes; `false` opts out;
-- `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` (default `true` from v0.27.0): replay carries the externalized-ref stub in place of a large tool result, per the two thresholds below; needs externalization on; `false` opts out;
+- `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` (default `true` from v0.27.0): ingest durably externalizes a large tool result, per the two thresholds below; below-threshold size-only host adoption waits for a real compression boundary; needs externalization on; `false` opts out;
 - `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` (default `10000`) and `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` (default `2000`; `0` = the first-sight value, never above it) (#671): with `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` and `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` both on (the default from v0.27.0), a new tool result over the first value is replaced by its externalized-ref stub at ingest, and at a compaction a tool result outside the fresh tail is stubbed from the aged value. The stub keeps the call row; `lcm_expand(externalized_ref=...)` returns the original. An automatic compaction at or over the threshold first tries these free cuts without a model call and returns them when the host-measured list is at or under min(threshold - leaf chunk, 0.95 x threshold): stop reason `stub_first_exit` (partial; `lcm_status` `last_stub_first_exit`, the doctor, the `LCM compaction stop:` line); the rows no leaf summarised stay stored as backlog.
+- Durable ingest and host adoption are separate: if both original and replay estimates stay below the compaction threshold, a size-only replay change waits for the next threshold, overflow or independently required maintenance boundary. The host may keep carrying the original payload until then. Quarantine, ignore and sensitive-redaction cleanup still request immediate adoption; direct `compress()` callers still receive the cleaned replay.
 - `LCM_STUB_FIRST_EXIT_TARGET_RATIO` (default `0`; env only): lowers the stub-first exit's target to min(threshold - leaf chunk, 0.95 x threshold, int(ratio x threshold)); cuts over it take the leaf path. `0` keeps the built-in target; a negative value, a value over `1` or a non-number keeps it with a config warning. The applied target is the one in `last_stub_first_exit` and on the stop line. Use it on a large window where an exit leaves a long live list (with a 750,000-token threshold, `0.2` exits only at 150,000 tokens or under); the share follows the active model's threshold.
 - `LCM_SUMMARY_PROMPT_VERSION` (default `1`; env only): `1` keeps the original summariser prompts and 2x output ceiling; `2` opts in to the v2 prompts (six fixed headings, focus directives in the trusted policy, topic label tagged in the transcript message) and a 3x ceiling. Other values fall back to `1` with a config warning. (#646)
 
 
 ## Generated scalar environment reference
 
-Regenerate this table with `python scripts/gen_config_reference.py` from the
+Regenerate this table with the [reference generator](https://github.com/electricsheephq/lcm-x/blob/main/scripts/gen_config_reference.py) from the
 checkout root. It lists every scalar registry entry using the declared constructor
 default, without reading the environment, credentials, or host configuration.
 `""` is an empty string; `null` means unset (automatic provider-dependent protection
@@ -157,7 +211,7 @@ warns without changing its behavior until removal.
 | `LCM_CONDENSATION_FANIN` | `int` | `4` | — | — |
 | `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `bool` | `false` | — | — |
 | `LCM_DYNAMIC_LEAF_CHUNK_MAX` | `int` | `40000` | — | — |
-| `LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` | `bool` | `false` | — | Deprecated v0.28.0; removed v0.29.0 |
+| `LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` | `bool` | `false` | — | Deprecated v0.28.0; removed v0.30.0 |
 | `LCM_CACHE_FRIENDLY_MIN_DEBT_GROUPS` | `int` | `2` | — | — |
 | `LCM_DEFERRED_MAINTENANCE_ENABLED` | `bool` | `false` | — | — |
 | `LCM_DEFERRED_MAINTENANCE_MAX_PASSES` | `int` | `4` | — | — |
@@ -175,6 +229,7 @@ warns without changing its behavior until removal.
 | `LCM_EXTRACTION_ENABLED` | `bool` | `false` | — | — |
 | `LCM_EXTRACTION_MODEL` | `str` | `""` | — | — |
 | `LCM_EXTRACTION_OUTPUT_PATH` | `str` | `""` | — | — |
+| `LCM_ENTITIES_ENABLED` | `bool` | `false` | — | — |
 | `LCM_ASSERTIONS_ENABLED` | `bool` | `false` | — | — |
 | `LCM_QUERY_VIEWS_ENABLED` | `bool` | `false` | — | — |
 | `LCM_ADAPTIVE_RETRIEVAL_ENABLED` | `bool` | `false` | — | — |
@@ -190,7 +245,7 @@ warns without changing its behavior until removal.
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `bool` | `true` | — | — |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `int` | `10000` | — | — |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `int` | `2000` | — | — |
-| `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `bool` | `false` | — | Deprecated v0.28.0; removed v0.29.0 |
+| `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `bool` | `false` | — | Deprecated v0.28.0; removed v0.30.0 |
 | `LCM_STUB_FIRST_EXIT_TARGET_RATIO` | `float` | `0.0` | — | — |
 | `LCM_SUMMARY_MODEL` | `str` | `""` | — | — |
 | `LCM_NATIVE_RECOVERY` | `bool` | `false` | — | — |
@@ -207,7 +262,7 @@ warns without changing its behavior until removal.
 | `LCM_SUMMARY_TIMEOUT_MS` | `int` | `120000` | `> 0` | — |
 | `LCM_EXPANSION_TIMEOUT_MS` | `int` | `120000` | — | — |
 | `LCM_DATABASE_PATH` | `str` | `""` | — | — |
-| `LCM_EMBEDDINGS_ENABLED` | `bool` | `false` | — | — |
+| `LCM_EMBEDDINGS_ENABLED` | `bool` | `true` | — | — |
 | `LCM_RERANK_ENABLED` | `bool` | `false` | — | — |
 | `LCM_RERANK_MODEL` | `str` | `"rerank-2.5-lite"` | — | — |
 | `LCM_RERANK_WINDOW_LIMIT` | `int` | `0` | — | — |
@@ -216,6 +271,7 @@ warns without changing its behavior until removal.
 | `LCM_RECALL_SCAN_MAX_ROWS` | `int` | `0` | — | — |
 | `LCM_RECALL_SCAN_BUDGET_S` | `float` | `0.0` | — | — |
 | `LCM_RECALL_REFERENCE_STRICT` | `bool` | `true` | — | — |
+| `LCM_RECALL_DELIVERY_UNIT` | `str` | `"hits"` | `"hits"`, `"session"` | — |
 | `LCM_RECALL_FTS_ANCHOR` | `bool` | `true` | — | — |
 | `LCM_PROACTIVE_RECALL_ENABLED` | `bool` | `false` | — | — |
 | `LCM_PROACTIVE_RECALL_MIN_SCORE` | `float` | `0.01` | — | — |
@@ -230,8 +286,10 @@ warns without changing its behavior until removal.
 | `LCM_EMBEDDING_STORE_DIM` | `int` | `0` | — | — |
 | `LCM_EMBEDDING_BINARY_PRESCREEN` | `bool` | `false` | — | — |
 | `LCM_KNN_PRESCREEN_MULTIPLIER` | `int` | `4` | — | — |
-| `LCM_EMBEDDING_PROVIDER` | `str` | `""` | `"voyage"`, `"voyageai"`, `"ollama"`, `"fastembed"`, `"fast-embed"`, `"openai-compatible"`, `"openai"`, `"siliconflow"` | — |
+| `LCM_EMBEDDING_PROVIDER` | `str` | `"fastembed"` | `"voyage"`, `"voyageai"`, `"ollama"`, `"fastembed"`, `"fast-embed"`, `"openai-compatible"`, `"openai"`, `"siliconflow"` | — |
 | `LCM_EMBEDDING_MODEL` | `str` | `""` | — | — |
+| `LCM_EMBEDDING_QUERY_PREFIX` | `str` | `""` | — | — |
+| `LCM_EMBEDDING_DOCUMENT_PREFIX` | `str` | `""` | — | — |
 | `LCM_EMBED_CONTENT_POLICY` | `str` | `"conversational"` | — | — |
 | `LCM_OLLAMA_BASE_URL` | `str` | `"http://localhost:11434"` | — | — |
 | `LCM_EMBEDDING_BASE_URL` | `str` | `""` | — | — |
@@ -266,7 +324,7 @@ comma-separated values. Keep their existing source tracking and parsing rules.
 
 | Environment key | Format / declared default |
 | --- | --- |
-| `LCM_MODEL_THRESHOLDS` | `model:threshold` pairs; `{}`; each threshold must be > 0 and <= 1 |
+| `LCM_MODEL_THRESHOLDS` | `model:threshold` pairs; `{}`; each threshold must be > 0 and <= 1. In `lcm.model_thresholds`, values must be YAML numbers; quoted values such as `glm: "0.35"` are skipped on every loader. |
 | `LCM_SUMMARY_REASONING_EFFORT` | Empty (task/provider default); `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `LCM_EXPANSION_REASONING_EFFORT` | Same reasoning choices; empty (task/provider default) |
 | `LCM_SENSITIVE_PATTERNS` | List; `api_key,bearer_token,password_assignment,private_key` |
@@ -279,7 +337,7 @@ comma-separated values. Keep their existing source tracking and parsing rules.
 
 ## Hand-written reference: side-channel environment readers
 
-These 11 keys are read outside `config.py`, directly or through helper
+These 12 keys are read outside `config.py`, directly or through helper
 wrappers. They are not loaded into `LCMConfig`; listing them does not
 consolidate or change their readers. Reader filenames are relative to the
 checkout root. Credential entries list only variable names, never values.
@@ -288,6 +346,7 @@ checkout root. Credential entries list only variable names, never values.
 | --- | --- | --- | --- |
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `engine.py` | Absolute compaction threshold override | each call — `_set_context_length()` with a positive context length, through model updates, session-start metadata, or cloning |
 | `LCM_ENABLE_SLASH_COMMAND` | `__init__.py` | Optional slash-command registration | plugin registration |
+| `LCM_SENDER_CAPTURE` | `sender_capture.py` | Profile-aware pending sender capture; default `true`, `0` disables capture without removing columns or backfilling history | each call — pending association creation through the profile-aware boolean resolver |
 | `LCM_HERMES_BASE_DIR` | `config.py` (called by `engine.py`, `externalize.py`, `diagnostics.py`) | Storage containment boundary; process-wide, never read from a routed profile | each call — storage-directory resolution or state-database containment validation; `_get_allowed_hermes_base()` also reads it when called (tests only; no production caller) |
 | `LCM_IDENTITY_ANCHOR` | `identity_anchor.py` | Identity-anchor switch | each call — `identity_anchor_enabled()` checks during ingest, replay identity handling, and compaction |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `db_bootstrap.py` | Startup integrity-check interval | database open — startup FTS validation, after structural checks pass |

@@ -6,6 +6,7 @@ that persists every message and provides structured retrieval tools.
 Based on the LCM paper by Ehrlich & Blackman (Voltropy PBC, Feb 2026).
 """
 
+from contextlib import nullcontext
 import importlib.util
 import json
 import logging
@@ -253,6 +254,7 @@ def _answer_ready_baseline(active_engine, question: str, payload: dict):
             "scope_bias": 0.0,
             "include_occurrence_time": True,
         },
+        delivery_unit="hits",
     )
     recalled = json.loads(raw) if isinstance(raw, str) else raw
     hits = recalled.get("hits") if isinstance(recalled, dict) else None
@@ -272,6 +274,10 @@ def _answer_ready_baseline(active_engine, question: str, payload: dict):
                     "content": quote,
                 }
             )
+        else:
+            continue
+        if hit.get("duplicate_store_ids"):
+            candidates[-1]["duplicate_store_ids"] = hit["duplicate_store_ids"]
     return tuple(candidates)
 
 
@@ -329,7 +335,7 @@ def _pre_llm_context(active_engine, payload: dict) -> dict | None:
                 baseline_refs=baseline_refs,
                 question_as_of=question_date,
                 retrieve=lambda recall_args: active_engine.handle_tool_call(
-                    "lcm_recall", recall_args
+                    "lcm_recall", recall_args, delivery_unit="hits"
                 ),
                 enabled=True,
                 render_baseline_context=baseline_was_internal,
@@ -470,11 +476,10 @@ def _warn_if_embedding_provider_unavailable(config) -> None:
             "unavailable: %s (provider=%s, model=%s). Semantic retrieval is "
             "degraded to full-text: lcm_recall reports degraded=true and "
             "lcm_grep mode=semantic falls back to FTS. Stored history is intact "
-            "and nothing is lost. Fix what the detail names (a missing dependency "
-            "or provider credential); a dependency installed by hand, such as "
-            "fastembed, can be dropped by a Hermes update. Then run `/lcm doctor` "
-            "to confirm. No restart is needed once the dependency is present "
-            "(the import is lazy).",
+            "and nothing is lost. Follow the detail's host plugin-manager "
+            "command for the local-embeddings companion, or fix the named "
+            "provider credential. Restart Hermes after companion enable, then "
+            "run `/lcm doctor` to confirm.",
             probe.get("detail"),
             probe.get("provider"),
             probe.get("model"),
@@ -659,17 +664,20 @@ def register(ctx):
         # persists hook context as user-attributed ``api_content``.
         try:
             def _on_pre_llm_call(**payload):
+                from .sender_capture import create_pending
+
                 session_id = str(payload.get("session_id") or "")
                 conversation_id = str(
                     payload.get("conversation_id")
                     or payload.get("gateway_session_key")
                     or ""
                 )
+                def prepare(active_engine):
+                    create_pending(active_engine, payload)
+                    return _pre_llm_context(active_engine, payload)
+
                 result = use_active_lcm_engine(
-                    lambda active_engine: _pre_llm_context(
-                        active_engine,
-                        payload,
-                    ),
+                    prepare,
                     session_id=session_id,
                     conversation_id=conversation_id,
                 )
@@ -693,6 +701,9 @@ def register(ctx):
     # shadow Path B and lose current-turn ingest, so the Path B fallback is the
     # expected healthy behavior there.
     _TOOLS = [(spec.name, spec.schema, spec.emoji) for spec in TOOL_REGISTRY]
+    if getattr(engine._config, "recall_delivery_unit", "hits") == "session":
+        from .recall_session import session_schema
+        _TOOLS = [(name, session_schema(schema), emoji) for name, schema, emoji in _TOOLS]
     # Share the loaded-config filter with the native context-engine path:
     # explicitly disabled and flag-dormant tools cost no schema tokens.
     _disabled = engine._omitted_tool_names()
@@ -783,7 +794,8 @@ def register(ctx):
             def _ingest_and_note(active_engine):
                 # The turn ended whether or not its ingest succeeded (#597).
                 try:
-                    ingested = active_engine.ingest(history)
+                    with getattr(active_engine, "_attribution_span", lambda *_: nullcontext())("post_llm_call", len(history)):
+                        ingested = active_engine.ingest(history)
                 finally:
                     try:
                         note = getattr(active_engine, "note_turn_complete", None)

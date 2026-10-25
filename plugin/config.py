@@ -1,7 +1,10 @@
 """LCM configuration with defaults and env var overrides."""
 import contextvars
+import json
 import logging
 import os
+import re
+import shlex
 from collections import ChainMap
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -14,6 +17,12 @@ try:
     import yaml
 except Exception:  # pragma: no cover - optional fallback for minimal installs
     yaml = None
+
+
+try:
+    import ruamel.yaml as ruamel_yaml
+except Exception:  # pragma: no cover - optional fallback for minimal installs
+    ruamel_yaml = None
 
 
 logger = logging.getLogger(__name__)
@@ -247,8 +256,9 @@ _host_message_uid_mode_warned = False
 
 
 def host_message_uid_mode() -> str:
-    """``LCM_HOST_MESSAGE_UID`` (v0.26.0): ``off`` | ``shadow`` (default) | ``on`` (reserved for slice C; runs as
-    ``shadow`` today). An unknown value means ``shadow``, with one WARNING per process."""
+    """``LCM_HOST_MESSAGE_UID``: ``off`` disables UID capture and alias-guard reads; ``shadow`` (default)
+    observes only; ``on`` behaves exactly like ``shadow``. Alias UID conflicts are count-only diagnostics (#1519).
+    An unknown value means ``shadow``, with one WARNING per process."""
     global _host_message_uid_mode_warned
     raw = (lcm_env_get("LCM_HOST_MESSAGE_UID") or "").strip().lower()
     if raw and raw not in _HOST_MESSAGE_UID_MODES and not _host_message_uid_mode_warned:
@@ -328,6 +338,72 @@ def _hermes_config_path() -> Path:
     return home / "config.yaml"
 
 
+_YAML_QUOTED_SCALAR = r""""(?:\\.|[^"\\])*"|'(?:''|[^'])*'"""
+
+
+def _plain_yaml_value(value, memo=None):
+    if memo is None:
+        memo = {}
+    if id(value) in memo:
+        return memo[id(value)]
+    if isinstance(value, (dict, list, tuple)):
+        result = {} if isinstance(value, dict) else []
+        memo[id(value)] = result
+        if isinstance(value, dict):
+            result.update((_plain_yaml_value(k, memo), _plain_yaml_value(v, memo)) for k, v in value.items())
+        else:
+            result.extend(_plain_yaml_value(item, memo) for item in value)
+        return result
+    if value is None:
+        return None
+    for scalar_type in (str, bool, int, float):
+        if isinstance(value, scalar_type):
+            return scalar_type(value)
+    return str(value)
+
+
+def _parse_yaml_fallback_scalar(value: str):
+    value = value.strip()
+    quoted = re.match(_YAML_QUOTED_SCALAR, value)
+    if quoted:
+        token = quoted.group()
+        try:
+            return json.loads(token) if token[0] == '"' else token[1:-1].replace("''", "'")
+        except ValueError:
+            pass  # Unsupported escape: retain the old parser's result below.
+    if value.startswith("["):
+        items = []
+        start = 1
+        # Quoted tokens consume their own commas, hashes and escaped quotes.
+        quoted_item = r"(?:^|(?<=,))\s*(?:" + _YAML_QUOTED_SCALAR + ")"
+        for match in re.finditer(quoted_item + r"|[,\]\[]|(?<!\S)#", value[1:]):
+            token = match.group()
+            if token in {"#", "["}:
+                break  # Unsupported list shape: retain the old result.
+            if token in {",", "]"}:
+                end = match.start() + 1
+                item = value[start:end].strip()
+                if item or token == ",":
+                    items.append(_parse_yaml_fallback_scalar(item))
+                if token == "]":
+                    return items
+                start = match.end() + 1
+    for match in re.finditer(r"^(?:" + _YAML_QUOTED_SCALAR + r")|(?<!\S)#", value):
+        if match.group() == "#":
+            value = value[:match.start()]
+            break
+    value = value.rstrip().strip("'\"")
+    lowered = value.lower()
+    if lowered in {"true", "yes", "on"}:
+        return True
+    if lowered in {"false", "no", "off"}:
+        return False
+    try:
+        return float(value) if "." in value else int(value)
+    except ValueError:
+        return value
+
+
 def _load_hermes_config_yaml(cfg_path: Path | None = None) -> dict[str, Any]:
     cfg_path = _hermes_config_path() if cfg_path is None else cfg_path
     try:
@@ -341,11 +417,26 @@ def _load_hermes_config_yaml(cfg_path: Path | None = None) -> dict[str, Any]:
         except Exception:
             return {}
 
+    if ruamel_yaml is not None:
+        try:
+            loaded = _plain_yaml_value(ruamel_yaml.YAML(typ="safe", pure=True).load(text))
+            return loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            return {}
+
     root: dict[str, Any] = {}
     stack: list[tuple[int, dict[str, Any]]] = [(-1, root)]
     for raw_line in text.splitlines():
-        line = raw_line.split("#", 1)[0].rstrip()
-        if not line.strip() or ":" not in line:
+        line = raw_line.rstrip()
+        content = line
+        quoted_scalar = r"(?:^\s*|^[^:#]*:\s*)(?:" + _YAML_QUOTED_SCALAR + ")"
+        if line.partition(":")[2].lstrip().startswith("["):
+            quoted_scalar = r"(?<=[\[,])\s*(?:" + _YAML_QUOTED_SCALAR + ")|" + quoted_scalar
+        for match in re.finditer(quoted_scalar + r"|(?<!\S)#", line):
+            if match.group() == "#":
+                content = line[:match.start()]
+                break
+        if ":" not in content:
             continue
         indent = len(line) - len(line.lstrip(" \t"))
         key, raw_value = line.strip().split(":", 1)
@@ -359,23 +450,12 @@ def _load_hermes_config_yaml(cfg_path: Path | None = None) -> dict[str, Any]:
             stack.pop()
         parent = stack[-1][1] if stack else root
         value = raw_value.strip()
-        if not value:
+        if not value or value.startswith("#"):
             child: dict[str, Any] = {}
             parent[key] = child
             stack.append((indent, child))
             continue
-        value = value.strip("'\"")
-        lowered = value.lower()
-        if lowered in {"true", "yes", "on"}:
-            parsed: Any = True
-        elif lowered in {"false", "no", "off"}:
-            parsed = False
-        else:
-            try:
-                parsed = float(value) if "." in value else int(value)
-            except ValueError:
-                parsed = value
-        parent[key] = parsed
+        parent[key] = _parse_yaml_fallback_scalar(value)
     return root
 
 
@@ -384,6 +464,7 @@ _SUPPORTED_LCM_CONFIG_YAML_KEYS = {
     "model_thresholds",
     "summary_reasoning_effort",
     "expansion_reasoning_effort",
+    "embedding_query_prefix", "embedding_document_prefix",
 }
 
 
@@ -649,13 +730,36 @@ PREANSWER_EVIDENCE_MODES = ("off", "legacy_selective", "requirements_v1")
 EMBEDDING_STORAGE_DTYPES = ("float32", "int8")
 
 
+def normalize_embedding_provider(spelling: str) -> str:
+    """Normalize provider spelling before alias resolution."""
+    return str(spelling or "").strip().lower()
+
+
 def embedding_provider_id(spelling: str) -> str:
     """Map an already-normalized spelling to its id; preserve unknown values."""
     return next((provider for provider, spellings in EMBEDDING_PROVIDER_SPELLINGS.items()
                  if spelling in spellings), spelling)
 
 
+def effective_embedding_model(provider: str, configured_model: str) -> str:
+    """Only fastembed supplies a built-in model; cloud configuration fails closed."""
+    return str(configured_model or "").strip() or (
+        "BAAI/bge-small-en-v1.5"
+        if embedding_provider_id(normalize_embedding_provider(provider)) == "fastembed" else ""
+    )
+
+
+def companion_enable_command() -> str:
+    """Match install.sh's explicit root/profile target, including profile-shaped homes."""
+    home = Path(lcm_env_get("HERMES_HOME", str(Path.home() / ".hermes")))
+    profile = lcm_env_get("HERMES_PROFILE", "default")
+    if home.parent.name == "profiles":
+        profile, home = home.name, home.parent.parent
+    return f"HERMES_HOME={shlex.quote(str(home))} hermes -p {shlex.quote(profile)} plugins enable hermes-lcm-x-local-embeddings"
+
+
 _ENV_CHOICES = {
+    "recall_delivery_unit": (("hits", "session"), str.lower, "ignored; using 'hits'"),
     "embedding_provider": (
         tuple(spelling for spellings in EMBEDDING_PROVIDER_SPELLINGS.values() for spelling in spellings),
         str.lower, "provider resolution raises ProviderUnavailable when requested",
@@ -668,8 +772,8 @@ _ENV_CHOICES = {
 
 # Deprecation/removal versions shared by the loader and generated reference.
 ENV_FIELD_DEPRECATIONS: dict[str, tuple[str, str]] = {
-    "cache_friendly_condensation_enabled": ("v0.28.0", "v0.29.0"),
-    "large_output_transcript_gc_enabled": ("v0.28.0", "v0.29.0"),
+    "cache_friendly_condensation_enabled": ("v0.28.0", "v0.30.0"),
+    "large_output_transcript_gc_enabled": ("v0.28.0", "v0.30.0"),
 }
 
 
@@ -732,6 +836,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("extraction_enabled", "LCM_EXTRACTION_ENABLED", bool),
     _EnvFieldSpec("extraction_model", "LCM_EXTRACTION_MODEL", str),
     _EnvFieldSpec("extraction_output_path", "LCM_EXTRACTION_OUTPUT_PATH", str),
+    _EnvFieldSpec("entities_enabled", "LCM_ENTITIES_ENABLED", bool),
     _EnvFieldSpec("assertions_enabled", "LCM_ASSERTIONS_ENABLED", bool),
     _EnvFieldSpec("query_views_enabled", "LCM_QUERY_VIEWS_ENABLED", bool),
     _EnvFieldSpec(
@@ -789,6 +894,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("recall_scan_max_rows", "LCM_RECALL_SCAN_MAX_ROWS", int),
     _EnvFieldSpec("recall_scan_budget_s", "LCM_RECALL_SCAN_BUDGET_S", float),
     _EnvFieldSpec("recall_reference_strict", "LCM_RECALL_REFERENCE_STRICT", bool),
+    _EnvFieldSpec("recall_delivery_unit", "LCM_RECALL_DELIVERY_UNIT", str),
     _EnvFieldSpec("recall_fts_anchor", "LCM_RECALL_FTS_ANCHOR", bool),
     _EnvFieldSpec("proactive_recall_enabled", "LCM_PROACTIVE_RECALL_ENABLED", bool),
     _EnvFieldSpec("proactive_recall_min_score", "LCM_PROACTIVE_RECALL_MIN_SCORE", float),
@@ -805,6 +911,8 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("knn_prescreen_multiplier", "LCM_KNN_PRESCREEN_MULTIPLIER", int),
     _EnvFieldSpec("embedding_provider", "LCM_EMBEDDING_PROVIDER", str),
     _EnvFieldSpec("embedding_model", "LCM_EMBEDDING_MODEL", str),
+    _EnvFieldSpec("embedding_query_prefix", "LCM_EMBEDDING_QUERY_PREFIX", str),
+    _EnvFieldSpec("embedding_document_prefix", "LCM_EMBEDDING_DOCUMENT_PREFIX", str),
     _EnvFieldSpec("embedding_content_policy", "LCM_EMBED_CONTENT_POLICY", str),
     _EnvFieldSpec("ollama_base_url", "LCM_OLLAMA_BASE_URL", str),
     _EnvFieldSpec(
@@ -981,6 +1089,10 @@ class LCMConfig:
     # Directory for daily extraction files (empty = auto: ~/.hermes/lcm-extractions/)
     extraction_output_path: str = ""
 
+    # First flag-on open creates entity_memory_v1 (six tables); flag-off preserves them.
+    # Rollback/forget boundary: docs/entities-adr.md D11 (forget is not purge).
+    entities_enabled: bool = False
+
     # -- V4 assertion sidecar --
     # Materializes the rebuildable assertion tables in the same profile lcm.db.
     # This does not enable extraction or backfill; it only binds schema/read APIs.
@@ -1079,8 +1191,8 @@ class LCMConfig:
     # -- Storage ---
     database_path: str = ""       # empty = HERMES_HOME/lcm.db; LCM_DATABASE_PATH may override
 
-    # -- Embeddings (default-off until a provider/model are configured) ---
-    embeddings_enabled: bool = False
+    # -- Embeddings (automatic local default; non-local providers require opt-in) ---
+    embeddings_enabled: bool | None = None  # None distinguishes omitted consent.
     # lcm_recall cross-encoder rerank stage over the top fused candidates.
     # Default-off: recall ships value on RRF order alone, and rerank is one extra
     # billable API call the operator opts into. The lite default preserves the
@@ -1159,6 +1271,7 @@ class LCMConfig:
     # that renders recall without citations and wants summary hits back; disabled,
     # the answer_ready response is byte-identical to the pre-F35 delivery.
     recall_reference_strict: bool = True
+    recall_delivery_unit: str = "hits"
     # lcm_recall FTS anchor slot: with two or more arms, the FTS arm's best
     # message is kept inside the delivered window (at most one session evicted).
     # Evidence (#950): frozen LongMemEval-M LOCAL replay, R@10 0.898 -> 0.905 (470 q).
@@ -1196,8 +1309,10 @@ class LCMConfig:
     # still performs only the provider-free session-bundle path.
     selective_compiler_enabled: bool = False
     selective_compiler_model: str = ""
-    embedding_provider: str = ""
+    embedding_provider: str | None = None  # Resolved immediately in __post_init__.
     embedding_model: str = ""
+    embedding_query_prefix: str = ""
+    embedding_document_prefix: str = ""
     # Content-aware chunk policy for the raw-history chunk corpus:
     # conversational (default) | heads | full. Unknown values degrade to the
     # default in the chunker's normalize_content_policy.
@@ -1296,6 +1411,20 @@ class LCMConfig:
     # min(threshold - leaf chunk, 0.95 x threshold, int(ratio x threshold)); 0 = the built-in target.
     stub_first_exit_target_ratio: float = 0.0
 
+    # Loader provenance only, not a user setting. Manual configs are explicit.
+    embeddings_enabled_explicit: bool = True
+    _embeddings_enabled_supplied: bool | None = field(default=None, repr=False)
+
+    def __post_init__(self):
+        # A copy keeps its consent marker; a copy reset to None is an omitted setting again.
+        if self._embeddings_enabled_supplied is None or self.embeddings_enabled is None:
+            self._embeddings_enabled_supplied = self.embeddings_enabled is not None
+        model_only = not str(self.embedding_provider or "").strip() and bool(self.embedding_model)
+        if not str(self.embedding_provider or "").strip():
+            self.embedding_provider = "" if model_only else "fastembed"
+        if self.embeddings_enabled is None:
+            self.embeddings_enabled = not model_only and embedding_provider_id(normalize_embedding_provider(self.embedding_provider)) in {"", "fastembed"}
+
     @classmethod
     def from_env(cls) -> "LCMConfig":
         """Build config from environment variables (LCM_ prefix)."""
@@ -1304,6 +1433,19 @@ class LCMConfig:
         if pinned:
             _profile_envs[env["HERMES_HOME"]] = MappingProxyType(dict(env))
         c = cls()
+        raw_provider = env.get("LCM_EMBEDDING_PROVIDER", "").strip()
+        model_only = bool(env.get("LCM_EMBEDDING_MODEL", "").strip()) and not raw_provider
+        if model_only:
+            c.embedding_provider = ""  # A runtime model alone never selected a provider.
+        # Invalid bools retain the historical OFF fallback and warning. The
+        # flipped unset default belongs only to the local arm, never cloud consent.
+        c.embeddings_enabled = (
+            "LCM_EMBEDDINGS_ENABLED" not in env and not model_only
+            and embedding_provider_id(normalize_embedding_provider(raw_provider or c.embedding_provider)) in {"", "fastembed"}
+        )
+        c.embeddings_enabled_explicit = env.get("LCM_EMBEDDINGS_ENABLED", "").strip().lower() in (
+            "1", "true", "yes", "on", "0", "false", "no", "off")
+        c._embeddings_enabled_supplied = c.embeddings_enabled_explicit
         c._absolute_threshold_tokens = env.get("LCM_ABSOLUTE_THRESHOLD_TOKENS", "0") if pinned else None
         config_sources: dict[str, str] = {}
         config_source_warnings: list[str] = []
@@ -1314,6 +1456,11 @@ class LCMConfig:
                 config_source_warnings.append(warning)
             elif source == f"env:LCM_{field.upper()}":
                 _warn_env_range(field, getattr(c, field), config_source_warnings)
+
+        prefix_yaml = _load_hermes_config_yaml().get("lcm", {})
+        for name in ("embedding_query_prefix", "embedding_document_prefix"):
+            if isinstance(prefix_yaml, dict) and isinstance(prefix_yaml.get(name), str):
+                setattr(c, name, prefix_yaml[name])
 
         c.ignored_config_yaml_lcm_keys = _ignored_lcm_config_yaml_keys()
 
@@ -1463,6 +1610,10 @@ class LCMConfig:
                     "Until then it behaves as before."
                 )
 
+        c.recall_delivery_unit = c.recall_delivery_unit.strip().lower()
+        if c.recall_delivery_unit not in ("hits", "session"):
+            c.recall_delivery_unit = "hits"
+
         # Pattern-list overrides carry a source sidecar and stay explicit.
         raw_sensitive_patterns = lcm_env_get("LCM_SENSITIVE_PATTERNS")
         if raw_sensitive_patterns is not None:
@@ -1503,6 +1654,8 @@ class LCMConfig:
             c.ignore_message_patterns = _parse_pattern_list(raw_ignore_messages)
             c.ignore_message_patterns_source = "env"
 
+        if not raw_provider and not model_only:
+            c.embedding_provider = "fastembed"
         c.config_sources = config_sources
         c.config_source_warnings = config_source_warnings
         return c

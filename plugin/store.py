@@ -15,7 +15,7 @@ import math
 import sqlite3
 import threading
 import time
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Collection, Dict, Iterable, List, Optional
@@ -35,7 +35,7 @@ from .db_bootstrap import (
 from .config import LCMConfig
 from .ingest_protection import protect_message_for_ingest, protect_messages_for_ingest
 from .search_query import (
-    build_snippet,
+    build_snippet_with_span,
     compute_search_candidate_cap,
     compute_directness_rank_bonus_upper_bound,
     compute_directness_score,
@@ -74,6 +74,67 @@ _MESSAGE_SELECT_COLUMNS = (
 )
 _MESSAGE_SELECT_COLUMN_COUNT = len(_MESSAGE_SELECT_COLUMNS.split(","))
 _UNKNOWN_SOURCE = "unknown"
+
+
+class _ObservedAtRows(list):
+    """Lookup rows with private, non-persisted provenance from the same fetched data."""
+
+    def __init__(self, rows, canonical_stamps):
+        super().__init__(rows)
+        self.canonical_stamps = canonical_stamps
+
+    def __reduce__(self):
+        return list, (list(self),)
+
+    def __copy__(self):
+        return list(self)
+
+    def __deepcopy__(self, memo):
+        from copy import deepcopy
+
+        return deepcopy(list(self), memo)
+
+
+def _matching_names_filter(names: Collection[str] | None, prefix: str) -> tuple[str, list[Any]]:
+    """Restrict question ranking using the same literal FTS/LIKE name matching."""
+    if names is None:
+        return "", []
+    clauses, args, fts = [], [], []
+    for name in names:
+        query = '"' + name.replace('"', '""') + '"'
+        safe = sanitize_fts5_query(query)
+        if requires_like_fallback(query, safe):
+            for term in extract_search_terms(sanitize_like_query(query)):
+                clauses.append(f"{prefix}content LIKE ? ESCAPE '\\'")
+                args.append(f"%{escape_like(term)}%")
+        else:
+            fts.append(safe)
+    if fts:
+        clauses.append(f"{prefix}store_id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
+        args.append(" OR ".join(f"({query})" for query in fts))
+    return "(" + " OR ".join(clauses) + ")" if clauses else "0", args
+
+
+def _fetch_ranked_search_rows(conn: sqlite3.Connection, sql: str, args: list[Any]) -> list[list[Any]]:
+    # A single SQLite result avoids reacquiring Python's GIL for every candidate.
+    # JSON1 rounds REALs; tagged round-trip decimals preserve the original bits.
+    names = [name.strip() for name in _MESSAGE_SELECT_COLUMNS.split(",")] + ["search_rank", "snippet"]
+    packed = ", ".join(["ordinal"] + [
+        f"CASE WHEN typeof({name})='real' THEN json_object('_real',printf('%!.17g',{name})) ELSE {name} END"
+        for name in names
+    ])
+    aggregate = f"""WITH ranked AS NOT MATERIALIZED ({sql})
+        SELECT json_group_array(json_array({packed})) FROM ranked"""
+    try:
+        decoded = json.loads(conn.execute(aggregate, args).fetchone()[0])
+    except sqlite3.Error as exc:
+        if getattr(exc, "sqlite_errorcode", None) not in (sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM):
+            raise
+        # Only the packed value failed: retain the same ranked full-text window.
+        return [list(row)[1:] for row in conn.execute(sql, args).fetchall()]
+    decoded.sort(key=lambda row: row[0])
+    return [[float(value['_real']) if isinstance(value, dict) else value for value in row[1:]]
+            for row in decoded]
 
 
 def _legacy_blank_source_clause(column: str) -> str:
@@ -312,6 +373,14 @@ def delete_host_uid_bindings(conn: sqlite3.Connection, rows_sql: str, args: tupl
         conn.execute(f"DELETE FROM host_uid_bindings WHERE store_id IN ({rows_sql})", args)
 
 
+def delete_chunk_inflight(conn: sqlite3.Connection, rows_sql: str, args: tuple = ()) -> None:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='lcm_embedding_backfill_inflight'").fetchone():
+        conn.execute(
+            "DELETE FROM lcm_embedding_backfill_inflight WHERE instr(embedded_id, ':') > 0 "
+            f"AND CAST(substr(embedded_id, 1, instr(embedded_id, ':') - 1) AS INTEGER) IN ({rows_sql})", args,
+        )
+
+
 class MessageStore:
     """SQLite-backed immutable message store."""
 
@@ -322,6 +391,7 @@ class MessageStore:
         self._hermes_home = hermes_home or str(self.db_path.parent)
         self._context_window_tokens: dict[str, int] = {}  # transient, session-keyed; never LCMConfig/SQLite
         self._conn: Optional[sqlite3.Connection] = None
+        self._carried_relation_connections: set[sqlite3.Connection] = set()
         # ``self._conn`` is shared across threads (the connection is opened with
         # ``check_same_thread=False``). SQLite's own C-level mutex serializes
         # statements at the engine layer, but the Python ``sqlite3`` module
@@ -340,6 +410,7 @@ class MessageStore:
         # uncontended ``RLock.acquire``/``release`` pair per operation.
         self._write_lock = threading.RLock()
         self._transaction_owner = TransactionOwner(self._write_lock)
+        self._manual_chunk_backlog_pending = False
         self._init_db()
 
     def _init_db(self):
@@ -370,7 +441,9 @@ class MessageStore:
                 pinned INTEGER DEFAULT 0,
                 ingested_at REAL,
                 observed_at REAL,
-                observed_at_source TEXT
+                observed_at_source TEXT,
+                sender_id TEXT,
+                sender_source TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_msg_session
                 ON messages(session_id, store_id);
@@ -434,6 +507,8 @@ class MessageStore:
             "observed_at_source",
             "ALTER TABLE messages ADD COLUMN observed_at_source TEXT",
         )
+        for name in ("sender_id", "sender_source"):
+            add_column_if_missing(self._conn, columns, name, f"ALTER TABLE messages ADD COLUMN {name} TEXT")
         # The NULL probe has no index and scans the whole table, so run it once
         # per store and remember that it ran; register() opens the store under
         # Hermes' plugin load deadline (#622).
@@ -462,6 +537,33 @@ class MessageStore:
 
     def clear_context_windows(self) -> None:
         self._context_window_tokens.clear()
+
+    def _mark_manual_chunk_backlog(self) -> None:
+        was_in_transaction = self._conn.in_transaction
+        try:
+            config = self._ingest_protection_config
+            if not config.embeddings_enabled:
+                return
+            from . import command, embedding_maintenance
+            if embedding_maintenance._automatic_chunks_allowed(config, command):
+                return
+            if self._conn.in_transaction:
+                self._manual_chunk_backlog_pending = True
+                return  # An enclosing atomic owner has not committed ingest yet.
+            self._manual_chunk_backlog_pending = False
+            self._conn.execute(
+                "UPDATE metadata SET value=json_set(value, '$.remaining', json('true'), '$.updated_at', ?) "
+                "WHERE key='embedding_catchup:chunk:' || (SELECT identity_hash FROM lcm_embedding_profile "
+                "WHERE active=1 AND archived_at IS NULL AND task IN ('chunk', 'chunk+prefix') "
+                "ORDER BY registered_at DESC, identity_hash DESC LIMIT 1) "
+                "AND json_type(value, '$.remaining') IS NOT 'true'",
+                (time.time(),),
+            )
+            self._conn.commit()
+        except Exception:
+            if not was_in_transaction and self._conn.in_transaction:
+                self._conn.rollback()
+            logging.getLogger(__name__).debug("Could not mark manual chunk backlog", exc_info=True)
 
     def append(self, session_id: str, msg: Dict[str, Any],
                token_estimate: int = 0, source: str = "",
@@ -504,6 +606,7 @@ class MessageStore:
                 ),
             )
             self._commit()
+            self._mark_manual_chunk_backlog()
             return cur.lastrowid
 
     def append_batch(self, session_id: str,
@@ -540,7 +643,8 @@ class MessageStore:
                                 ] = None,
                                 metadata_messages: Optional[
                                     List[Dict[str, Any]]
-                                ] = None) -> List[int]:
+                                ] = None,
+                                senders: Optional[List[Optional[tuple[str, str]]]] = None) -> List[int]:
         """Persist messages that already passed ingest protection.
 
         This is an internal fast path for callers that need the protected form
@@ -554,6 +658,8 @@ class MessageStore:
             raise ValueError(
                 "metadata_messages must align one-to-one with protected messages"
             )
+        if senders is not None and len(senders) != len(messages):
+            raise ValueError("senders must align one-to-one with protected messages")
 
         conn = self._conn
         if conn is None:
@@ -566,12 +672,18 @@ class MessageStore:
                 tc_json = json.dumps(tc) if tc else None
                 ts = time.time()
                 observed_at = _normalize_observed_at(msg.get("timestamp"))
+                sender = senders[index] if senders is not None else None
                 cur = conn.execute(
                     """INSERT INTO messages
                        (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
                         tool_name, timestamp, token_estimate, pinned, ingested_at,
                         observed_at, observed_at_source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""" if sender is None else
+                    """INSERT INTO messages
+                       (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
+                        tool_name, timestamp, token_estimate, pinned, ingested_at,
+                        observed_at, observed_at_source, sender_id, sender_source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         _normalize_source_value(source),
@@ -587,7 +699,7 @@ class MessageStore:
                         ts,
                         observed_at,
                         "host_message_timestamp" if observed_at is not None else None,
-                    ),
+                    ) + (sender or ()),
                 )
                 if cur.lastrowid is None:
                     raise RuntimeError("SQLite did not return a message id")
@@ -611,11 +723,64 @@ class MessageStore:
             return ids
 
         with self._write_lock:
-            return _run_sqlite_write_with_snapshot_retry(
+            ids = _run_sqlite_write_with_snapshot_retry(
                 conn,
                 insert_messages,
                 operation_name="message_store.append_protected_batch",
             )
+            if ids:
+                self._mark_manual_chunk_backlog()
+            return ids
+
+    def get_message_senders(self, store_ids) -> dict[int, tuple[str | None, str | None]]:
+        if not store_ids:
+            return {}
+        marks = ",".join("?" for _ in store_ids)
+        return {int(sid): (sender, source) for sid, sender, source in self._conn.execute(
+            f"SELECT store_id, sender_id, sender_source FROM messages WHERE store_id IN ({marks})", list(store_ids))}
+
+    def set_sender_if_null(self, store_id, sender_id, sender_source, session_ids) -> int:
+        if not session_ids or not self._write_lock.acquire(blocking=False):
+            return 0
+        conn, opened, timeout = self._conn, False, None
+        try:
+            timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            conn.execute("PRAGMA busy_timeout=0")
+            if not conn.in_transaction:
+                conn.execute("BEGIN")
+                opened = True
+            marks = ",".join("?" for _ in session_ids)
+            # Global AUTOINCREMENT store_id orders rows across sessions, regardless of wall clocks.
+            count = conn.execute(
+                "UPDATE messages SET sender_id = ?, sender_source = ?"
+                " WHERE store_id = ? AND role = 'user' AND sender_id IS NULL AND sender_source IS NULL"
+                f" AND session_id IN ({marks})"
+                f" AND NOT EXISTS (SELECT 1 FROM messages later WHERE later.session_id IN ({marks})"
+                " AND later.role = 'user' AND later.store_id > messages.store_id)",
+                (sender_id, sender_source, store_id, *session_ids, *session_ids)).rowcount
+            assert count in (0, 1)
+            if not count:
+                existing = self.get_message_senders([store_id]).get(store_id)
+                if existing not in (None, (None, None), (sender_id, sender_source)):
+                    logger.debug("sender_capture:conflict")
+            if opened:
+                conn.commit()
+            return count
+        except BaseException as exc:
+            if opened:
+                conn.rollback()
+            if not isinstance(exc, Exception):
+                raise
+            logger.debug("sender_capture:write_unavailable")
+            return 0
+        finally:
+            try:
+                if timeout is not None:
+                    conn.execute(f"PRAGMA busy_timeout={int(timeout)}")
+            except Exception:
+                logger.debug("sender_capture:restore_error")
+            finally:
+                self._write_lock.release()
 
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
         """Move all persisted messages from one session_id to another."""
@@ -634,6 +799,7 @@ class MessageStore:
         with self._write_lock:
             delete_message_relations(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_host_uid_bindings(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
+            delete_chunk_inflight(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),
@@ -726,6 +892,23 @@ class MessageStore:
             store_ids,
         ).fetchall()
         return {row[0]: self._row_to_dict(row) for row in rows}
+
+    @contextmanager
+    def _read_snapshot(self):
+        """Hold a deferred read snapshot, retaining an enclosing transaction."""
+        with self._write_lock:
+            conn = self._conn
+            owns = not conn.in_transaction
+            if owns:
+                conn.execute("BEGIN")
+            try:
+                yield
+                if owns:
+                    conn.commit()
+            except BaseException:
+                if owns:
+                    conn.rollback()
+                raise
 
     def scan_evidence_rows(self, *, limit: int = 4096) -> Dict[str, Any]:
         """Return one bounded, read-only whole-corpus evidence snapshot.
@@ -1029,6 +1212,7 @@ class MessageStore:
                 CREATE INDEX IF NOT EXISTS idx_msg_relations_observed ON message_relations(kind, observed_at);
             """)
         self._identity_anchor_schema_ready = True
+        self._carried_relation_connections.add(self._conn)
 
     # -- Host uid shadow bindings: droppable; canonical evidence for #1124 exclusions / #1403 audits --
 
@@ -1147,9 +1331,10 @@ class MessageStore:
         (indexed; bounded by the distinct stamps asked for)."""
         values, sessions = sorted(set(observed_ats)), set(session_ids)
         if not values or not sessions:
-            return []
+            return _ObservedAtRows([], {})
         self._ensure_identity_anchor_schema()
         found: dict[tuple[int, float], Dict[str, Any]] = {}
+        canonical_stamps = {}
         for start in range(0, len(values), 500):
             chunk = values[start:start + 500]
             marks = ",".join("?" * len(chunk))
@@ -1165,13 +1350,15 @@ class MessageStore:
             for r in rows:
                 row = self._row_to_dict(r)
                 if str(row.get("session_id") or "") in sessions:
+                    canonical_stamps[int(row["store_id"])] = row.get("observed_at")
                     found[(int(row["store_id"]), float(row["observed_at"]))] = row
             batch = self.get_batch(sorted({int(store_id) for store_id, _stamp in aliased}))
             for store_id, stamp in aliased:  # the one occurrence an H1 unstable stamp was proven for (R5)
                 row = batch.get(int(store_id))
                 if row is not None and str(row.get("session_id") or "") in sessions:
+                    canonical_stamps[int(store_id)] = row.get("observed_at")
                     found[(int(store_id), float(stamp))] = {**row, "observed_at": float(stamp)}
-        return [found[key] for key in sorted(found)]
+        return _ObservedAtRows([found[key] for key in sorted(found)], canonical_stamps)
 
     def add_message_relations(self, groups: List[List[tuple]]) -> int:
         """Append relation GROUPS; each group is ``[(store_id, kind, related_store_id, ordinal,
@@ -1204,6 +1391,50 @@ class MessageStore:
                 added += len(group)
             self._commit()
         return added
+
+    def get_carried_stamp_ids(self, store_ids: List[int], *, connection=None, session_ids=None, batched=False) -> set[int]:
+        """Read carried-time provenance without creating schema or changing rows.
+
+        A caller's read-only connection keeps recall's existing deadline policy.
+        Stores predating the optional relation table have no carried markers.
+        """
+        ids = sorted({int(i) for i in store_ids})
+        conn = connection if connection is not None else self._conn
+        if batched:
+            known = getattr(self, '_memory_relation_connections', {})
+            self._memory_relation_connections = known
+            if conn not in known and conn not in self._carried_relation_connections:
+                known[conn] = bool(conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
+                ).fetchone())
+            relation = ('message_relations' if conn in self._carried_relation_connections or known.get(conn)
+                        else '(SELECT NULL AS store_id, NULL AS kind)')
+            return {int(r[0]) for r in conn.execute(
+                f"SELECT store_id FROM {relation} WHERE kind='carried_stamp' "
+                "AND store_id IN (SELECT value FROM json_each(?))", (json.dumps(ids),))}
+        if not (ids or session_ids):
+            return set()
+        if conn not in self._carried_relation_connections:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
+            ).fetchone():
+                return set()
+            if conn is self._conn and not conn.in_transaction:
+                self._carried_relation_connections.add(conn)
+        if session_ids:
+            # Collect the entire candidate ID set in SQL before session formatting,
+            # including neighbors later rejected by the payload budget.
+            return {int(row[0]) for row in conn.execute(
+                "SELECT store_id FROM message_relations WHERE kind = 'carried_stamp' "
+                "AND store_id IN (SELECT store_id FROM messages WHERE session_id IN ("
+                + ",".join("?" for _ in session_ids) + "))", session_ids)}
+        found: set[int] = set()
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            found.update(int(row[0]) for row in conn.execute(
+                "SELECT store_id FROM message_relations WHERE kind = 'carried_stamp' "
+                f"AND store_id IN ({','.join('?' * len(chunk))})", chunk))
+        return found
 
     def get_message_relations(self, store_ids: List[int], kind: str, *, related: bool = False) -> List[Dict[str, Any]]:
         """Relation rows of ``kind`` whose ``store_id`` (or ``related_store_id``) is in ``store_ids``."""
@@ -1524,7 +1755,20 @@ class MessageStore:
         conn = self._conn
         if conn is None:
             raise RuntimeError("MessageStore connection is closed")
-        return self._transaction_owner.atomic(conn, immediate=immediate)
+        @contextmanager
+        def marked():
+            with self._write_lock:
+                try:
+                    with self._transaction_owner.atomic(conn, immediate=immediate):
+                        yield
+                except BaseException:
+                    if not conn.in_transaction:
+                        self._manual_chunk_backlog_pending = False
+                    raise
+                if self._manual_chunk_backlog_pending:
+                    self._mark_manual_chunk_backlog()
+        return marked()
+
 
     def update_metadata_json(self, key: str, update: Any) -> Any:
         """Atomic read-modify-write of one metadata JSON value: ``update(current)`` (None when absent) runs
@@ -1746,7 +1990,9 @@ class MessageStore:
                     exclude_session_ids: Collection[str] | None = None,
                     allow_operators: bool = False,
                     agent_operators: bool = False,
-                    stemmed: bool = False) -> List[Dict[str, Any]]:
+                    stemmed: bool = False,
+                    matching_names: Collection[str] | None = None,
+                    _include_like_excerpt: bool = False, _memory=None) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
         Retrieval contract:
@@ -1785,6 +2031,8 @@ class MessageStore:
                 time_from=time_from,
                 time_to=time_to,
                 exclude_session_ids=exclude_session_ids,
+                **({"matching_names": matching_names} if matching_names is not None else {}),
+                _include_excerpt=_include_like_excerpt, _memory=_memory,
             )
 
         order_by = _build_search_order_by(
@@ -1792,6 +2040,8 @@ class MessageStore:
             "m.timestamp",
             _MESSAGE_ROLE_BIAS_SQL,
         )
+        key_order = order_by.replace(_MESSAGE_ROLE_BIAS_SQL, "key_role").replace(
+            "m.timestamp", "key_timestamp").replace("rank", "search_rank")
         fetch_limit = compute_search_fetch_limit(limit, terms, phrases)
         candidate_cap = compute_search_candidate_cap(limit)
         apply_directness_adjustment = should_apply_directness_rank_adjustment(terms, phrases)
@@ -1808,6 +2058,10 @@ class MessageStore:
                 if session_id is not None:
                     where.append("m.session_id = ?")
                     args.append(session_id)
+                name_clause, name_args = _matching_names_filter(matching_names, "m.")
+                if name_clause:
+                    where.append(name_clause)
+                    args.extend(name_args)
                 if exclude_session_ids:
                     where.append(
                         "m.session_id NOT IN (SELECT value FROM json_each(?))"
@@ -1829,21 +2083,41 @@ class MessageStore:
                     where.append("m.timestamp <= ?")
                     args.append(time_to)
                 args.extend([fetch_limit, offset])
-                rows = self._conn.execute(
-                    f"""SELECT m.store_id, m.session_id, m.source, m.role, m.content, m.tool_call_id,
+                rows = _fetch_ranked_search_rows(
+                    self._conn,
+                    f"""WITH ranked_keys AS MATERIALIZED (
+                           SELECT fts.rowid AS key_id, rank AS search_rank,
+                                  m.timestamp AS key_timestamp, {_MESSAGE_ROLE_BIAS_SQL} AS key_role
+                           FROM {fts_table} fts
+                           JOIN messages m ON m.store_id = fts.rowid
+                           WHERE {' AND '.join(where)}
+                           ORDER BY {order_by} LIMIT ? OFFSET ?
+                       ), numbered_keys AS (
+                           SELECT row_number() OVER (ORDER BY {key_order}, key_id) AS ordinal,
+                                  * FROM ranked_keys
+                       )
+                       SELECT keys.ordinal, m.store_id, m.session_id, m.source, m.role, m.content, m.tool_call_id,
                               m.tool_calls, m.tool_name, m.timestamp, m.token_estimate, m.pinned, m.conversation_id,
                               m.ingested_at, m.observed_at, m.observed_at_source,
-                              rank as search_rank,
+                              keys.search_rank,
                               snippet({fts_table}, 0, '>>>', '<<<', '...', 40) as snippet
-                       FROM {fts_table} fts
-                       JOIN messages m ON m.store_id = fts.rowid
-                       WHERE {' AND '.join(where)}
-                       ORDER BY {order_by} LIMIT ? OFFSET ?""",
-                    args,
-                ).fetchall()
+                       FROM numbered_keys keys
+                       CROSS JOIN {fts_table} fts
+                       CROSS JOIN messages m
+                       WHERE fts.rowid = keys.key_id AND m.store_id = keys.key_id
+                         AND {fts_table} MATCH ?
+                       ORDER BY keys.ordinal""",
+                    [*args, safe_query],
+                )
+                if _memory is not None and offset == 0:
+                    _memory['rows'] = [dict(zip(('store_id', 'session_id', 'timestamp', 'observed_at'), r)) for r in self._conn.execute(
+                        f"SELECT m.store_id,m.session_id,m.timestamp,m.observed_at FROM {fts_table} fts "
+                        f"JOIN messages m ON m.store_id=fts.rowid WHERE {' AND '.join(where)}", args[:-2])]
                 self._last_fts_index = "stem" if fts_table == "messages_fts_stem" else "plain"
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
+                if getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT:
+                    raise
                 if fts_table == "messages_fts_stem":
                     fts_table = "messages_fts"
                     offset = scanned_rows = 0
@@ -1867,6 +2141,8 @@ class MessageStore:
                     time_from=time_from,
                     time_to=time_to,
                     exclude_session_ids=exclude_session_ids,
+                    **({"matching_names": matching_names} if matching_names is not None else {}),
+                    _include_excerpt=_include_like_excerpt, _memory=_memory,
                 )
 
             raw_primary_values: list[float] = []
@@ -1908,9 +2184,13 @@ class MessageStore:
                      role: str | None = None,
                      time_from: float | None = None,
                      time_to: float | None = None,
-                     exclude_session_ids: Collection[str] | None = None) -> List[Dict[str, Any]]:
+                     exclude_session_ids: Collection[str] | None = None, *,
+                     matching_names: Collection[str] | None = None,
+                     _include_excerpt: bool = False, _memory=None) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
+        if _memory is not None:
+            _memory['like'] = True
         safe_query = sanitize_like_query(query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
@@ -1922,6 +2202,10 @@ class MessageStore:
         if session_id is not None:
             where.append("session_id = ?")
             args.append(session_id)
+        name_clause, name_args = _matching_names_filter(matching_names, "")
+        if name_clause:
+            where.append(name_clause)
+            args.extend(name_args)
         if exclude_session_ids:
             where.append("session_id NOT IN (SELECT value FROM json_each(?))")
             args.append(json.dumps(list(exclude_session_ids)))
@@ -2033,7 +2317,12 @@ class MessageStore:
                 if score <= 0:
                     continue
                 result["search_rank"] = -float(score)
-                result["snippet"] = build_snippet(content, terms)
+                snippet, start, end = build_snippet_with_span(content, terms)
+                result["snippet"] = snippet
+                if _include_excerpt:
+                    result["_like_excerpt"] = {
+                        "snippet": content[start:end], "content_offset": start,
+                    }
                 result["_fallback_score"] = float(score)
                 result["_directness_score"] = _message_directness_score(result.get("role"), content, terms, phrases)
                 results.append(result)
@@ -2097,14 +2386,16 @@ class MessageStore:
                 f"{role_bias} ASC, timestamp DESC, store_id DESC"
             )
             candidate_cap = compute_search_candidate_cap(limit)
+            sql = f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE {' AND '.join(where)}"
             rows = self._conn.execute(
-                f"""SELECT {_MESSAGE_SELECT_COLUMNS}
-                    FROM messages
-                    WHERE {' AND '.join(where)}
-                    {order_by}
-                    LIMIT ? OFFSET ?""",
-                [*base_args, *order_args, *exact_args, candidate_cap, 0],
-            ).fetchall()
+                f"{sql} {order_by} LIMIT ? OFFSET ?",
+                [*base_args, *order_args, *exact_args, candidate_cap, 0]).fetchall()
+            if _memory is not None:
+                for r in self._conn.execute(
+                        f"SELECT store_id,session_id,timestamp,observed_at,content FROM messages WHERE {' AND '.join(where)}", base_args):
+                    score = sum(min(count_term_matches(r[4], t), 1) if collapse_risky_repeats else count_term_matches(r[4], t) for t in terms)
+                    if score > 0:
+                        _memory['rows'].append(dict(zip(('store_id', 'session_id', 'timestamp', 'observed_at'), r)))
             add_rows(rows)
 
         results.sort(key=lambda result: _fallback_result_sort_key(result, sort))

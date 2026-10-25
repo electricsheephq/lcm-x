@@ -9,6 +9,7 @@ import atexit
 import contextlib
 import copy
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -35,6 +36,7 @@ from .compaction_policy import (
 )
 from .config import LCMConfig, _disabled_tool_names, containment_base_dir, lcm_env_get, profile_bound
 from .dag import SummaryDAG, SummaryNode
+from . import sender_capture
 from .diagnostics import _enforce_state_db_containment
 from .engine_registry import (
     _ACTIVE_ENGINE_COLD_START_LOCK,
@@ -44,7 +46,9 @@ from .engine_registry import (
     _remove_registry_entries_for_engine,
     ActiveEngineUseResult,
     ActiveEngineUseStatus,
+    live_bound_session_ids,
     resolve_active_lcm_engine,  # noqa: F401  (re-exported: hosts import it from .engine)
+    use_lcm_engine,
 )
 from .escalation import (
     _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS,
@@ -109,7 +113,9 @@ from .runtime_identity import (
     _git_runtime_identity,
     _plugin_metadata,
 )
-from .embedding_maintenance import _STOP_EMBEDDING_MAINTENANCE, run_incremental_embedding_pass
+from .embedding_maintenance import (
+    _STOP_EMBEDDING_MAINTENANCE, retire_local_model_prepare, run_incremental_embedding_pass,
+)
 from .rollup_builder import (
     initialize_rollup_invalidation_outbox,
     mark_stale_for_published_summary,
@@ -117,6 +123,7 @@ from .rollup_builder import (
 )
 from .assertion_extraction import ModelAssertionExtractor
 from .assertion_store import AssertionStore, SourceSnapshot
+from .entity_store import EntityStore
 from .adaptive_retrieval import AdaptiveRetrievalRegistry
 from .query_view_store import QueryViewStore
 from .tool_registry import TOOL_REGISTRY
@@ -174,6 +181,7 @@ from .frontier_state import FrontierState
 from . import tools as lcm_tools
 
 logger = logging.getLogger(__name__)
+_DIAGNOSTIC_ENGINE_TOKENS = itertools.count(1)
 _NATIVE_RECOVERY_WARNING_LOGGED = False
 
 
@@ -286,6 +294,9 @@ class _RollupMaintenanceScheduler:
             tuple[tuple[str, str], Callable[[], None]]
         ] = deque()
         self._queued_keys: set[tuple[str, str]] = set()
+        # Keep one equally bounded overflow bank; admission never grows the ready queue.
+        self._deferred_jobs: dict[tuple[str, str], Callable] = {}
+        self._not_before: dict[tuple[str, str], float] = {}
         self._active_keys: set[tuple[str, str]] = set()
         # One worker means at most one active key. Keep its requested rerun in
         # a literal single slot so queue saturation cannot discard the
@@ -296,6 +307,7 @@ class _RollupMaintenanceScheduler:
         self._exclusive_keys: set[tuple[str, str]] = set()
         self._owned_keys: dict[object, set[tuple[str, str]]] = {}
         self._key_owners: dict[tuple[str, str], set[object]] = {}
+        self._handoff_jobs: dict[tuple[str, str], dict[object, Callable]] = {}
         self._retired_active_keys: dict[object, set[tuple[str, str]]] = {}
         self._worker: threading.Thread | None = None
         self._closed = False
@@ -305,20 +317,25 @@ class _RollupMaintenanceScheduler:
         self,
         key: tuple[str, str],
         owner: object | None,
+        job: Callable | None = None,
     ) -> None:
         if owner is None:
             return
         self._owned_keys.setdefault(owner, set()).add(key)
         self._key_owners.setdefault(key, set()).add(owner)
+        if job is not None:
+            self._handoff_jobs.setdefault(key, {})[owner] = job
 
     def _release_key_owners_if_idle_locked(self, key: tuple[str, str]) -> None:
         if (
             key in self._queued_keys
+            or key in self._deferred_jobs
             or key in self._active_keys
             or key in self._exclusive_keys
             or self._follow_up_key == key
         ):
             return
+        self._handoff_jobs.pop(key, None)
         for owner in self._key_owners.pop(key, set()):
             owned = self._owned_keys.get(owner)
             if owned is None:
@@ -333,6 +350,8 @@ class _RollupMaintenanceScheduler:
         job: Callable[[], None],
         *,
         owner: object | None = None,
+        delay: float = 0.0,
+        handoff: bool = False,
     ) -> bool:
         global _EMBEDDING_EXIT_QUIESCE_REGISTERED
         with self._condition:
@@ -349,23 +368,40 @@ class _RollupMaintenanceScheduler:
                     key[1],
                 )
                 return False
-            if key in self._queued_keys:
-                self._track_owner_locked(key, owner)
+            if key in self._queued_keys or key in self._deferred_jobs:
+                if delay > 0:
+                    self._not_before[key] = max(
+                        self._not_before.get(key, 0), time.monotonic() + delay,
+                    )
+                self._track_owner_locked(key, owner, job if handoff else None)
                 return True
-            if key in self._active_keys and not self._running_follow_up:
+            if delay > 0:
+                self._not_before[key] = time.monotonic() + delay
+                if self._follow_up_key == key:
+                    self._follow_up_key = self._follow_up_job = None
+            if key in self._active_keys and not self._running_follow_up and delay <= 0:
                 self._follow_up_key = key
                 self._follow_up_job = job
-                self._track_owner_locked(key, owner)
+                self._track_owner_locked(key, owner, job if handoff else None)
                 self._condition.notify_all()
                 return True
             if len(self._jobs) >= self._max_pending_jobs:
+                if self._kind == "incremental embedding" and len(self._deferred_jobs) < self._max_pending_jobs:
+                    self._deferred_jobs[key] = job
+                    self._track_owner_locked(key, owner, job if handoff else None)
+                    return True
                 logger.warning(
-                    "LCM %s maintenance queue is full; "
-                    "deferring database=%s scope=%s until a later bind",
+                    "LCM %s maintenance queue is full; " + (
+                        "bounded deferred capacity exhausted; refusing database=%s scope=%s"
+                        if self._kind == "incremental embedding" else "deferring database=%s scope=%s until a later bind"),
                     self._kind,
                     key[0],
                     key[1],
                 )
+                if self._kind == "incremental embedding":
+                    from .embedding_maintenance import _record
+                    _record(key[0], "queue_capacity_exhausted", "ready and deferred capacities exhausted")
+                self._not_before.pop(key, None)
                 return False
             if self._worker is None or not self._worker.is_alive():
                 if self is _EMBEDDING_MAINTENANCE_SCHEDULER and not _EMBEDDING_EXIT_QUIESCE_REGISTERED:
@@ -380,9 +416,17 @@ class _RollupMaintenanceScheduler:
                 self._worker = worker
             self._jobs.append((key, job))
             self._queued_keys.add(key)
-            self._track_owner_locked(key, owner)
+            self._track_owner_locked(key, owner, job if handoff else None)
             self._condition.notify_all()
             return True
+
+    def handoff(self, key, retired_owner, *, delay=0.0) -> bool:
+        """Continue LOCAL work through a surviving owner, preserving its idle delay."""
+        with self._condition:
+            for owner, job in self._handoff_jobs.get(key, {}).items():
+                if owner is not retired_owner:
+                    return self.schedule(key, job, owner=owner, delay=delay, handoff=True)
+        return False
 
     def try_acquire_exclusive(self, key: tuple[str, str]) -> bool:
         """Reserve one idle key for a synchronous operator rebuild.
@@ -393,7 +437,7 @@ class _RollupMaintenanceScheduler:
         background pass completes.
         """
         with self._condition:
-            busy_keys = self._queued_keys | self._active_keys | self._exclusive_keys
+            busy_keys = self._queued_keys | self._active_keys | self._exclusive_keys | set(self._deferred_jobs)
             if key in busy_keys or self._follow_up_key == key:
                 return False
             if len(self._exclusive_keys) >= self._max_pending_jobs:
@@ -416,6 +460,7 @@ class _RollupMaintenanceScheduler:
         with self._condition:
             while keys & (
                 self._queued_keys
+                | set(self._deferred_jobs)
                 | self._active_keys
                 | self._exclusive_keys
                 | ({self._follow_up_key} if self._follow_up_key else set())
@@ -456,9 +501,22 @@ class _RollupMaintenanceScheduler:
                 for key in keys:
                     owners = self._key_owners.get(key, set())
                     owners.discard(owner)
+                    handoffs = self._handoff_jobs.get(key, {})
+                    handoffs.pop(owner, None)
                     if owners:
+                        if handoffs:
+                            # LOCAL dedup retains each live owner's profile-bound job.
+                            job = next(iter(handoffs.values()))
+                            self._jobs = deque((k, job if k == key else j) for k, j in self._jobs)
+                            if key in self._deferred_jobs:
+                                self._deferred_jobs[key] = job
+                            if self._follow_up_key == key:
+                                self._follow_up_job = job
                         continue
+                    self._handoff_jobs.pop(key, None)
                     self._key_owners.pop(key, None)
+                    self._deferred_jobs.pop(key, None)
+                    self._not_before.pop(key, None)
                     if key in self._queued_keys:
                         self._jobs = deque(
                             (queued_key, job) for queued_key, job in self._jobs
@@ -499,6 +557,9 @@ class _RollupMaintenanceScheduler:
             with self._condition:
                 self._closed = True
                 pending_keys = self._queued_keys.copy()
+                pending_keys.update(self._deferred_jobs)
+                self._deferred_jobs.clear()
+                self._not_before.clear()
                 if self._follow_up_key is not None:
                     pending_keys.add(self._follow_up_key)
                 self._jobs.clear()
@@ -518,7 +579,10 @@ class _RollupMaintenanceScheduler:
                             )
                         return False
                     self._condition.wait(remaining)
-                return True
+            if self is _EMBEDDING_MAINTENANCE_SCHEDULER:
+                from .embedding_provider import _drain_local_embedding_workers
+                return _drain_local_embedding_workers(deadline)
+            return True
         except Exception:
             logger.warning("LCM could not quiesce %s maintenance", self._kind, exc_info=True)
             return False
@@ -527,8 +591,30 @@ class _RollupMaintenanceScheduler:
         while True:
             with self._condition:
                 while not self._jobs:
+                    # Retirement may empty the ready queue while retained work survives.
+                    if self._deferred_jobs:
+                        deferred_key = next(iter(self._deferred_jobs))
+                        self._jobs.append((deferred_key, self._deferred_jobs.pop(deferred_key)))
+                        self._queued_keys.add(deferred_key)
+                        break
+                    if self._closed:
+                        return
                     self._condition.wait()
+                while self._jobs and all(self._not_before.get(k, 0) > time.monotonic() for k, _ in self._jobs):
+                    if self is _EMBEDDING_MAINTENANCE_SCHEDULER and _STOP_EMBEDDING_MAINTENANCE.is_set():
+                        self.quiesce(0)
+                        return
+                    self._condition.wait(min(0.5, min(self._not_before[k] for k, _ in self._jobs) - time.monotonic()))
+                if not self._jobs:
+                    continue
+                while self._not_before.get(self._jobs[0][0], 0) > time.monotonic():
+                    self._jobs.rotate(-1)
                 key, job = self._jobs.popleft()
+                self._not_before.pop(key, None)
+                if self._deferred_jobs:
+                    deferred_key = next(iter(self._deferred_jobs))
+                    self._jobs.append((deferred_key, self._deferred_jobs.pop(deferred_key)))
+                    self._queued_keys.add(deferred_key)
                 self._queued_keys.discard(key)
                 self._active_keys.add(key)
                 self._running_follow_up = False
@@ -1267,6 +1353,9 @@ class LCMEngine(
         # #671: the latest stub-first exit (tokens before/after, target, backlog rows) and this compress()'s.
         self._last_stub_first_exit: Optional[dict[str, int]] = None
         self._stub_first_exit_now: Optional[dict[str, int]] = None
+        self._diagnostic_engine_token = next(_DIAGNOSTIC_ENGINE_TOKENS)
+        self._compress_commit_reason, self._compress_commit_publication = "no_proof", "local"
+        self._end_attribution = None
         self._compress_calls = 0  # #1116: which compress() a stub-first proof came from
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
@@ -1364,6 +1453,7 @@ class LCMEngine(
         # diagnostic drains do not retain every historical session key forever.
         self._rollup_maintenance_owner = object()
         self._embedding_maintenance_owner = object()
+        self._embedding_maintenance_lock = threading.Lock()
         self._embedding_maintenance_retired = False
         # Host-facing engine name: ENGINE_NAME, or the legacy alias when the
         # active Hermes config still selects ``context.engine: lcm`` (#471).
@@ -1516,9 +1606,20 @@ class LCMEngine(
             return Path(hermes_home) / "lcm.db"
         return Path.home() / ".hermes" / "lcm.db"
 
+    def _entity_profile_key(self, db_path: str | Path) -> str:
+        """Use command authorization's optional host profile-name resolution."""
+        home = self._hermes_home
+        try:
+            from hermes_constants import profile_name_for_home
+            name = str(profile_name_for_home(home) or "") if home else ""
+        except Exception:
+            name = ""
+        return name or str(Path(home or Path(db_path).parent).resolve())
+
     def _bind_storage(self, db_path: str | Path, hermes_home: str = "") -> None:
         """Bind store/DAG/lifecycle helpers to one SQLite database."""
         self._assertions = None
+        self._entities = None
         self._query_views = None
         self._adaptive_retrieval = None
         self._assertion_extractor = None
@@ -1539,6 +1640,8 @@ class LCMEngine(
                 if bool(getattr(self._config, "assertions_enabled", False))
                 else None
             )
+            self._entities = (EntityStore(db_path, profile_key=lambda: self._entity_profile_key(db_path))
+                if self._config.entities_enabled else None)
             self._query_views = (
                 QueryViewStore(db_path)
                 if bool(getattr(self._config, "query_views_enabled", False))
@@ -1587,6 +1690,7 @@ class LCMEngine(
             "_dag",
             "_lifecycle",
             "_assertions",
+            "_entities",
             "_query_views",
         ):
             helper = getattr(self, attr, None)
@@ -2367,27 +2471,209 @@ class LCMEngine(
         self._sweep_budget_hold_until = 0.0
         return False
 
-    def _start_no_progress_hold(self, reason: str) -> None:
+    def _start_no_progress_hold(self, reason: str, *, persist: bool = False) -> None:
         """#651: hold automatic threshold passes until its time or a stored leaf; turn-paced reasons
         (#597 progress refusals, #922 objective-only no-ops, #904 hidden-only passes) also end at turn end."""
         self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
+        self._no_progress_hold_persisted = bool(reason == "no_progress" and persist)
+        if self._no_progress_hold_persisted:
+            self._persist_no_progress_hold()
         if reason in _TURN_END_HOLD_REASONS:
             logger.info("LCM automatic compaction held until turn end (cap %.0fs): %s",
                         _SWEEP_BUDGET_HOLD_SECONDS, reason)
         else:
             logger.info("LCM automatic compaction held for %.0fs: %s", _SWEEP_BUDGET_HOLD_SECONDS, reason)
 
-    def _no_progress_hold_active(self) -> bool:
+    def _no_progress_hold_active(self, *, managed_scope: bool = False) -> bool:
         """#651: never latches; it ends at its time (a stored leaf clears it in compress())."""
-        if self._no_progress_hold is None:
+        if not managed_scope and self._bypasses_lcm_context_management():
             return False
+        if self._no_progress_hold is None or (
+                self._no_progress_hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)):
+            return self._persisted_no_progress_hold_active(managed_scope=True)
         if time.monotonic() < self._no_progress_hold[0]:
             return True
         self._no_progress_hold = None
         return False
 
+    def _no_progress_metadata_warning(self) -> None:
+        # No record payload, session identifier or exception text enters diagnostics.
+        if not getattr(self, "_no_progress_metadata_warned", False):
+            self._no_progress_metadata_warned = True
+            logger.warning("LCM no-progress metadata unavailable; automatic work remains enabled")
+
+    def _observe_no_progress_replay(self, original, active) -> None:
+        """Reuse the current ingest's identities; never scan replay at admission.
+
+        Include exact cleanup bytes and occurrence metadata: canonical row identity
+        alone aliases some pruned placeholders and cannot prove unchanged cleanup.
+        Only the digest survives this ingest, never its input payload.
+        """
+        self._no_progress_replay = None
+        if getattr(self, "_no_progress_ingest_generation", None) != self._ingest_failure_count:
+            return  # An internally swallowed failure is not completed current-ingest proof.
+        try:
+            # Public copies are already owned by the current ingest copy loop.
+            public = self._no_progress_public_rows
+            payload = [self._last_active_replay_source_identities,
+                       [public[id(row)] for row in self._last_active_replay_messages],
+                       [self._host_occurrence_metadata(row) for row in original]]
+            digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            self._no_progress_replay = (self._session_id, self._conversation_id, digest)
+        except Exception:
+            self._no_progress_metadata_warning()
+
+    def _no_progress_fingerprint(self, *, managed_scope: bool = False) -> Optional[str]:
+        replay = getattr(self, "_no_progress_replay", None)
+        observed = getattr(self, "_no_progress_observed_tokens", None)
+        if (not replay or replay[:2] != (self._session_id, self._conversation_id)
+                or observed is None or observed <= 0
+                or self._consecutive_ingest_failures
+                or (not managed_scope and self._bypasses_lcm_context_management())):
+            return None
+        # Explicit non-secret settings only, never a config dump, credential, URL
+        # or prompt. Changes to filtering identities are represented only by hash.
+        names = (
+            "fresh_tail_count", "fresh_tail_max_tokens", "fresh_tail_pressure_yield_enabled",
+            "fresh_tail_pressure_yield_min_observations", "leaf_chunk_tokens",
+            "leaf_target_ratio", "leaf_target_min_tokens", "leaf_target_max_tokens",
+            "l2_budget_ratio", "summary_prompt_version",
+            "stub_first_exit_target_ratio", "proactive_recall_enabled", "proactive_recall_budget_tokens", "embeddings_enabled",
+            "dynamic_leaf_chunk_enabled", "dynamic_leaf_chunk_max", "incremental_max_depth",
+            "condensation_fanin", "cache_friendly_condensation_enabled", "cache_friendly_min_debt_groups",
+            "threshold_full_sweep_enabled", "summary_prefix_target_tokens", "l3_truncate_tokens",
+            "survival_fit", "survival_reserve", "max_assembly_tokens", "reserve_tokens_floor",
+            "deferred_maintenance_enabled", "deferred_maintenance_max_passes", "critical_budget_pressure_ratio",
+            "foreground_soft_seconds", "foreground_hard_seconds", "summary_model", "summary_fallback_models",
+            "summary_reasoning_effort", "summary_timeout_ms", "ignore_message_patterns",
+            "sensitive_patterns_enabled", "sensitive_patterns", "large_output_externalization_enabled",
+            "large_output_externalization_threshold_chars", "large_output_active_replay_stubbing_enabled",
+            "large_output_active_replay_stub_threshold_tokens", "large_output_active_replay_stub_aged_threshold_tokens",
+        )
+        try:
+            route = []
+            for name in ("model", "provider", "api_mode"):
+                value = getattr(self, name)
+                if not isinstance(value, str) or any(marker in value for marker in ("://", "@", "?", "#")):
+                    return None  # An opaque or URL-shaped route cannot supply safe scalar identity.
+                route.append(value.strip())
+            tokens = max(int(self.last_prompt_tokens or 0), int(observed))
+            yield_ready = (self._config.fresh_tail_pressure_yield_enabled
+                           and self._pressure_yield_blocked_streak >= max(
+                               1, int(self._config.fresh_tail_pressure_yield_min_observations)))
+            ceiling = self._survival_ceiling()
+            pressure = ("overflow" if self._should_force_overflow_recovery(observed_tokens=tokens)
+                        else "survival" if ceiling is not None and tokens >= ceiling
+                        else "threshold" if self.threshold_tokens > 0 and tokens >= self.threshold_tokens
+                        else "below")
+            # MAX(primary key) and lifecycle's indexed conversation lookup are
+            # bounded. Global maxima conservatively invalidate on other sessions.
+            # The open store's resolved path is invariant for this binding. Cache
+            # only that identity, never metadata or the current fingerprint.
+            store_path = self._store.db_path
+            bound_store = getattr(self, "_no_progress_bound_store", None)
+            if bound_store is None or bound_store[0] is not self._store or bound_store[1] != store_path:
+                bound_store = (self._store, store_path, str(Path(store_path).resolve()))
+                self._no_progress_bound_store = bound_store
+            state = [replay, bound_store[2], self._store.max_store_id(),
+                     self._store_complete_frontier(),
+                     self._dag._conn.execute("SELECT COALESCE(MAX(node_id), 0) FROM summary_nodes").fetchone()[0],
+                     pressure, tokens // 1024, tokens, int(self.context_length or 0), self.threshold_tokens,
+                     yield_ready,
+                     route,
+                     [getattr(self._config, name) for name in names]]
+            return hashlib.sha256(json.dumps(state, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        except Exception:
+            self._no_progress_metadata_warning()
+            return None
+
+    def _persisted_no_progress_hold_active(self, *, managed_scope: bool = False) -> bool:
+        if not self._session_id or (not managed_scope and self._bypasses_lcm_context_management()):
+            return False
+        self._no_progress_hold = None
+        try:
+            record = self._store.read_metadata_json(f"compaction_no_progress:v1:{self._session_id}")
+            if record is None:  # Common unheld gate: no fingerprint or indexed state reads.
+                return False
+            if (not isinstance(record, dict) or record.get("version") != 1
+                    or record.get("reason") != "no_progress"
+                    or not isinstance(record.get("fingerprint"), str)
+                    or re.fullmatch(r"[0-9a-f]{64}", record["fingerprint"]) is None):
+                raise ValueError("invalid metadata shape")
+            recorded, expires = record["recorded_at"], record["expires_at"]
+            if (type(recorded) not in (int, float) or type(expires) not in (int, float)
+                    or not math.isfinite(recorded) or not math.isfinite(expires)
+                    or not 0 < expires - recorded <= _SWEEP_BUDGET_HOLD_SECONDS
+                    or recorded > time.time()):
+                raise ValueError("invalid metadata time")
+            remaining = expires - time.time()
+            if remaining <= 0:
+                return False
+            fingerprint = self._no_progress_fingerprint(managed_scope=True)
+            if fingerprint is None:
+                return False
+            if fingerprint != record["fingerprint"]:
+                # Logically invalid for this state. Leave the old proof intact:
+                # another engine may still be bound to it; all readers compare.
+                return False
+            # Never extend on a hit; preserve the earlier monotonic deadline
+            # under backward wall-clock movement within the same engine.
+            identity = (record["fingerprint"], recorded, expires)
+            observed = getattr(self, "_no_progress_deadline", None)
+            deadline = time.monotonic() + remaining
+            if observed and observed[0] == identity:
+                deadline = min(deadline, observed[1])
+            self._no_progress_deadline = (identity, deadline)
+            if deadline <= time.monotonic():
+                return False
+            self._no_progress_hold = (deadline, "no_progress")
+            self._no_progress_hold_persisted = True
+            return True
+        except Exception:
+            self._no_progress_metadata_warning()
+            return False
+
+    def _persist_no_progress_hold(self) -> None:
+        fingerprint = self._no_progress_fingerprint()
+        self._no_progress_hold = None
+        if fingerprint is None or fingerprint != getattr(self, "_no_progress_proof_fingerprint", None):
+            self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, "no_progress")
+            self._no_progress_hold_persisted = False
+            return
+        if self._persisted_no_progress_hold_active():
+            return  # No rearming and no write for a matching proof.
+        try:
+            now = time.time()
+            record = {"version": 1, "fingerprint": fingerprint, "reason": "no_progress",
+                      "recorded_at": now, "expires_at": now + _SWEEP_BUDGET_HOLD_SECONDS}
+            self._store.write_metadata_json([f"compaction_no_progress:v1:{self._session_id}"], json.dumps(record))
+            deadline = time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS
+            self._no_progress_deadline = ((fingerprint, now, record["expires_at"]), deadline)
+            self._no_progress_hold = (deadline, "no_progress")
+        except Exception:
+            self._no_progress_metadata_warning()
+            self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, "no_progress")
+            self._no_progress_hold_persisted = False
+
+    def _clear_persisted_no_progress_hold(self) -> None:
+        try:
+            key = f"compaction_no_progress:v1:{self._session_id}"
+            try:
+                record = self._store.read_metadata_json(key)
+            except json.JSONDecodeError:
+                record = True  # A corrupt value still exists and must be cleared after progress.
+            if record is not None:
+                self._store.write_metadata_json([key], "null", skip_unchanged=True)
+        except Exception:
+            self._no_progress_metadata_warning()
+
     def _no_progress_hold_status(self) -> Optional[dict]:
-        if not self._no_progress_hold_active():
+        hold = self._no_progress_hold
+        # Legacy local pacing remains observable from auxiliary status, without
+        # granting that scope access to durable proof or admission decisions.
+        local_only = hold is not None and not (
+            hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False))
+        if not self._no_progress_hold_active(managed_scope=local_only):
             return None
         until, reason = self._no_progress_hold
         return {"reason": reason, "until": time.time() + max(0.0, until - time.monotonic())}  # #618: wall clock
@@ -2460,11 +2746,14 @@ class LCMEngine(
     def _no_progress_hold_blocks(self, tokens: int) -> bool:
         """#651: the one hold decision the host gate and compress() share. The hold governs LCM-managed
         compaction only, and forced overflow and the survival ceiling are never held."""
-        if self._bypasses_lcm_context_management() or not self._no_progress_hold_active():
+        if self._bypasses_lcm_context_management():
+            return False
+        self._no_progress_observed_tokens = int(tokens or 0)
+        if not self._no_progress_hold_active(managed_scope=True):
             return False
         if self._should_force_overflow_recovery(observed_tokens=tokens):
             return False
-        return self._sweep_budget_hold_applies(tokens)
+        return self._sweep_budget_hold_applies(tokens, managed_scope=True)
 
     def _sweep_budget_hold_blocks(self, tokens: int) -> bool:
         """#625: the #608 hold at the host gate, with the exemptions of ``_no_progress_hold_blocks``."""
@@ -2501,10 +2790,14 @@ class LCMEngine(
             and not self._bypasses_lcm_context_management()
             and self._sweep_budget_hold_active())
 
-    def _sweep_budget_hold_applies(self, tokens: Optional[int]) -> bool:
+    def _sweep_budget_hold_applies(self, tokens: Optional[int], *, managed_scope: bool = False) -> bool:
         """#608: the hold never applies at or over the survival ceiling, whose fit only compress() runs.
         #651: the no-progress hold applies the same way."""
-        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active():
+        # A true flag belongs only to this synchronous invocation's completed bypass check.
+        if not managed_scope and self._bypasses_lcm_context_management():
+            return False
+        self._no_progress_observed_tokens = None if tokens is None else int(tokens)
+        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active(managed_scope=True):
             return False
         ceiling = self._survival_ceiling()
         if ceiling is None or tokens is None:
@@ -2515,7 +2808,10 @@ class LCMEngine(
         return True
 
     def _record_ingest_success(self) -> None:
-        self._consecutive_ingest_failures = 0
+        if getattr(self, "_no_progress_ingest_generation", None) == self._ingest_failure_count:
+            self._consecutive_ingest_failures = 0
+        else:
+            self._no_progress_replay = None
 
     def _record_ingest_failure(self, where: str, error: Exception) -> None:
         """Track a swallowed ingest error so it is operator-visible.
@@ -2524,6 +2820,7 @@ class LCMEngine(
         transient lock is a warning, but a sustained inability to persist
         means the lossless guarantee is broken and must not stay hidden.
         """
+        self._no_progress_replay = None
         self._ingest_failure_count += 1
         self._consecutive_ingest_failures += 1
         self._last_ingest_error = f"{type(error).__name__}: {error}"
@@ -2745,6 +3042,47 @@ class LCMEngine(
         )
         return True
 
+    def on_turn_complete(self, messages: List[Dict[str, Any]], usage=None, **meta) -> None:
+        """Persist stopped turns on the already-bound engine (#1623)."""
+        try:
+            base = getattr(super(), "on_turn_complete", None)
+            if callable(base):
+                base(messages, usage=usage, **meta)
+            # The pinned hosts skip post_llm_call when interrupted. Failed-only
+            # turns may still fire it; meta has no final-response/hook-fired bit.
+            if not meta.get("interrupted"):
+                return
+            binding = (self._session_id, self._conversation_id)
+
+            def ingest_stopped(active_engine):
+                if ((active_engine._session_id, active_engine._conversation_id) != binding
+                        or not active_engine._session_id or active_engine._session_ignored
+                        or active_engine._session_stateless or active_engine._thread_context_stateless()):
+                    return
+                cached = getattr(active_engine, "_last_active_replay_source_identities", None)
+                if (active_engine._ingest_cursor <= 0 or active_engine._pending_reset_session_id
+                        or active_engine._ingest_cursor_needs_reconcile or cached is None
+                        or cached != [active_engine._message_replay_identity(message, strip_carrier=False)
+                                      for message in messages[:len(cached)]]):
+                    # Check under the lease: a reset/rebind may have won admission.
+                    logger.debug("LCM stopped-turn ownership unproven; defer to completed-turn catch-up")
+                    return
+                if messages and messages[-1].get("role") == "user":
+                    # Retry can still merge this open tail into its next user
+                    # row. Persisting it now changes the later replay match.
+                    logger.debug("LCM stopped user tail still mutable; defer to completed-turn catch-up")
+                    return
+                try:
+                    active_engine.ingest(messages)
+                finally:
+                    active_engine.note_turn_complete()
+
+            use_lcm_engine(self, ingest_stopped, timeout=None)
+        except Exception as exc:
+            logger.debug("LCM on_turn_complete error: %s", type(exc).__name__)
+        finally:
+            sender_capture.retire(self, meta.get("turn_id"))
+
     def ingest(self, messages: List[Dict[str, Any]]) -> None:
         """Persist messages to the durable store every turn.
 
@@ -2914,7 +3252,7 @@ class LCMEngine(
             database_path = Path(raw_database_path).resolve()
             config = copy.deepcopy(self._config)
             from . import command
-            from .embedding_maintenance import _automatic_chunks_allowed
+            from .embedding_maintenance import _automatic_chunks_allowed, start_local_model_prepare
             from .vector_store import VectorStore
 
             chunks_allowed = _automatic_chunks_allowed(config, command)
@@ -2935,13 +3273,34 @@ class LCMEngine(
             breaker = getattr(cached[1], "breaker", None) if cached else None
 
             def maintain() -> None:
-                run_incremental_embedding_pass(database_path, config, breaker=breaker)
+                if slice_state is not None:
+                    with self._embedding_maintenance_lock:
+                        if self._embedding_maintenance_retired or owner is not self._embedding_maintenance_owner:
+                            _EMBEDDING_MAINTENANCE_SCHEDULER.handoff(maintenance_key, owner)
+                            return
+                        start_local_model_prepare(database_path, config, on_ready=bound_enqueue, owner=owner)
+                run_incremental_embedding_pass(database_path, config, breaker=breaker,
+                                               **({"slice_state": slice_state} if slice_state is not None else {}))
+                if slice_state is not None and slice_state.get("continue"):
+                    enqueue(delay=max(1e-9, slice_state["delay"]))
 
-            _EMBEDDING_MAINTENANCE_SCHEDULER.schedule(
-                self._rollup_maintenance_key("embeddings"),
-                profile_bound(maintain),
-                owner=self._embedding_maintenance_owner,
-            )
+            maintenance_key = self._rollup_maintenance_key("embeddings")
+            owner = self._embedding_maintenance_owner
+            slice_state = {} if config.embedding_provider.strip().lower() in {"fastembed", "fast-embed"} else None
+            bound_maintain = profile_bound(maintain)
+
+            def enqueue(delay=0.0) -> None:
+                with self._embedding_maintenance_lock:
+                    if not self._embedding_maintenance_retired and owner is self._embedding_maintenance_owner:
+                        _EMBEDDING_MAINTENANCE_SCHEDULER.schedule(maintenance_key, bound_maintain, owner=owner, delay=delay, handoff=slice_state is not None)
+                    elif slice_state is not None:
+                        _EMBEDDING_MAINTENANCE_SCHEDULER.handoff(maintenance_key, owner, delay=delay)
+
+            bound_enqueue = profile_bound(enqueue)
+            with self._embedding_maintenance_lock:
+                if not self._embedding_maintenance_retired and owner is self._embedding_maintenance_owner:
+                    start_local_model_prepare(database_path, config, on_ready=bound_enqueue, owner=owner)
+            bound_enqueue()
         except Exception:
             logger.warning(
                 "LCM could not schedule background incremental embedding",
@@ -2949,13 +3308,20 @@ class LCMEngine(
             )
 
     def _rearm_embedding_maintenance(self) -> None:
-        self._embedding_maintenance_retired = False
+        with self._embedding_maintenance_lock:
+            if self._embedding_maintenance_retired:
+                self._embedding_maintenance_owner = object()
+            self._embedding_maintenance_retired = False
 
     def _retire_embedding_maintenance(self, wait: bool) -> None:
-        self._embedding_maintenance_retired = True
+        with self._embedding_maintenance_lock:
+            self._embedding_maintenance_retired = True
+            # Snapshot under the lock: a concurrent rearm mints a new owner, which must stay live.
+            owner = self._embedding_maintenance_owner
+        retire_local_model_prepare(owner)
         try:
             _EMBEDDING_MAINTENANCE_SCHEDULER.retire_owner(
-                self._embedding_maintenance_owner,
+                owner,
                 timeout=_EMBEDDING_RETIRE_TIMEOUT_S if wait else 0,
             )
         except Exception:
@@ -3005,7 +3371,10 @@ class LCMEngine(
             self._config.empty_lifecycle_gc_enabled
             and self._lifecycle.row_count() > self._config.empty_lifecycle_gc_threshold
         ):
-            protected = {str(self._session_id)} if self._session_id else None
+            # #753: also keep rows other live clones in this process have bound.
+            protected = live_bound_session_ids()
+            if self._session_id:
+                protected.add(str(self._session_id))
             max_age = self._config.empty_lifecycle_gc_max_age_hours
             try:
                 deleted = self._lifecycle.prune_empty_sessions(
@@ -4045,6 +4414,7 @@ class LCMEngine(
             # #1116: Hermes fires this boundary only after it committed the compression, so the stub-first list
             # compress() handed it is the host's now: its proof becomes durable, as the rotation re-key does.
             self._persist_compress_commit_proof(proof, last_store_id=proof.get("stub_first_last_store_id"))
+            proof = self._compress_commit_proof
         cursor_proven = bool(
             proof
             and proof.get("session_id") == session_id
@@ -4538,6 +4908,7 @@ class LCMEngine(
                     )
 
     def _on_session_start_unlocked(self, session_id: str, **kwargs) -> None:
+        sender_capture.retire(self)
         # The post-LLM hook also binds here under stable engine use, without
         # entering the public wrapper.
         self._retry_session_end_tails()
@@ -4828,15 +5199,67 @@ class LCMEngine(
         self._log_session_filter_diagnostics()
 
 
+    @contextmanager
+    def _attribution_span(self, phase, rows=0):
+        diagnostic = self._end_attribution
+        if diagnostic is None and not logger.isEnabledFor(logging.DEBUG):
+            yield
+            return
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = (time.perf_counter() - started) * 1000
+            if diagnostic is not None:
+                diagnostic[phase + "_ms"] = elapsed
+            else:
+                try:
+                    logger.debug("LCM attribution phase=%s rows=%d elapsed_ms=%.3f engine_token=%d compress_sequence=%d",
+                                 phase, rows, elapsed, self._diagnostic_engine_token, self._compress_calls)
+                except Exception:
+                    pass  # Diagnostic handlers cannot change the observed operation's result.
+
+    @contextmanager
+    def _session_end_diagnostic(self, messages, started, admitted, admission_started):
+        previous = self._end_attribution
+        self._end_attribution = diagnostic = dict.fromkeys(
+            ("classifier_ms", "ingest_ms", "finalize_ms", "snapshot_ms", "retire_ms"), 0.0)
+        diagnostic.update(reason="not_foreground", rows=len(messages), cursor_entry=self._ingest_cursor,
+                          reconcile_entry=int(self._ingest_cursor_needs_reconcile))
+        try:
+            yield
+        finally:
+            diagnostic.update(outer_ms=(time.perf_counter() - started) * 1000,
+                              admission_ms=(admitted - admission_started) * 1000,
+                              prelude_ms=(admission_started - started) * 1000, cursor_exit=self._ingest_cursor,
+                              reconcile_exit=int(self._ingest_cursor_needs_reconcile))
+            self._end_attribution = previous
+            try:
+                logger.info("LCM attribution phase=session_end engine_token=%d compress_sequence=%d writer_reason=%s proof_state=%s "
+                    "reason=%s rows=%d cursor_entry=%d reconcile_entry=%d cursor_exit=%d reconcile_exit=%d "
+                    "outer_ms=%.3f admission_ms=%.3f prelude_ms=%.3f classifier_ms=%.3f ingest_ms=%.3f finalize_ms=%.3f "
+                    "snapshot_ms=%.3f retire_ms=%.3f",
+                    self._diagnostic_engine_token, self._compress_calls, self._compress_commit_reason,
+                    self._compress_commit_publication if self._compress_commit_proof else "none",
+                    *(diagnostic[key] for key in ("reason", "rows", "cursor_entry", "reconcile_entry", "cursor_exit",
+                      "reconcile_exit", "outer_ms", "admission_ms", "prelude_ms", "classifier_ms", "ingest_ms", "finalize_ms",
+                      "snapshot_ms", "retire_ms")))
+            except Exception:
+                pass
+
     def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        started = time.perf_counter()
+        sender_capture.retire(self)
+        admission_started = time.perf_counter()
         with self._exclusive_lifecycle("end"):
             if self._stable_use_closed:
                 return
-            self._retry_session_end_tails()
-            try:
-                self._on_session_end_unlocked(session_id, messages)
-            finally:
-                self._session_end_flush_active = False
+            with self._session_end_diagnostic(messages, started, time.perf_counter(), admission_started):
+                self._retry_session_end_tails()
+                try:
+                    self._on_session_end_unlocked(session_id, messages)
+                finally:
+                    self._session_end_flush_active = False
 
     def _on_session_end_unlocked(
         self,
@@ -5122,23 +5545,29 @@ class LCMEngine(
         try:
             self._finalize_foreground_session_end_unlocked(session_id, messages)
         finally:
-            self._retire_embedding_maintenance(wait=False)
+            with self._attribution_span("retire"):
+                self._retire_embedding_maintenance(wait=False)
 
     def _finalize_foreground_session_end_unlocked(
         self,
         session_id: str,
         messages: List[Dict[str, Any]],
     ) -> None:
-        proof = getattr(self, "_compress_commit_proof", None)
-        if (
-            proof
-            and proof.get("session_id") == session_id
-            and proof.get("conversation_id") == self._conversation_id
-            and not proof.get("end_consumed")
-            and proof.get("input") is not None
-            and len(messages) == len(proof["input"])
-            and [self._proof_replay_identity(m, strip_carrier=False) for m in messages] == proof["input"]
-        ):
+        with self._attribution_span("classifier"):
+            proof = getattr(self, "_compress_commit_proof", None)
+            reason = next((reason for reason, gate in (
+                ("no_proof", lambda: proof),
+                ("session_mismatch", lambda: proof.get("session_id") == session_id),
+                ("conversation_mismatch", lambda: proof.get("conversation_id") == self._conversation_id),
+                ("already_consumed", lambda: not proof.get("end_consumed")),
+                ("input_unavailable", lambda: proof.get("input") is not None),
+                ("length_mismatch", lambda: len(messages) == len(proof["input"])),
+                ("identity_mismatch", lambda: [self._proof_replay_identity(m, strip_carrier=False)
+                                              for m in messages] == proof["input"]),
+            ) if not gate()), "fast")
+            if self._end_attribution is not None:
+                self._end_attribution["reason"] = reason
+        if reason == "fast":
             # Compaction commit (#483): every input row is already durable and the
             # cursor indexes compress()'s output, so skip the re-ingest. Still
             # finalize: the end may be a real exit after a cancelled commit, and
@@ -5147,7 +5576,7 @@ class LCMEngine(
             try:
                 with _temporary_sqlite_busy_timeout(
                     [getattr(self._lifecycle, "_conn", None)], _SESSION_END_BUSY_TIMEOUT_MS
-                ):
+                ), self._attribution_span("finalize"):
                     self._lifecycle.finalize_session(
                         self._conversation_id,
                         session_id,
@@ -5181,10 +5610,11 @@ class LCMEngine(
                     # consume session-end replay proof; ordinary ingest never
                     # does, so a host-supplied history cannot skip a fresh delta.
                     self._session_end_flush_active = True
-                    self._ingest_messages(
-                        messages,
-                        allow_session_end_replay_proof=is_current_session_full_history_end,
-                    )
+                    with self._attribution_span("ingest"):
+                        self._ingest_messages(
+                            messages,
+                            allow_session_end_replay_proof=is_current_session_full_history_end,
+                        )
                     self._session_end_flush_active = False
                     ingest_finished = True
                 except KeyboardInterrupt:
@@ -5209,11 +5639,12 @@ class LCMEngine(
                     raise
 
                 try:
-                    self._lifecycle.finalize_session(
-                        self._conversation_id,
-                        session_id,
-                        frontier_store_id=self._last_compacted_store_id,
-                    )
+                    with self._attribution_span("finalize"):
+                        self._lifecycle.finalize_session(
+                            self._conversation_id,
+                            session_id,
+                            frontier_store_id=self._last_compacted_store_id,
+                        )
                 except KeyboardInterrupt:
                     logger.warning(
                         "LCM session-end lifecycle finalization interrupted; "
@@ -5240,7 +5671,8 @@ class LCMEngine(
                 # This is a no-op for ordinary histories (empty digest without a
                 # generated summary scaffold) and for off-current ends (the
                 # helper writes only when session_id == self._session_id).
-                self._remember_session_end_replay_snapshot(session_id, messages)
+                with self._attribution_span("snapshot"):
+                    self._remember_session_end_replay_snapshot(session_id, messages)
         except KeyboardInterrupt:
             logger.warning(
                 "LCM session-end ingest/finalize interrupted before bounded flush completed%s",
@@ -5258,6 +5690,7 @@ class LCMEngine(
             raise
 
     def on_session_reset(self) -> None:
+        sender_capture.retire(self)
         with self._exclusive_lifecycle("reset"):
             if self._stable_use_closed:
                 return
@@ -5510,6 +5943,9 @@ class LCMEngine(
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         disabled = self._omitted_tool_names()
         schemas = [spec.schema for spec in TOOL_REGISTRY]
+        if getattr(getattr(self, "_config", None), "recall_delivery_unit", "hits") == "session":
+            from .recall_session import session_schema
+            schemas = [session_schema(s) for s in schemas]
         if disabled:
             return [s for s in schemas if s.get("name") not in disabled]
         return schemas
@@ -5555,7 +5991,8 @@ class LCMEngine(
         }
         handler = handlers.get(name)
         if handler:
-            return handler(args, engine=self)
+            return handler(args, engine=self,
+                           **{k: v for k, v in kwargs.items() if k == "delivery_unit"})
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
@@ -5905,7 +6342,7 @@ class LCMEngine(
             )
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
-            self._ingest_cursor_needs_reconcile = False
+            self._ingest_cursor_needs_reconcile = True
 
     def _stored_row_externalized_text_parts_for_pattern_matching(self, msg: Dict[str, Any]) -> list[str]:
         ref_sources: list[str] = []
@@ -6019,6 +6456,7 @@ class LCMEngine(
         active_replay_messages: List[Dict[str, Any]],
     ) -> list[Dict[str, Any]]:
         copied_replay_messages: list[Dict[str, Any]] = []
+        public_rows = {}
         generated_message_ids = getattr(
             self,
             "_generated_ignored_active_replay_placeholder_message_ids",
@@ -6026,10 +6464,15 @@ class LCMEngine(
         )
         for message in active_replay_messages:
             copied_message = dict(message)
+            public_rows[id(copied_message)] = {
+                key: value for key, value in copied_message.items()
+                if key != "timestamp" and not str(key).startswith("_")
+            }
             if id(message) in generated_message_ids:
                 self._generated_ignored_active_replay_placeholder_message_ids.add(id(copied_message))
                 self._generated_ignored_active_replay_placeholder_messages[id(copied_message)] = copied_message
             copied_replay_messages.append(copied_message)
+        self._no_progress_public_rows = public_rows
         return copied_replay_messages
 
     def _refresh_generated_active_replay_placeholder_retention(
@@ -6068,6 +6511,7 @@ class LCMEngine(
         self._write_generated_ignored_placeholder_hash_ordinals(
             self._generated_placeholder_digest_ordinals_for_active_replay(active_replay_messages)
         )
+        self._observe_no_progress_replay(original_messages, active_replay_messages)
         return active_replay_messages
 
     def _keep_host_held_stubs(
@@ -6093,6 +6537,12 @@ class LCMEngine(
             sync_cached_host_metadata(
                 host_messages, current, self._generated_ignored_active_replay_placeholder_message_ids,
             )
+        for row in current:
+            if id(row) not in self._no_progress_public_rows:
+                self._no_progress_public_rows[id(row)] = {
+                    key: value for key, value in row.items()
+                    if key != "timestamp" and not str(key).startswith("_")
+                }
         return current
 
     def _cached_active_replay_messages(
@@ -6114,6 +6564,7 @@ class LCMEngine(
                     original_messages,
                     current,
                 )
+                self._observe_no_progress_replay(original_messages, current)
                 return current
         return None
 
@@ -6481,48 +6932,69 @@ class LCMEngine(
             redacted_replay_messages.append(redacted_message)
         return redacted_replay_messages
 
-    def _record_compress_commit_proof(self, messages, result) -> None:
-        if self._bypasses_lcm_context_management():
-            return
-        super()._record_compress_commit_proof(messages, result)
-        if self._compress_commit_proof is not None:
-            proof = self._compress_commit_proof
-            # Snapshot before the host can mutate rows. Effective identity maps
-            # retained rows through the host's scaffold/user merge, including on restart.
-            _, identities = self._occurrence_replay_identities(result, proof)
-            proof["output_metadata"] = [
-                {**self._host_occurrence_metadata(message), "identity_sha256": (
-                    _commit_proof_identity_digest(_proof_user_identity(identity)) if identity is not None else None
-                )}
-                for message, identity in zip(result, identities)
-            ]
-            if any(proof.get(key) for key in ("published", "native", "recovery", "filtered")):
-                self._persist_compress_commit_proof(proof)
+    def _prepare_compress_commit_proof(self, proof, result) -> None:
+        # Snapshot before the host can mutate rows, and before either durable write.
+        _, identities = self._occurrence_replay_identities(result, proof)
+        proof["output_metadata"] = [
+            {**self._host_occurrence_metadata(message), "identity_sha256": (
+                _commit_proof_identity_digest(_proof_user_identity(identity)) if identity is not None else None
+            )}
+            for message, identity in zip(result, identities)
+        ]
 
-    def _persist_compress_commit_proof(self, proof, last_store_id=None) -> None:
-        super()._persist_compress_commit_proof(proof, last_store_id=last_store_id)
-        if "output_metadata" not in proof:
-            return
-        try:
-            key = self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
-            expected = [_commit_proof_identity_digest(identity) for identity in proof["output_effective"]]
+    def _write_compress_commit_proof_payload(self, proof, payload) -> None:
+        snapshot = None
+        if "output_metadata" in proof and proof.get("durable") is not False:
+            snapshot = {"output_metadata": proof["output_metadata"], "output_length": len(proof["output"])}
+            if not self._occurrence_snapshot_shape_valid(snapshot, payload):
+                raise ValueError("invalid occurrence snapshot")
+            snapshot["proof_sha256"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        # Helpers defer their commits to this owner; no exception is swallowed before rollback.
+        with self._store.atomic(immediate=True):
+            super()._write_compress_commit_proof_payload(proof, payload)
+            self._store.write_metadata_json(
+                [self._replay_snapshot_metadata_key("host_occurrence_snapshot")],
+                json.dumps(snapshot, sort_keys=True),
+            )
 
-            payload = self._store.read_metadata_json(key)
-            if (isinstance(payload, dict) and payload.get("session_id") == proof.get("session_id")
-                    and payload.get("effective_sha256_v4") == expected):
-                # Keep the rollback-compatible proof wire unchanged. This
-                # snapshot is usable only with the exact proof that wrote it.
-                self._store.write_metadata_json(
-                    [self._replay_snapshot_metadata_key("host_occurrence_snapshot")],
-                    json.dumps({
-                        "proof_sha256": hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest(),
-                        "output_metadata": proof["output_metadata"],
-                    }, sort_keys=True),
-                )
-        except Exception:
-            logger.debug("LCM occurrence metadata persistence failed", exc_info=True)
+    @staticmethod
+    def _occurrence_snapshot_shape_valid(snapshot, payload) -> bool:
+        rows = snapshot.get("output_metadata")
+        if not isinstance(rows, list):
+            return False
+        if "output_length" in snapshot and (type(snapshot["output_length"]) is not int
+                                            or snapshot["output_length"] != len(rows)):
+            return False
+        for row in rows:
+            if not isinstance(row, dict) or not {"timestamp", "message_uid", "identity_sha256"} <= row.keys():
+                return False
+            stamp, uid, digest = row["timestamp"], row["message_uid"], row["identity_sha256"]
+            if stamp is not None and (type(stamp) not in (int, float) or _normalize_observed_at(stamp) != stamp):
+                return False
+            if uid is not None and not _valid_uid(uid):
+                return False
+            if digest is not None and (not isinstance(digest, str) or len(digest) != 64
+                                       or any(c not in "0123456789abcdef" for c in digest)):
+                return False
+        if [row["identity_sha256"] for row in rows if row["identity_sha256"] is not None] != payload.get(
+                "effective_sha256_v4", payload.get("effective_sha256", [])):
+            return False
+        if "output_length" not in snapshot:
+            # Old snapshots lack a count. Their effective sequence and known scaffold positions must agree.
+            scaffold = payload.get("scaffold_sha256_v4", payload.get("scaffold_sha256"))
+            if scaffold is not None:
+                return len(rows) == len(scaffold)
+            # Old finalizers bind every descriptor to the complete output length. Carriers may
+            # keep full identity; system notes and host todo rows may be null at any position.
+            lengths = [item["output_occurrence"]["of"] for item in payload.get("emissions", [])]
+            if any(type(n) is not int or n != len(rows) for n in lengths):
+                return False
+        return True
 
     def _durable_commit_proof_payload(self, session_id=None):
+        local = self._compress_commit_proof
+        if local and local.get("durable") is False and local.get("session_id") == (session_id or self._session_id):
+            return None
         payload = super()._durable_commit_proof_payload(session_id)
         if payload is None:
             return None
@@ -6536,7 +7008,8 @@ class LCMEngine(
             # attach the snapshot only to the proof that was validated above.
             same_proof = isinstance(raw, dict) and all(
                 raw.get(field) == payload.get(field) for field in ("created_at", "effective_sha256_v4"))
-            if same_proof and isinstance(snapshot, dict) and snapshot.get("proof_sha256") == digest:
+            if (same_proof and isinstance(snapshot, dict) and snapshot.get("proof_sha256") == digest
+                    and self._occurrence_snapshot_shape_valid(snapshot, payload)):
                 payload["output_metadata"] = snapshot["output_metadata"]
         except Exception:
             logger.debug("LCM occurrence metadata load failed", exc_info=True)
@@ -6553,6 +7026,11 @@ class LCMEngine(
             except Exception:  # Host mappings may raise: unknown metadata keeps legacy behaviour.
                 metadata[key] = None
         return metadata
+
+    @classmethod
+    def _host_occurrence_known(cls, message) -> bool:
+        """Whether a host stamp or UID can witness this occurrence."""
+        return any(value is not None for value in cls._host_occurrence_metadata(message).values())
 
     @classmethod
     def _host_occurrence_changed(cls, message, previous) -> bool:
@@ -6621,6 +7099,9 @@ class LCMEngine(
         assistant loops replaced by quarantine placeholders. Existing callers may
         ignore the return value when they only need durable persistence.
         """
+        self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
+        self._no_progress_ingest_generation = self._ingest_failure_count
+        self._ingest_replay_redaction_changes = {}
         if not self._session_id:
             logger.debug("Ingest skipped: no session_id")
             return self._redact_active_replay_messages(messages)
@@ -6635,13 +7116,20 @@ class LCMEngine(
 
         if getattr(self, "_identity_anchor_recovery", None):
             self._identity_anchor_observe_recovery()
+        sender_capture.try_update(self)
         self._capture_host_rewrites(messages)
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
         new_prefix_occurrences = set()
         unchanged_prefix_occurrences = set()
+        proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.
         accepted_compaction_prefix = 0
         proof = getattr(self, "_compress_commit_proof", None)
+        if proof and proof.get("durable") is False:
+            metadata = proof.get("output_metadata")
+            if (not isinstance(metadata, list) or len(metadata) != len(proof.get("output") or ())
+                    or any(not isinstance(row, dict) for row in metadata)):
+                proof = {**proof, "output_metadata": []}
         if (
             not self._ingest_cursor_needs_reconcile
             and proof
@@ -6676,6 +7164,7 @@ class LCMEngine(
             ] == proof["output"]:
                 # Content proves position, but a known metadata conflict proves
                 # a new occurrence. Use the output snapshot, not the input cache.
+                proven_cursor = self._ingest_cursor
                 new_prefix_occurrences = {
                     idx for idx, previous in enumerate(proof.get("output_metadata", ()))
                     if self._host_occurrence_changed(messages[idx], previous)
@@ -6701,6 +7190,7 @@ class LCMEngine(
                 if remapped is None and proof.get("native"):
                     remapped = self._remap_cursor_through_native_host_repair(messages, proof)
                 if remapped is not None:
+                    proven_cursor = remapped
                     metadata = self._remapped_output_metadata(messages, proof, remapped)
                     new_prefix_occurrences = {
                         idx for idx, previous in metadata.items()
@@ -6829,15 +7319,47 @@ class LCMEngine(
                 if cursor > 0 and cached_source_identities is not None and len(cached_source_identities) >= cursor
                 else None
             )
+        if accepted_compaction_prefix or reconciled_existing_session:
+            # #1540: unknown metadata cannot prove replay within a known-new
+            # user turn. The next user starts a separate occurrence span.
+            for start in sorted(new_prefix_occurrences):
+                if str(messages[start].get("role") or "") != "user":
+                    continue
+                segments: dict[int, list[int]] = {}
+                call_owners: dict[str, int] = {}
+                for idx in range(start + 1, n):
+                    role = str(messages[idx].get("role") or "")
+                    if role == "user":
+                        break
+                    calls = messages[idx].get("tool_calls") if role == "assistant" else None
+                    if calls:
+                        segments[idx] = [idx]
+                        call_owners.update((str(call.get("id") or ""), idx) for call in calls
+                                           if isinstance(call, dict) and call.get("id"))
+                    elif role == "tool" and str(messages[idx].get("tool_call_id") or "") in call_owners:
+                        segments[call_owners[str(messages[idx].get("tool_call_id") or "")]].append(idx)
+                    elif idx in unchanged_prefix_occurrences and not self._host_occurrence_known(messages[idx]):
+                        unchanged_prefix_occurrences.discard(idx)
+                for segment in segments.values():
+                    proven = any(idx in unchanged_prefix_occurrences and self._host_occurrence_known(messages[idx])
+                                 for idx in segment)
+                    # Only unknown siblings inherit proof; known changed rows remain fresh.
+                    unknown = {idx for idx in segment if not self._host_occurrence_known(messages[idx])}
+                    if proven:
+                        unchanged_prefix_occurrences.update(idx for idx in unknown if idx < (proven_cursor or 0))
+                    else:
+                        unchanged_prefix_occurrences.difference_update(unknown)
         unchanged_prefix_occurrences -= new_prefix_occurrences
         anchor_plan = None
+        unaudited_from = None
         if identity_anchor_enabled():
             # A steady-state cursor proves the prefix only while the host keeps that prefix; where it
             # changed, the pre-match audits it (a row the host moved before the cursor was never stored).
             audit_from = None
             if not reconciled_existing_session and current_prefix_identities is not None:
                 audit_from = next((idx for idx, identity in enumerate(current_prefix_identities)
-                                   if identity != cached_source_identities[idx]), None)
+                                   if idx >= accepted_compaction_prefix
+                                   and identity != cached_source_identities[idx]), None)
             try:
                 if (reconciled_existing_session or accepted_compaction_prefix) and cursor > 0:
                     self._store.backfill_observed_at_many(
@@ -6856,6 +7378,9 @@ class LCMEngine(
             except Exception as exc:
                 logger.warning("LCM identity-anchor pre-match failed (%s); ordered-prefix path only", type(exc).__name__)
                 anchor_plan = None
+                if audit_from is not None:
+                    unaudited_from = audit_from
+                    self._record_ingest_failure("identity-anchor pre-match", exc)
             if anchor_plan and anchor_plan["cursor"] < cursor:
                 cursor = anchor_plan["cursor"]
                 self._ingest_cursor = cursor
@@ -6863,6 +7388,19 @@ class LCMEngine(
                 logger.info("LCM identity-anchor recognised %d replayed rows: session=%s cursor=%d incoming=%d",
                             len(anchor_plan["replayed"]), self._session_id, cursor, n)
         anchored_replay_indexes = anchor_plan["replayed"] if anchor_plan else set()
+        # #1628: keep this after the last rewind; #1508 must precede it when restored.
+        rewound = [idx for idx in range(cursor, scan_start) if idx not in anchored_replay_indexes]
+        if rewound:
+            _s, rescan_ignored, rescan_replay = self._build_ingest_replay(
+                messages=messages, n=n, cursor=cursor, only=set(rewound),
+                store_ids=(ignored_original_messages.store_ids if self._compiled_ignore_message_patterns and not any(
+                    anchor_plan.get(key) for key in ("ws", "relations"))
+                    and all(row.get("session_id") == self._session_id for row in anchor_plan.get("carry", ()))
+                    and ignored_original_messages.rewrite_overrides == getattr(self, "_host_rewrite_overrides", {}) else None),
+            )
+            replay_messages = list(replay_messages)
+            for idx in rewound:
+                ignored_original_messages[idx], replay_messages[idx] = rescan_ignored[idx], rescan_replay[idx]
         anchor_remainders: dict[int, Any] = {}
         fresh_replay_messages = replay_messages  # #772: the host's rows, before any cached copy is spliced in
         if cursor > 0:
@@ -6900,6 +7438,24 @@ class LCMEngine(
         new_messages = replay_messages[cursor:] if cursor < n else []
         original_new_messages = messages[cursor:] if cursor < n else []
 
+        def remember(active):
+            previous_replay = getattr(self, "_last_active_replay_messages", ())
+            previous_generated_ids = (
+                self._generated_ignored_active_replay_placeholder_message_ids.copy() if unaudited_from is not None else ()
+            )
+            result = self._remember_active_replay_messages(messages, active)
+            # #1353: keep paired proof for the unaudited prefix, never the newly stored tail.
+            if unaudited_from is not None:
+                end = min(cursor, len(cached_source_identities), len(previous_replay),
+                          len(self._last_active_replay_source_identities), len(self._last_active_replay_messages))
+                self._last_active_replay_source_identities[unaudited_from:end] = cached_source_identities[unaudited_from:end]
+                self._last_active_replay_messages[unaudited_from:end] = previous_replay[unaudited_from:end]
+                for message in self._last_active_replay_messages[unaudited_from:end]:
+                    if id(message) in previous_generated_ids:
+                        self._generated_ignored_active_replay_placeholder_message_ids.add(id(message))
+                        self._generated_ignored_active_replay_placeholder_messages[id(message)] = message
+            return result
+
         if not new_messages:
             cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
             self._compression_boundary_ingest_pending = False
@@ -6910,7 +7466,7 @@ class LCMEngine(
             self._host_uid_shadow(host_uids)
             if cached_replay is not None:
                 return cached_replay
-            return self._remember_active_replay_messages(messages, replay_messages)
+            return remember(replay_messages)
 
         active_replay_messages = replay_messages
         compression_boundary_ingest_pending = self._compression_boundary_ingest_pending
@@ -6955,7 +7511,8 @@ class LCMEngine(
             self._compression_boundary_stored_placeholder_digest_counts = {}
             self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
             self._host_uid_shadow(host_uids)
-            return self._remember_active_replay_messages(messages, active_replay_messages)
+            sender_capture.try_update(self)
+            return remember(active_replay_messages)
 
         protected_messages, active_replay_messages = self._protect_ingest_rows(
             messages=messages,
@@ -6967,9 +7524,14 @@ class LCMEngine(
         store_ids = self._store_ingest_rows(
             messages_to_store_with_index=messages_to_store_with_index,
             protected_messages=protected_messages,
+            sender_originals=[(idx, messages[idx]) for idx, _msg in messages_to_store_with_index],
+            sender_excluded=anchor_remainders,
         )
+        sender_capture.exclude(self, {sid for (idx, _m), sid in zip(messages_to_store_with_index, store_ids)
+                                      if idx in anchor_remainders and sid})
         originals = [messages[idx] for idx, _msg in messages_to_store_with_index]
         self._watch_stored_user_rows(zip(originals, protected_messages, store_ids))
+        sender_capture.try_update(self)
         if anchor_plan is not None:
             stored_at = {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index, store_ids)}
             try:  # #1501 provenance: read right after R is stored (R3 has a NULL stamp); a miss duplicates
@@ -7005,7 +7567,7 @@ class LCMEngine(
         # data/base64 substrings stay provider-usable in active replay. The
         # exceptions are whole-message ``raw_payload`` externalization and the
         # separately opt-in textual tool-result interceptor above.
-        return self._remember_active_replay_messages(messages, active_replay_messages)
+        return remember(active_replay_messages)
 
     def _build_ingest_replay(
         self,
@@ -7013,19 +7575,48 @@ class LCMEngine(
         messages: List[Dict[str, Any]],
         n: int,
         cursor: int,
+        only: Optional[set[int]] = None,
+        store_ids: Optional[dict[int, int]] = None,
     ) -> tuple[int, list[bool], List[Dict[str, Any]]]:
         scan_start = 0 if self._ingest_cursor_needs_reconcile else cursor
         ignored_original_messages = [False] * n
         if self._compiled_ignore_message_patterns:
+            class IgnoreDecisions(list):
+                """Carry the full-list map and override snapshot within this ingest only."""
+
+            ignored_original_messages = IgnoreDecisions(ignored_original_messages)
             store_id_scope = self._compress_run.preserve_store_ids()
-            self._compress_run.store_ids_by_message_id = self._get_store_id_map_for_messages(messages)
+            ignored_original_messages.store_ids = (
+                self._get_store_id_map_for_messages(messages) if store_ids is None else store_ids
+            )
+            ignored_original_messages.rewrite_overrides = dict(self._host_rewrite_overrides)
+            self._compress_run.store_ids_by_message_id = ignored_original_messages.store_ids
             with store_id_scope:
                 for idx in range(scan_start, n):
+                    if only is not None and idx not in only:
+                        continue
                     mapped_ignore = self._mapped_stored_row_matches_ignore_message_patterns(messages[idx])
                     ignored_original_messages[idx] = (
                         self._matches_ignore_message_patterns(messages[idx])
                         or mapped_ignore
                     )
+        if only is not None:
+            from .ingest_protection import quarantine_suspicious_assistant_message
+
+            replay_messages = list(messages)  # Unselected rows retain their input defaults.
+            for idx in sorted(only):
+                message = quarantine_suspicious_assistant_message(
+                    messages[idx], config=self._config, hermes_home=self._hermes_home,
+                    session_id=self._session_id, externalize=idx >= scan_start and not ignored_original_messages[idx],
+                    prefer_existing_externalized=idx < scan_start,
+                )
+                replay_messages[idx] = self._redact_active_replay_messages([message])[0]
+                self._ingest_replay_redaction_changes[idx] = any(
+                    message.get(key) != replay_messages[idx].get(key) for key in ("content", "tool_calls")
+                )
+            return scan_start, ignored_original_messages, self._apply_ignored_active_replay_placeholders(
+                messages, replay_messages, scan_start=scan_start, ignored_messages=ignored_original_messages,
+            )
         externalize_messages = [False] * n
         prefer_existing_externalized = [False] * n
         for idx in range(scan_start, n):
@@ -7040,7 +7631,12 @@ class LCMEngine(
             externalize=externalize_messages,
             prefer_existing_externalized=prefer_existing_externalized,
         )
+        before_redaction = replay_messages
         replay_messages = self._redact_active_replay_messages(replay_messages)
+        self._ingest_replay_redaction_changes = {
+            idx: any(before.get(key) != after.get(key) for key in ("content", "tool_calls"))
+            for idx, (before, after) in enumerate(zip(before_redaction, replay_messages))
+        }
         replay_messages = self._apply_ignored_active_replay_placeholders(
             messages,
             replay_messages,
@@ -7344,6 +7940,7 @@ class LCMEngine(
         self, *,
         messages_to_store_with_index: list[tuple[int, Dict[str, Any]]],
         protected_messages: List[Dict[str, Any]],
+        sender_originals=(), sender_excluded=(),
     ) -> list[int]:
         estimates = [count_message_tokens(m) for m in protected_messages]
         batch = dict(
@@ -7352,6 +7949,9 @@ class LCMEngine(
             messages=protected_messages, estimates=estimates,
             metadata_messages=[msg for _idx, msg in messages_to_store_with_index],
         )
+        pending, senders = sender_capture.batch_senders(self, sender_originals, sender_excluded)
+        if senders is not None:
+            batch["senders"] = senders
         pending_after_store_id = 0
         if self._session_end_flush_active:
             tail = self._store.get_session_tail(self._session_id, limit=1)
@@ -7365,10 +7965,14 @@ class LCMEngine(
                 pending = {**batch, "after_store_id": pending_after_store_id}
                 for key in ("messages", "estimates", "metadata_messages"):
                     pending[key] = copy.deepcopy(pending[key])
+                if "senders" in pending:
+                    pending["senders"] = copy.deepcopy(pending["senders"])
                 if not any(old == pending for old in self._pending_session_tails):
                     self._pending_session_tails.append(pending)
                 _PENDING_TAIL_ENGINES.add(self)
             raise
+        if senders is not None:
+            sender_capture.record(self, pending, store_ids, senders)
         return store_ids
 
     @staticmethod
@@ -8338,6 +8942,7 @@ class LCMEngine(
                 return passes, "condensation_error"
             passes += 1
             self._no_progress_candidate = False  # #909/#651: a stored condensation is progress
+            self._clear_persisted_no_progress_hold()
             if (budget := self._foreground_call_budget()) is not None:
                 budget.progress = budget.progress or "condensation"
             try:
@@ -8583,6 +9188,14 @@ class LCMEngine(
                 return text
         return ""
 
+    def _proactive_recall_eligible(self) -> bool:
+        config = self._config
+        override = str(config.proactive_recall_provider or "").strip()
+        return bool(config.proactive_recall_enabled and config.embeddings_enabled
+                    and (override.lower() in {"", "fastembed", "fast-embed"}
+                         or (config.embeddings_enabled_explicit and config._embeddings_enabled_supplied))
+                    and (override or not lcm_tools.default_semantic_cpu_limited(config)))
+
     def _build_proactive_recall_message(
         self,
         tail_messages: List[Dict[str, Any]],
@@ -8600,12 +9213,9 @@ class LCMEngine(
         never re-enters the lossless store as a real turn.
         """
         config = self._config
-        if not getattr(config, "proactive_recall_enabled", False):
+        if not self._proactive_recall_eligible():
             return None
-        # Injection is an embedding-query feature: silently inert when embeddings
-        # are disabled/unwarmed (no provider to embed the newest message).
-        if not getattr(config, "embeddings_enabled", False):
-            return None
+        provider_override = str(getattr(config, "proactive_recall_provider", "") or "").strip()
 
         query = self._newest_user_message_text(tail_messages)
         if not query:
@@ -8619,7 +9229,6 @@ class LCMEngine(
         budget_tokens = int(getattr(config, "proactive_recall_budget_tokens", 500) or 0)
         if budget_tokens <= 0:
             return None
-        provider_override = getattr(config, "proactive_recall_provider", "") or ""
 
         try:
             raw = lcm_tools.lcm_recall(
@@ -8635,6 +9244,7 @@ class LCMEngine(
                 # relevance floor below filters the 6 hits without refill, so an
                 # FTS-only anchor under the floor would displace an eligible hit.
                 fts_anchor=False,
+                delivery_unit="hits",
             )
             payload = json.loads(raw)
         except EmbeddingPrivacyPolicyError as exc:
@@ -9072,7 +9682,7 @@ class LCMEngine(
                 tail_tokens=count_messages_tokens(tail_selected),
                 repaired_tail_tokens=count_messages_tokens(measurement_tail),
                 recall_budget_tokens=self._config.proactive_recall_budget_tokens,
-                proactive_recall_enabled=self._config.proactive_recall_enabled,
+                proactive_recall_enabled=self._proactive_recall_eligible(),
                 embeddings_enabled=self._config.embeddings_enabled, survival_fit=self._config.survival_fit,
             )
             full_prefix = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}
@@ -10014,6 +10624,7 @@ class LCMEngine(
             source=batch["source"], conversation_id=batch["conversation_id"],
             metadata_factory=self._real_user_scaffold_metadata_rows,
             metadata_messages=batch["metadata_messages"],
+            **({"senders": batch["senders"]} if "senders" in batch else {}),
         )
 
     @staticmethod
@@ -10045,6 +10656,8 @@ class LCMEngine(
             tail["after_store_id"] = row["store_id"]
         for key in ("messages", "estimates", "metadata_messages"):
             tail[key] = tail[key][covered:]
+        if "senders" in tail:
+            tail["senders"] = tail["senders"][covered:]
 
     def _retry_pending_session_tails(self, *, deadline: float | None = None, exiting: bool = False) -> None:
         """Drain under the lifecycle lock, sharing one busy-wait budget."""
@@ -10143,6 +10756,7 @@ class LCMEngine(
             self._stable_use_lock.release()
 
     def shutdown(self):
+        sender_capture.retire(self)
         with self._exclusive_lifecycle("shutdown"):
             if self._stable_use_closed:
                 return
@@ -10166,6 +10780,7 @@ class LCMEngine(
             self._dag.close,
             self._lifecycle.close,
             *([self._assertions.close] if self._assertions is not None else []),
+            *([self._entities.close] if self._entities is not None else []),
             *([self._query_views.close] if self._query_views is not None else []),
         ]
         failures = []

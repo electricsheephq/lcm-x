@@ -4,6 +4,22 @@ Hermes `/new` starts a new host session. LCM-X binds that session to its own lif
 
 Do not promise that `/new` deletes historical LCM data. Earlier rows remain in `lcm.db` unless an explicitly authorized cleanup removes them, and they remain available through bounded cross-session recall.
 
+## Stopped-turn persistence
+
+`on_turn_complete` ingests interrupted turns immediately on the already-bound
+engine; completed and failed-only callbacks do not ingest. Under the stable-use
+lease, the original session/conversation binding must still match. Ownership also
+requires a positive ingest cursor, no pending reset or cursor reconciliation, and
+a cached replay-identity prefix matching the supplied history.
+Histories ending in a user row also wait for catch-up: retry can still merge
+that open tail with the next prompt, so ownership alone does not prove it stable.
+Unproven, unbound, ignored or stateless histories wait for normal catch-up;
+callback metadata never binds or rebinds a session. Eligible rows are durable and
+searchable before the callback returns, with `note_turn_complete` in `finally`.
+Errors log only their class and do not escape host finalization; no leaves are
+prepared here. A host failed-turn boundary appended after the callback is stored
+once by the next completed turn or a session-end flush supplied that final history.
+
 ## CLI reset-time bind host contract
 
 The minimum Hermes capability for CLI `/new` rebinding is a reset-time call to
@@ -42,6 +58,18 @@ to its parent session.
 ## Compaction commits
 
 Hermes commits a compaction by calling the session-end hook with the list it compressed, then the compression-start hook. LCM-X treats that call as a commit, not a session end. It does not re-store those rows. The session keeps its identity, published frontier and ingest position across the boundary, both when Hermes keeps the session id (in place) and when it rotates to a new one. A genuine session end (exit, `/new`, or an end after a cancelled compaction) still finalizes the session. It also pauses this engine's background embedding maintenance: queued passes are dropped and nothing new is scheduled until the next live bind re-arms it (a compaction commit leaves maintenance running; see `architecture.md` for the shutdown and process-exit waits). A session that resumes later continues from the frontier it finalized itself, never another session's.
+
+At process exit, scheduler work and orphaned local encoder workers share one deadline.
+A timed-out encoder holds its worker slot until it finishes. Exit waits for that slot
+only within the remaining deadline; it does not guarantee that native inference stops.
+The drain does not fence new slot acquisitions after it returns, including a preparing
+model or a late recall query embed (see [#1832](https://github.com/electricsheephq/lcm-x/issues/1832)).
+Embedding failure counts and the first warning belong to each database. Deferred passes
+preserve them. A pass with no failure in any corpus that embedded rows or completed resets
+the count and re-arms the warning; a failure in any corpus counts as a failure, even
+if another corpus wrote rows.
+Status and doctor label unsent claimed rows and dispatches owned by a live lease as `in flight`.
+A dispatch with an expired or missing owner is `uncertain`, as is a recovered uncertain marker.
 
 `LCM_NATIVE_RECOVERY`: removed in v0.25.0; ignored if set. Native adoption proofs and replay-snapshot digests that older versions wrote are still read, so a host replay of an adopted native summary reconciles after a restart or rotation.
 
