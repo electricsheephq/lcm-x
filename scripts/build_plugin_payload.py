@@ -9,6 +9,7 @@ import subprocess
 
 VERSION = 1
 ASSETS = Path(__file__).resolve().parents[1] / "release/payload-assets.txt"
+README_TEMPLATE = Path(__file__).resolve().parent / "payload/README.md.tmpl"
 # tools/plugin_guard.py:102-104 at NousResearch/hermes-agent@6f7a7991bb069db07ae74a479823ce8310f8c7e0
 MAX_FILES, MAX_TOTAL_BYTES, MAX_FILE_BYTES = 400, 10 * 1024**2, 1024**2
 FORBIDDEN = {"tests", "bench", "scripts", ".github", ".agents", "docs"}
@@ -56,7 +57,7 @@ def closure(root, paths, read):
     return seen
 
 
-def build(source, out, manifest, assets=ASSETS):
+def build(source, out, manifest, assets=ASSETS, *, allow_dirty_tooling=False):
     checkout = Path(source).is_dir()
     root = Path(source).resolve() if checkout else Path.cwd()
 
@@ -66,6 +67,11 @@ def build(source, out, manifest, assets=ASSETS):
     sha = git("rev-parse", "--verify", "HEAD" if checkout else source + "^{commit}").decode().strip()
     if checkout and git("status", "--porcelain", "--untracked-files=no"):
         raise ValueError("dirty tracked checkout refused")
+    tooling_root = ASSETS.parent.parent
+    tooling_dirty = bool(subprocess.check_output(
+        ["git", "-C", str(tooling_root), "status", "--porcelain"]))
+    if not checkout and tooling_dirty and not allow_dirty_tooling:
+        raise ValueError("dirty tooling checkout refused; commit changes or use --allow-dirty-tooling")
     paths = set(git("ls-files", "-z").decode().split("\0")) if checkout else {
         row.split("\t", 1)[1] for row in git("ls-tree", "-rz", sha).decode().split("\0") if row}
     paths.discard("")
@@ -93,12 +99,14 @@ def build(source, out, manifest, assets=ASSETS):
     if any(p.split("/")[0] in FORBIDDEN for p in selected):
         raise ValueError("forbidden payload path")
     data = {p: read(p) for p in sorted(selected)}
+    data["README.md"] = README_TEMPLATE.read_text().replace("@SOURCE_SHA@", sha).encode()
+    data = dict(sorted(data.items()))
     if len(data) > MAX_FILES or sum(map(len, data.values())) > MAX_TOTAL_BYTES or any(
             len(value) > MAX_FILE_BYTES for value in data.values()):
         raise ValueError("payload exceeds host limit")
     tooling_sha = subprocess.check_output(["git", "-C", str(ASSETS.parent.parent), "rev-parse", "HEAD"]).decode().strip()
     result = dict(source_sha=sha, tooling_sha=tooling_sha, allowlist_sha256=hashlib.sha256(assets.read_bytes()).hexdigest(),
-                  builder_version=VERSION, file_count=len(data),
+                  builder_version=VERSION, tooling_dirty=tooling_dirty, file_count=len(data),
                   total_bytes=sum(map(len, data.values())), files=[
                       dict(path=p, bytes=len(value), sha256=hashlib.sha256(value).hexdigest()) for p, value in data.items()])
     Path(out).mkdir(parents=True, exist_ok=False)
@@ -114,5 +122,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("source", "out", "manifest"):
         parser.add_argument("--" + option, required=True)
+    parser.add_argument("--allow-dirty-tooling", action="store_true",
+                        help="allow a hand-run SHA build with uncommitted tooling; record tooling_dirty")
     args = parser.parse_args()
-    build(args.source, args.out, args.manifest)
+    build(args.source, args.out, args.manifest, allow_dirty_tooling=args.allow_dirty_tooling)

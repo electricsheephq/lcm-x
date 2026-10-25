@@ -726,3 +726,11 @@ def test_doctor_fresh_connection_read_only(tmp_path, monkeypatch):
         assert diagnostics.fresh_sqlite_check(engine, "integrity_check") == (True, "ok")
         assert refused == [True]
         assert not engine._store.connection.execute("SELECT 1 FROM sqlite_master WHERE name='ro_probe'").fetchall()
+
+
+def test_compaction_progress_docs_url_uses_plugin_version():
+    from hermes_lcm.diagnostics import doctor_guidance_for_check
+    from hermes_lcm.runtime_identity import _plugin_metadata
+    result = doctor_guidance_for_check({"check": "compaction_progress", "status": "warn"})
+    assert result["operator_action"].endswith(
+        f"offline diagnosis: https://github.com/electricsheephq/lcm-x/blob/v{_plugin_metadata()['version']}/docs/operations/store-wedge-inspect.md")

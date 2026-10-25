@@ -15,11 +15,15 @@ manager must inspect the reported rule and change settings if appropriate. The
 workflow never bypasses a ruleset or retries with force.
 Publication runs queue without cancellation (GitHub's finite limit is 100 pending runs).
 
+The builder renders `plugin/README.md` from the reviewed
+`scripts/payload/README.md.tmpl`. It contains catalog install/enable commands and
+absolute source-SHA-pinned links, and is hashed in the manifest like every asset.
+
 Each dist commit contains `plugin/` and `payload-manifest.json`. The commit message
 is `payload: <tag> <source-sha>`; the workflow prints the dist SHA and attaches the
-same manifest to the existing GitHub release. The release must exist before any dist
+same manifest to the existing GitHub release. The release must be published (not a draft) before any dist
 build or push; the workflow polls every 10 seconds for at most 10 minutes. If it
-times out, nothing is pushed; re-run with `workflow_dispatch` once the release exists.
+times out, nothing is pushed; re-run with `workflow_dispatch` once the release is published.
 Repeating a tag/source pair reuses its existing dist commit and re-attaches that commit's stored manifest,
 even when dispatch tooling has changed. An upload failure can be retried this way.
 
@@ -41,6 +45,10 @@ not prove the dist tree matches. Builder limits mirror the host at
 [`6f7a7991`, `plugin_guard.py:102-104`](https://github.com/NousResearch/hermes-agent/blob/6f7a7991bb069db07ae74a479823ce8310f8c7e0/tools/plugin_guard.py#L102):
 400 files, 10 MiB total, and 1 MiB per file. Symlinks are rejected, including links
 outside the source tree. Every allowlist entry must match a tracked file.
+SHA mode refuses uncommitted changes in the tooling checkout, including untracked
+files. For hand runs only, `--allow-dirty-tooling` permits these changes and records
+`tooling_dirty: true` in the manifest; clean builds record `false`. Reproducible
+provenance verification requires clean tooling. CI uses a fresh tooling checkout.
 Checkout mode refuses staged or unstaged tracked changes. Untracked receipts are
 ignored and never selected. The drift gate rescans payload Python for reviewed
 file-relative and dynamic-import sites in `tests/fixtures/payload-reviewed-sites.json`;
