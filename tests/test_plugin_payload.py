@@ -194,6 +194,7 @@ def reviewed_sites(payload):
         for node in ast.walk(tree):
             dynamic_getattr = (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                                and node.func.id == "getattr" and node.args
+                               and isinstance(node.args[0], (ast.Name, ast.Attribute))
                                and canonical(node.args[0]).split(".")[0] == "importlib")
             if dynamic_getattr or (isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load)
                     and (canonical(node).split(".")[-1] in names | {"__file__"}
