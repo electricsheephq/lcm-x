@@ -49,10 +49,10 @@ jobs:
         run: python -m bench.instruments.reliability.ci prep --host "${{ matrix.host }}" --root "$RUNNER_TEMP/hosts" --out "$RUNNER_TEMP/hosts.json"
 
       - name: R1 in-process, all cells
-        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r1"
+        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r1" --keep-dbs fail
 
       - name: R2 acp-process, all cells
-        run: python bench/instruments/reliability/run_matrix.py --transport acp-process --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r2"
+        run: python bench/instruments/reliability/run_matrix.py --transport acp-process --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r2" --keep-dbs fail
 
       - name: Gate (ERROR, or a G-REL-1 FAIL without an open targeted issue)
         env:
@@ -67,7 +67,7 @@ jobs:
         if: ${{ !cancelled() }}
         continue-on-error: ${{ env.DEFAULT_WINDOW_REPORT_ONLY == 'true' }}
         timeout-minutes: 30
-        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells 'default-window/*' --jobs 4 --out "$OUT/default-window-r1"
+        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells 'default-window/*' --jobs 4 --out "$OUT/default-window-r1" --keep-dbs fail
 
       - name: Job summary
         if: always()
@@ -80,18 +80,24 @@ jobs:
               printf 'No matrix report produced; see step logs.\n' >> "$GITHUB_STEP_SUMMARY"
             fi
           done
+          if [ -d "$OUT" ]; then
+            du -sh --exclude=pycache --exclude=files "$OUT" | awk '{printf "\nArtifact inputs: %s\n", $1}' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: reliability-${{ matrix.host }}
+          include-hidden-files: true
           path: |
             reliability-out/*/results.jsonl
             reliability-out/*/run.json
             reliability-out/*/*.md
-            reliability-out/*/cells/**/verdict.json
+            reliability-out/*/cells/**
             reliability-out/default-window-*/**
+            !reliability-out/**/pycache/**
+            !reliability-out/*/cells/*/*/*/files/**
           if-no-files-found: warn
 
 

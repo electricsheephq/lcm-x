@@ -236,7 +236,7 @@ def drained_coverage(final, stored, nodes, group):
 def tag_counts(texts, pattern):
     counts = Counter()
     for text in texts:
-        for tag in set(re.findall(pattern, text or "")):
+        for tag in sorted(set(re.findall(pattern, text or ""))):
             counts[tag] += 1
     return counts
 
@@ -282,7 +282,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         have_a = tag_counts([c for _s, _sid, r, c in rows if r == "assistant"], reply_pat)
         hg = None if host is None else host.get(g, {})
         mism = {}
-        for k in set(want_u) | set(have_u):
+        for k in sorted(set(want_u) | set(have_u)):
             ids = [s for s, _sid, r, c in rows if r == "user" and k in re.findall(user_pat, c or "")] \
                 if have_u[k] > want_u[k] else []
             lic = host_parity.b1_licence(k, want_u[k], have_u[k], hg, ids)
@@ -290,7 +290,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
             if want_u[k] + (lic or {}).get("licensed", 0) != have_u[k]:
                 mism[f"{label}{k}"] = {"expected": want_u[k], "stored": have_u[k]}
         mism.update({f"reply {label}{k}": {"expected": want_a[k], "stored": have_a[k]}
-                     for k in set(want_a) | set(have_a) if want_a[k] != have_a[k]})
+                     for k in sorted(set(want_a) | set(have_a)) if want_a[k] != have_a[k]})
         want_c = continue_positions(items, reply_pat)
         have_c = continue_positions([(r, c) for _s, _sid, r, c in rows if r in ("user", "assistant")], reply_pat)
         if want_c != have_c:
@@ -384,7 +384,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         if any(group(session_of.get(i, f"missing:{i}") if type(i) is int else f"invalid:{i}") != group(sid)
                for i in ids):
             crossing.append(nid)
-    grow["cross_lineage_nodes"], grow["empty_source_nodes"] = crossing[:10], empty[:10]
+    grow["cross_lineage_nodes"], grow["empty_source_nodes"] = sorted(crossing)[:10], sorted(empty)[:10]
     numbers["B5"] = grow
     if not grow["ok"] or crossing or empty:
         failed["B5"] = {k: v for k, v in grow.items() if k != "depth0_sequence"} | {"depth0_tail": grow["depth0_sequence"][-8:]}
