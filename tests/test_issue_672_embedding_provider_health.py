@@ -218,7 +218,7 @@ def test_probe_performs_no_network_or_model_load(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "kwargs, expect_available, needle",
     [
-        ({"embedding_provider": "", "embedding_model": ""}, False, "unset"),
+        ({"embedding_provider": "", "embedding_model": ""}, False, "fastembed"),
         ({"embedding_provider": "voyage", "embedding_model": ""}, False, "LCM_EMBEDDING_MODEL"),
         ({"embedding_provider": "", "embedding_model": "x"}, False, "LCM_EMBEDDING_PROVIDER"),
         ({"embedding_provider": "nope", "embedding_model": "x"}, False, "unsupported"),
