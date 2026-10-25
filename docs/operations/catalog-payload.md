@@ -58,6 +58,8 @@ file-relative and dynamic-import sites in `tests/fixtures/payload-reviewed-sites
 new or removed sites require review of the committed baseline.
 The payload link check reads text as UTF-8. Invalid encoding and NUL bytes in
 text files fail with the file name, while binary assets are skipped.
+Files with a suffix in `PAYLOAD_TEXT_SUFFIXES` must be valid text; all other files
+are checked as text only if they decode as UTF-8 and contain no NUL bytes.
 
 ## Catalog pin and rollback
 

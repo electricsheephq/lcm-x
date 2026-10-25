@@ -16,6 +16,10 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+PAYLOAD_TEXT_SUFFIXES = {
+    ".md", ".py", ".yaml", ".yml", ".txt", ".json", ".sh", ".toml",
+    ".cfg", ".ini", ".j2", ".html", ".css", ".js",
+}
 
 
 @pytest.fixture
@@ -260,12 +264,15 @@ def assert_payload_markdown_paths(payload):
     repo_dirs = {p.split("/")[0] for p in git(ROOT, "ls-files").splitlines() if "/" in p}
     checked = []
     for page in sorted(p for p in payload.rglob("*") if p.is_file()):
-        if page.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf"}:
-            continue
+        known_text = page.suffix.lower() in PAYLOAD_TEXT_SUFFIXES
         try:
             text = page.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
+            if not known_text:
+                continue
             raise AssertionError(f"{page}: non-UTF-8 payload text") from exc
+        if "\x00" in text and not known_text:
+            continue
         assert "\x00" not in text, f"{page}: binary-in-text payload file"
         if page.suffix == ".py":
             # Source comments are not runtime-facing references.
@@ -275,7 +282,8 @@ def assert_payload_markdown_paths(payload):
             visible, fence = [], None
             for line in text.splitlines(keepends=True):
                 marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
-                if marker:
+                if marker and not (fence is None and marker.group(1)[0] == "`"
+                                   and "`" in line[marker.end():]):
                     run = marker.group(1)
                     if fence is None:
                         fence = run
@@ -290,9 +298,12 @@ def assert_payload_markdown_paths(payload):
         text = re.sub(r"!?\[[^\]]*\]\(https?://[^)]*\)", "", text)
         text = re.sub(r"<https?://[^>]+>", "", text)
         if page.suffix == ".py":
-            text = re.sub(r'''[fFrR]*(?:"[^"\n]*https?://[^"\n]*"|'[^'\n]*https?://[^'\n]*')''', "", text)
             text = re.sub(r'''plugin_docs_url\(\s*(['"])docs/[^'"]+\1''', "plugin_docs_url(", text)
-        text = re.sub(r"https?://(?:[^\s`<>()\"',]|\([^()\n]*\))*", "", text)
+        url_parts = r'''[^\s`<>()"',]|\([^()\n]*\)'''
+        if page.suffix == ".py":
+            # Quoted f-string expressions belong to the URL token, not surrounding prose.
+            url_parts = r"\{[^{}\n]*\}|" + url_parts
+        text = re.sub(r"https?://(?:" + url_parts + r")*", "", text)
         targets = []
         if page.suffix == ".md":
             targets += [(target, True) for target in re.findall(r"!?\[[^\]]*\]\(\s*<?([^\s)>]+)", text)]
@@ -530,16 +541,19 @@ def test_payload_relative_link_forms_rejected(tmp_path, form):
         assert_payload_markdown_paths(tmp_path)
 
 
-@pytest.mark.parametrize("filename", ["plugin.yaml", "asset.txt", "module.py"])
+@pytest.mark.parametrize("filename", ["plugin.yaml", "asset.txt", "module.py", "asset.data"])
 def test_payload_non_markdown_docs_rejected(tmp_path, filename):
     (tmp_path / filename).write_text('help: "docs/missing.md"')
     with pytest.raises(AssertionError, match="docs/missing"):
         assert_payload_markdown_paths(tmp_path)
 
 
-def test_payload_relative_links_positive(tmp_path):
-    (tmp_path / "module.py").write_text(
-        'DOCS = f"https://github.com/electricsheephq/lcm-x/blob/v{metadata()[\'version\']}/docs/guide.md"')
+@pytest.mark.parametrize("literal", [
+    'f"https://github.com/electricsheephq/lcm-x/blob/v{metadata()[\'version\']}/docs/guide.md"',
+    '"https://example.com/docs/x.md"',
+])
+def test_payload_relative_links_positive(tmp_path, literal):
+    (tmp_path / "module.py").write_text(f"DOCS = {literal}\n")
     (tmp_path / "assets").mkdir()
     (tmp_path / "assets/image.png").write_bytes(b"fixture")
     (tmp_path / "guide").write_text("fixture")
@@ -683,15 +697,16 @@ def test_nested_page_link_cannot_fall_back_to_payload_root(tmp_path, form):
 
 @pytest.mark.parametrize("form", ["[^1]: Footnote text",
                                   "<https://example.com/docs/missing.md>",
+                                  "~~~info `code`\n[missing](docs/missing.md)\n~~~",
                                   "```md\n[missing](docs/missing.md)\n```"])
 def test_payload_non_links_are_accepted(tmp_path, form):
     (tmp_path / "README.md").write_text(form)
-    assert_payload_markdown_paths(tmp_path) == []
+    assert assert_payload_markdown_paths(tmp_path) == []
 
 
 def test_fence_with_trailing_text_does_not_close(tmp_path):
     (tmp_path / "README.md").write_text("```md\n```example\n[missing](docs/missing.md)\n```\n")
-    assert_payload_markdown_paths(tmp_path) == []
+    assert assert_payload_markdown_paths(tmp_path) == []
 
 
 def test_bare_path_ignores_trailing_prose_punctuation(tmp_path):
@@ -715,9 +730,10 @@ def test_non_utf8_payload_text_names_file(tmp_path):
         assert_payload_markdown_paths(tmp_path)
 
 
-def test_nul_payload_text_names_file(tmp_path):
-    (tmp_path / "bad.md").write_bytes(b"bad: \x00")
-    with pytest.raises(AssertionError, match="bad.md.*binary-in-text"):
+@pytest.mark.parametrize("filename", ["bad.md", "bad.yaml"])
+def test_nul_payload_text_names_file(tmp_path, filename):
+    (tmp_path / filename).write_bytes(b"bad: \x00")
+    with pytest.raises(AssertionError, match=filename + ".*binary-in-text"):
         assert_payload_markdown_paths(tmp_path)
 
 
@@ -729,3 +745,24 @@ def test_payload_markdown_reference_definitions(tmp_path):
             assert_payload_markdown_paths(tmp_path)
     page.write_text("[x]: https://github.com/electricsheephq/lcm-x/blob/v0.29.1/docs/missing.md\n")
     assert_payload_markdown_paths(tmp_path)
+
+
+def test_backtick_in_fence_info_keeps_links_visible(tmp_path):
+    (tmp_path / "README.md").write_text("```x``` then [m](missing.md)\n[n](missing2.md)\n")
+    with pytest.raises(AssertionError, match=r"'missing\.md'"):
+        assert_payload_markdown_paths(tmp_path)
+
+
+@pytest.mark.parametrize("literal", ['"see docs/missing.md or https://example.com/x"',
+                                     "f'run per docs/missing.md; https://x.example/{v}'"])
+def test_python_url_literal_keeps_docs_paths_visible(tmp_path, literal):
+    (tmp_path / "m.py").write_text(f"MSG = {literal}\n")
+    with pytest.raises(AssertionError, match="docs/missing.md"):
+        assert_payload_markdown_paths(tmp_path)
+
+
+@pytest.mark.parametrize("filename", ["model.onnx", "store.sqlite", "f.woff2"])
+@pytest.mark.parametrize("data", [b"asset\xff", b"asset\x00"])
+def test_binary_payload_assets_are_sniffed_and_skipped(tmp_path, filename, data):
+    (tmp_path / filename).write_bytes(data)
+    assert assert_payload_markdown_paths(tmp_path) == []
