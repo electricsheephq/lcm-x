@@ -1,7 +1,7 @@
 """Standalone scoring of an lcm.db copy.
 
     python -m bench.instruments.reliability.scorers.cli --db <lcm.db> --gauntlet-run <run dir>   # a live gauntlet run
-    python -m bench.instruments.reliability.scorers.cli --cell-dir <harness cell dir>           # re-score one cell
+    python -m bench.instruments.reliability.scorers.cli --cell-dir <harness cell dir> --plugin-tree <checkout>  # re-score one cell
 
 The DB (with any -wal/-shm) is first copied into a private temp dir and only the copy is opened, read-only:
 the source file is never opened, so a positive-control DB cannot be modified.
@@ -17,10 +17,13 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
-from bench.instruments.reliability.scorers import bars, dupes, multiset  # noqa: E402
+from bench.instruments.reliability.scorers import bars, continuity, dupes, multiset  # noqa: E402
+from bench.instruments.reliability import stop_turn  # noqa: E402
+from bench.instruments.reliability.process_cell import apply_f4, read_jsonl  # noqa: E402
 from bench.instruments.reliability.run_matrix import unfired_reason  # noqa: E402
 
 
@@ -72,20 +75,32 @@ def main(argv=None) -> int:
         ap.error("--plugin-tree requires --cell-dir")
     if a.cell_dir:
         if not (a.cell_dir / "cell.json").is_file():
-            ap.error("cannot re-score: no cell.json (pre-run cells have no scoring inputs)")
+            ap.exit(2, "cannot re-score: no cell.json (pre-run cells have no scoring inputs)\n")
         cell = json.loads((a.cell_dir / "cell.json").read_text())
         uploaded = json.loads((a.cell_dir / "verdict.json").read_text()) if (a.cell_dir / "verdict.json").is_file() else {}
-        if cell.get("stop_after_tool"):
-            ap.error("cannot re-score stop_after_tool: verdict requires in-memory stop-turn state")
-        if cell.get("id", "").startswith("continuity/") and (
-                "F4" in (uploaded.get("failed_bars") or {})
-                or str(uploaded.get("reason", "")).startswith("continuity F4:")
-                or (uploaded.get("verdict") == "FAIL" and not uploaded.get("failed_bars"))):
-            ap.error("cannot re-score continuity F4 decisions or continuity FAIL with no failed bars: in-memory state required")
-        if cell.get("transport") == "acp-process" or "acp_session" in uploaded:
+        def refuse(reason):
+            ap.exit(2, f"cannot re-score: {reason}\n")
+
+        if uploaded.get("verdict") == "ERROR":
+            refuse("uploaded verdict is ERROR (a harness decision)")
+        if cell.get("drain") and cell.get("transport") != "acp-process":
+            refuse("drain cells need the R2 observer's per-compaction counters (acp-process only)")
+        if not (a.cell_dir / "phase-A.json").is_file():
+            refuse("no phase-A.json (no probe scoring inputs)")
+        if not (a.cell_dir / "db/lcm.db").is_file():
+            refuse("no retained database (db/lcm.db absent)")
+        if cell.get("transport") == "acp-process":
             if not uploaded.get("acp_session"):
-                ap.error("cannot re-score acp-process: verdict.json has no acp_session")
-            cell.update(chat_root=uploaded["acp_session"], transport=uploaded.get("transport") or "acp-process")
+                refuse("acp-process verdict.json has no acp_session")
+            cell["chat_root"] = uploaded["acp_session"]
+        f4 = cell.get("id", "").startswith("continuity/")
+        if f4 and (cell.get("transport") != "acp-process" or any(
+                not (a.cell_dir / name).is_file() for name in ("provider-requests.jsonl", "observer.jsonl"))):
+            refuse("continuity F4 requires acp-process provider-requests.jsonl and observer.jsonl")
+        if cell.get("stop_after_tool") and any(not (a.cell_dir / name).is_file() for name in (
+                "phase-B.json", "observer.jsonl", "transcript.jsonl", "provider-requests.jsonl",
+                "stop-immediate.json", "stop-end.json", "stop-catchup.json")):
+            refuse("stop_after_tool disk scoring inputs are incomplete")
         if a.plugin_tree is not None:
             expected = cell["plugin"]["sha"]
             tree = a.plugin_tree.resolve()
@@ -102,11 +117,30 @@ def main(argv=None) -> int:
             if identity != ["true", str(tree), expected] or dirty:
                 ap.error(f"--plugin-tree must be a clean checkout root with HEAD equal to {expected}; got {identity}")
             cell["plugin"]["tree"] = str(tree)
+        elif not Path(cell["plugin"]["tree"]).exists():
+            refuse("recorded plugin tree is missing; supply --plugin-tree <checkout>")
         fired_path, phase_path = a.cell_dir / "faults-fired.jsonl", a.cell_dir / "phase-A.json"
         fired = {json.loads(line)["kind"] for line in fired_path.read_text().splitlines() if line.strip()} if fired_path.is_file() else set()
         citations = json.loads(phase_path.read_text()).get("citations", {}) if phase_path.is_file() else {}
         reason = unfired_reason({**cell, "faults": cell.get("faults", [])}, fired, citations)
-        report = {"verdict": "UNSUPPORTED", "reason": reason} if reason else bars.score(cell, a.cell_dir)
+        if cell.get("stop_after_tool"):
+            run = SimpleNamespace(d=a.cell_dir, transcript=a.cell_dir / "transcript.jsonl",
+                                  notes=lambda kind: [n for n in read_jsonl(a.cell_dir / "observer.jsonl")
+                                                      if n["kind"] == kind])
+            last = json.loads((a.cell_dir / "phase-B.json").read_text())
+            report = stop_turn.score(run, last)
+        else:
+            report = {"verdict": "UNSUPPORTED", "reason": reason} if reason else bars.score(cell, a.cell_dir)
+            if f4:
+                requests = read_jsonl(a.cell_dir / "provider-requests.jsonl")
+                unique = {r["rid"]: r for r in requests if r.get("role") == "main" and r.get("unexpected")}
+                if any(not r.get("current_user_missing") or any(k not in r for k in (
+                        "turn", "current_user_projected")) for r in unique.values()):
+                    refuse("continuity F4 scenario findings are unavailable on disk")
+                unexpected = [{k: r[k] for k in ("turn", "current_user_missing", "current_user_projected")}
+                              for r in unique.values()]
+                report["continuity"] = continuity.score_dir(cell, a.cell_dir)
+                apply_f4(report, cell, unexpected)
     else:
         if not (a.db and a.gauntlet_run):
             ap.error("--db and --gauntlet-run are required without --cell-dir")
