@@ -10,6 +10,12 @@ hermes plugins enable hermes-lcm-x
 
 Set `context.engine: lcm-x` in your Hermes configuration, then restart Hermes.
 
+Local semantic recall needs the companion below; without it, recall uses full text.
+
+```sh
+hermes plugins install electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings --ref @SOURCE_SHA@
+```
+
 - [Setup and configuration](https://github.com/electricsheephq/lcm-x/blob/@SOURCE_SHA@/README.md)
 - [Embedding setup](https://github.com/electricsheephq/lcm-x/blob/@SOURCE_SHA@/docs/embeddings-setup.md)
 - [Catalog payload and provenance](https://github.com/electricsheephq/lcm-x/blob/@SOURCE_SHA@/docs/operations/catalog-payload.md)

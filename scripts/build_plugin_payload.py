@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import subprocess
 
-VERSION = 1
+VERSION = 2
 ASSETS = Path(__file__).resolve().parents[1] / "release/payload-assets.txt"
 README_TEMPLATE = Path(__file__).resolve().parent / "payload/README.md.tmpl"
 # tools/plugin_guard.py:102-104 at NousResearch/hermes-agent@6f7a7991bb069db07ae74a479823ce8310f8c7e0

@@ -18,6 +18,7 @@ Publication runs queue without cancellation (GitHub's finite limit is 100 pendin
 The builder renders `plugin/README.md` from the reviewed
 `scripts/payload/README.md.tmpl`. It contains catalog install/enable commands and
 absolute source-SHA-pinned links, and is hashed in the manifest like every asset.
+Builder version 2 adds this README and the `tooling_dirty` manifest field.
 
 Each dist commit contains `plugin/` and `payload-manifest.json`. The commit message
 is `payload: <tag> <source-sha>`; the workflow prints the dist SHA and attaches the

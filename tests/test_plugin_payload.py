@@ -77,7 +77,7 @@ def test_import_closure_and_manifest(builder, source, tmp_path):
     assert paths == sorted(paths)
     assert {"__init__.py", "core.py", "package/__init__.py", "package/child.py"} <= set(paths)
     assert result["source_sha"] == git(source, "rev-parse", "HEAD")
-    assert result["builder_version"]
+    assert result["builder_version"] == 2
     assert result["tooling_sha"] == git(ROOT, "rev-parse", "HEAD")
     assert result["allowlist_sha256"] == hashlib.sha256((tmp_path / "assets.txt").read_bytes()).hexdigest()
     assert result["file_count"] == len(paths)
@@ -201,7 +201,7 @@ def reviewed_sites(payload):
                                and canonical(node.args[0]).split(".")[0] == "importlib")
             if dynamic_getattr or (isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load)
                     and (canonical(node).split(".")[-1] in names | {"__file__"}
-                         or canonical(node) == "__spec__.origin"
+                         or canonical(node).split(".")[-2:] == ["__spec__", "origin"]
                          or canonical(node).startswith("importlib.resources")
                          or canonical(node) in roots or f"{module(path)}.{canonical(node)}".strip(".") in roots)):
                 # Include the enclosing expression so a changed asset path is drift too.
@@ -557,6 +557,7 @@ def test_payload_wait_requires_published_release():
 
 
 @pytest.mark.parametrize("site", ["__spec__.origin", "pkgutil.get_data(name, path)",
+                                  "module.__spec__.origin", "sys.modules[__name__].__spec__.origin",
                                   "SourceFileLoader(name, path)",
                                   'getattr(importlib, "import_module")(name)'])
 def test_loader_api_drift(tmp_path, site):
@@ -584,3 +585,58 @@ def test_fixture_sha_build_allows_recorded_dirty_tooling(builder, source, tmp_pa
     (source / "pytest-receipt.json").write_text("{}")
     result = build(builder, git(source, "rev-parse", "HEAD"), tmp_path)
     assert result["tooling_dirty"] is True
+
+
+def test_catalog_scanner_fixture_sha_build_twice(builder, source, tmp_path, monkeypatch):
+    release = source / "release"
+    release.mkdir()
+    assets = release / "payload-assets.txt"
+    assets.write_text("plugin.yaml\nLICENSE\nskills/hermes-lcm/**\n")
+    commit(source)
+    monkeypatch.setattr(builder, "ASSETS", assets)
+    monkeypatch.setattr(builder.build, "__defaults__", (assets,))
+    monkeypatch.chdir(source)
+    receipts = source / "catalog-scanner-1946"
+    receipts.mkdir()
+    (source / "earlier-test-output.txt").write_text("untracked fixture output")
+    tree = ast.parse((ROOT / "tests/test_catalog_scanner_on.py").read_text())
+    call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                and ast.unparse(node.func) == "builder.build")
+    expression = compile(ast.Expression(call), "scanner fixture build", "eval")
+    for label in ("first", "second"):
+        result = eval(expression, dict(builder=builder, source=git(source, "rev-parse", "HEAD"),
+                                       out=tmp_path / label / "plugin", receipts=receipts, label=label))
+        assert result["tooling_dirty"] is True
+    assert "catalog-scanner-1946/" in (ROOT / ".gitignore").read_text().splitlines()
+
+
+def test_clean_default_sha_build_records_tooling_clean(builder, source, tmp_path, monkeypatch):
+    release = source / "release"
+    release.mkdir()
+    assets = release / "payload-assets.txt"
+    assets.write_text("plugin.yaml\nLICENSE\nskills/hermes-lcm/**\n")
+    commit(source)
+    monkeypatch.setattr(builder, "ASSETS", assets)
+    monkeypatch.chdir(source)
+    result = builder.build(git(source, "rev-parse", "HEAD"), tmp_path / "payload",
+                           tmp_path / "manifest.json", assets)
+    assert result["tooling_dirty"] is False
+    assert json.loads((tmp_path / "manifest.json").read_text())["tooling_dirty"] is False
+
+
+def test_payload_readme_companion_source_sha(builder, source, tmp_path):
+    result = build(builder, source, tmp_path)
+    command = ("hermes plugins install electricsheephq/lcm-x/companions/"
+               f"hermes-lcm-x-local-embeddings --ref {git(source, 'rev-parse', 'HEAD')}")
+    assert command in (tmp_path / "payload/README.md").read_text()
+    assert result["source_sha"] in command
+
+
+def test_payload_markdown_reference_definitions(tmp_path):
+    page = tmp_path / "README.md"
+    for target in ("docs/missing.md", "missing"):
+        page.write_text(f"[x]: {target}\n")
+        with pytest.raises(AssertionError):
+            assert_payload_markdown_paths(tmp_path)
+    page.write_text("[x]: https://github.com/electricsheephq/lcm-x/blob/v0.29.1/docs/missing.md\n")
+    assert_payload_markdown_paths(tmp_path)
