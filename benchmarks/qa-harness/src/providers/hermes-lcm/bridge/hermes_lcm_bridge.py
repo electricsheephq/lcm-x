@@ -161,9 +161,9 @@ class Bridge:
         )
         effective = {
             "ok": True,
-            "provider": self.provider_name,
+            "provider": self.provider_name if self.embeddings_enabled else "",
             "provider_source": self.provider_source,
-            "model": self.model,
+            "model": self.model if self.embeddings_enabled else "",
             "dim": self.dim,
             "embeddings_enabled": self.embeddings_enabled,
             "embeddings_enabled_explicit": self.embedding_settings_explicit,
