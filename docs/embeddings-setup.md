@@ -9,7 +9,8 @@ Non-local providers (including Ollama) require `LCM_EMBEDDINGS_ENABLED=true` and
 their own explicit model, retaining their privacy and consent requirements.
 This consent rule also applies to a non-local proactive recall override and to
 programmatic constructors; an omitted enable boolean never consents to cloud use.
-Unrecognized enable values resolve OFF with a warning. The ignored config.yaml
+Unrecognized enable values resolve OFF with a warning. A set-but-blank value also
+resolves OFF, without a warning; leave the variable unset to keep the local default. The ignored config.yaml
 key `lcm.embeddings_enabled` does not opt out; use `LCM_EMBEDDINGS_ENABLED=false`.
 Set `LCM_EMBEDDINGS_ENABLED=false` to opt out: no provider load or model download,
 and existing rows and vectors remain intact. Other providers are explicit options.
