@@ -70,4 +70,4 @@ def count(db_path, batch_gap: float = 0.5, compaction_ts=()) -> dict:
     return {"messages_total": len(rows), "sessions": len(by_session), "first_compaction_ts": first_comp,
             "replayed_rows_after_compaction": counted_total, "burst_rows_any_time": any_total,
             "key_based_extra_rows_all_time": key_extra, "naive_content_only_extra_rows": naive_extra,
-            "per_session": sessions}
+            "per_session": sorted(sessions, key=lambda r: r["session_id"])}

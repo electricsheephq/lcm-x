@@ -101,9 +101,11 @@ def b1_licence(tag: str, want: int, have: int, host: dict | None, store_ids: lis
     held = (host or {}).get("tags", {}).get(tag)
     n = min(have - want, held["n"] - want) if held and have > want else 0
     return {"tag": tag, "expected": want, "stored": have, "host": held["n"], "licensed": n,
-            "store_ids": store_ids[:10], "host_row_ids": held["ids"][:10]} if n > 0 else None
+            "store_ids": sorted(store_ids)[:10], "host_row_ids": sorted(held["ids"])[:10]} if n > 0 else None
 
 
 def summary(records: list[dict], why: str | None) -> dict:
     """``host_parity_licensed``: the licensed row count and up to 10 row records (never silent)."""
-    return {"rows": sum(r["licensed"] for r in records), "records": records[:10], **({"unavailable": why} if why else {})}
+    return {"rows": sum(r["licensed"] for r in records),
+            "records": sorted(records, key=lambda r: json.dumps(r, sort_keys=True))[:10],
+            **({"unavailable": why} if why else {})}

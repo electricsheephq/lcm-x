@@ -14,6 +14,7 @@ nothing.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import unicodedata
 from collections import Counter, defaultdict
@@ -37,7 +38,8 @@ def licence(key: tuple, surplus: int, expected: int, host: dict | None, store_id
     held = (host or {}).get(key) if key[0] == "user" else None
     n = min(surplus, held["n"] - expected - spent) if held else 0
     return {"role": key[0], "sha256": key[1], "expected": expected, "stored": expected + surplus, "host": held["n"],
-            "licensed": n, "store_ids": store_ids[:10], "host_row_ids": held["ids"][:10], "tags": held.get("tags", [])} \
+            "licensed": n, "store_ids": sorted(store_ids)[:10], "host_row_ids": sorted(held["ids"])[:10],
+            "tags": sorted(held.get("tags", []))} \
         if n > 0 else None
 
 
@@ -349,15 +351,15 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
         "deficit_rows": sum(e["expected"] - e["stored"] for e in missing),
         "duplicated_keys": len(duplicated),
         "surplus_rows": sum(e["stored"] - e["expected"] - e.get("licensed", 0) for e in duplicated) + sum(e["copies"] for e in extra),
-        "host_parity_licensed": licensed,
-        "held_composites_as_parts": composites,
-        "embedded_span_credits": span_credits,
-        "missing": missing,
-        "duplicated": duplicated,
-        "split_assistant_turns": split,
+        "host_parity_licensed": sorted(licensed, key=lambda r: json.dumps(r, sort_keys=True)),
+        "held_composites_as_parts": sorted(composites, key=lambda r: json.dumps(r, sort_keys=True)),
+        "embedded_span_credits": sorted(span_credits, key=lambda r: json.dumps(r, sort_keys=True)),
+        "missing": sorted(missing, key=lambda r: json.dumps(r, sort_keys=True)),
+        "duplicated": sorted(duplicated, key=lambda r: json.dumps(r, sort_keys=True)),
+        "split_assistant_turns": sorted(split, key=lambda r: json.dumps(r, sort_keys=True)),
         "split_keys": len(split),
         "stored_rows_not_expected": len(extra),
-        "extra": extra,
+        "extra": sorted(extra, key=lambda r: json.dumps(r, sort_keys=True)),
     }
 
 

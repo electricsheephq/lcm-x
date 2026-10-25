@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -62,10 +63,24 @@ def main(argv=None) -> int:
     ap.add_argument("--db", type=Path)
     ap.add_argument("--gauntlet-run", type=Path)
     ap.add_argument("--cell-dir", type=Path)
+    ap.add_argument("--plugin-tree", type=Path, help="exact-SHA git checkout for --cell-dir scoring")
     ap.add_argument("--out", type=Path)
     a = ap.parse_args(argv)
+    if a.plugin_tree is not None and not a.cell_dir:
+        ap.error("--plugin-tree requires --cell-dir")
     if a.cell_dir:
         cell = json.loads((a.cell_dir / "cell.json").read_text())
+        if a.plugin_tree is not None:
+            expected = cell["plugin"]["sha"]
+            try:
+                identity = subprocess.check_output(
+                    ["git", "-C", str(a.plugin_tree), "rev-parse", "--is-inside-work-tree", "HEAD"],
+                    text=True, stderr=subprocess.DEVNULL).splitlines()
+            except (OSError, subprocess.CalledProcessError):
+                ap.error(f"--plugin-tree must be a git checkout with HEAD equal to {expected}")
+            if identity != ["true", expected]:
+                ap.error(f"--plugin-tree must be a git checkout with HEAD equal to {expected}; got {identity}")
+            cell["plugin"]["tree"] = str(a.plugin_tree)
         report = bars.score(cell, a.cell_dir)
     else:
         if not (a.db and a.gauntlet_run):
