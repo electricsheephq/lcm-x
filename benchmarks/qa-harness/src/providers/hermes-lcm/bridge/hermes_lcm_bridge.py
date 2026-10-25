@@ -65,6 +65,30 @@ def _safe(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value)).strip("-._") or "container"
 
 
+def _local_certifier():
+    """The measured tree's certification helper, or the same steps for trees that predate it."""
+    import benchmarking.longmemeval as lme
+
+    return getattr(lme, "certify_local_recall_store", _certify_local_recall_store)
+
+
+def _certify_local_recall_store(config, db_path) -> None:
+    """Trees before the LongMemEval helper: run the same product backfill certification directly."""
+    from hermes_lcm import command
+
+    runs = [
+        command._embedding_backfill_summary_run(config, db_path, apply=True, limit=1, retry_uncertain=False),
+        command._chunk_backfill_run(
+            config, db_path, apply=True, limit=1, retry_uncertain=False,
+            policy="conversational", confirm_raw_text=True),
+    ]
+    for result in runs:
+        # "complete" covers one batch only; the store is certified only when nothing is left.
+        if not isinstance(result, dict) or result.get("status") != "complete" or any(
+                result.get(counter) != 0 for counter in ("remaining", "in_flight", "uncertain")):
+            raise RuntimeError(f"LOCAL producer catch-up incomplete: {result}")
+
+
 class Bridge:
     def __init__(self) -> None:
         repo = os.environ.get("HERMES_LCM_REPO")
@@ -170,9 +194,11 @@ class Bridge:
         return {}
 
     def _config(self, db_path: Path):
+        import dataclasses
+
         from hermes_lcm.config import LCMConfig
 
-        return LCMConfig(
+        settings = dict(
             recall_delivery_unit="hits",  # Historical QA/AML hydration and slicing contract.
             database_path=str(db_path),
             embeddings_enabled=self.embeddings_enabled,
@@ -180,6 +206,12 @@ class Bridge:
             embedding_model=self.model,
             embeddings_enabled_explicit=self.embedding_settings_explicit,
         )
+        # A pinned bridge can measure an older tree whose config predates the two newer settings.
+        if dataclasses.is_dataclass(LCMConfig):
+            known = {field.name for field in dataclasses.fields(LCMConfig)}
+            newer = {"recall_delivery_unit", "embeddings_enabled_explicit"}
+            settings = {name: value for name, value in settings.items() if name in known or name not in newer}
+        return LCMConfig(**settings)
 
     # -- ingest ---------------------------------------------------------------
 
@@ -295,8 +327,7 @@ class Bridge:
         db_path = self._db_path(container_tag)
         config = self._config(db_path)
         if self.embeddings_enabled and self.provider_name in {"fastembed", "fast-embed"} and container_tag not in self._certified:
-            from benchmarking.longmemeval import certify_local_recall_store
-            certify_local_recall_store(config, db_path)
+            _local_certifier()(config, db_path)
             self._certified.add(container_tag)
         store = MessageStore(str(db_path), ingest_protection_config=config)
         dag = SummaryDAG(str(db_path))

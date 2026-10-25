@@ -613,6 +613,30 @@ def _embedding_privacy_context(
     return config, embedding_privacy_revision(config)
 
 
+def _effective_embedding_model(provider: str, model: str) -> str:
+    """The product's effective model; trees before #1186 have no resolver, so the configured model is effective."""
+    from hermes_lcm import config as config_module
+
+    return getattr(config_module, "effective_embedding_model", lambda _provider, configured: configured)(provider, model)
+
+
+# Settings added after v0.28.1; an older measured tree's config omits them (its behaviour matches the defaults used here).
+_SETTINGS_AFTER_V0281 = frozenset({"embeddings_enabled_explicit", "recall_delivery_unit"})
+
+
+def _measured_config(**settings):
+    """The measured tree's LCMConfig, without the newer settings an older tree does not declare."""
+    import dataclasses
+
+    from hermes_lcm.config import LCMConfig
+
+    if dataclasses.is_dataclass(LCMConfig):
+        known = {item.name for item in dataclasses.fields(LCMConfig)}
+        settings = {name: value for name, value in settings.items()
+                    if name in known or name not in _SETTINGS_AFTER_V0281}
+    return LCMConfig(**settings)
+
+
 def _ensure_hermes_lcm_package() -> None:
     """Make this source checkout importable as ``hermes_lcm`` (no plugin registration)."""
     ensure_agent_context_engine_importable()
@@ -1003,8 +1027,7 @@ def resolve_harness_provider(
         resolved = StubEmbedder()
     else:
         _ensure_hermes_lcm_package()
-        from hermes_lcm.config import effective_embedding_model
-        model = effective_embedding_model(provider, model)
+        model = _effective_embedding_model(provider, model)
     if provider != "stub" and not model:
         raise ValueError(f"--model is required for --provider {provider}")
     if provider in {"fastembed", "fast-embed"}:
@@ -1046,9 +1069,12 @@ def resolve_harness_provider(
             lambda: resolved.embed_query("warmup"),
         )
     if warmup and provider in {"fastembed", "fast-embed"}:
+        from hermes_lcm import embedding_maintenance
         from hermes_lcm.config import LCMConfig
-        from hermes_lcm.embedding_maintenance import note_local_model_present
-        note_local_model_present(LCMConfig(embedding_provider=provider, embedding_model=model))
+        # Trees before the local readiness marker keep no record.
+        note_local_model_present = getattr(embedding_maintenance, "note_local_model_present", None)
+        if note_local_model_present is not None:
+            note_local_model_present(LCMConfig(embedding_provider=provider, embedding_model=model))
     if not use_embed_cache:
         return resolved
     return _maybe_cache_harness_provider(resolved, provider_name=provider)
@@ -2700,7 +2726,6 @@ def evaluate_question(
     _PRIVACY_QUESTION.update({key: 0 for key in _PRIVACY_KEYS})
     _ensure_hermes_lcm_package()
     from hermes_lcm.chunking import group_by_store_id, iter_message_chunks
-    from hermes_lcm.config import LCMConfig
     from hermes_lcm.dag import SummaryDAG, SummaryNode
     from hermes_lcm.embedding_provider import default_chunk_model
     from hermes_lcm.store import MessageStore
@@ -2768,7 +2793,7 @@ def evaluate_question(
     summary_requires_privacy = embedding_provider_requires_privacy(summary_name)
     chunk_requires_privacy = embedding_provider_requires_privacy(chunk_name)
 
-    config = LCMConfig(
+    config = _measured_config(
         database_path=str(db_path),
         embeddings_enabled=embeddings_enabled,
         embeddings_enabled_explicit=embeddings_enabled_explicit,
@@ -4162,11 +4187,11 @@ def run_harness(
         raise ValueError("shipped_default cannot override explicit embedding settings")
     if shipped_default or provider_name != "stub":
         _ensure_hermes_lcm_package()
-        from hermes_lcm.config import LCMConfig, effective_embedding_model
+        from hermes_lcm.config import LCMConfig
         if shipped_default:
             defaults = LCMConfig()
             provider_name, model, embeddings_enabled = defaults.embedding_provider, defaults.embedding_model, defaults.embeddings_enabled
-        model = effective_embedding_model(provider_name, model)
+        model = _effective_embedding_model(provider_name, model)
     _reset_privacy_counts()
     dataset_report: dict[str, Any] = dataset_coordinates(dataset_label)
     if source_sha256 is not None:
@@ -4353,12 +4378,11 @@ def run_harness(
                     )
         if reuse_db_template:
             _ensure_hermes_lcm_package()
-            from hermes_lcm.config import LCMConfig
 
             db_template = Path(tmp_dir) / "_template.db"
             _bootstrap_db_template(
                 db_template,
-                LCMConfig(
+                _measured_config(
                     database_path=str(db_template),
                     embeddings_enabled=embeddings_enabled,
                     embedding_provider=provider_set.summary_binding[0],
