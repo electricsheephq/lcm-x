@@ -311,6 +311,16 @@ def test_held_cloud_profile_preserved_and_explained(tmp_path, monkeypatch, trans
         doctor = json.dumps(tools._embedding_provider_health_check(engine))
         assert "voyage" in doctor and "LCM_EMBEDDINGS_ENABLED=true" in doctor
         assert "/lcm embed warmup" in doctor
+        # Another database may have prepared this process-wide local model,
+        # while this database still holds its explicit cloud identity.
+        monkeypatch.setattr(maintenance, "local_model_state", lambda config: ("present", ""))
+        monkeypatch.setattr(tools, "probe_provider_availability", lambda config: {
+            "available": True, "provider": "fastembed", "model": "BAAI/bge-small-en-v1.5", "detail": "configured"})
+        text = command.handle_lcm_command("doctor", engine)
+        line = next(line for line in text.splitlines() if line.startswith("embedding_readiness:"))
+        assert line.startswith("embedding_readiness: Model ready; summaries 0/1; chunks ")
+        assert line.count("summaries") == 1 and "maintenance" not in line
+        assert "status: issues-found" in text and "profile belongs to voyage" in text
         assert {table: list(conn.execute(f"SELECT * FROM {table}")) for table in tables} == before
         assert sent == [] and sockets == []
     finally:

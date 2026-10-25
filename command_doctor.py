@@ -708,7 +708,10 @@ def render_doctor(facts: DoctorFacts) -> str:
             elif readiness.startswith("model: unavailable("):
                 readiness = f"Local semantic recall unavailable ({reason}); full-text recall is active"
             elif readiness.startswith("model: present;"):
-                readiness = detail.get("impact") or ("Model ready; " + readiness.split("; ", 1)[1])
+                coverage, _, chunks = readiness.split("; coverage: ", 1)[1].partition("; chunks: ")
+                coverage = coverage.split(";", 1)[0].removesuffix(" summaries")
+                chunks = chunks.split("; maintenance:", 1)[0] or "unknown"
+                readiness = f"Model ready; summaries {coverage}; chunks {chunks}"
             lines.append(f"embedding_readiness: {readiness}")
         if isinstance(detail, dict) and detail.get("cpu_limited"):
             lines.append(str(detail["cpu_limit_reason"]))
