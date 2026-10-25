@@ -65,7 +65,10 @@ def source(tmp_path):
 def build(builder, source, tmp_path, assets=None):
     allowlist = tmp_path / "assets.txt"
     allowlist.write_text(assets or "plugin.yaml\nLICENSE\nskills/hermes-lcm/**\n")
-    return builder.build(str(source), tmp_path / "payload", tmp_path / "manifest.json", allowlist)
+    # Fixture generation may share tooling with pytest/xdist outputs; provenance
+    # admission is tested in isolated tooling repos below. Publication stays strict.
+    return builder.build(str(source), tmp_path / "payload", tmp_path / "manifest.json", allowlist,
+                         allow_dirty_tooling=True)
 
 
 def test_import_closure_and_manifest(builder, source, tmp_path):
@@ -227,7 +230,7 @@ def assert_reviewed_sites(payload):
 def test_new_unreviewed_site_mutation_fails(builder, tmp_path, monkeypatch, site):
     monkeypatch.chdir(ROOT)
     payload = tmp_path / "payload"
-    builder.build(git(ROOT, "rev-parse", "HEAD"), payload, tmp_path / "manifest.json")
+    builder.build(git(ROOT, "rev-parse", "HEAD"), payload, tmp_path / "manifest.json", allow_dirty_tooling=True)
     assert_reviewed_sites(payload)
     with (payload / "__init__.py").open("a") as stream:
         stream.write("\n" + site + "\n")
@@ -241,7 +244,7 @@ def test_new_unreviewed_site_mutation_fails(builder, tmp_path, monkeypatch, site
 def test_reviewed_root_data_flow_mutations_fail(builder, tmp_path, monkeypatch, module, prefix):
     monkeypatch.chdir(ROOT)
     payload = tmp_path / "payload"
-    builder.build(git(ROOT, "rev-parse", "HEAD"), payload, tmp_path / "manifest.json")
+    builder.build(git(ROOT, "rev-parse", "HEAD"), payload, tmp_path / "manifest.json", allow_dirty_tooling=True)
     assert_reviewed_sites(payload)
     with (payload / module).open("a") as stream:
         stream.write("\n" + prefix + '(_PLUGIN_ROOT / "prompts" / "extra.md").read_text()\n')
@@ -292,7 +295,7 @@ def assert_payload_markdown_paths(payload):
 def test_payload_markdown_link_integrity(builder, tmp_path, monkeypatch):
     monkeypatch.chdir(ROOT)
     payload = tmp_path / "payload"
-    builder.build(git(ROOT, "rev-parse", "HEAD"), payload, tmp_path / "manifest.json")
+    builder.build(git(ROOT, "rev-parse", "HEAD"), payload, tmp_path / "manifest.json", allow_dirty_tooling=True)
     assert "references/configuration.md" in assert_payload_markdown_paths(payload)  # Positive control.
     page = payload / "skills/hermes-lcm/references/configuration.md"
     with page.open("a") as stream:
@@ -519,7 +522,7 @@ def test_payload_relative_links_positive(tmp_path):
 
 
 @pytest.mark.parametrize("allowed", [False, True])
-@pytest.mark.parametrize("staged", [False, True])
+@pytest.mark.parametrize("staged", [False, True, "untracked"])
 def test_sha_dirty_tooling(builder, source, tmp_path, monkeypatch, allowed, staged):
     release = source / "release"
     release.mkdir()
@@ -528,9 +531,12 @@ def test_sha_dirty_tooling(builder, source, tmp_path, monkeypatch, allowed, stag
     commit(source)
     monkeypatch.setattr(builder, "ASSETS", assets)
     monkeypatch.chdir(source)
-    (source / "core.py").write_text("CHANGED = True\n")
-    if staged:
-        git(source, "add", "core.py")
+    if staged == "untracked":
+        (source / "pytest-receipt.json").write_text("{}")
+    else:
+        (source / "core.py").write_text("CHANGED = True\n")
+        if staged:
+            git(source, "add", "core.py")
     args = [git(source, "rev-parse", "HEAD"), tmp_path / "payload", tmp_path / "manifest.json", assets]
     if allowed:
         result = builder.build(*args, allow_dirty_tooling=True)
@@ -565,3 +571,16 @@ def test_package_relative_root_drift(tmp_path, package):
     (root / "__init__.py").write_text('ROOT = Path(__file__).parent\n')
     (root / "consumer.py").write_text('from . import ROOT as R\n(R / "extra.md").read_text()\n')
     assert [package + "consumer.py", "(R / 'extra.md').read_text()"] in reviewed_sites(tmp_path)
+
+
+def test_fixture_sha_build_allows_recorded_dirty_tooling(builder, source, tmp_path, monkeypatch):
+    release = source / "release"
+    release.mkdir()
+    assets = release / "payload-assets.txt"
+    assets.write_text("plugin.yaml\nLICENSE\nskills/hermes-lcm/**\n")
+    commit(source)
+    monkeypatch.setattr(builder, "ASSETS", assets)
+    monkeypatch.chdir(source)
+    (source / "pytest-receipt.json").write_text("{}")
+    result = build(builder, git(source, "rev-parse", "HEAD"), tmp_path)
+    assert result["tooling_dirty"] is True
