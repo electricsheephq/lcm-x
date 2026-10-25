@@ -120,7 +120,8 @@ def test_catchup_failing_stalled_informational_and_complete(default_engine, monk
     clock[0] += command._embedding_backfill_lease_ttl_s() + 1
     check = tools._embedding_provider_health_check(default_engine)
     assert "stalled" in check["detail"]["reason"]  # persisted receipt after process restart
-    # Real registration timestamps are ISO strings, unlike receipt timestamps.
+    # Registration is not a catch-up attempt, so its ISO timestamp cannot
+    # date a new backlog before the first catch-up receipt.
     from hermes_lcm.vector_store import VectorStore
     vectors = VectorStore(default_engine._store.db_path, config=default_engine._config)
     try:
@@ -137,6 +138,17 @@ def test_catchup_failing_stalled_informational_and_complete(default_engine, monk
     clock[0] = tools.datetime.fromisoformat(profile["registered_at"]).timestamp()
     check = tools._embedding_provider_health_check(default_engine)
     assert check["detail"]["informational"]  # registered, before the first receipt
+    clock[0] += command._embedding_backfill_lease_ttl_s() + 1
+    check = tools._embedding_provider_health_check(default_engine)
+    assert check["detail"]["informational"]
+    # A completed receipt describes the old backlog, not a new leaf queued
+    # after an idle period. Only a pending receipt starts its stall window.
+    command._record_embedding_catchup(default_engine._store.db_path, "summary", profile["identity_hash"], 0)
+    clock[0] += command._embedding_backfill_lease_ttl_s() + 1
+    check = tools._embedding_provider_health_check(default_engine)
+    assert check["detail"]["informational"]
+    assert "status: issues-found" not in render_doctor(collect_doctor(default_engine))
+    command._record_embedding_catchup(default_engine._store.db_path, "summary", profile["identity_hash"], 1)
     clock[0] += command._embedding_backfill_lease_ttl_s() + 1
     check = tools._embedding_provider_health_check(default_engine)
     assert check["status"] == "warn" and "stalled" in check["detail"]["reason"]

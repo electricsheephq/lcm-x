@@ -4836,12 +4836,13 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
                 profile = command._embedding_current_profile(conn)
                 if (profile is not None and embedding_provider_id(profile["provider"]) == "fastembed"
                         and profile["model_name"] == effective_embedding_model("fastembed", probe.get("model"))):
-                    if updated_at is None:
-                        updated_at, _ = _parse_optional_timestamp(profile["registered_at"], "registered_at")
                     row = conn.execute("SELECT value FROM metadata WHERE key=?", (
                         f"embedding_catchup:summary:{profile['identity_hash']}",)).fetchone()
                     if row:
-                        updated_at = json.loads(row[0]).get("updated_at", updated_at)
+                        record = json.loads(row[0])
+                        updated_at = record.get("updated_at", updated_at)
+                        if record.get("remaining") == 0 and not record.get("operator_retry"):
+                            updated_at = None  # Completed work does not date a new backlog.
             finally:
                 conn.close()
             problem = "failing (last catch-up attempt recorded an error)" if failures else (
