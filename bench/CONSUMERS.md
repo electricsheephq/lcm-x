@@ -41,7 +41,7 @@ background preparation on a new tree; it must not masquerade as an OFF run.
 | Reliability `scorers/externalized.py` | Reads default externalization policy only; does not start an embedding engine. |
 | `scripts/gen_config_reference.py` | Reads declared defaults to generate reference text; does not run a model. |
 | Track S `run_s_lcmx.py::dry_run` and local catch-up `tests/test_fix_round.py::test_5_product_defaults` | Defaults-only `LCMConfig()` comparisons; Track S serializes the effective defaults with `config_dict`, and the catch-up test compares policy fields without starting a default-config engine. |
-| `scripts/store_wedge_inspect.py::_ReadEngine` | Product inspection tool: `LCMConfig(**config)` supplies replay-policy fields to a read-only facade; no `LCMEngine` or embedding execution. |
+| `scripts/store_wedge_inspect.py::_Probe` | Product inspection tool: `LCMConfig(**config)` supplies replay-policy fields to a read-only facade; no `LCMEngine` or embedding execution. |
 | `scripts/backfill_externalized_tool_outputs.py` (three `from_env()` sites) | Product backfill tool: preserves runtime configuration for protection/externalization policy; does not select a benchmark arm. |
 | `scripts/import_lossless_claw.py` (`from_env()`) | Product import tool: reads protection policy for imported data; does not select a benchmark arm. |
 | `scripts/maintainer_gate.py` | Generic risk classification; does not select or execute an embedding arm. |
