@@ -12,7 +12,8 @@ from hermes_cli import plugins_cmd as pc
 from hermes_cli import plugins_cmd_catalog as cc
 from tools import plugin_guard as guard
 
-phase, config, receipt, expected, probe = sys.argv[1:]
+phase, config, receipt, expected, probe, *flags = sys.argv[1:]
+assert flags in ([], ["--force"]), flags
 entries = json.loads(Path(config).read_text())
 home = Path(os.environ["HERMES_HOME"])
 home.mkdir(parents=True, exist_ok=True)
@@ -50,7 +51,7 @@ try:
     label = "candidate" if phase == "candidate" else "baseline"
     entry = cache(label)
     assert entry is not None
-    target, manifest, name = cc.install_catalog_entry(entry, force=False)
+    target, manifest, name = cc.install_catalog_entry(entry, force=bool(flags))
     revision = pc._read_install_metadata()[name]["revision"]
     assert revision == entries[label]["sha"]
     details["revision"] = revision

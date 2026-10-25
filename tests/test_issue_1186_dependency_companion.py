@@ -135,7 +135,8 @@ def run_resolving_installer(tmp_path, *, profile=None, sticky=None, custom=True,
     log = tmp_path / "calls.jsonl"
     hermes = bindir / "hermes"
     python = os.environ.get("LCM_REAL_HERMES_PYTHON", sys.executable)
-    hermes.write_text(f"#!{python} -B\n" + """import json, os, sys
+    launcher = f'#!/bin/sh\n""":"\nexec {shlex.quote(python)} -B "$0" "$@"\n":"""\n'
+    hermes.write_text(launcher + """import json, os, sys
 from pathlib import Path
 root = Path(os.environ['HERMES_HOME'])
 args = sys.argv[1:]
