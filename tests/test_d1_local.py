@@ -6,7 +6,6 @@ import os
 import sqlite3
 import sys
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -148,6 +147,7 @@ def test_parallel_driver_receipts_and_failure_isolation(tmp_path, monkeypatch, f
     aa.mkdir()
     (aa / "manifest.json").write_text(json.dumps({"questions": [{"question_id": f"q{i}"} for i in range(100)]}))
     lock = threading.Lock()
+    joined = threading.Condition(lock)
     active, peak, roots, caps = 0, 0, [], []
 
     real_run_child = cli.run_child
@@ -169,12 +169,14 @@ def test_parallel_driver_receipts_and_failure_isolation(tmp_path, monkeypatch, f
         assert env["LCM_D1_CACHE_MODE"] == "read"
         if fault == "timeout" and "shard-1" in env["TMPDIR"]:
             return real_run_child([sys.executable, "-c", "import subprocess,sys,time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)"], timeout=timeout, stdout=stdout, stderr=stderr)
-        with lock:
+        with joined:
             active += 1
             peak = max(peak, active)
             roots.append((env["HERMES_HOME"], env["TMPDIR"]))
             caps.append(int(env["LCM_D1_ORT_THREADS"]))
-        time.sleep(0.015)
+            joined.notify_all()
+            # Hold each worker until three have overlapped once, so the peak never depends on CI timing.
+            joined.wait_for(lambda: peak >= 3, timeout=10)
         out = Path(command[command.index("--output") + 1])
         out.mkdir(parents=True)
         row = {"question_id": "q0", "embed_cache": {"hits": 2, "misses": 1}}
