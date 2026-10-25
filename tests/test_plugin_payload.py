@@ -50,6 +50,9 @@ def source(tmp_path):
         "plugin.yaml": "name: fixture\n",
         "LICENSE": "fixture license\n",
         "skills/hermes-lcm/SKILL.md": "fixture skill\n",
+        "README.md": "fixture setup\n",
+        "docs/embeddings-setup.md": "fixture embeddings\n",
+        "docs/operations/catalog-payload.md": "fixture payload\n",
     }
     for name, data in files.items():
         path = root / name
@@ -257,21 +260,43 @@ def assert_payload_markdown_paths(payload):
     repo_dirs = {p.split("/")[0] for p in git(ROOT, "ls-files").splitlines() if "/" in p}
     checked = []
     for page in sorted(p for p in payload.rglob("*") if p.is_file()):
-        try:
-            text = page.read_text()
-        except UnicodeDecodeError:
+        if page.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf"}:
             continue
+        try:
+            text = page.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise AssertionError(f"{page}: non-UTF-8 payload text") from exc
+        assert "\x00" not in text, f"{page}: binary-in-text payload file"
         if page.suffix == ".py":
             # Source comments are not runtime-facing references.
             text = tokenize.untokenize(t for t in tokenize.generate_tokens(io.StringIO(text).readline)
                                        if t.type != tokenize.COMMENT)
+        if page.suffix == ".md":
+            visible, fence = [], None
+            for line in text.splitlines(keepends=True):
+                marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+                if marker:
+                    run = marker.group(1)
+                    if fence is None:
+                        fence = run
+                    elif run[0] == fence[0] and len(run) >= len(fence):
+                        fence = None
+                    continue
+                if fence is None:
+                    visible.append(line)
+            text = "".join(visible)
+            text = re.sub(r"(?m)^(\s*)\[\^[^\]]+\]:\s*", r"\1", text)
         # Absolute URLs name external resources, not files in the installed payload.
         text = re.sub(r"!?\[[^\]]*\]\(https?://[^)]*\)", "", text)
-        text = re.sub(r"https?://(?:[^\s`<>()]|\([^()\n]*\))*", "", text)
+        text = re.sub(r"<https?://[^>]+>", "", text)
+        if page.suffix == ".py":
+            text = re.sub(r'''[fFrR]*(?:"[^"\n]*https?://[^"\n]*"|'[^'\n]*https?://[^'\n]*')''', "", text)
+            text = re.sub(r'''plugin_docs_url\(\s*(['"])docs/[^'"]+\1''', "plugin_docs_url(", text)
+        text = re.sub(r"https?://(?:[^\s`<>()\"',]|\([^()\n]*\))*", "", text)
         targets = []
         if page.suffix == ".md":
-            targets += re.findall(r"!?\[[^\]]*\]\(\s*<?([^\s)>]+)", text)
-            targets += re.findall(r"^\s*\[[^\]]+\]:\s*<?([^\s>]+)", text, re.M)
+            targets += [(target, True) for target in re.findall(r"!?\[[^\]]*\]\(\s*<?([^\s)>]+)", text)]
+            targets += [(target, True) for target in re.findall(r"^\s*\[[^\]]+\]:\s*<?([^\s>]+)", text, re.M)]
             for match in re.finditer(r"(?<![\w/])(?:\.{1,2}/)*(?:[\w.-]+/)*[\w.-]+\.(?:md|py|sh|json|ya?ml|txt)\b", text):
                 target = match.group()
                 if "/" not in target and not target.endswith(".md"):
@@ -279,14 +304,16 @@ def assert_payload_markdown_paths(payload):
                 if ("/" in target and target.split("/")[0] not in repo_dirs | {".", ".."}
                         and not (page.parent / target.split("/")[0]).is_dir()):
                     continue  # e.g. Hermes-owned agent/ and hermes_cli/ source references.
-                targets.append(target)
-        targets += re.findall(r"(?<![\w/])/?docs/[^\s`\"'<>)]*", text)
-        for target in targets:
+                targets.append((target, False))
+        targets += [(target, False) for target in re.findall(r"(?<![\w/])/?docs/[^\s`\"'<>)]*", text)]
+        for target, page_relative in targets:
             if target.startswith(("#", "//")) or re.match(r"^[\w+.-]+:", target):
                 continue
             target = target.split("#")[0].split("?")[0]
             candidates = [(payload / target.lstrip("/")).resolve()] if target.startswith("/") else [
-                (page.parent / target).resolve(), (payload / target).resolve()]
+                (page.parent / target).resolve()]
+            if not target.startswith("/") and not page_relative:
+                candidates.append((payload / target).resolve())
             assert any(p.is_relative_to(payload.resolve()) and p.exists() for p in candidates), (page, target)
             checked.append(target)
     return checked
@@ -630,6 +657,54 @@ def test_payload_readme_companion_source_sha(builder, source, tmp_path):
                f"hermes-lcm-x-local-embeddings --ref {git(source, 'rev-parse', 'HEAD')}")
     assert command in (tmp_path / "payload/README.md").read_text()
     assert result["source_sha"] in command
+
+
+def test_sha_readme_omits_links_missing_at_source(builder, source, tmp_path, monkeypatch):
+    (source / "docs/embeddings-setup.md").unlink()
+    commit(source)
+    monkeypatch.chdir(source)
+    result = build(builder, git(source, "rev-parse", "HEAD"), tmp_path)
+    readme = (tmp_path / "payload/README.md").read_text()
+    assert "[Embedding setup]" not in readme
+    assert "docs/embeddings-setup.md" in result["readme_omitted_links"]
+    assert "[Catalog payload and provenance]" in readme
+
+
+@pytest.mark.parametrize("form", ["[x](./x.md)", "[x][ref]\n\n[ref]: ./x.md"])
+def test_nested_page_link_cannot_fall_back_to_payload_root(tmp_path, form):
+    (tmp_path / "x.md").write_text("root only")
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested/page.md").write_text(form)
+    with pytest.raises(AssertionError, match="x.md"):
+        assert_payload_markdown_paths(tmp_path)
+
+
+@pytest.mark.parametrize("form", ["[^1]: Footnote text",
+                                  "<https://example.com/docs/missing.md>",
+                                  "```md\n[missing](docs/missing.md)\n```"])
+def test_payload_non_links_are_accepted(tmp_path, form):
+    (tmp_path / "README.md").write_text(form)
+    assert_payload_markdown_paths(tmp_path) == []
+
+
+@pytest.mark.parametrize("form", ['"https://example.com/a", docs/missing.md',
+                                  '"https://example.com/a",docs/missing.md'])
+def test_bare_url_does_not_swallow_following_docs_path(tmp_path, form):
+    (tmp_path / "README.md").write_text(form)
+    with pytest.raises(AssertionError, match="docs/missing.md"):
+        assert_payload_markdown_paths(tmp_path)
+
+
+def test_non_utf8_payload_text_names_file(tmp_path):
+    (tmp_path / "bad.md").write_bytes(b"bad: \xff")
+    with pytest.raises(AssertionError, match="bad.md.*UTF-8"):
+        assert_payload_markdown_paths(tmp_path)
+
+
+def test_nul_payload_text_names_file(tmp_path):
+    (tmp_path / "bad.md").write_bytes(b"bad: \x00")
+    with pytest.raises(AssertionError, match="bad.md.*binary-in-text"):
+        assert_payload_markdown_paths(tmp_path)
 
 
 def test_payload_markdown_reference_definitions(tmp_path):
