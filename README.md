@@ -262,12 +262,14 @@ stays empty; FastEmbed resolves it to `BAAI/bge-small-en-v1.5`. An explicit mode
 wins with an explicit provider; a runtime model alone stays disabled/unconfigured.
 Non-local providers require `LCM_EMBEDDINGS_ENABLED=true`, an explicit model and
 their existing privacy/consent steps. Invalid enable values fall back to OFF with
-a warning. The companion uses the host's normal dependency consent;
+a warning; a set-but-blank value also means OFF, without a warning, so leave the
+variable unset to keep the local default. The companion uses the host's normal dependency consent;
 see [installation and recovery](docs/embeddings-setup.md#install-consent-updates-and-recovery).
 After it is enabled and Hermes restarts, model warmup and index catch-up run in
 the background. While the dependency, model or index is unavailable or preparing,
 recall uses full text with `degraded=true`, a reason and actual arm coverage;
-queries never download models or backfill. `/lcm doctor` distinguishes model
+queries never wait for a model download or a backfill (a recall that finds no
+local model starts the background preparation, which may download it). `/lcm doctor` distinguishes model
 readiness from summary/chunk coverage. Existing rows and vectors are preserved.
 Set `LCM_EMBEDDINGS_ENABLED=false` to opt out without loading or downloading a model.
 Under the product default, hosts with at most 2 effective CPUs use full-text recall

@@ -61,7 +61,7 @@ model remains empty; only fastembed supplies the effective default
 `BAAI/bge-small-en-v1.5`. Explicit models win with an explicit provider; runtime
 model-only input stays unconfigured. Non-local providers require an explicit
 model and `LCM_EMBEDDINGS_ENABLED=true`. Invalid enable values resolve OFF with a
-warning. config.yaml `lcm.embeddings_enabled` is ignored; use the environment key.
+warning; a set-but-blank value also resolves OFF, without a warning. config.yaml `lcm.embeddings_enabled` is ignored; use the environment key.
 Non-local proactive overrides also require explicit enablement. A held cloud
 profile requires restoring its settings with `LCM_EMBEDDINGS_ENABLED=true`, or
 switching to the local model with `/lcm embed warmup`; no automatic takeover occurs.
@@ -127,7 +127,9 @@ values and reports them through `config_source_warnings` in `lcm_status`,
 `/lcm status`, and the `lcm_doctor` configuration check. For example,
 `LCM_SURVIVAL_FIT=flase` keeps `true`; the warning names the key, shows the raw
 value's representation limited to 40 characters, and states the value used.
-Empty or whitespace-only values in this loader keep the default without warnings.
+Empty or whitespace-only values in this loader keep the default without warnings,
+except `LCM_EMBEDDINGS_ENABLED`: a blank value there turns embeddings off instead of
+keeping the local default.
 Range warnings (`LCM_CONTEXT_THRESHOLD`, `LCM_SURVIVAL_RESERVE`, `LCM_LEAF_CHUNK_TOKENS`, `LCM_SUMMARY_TIMEOUT_MS`), choice warnings (`LCM_EMBEDDING_PROVIDER`, `LCM_PREANSWER_EVIDENCE_MODE`, `LCM_EMBEDDING_STORAGE_DTYPE`), and dropped-input warnings (`LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS`, `LCM_RECALL_ARM_WEIGHTS`, `LCM_MODEL_THRESHOLDS`) use the same channel without changing values or consumer fallbacks.
 
 `LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` and `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` are deprecated in v0.28.0 and removed in v0.30.0 (#1246). Each enabled flag adds one `config_source_warnings` entry without changing behavior; false or unset flags and direct `LCMConfig(...)` construction add no deprecation warning. These flags are environment-only; their `lcm.*` YAML keys are ignored and shipped presets do not set them.
