@@ -984,6 +984,20 @@ def _maybe_cache_harness_provider(provider, *, provider_name: str):
         return provider
     if not cache_path.strip():
         raise ValueError(f"{EMBED_CACHE_ENV} must be a non-empty SQLite path")
+    if os.environ.get("LCM_D1_CACHE_MODE"):
+        from importlib.metadata import version
+        from .d1_cache import D1Cache
+        if os.environ["LCM_D1_CACHE_MODE"] not in {"build", "read"}:
+            raise ValueError("D1 cache mode must be build or read")
+        if provider_name not in {"fastembed", "fast-embed", "stub"}:
+            raise ValueError("D1 cache requires a local independent-document provider")
+        product_sha, role = os.environ["LCM_D1_PRODUCT_SHA"], os.environ["LCM_D1_ROLE"]
+        if not re.fullmatch(r"[0-9a-f]{40}", product_sha) or not role.isidentifier():
+            raise ValueError("D1 cache requires a product commit SHA and role")
+        return D1Cache(provider, cache_path, readonly=os.environ["LCM_D1_CACHE_MODE"] == "read",
+                       options={"dimension": provider.dim, "normalization": "fastembed-default",
+                                "product_sha": product_sha, "role": role,
+                                "mode": "document", "implementation": version("fastembed") if provider_name != "stub" else "stub-v1"})
     return ContentHashEmbeddingCache(
         provider,
         cache_path,
@@ -1022,14 +1036,14 @@ def resolve_harness_provider(
     reports dim only after the first embed) and any model download happens before
     the scoring loop rather than inside a per-question deadline.
     """
+    if provider != "stub" and not model.strip():
+        raise ValueError(f"--model is required for --provider {provider}")
     resolved = None
     if provider == "stub":
         resolved = StubEmbedder()
     else:
         _ensure_hermes_lcm_package()
         model = _effective_embedding_model(provider, model)
-    if provider != "stub" and not model:
-        raise ValueError(f"--model is required for --provider {provider}")
     if provider in {"fastembed", "fast-embed"}:
         from hermes_lcm.embedding_provider import EmbeddingSpendGuard, FastembedProvider
 
@@ -1039,7 +1053,16 @@ def resolve_harness_provider(
         # max_calls=0 disables the per-minute call-rate guard, matching the
         # bulk-backfill contract (resolve_provider(for_backfill=True)); the
         # harness embeds thousands of summaries in one pass.
-        resolved = FastembedProvider(
+        class HarnessFastembed(FastembedProvider):
+            thread_cap_applied = False
+            def _cache_key(self):
+                model, cache, threads = super()._cache_key()
+                self.thread_cap_applied = True
+                self.effective_threads = min(threads, max(1, int(os.environ.get("LCM_D1_ORT_THREADS", threads))))
+                return model, cache, self.effective_threads
+
+        provider_class = HarnessFastembed if "LCM_D1_ORT_THREADS" in os.environ else FastembedProvider
+        resolved = provider_class(
             model,
             cache_dir=_fastembed_cache_dir(),
             timeout=timeout,
@@ -1075,6 +1098,19 @@ def resolve_harness_provider(
         note_local_model_present = getattr(embedding_maintenance, "note_local_model_present", None)
         if note_local_model_present is not None:
             note_local_model_present(LCMConfig(embedding_provider=provider, embedding_model=model))
+    if os.environ.get("LCM_D1_THREAD_REPORT"):
+        count = getattr(resolved, "effective_threads", None)
+        node = resolved
+        for attr in ("_model", "model", "model"):
+            node = getattr(node, attr, None)
+            if hasattr(node, "get_session_options"):
+                count = node.get_session_options().intra_op_num_threads or None
+                break
+        Path(os.environ["LCM_D1_THREAD_REPORT"]).write_text(json.dumps({
+            "thread_cap_applied": bool(getattr(resolved, "thread_cap_applied", False)),
+            "effective_intra_op_threads": count,
+            "reason": None if count is not None else "product provider does not expose an explicit intra-op thread count",
+        }))
     if not use_embed_cache:
         return resolved
     return _maybe_cache_harness_provider(resolved, provider_name=provider)
@@ -2743,6 +2779,8 @@ def evaluate_question(
     cache_start_hits, cache_start_misses = _embed_cache_totals(
         (summary_provider, chunk_provider)
     )
+    d1_providers = {id(p): p for p in (summary_provider, chunk_provider)}.values()
+    d1_start = [sum(getattr(p, field, 0) for p in d1_providers) for field in ("wall_ms", "corruptions")]
     summary_name, model = _provider_binding(summary_provider, provider_name, "")
     chunk_name, chunk_model = _provider_binding(
         chunk_provider, summary_name, default_chunk_model(summary_name, model)
@@ -3320,6 +3358,11 @@ def evaluate_question(
             "hits": cache_end_hits - cache_start_hits,
             "misses": cache_end_misses - cache_start_misses,
         }
+        if hasattr(summary_provider, "manifest_hash"):
+            scored["embedding"] = dict(zip(("wall_ms", "corruptions"),
+                (sum(getattr(p, field, 0) for p in d1_providers) - before
+                 for field, before in zip(("wall_ms", "corruptions"), d1_start))))
+            scored["embedding"]["manifest_sha256"] = summary_provider.manifest_hash
         return scored
     finally:
         vector_store.close()
@@ -3890,6 +3933,7 @@ def _question_checkpoint_record(
             record["embed_cache_enabled"] = embed_cache_enabled
         return record
     checkpoint_scored = copy.deepcopy(scored)
+    checkpoint_scored.pop("embedding", None)
     checkpoint_scored.pop("_candidate_rankings", None)
     scored_chunk_embedding_mode = checkpoint_scored.pop(
         "chunk_embedding_mode", chunk_embedding_mode
@@ -4185,6 +4229,8 @@ def run_harness(
     """Run every arm over every question and return an aggregate-only report."""
     if shipped_default and (provider_name != "stub" or model or embeddings_enabled is not None):
         raise ValueError("shipped_default cannot override explicit embedding settings")
+    if not shipped_default and provider_name not in {"stub", "none"} and not model.strip():
+        raise ValueError(f"--model is required for --provider {provider_name}")
     if shipped_default or provider_name != "stub":
         _ensure_hermes_lcm_package()
         from hermes_lcm.config import LCMConfig
@@ -4403,6 +4449,9 @@ def run_harness(
             # survive a crash that predates the dirent reaching disk.
             _fsync_parent_directory(checkpoint_path)
 
+    embedding_metrics_file = None
+    if checkpoint_file is not None and os.environ.get("LCM_D1_CACHE_MODE") == "read":
+        embedding_metrics_file = checkpoint_path.with_name("embedding-metrics.jsonl").open("a" if resume else "w", encoding="utf-8")
     candidate_dump_file = None
     if dump_candidates_path is not None and not fully_completed_resume:
         dump_candidates_path = Path(dump_candidates_path)
@@ -4527,6 +4576,11 @@ def run_harness(
                         ),
                     )
                 if checkpoint_file is not None:
+                    if embedding_metrics_file is not None:
+                        metrics = {"wall_ms": 0.0, "corruptions": 0, **(scored.get("embedding", {}) if scored else {})}
+                        _write_checkpoint_record(embedding_metrics_file, {
+                            "question_id": question.question_id, **metrics, **record["embed_cache"],
+                        })
                     _write_checkpoint_record(checkpoint_file, record)
             except Exception as exc:
                 # A run-time privacy refusal (query texts are protected only
@@ -4542,6 +4596,8 @@ def run_harness(
             checkpoint_file.close()
         if candidate_dump_file is not None:
             candidate_dump_file.close()
+        if embedding_metrics_file is not None:
+            embedding_metrics_file.close()
 
     if resume and observed_question_ids != selected_ids:
         missing = sorted(selected_ids - observed_question_ids)

@@ -41,7 +41,7 @@ def test_bridge_reads_tree_default_and_records_it(bridge_module, tmp_path, monke
     bridge._resolve_harness_provider = lambda provider, model: calls.append((provider, model)) or SimpleNamespace(dim=2, model_id=model)
     result = bridge.initialize({})
     assert result["embeddings_enabled"] is enabled
-    assert result["model"] == "tree-specific-model"
+    assert result["model"] == ("tree-specific-model" if enabled else "")
     assert result["provider_source"] == "tree_default"
     assert calls == ([("fastembed", "tree-specific-model")] if enabled else [])
     assert json.loads((tmp_path / "effective-config.json").read_text())["model"] == result["model"]
