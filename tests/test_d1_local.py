@@ -641,6 +641,30 @@ def test_distinct_normalized_sidecar_paths_are_accepted(tmp_path, monkeypatch, e
     assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 
+def test_nfc_paths_never_probe_normalization(tmp_path, monkeypatch):
+    monkeypatch.setenv("LCM_D1_CACHE_MODE", "read")
+    output = tmp_path / "output"
+    output.mkdir()
+    def no_probe(parent):
+        raise AssertionError("probe must not run when both names are NFC")
+    monkeypatch.setattr(lme, "_d1_normalization_insensitive", no_probe)
+    lme._validate_d1_sidecar_alias(output / "per_question_checkpoint.jsonl", tmp_path / "other" / "dump.jsonl")
+    with pytest.raises(ValueError, match="must not alias"):
+        lme._validate_d1_sidecar_alias(output / "per_question_checkpoint.jsonl", output / "embedding-metrics.jsonl")
+
+
+def test_unprobeable_normalization_refuses_equivalent_spelling(tmp_path, monkeypatch):
+    monkeypatch.setenv("LCM_D1_CACHE_MODE", "read")
+    output = tmp_path / "caf\u00e9"
+    output.mkdir()
+    def broken_probe(parent):
+        raise PermissionError("grandparent not writable")
+    monkeypatch.setattr(lme, "_d1_normalization_insensitive", broken_probe)
+    with pytest.raises(ValueError, match="must not alias"):
+        lme._validate_d1_sidecar_alias(output / "per_question_checkpoint.jsonl",
+                                       tmp_path / "cafe\u0301" / "embedding-metrics.jsonl")
+
+
 @pytest.mark.parametrize("alias", ["exact", "symlink", "dotdot", "case", "hardlink", "nfd"])
 @pytest.mark.parametrize("exists", [False, True])
 def test_cli_refuses_metrics_sidecar_alias_before_open(tmp_path, monkeypatch, alias, exists):

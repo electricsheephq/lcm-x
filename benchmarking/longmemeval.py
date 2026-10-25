@@ -4239,7 +4239,15 @@ def _validate_d1_sidecar_alias(checkpoint_path, dump_path):
         while not parent.exists():
             parent = parent.parent
         dump_name, sidecar_name = str(dump), str(sidecar)
-        if _d1_normalization_insensitive(parent):
+        # Two NFC names are equivalent only if identical, so probe only when one is not NFC.
+        if unicodedata.normalize("NFC", dump_name) != dump_name or unicodedata.normalize("NFC", sidecar_name) != sidecar_name:
+            try:
+                insensitive_normalization = _d1_normalization_insensitive(parent)
+            except (OSError, ValueError):
+                insensitive_normalization = True  # Unprobeable: refuse equivalent spellings.
+        else:
+            insensitive_normalization = False
+        if insensitive_normalization:
             dump_name = unicodedata.normalize("NFC", dump_name)
             sidecar_name = unicodedata.normalize("NFC", sidecar_name)
         alias |= dump_name == sidecar_name
