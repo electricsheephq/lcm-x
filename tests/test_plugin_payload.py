@@ -263,6 +263,7 @@ def assert_payload_markdown_paths(payload):
             text = tokenize.untokenize(t for t in tokenize.generate_tokens(io.StringIO(text).readline)
                                        if t.type != tokenize.COMMENT)
         # Absolute URLs name external resources, not files in the installed payload.
+        text = re.sub(r"!?\[[^\]]*\]\(https?://[^)]*\)", "", text)
         text = re.sub(r"https?://(?:[^\s`<>()]|\([^()\n]*\))*", "", text)
         targets = []
         if page.suffix == ".md":
@@ -513,7 +514,7 @@ def test_payload_relative_links_positive(tmp_path):
     (tmp_path / "README.md").write_text(
         "![image](assets/image.png) [directory](assets/) [extensionless](/guide) "
         "[anchor](#section) [mail](mailto:example@example.invalid) "
-        "[external](https://github.com/electricsheephq/lcm-x/blob/v1/docs/guide.md)")
+        "[docs/guide.md](https://github.com/electricsheephq/lcm-x/blob/v1/docs/guide.md)")
     assert_payload_markdown_paths(tmp_path)
 
 
