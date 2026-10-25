@@ -1022,14 +1022,14 @@ def resolve_harness_provider(
     reports dim only after the first embed) and any model download happens before
     the scoring loop rather than inside a per-question deadline.
     """
+    if provider != "stub" and not model.strip():
+        raise ValueError(f"--model is required for --provider {provider}")
     resolved = None
     if provider == "stub":
         resolved = StubEmbedder()
     else:
         _ensure_hermes_lcm_package()
         model = _effective_embedding_model(provider, model)
-    if provider != "stub" and not model:
-        raise ValueError(f"--model is required for --provider {provider}")
     if provider in {"fastembed", "fast-embed"}:
         from hermes_lcm.embedding_provider import EmbeddingSpendGuard, FastembedProvider
 
@@ -4185,6 +4185,8 @@ def run_harness(
     """Run every arm over every question and return an aggregate-only report."""
     if shipped_default and (provider_name != "stub" or model or embeddings_enabled is not None):
         raise ValueError("shipped_default cannot override explicit embedding settings")
+    if not shipped_default and provider_name not in {"stub", "none"} and not model.strip():
+        raise ValueError(f"--model is required for --provider {provider_name}")
     if shipped_default or provider_name != "stub":
         _ensure_hermes_lcm_package()
         from hermes_lcm.config import LCMConfig

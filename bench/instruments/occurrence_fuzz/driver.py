@@ -70,7 +70,7 @@ def run(
 ) -> dict[str, Any]:
     directory.mkdir(parents=True)
     catch.bad.clear()
-    config = config_module.LCMConfig()
+    config = config_module.LCMConfig(embeddings_enabled=False)
     config.database_path = str(directory / "lcm.db")
     engine = engine_module.LCMEngine(config=config, hermes_home=str(directory / "home"))
     counts: list[int] = []

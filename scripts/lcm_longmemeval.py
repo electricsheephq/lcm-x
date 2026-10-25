@@ -49,8 +49,11 @@ from benchmarking.longmemeval import (  # noqa: E402
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    # Subparsers do not inherit allow_abbrev from their parent.
+    from functools import partial
+    sub = parser.add_subparsers(dest="command", required=True,
+                               parser_class=partial(argparse.ArgumentParser, allow_abbrev=False))
 
     fetch = sub.add_parser("fetch", help="Download a pinned LongMemEval dataset file.")
     fetch.add_argument("--output", required=True, help="Directory to write the dataset file into.")
