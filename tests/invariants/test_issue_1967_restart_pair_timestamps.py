@@ -76,5 +76,5 @@ def test_cold_restart_pair_occurrence(build, monkeypatch, capsys, case):
     if changed:
         assert counts == [2, 2] and changed_stored == [True, True], "fresh stamped pair was suppressed"
     else:
-        # Differential probe: old may retain an ambiguous duplicate; rc2 should keep one.
-        assert counts in ([1, 1], [2, 2])
+        # An unchanged re-sent pair is a replay: exactly one durable copy (v0.28.1 and rc2 agree).
+        assert counts == [1, 1], "unchanged replayed pair was stored twice"
