@@ -262,7 +262,9 @@ def test_stall_guidance_is_actionable_on_every_host(cpus, reason):
 
 
 @pytest.mark.parametrize("raw", ["{", "[]", "null", '{"updated_at": []}',
-    '{"updated_at": null}', '{"updated_at": "not-a-time"}'])
+    '{"updated_at": null}', '{"updated_at": "not-a-time"}', '{"updated_at": "nan"}',
+    '{"updated_at": 1e999}', pytest.param('{"updated_at": 1' + "0" * 400 + '}', id="huge-int"),
+    pytest.param("[" * 200000, id="deep-nesting")])
 def test_malformed_catchup_receipt_falls_back_to_maintenance(default_engine, monkeypatch, raw):
     probe(monkeypatch)
     monkeypatch.setattr(tools.time, "time", lambda: 2000.0)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import math
 import re
 import sqlite3
 import threading
@@ -4851,8 +4852,10 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
                         try:
                             record = json.loads(row[0])
                             receipt_time = float(record["updated_at"])
+                            if not math.isfinite(receipt_time):
+                                raise ValueError("non-finite catch-up receipt time")
                             updated_at = None if record.get("remaining") == 0 and not record.get("operator_retry") else receipt_time
-                        except (TypeError, ValueError, KeyError):
+                        except (TypeError, ValueError, KeyError, OverflowError, RecursionError):
                             pass  # No usable receipt: retain the maintenance fallback.
             finally:
                 conn.close()
