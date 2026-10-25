@@ -703,6 +703,12 @@ def render_doctor(facts: DoctorFacts) -> str:
         lines.append(f"embedding_provider_health: {facts.embedding_check['status']}{suffix}")
         readiness = detail.get("readiness") if isinstance(detail, dict) else None
         if readiness:
+            if readiness.startswith("model: preparing;"):
+                readiness = "Local semantic recall preparing; full-text recall is active"
+            elif readiness.startswith("model: unavailable("):
+                readiness = f"Local semantic recall unavailable ({reason}); full-text recall is active"
+            elif readiness.startswith("model: present;"):
+                readiness = detail.get("impact") or ("Model ready; " + readiness.split("; ", 1)[1])
             lines.append(f"embedding_readiness: {readiness}")
         if isinstance(detail, dict) and detail.get("cpu_limited"):
             lines.append(str(detail["cpu_limit_reason"]))

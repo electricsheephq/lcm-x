@@ -1819,10 +1819,9 @@ def _lcm_grep_resolve_provider(
     state = local_model_state(config)
     if state is None and embedding_provider_id(normalize_embedding_provider(config.embedding_provider)) == "fastembed":
         start_local_model_prepare(engine._store.db_path, config)
-        raise RuntimeError("local embedding model is preparing; retrieval uses full text")
+        raise RuntimeError("local semantic recall preparing; using full-text recall")
     if state is not None and state[0] in {"preparing", "unavailable"}:
-        reason = f" ({state[1]})" if state[1] else ""
-        raise RuntimeError(f"local embedding model is {state[0]}{reason}; retrieval uses full text")
+        raise RuntimeError(f"local semantic recall {state[0]}; using full-text recall")
     cache_key = (
         str(getattr(config, "embedding_provider", "") or "").strip().lower(),
         effective_embedding_model(getattr(config, "embedding_provider", ""), getattr(config, "embedding_model", "")),
@@ -4123,13 +4122,15 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         local_fallback_reasons = [reason for task, active in (("summary", run_summary), ("chunk", run_chunk))
                          if active and (reason := _lcm_recall_catchup_reason(engine, selected, task))]
         probe, state = probe_provider_availability(selected_config), local_model_state(selected_config)
-        if not probe.get("available"):
-            local_fallback_reasons.insert(0, f"local dependency unavailable: {probe.get('detail')}")
+        if any(reason.startswith("store's profile belongs to ") for reason in local_fallback_reasons):
+            pass  # Preserve the held-provider disclosure without an operator remedy.
+        elif not probe.get("available"):
+            local_fallback_reasons = ["local semantic recall unavailable; using full-text recall"]
         elif state is None:
             start_local_model_prepare(engine._store.db_path, selected_config)
-            local_fallback_reasons.insert(0, "local model preparing")
+            local_fallback_reasons = ["local semantic recall preparing; using full-text recall"]
         elif state and state[0] != "present":
-            local_fallback_reasons.insert(0, f"local model {state[0]}" + (f": {state[1]}" if state[1] else ""))
+            local_fallback_reasons = [f"local semantic recall {state[0]}; using full-text recall"]
         run_fts = run_fts or bool(local_fallback_reasons)
 
     arm_hits: dict[str, list[dict[str, Any]]] = {}
@@ -4624,8 +4625,7 @@ def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
     elif state is not None and state[0] == "unavailable":
         model = f"unavailable({state[1]})"
     else:
-        # Process state is shared by every database on this model: "present" needs this database's profile too.
-        model = None
+        model = "present" if state and state[0] == "present" else "preparing"
     try:
         conn = command._embedding_read_connection(engine._store.db_path)
         try:
@@ -4635,8 +4635,6 @@ def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
             if profile is not None and not (embedding_provider_id(str(profile["provider"] or "")) == "fastembed"
                                             and str(profile["model_name"] or "") == wanted):
                 profile = None  # another model's vectors are not coverage for the configured one
-            if model is None:
-                model = "present" if state and state[0] == "present" else "preparing"
             vectors = "SELECT 1 WHERE 0" if profile is None else (
                 "SELECT 1 FROM lcm_embedding_meta AS m WHERE m.embedded_id = CAST(n.node_id AS TEXT) "
                 "AND m.embedded_kind = 'summary' AND m.identity_hash = :identity"
@@ -4653,8 +4651,6 @@ def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
         coverage += "".join(f"; {label} {count}" for label, count in zip(("in flight", "uncertain"), counts) if count)
     except sqlite3.Error as exc:
         coverage = f"unavailable ({exc})"
-        if model is None:
-            model = "present" if _active_embedding_profile_exists(engine) else "preparing"
     last, _ = command.incremental_embedding_state(engine._store.db_path)
     provider = SimpleNamespace(provider_id="fastembed", model_id=probe.get("model"), identity_revision_suffix="")
     chunks = _lcm_recall_catchup_reason(engine, provider, "chunk") or "caught up (coverage certified)"
@@ -4726,6 +4722,10 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
         detail.update(cpu_limited=True, effective_cpus=effective_cpus(), cpu_limit_reason=(
             f"semantic recall limited on this host ({effective_cpus():g} effective CPUs); full-text recall is active"))
     readiness = str(detail.get("readiness", ""))
+    if readiness.startswith("model: present;"):
+        coverage = readiness.split("coverage: ", 1)[1].split(";", 1)[0].removesuffix(" summaries")
+        chunks = readiness.split("; chunks: ", 1)[1].split("; maintenance:", 1)[0] if "; chunks: " in readiness else "unknown"
+        detail["impact"] = f"Model ready; summaries {coverage}; chunks {chunks}"
     if "coverage: unavailable" in readiness:
         detail["reason"] = "embedding coverage could not be read"
         return {"check": "embedding_provider_health", "status": "warn", "detail": detail}
@@ -4823,7 +4823,32 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
             }
     detail["informational"] = cpu_limited or readiness.startswith("model: present;")
     if readiness.startswith("model: present;"):
-        detail["impact"] = "Model ready; summaries " + readiness.split("coverage: ", 1)[1]
+        embedded, _, eligible = coverage.partition("/")
+        if embedded.isdigit() and eligible.isdigit() and int(embedded) < int(eligible):
+            from . import command
+            from .command import _embedding_backfill_lease_ttl_s
+            last, failures = command.incremental_embedding_state(engine._store.db_path)
+            updated_at = last[0] if last else None
+            # A persisted receipt survives a process restart; read only the
+            # configured summary identity, never count another corpus here.
+            conn = command._embedding_read_connection(engine._store.db_path)
+            try:
+                profile = command._embedding_current_profile(conn)
+                if (profile is not None and embedding_provider_id(profile["provider"]) == "fastembed"
+                        and profile["model_name"] == effective_embedding_model("fastembed", probe.get("model"))):
+                    if updated_at is None:
+                        updated_at = profile["registered_at"]
+                    row = conn.execute("SELECT value FROM metadata WHERE key=?", (
+                        f"embedding_catchup:summary:{profile['identity_hash']}",)).fetchone()
+                    if row:
+                        updated_at = json.loads(row[0]).get("updated_at", updated_at)
+            finally:
+                conn.close()
+            problem = "failing (last catch-up attempt recorded an error)" if failures else (
+                "stalled (no recent catch-up progress)" if updated_at is not None and time.time() - updated_at > _embedding_backfill_lease_ttl_s() else "")
+            if problem:
+                detail.update(informational=False, reason=f"summary catch-up {problem}")
+                return {"check": "embedding_provider_health", "status": "warn", "detail": detail}
     return {
         "check": "embedding_provider_health",
         "status": "warn" if cpu_limited else "pass",

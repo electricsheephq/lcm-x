@@ -268,9 +268,9 @@ def test_blank_provider_is_unset_local(monkeypatch, raw):
 
 
 @pytest.mark.parametrize("state,available,prefix", [
-    (None, False, "local dependency unavailable:"),
-    (("preparing", ""), True, "local model preparing;"),
-    (("unavailable", "fixture uncached"), True, "local model unavailable: fixture uncached;"),
+    (None, False, "local semantic recall unavailable;"),
+    (("preparing", ""), True, "local semantic recall preparing;"),
+    (("unavailable", "fixture uncached"), True, "local semantic recall unavailable;"),
 ])
 def test_readiness_cause_precedes_catchup(tmp_path, monkeypatch, transport, state, available, prefix):
     engine = _engine(tmp_path, LCMConfig(embeddings_enabled=True, embedding_provider="fastembed"))

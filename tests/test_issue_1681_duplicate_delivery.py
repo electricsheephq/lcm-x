@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -317,8 +318,12 @@ def duplicate_free_responses(engine, monkeypatch):
 
 
 def test_duplicate_free_bytes_match_main(engine, monkeypatch):
-    golden = json.loads((Path(__file__).parent / "fixtures/issue_1681_duplicate_free.json").read_text())
-    assert duplicate_free_responses(engine, monkeypatch) == golden
+    path = Path(__file__).parent / "fixtures/issue_1681_duplicate_free.json"
+    actual = duplicate_free_responses(engine, monkeypatch)
+    if os.environ.get("ISSUE_1681_CAPTURE_BASELINE") == "1":
+        path.write_text(json.dumps(actual, indent=2, ensure_ascii=False) + "\n")
+        return
+    assert actual == json.loads(path.read_text())
 
 
 @pytest.mark.parametrize("consumer", ["pack", "compiler", "host", "preanswer", "adaptive", "baseline"])

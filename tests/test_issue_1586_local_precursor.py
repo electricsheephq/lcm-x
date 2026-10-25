@@ -237,7 +237,7 @@ def test_explicit_local_prepare_keeps_recall_answering(make_engine, monkeypatch,
         assert not engine.drain_embedding_maintenance(0)
         assert maintenance.local_model_state(engine._config) == ("preparing", "")
         text = command.handle_lcm_command("doctor", engine)
-        assert "embedding_readiness: model: preparing; coverage: 0/1 summaries" in text
+        assert "embedding_readiness: Local semantic recall preparing; full-text recall is active" in text
         result = json.loads(engine.handle_tool_call("lcm_recall", {"query": "canary", "include": "all"}))
         assert result["hits"] and result["degraded"]
         assert "preparing" in result["degraded_reason"]
@@ -249,7 +249,7 @@ def test_explicit_local_prepare_keeps_recall_answering(make_engine, monkeypatch,
         with sqlite3.connect(engine._store.db_path) as conn:
             assert conn.execute("SELECT COUNT(*) FROM lcm_embedding_meta").fetchone()[0] == 1
             assert conn.execute("SELECT COUNT(*) FROM lcm_chunk_meta").fetchone()[0] > 0
-        assert "embedding_readiness: model: present; coverage: 1/1 summaries" in command.handle_lcm_command("doctor", engine)
+        assert "embedding_readiness: Model ready; summaries 1/1; chunks " in command.handle_lcm_command("doctor", engine)
         result = json.loads(engine.handle_tool_call("lcm_recall", {"query": "canary", "include": "all"}))
         assert result["hits"] and not result["degraded"]
         assert len(calls) == 2
@@ -326,7 +326,8 @@ def test_grep_defers_process_cold_local_model(make_engine, monkeypatch, tmp_path
             assert result["results"] and result["degraded_to_fts"]
             assert "full-text hit" in result["results"][0]["snippet"]
             assert "unavailable" in result["degraded_reason"]
-            assert "fixture preparation failed" in result["degraded_reason"]
+            assert "local semantic recall unavailable; using full-text recall" in result["degraded_reason"]
+            assert "fixture preparation failed" not in result["degraded_reason"]
         else:
             assert calls == [("lcm-embedding-prepare", True)]
             assert not result["degraded_to_fts"]

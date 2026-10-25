@@ -751,8 +751,8 @@ def effective_embedding_model(provider: str, configured_model: str) -> str:
 
 def companion_enable_command() -> str:
     """Match install.sh's explicit root/profile target, including profile-shaped homes."""
-    home = Path(lcm_env_get("HERMES_HOME", str(Path.home() / ".hermes")))
-    profile = lcm_env_get("HERMES_PROFILE", "default")
+    home = Path(lcm_env_get("HERMES_HOME") or str(Path.home() / ".hermes"))
+    profile = lcm_env_get("HERMES_PROFILE") or "default"
     if home.parent.name == "profiles":
         profile, home = home.name, home.parent.parent
     return f"HERMES_HOME={shlex.quote(str(home))} hermes -p {shlex.quote(profile)} plugins enable hermes-lcm-x-local-embeddings"

@@ -167,6 +167,6 @@ def test_cpu_limited_slash_doctor_reports_missing_fastembed(default_engine, monk
     text = handle_lcm_command("doctor", default_engine)
     assert "FastEmbed is not installed" in text
     assert "semantic recall limited on this host (1 effective CPUs); full-text recall is active" in text
-    assert "embedding_readiness: model: unavailable(" in text
+    assert "embedding_readiness: Local semantic recall unavailable (" in text
     assert "configured but not runnable" in text
     assert "hermes-lcm-x-local-embeddings" in text
