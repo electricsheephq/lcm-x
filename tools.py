@@ -4837,7 +4837,7 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
                 if (profile is not None and embedding_provider_id(profile["provider"]) == "fastembed"
                         and profile["model_name"] == effective_embedding_model("fastembed", probe.get("model"))):
                     if updated_at is None:
-                        updated_at = profile["registered_at"]
+                        updated_at, _ = _parse_optional_timestamp(profile["registered_at"], "registered_at")
                     row = conn.execute("SELECT value FROM metadata WHERE key=?", (
                         f"embedding_catchup:summary:{profile['identity_hash']}",)).fetchone()
                     if row:

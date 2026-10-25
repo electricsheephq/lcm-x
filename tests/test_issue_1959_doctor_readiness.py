@@ -101,12 +101,33 @@ def test_catchup_failing_stalled_informational_and_complete(default_engine, monk
     assert check["status"] == "warn" and "stalled" in check["detail"]["reason"]
     assert "status: issues-found" in render_doctor(collect_doctor(default_engine))
     maintenance._LAST_PASS.pop(db)
+    current_profile = command._embedding_current_profile
     monkeypatch.setattr(command, "_embedding_current_profile", lambda conn: {
         "identity_hash": "fixture", "provider": "fastembed", "model_name": "test", "registered_at": 1000.0})
     command._record_embedding_catchup(default_engine._store.db_path, "summary", "fixture", 1)
     clock[0] += command._embedding_backfill_lease_ttl_s() + 1
     check = tools._embedding_provider_health_check(default_engine)
     assert "stalled" in check["detail"]["reason"]  # persisted receipt after process restart
+    # Real registration timestamps are ISO strings, unlike receipt timestamps.
+    from hermes_lcm.vector_store import VectorStore
+    vectors = VectorStore(default_engine._store.db_path, config=default_engine._config)
+    try:
+        vectors.register_profile("test", "fastembed", 2)
+    finally:
+        vectors.close()
+    monkeypatch.setattr(command, "_embedding_current_profile", current_profile)
+    conn = command._embedding_read_connection(default_engine._store.db_path)
+    try:
+        profile = current_profile(conn)
+    finally:
+        conn.close()
+    assert isinstance(profile["registered_at"], str)
+    clock[0] = tools.datetime.fromisoformat(profile["registered_at"]).timestamp()
+    check = tools._embedding_provider_health_check(default_engine)
+    assert check["detail"]["informational"]  # registered, before the first receipt
+    clock[0] += command._embedding_backfill_lease_ttl_s() + 1
+    check = tools._embedding_provider_health_check(default_engine)
+    assert check["status"] == "warn" and "stalled" in check["detail"]["reason"]
     monkeypatch.setattr(tools, "_embedding_readiness", lambda *a: "model: present; coverage: 1/1 summaries; chunks: caught up (coverage certified)")
     check = tools._embedding_provider_health_check(default_engine)
     assert check["status"] == "pass"
