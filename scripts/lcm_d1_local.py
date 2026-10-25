@@ -56,17 +56,60 @@ def run_pool(tasks, jobs, launch):
         return results
 
 
-def run_child(command, *, timeout, **kwargs):
+def signal_group(pid, signum):
+    try:
+        os.killpg(pid, signum)
+    except (ProcessLookupError, PermissionError):
+        pass  # The worker may exit between wait/timeout and the signal.
+
+
+def run_child(command, *, timeout, interrupt=None, **kwargs):
     with subprocess.Popen(command, start_new_session=True, **kwargs) as child:
-        try:
-            return {"exit_code": child.wait(timeout=timeout), "timed_out": False}
-        except subprocess.TimeoutExpired:
-            os.killpg(child.pid, signal.SIGKILL)
-            child.wait()
-            return {"exit_code": 124, "timed_out": True}
+        deadline = time.monotonic() + timeout
+        while True:
+            if interrupt and interrupt[0]:
+                signal_group(child.pid, interrupt[0])
+                # Retain the group even if its leader exits before descendants.
+                until = time.monotonic() + 2
+                while time.monotonic() < until:
+                    child.poll()  # Reap the leader before probing its group.
+                    try:
+                        os.killpg(child.pid, 0)
+                    except ProcessLookupError:
+                        break
+                    except PermissionError:
+                        pass
+                    time.sleep(0.05)
+                signal_group(child.pid, signal.SIGKILL)
+                child.wait()
+                return {"exit_code": 128 + interrupt[0], "timed_out": False}
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                signal_group(child.pid, signal.SIGKILL)
+                child.wait()
+                return {"exit_code": 124, "timed_out": True}
+            try:
+                return {"exit_code": child.wait(timeout=min(remaining, 0.1)), "timed_out": False}
+            except subprocess.TimeoutExpired:
+                continue
 
 
 def main(argv=None):
+    interrupt = [0]
+
+    def interrupted(signum, frame):
+        if not interrupt[0]:
+            interrupt[0] = signum
+
+    previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        return _main(argv, interrupt)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def _main(argv, interrupt):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--product", action="append", required=True, help="ROLE=clean-product-tree (twice)")
     for name in ("prepared-dir", "shards-dir", "aprime-dir", "output", "scratch"):
@@ -109,6 +152,8 @@ def main(argv=None):
     started = time.monotonic()
 
     def invoke(role, name, command, mode):
+        if interrupt[0]:
+            return {"exit_code": 128 + interrupt[0], "timed_out": False}
         scratch = args.scratch.resolve() / role / name
         scratch.mkdir(parents=True)
         child_env = dict(env, LCM_LONGMEMEVAL_EMBED_CACHE=str(caches[role]),
@@ -116,13 +161,15 @@ def main(argv=None):
                          LCM_D1_THREAD_REPORT=str(args.output.resolve() / f"{role}-{name}-threads.json"),
                          LCM_D1_CACHE_MODE=mode, HERMES_HOME=str(scratch / "home"), TMPDIR=str(scratch))
         with (args.output / f"{role}-{name}.log").open("w") as log:
-            return run_child([sys.executable, str(Path(__file__).resolve()), "--worker", products[role], pins[role], instrument, *command], cwd=products[role], env=child_env, stdout=log, stderr=subprocess.STDOUT, timeout=args.worker_timeout)
+            return run_child([sys.executable, str(Path(__file__).resolve()), "--worker", products[role], pins[role], instrument, *command], cwd=products[role], env=child_env, stdout=log, stderr=subprocess.STDOUT, timeout=args.worker_timeout, interrupt=interrupt)
 
     # Enumerate the product's actual chunk/summary units in each tree, including
     # the placebo corpus. Only this serial phase is allowed to write the cache.
     from benchmarking.d1_cache import seal
     manifests, role_threads, preembed = {}, {}, []
     for role in products:
+        if interrupt[0]:
+            break
         caches[role].parent.mkdir()
         for name, prepared in (("preembed", args.prepared_dir), ("preembed-aa", args.aprime_dir)):
             command = ["prewarm-cache", "--prepared-dir", str(prepared.resolve()), "--shards-manifest", str(prepared.resolve()), *common]
@@ -145,7 +192,7 @@ def main(argv=None):
         try:
             command = ["run", "--prepared-dir", str(prepared.resolve()), "--output", str(out), "--allow-external-output", "--dump-candidates", str(out / "candidates.jsonl"), *common]
             status.update(invoke(role, name, command, "read"))
-            if status["timed_out"]:
+            if status["timed_out"] or interrupt[0]:
                 return status
             rows = [json.loads(line) for line in (out / "per_question_checkpoint.jsonl").read_text().splitlines()]
             metrics = [json.loads(line) for line in (out / "embedding-metrics.jsonl").read_text().splitlines()]
@@ -161,17 +208,17 @@ def main(argv=None):
 
     effective = [value["effective_intra_op_threads"] for value in role_threads.values()]
     budget_ok = args.jobs * max((n for n in effective if n is not None), default=threads) <= args.thread_budget
-    arms = run_pool([task for task in tasks if task[0] in manifests], args.jobs, launch) if budget_ok else []
+    arms = run_pool([task for task in tasks if task[0] in manifests], args.jobs, launch) if budget_ok and not interrupt[0] else []
     receipt = {"instrument_sha": instrument, "products": pins, "jobs": args.jobs,
                "cache_manifests": manifests, "role_threads": role_threads,
                "thread_budget_ok": budget_ok, "thread_budget_fully_known": len(effective) == 2 and None not in effective,
-               "worker_timeout": args.worker_timeout, "preembed": preembed,
+               "worker_timeout": args.worker_timeout, "preembed": preembed, "interrupted": bool(interrupt[0]),
                "fresh_output_guard_already_existed": True,
                "ort_threads_per_shard_cap": threads, "thread_budget": args.thread_budget,
                "wall_seconds": time.monotonic() - started, "arms": arms,
                "not_proven": "Eight-hour acceptance requires the complete quiet-window run; recall equivalence is a separate gate."}
     (args.output / "d1-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    return int(not budget_ok or any(row["exit_code"] for row in preembed) or any(arm["exit_code"] or arm["parse_error"] for arm in arms))
+    return 128 + interrupt[0] if interrupt[0] else int(not budget_ok or any(row["exit_code"] for row in preembed) or any(arm["exit_code"] or arm["parse_error"] for arm in arms))
 
 
 if __name__ == "__main__":

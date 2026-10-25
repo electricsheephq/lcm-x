@@ -4202,6 +4202,50 @@ def _accumulate_question_checkpoint(
     return 1, 0
 
 
+def _validate_d1_sidecar_alias(checkpoint_path, dump_path):
+    if checkpoint_path is None or dump_path is None or os.environ.get("LCM_D1_CACHE_MODE") != "read":
+        return
+    sidecar = Path(checkpoint_path).with_name("embedding-metrics.jsonl").resolve()
+    dump = Path(dump_path).resolve()
+    alias = dump == sidecar
+    if dump.exists() and sidecar.exists():
+        alias |= os.path.samefile(dump, sidecar)
+    else:
+        parent = sidecar.parent
+        while not parent.exists():
+            parent = parent.parent
+        while parent.name and parent.name == parent.name.swapcase():
+            parent = parent.parent
+        alternate = parent.with_name(parent.name.swapcase()) if parent.name else parent
+        insensitive = alternate.exists() and alternate != parent and os.path.samefile(parent, alternate)
+        if insensitive:
+            alias |= str(dump).casefold() == str(sidecar).casefold()
+    if alias:
+        raise ValueError("--dump-candidates must not alias embedding-metrics.jsonl in D1 read mode")
+
+
+def _reconcile_d1_metrics(path, completed_ids):
+    if not path.exists():
+        return
+    lines = path.read_bytes().splitlines(keepends=True)
+    records = {}
+    for index, line in enumerate(lines):
+        try:
+            record = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            if index == len(lines) - 1:
+                break
+            raise ValueError("invalid embedding metrics before final line") from None
+        if isinstance(record, dict) and record.get("question_id") in completed_ids:
+            records[record["question_id"]] = json.dumps(record) + "\n"
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=".embedding-metrics-", delete=False) as repaired:
+        repaired.writelines(records.values())
+        repaired.flush()
+        os.fsync(repaired.fileno())
+    os.replace(repaired.name, path)
+    _fsync_parent_directory(path)
+
+
 def run_harness(
     questions: Iterable[Question],
     *,
@@ -4227,6 +4271,7 @@ def run_harness(
     accounting: ProviderAccounting | None = None,
 ) -> dict[str, Any]:
     """Run every arm over every question and return an aggregate-only report."""
+    _validate_d1_sidecar_alias(checkpoint_path, dump_candidates_path)
     if shipped_default and (provider_name != "stub" or model or embeddings_enabled is not None):
         raise ValueError("shipped_default cannot override explicit embedding settings")
     if not shipped_default and provider_name not in {"stub", "none"} and not model.strip():
@@ -4440,6 +4485,8 @@ def run_harness(
                 ),
             )
 
+    if checkpoint_path is not None and resume and os.environ.get("LCM_D1_CACHE_MODE") == "read":
+        _reconcile_d1_metrics(checkpoint_path.with_name("embedding-metrics.jsonl"), completed_question_ids)
     checkpoint_file = None
     if checkpoint_path is not None and not fully_completed_resume:
         checkpoint_file = checkpoint_path.open("a" if resume else "w", encoding="utf-8")
@@ -4561,10 +4608,8 @@ def run_harness(
                 abstention_count += abstention_delta
                 # Sidecar row FIRST, checkpoint second: a crash between the two
                 # re-evaluates the question on resume (its checkpoint record
-                # never landed) and appends a fresh sidecar row. The worst case
-                # is a duplicate sidecar row for one question -- consumers
-                # dedupe by question_id keeping the last -- never a checkpointed
-                # question with a silently missing sidecar row.
+                # never landed). Resume reconciles the sidecar against completed
+                # checkpoint IDs before appending the re-evaluated question.
                 if candidate_dump_file is not None:
                     _write_candidate_dump_record(
                         candidate_dump_file,

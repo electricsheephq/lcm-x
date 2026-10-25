@@ -3,9 +3,12 @@ import hashlib
 import importlib.util
 import json
 import os
+import signal
+import subprocess
 import sqlite3
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -131,9 +134,19 @@ def driver():
     return module
 
 
-@pytest.mark.parametrize("fault", ["exit", "torn", "timeout", "older", "budget", "pretimeout"])
+@pytest.mark.parametrize("fault", ["exit", "torn", "timeout", "older", "budget", "pretimeout",
+                                  "timeout_lookup", "timeout_permission", "pretimeout_lookup", "pretimeout_permission"])
 def test_parallel_driver_receipts_and_failure_isolation(tmp_path, monkeypatch, fault):
     cli = driver()
+    if "_" in fault:
+        fault, exception = fault.split("_")
+        killpg = cli.os.killpg
+        def raced_kill(pid, sig):
+            killpg(pid, sig)  # Model a worker disappearing just before kill.
+            if sig == signal.SIGKILL:
+                raise {"lookup": ProcessLookupError, "permission": PermissionError}[exception]()
+        monkeypatch.setattr(cli.os, "killpg", raced_kill)
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
     monkeypatch.setattr(cli, "pin", lambda tree: ("b" if str(tree).endswith("candidate-tree") else "a") * 40)
     shards = tmp_path / "shards"
     qid = 0
@@ -152,7 +165,7 @@ def test_parallel_driver_receipts_and_failure_isolation(tmp_path, monkeypatch, f
 
     real_run_child = cli.run_child
 
-    def fake_run(command, *, timeout, cwd, env, stdout, stderr):
+    def fake_run(command, *, timeout, cwd, env, stdout, stderr, interrupt):
         nonlocal active, peak
         cache = Path(env[lme.EMBED_CACHE_ENV])
         if "prewarm-cache" in command:
@@ -194,6 +207,7 @@ def test_parallel_driver_receipts_and_failure_isolation(tmp_path, monkeypatch, f
     assert cli.main(["--product", "base=base-tree", "--product", "candidate=candidate-tree",
                      "--prepared-dir", str(tmp_path), "--shards-dir", str(shards),
                      "--aprime-dir", str(aa), "--output", str(out), "--scratch", str(tmp_path / "scratch"), "--worker-timeout", "0.05"]) == int(fault != "older")
+    assert all(signal.getsignal(sig) == handler for sig, handler in previous.items())
     receipt = json.loads((out / "d1-receipt.json").read_text())
     if os.environ.get("D1_DRIVER_REPORT_DIR"):
         Path(os.environ["D1_DRIVER_REPORT_DIR"], f"driver-{fault}.json").write_text(json.dumps(receipt, indent=2) + "\n")
@@ -446,3 +460,194 @@ def test_older_provider_proceeds_without_hook(tmp_path, monkeypatch, effective):
     assert receipt["thread_cap_applied"] is False
     assert receipt["effective_intra_op_threads"] == effective
     assert bool(receipt["reason"]) == (effective is None)
+
+
+def wait_until(predicate, seconds=8):
+    until = time.monotonic() + seconds
+    while time.monotonic() < until:
+        if predicate():
+            return
+        time.sleep(0.025)
+    assert predicate(), "condition did not become true before deadline"
+
+
+def pid_gone(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def test_timeout_kills_grandchild(tmp_path):
+    cli = driver()
+    grand_pid = tmp_path / "grand.pid"
+    parent_pid = tmp_path / "parent.pid"
+    grand_code = f"import os,time; from pathlib import Path; Path({str(grand_pid)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    code = (f"import os,subprocess,sys,time; from pathlib import Path; Path({str(parent_pid)!r}).write_text(str(os.getpid())); "
+            f"subprocess.Popen([sys.executable, '-c', {grand_code!r}]); time.sleep(60)")
+    try:
+        result = cli.run_child([sys.executable, "-c", code], timeout=1)
+        assert result == {"exit_code": 124, "timed_out": True}
+        assert grand_pid.exists(), "grandchild must have started before timeout"
+        wait_until(lambda: pid_gone(int(grand_pid.read_text())), seconds=3)
+    finally:
+        if parent_pid.exists():
+            try:
+                os.killpg(int(parent_pid.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def driver_args(root):
+    ids = [f"q{i}" for i in range(500)]
+    def manifest(directory, selected):
+        directory.mkdir(parents=True)
+        (directory / "manifest.json").write_text(json.dumps({"questions": [{"question_id": q} for q in selected]}))
+    manifest(root / "prepared", ids)
+    manifest(root / "aa", ids[:100])
+    for k in range(6):
+        manifest(root / "shards" / f"shard-{k}", ids[k::6])
+    return ["--product", "base=base", "--product", "candidate=candidate",
+            "--prepared-dir", str(root / "prepared"), "--shards-dir", str(root / "shards"),
+            "--aprime-dir", str(root / "aa"), "--output", str(root / "out"), "--scratch", str(root / "scratch")]
+
+
+@pytest.mark.parametrize("phase", ["build", "read"])
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_driver_interrupt_cleans_groups_and_writes_partial_receipt(tmp_path, phase, signum):
+    argv = driver_args(tmp_path)
+    # A descendant ignores the forwarded signal, exercising bounded escalation
+    # even when the worker leader exits immediately.
+    grand = "import os,signal,time; signal.signal(signal.SIGINT,signal.SIG_IGN); signal.signal(signal.SIGTERM,signal.SIG_IGN); print(os.getpid(),flush=True); time.sleep(60)"
+    sleeper = ("import json,os,subprocess,sys,time; from pathlib import Path; "
+               f"p=subprocess.Popen([sys.executable,'-c',{grand!r}],stdout=subprocess.PIPE,text=True); "
+               "g=int(p.stdout.readline()); Path(sys.argv[1]).write_text(json.dumps([os.getpid(),g])); time.sleep(60)")
+    runner = f'''
+import importlib.util,json,sys
+from pathlib import Path
+spec=importlib.util.spec_from_file_location("driver", {str(Path(__file__).resolve().parents[1] / 'scripts/lcm_d1_local.py')!r})
+cli=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cli)
+cli.pin=lambda _: "a"*40
+import benchmarking.d1_cache
+benchmarking.d1_cache.seal=lambda _: "fake-manifest"
+run=cli.run_child
+def fake(command, **kw):
+    env=kw["env"]
+    if env["LCM_D1_CACHE_MODE"] == "build" and {phase!r} == "read":
+        Path(env["LCM_D1_THREAD_REPORT"]).write_text(json.dumps({{"effective_intra_op_threads":2}}))
+        return {{"exit_code":0,"timed_out":False}}
+    ready=Path(env["TMPDIR"]).with_suffix(".ready")
+    kw.pop("cwd")
+    return run([sys.executable,"-c",{sleeper!r},str(ready)], **kw)
+cli.run_child=fake
+raise SystemExit(cli.main({argv!r}))
+'''
+    process = subprocess.Popen([sys.executable, "-c", runner], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    expected = 1 if phase == "build" else 3
+    try:
+        wait_until(lambda: len(list((tmp_path / "scratch").glob("*/*.ready"))) == expected)
+        ready = list((tmp_path / "scratch").glob("*/*.ready"))
+        wait_until(lambda: all(p.stat().st_size for p in ready))
+        groups = [json.loads(p.read_text()) for p in ready]
+        process.send_signal(signum)
+        assert process.wait(timeout=10) == 128 + signum
+        receipt = json.loads((tmp_path / "out/d1-receipt.json").read_text())
+        assert receipt["interrupted"] is True
+        rows = receipt["preembed"] if phase == "build" else receipt["arms"]
+        assert any(row["exit_code"] == 128 + signum for row in rows)
+        for leader, grandchild in groups:
+            wait_until(lambda: pid_gone(leader) and pid_gone(grandchild))
+            with pytest.raises(ProcessLookupError):
+                os.killpg(leader, 0)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        for ready in (tmp_path / "scratch").glob("*/*.ready"):
+            if ready.stat().st_size:
+                try:
+                    os.killpg(json.loads(ready.read_text())[0], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
+@pytest.mark.parametrize("alias", ["exact", "symlink", "dotdot", "case", "hardlink"])
+@pytest.mark.parametrize("exists", [False, True])
+def test_cli_refuses_metrics_sidecar_alias_before_open(tmp_path, monkeypatch, alias, exists):
+    spec = importlib.util.spec_from_file_location("lme_cli", Path(__file__).resolve().parents[1] / "scripts/lcm_longmemeval.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    output = tmp_path / "output"
+    output.mkdir()
+    sidecar = output / "embedding-metrics.jsonl"
+    if exists:
+        sidecar.write_text("preserve\n")
+    dump = sidecar
+    if alias == "symlink":
+        dump = tmp_path / "alias.jsonl"
+        dump.symlink_to(sidecar)
+    elif alias == "dotdot":
+        (output / "nested").mkdir()
+        dump = output / "nested/../embedding-metrics.jsonl"
+    elif alias == "case":
+        if not output.with_name("OUTPUT").exists():
+            pytest.skip("case-sensitive volume")
+        dump = output / "EMBEDDING-METRICS.JSONL"
+    elif alias == "hardlink":
+        if not exists:
+            pytest.skip("hardlink requires existing target")
+        dump = tmp_path / "hardlink.jsonl"
+        os.link(sidecar, dump)
+    dataset = tmp_path / lme.DATASET_COORDS["s"]["file"]
+    dataset.write_text("[]")
+    monkeypatch.setattr(cli, "load_questions_with_sha256", lambda *a, **k: (questions()[:1], "a" * 64))
+    monkeypatch.setenv("LCM_D1_CACHE_MODE", "read")
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    with pytest.raises(SystemExit, match="must not alias embedding-metrics.jsonl"):
+        cli.main(["run", "--dataset", str(dataset), "--output", str(output),
+                  "--allow-external-output", "--dump-candidates", str(dump)])
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("crash", ["midwrite", "before_checkpoint"])
+def test_read_mode_resume_reconciles_metrics(tmp_path, monkeypatch, crash):
+    monkeypatch.setenv("LCM_D1_PRODUCT_SHA", "a" * 40)
+    monkeypatch.setenv("LCM_D1_ROLE", "base")
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.sqlite"))
+    monkeypatch.setenv("LCM_D1_CACHE_MODE", "build")
+    builder = lme.resolve_harness_provider("stub", "")
+    lme.prewarm_embedding_cache(questions()[:2], builder)
+    seal(builder.cache_path)
+    monkeypatch.setenv("LCM_D1_CACHE_MODE", "read")
+    checkpoint = tmp_path / "run/per_question_checkpoint.jsonl"
+    sidecar = checkpoint.with_name("embedding-metrics.jsonl")
+    write = lme._write_checkpoint_record
+    def crash_write(file, record):
+        if record.get("question_id") == "q1":
+            if crash == "midwrite" and Path(file.name) == sidecar:
+                file.write('{"question_id": "q1", "wall_ms":')
+                file.flush()
+                raise RuntimeError("injected midwrite crash")
+            if crash == "before_checkpoint" and Path(file.name) == checkpoint:
+                raise RuntimeError("injected before_checkpoint crash")
+        write(file, record)
+    monkeypatch.setattr(lme, "_write_checkpoint_record", crash_write)
+    args = dict(provider_name="stub", model="", tmp_dir=tmp_path / "db", checkpoint_path=checkpoint, reuse_db_template=False)
+    with pytest.raises(RuntimeError, match="injected"):
+        lme.run_harness(questions()[:2], **args)
+    if crash == "midwrite":
+        assert sidecar.read_text().endswith('"wall_ms":')
+    else:
+        assert len(sidecar.read_text().splitlines()) == 2
+    monkeypatch.setattr(lme, "_write_checkpoint_record", write)
+    lme.run_harness(questions()[:2], resume=True, **args)
+    rows = list(map(json.loads, sidecar.read_text().splitlines()))
+    checkpoint_ids = [r["question_id"] for r in map(json.loads, checkpoint.read_text().splitlines()) if "question_id" in r]
+    assert [row["question_id"] for row in rows] == checkpoint_ids == ["q0", "q1"]
+    # Completed resumes reconcile too, without constructing a provider.
+    with sidecar.open("a") as file:
+        file.write('{"question_id":')
+    lme.run_harness(questions()[:2], resume=True, **args)
+    assert list(map(json.loads, sidecar.read_text().splitlines())) == rows
