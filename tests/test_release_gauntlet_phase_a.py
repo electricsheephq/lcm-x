@@ -76,10 +76,10 @@ def _runner_module():
     return module
 
 
-def _doctor_scenario(phase_a, monkeypatch, checks):
+def _doctor_scenario(phase_a, monkeypatch, checks, overall="warnings"):
     monkeypatch.setattr(phase_a.importlib.util, "find_spec", lambda _name: object())
     monkeypatch.setattr(phase_a, "_payload", lambda *_args: {
-        "checks": checks, "overall": "warnings",
+        "checks": checks, "overall": overall,
     })
     context = {
         "finance": {"content": "taxi costs $60; train costs $20", "store_id": "fixture"},
@@ -99,6 +99,37 @@ def test_local_doctor_accepts_only_preparing_warning(monkeypatch):
         }},
     ]
     assert _doctor_scenario(_runner_module(), monkeypatch, checks)[2] == "PASS"
+
+
+@pytest.mark.parametrize("fault", [False, True])
+def test_local_doctor_real_informational_payload_and_fault(tmp_path, monkeypatch, fault):
+    import json
+    from hermes_lcm import embedding_maintenance, tools
+    from tests.harness import engine_context
+
+    monkeypatch.setattr(tools, "effective_cpus", lambda: 8)
+    monkeypatch.setattr(embedding_maintenance, "local_model_state", lambda config: ("preparing", ""))
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda config: {
+        "available": True, "provider": "fastembed", "model": "BAAI/bge-small-en-v1.5",
+        "detail": "importable",
+    })
+    with engine_context(tmp_path, window=40_000, temporal_rollups_enabled=False) as engine:
+        engine._config.embeddings_enabled = True
+        engine._config.embedding_provider = "fastembed"
+        engine._store.append(engine.current_session_id, {"role": "user", "content": "Phase A fixture"})
+        payload = json.loads(tools.lcm_doctor({}, engine=engine))
+    assert payload["overall"] == "healthy", json.dumps([c for c in payload["checks"] if c["status"] != "pass"])
+    check = next(c for c in payload["checks"] if c["check"] == "embedding_provider_health")
+    assert check["status"] == "warn" and check["detail"]["informational"] is True
+    if fault:
+        # Mutate a second real check: an unrelated fault must still fail even
+        # while the local model's preparation remains informational.
+        other = next(c for c in payload["checks"] if c["check"] == "config_validation")
+        other["status"] = "warn"
+        other["detail"] = ["synthetic configuration fault"]
+        payload["overall"] = "warnings"
+    row = _doctor_scenario(_runner_module(), monkeypatch, payload["checks"], payload["overall"])
+    assert row[2] == ("FAIL" if fault else "PASS")
 
 
 @pytest.mark.parametrize("name,readiness,impact", [

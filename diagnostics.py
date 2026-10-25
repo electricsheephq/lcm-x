@@ -7,7 +7,7 @@ from sqlite3 import connect
 from pathlib import Path
 from typing import Any
 
-from .config import containment_base_dir
+from .config import companion_enable_command, containment_base_dir
 
 
 DOCTOR_ACTION_SAFE_IGNORE = "safe/ignore"
@@ -208,6 +208,22 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             )
             warning_only = True
             rationale = "stale stored vectors affect only semantic recall, which is switched off"
+        elif isinstance(detail, dict) and str(detail.get("reason", "")).startswith("store's profile belongs to "):
+            action = DOCTOR_ACTION_INSPECT
+            command = detail["reason"]
+            warning_only = True
+            rationale = "the stored profile is held; full-text recall is active"
+        elif isinstance(detail, dict) and "coverage: unavailable" in str(detail.get("readiness", "")):
+            action = DOCTOR_ACTION_INSPECT
+            command = "inspect embedding coverage SQLite read errors and database access, then re-run `/lcm doctor`"
+            warning_only = True
+            rationale = "embedding coverage could not be read; full-text recall is active"
+        elif (isinstance(detail, dict) and detail.get("available") and
+              str(detail.get("readiness", "")).startswith(("model: preparing;", "model: unavailable("))):
+            action = DOCTOR_ACTION_INSPECT
+            command = "inspect background model preparation; run `/lcm embed warmup` if preparation fails, then re-run `/lcm doctor`"
+            warning_only = True
+            rationale = "local model preparation is in progress or needs retry; full-text recall is active"
         elif (status == "warn" and isinstance(detail, dict) and detail.get("cpu_limited")
               and detail.get("available")
               and not str(detail.get("readiness", "")).startswith("model: unavailable(")):
@@ -230,8 +246,8 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             command = (
                 "semantic retrieval is configured but not runnable: install the local fastembed dependency "
                 "companion with `hermes plugins install electricsheephq/lcm-x/companions/"
-                "hermes-lcm-x-local-embeddings --ref <LCM-X-40-character-SHA>`; if installed, run `hermes plugins "
-                "enable hermes-lcm-x-local-embeddings`. Otherwise fix "
+                "hermes-lcm-x-local-embeddings --ref <LCM-X-40-character-SHA>`; if installed, run "
+                f"`{companion_enable_command()}`. Otherwise fix "
                 "LCM_EMBEDDING_PROVIDER/LCM_EMBEDDING_MODEL and provider credentials. Restart Hermes "
                 "after enable, then run `/lcm embed warmup` and re-run `/lcm doctor`. Nothing is lost meanwhile -- the lossless "
                 "store is intact and recall falls back to full-text"

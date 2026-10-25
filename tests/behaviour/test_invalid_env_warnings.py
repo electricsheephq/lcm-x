@@ -110,7 +110,7 @@ def test_uniform_warning_table(monkeypatch, key, field, raw, value):
 def test_every_uniform_typed_field_warns(monkeypatch, spec):
     monkeypatch.setenv(spec.env_key, "invalid")
     c = config.LCMConfig.from_env()
-    default = getattr(config.LCMConfig(), spec.name)
+    default = False if spec.name == "embeddings_enabled" else getattr(config.LCMConfig(), spec.name)
     assert getattr(c, spec.name) == default
     assert c.config_source_warnings == [f"invalid env {spec.env_key}='invalid' ignored; using {default!r}"]
 

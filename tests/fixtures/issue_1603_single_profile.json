@@ -138,6 +138,7 @@
     "VOYAGE_API_KEY": "fixture-voyage-key"
   },
   "expected": {
+    "_embeddings_enabled_supplied": true,
     "adaptive_retrieval_enabled": false,
     "assertion_extraction_enabled": false,
     "assertion_extraction_max_sources_per_pass": 4,
@@ -191,7 +192,7 @@
     "embedding_max_batch_items": 1000,
     "embedding_model": "",
     "embedding_privacy_enabled": false,
-    "embedding_provider": "",
+    "embedding_provider": "fastembed",
     "embedding_query_prefix": "",
     "embedding_query_spend_backoff_seconds": 60.0,
     "embedding_query_spend_max_calls": 600,

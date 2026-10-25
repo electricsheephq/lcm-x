@@ -1003,11 +1003,16 @@ def resolve_harness_provider(
         resolved = StubEmbedder()
     else:
         _ensure_hermes_lcm_package()
+        from hermes_lcm.config import effective_embedding_model
+        model = effective_embedding_model(provider, model)
     if provider != "stub" and not model:
         raise ValueError(f"--model is required for --provider {provider}")
     if provider in {"fastembed", "fast-embed"}:
         from hermes_lcm.embedding_provider import EmbeddingSpendGuard, FastembedProvider
 
+        # Product readiness/backfill uses FASTEMBED_CACHE_PATH for this key too.
+        if _fastembed_cache_dir():
+            os.environ["FASTEMBED_CACHE_PATH"] = _fastembed_cache_dir()
         # max_calls=0 disables the per-minute call-rate guard, matching the
         # bulk-backfill contract (resolve_provider(for_backfill=True)); the
         # harness embeds thousands of summaries in one pass.
@@ -1040,6 +1045,10 @@ def resolve_harness_provider(
             accounting_role,
             lambda: resolved.embed_query("warmup"),
         )
+    if warmup and provider in {"fastembed", "fast-embed"}:
+        from hermes_lcm.config import LCMConfig
+        from hermes_lcm.embedding_maintenance import note_local_model_present
+        note_local_model_present(LCMConfig(embedding_provider=provider, embedding_model=model))
     if not use_embed_cache:
         return resolved
     return _maybe_cache_harness_provider(resolved, provider_name=provider)
@@ -2407,6 +2416,21 @@ def _typed_provider_degraded_outcomes(payload: dict[str, Any]) -> tuple[str, ...
     return tuple(dict.fromkeys(outcomes))
 
 
+def certify_local_recall_store(config, db_path, *, summaries=True):
+    """Have product backfill certify directly populated LOCAL vectors, once per store."""
+    from hermes_lcm import command
+    runs = []
+    if summaries:
+        runs.append(command._embedding_backfill_summary_run(
+            config, db_path, apply=True, limit=1, retry_uncertain=False))
+    runs.append(command._chunk_backfill_run(
+        config, db_path, apply=True, limit=1, retry_uncertain=False,
+        policy="conversational", confirm_raw_text=True))
+    for result in runs:
+        if not isinstance(result, dict) or result.get("status") != "complete":
+            raise RuntimeError(f"LOCAL producer catch-up incomplete: {result}")
+
+
 def production_recall_hits(
     question: "Question",
     config,
@@ -2654,6 +2678,7 @@ def evaluate_question(
     provider_name: str,
     tmp_dir: Path,
     embeddings_enabled: bool,
+    embeddings_enabled_explicit: bool = True,
     top_k: int = 10,
     use_rerank: bool = False,
     recall_rerank: bool = False,
@@ -2746,6 +2771,7 @@ def evaluate_question(
     config = LCMConfig(
         database_path=str(db_path),
         embeddings_enabled=embeddings_enabled,
+        embeddings_enabled_explicit=embeddings_enabled_explicit,
         embedding_provider=summary_name,
         embedding_model=model,
         rerank_enabled=recall_rerank,
@@ -3030,6 +3056,8 @@ def evaluate_question(
                     str(node_id), "summary", model, vector, identity=identity
                 )
                 session_vectors[session_id] = _unit(list(vector))
+        if embeddings_enabled and summary_name in {"fastembed", "fast-embed"}:
+            certify_local_recall_store(config, db_path)
         ingest_ms = (time.perf_counter() - ingest_start) * 1000.0
 
         relevant = evidence_sessions(question)
@@ -4112,6 +4140,7 @@ def run_harness(
     model: str,
     tmp_dir: Path,
     embeddings_enabled: bool | None = None,
+    shipped_default: bool = False,
     use_rerank: bool = False,
     recall_rerank: bool = False,
     recall_rerank_window: int = 0,
@@ -4129,6 +4158,15 @@ def run_harness(
     accounting: ProviderAccounting | None = None,
 ) -> dict[str, Any]:
     """Run every arm over every question and return an aggregate-only report."""
+    if shipped_default and (provider_name != "stub" or model or embeddings_enabled is not None):
+        raise ValueError("shipped_default cannot override explicit embedding settings")
+    if shipped_default or provider_name != "stub":
+        _ensure_hermes_lcm_package()
+        from hermes_lcm.config import LCMConfig, effective_embedding_model
+        if shipped_default:
+            defaults = LCMConfig()
+            provider_name, model, embeddings_enabled = defaults.embedding_provider, defaults.embedding_model, defaults.embeddings_enabled
+        model = effective_embedding_model(provider_name, model)
     _reset_privacy_counts()
     dataset_report: dict[str, Any] = dataset_coordinates(dataset_label)
     if source_sha256 is not None:
@@ -4187,6 +4225,9 @@ def run_harness(
         manifest_sha256=manifest_sha256,
     )
 
+    if shipped_default:
+        expected_checkpoint_header[_CHECKPOINT_HEADER_KEY]["embeddings_enabled_explicit"] = False
+        expected_dump_header[_DUMP_HEADER_KEY]["embeddings_enabled_explicit"] = False
     if resume and checkpoint_path is None:
         raise ValueError("resume=True requires a checkpoint_path")
     checkpoint_records: list[dict[str, Any]] = []
@@ -4277,7 +4318,7 @@ def run_harness(
             # Lexical-only runs retain the historical summary-provider setup but
             # never resolve or warm the distinct production chunk identity.
             summary_provider = resolve_harness_provider(
-                provider_name,
+                "stub" if shipped_default else provider_name,
                 model,
                 accounting=accounting,
                 accounting_role="summary_documents",
@@ -4322,6 +4363,7 @@ def run_harness(
                     embeddings_enabled=embeddings_enabled,
                     embedding_provider=provider_set.summary_binding[0],
                     embedding_model=provider_set.summary_binding[1],
+                    embeddings_enabled_explicit=not shipped_default,
                     # Match the per-question lossless/provider-copy split.
                     sensitive_patterns_enabled=False,
                     embedding_privacy_enabled=None,
@@ -4407,6 +4449,7 @@ def run_harness(
                         provider_name=provider_name,
                         tmp_dir=tmp_dir,
                         embeddings_enabled=embeddings_enabled,
+                        **({"embeddings_enabled_explicit": False} if shipped_default else {}),
                         use_rerank=use_rerank,
                         recall_rerank=recall_rerank,
                         recall_rerank_window=recall_rerank_window,

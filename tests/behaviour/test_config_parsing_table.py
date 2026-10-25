@@ -56,7 +56,7 @@ CONFIG_ROWS = (
     ('stub_first_exit_target_ratio', 'LCM_STUB_FIRST_EXIT_TARGET_RATIO', 'float', 0.0),
     ('native_recovery', 'LCM_NATIVE_RECOVERY', 'bool', False),
     ('survival_fit', 'LCM_SURVIVAL_FIT', 'bool', True),
-    ('embeddings_enabled', 'LCM_EMBEDDINGS_ENABLED', 'bool', False),
+    ('embeddings_enabled', 'LCM_EMBEDDINGS_ENABLED', 'bool', True),
     ('rerank_enabled', 'LCM_RERANK_ENABLED', 'bool', False),
     ('recall_reference_strict', 'LCM_RECALL_REFERENCE_STRICT', 'bool', True),
     ('recall_fts_anchor', 'LCM_RECALL_FTS_ANCHOR', 'bool', True),
@@ -149,7 +149,7 @@ CONFIG_ROWS = (
     ('preanswer_evidence_mode', 'LCM_PREANSWER_EVIDENCE_MODE', 'str', ''),
     ('selective_compiler_model', 'LCM_SELECTIVE_COMPILER_MODEL', 'str', ''),
     ('embedding_storage_dtype', 'LCM_EMBEDDING_STORAGE_DTYPE', 'str', 'float32'),
-    ('embedding_provider', 'LCM_EMBEDDING_PROVIDER', 'str', ''),
+    ('embedding_provider', 'LCM_EMBEDDING_PROVIDER', 'str', 'fastembed'),
     ('embedding_model', 'LCM_EMBEDDING_MODEL', 'str', ''),
     ('embedding_query_prefix', 'LCM_EMBEDDING_QUERY_PREFIX', 'str', ''),
     ('embedding_document_prefix', 'LCM_EMBEDDING_DOCUMENT_PREFIX', 'str', ''),
@@ -174,6 +174,8 @@ EXTRA_CONFIG_ROWS = (
 
 # from_env has validation after the primitive reader for these fields.
 SPECIAL = {
+    "embeddings_enabled": FLAG,  # R3: unset local ON; invalid/blank stays OFF.
+    "embedding_provider": (D, D, *VALUES[2:]),  # R4: blank provider follows unset local default.
     "recall_delivery_unit": ("hits",) * 16,
     "fresh_tail_max_tokens": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, HUGE),
     "leaf_target_ratio": (D, D, D, D, 1.0, D, D, D, D, D, D, D, D, D, 0.5, D),

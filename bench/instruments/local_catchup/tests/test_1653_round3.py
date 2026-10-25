@@ -22,6 +22,10 @@ pytest_plugins = ["bench.instruments.local_catchup.tests.test_fix_round3",
 def test_request_build_on_real_product_child_is_foreground(corpus, tmp_path, monkeypatch, path):
     db, manifest, mod = corpus
     provider = mod("embedding_provider")
+    # Bypass normal cold-grep readiness for the intentional foreground-construction
+    # fault; retain the no-state recall sibling's preparation negative control.
+    monkeypatch.setattr(mod("embedding_maintenance"), "local_model_state",
+                        lambda config: ("present", "") if path == "cold" else None)
     built = []
     class FakeTextEmbedding:
         def __init__(self, **kw):
@@ -30,6 +34,7 @@ def test_request_build_on_real_product_child_is_foreground(corpus, tmp_path, mon
             return [[.1]*384 for _ in texts]
         embed = query_embed
     monkeypatch.setattr(provider, "_load_fastembed", lambda: FakeTextEmbedding)
+    monkeypatch.setattr(mod("tools"), "probe_provider_availability", lambda config: {"available": True, "detail": "synthetic fastembed backend"})
     monkeypatch.setattr(provider.FastembedProvider, "_construct", provider.FastembedProvider._construct)
     for name in ("_chunk_backfill_run", "_embedding_backfill_summary_run"):
         monkeypatch.setattr(mod("command"), name, getattr(mod("command"), name))

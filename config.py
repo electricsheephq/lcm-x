@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shlex
 from collections import ChainMap
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -740,6 +741,23 @@ def embedding_provider_id(spelling: str) -> str:
                  if spelling in spellings), spelling)
 
 
+def effective_embedding_model(provider: str, configured_model: str) -> str:
+    """Only fastembed supplies a built-in model; cloud configuration fails closed."""
+    return str(configured_model or "").strip() or (
+        "BAAI/bge-small-en-v1.5"
+        if embedding_provider_id(normalize_embedding_provider(provider)) == "fastembed" else ""
+    )
+
+
+def companion_enable_command() -> str:
+    """Match install.sh's explicit root/profile target, including profile-shaped homes."""
+    home = Path(lcm_env_get("HERMES_HOME", str(Path.home() / ".hermes")))
+    profile = lcm_env_get("HERMES_PROFILE", "default")
+    if home.parent.name == "profiles":
+        profile, home = home.name, home.parent.parent
+    return f"HERMES_HOME={shlex.quote(str(home))} hermes -p {shlex.quote(profile)} plugins enable hermes-lcm-x-local-embeddings"
+
+
 _ENV_CHOICES = {
     "recall_delivery_unit": (("hits", "session"), str.lower, "ignored; using 'hits'"),
     "embedding_provider": (
@@ -1173,8 +1191,8 @@ class LCMConfig:
     # -- Storage ---
     database_path: str = ""       # empty = HERMES_HOME/lcm.db; LCM_DATABASE_PATH may override
 
-    # -- Embeddings (default-off until a provider/model are configured) ---
-    embeddings_enabled: bool = False
+    # -- Embeddings (automatic local default; non-local providers require opt-in) ---
+    embeddings_enabled: bool | None = None  # None distinguishes omitted consent.
     # lcm_recall cross-encoder rerank stage over the top fused candidates.
     # Default-off: recall ships value on RRF order alone, and rerank is one extra
     # billable API call the operator opts into. The lite default preserves the
@@ -1291,7 +1309,7 @@ class LCMConfig:
     # still performs only the provider-free session-bundle path.
     selective_compiler_enabled: bool = False
     selective_compiler_model: str = ""
-    embedding_provider: str = ""
+    embedding_provider: str | None = None  # Resolved immediately in __post_init__.
     embedding_model: str = ""
     embedding_query_prefix: str = ""
     embedding_document_prefix: str = ""
@@ -1395,6 +1413,17 @@ class LCMConfig:
 
     # Loader provenance only, not a user setting. Manual configs are explicit.
     embeddings_enabled_explicit: bool = True
+    _embeddings_enabled_supplied: bool | None = field(default=None, repr=False)
+
+    def __post_init__(self):
+        # A copy keeps its consent marker; a copy reset to None is an omitted setting again.
+        if self._embeddings_enabled_supplied is None or self.embeddings_enabled is None:
+            self._embeddings_enabled_supplied = self.embeddings_enabled is not None
+        model_only = not str(self.embedding_provider or "").strip() and bool(self.embedding_model)
+        if not str(self.embedding_provider or "").strip():
+            self.embedding_provider = "" if model_only else "fastembed"
+        if self.embeddings_enabled is None:
+            self.embeddings_enabled = not model_only and embedding_provider_id(normalize_embedding_provider(self.embedding_provider)) in {"", "fastembed"}
 
     @classmethod
     def from_env(cls) -> "LCMConfig":
@@ -1404,8 +1433,19 @@ class LCMConfig:
         if pinned:
             _profile_envs[env["HERMES_HOME"]] = MappingProxyType(dict(env))
         c = cls()
+        raw_provider = env.get("LCM_EMBEDDING_PROVIDER", "").strip()
+        model_only = bool(env.get("LCM_EMBEDDING_MODEL", "").strip()) and not raw_provider
+        if model_only:
+            c.embedding_provider = ""  # A runtime model alone never selected a provider.
+        # Invalid bools retain the historical OFF fallback and warning. The
+        # flipped unset default belongs only to the local arm, never cloud consent.
+        c.embeddings_enabled = (
+            "LCM_EMBEDDINGS_ENABLED" not in env and not model_only
+            and embedding_provider_id(normalize_embedding_provider(raw_provider or c.embedding_provider)) in {"", "fastembed"}
+        )
         c.embeddings_enabled_explicit = env.get("LCM_EMBEDDINGS_ENABLED", "").strip().lower() in (
             "1", "true", "yes", "on", "0", "false", "no", "off")
+        c._embeddings_enabled_supplied = c.embeddings_enabled_explicit
         c._absolute_threshold_tokens = env.get("LCM_ABSOLUTE_THRESHOLD_TOKENS", "0") if pinned else None
         config_sources: dict[str, str] = {}
         config_source_warnings: list[str] = []
@@ -1614,6 +1654,8 @@ class LCMConfig:
             c.ignore_message_patterns = _parse_pattern_list(raw_ignore_messages)
             c.ignore_message_patterns_source = "env"
 
+        if not raw_provider and not model_only:
+            c.embedding_provider = "fastembed"
         c.config_sources = config_sources
         c.config_source_warnings = config_source_warnings
         return c

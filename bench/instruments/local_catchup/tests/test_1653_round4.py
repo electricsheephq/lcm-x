@@ -75,8 +75,10 @@ def test_request_scheduled_maintenance_captures_background_context(corpus, monke
         engine.shutdown()
 
 
-def test_reader_shares_late_engine_provider_resolution(corpus, tmp_path):
+def test_reader_shares_late_engine_provider_resolution(corpus, tmp_path, monkeypatch):
     db, _, mod = corpus
+    # This fixture exercises ready-provider cache sharing, not startup preparation.
+    monkeypatch.setattr(mod("embedding_maintenance"), "local_model_state", lambda config: ("present", ""))
     engine = NS(_config=common.config(mod, db))
     reader = recall.recall_reader(engine, mod, db, tmp_path)
     try:

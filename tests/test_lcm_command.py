@@ -22,7 +22,7 @@ from hermes_lcm.store import build_message_fts_spec
 
 @pytest.fixture
 def engine(tmp_path):
-    config = LCMConfig()
+    config = LCMConfig(embeddings_enabled=False)
     config.database_path = str(tmp_path / "lcm_test.db")
     hermes_home = tmp_path / "hermes_home"
     e = LCMEngine(config=config, hermes_home=str(hermes_home))

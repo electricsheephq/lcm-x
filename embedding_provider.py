@@ -26,7 +26,7 @@ from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
 from .ingest_policy import embedding_prefix_suffix
-from .config import LCMConfig, embedding_provider_id, lcm_env_get, normalize_embedding_provider, profile_bound
+from .config import companion_enable_command, effective_embedding_model, LCMConfig, embedding_provider_id, lcm_env_get, normalize_embedding_provider, profile_bound
 from .tokens import count_tokens
 
 logger = logging.getLogger(__name__)
@@ -1993,7 +1993,7 @@ def resolve_provider(
     the guard entirely; the circuit breaker still trips on real failures.
     """
     provider = normalize_embedding_provider(getattr(config, "embedding_provider", ""))
-    model = str(getattr(config, "embedding_model", "") or "").strip()
+    model = effective_embedding_model(getattr(config, "embedding_provider", ""), getattr(config, "embedding_model", ""))
     if not provider and not model:
         return None
     if not provider or not model:
@@ -2074,7 +2074,7 @@ def probe_provider_availability(config: LCMConfig) -> dict[str, Any]:
     ``detail`` string written for an operator.
     """
     provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
-    model = str(getattr(config, "embedding_model", "") or "").strip()
+    model = effective_embedding_model(getattr(config, "embedding_provider", ""), getattr(config, "embedding_model", ""))
 
     def result(available: bool, detail: str, *, probed: bool = True) -> dict[str, Any]:
         return {
@@ -2105,8 +2105,7 @@ def probe_provider_availability(config: LCMConfig) -> dict[str, Any]:
                 "FastEmbed is not installed; install the dependency companion with "
                 "`hermes plugins install electricsheephq/lcm-x/companions/"
                 "hermes-lcm-x-local-embeddings --ref <LCM-X-40-character-SHA>`; "
-                "if already installed, run `hermes plugins enable "
-                "hermes-lcm-x-local-embeddings`. Restart Hermes after enable; "
+                f"if already installed, run `{companion_enable_command()}`. Restart Hermes after enable; "
                 "see docs/embeddings-setup.md",
             )
         return result(True, "fastembed is importable")

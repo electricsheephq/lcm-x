@@ -9188,6 +9188,14 @@ class LCMEngine(
                 return text
         return ""
 
+    def _proactive_recall_eligible(self) -> bool:
+        config = self._config
+        override = str(config.proactive_recall_provider or "").strip()
+        return bool(config.proactive_recall_enabled and config.embeddings_enabled
+                    and (override.lower() in {"", "fastembed", "fast-embed"}
+                         or (config.embeddings_enabled_explicit and config._embeddings_enabled_supplied))
+                    and (override or not lcm_tools.default_semantic_cpu_limited(config)))
+
     def _build_proactive_recall_message(
         self,
         tail_messages: List[Dict[str, Any]],
@@ -9205,15 +9213,9 @@ class LCMEngine(
         never re-enters the lossless store as a real turn.
         """
         config = self._config
-        if not getattr(config, "proactive_recall_enabled", False):
-            return None
-        # Injection is an embedding-query feature: silently inert when embeddings
-        # are disabled/unwarmed (no provider to embed the newest message).
-        if not getattr(config, "embeddings_enabled", False):
+        if not self._proactive_recall_eligible():
             return None
         provider_override = str(getattr(config, "proactive_recall_provider", "") or "").strip()
-        if not provider_override and lcm_tools.default_semantic_cpu_limited(config):
-            return None
 
         query = self._newest_user_message_text(tail_messages)
         if not query:
@@ -9680,10 +9682,7 @@ class LCMEngine(
                 tail_tokens=count_messages_tokens(tail_selected),
                 repaired_tail_tokens=count_messages_tokens(measurement_tail),
                 recall_budget_tokens=self._config.proactive_recall_budget_tokens,
-                proactive_recall_enabled=self._config.proactive_recall_enabled and (
-                    bool(str(self._config.proactive_recall_provider or "").strip())
-                    or not lcm_tools.default_semantic_cpu_limited(self._config)
-                ),
+                proactive_recall_enabled=self._proactive_recall_eligible(),
                 embeddings_enabled=self._config.embeddings_enabled, survival_fit=self._config.survival_fit,
             )
             full_prefix = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}

@@ -122,7 +122,7 @@ def run_cell(args, root, arm, seed):
     escalation._invoke_summary_llm = provider
     cfg = config.LCMConfig(database_path=str(home / "lcm.db"), background_leaf_prep_enabled=arm == "on",
                            summary_model=args.summary_model, **SETTINGS)
-    dump(root / "config.json", asdict(cfg))
+    dump(root / "config.json", {**asdict(cfg), "embedding_model": getattr(config, "effective_embedding_model", lambda provider, model: model)(cfg.embedding_provider, cfg.embedding_model)})
     engine = engine_module.LCMEngine(config=cfg, hermes_home=str(home))
     engine.on_session_start("bgprep", platform="eval", conversation_id="bgprep", context_length=60000)
     def counted_leaf(operation):

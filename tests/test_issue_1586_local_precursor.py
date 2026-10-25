@@ -40,8 +40,8 @@ def local_config():
     return dict(embeddings_enabled=True, embedding_provider="fastembed", embedding_model="fixture-local")
 
 
-def test_default_off_identity(make_engine, monkeypatch):
-    engine = make_engine()
+def test_explicit_off_identity(make_engine, monkeypatch):
+    engine = make_engine(embeddings_enabled=False)
     calls = []
     monkeypatch.setattr(providers, "_load_fastembed", lambda: calls.append("model"))
     monkeypatch.setattr(engines._EMBEDDING_MAINTENANCE_SCHEDULER, "schedule",
@@ -57,10 +57,11 @@ def test_default_off_identity(make_engine, monkeypatch):
 
     recall_before = health()
     doctor_before = command.handle_lcm_command("doctor", engine)
-    # New helper must itself stay inert for the existing default configuration.
+    # Explicit OFF stays inert even with the shipped local provider selected.
     assert maintenance.start_local_model_prepare(engine._store.db_path, engine._config) is False
     engine._schedule_embedding_maintenance()
-    assert engine._config.embedding_provider == engine._config.embedding_model == ""
+    assert engine._config.embedding_provider == "fastembed"
+    assert engine._config.embedding_model == ""
     assert not engine._config.embeddings_enabled
     assert maintenance._PREPARE_THREAD is None
     assert not calls
@@ -444,7 +445,7 @@ def test_prepare_keeps_every_owner_callback_for_one_database(monkeypatch, tmp_pa
 
 
 @pytest.mark.parametrize(("model", "expected"), [
-    ("other-local", "not prepared (run /lcm embed warmup)"), ("fixture-local", "present")])
+    ("other-local", "preparing"), ("fixture-local", "preparing")])
 def test_doctor_present_needs_the_configured_local_model(make_engine, monkeypatch, model, expected):
     from hermes_lcm.vector_store import VectorStore
 
@@ -476,4 +477,5 @@ def test_process_present_state_does_not_vouch_for_another_database(make_engine, 
         "available": True, "provider": "fastembed", "model": "fixture-local", "probed": True, "detail": "fixture"})
     assert tools._embedding_provider_health_check(prepared)["detail"]["readiness"].startswith("model: present;")
     readiness = tools._embedding_provider_health_check(other)["detail"]["readiness"]
-    assert readiness == "model: not prepared (run /lcm embed warmup); coverage: 0/1 summaries"
+    assert readiness.startswith("model: present; coverage: 0/1 summaries; chunks:")
+    assert "coverage not certified" in readiness

@@ -1,8 +1,18 @@
 # Embeddings setup — free and local options
 
-Semantic and hybrid retrieval are **opt-in** and need an embedding provider. You have three good
-options, two of which cost nothing. If you configure nothing, nothing changes — retrieval stays
-FTS-only exactly as before.
+Local semantic recall is **on by default**, using in-process `fastembed` and its
+effective default model `BAAI/bge-small-en-v1.5` (384 dimensions). The configured
+model stays empty: only FastEmbed supplies this built-in default. An explicit
+`LCM_EMBEDDING_MODEL` wins with an explicit provider; a runtime model alone keeps
+the historical missing-provider rejection and stays inert when enable is unset.
+Non-local providers (including Ollama) require `LCM_EMBEDDINGS_ENABLED=true` and
+their own explicit model, retaining their privacy and consent requirements.
+This consent rule also applies to a non-local proactive recall override and to
+programmatic constructors; an omitted enable boolean never consents to cloud use.
+Unrecognized enable values resolve OFF with a warning. The ignored config.yaml
+key `lcm.embeddings_enabled` does not opt out; use `LCM_EMBEDDINGS_ENABLED=false`.
+Set `LCM_EMBEDDINGS_ENABLED=false` to opt out: no provider load or model download,
+and existing rows and vectors remain intact. Other providers are explicit options.
 
 When local embeddings are enabled by the product default, hosts with at most
 2 effective CPUs use full-text recall immediately, including summaries-only
@@ -11,7 +21,9 @@ actual coverage; doctor explains the limit. Effective capacity respects affinity
 and cgroup quotas (including ancestor limits and fractional CPUs), cached per
 process. Background catch-up continues. An explicit `LCM_EMBEDDINGS_ENABLED`
 value or programmatic config keeps control; explicit semantic `lcm_grep` is
-unchanged. Today's product default is still off, so this policy is inert. Proactive recall stays inert on these hosts unless a nonblank provider override is set. Doctor still checks provider availability and readiness; a healthy CPU-limited host needs only an explicit opt-in if semantic recall is wanted.
+unchanged. Proactive recall stays inert on these hosts unless a nonblank provider
+override is set. Doctor still checks provider availability and readiness; a
+healthy CPU-limited host needs only an explicit opt-in if semantic recall is wanted.
 
 ## TL;DR
 
@@ -80,20 +92,33 @@ external service. The host installs its Python package through the stable compan
 # Use the full source commit SHA of your installed LCM-X core.
 LCM_X_REF=<LCM-X-40-character-SHA>
 hermes plugins install electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings --ref "$LCM_X_REF"
-export LCM_EMBEDDINGS_ENABLED=true
-export LCM_EMBEDDING_PROVIDER=fastembed
-export LCM_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5   # 384-dim, compact and quick on CPU
-/lcm embed warmup     # downloads the model ONCE, explicitly (a few hundred MB incl. onnxruntime)
-/lcm embed backfill --apply
+# Accept the host's dependency consent, enable the companion if needed, then restart Hermes.
+# No LCM_* settings or manual warmup are required for the local default.
+/lcm doctor
 ```
 
-The model download happens **only** during `warmup` — never lazily during a query or an agent turn.
-If you skip warmup, semantic search simply stays off and the tools tell you why. Queries use the
-model's query-specific encoding (distinct from document encoding) so query/passage asymmetry is
+Model preparation runs the warmup path automatically in the background; it may
+download an uncached model there, never during a query or on the turn path.
+Catch-up then embeds existing history in bounded background batches. An offline
+cold start uses full text, with bounded preparation retries; preparation can
+complete after connectivity returns. A missing/disabled companion, an uncached
+or loading model, and an incomplete index all keep `lcm_recall` on full text,
+including summaries-only requests, with `degraded=true`, a precise reason and
+actual coverage. Full-text coverage of `none` is not a successful fallback.
+`/lcm doctor` reports preparing, unavailable (with the remedy), or model ready
+with separate summary coverage and chunk coverage/backlog. Model ready does not
+mean index ready. Manual `/lcm embed warmup` and `/lcm embed backfill --apply`
+remain operator tools, rather than prerequisites for the default local path.
+An existing cloud profile stays held when returning to the local default. Doctor
+names its provider: restore that provider's settings with `LCM_EMBEDDINGS_ENABLED=true`,
+or switch to the local model with `/lcm embed warmup`. Existing vectors stay intact.
+Queries use the model's query-specific encoding (distinct from document encoding) so query/passage asymmetry is
 preserved. When `LCM_EMBEDDINGS_ENABLED=false`, `warmup` is inert: it does not resolve a provider,
 download a model, create embedding tables, or create the configured database.
 
-The model runs with 2 threads. To load it from another cache, for example one shared, read-only
+FastEmbed uses one ONNX Runtime intra-op thread for `BAAI/bge-small-en-v1.5`
+and two for other models; this is not a process CPU quota.
+To load it from another cache, for example one shared, read-only
 cache for several profiles, set fastembed's own `FASTEMBED_CACHE_PATH` (default: the user cache directory).
 Pre-seed a read-only cache: `warmup` cannot download into it.
 
@@ -127,14 +152,17 @@ Noninteractive installation or a decline leaves the companion installed but
 later, run the host's printed command:
 
 ```bash
-hermes plugins enable hermes-lcm-x-local-embeddings
+HERMES_HOME=<root> hermes -p <profile> plugins enable hermes-lcm-x-local-embeddings
 ```
 
 The reference Hermes 0.21.5 pin uses its legacy dependency installer, without a
 separate dependency-consent question on enable. Its first session may need a
 restart before fastembed becomes available. Restart Hermes after enable on either
-host, then run `/lcm doctor` to check provider health. No model download is part
-of companion installation; warmup and backfill remain explicit in this slice.
+host, then run `/lcm doctor` to check provider health. Use the root and profile
+printed by the installer (`default` for the root profile); a profile-shaped home
+is normalized to its root and profile. Doctor names the same enable command when
+the companion is disabled. No model download is part of companion installation;
+local model preparation and catch-up start automatically in the running plugin.
 
 The companion is a normal host-managed plugin: use host verbs to enable, disable
 or uninstall it. A pinned install does not move with `hermes plugins update`.
@@ -154,7 +182,7 @@ ordinary LCM-X version updates leave the stable carrier manifest unchanged.
 Disabling or uninstalling the carrier may remove fastembed on the next sync.
 
 If fastembed is missing after an update, install or enable the companion, restart
-Hermes and run `/lcm doctor`, then `/lcm embed backfill --apply` for the gap. The
+Hermes and run `/lcm doctor`; background preparation and catch-up fill the gap. The
 store and existing vectors are preserved while recall degrades to full text.
 As a last resort on an unmanaged host, `pip install -r requirements-semantic.txt`
 installs into its active environment; manual installs can be dropped on update.
@@ -261,7 +289,8 @@ therefore reports bounded coverage rather than claiming universal pre-bound sour
 
 ## New content is embedded automatically
 
-With `LCM_EMBEDDINGS_ENABLED=true` and a registered profile (`/lcm embed warmup`), LCM-X
+With embeddings enabled (the default) and a registered profile (automatic local
+preparation, or explicit `/lcm embed warmup` for other providers), LCM-X
 embeds new content in the background: after each leaf summary is published (condensed summaries
 are not embedding targets, as with `/lcm embed backfill`), and
 once when a session binds. Each pass handles at most one backfill batch per corpus, runs off the
@@ -290,7 +319,7 @@ passes skipped inside the embedded range is not counted, and a dry run of
 `uncertain` by a failure after dispatch, which only `--retry-uncertain` resends), the time and outcome
 of the last incremental pass (`embedding_incremental_last_pass`) and the process's skipped-pass
 count (`embedding_incremental_failures`). `/lcm embed backfill --apply` is still the way to embed
-an existing history in one go.
+an existing history in one go instead of waiting for bounded background catch-up.
 
 ## Performance & footprint
 

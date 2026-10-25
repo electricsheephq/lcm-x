@@ -25,23 +25,20 @@ def test_not_prepared_guidance_with_real_readiness(default_engine, monkeypatch, 
             raise sqlite3.OperationalError("synthetic coverage read failure")
         monkeypatch.setattr(command, "_embedding_read_connection", unreadable)
     check = tools._embedding_provider_health_check(default_engine)
-    assert check["detail"]["readiness"].startswith("model: not prepared (run /lcm embed warmup);")
+    assert check["detail"]["readiness"].startswith("model: preparing;")
     guidance = doctor_guidance_for_check(check)
-    if cpus == 8:
-        assert check["status"] == "pass" and guidance is None
+    assert check["status"] == "warn"
+    assert not any(marker in guidance["operator_action"] for marker in (
+        "configured but not runnable", "hermes-lcm-x-local-embeddings",
+    ))
+    assert guidance["action"] == "inspect"
+    if coverage_error:
+        assert "coverage" in guidance["operator_action"] and "SQLite" in guidance["operator_action"]
+        assert not check["detail"].get("informational", False)
     else:
-        assert check["status"] == "warn"
-        assert not any(marker in guidance["operator_action"] for marker in (
-            "configured but not runnable", "hermes-lcm-x-local-embeddings",
-        ))
-        if coverage_error:
-            assert guidance["action"] == "inspect"
-            assert "coverage" in guidance["operator_action"] and "SQLite" in guidance["operator_action"]
-        else:
-            assert guidance["action"] == "safe/ignore"
-            assert "expected on this host" in guidance["rationale"]
-            assert "LCM_EMBEDDINGS_ENABLED=true" in guidance["operator_action"]
-            assert "more than 2 effective CPUs" in guidance["operator_action"]
+        assert "prepar" in guidance["operator_action"]
+        assert check["detail"]["informational"] is True
+
 
 
 @pytest.mark.parametrize("model,available,action,remedy", [
@@ -68,12 +65,15 @@ def test_cpu_limited_readiness_remedies(default_engine, monkeypatch, model, avai
 
 @pytest.mark.parametrize("override", ["", " ", "voyage", " fastembed "])
 @pytest.mark.parametrize("cpus", [1, 8])
-def test_prefix_budget_matches_off_unless_semantic_active(default_engine, monkeypatch, override, cpus):
+@pytest.mark.parametrize("consented", [False, True])
+def test_prefix_budget_matches_off_unless_semantic_active(default_engine, monkeypatch, override, cpus, consented):
     engine = default_engine
     config = engine._config
     config.proactive_recall_enabled = True
     config.proactive_recall_budget_tokens = 500
     config.proactive_recall_provider = override
+    config.embeddings_enabled_explicit = consented
+    config._embeddings_enabled_supplied = consented
     monkeypatch.setattr(tools, "effective_cpus", lambda: cpus)
     monkeypatch.setattr(engine, "_survival_ceiling", lambda: 2000)
     monkeypatch.setattr(engine, "_survival_assembly_overhead", lambda *args: 0)
@@ -88,7 +88,8 @@ def test_prefix_budget_matches_off_unless_semantic_active(default_engine, monkey
     assert off == 2000
     config.embeddings_enabled = True
     active = budget()
-    assert active == off - (500 if cpus > 2 or override.strip() else 0)
+    eligible = (override.strip() != "voyage" or consented) and (consented or cpus > 2 or override.strip())
+    assert active == off - (500 if eligible else 0)
     if cpus <= 2 and not override.strip():
         # Assert the assembled bytes as well as the selected numerical budget.
         engine.on_session_start("synthetic-r4", context_length=2000)

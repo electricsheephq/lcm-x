@@ -9,7 +9,7 @@ import pytest
 from hermes_lcm import tools
 from hermes_lcm.diagnostics import doctor_guidance_for_check
 from hermes_lcm.engine import LCMEngine
-from tests.test_issue_1186_smallhost import DefaultOnConfig
+from tests.test_issue_1186_smallhost import DefaultOnConfig, ready_local  # noqa: F401
 from tests.test_lcm_recall import recall_engine  # noqa: F401
 
 
@@ -74,7 +74,8 @@ def test_cpu_limited_doctor_keeps_provider_and_readiness(recall_engine, monkeypa
     assert called == ["probe", "readiness"]
     assert check["status"] == "warn"
     detail = check["detail"]
-    assert detail["available"] is available and detail["reason"] == reason
+    assert detail["available"] is available
+    assert detail["reason"] == ("download failed" if state == "unavailable" else reason)
     assert detail["readiness"] == readiness
     assert detail["cpu_limited"] is True and detail["effective_cpus"] == 1
     assert "semantic recall limited on this host (1 effective CPUs); full-text recall is active" in detail["cpu_limit_reason"]
@@ -114,7 +115,8 @@ def test_cpu_limited_proactive_matches_off_unless_overridden(default_engine, mon
         return json.dumps({"hits": [{"snippet": "older cobalt memory", "score": 0.5}]})
     monkeypatch.setattr(tools, "lcm_recall", recall)
     message = engine._build_proactive_recall_message([{"role": "user", "content": "cobalt"}], "user", set())
-    if override.strip():
+    # R4: only a local override bypasses CPU limits without explicit cloud consent.
+    if override.strip() == "fastembed":
         assert called and message is not None
         assert "older cobalt memory" in message["content"]
     else:
@@ -122,9 +124,10 @@ def test_cpu_limited_proactive_matches_off_unless_overridden(default_engine, mon
 
 
 @pytest.mark.parametrize("cpus", [2.01, 2.5, 3])
-def test_default_normal_host_retains_semantic(recall_engine, monkeypatch, cpus):
+def test_default_normal_host_retains_semantic(recall_engine, monkeypatch, ready_local, cpus):
     recall_engine._config = DefaultOnConfig.from_env()
     monkeypatch.setattr(tools, "effective_cpus", lambda: cpus)
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda config: {"available": True, "detail": "synthetic backend"})
     called = []
     monkeypatch.setattr(tools, "_resolve_recall_provider", lambda *args, **kwargs: called.append(True))
     result = json.loads(tools.lcm_recall({"query": "cobalt"}, engine=recall_engine))

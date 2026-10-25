@@ -37,7 +37,7 @@ from hermes_lcm.tokens import count_message_tokens, count_messages_tokens, count
 
 @pytest.fixture
 def engine(tmp_path):
-    config = LCMConfig()
+    config = LCMConfig(embeddings_enabled=False)
     config.fresh_tail_count = 4  # small for testing
     config.leaf_chunk_tokens = 100  # low threshold for testing
     config.database_path = str(tmp_path / "lcm_test.db")

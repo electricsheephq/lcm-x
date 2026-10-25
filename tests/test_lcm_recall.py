@@ -3601,6 +3601,28 @@ def test_provider_alias_resolves_to_its_canonical_provider_id(
     assert real_resolve_provider(config).provider_id == canonical_provider
 
 
+@pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_catchup_advisory_classification_never_masks_read_error(recall_engine, monkeypatch, local, unreadable):
+    provider = SimpleNamespace(model_id="fixture-model")
+    if local:
+        provider.provider_id = "fastembed"
+    store = VectorStore(recall_engine._store.db_path, config=recall_engine._config)
+    try:
+        store.register_profile("fixture-model", "fastembed", 2)
+    finally:
+        store.close()
+    if unreadable:
+        def fail(*args, **kwargs):
+            raise sqlite3.OperationalError("synthetic metadata read failure")
+        monkeypatch.setattr(lcm_tools.sqlite3, "connect", fail)
+    reason = lcm_tools._lcm_recall_catchup_reason(recall_engine, provider, "summary")
+    if local:
+        assert "catching up" in reason and "coverage not certified" in reason
+    else:
+        assert reason is None
+
+
 @pytest.mark.parametrize(("configured_provider", "canonical_provider"), _PROVIDER_ALIAS_PAIRS)
 def test_provider_alias_uses_existing_vector_corpus_for_fts_fairness(
     recall_engine,
@@ -3622,6 +3644,16 @@ def test_provider_alias_uses_existing_vector_corpus_for_fts_fairness(
         [(node, [1.0, 0.0])],
         provider=canonical_provider,
     )
+    if canonical_provider == "fastembed":
+        from hermes_lcm import command, embedding_maintenance
+        embedding_maintenance.note_local_model_present(recall_engine._config)
+        store = VectorStore(recall_engine._store.db_path, config=recall_engine._config)
+        try:
+            for task in ("summary", "chunk"):
+                identity = store.register_profile("mock-model", "fastembed", 2, task=task)
+                command._record_embedding_catchup(recall_engine._store.db_path, task, identity, 0)
+        finally:
+            store.close()
 
     provider = MockProvider()
     provider.provider_id = canonical_provider
@@ -3635,6 +3667,7 @@ def test_provider_alias_uses_existing_vector_corpus_for_fts_fairness(
 
     monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
     _freeze_vector_store_clock(monkeypatch, clock)
+    monkeypatch.setattr(lcm_tools, "probe_provider_availability", lambda config: {"available": True, "detail": "synthetic backend"})
     monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: provider)
     monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", fts_arm)
 

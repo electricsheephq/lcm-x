@@ -499,9 +499,10 @@ def test_fastembed_absent_dependency_is_clean(monkeypatch):
         provider.embed_query("hello")
 
 
-def test_resolve_provider_strings_and_dormant_defaults(monkeypatch):
+def test_resolve_provider_strings_and_local_defaults(monkeypatch):
     defaults = LCMConfig()
-    assert resolve_provider(defaults) is None
+    assert isinstance(resolve_provider(defaults), FastembedProvider)
+    assert resolve_provider(defaults).model_id == "BAAI/bge-small-en-v1.5"
 
     config = LCMConfig(
         embedding_provider="  VOYAGEAI ",
@@ -598,7 +599,7 @@ def test_fastembed_backfill_is_not_bound_by_interactive_query_timeout(monkeypatc
 
 def test_embedding_config_defaults_and_environment(monkeypatch):
     defaults = LCMConfig()
-    assert defaults.embedding_provider == ""
+    assert defaults.embedding_provider == "fastembed"
     assert defaults.embedding_model == ""
     assert defaults.ollama_base_url == "http://localhost:11434"
     assert defaults.embedding_query_timeout_s == 3.0

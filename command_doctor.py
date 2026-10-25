@@ -625,7 +625,9 @@ def render_doctor(facts: DoctorFacts) -> str:
     if facts.inactive_process:
         issues.append("inactive_process")
         recommended_actions.append(facts.inactive_action)
-    if facts.embedding_check and facts.embedding_check["status"] in {"warn", "fail"}:
+    if (facts.embedding_check and facts.embedding_check["status"] in {"warn", "fail"}
+            and not (isinstance(facts.embedding_check.get("detail"), dict)
+                     and facts.embedding_check["detail"].get("informational"))):
         issues.append("embedding_provider_health")
         recommended_actions.append(facts.embedding_action)
 
@@ -734,5 +736,7 @@ def render_doctor(facts: DoctorFacts) -> str:
 def _doctor_text(engine: Any) -> str:
     from .ingest_policy import embedding_prefix_status
     prefix = embedding_prefix_status(engine._config)
-    return render_doctor(collect_doctor(engine)) + "".join(
+    note = ("\nconfig_note: config.yaml lcm.embeddings_enabled is ignored; use LCM_EMBEDDINGS_ENABLED=true/false"
+            if "embeddings_enabled" in getattr(engine._config, "ignored_config_yaml_lcm_keys", []) else "")
+    return render_doctor(collect_doctor(engine)) + note + "".join(
         f"\nembedding_prefix_{key}: {value}" for key, value in prefix.get("embedding_prefix", {}).items())
