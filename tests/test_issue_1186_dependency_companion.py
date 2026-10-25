@@ -96,6 +96,18 @@ def test_installer_targets_explicit_profile_and_root(tmp_path, profile, sticky, 
             assert shlex.split(command)[0] == f"HERMES_HOME={home}", line
 
 
+def test_fake_hermes_runs_with_interpreter_path_containing_spaces(tmp_path, monkeypatch):
+    interpreter = tmp_path / "python with spaces" / "python"
+    interpreter.parent.mkdir()
+    interpreter.symlink_to(sys.executable)
+    monkeypatch.setenv("LCM_REAL_HERMES_PYTHON", str(interpreter))
+    result, _, target, calls = run_resolving_installer(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert (target / "plugins/hermes-lcm-x").resolve() == ROOT
+    assert [call["args"][:3] for call in calls] == [
+        ["plugins", "enable", "hermes-lcm-x"], ["plugins", "install", SOURCE]]
+
+
 def run_resolving_installer(tmp_path, *, profile=None, sticky=None, custom=True,
                             existing=False, failure=None, legacy=False, profile_home=False, resolution_source=None):
     """Use real host profile resolution when requested; stub native verbs."""
