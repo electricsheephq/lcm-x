@@ -83,7 +83,9 @@ def _certify_local_recall_store(config, db_path) -> None:
             policy="conversational", confirm_raw_text=True),
     ]
     for result in runs:
-        if not isinstance(result, dict) or result.get("status") != "complete":
+        # "complete" covers one batch only; the store is certified only when nothing is left.
+        if not isinstance(result, dict) or result.get("status") != "complete" or any(
+                result.get(counter) != 0 for counter in ("remaining", "in_flight", "uncertain")):
             raise RuntimeError(f"LOCAL producer catch-up incomplete: {result}")
 
 
@@ -204,10 +206,11 @@ class Bridge:
             embedding_model=self.model,
             embeddings_enabled_explicit=self.embedding_settings_explicit,
         )
-        # A pinned bridge can measure an older tree whose config predates some of these settings.
+        # A pinned bridge can measure an older tree whose config predates the two newer settings.
         if dataclasses.is_dataclass(LCMConfig):
             known = {field.name for field in dataclasses.fields(LCMConfig)}
-            settings = {name: value for name, value in settings.items() if name in known}
+            newer = {"recall_delivery_unit", "embeddings_enabled_explicit"}
+            settings = {name: value for name, value in settings.items() if name in known or name not in newer}
         return LCMConfig(**settings)
 
     # -- ingest ---------------------------------------------------------------

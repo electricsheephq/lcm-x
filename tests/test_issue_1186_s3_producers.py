@@ -239,17 +239,21 @@ def test_bridge_certifies_trees_without_the_longmemeval_helper(bridge_module, mo
     monkeypatch.delattr(lme, "certify_local_recall_store")
     certify = bridge_module._local_certifier()
     assert certify is bridge_module._certify_local_recall_store
+    done = {"status": "complete", "remaining": 0, "in_flight": 0, "uncertain": 0}
     calls = []
     monkeypatch.setattr(command, "_embedding_backfill_summary_run",
-                        lambda *args, **kwargs: calls.append(("summary", kwargs)) or {"status": "complete"})
+                        lambda *args, **kwargs: calls.append(("summary", kwargs)) or dict(done))
     monkeypatch.setattr(command, "_chunk_backfill_run",
-                        lambda *args, **kwargs: calls.append(("chunk", kwargs)) or {"status": "complete"})
+                        lambda *args, **kwargs: calls.append(("chunk", kwargs)) or dict(done))
     certify(object(), "store.db")
     assert [name for name, _ in calls] == ["summary", "chunk"]
     assert calls[1][1]["policy"] == "conversational" and calls[1][1]["confirm_raw_text"] is True
-    monkeypatch.setattr(command, "_chunk_backfill_run", lambda *args, **kwargs: {"status": "partial"})
-    with pytest.raises(RuntimeError, match="catch-up incomplete"):
-        certify(object(), "store.db")
+    # "complete" describes one batch; rows left behind, unknown counters or a partial pass are not certified.
+    for report in ({"status": "partial", "remaining": 0, "in_flight": 0, "uncertain": 0},
+                   {**done, "remaining": 2}, {**done, "uncertain": 1}, {"status": "complete"}):
+        monkeypatch.setattr(command, "_chunk_backfill_run", lambda *args, report=report, **kwargs: report)
+        with pytest.raises(RuntimeError, match="catch-up incomplete"):
+            certify(object(), "store.db")
 
 
 def test_longmemeval_measures_trees_without_the_model_resolver(monkeypatch):
@@ -259,3 +263,42 @@ def test_longmemeval_measures_trees_without_the_model_resolver(monkeypatch):
     monkeypatch.delattr(config_module, "effective_embedding_model")
     assert lme._effective_embedding_model("fastembed", "") == ""
     assert lme._effective_embedding_model("fastembed", "explicit-local") == "explicit-local"
+
+
+@pytest.mark.parametrize("older", [True, False], ids=["older-tree-config", "current-config"])
+def test_longmemeval_config_omits_only_newer_settings(monkeypatch, older):
+    import benchmarking.longmemeval as lme
+
+    if older:
+        monkeypatch.setattr(config_module, "LCMConfig", _older_tree_config())
+    config = lme._measured_config(database_path="store.db", embeddings_enabled=False,
+                                  embeddings_enabled_explicit=True, recall_delivery_unit="hits")
+    assert config.database_path == "store.db" and config.embeddings_enabled is False
+    assert hasattr(config, "embeddings_enabled_explicit") is not older
+    # Only the named newer settings are omitted; anything else unknown still fails loudly.
+    with pytest.raises(TypeError, match="not_a_setting"):
+        lme._measured_config(database_path="store.db", not_a_setting=True)
+
+
+def test_longmemeval_local_warmup_without_readiness_marker(monkeypatch):
+    import benchmarking.longmemeval as lme
+    from hermes_lcm import embedding_maintenance, embedding_provider
+
+    class WarmProvider:
+        dim = 0
+
+        def __init__(self, model, **kwargs):
+            self.model_id = model
+
+        def warmup(self):
+            self.dim = 2
+
+    monkeypatch.setattr(embedding_provider, "FastembedProvider", WarmProvider)
+    marked = []
+    monkeypatch.setattr(embedding_maintenance, "note_local_model_present",
+                        lambda config: marked.append(config.embedding_model))
+    resolved = lme.resolve_harness_provider("fastembed", "explicit-local", use_embed_cache=False)
+    assert resolved.dim == 2 and marked == ["explicit-local"]
+    monkeypatch.delattr(embedding_maintenance, "note_local_model_present")
+    resolved = lme.resolve_harness_provider("fastembed", "explicit-local", use_embed_cache=False)
+    assert resolved.dim == 2 and marked == ["explicit-local"]
