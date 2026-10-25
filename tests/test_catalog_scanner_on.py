@@ -1,4 +1,5 @@
 """Real catalog install with the default scanner; fixture transport only (#1946)."""
+import ast
 import importlib.util
 import json
 import os
@@ -22,6 +23,13 @@ def run(args, cwd, env=None):
 
 
 def test_catalog_scanner_on(tmp_path):
+    host_source = Path(os.environ["LCM_REAL_HERMES_SRC"]) / "hermes_cli/plugins_cmd.py"
+    scan = next(node for node in ast.parse(host_source.read_text()).body
+                if isinstance(node, ast.FunctionDef) and node.name == "_scan_plugin_tree")
+    # The host documents reviewed_pin as accepting caution at a reviewed catalog SHA.
+    # Older hosts lack that policy and require --force. Classify from source, not
+    # the install's exit code, so unexpected success/blocking fails either branch.
+    blocks_caution = "reviewed_pin" not in {arg.arg for arg in scan.args.kwonlyargs}
     spec = importlib.util.spec_from_file_location("payload", ROOT / "scripts/build_plugin_payload.py")
     builder = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(builder)
@@ -68,13 +76,26 @@ def test_catalog_scanner_on(tmp_path):
                 "HERMES_HOME": str(tmp_path / "hermes"), "GIT_CONFIG_GLOBAL": "/dev/null",
                 "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "PYTHONDONTWRITEBYTECODE": "1",
                 "HERMES_DISABLE_LAZY_INSTALLS": "1", "PROBE_ENGINE": "lcm-x"}
-    for phase in ("candidate", "consent"):
+    catalog_source = host_source.with_name("plugins_cmd_catalog.py")
+    # Repin widening consent is a newer host capability, absent on the floor.
+    has_repin_consent = any(isinstance(node, ast.ClassDef) and node.name == "RepinConsentRequired"
+                           for node in ast.parse(catalog_source.read_text()).body)
+    for phase in (("candidate", "consent") if has_repin_consent else ("candidate",)):
         host_env["HERMES_HOME"] = str(tmp_path / ("hermes-" + phase))
-        command = [os.environ["LCM_REAL_HERMES_PYTHON"], ROOT / "tests/fixtures/catalog_scanner_probe.py",
-                   phase, config, receipts / f"{phase}.json", ROOT / "tests/fixtures/catalog-scanner-findings.json",
-                   ROOT / "tests/test_real_plugin_manager_identity.py"]
-        completed = subprocess.run([str(a) for a in command], cwd=os.environ["LCM_REAL_HERMES_SRC"],
-                                   env=host_env, capture_output=True, text=True, timeout=240)
-        (receipts / f"{phase}.stdout").write_text(completed.stdout)
-        (receipts / f"{phase}.stderr").write_text(completed.stderr)
-        assert completed.returncode == 0, completed.stdout + completed.stderr
+        # Consent tests need an installed baseline even on hosts requiring --force.
+        forces = (False, True) if blocks_caution and phase == "candidate" else (blocks_caution,)
+        for force in forces:
+            label = phase + ("-force" if force else "")
+            command = [os.environ["LCM_REAL_HERMES_PYTHON"], ROOT / "tests/fixtures/catalog_scanner_probe.py",
+                       phase, config, receipts / f"{label}.json", ROOT / "tests/fixtures/catalog-scanner-findings.json",
+                       ROOT / "tests/test_real_plugin_manager_identity.py", *(["--force"] if force else [])]
+            completed = subprocess.run([str(a) for a in command], cwd=os.environ["LCM_REAL_HERMES_SRC"],
+                                       env=host_env, capture_output=True, text=True, timeout=240)
+            (receipts / f"{label}.stdout").write_text(completed.stdout)
+            (receipts / f"{label}.stderr").write_text(completed.stderr)
+            output = completed.stdout + completed.stderr
+            if blocks_caution and phase == "candidate" and not force:
+                assert completed.returncode != 0, output
+                assert "caution" in output.lower() and "BLOCKED" in output, output
+            else:
+                assert completed.returncode == 0, output
