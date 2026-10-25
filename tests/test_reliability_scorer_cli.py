@@ -68,12 +68,15 @@ def test_without_plugin_tree_preserves_cell_and_output(tmp_path, monkeypatch, ca
     assert capsys.readouterr().out == json.dumps(report, indent=1, default=str) + "\n"
 
 
-def test_cell_report_is_byte_identical_across_hash_seeds(tmp_path):
+@pytest.mark.parametrize("mixed_prefixes", [False, True])
+def test_cell_report_is_byte_identical_across_hash_seeds(tmp_path, mixed_prefixes):
     from tests.test_reliability_scorers import U, clean_events, clean_rows, held, make
 
     # Extend the existing single-licence fixture past the ten-record sample limit.
     tree = {"tree": str(Path.cwd())}
     duplicates = [("user", U.format(t, t)) for t in range(1, 13)]
+    if mixed_prefixes:
+        duplicates += [("user", "\n".join(f"[{p}{t:02d}] user turn" for p in "CDEFGH")) for t in (2, 1)]
     make(tmp_path, rows=clean_rows(12) + duplicates, events=clean_events(12),
          host=held(12) + [("S0", role, text, 1) for role, text in duplicates], plugin=tree, bars=["B1", "B2"])
     directory = tmp_path / "cell"
@@ -83,6 +86,6 @@ def test_cell_report_is_byte_identical_across_hash_seeds(tmp_path):
         env={**os.environ, "PYTHONHASHSEED": str(seed)}) for seed in (0, 1)]
     report = json.loads(reports[0])
     assert report["verdict"] == "PASS"
-    assert report["numbers"]["B1"]["host_parity_licensed"]["rows"] == 12
+    assert report["numbers"]["B1"]["host_parity_licensed"]["rows"] == (24 if mixed_prefixes else 12)
     assert len(report["numbers"]["B1"]["host_parity_licensed"]["records"]) == 10
     assert reports[0] == reports[1]
