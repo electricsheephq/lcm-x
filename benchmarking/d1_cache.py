@@ -67,6 +67,7 @@ class D1Cache(ContentHashEmbeddingCache):
             for key in dict.fromkeys(digests):
                 row = db.execute("SELECT dim, payload, checksum FROM entries WHERE key=?", (key,)).fetchone()
                 if row is None:
+                    self.corruptions += int(self.readonly and key in self.expected)
                     continue
                 dim, payload, checksum = row
                 if not isinstance(payload, bytes):

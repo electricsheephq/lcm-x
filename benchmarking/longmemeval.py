@@ -1054,9 +1054,12 @@ def resolve_harness_provider(
         # bulk-backfill contract (resolve_provider(for_backfill=True)); the
         # harness embeds thousands of summaries in one pass.
         class HarnessFastembed(FastembedProvider):
+            thread_cap_applied = False
             def _cache_key(self):
                 model, cache, threads = super()._cache_key()
-                return model, cache, min(threads, max(1, int(os.environ.get("LCM_D1_ORT_THREADS", threads))))
+                self.thread_cap_applied = True
+                self.effective_threads = min(threads, max(1, int(os.environ.get("LCM_D1_ORT_THREADS", threads))))
+                return model, cache, self.effective_threads
 
         provider_class = HarnessFastembed if "LCM_D1_ORT_THREADS" in os.environ else FastembedProvider
         resolved = provider_class(
@@ -1095,6 +1098,19 @@ def resolve_harness_provider(
         note_local_model_present = getattr(embedding_maintenance, "note_local_model_present", None)
         if note_local_model_present is not None:
             note_local_model_present(LCMConfig(embedding_provider=provider, embedding_model=model))
+    if os.environ.get("LCM_D1_THREAD_REPORT"):
+        count = getattr(resolved, "effective_threads", None)
+        node = resolved
+        for attr in ("_model", "model", "model"):
+            node = getattr(node, attr, None)
+            if hasattr(node, "get_session_options"):
+                count = node.get_session_options().intra_op_num_threads or None
+                break
+        Path(os.environ["LCM_D1_THREAD_REPORT"]).write_text(json.dumps({
+            "thread_cap_applied": bool(getattr(resolved, "thread_cap_applied", False)),
+            "effective_intra_op_threads": count,
+            "reason": None if count is not None else "product provider does not expose an explicit intra-op thread count",
+        }))
     if not use_embed_cache:
         return resolved
     return _maybe_cache_harness_provider(resolved, provider_name=provider)

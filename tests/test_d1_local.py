@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import sqlite3
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -131,7 +132,7 @@ def driver():
     return module
 
 
-@pytest.mark.parametrize("fault", ["exit", "torn"])
+@pytest.mark.parametrize("fault", ["exit", "torn", "timeout", "older", "budget", "pretimeout"])
 def test_parallel_driver_receipts_and_failure_isolation(tmp_path, monkeypatch, fault):
     cli = driver()
     monkeypatch.setattr(cli, "pin", lambda tree: ("b" if str(tree).endswith("candidate-tree") else "a") * 40)
@@ -142,21 +143,32 @@ def test_parallel_driver_receipts_and_failure_isolation(tmp_path, monkeypatch, f
         directory.mkdir(parents=True)
         (directory / "manifest.json").write_text(json.dumps({"questions": [{"question_id": f"q{i}"} for i in range(qid, qid + size)]}))
         qid += size
+    (tmp_path / "manifest.json").write_text(json.dumps({"questions": [{"question_id": f"q{i}"} for i in range(500)]}))
     aa = tmp_path / "aa"
     aa.mkdir()
     (aa / "manifest.json").write_text(json.dumps({"questions": [{"question_id": f"q{i}"} for i in range(100)]}))
     lock = threading.Lock()
     active, peak, roots, caps = 0, 0, [], []
 
-    def fake_run(command, *, cwd, env, stdout, stderr):
+    real_run_child = cli.run_child
+
+    def fake_run(command, *, timeout, cwd, env, stdout, stderr):
         nonlocal active, peak
         cache = Path(env[lme.EMBED_CACHE_ENV])
         if "prewarm-cache" in command:
             assert env["LCM_D1_CACHE_MODE"] == "build"
             options = {**OPTIONS, "product_sha": env["LCM_D1_PRODUCT_SHA"], "role": env["LCM_D1_ROLE"]}
             D1Cache(Fake(), cache, options=options, readonly=False).embed_documents(["shared"])
-            return SimpleNamespace(returncode=0)
+            Path(env["LCM_D1_THREAD_REPORT"]).write_text(json.dumps({
+                "thread_cap_applied": fault != "older", "effective_intra_op_threads": 4 if fault == "budget" else (None if fault == "older" else 2),
+                "reason": "unavailable" if fault == "older" else None,
+            }))
+            if fault == "pretimeout":
+                return real_run_child([sys.executable, "-c", "import time; time.sleep(60)"], timeout=timeout, stdout=stdout, stderr=stderr)
+            return {"exit_code": 0, "timed_out": False}
         assert env["LCM_D1_CACHE_MODE"] == "read"
+        if fault == "timeout" and "shard-1" in env["TMPDIR"]:
+            return real_run_child([sys.executable, "-c", "import subprocess,sys,time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)"], timeout=timeout, stdout=stdout, stderr=stderr)
         with lock:
             active += 1
             peak = max(peak, active)
@@ -173,32 +185,42 @@ def test_parallel_driver_receipts_and_failure_isolation(tmp_path, monkeypatch, f
         }) + "\n")
         with lock:
             active -= 1
-        return SimpleNamespace(returncode=int(fault == "exit" and out.name == "shard-1"))
+        return {"exit_code": int(fault == "exit" and out.name == "shard-1"), "timed_out": False}
 
-    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli, "run_child", fake_run)
     out = tmp_path / "output"
     assert cli.main(["--product", "base=base-tree", "--product", "candidate=candidate-tree",
                      "--prepared-dir", str(tmp_path), "--shards-dir", str(shards),
-                     "--aprime-dir", str(aa), "--output", str(out), "--scratch", str(tmp_path / "scratch")]) == 1
+                     "--aprime-dir", str(aa), "--output", str(out), "--scratch", str(tmp_path / "scratch"), "--worker-timeout", "0.05"]) == int(fault != "older")
     receipt = json.loads((out / "d1-receipt.json").read_text())
     if os.environ.get("D1_DRIVER_REPORT_DIR"):
         Path(os.environ["D1_DRIVER_REPORT_DIR"], f"driver-{fault}.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    assert receipt["fresh_output_guard_already_existed"] is True
+    if fault in {"budget", "pretimeout"}:
+        assert not receipt["arms"]
+        assert not receipt["thread_budget_ok"] if fault == "budget" else all(row["timed_out"] and row["exit_code"] == 124 for row in receipt["preembed"])
+        return
+    if fault == "older":
+        assert all(not role["thread_cap_applied"] and role["effective_intra_op_threads"] is None for role in receipt["role_threads"].values())
     assert len(receipt["arms"]) == 16
     assert {(arm["role"], arm["arm"]) for arm in receipt["arms"]} == {
         (role, name) for role in ("base", "candidate")
         for name in [*(f"shard-{i}" for i in range(6)), "aa-A", "aa-Aprime"]
     }
-    assert sum(arm["exit_code"] for arm in receipt["arms"]) == (2 if fault == "exit" else 0)
+    assert sum(arm["exit_code"] for arm in receipt["arms"]) == (2 if fault == "exit" else 248 if fault == "timeout" else 0)
     assert sum(bool(arm["parse_error"]) for arm in receipt["arms"]) == (2 if fault == "torn" else 0)
     assert peak == 3
     assert peak * max(caps) <= receipt["thread_budget"] == 8
-    assert len(set(roots)) == len(roots) == 16
+    assert len(set(roots)) == len(roots) == (14 if fault == "timeout" else 16)
     assert receipt["products"] == {"base": "a" * 40, "candidate": "b" * 40}
     assert len(set(receipt["cache_manifests"].values())) == 2
     for arm in receipt["arms"]:
         assert arm["product_sha"] == receipt["products"][arm["role"]]
         assert arm["cache_manifest_sha256"] == receipt["cache_manifests"][arm["role"]]
         assert arm["cache_manifest_sha256"] == hashlib.sha256((out / arm["role"] / "embeddings.manifest.json").read_bytes()).hexdigest()
+        if arm["timed_out"]:
+            assert arm["exit_code"] == 124 and not arm["parse_error"]
+            continue
         if arm["parse_error"]:
             assert "JSONDecodeError" in arm["parse_error"]
             continue
@@ -268,6 +290,7 @@ def test_pin_resolves_head_and_refuses_dirty_tree(tmp_path, monkeypatch, dirty):
     calls = []
 
     def git(command, **kwargs):
+        assert kwargs["timeout"] == 60
         calls.append(command)
         if command[-1] == "--porcelain":
             return b" M embedding_provider.py\n" if dirty else b""
@@ -338,10 +361,86 @@ def test_fastembed_thread_cap_without_loading_model(tmp_path, monkeypatch):
         def _cache_key(self):
             return self.model_id, "fake-cache", 4
         def warmup(self):
+            self._cache_key()
             return self.embed_query("warmup")
     monkeypatch.setattr(ep, "FastembedProvider", FakeFastembed)
     monkeypatch.setattr(em, "note_local_model_present", lambda _: None)
     monkeypatch.delenv(lme.EMBED_CACHE_ENV, raising=False)
     monkeypatch.setenv("LCM_D1_ORT_THREADS", "2")
+    report = tmp_path / "threads.json"
+    monkeypatch.setenv("LCM_D1_THREAD_REPORT", str(report))
     provider = lme.resolve_harness_provider("fastembed", "fake-model")
     assert provider._cache_key()[2] == 2
+    assert json.loads(report.read_text()) == {"thread_cap_applied": True, "effective_intra_op_threads": 2, "reason": None}
+
+
+def test_missing_sealed_row_is_corruption(tmp_path):
+    path = tmp_path / "cache.sqlite"
+    builder = D1Cache(Fake(), path, options=OPTIONS, readonly=False)
+    expected = builder.embed_documents(["alpha"])
+    seal(path)
+    path.chmod(0o644)
+    with sqlite3.connect(path) as db:
+        db.execute("DELETE FROM entries WHERE key=?", (builder.content_sha256("alpha"),))
+    path.chmod(0o444)
+    before = path.read_bytes()
+    raw = Fake()
+    cached = D1Cache(raw, path, options=OPTIONS)
+    assert cached.embed_documents(["alpha", "ordinary miss"])[:1] == expected
+    assert (cached.hits, cached.misses, cached.corruptions) == (0, 2, 1)
+    assert raw.documents == ["alpha", "ordinary miss"]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("fault", ["mismatch", "duplicate", "aprime", "output"])
+def test_driver_refuses_inputs_before_workers(tmp_path, monkeypatch, capsys, fault):
+    cli = driver()
+    monkeypatch.setattr(cli, "pin", lambda _: "a" * 40)
+    def manifest(directory, ids):
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "manifest.json").write_text(json.dumps({"questions": [{"question_id": q} for q in ids]}))
+    ids = [f"q{i}" for i in range(500)]
+    manifest(tmp_path / "prepared", ids)
+    for k in range(6):
+        selected = ids[k::6]
+        if k == 0 and fault in {"mismatch", "duplicate"}:
+            selected[0] = "other" if fault == "mismatch" else "q1"
+        manifest(tmp_path / "shards" / f"shard-{k}", selected)
+    manifest(tmp_path / "aa", ids[:99] + (["other"] if fault == "aprime" else [ids[99]]))
+    out = tmp_path / "out"
+    if fault == "output":
+        out.mkdir()
+        (out / "existing").write_text("preserve")
+    monkeypatch.setattr(cli, "run_child", lambda *a, **k: pytest.fail("worker started"))
+    with pytest.raises(SystemExit, match="2"):
+        cli.main(["--product", "base=base", "--product", "candidate=candidate",
+                  "--prepared-dir", str(tmp_path / "prepared"), "--shards-dir", str(tmp_path / "shards"),
+                  "--aprime-dir", str(tmp_path / "aa"), "--output", str(out), "--scratch", str(tmp_path / "scratch")])
+    error = capsys.readouterr().err
+    assert {"mismatch": "partition", "duplicate": "duplicate question", "aprime": "subset", "output": "fresh directory"}[fault] in error
+    if fault == "output":
+        assert (out / "existing").read_text() == "preserve"
+
+
+@pytest.mark.parametrize("effective", [None, 1])
+def test_older_provider_proceeds_without_hook(tmp_path, monkeypatch, effective):
+    lme._ensure_hermes_lcm_package()
+    from hermes_lcm import embedding_provider as ep, embedding_maintenance as em
+    class OlderProvider(Fake):
+        def __init__(self, model, **kwargs):
+            super().__init__()
+        def warmup(self):
+            if effective is not None:
+                self._model = SimpleNamespace(model=SimpleNamespace(model=SimpleNamespace(get_session_options=lambda: SimpleNamespace(intra_op_num_threads=effective))))
+            return self.embed_query("warmup")
+    monkeypatch.setattr(ep, "FastembedProvider", OlderProvider)
+    monkeypatch.setattr(em, "note_local_model_present", lambda _: None)
+    monkeypatch.delenv(lme.EMBED_CACHE_ENV, raising=False)
+    monkeypatch.setenv("LCM_D1_ORT_THREADS", "2")
+    report = tmp_path / "threads.json"
+    monkeypatch.setenv("LCM_D1_THREAD_REPORT", str(report))
+    assert lme.resolve_harness_provider("fastembed", "fake-model").dim == 64
+    receipt = json.loads(report.read_text())
+    assert receipt["thread_cap_applied"] is False
+    assert receipt["effective_intra_op_threads"] == effective
+    assert bool(receipt["reason"]) == (effective is None)

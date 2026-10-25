@@ -7,7 +7,8 @@ files must already be staged. This command never fetches the corpus or models.
 The prepared corpus must contain all 500 questions; shards must partition those
 IDs, and the A/A-prime prepared corpus contains 100 questions. Supply two
 ROLE=PATH product bindings. --output and --scratch must be fresh directories.
-Default concurrency is three, with at most floor(8/3)=2 ORT threads per child.
+Default concurrency is three; request floor(8/3)=2 ORT threads per child.
+Older product defaults are retained; the receipt reports effective thread use.
 Each role's sealed SQLite cache and hash manifest live in --output. Per-question
 embedding wall time (including cache reads and queries), hits/misses and
 corruptions live in embedding-metrics.jsonl; d1-receipt.json aggregates each arm.
@@ -18,6 +19,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import signal
 import subprocess
 import sys
 import time
@@ -28,9 +30,9 @@ sys.path.insert(0, str(ROOT))
 
 
 def pin(tree):
-    if subprocess.check_output(["git", "-C", str(tree), "status", "--porcelain"]):
+    if subprocess.check_output(["git", "-C", str(tree), "status", "--porcelain"], timeout=60):
         raise ValueError("D1 requires clean product and instrument trees")
-    return subprocess.check_output(["git", "-C", str(tree), "rev-parse", "HEAD"], text=True).strip()
+    return subprocess.check_output(["git", "-C", str(tree), "rev-parse", "HEAD"], text=True, timeout=60).strip()
 
 
 def worker(product, expected, instrument, *argv):
@@ -54,6 +56,16 @@ def run_pool(tasks, jobs, launch):
         return results
 
 
+def run_child(command, *, timeout, **kwargs):
+    with subprocess.Popen(command, start_new_session=True, **kwargs) as child:
+        try:
+            return {"exit_code": child.wait(timeout=timeout), "timed_out": False}
+        except subprocess.TimeoutExpired:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+            return {"exit_code": 124, "timed_out": True}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--product", action="append", required=True, help="ROLE=clean-product-tree (twice)")
@@ -61,7 +73,10 @@ def main(argv=None):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--jobs", type=int, default=3)
     parser.add_argument("--thread-budget", type=int, default=8)
+    parser.add_argument("--worker-timeout", type=float, default=14400)
     args = parser.parse_args(argv)
+    if not 0 < args.worker_timeout < float("inf"):
+        parser.error("worker-timeout must be positive and finite")
     if not 1 <= args.jobs <= args.thread_budget <= 8 or len(args.product) != 2:
         parser.error("require two roles and 1 <= jobs <= thread-budget <= 8")
     products = dict(item.split("=", 1) for item in args.product)
@@ -74,8 +89,16 @@ def main(argv=None):
     if len(shards) != 6:
         parser.error("require six prepared shard manifests")
     from benchmarking.longmemeval import load_shard_question_ids
-    if len(load_shard_question_ids(args.shards_dir)) != 500 or len(load_shard_question_ids(args.aprime_dir)) != 100:
-        parser.error("require 500 distinct shard IDs and 100 placebo IDs")
+    try:
+        prepared = set(load_shard_question_ids(args.prepared_dir / "manifest.json"))
+        selected = set(load_shard_question_ids(args.shards_dir))
+        aprime = set(load_shard_question_ids(args.aprime_dir / "manifest.json"))
+        if len(prepared) != 500 or selected != prepared or len(aprime) != 100 or not aprime <= prepared:
+            raise ValueError("require shards to partition the 500 prepared IDs exactly and 100 A-prime IDs to be a subset")
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.output.exists():
+        parser.error("output must be a fresh directory; existing output cannot be resumed")
     args.output.mkdir(parents=True, exist_ok=False)
     args.scratch.mkdir(parents=True, exist_ok=False)
     caches = {role: args.output.resolve() / role / "embeddings.sqlite" for role in products}
@@ -90,20 +113,26 @@ def main(argv=None):
         scratch.mkdir(parents=True)
         child_env = dict(env, LCM_LONGMEMEVAL_EMBED_CACHE=str(caches[role]),
                          LCM_D1_PRODUCT_SHA=pins[role], LCM_D1_ROLE=role,
+                         LCM_D1_THREAD_REPORT=str(args.output.resolve() / f"{role}-{name}-threads.json"),
                          LCM_D1_CACHE_MODE=mode, HERMES_HOME=str(scratch / "home"), TMPDIR=str(scratch))
         with (args.output / f"{role}-{name}.log").open("w") as log:
-            return subprocess.run([sys.executable, str(Path(__file__).resolve()), "--worker", products[role], pins[role], instrument, *command], cwd=products[role], env=child_env, stdout=log, stderr=subprocess.STDOUT).returncode
+            return run_child([sys.executable, str(Path(__file__).resolve()), "--worker", products[role], pins[role], instrument, *command], cwd=products[role], env=child_env, stdout=log, stderr=subprocess.STDOUT, timeout=args.worker_timeout)
 
     # Enumerate the product's actual chunk/summary units in each tree, including
     # the placebo corpus. Only this serial phase is allowed to write the cache.
     from benchmarking.d1_cache import seal
-    manifests = {}
+    manifests, role_threads, preembed = {}, {}, []
     for role in products:
         caches[role].parent.mkdir()
         for name, prepared in (("preembed", args.prepared_dir), ("preembed-aa", args.aprime_dir)):
             command = ["prewarm-cache", "--prepared-dir", str(prepared.resolve()), "--shards-manifest", str(prepared.resolve()), *common]
-            if invoke(role, name, command, "build"):
-                raise SystemExit("pre-embed failed; inspect its isolated log")
+            result = invoke(role, name, command, "build")
+            preembed.append({"role": role, "arm": name, **result})
+            if result["exit_code"]:
+                break
+            role_threads[role] = json.loads((args.output / f"{role}-{name}-threads.json").read_text())
+        if preembed[-1]["exit_code"]:
+            continue
         manifests[role] = seal(caches[role])
     tasks = [(role, path.parent.name, path.parent) for role in products for path in shards]
     tasks += [(role, name, args.aprime_dir) for role in products for name in ("aa-A", "aa-Aprime")]
@@ -112,10 +141,12 @@ def main(argv=None):
         role, name, prepared = task
         out = args.output.resolve() / role / name
         status = {"role": role, "arm": name, "exit_code": 1, "parse_error": None,
-                  "product_sha": pins[role], "cache_manifest_sha256": manifests[role]}
+                  "timed_out": False, "product_sha": pins[role], "cache_manifest_sha256": manifests[role]}
         try:
             command = ["run", "--prepared-dir", str(prepared.resolve()), "--output", str(out), "--allow-external-output", "--dump-candidates", str(out / "candidates.jsonl"), *common]
-            status["exit_code"] = invoke(role, name, command, "read")
+            status.update(invoke(role, name, command, "read"))
+            if status["timed_out"]:
+                return status
             rows = [json.loads(line) for line in (out / "per_question_checkpoint.jsonl").read_text().splitlines()]
             metrics = [json.loads(line) for line in (out / "embedding-metrics.jsonl").read_text().splitlines()]
             hits, misses = (sum(row[field] for row in metrics) for field in ("hits", "misses"))
@@ -128,14 +159,19 @@ def main(argv=None):
             status["parse_error"] = f"{type(exc).__name__}: {exc}"
         return status
 
-    arms = run_pool(tasks, args.jobs, launch)
+    effective = [value["effective_intra_op_threads"] for value in role_threads.values()]
+    budget_ok = args.jobs * max((n for n in effective if n is not None), default=threads) <= args.thread_budget
+    arms = run_pool([task for task in tasks if task[0] in manifests], args.jobs, launch) if budget_ok else []
     receipt = {"instrument_sha": instrument, "products": pins, "jobs": args.jobs,
-               "cache_manifests": manifests,
+               "cache_manifests": manifests, "role_threads": role_threads,
+               "thread_budget_ok": budget_ok, "thread_budget_fully_known": len(effective) == 2 and None not in effective,
+               "worker_timeout": args.worker_timeout, "preembed": preembed,
+               "fresh_output_guard_already_existed": True,
                "ort_threads_per_shard_cap": threads, "thread_budget": args.thread_budget,
                "wall_seconds": time.monotonic() - started, "arms": arms,
                "not_proven": "Eight-hour acceptance requires the complete quiet-window run; recall equivalence is a separate gate."}
     (args.output / "d1-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    return int(any(arm["exit_code"] or arm["parse_error"] for arm in arms))
+    return int(not budget_ok or any(row["exit_code"] for row in preembed) or any(arm["exit_code"] or arm["parse_error"] for arm in arms))
 
 
 if __name__ == "__main__":
