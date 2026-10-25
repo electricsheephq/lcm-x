@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import shlex
+import sys
 
 import pytest
 
@@ -97,7 +98,7 @@ def test_installer_targets_explicit_profile_and_root(tmp_path, profile, sticky, 
 
 def run_resolving_installer(tmp_path, *, profile=None, sticky=None, custom=True,
                             existing=False, failure=None, legacy=False, profile_home=False, resolution_source=None):
-    """Stub the two pinned hosts' -p/root/sticky resolution and native verbs."""
+    """Use real host profile resolution when requested; stub native verbs."""
     home = tmp_path / ("custom root" if custom else "user/.hermes")
     canonical = profile.strip().casefold() if profile else "default"
     target = home / "profiles/work" if profile_home else (
@@ -121,8 +122,8 @@ def run_resolving_installer(tmp_path, *, profile=None, sticky=None, custom=True,
     bindir.mkdir()
     log = tmp_path / "calls.jsonl"
     hermes = bindir / "hermes"
-    hermes.write_text("""#!/usr/bin/env python3
-import ast, json, os, sys
+    python = os.environ.get("LCM_REAL_HERMES_PYTHON", sys.executable)
+    hermes.write_text(f"#!{python} -B\n" + """import json, os, sys
 from pathlib import Path
 root = Path(os.environ['HERMES_HOME'])
 args = sys.argv[1:]
@@ -134,16 +135,13 @@ else:
 source = os.environ.get('LCM_1186_PROFILE_SOURCE')
 if source:
     # Execute the real pin's resolution; only validation/liveness and verbs are stubbed.
-    namespace = {'os': os, 'Path': Path,
-                 '_canon_valid': lambda name: name.strip().casefold(),
-                 '_get_default_hermes_home': lambda: Path.home() / '.hermes',
-                 'named_profile_is_live': lambda path: path.is_dir()}
-    functions = [node for node in ast.parse(Path(source).read_text()).body
-                 if isinstance(node, ast.FunctionDef) and node.name in
-                 {'profile_root_for_env_home', 'resolve_profile_env'}]
-    assert len(functions) == 2
-    exec(compile(ast.Module(body=functions, type_ignores=[]), source, 'exec'), namespace)
-    home = Path(namespace['resolve_profile_env'](profile))
+    # Import the whole module so each pin retains its own helper dependencies.
+    sys.path.insert(0, str(Path(source).resolve().parents[1]))
+    from hermes_cli import profiles
+    profiles._canon_valid = lambda name: name.strip().casefold()
+    profiles._get_default_hermes_home = lambda: Path.home() / '.hermes'
+    profiles.named_profile_is_live = lambda path: path.is_dir()
+    home = Path(profiles.resolve_profile_env(profile))
 else:
     root = root.parent.parent if root.parent.name == 'profiles' else root
     home = root if profile == 'default' else root / 'profiles' / profile
