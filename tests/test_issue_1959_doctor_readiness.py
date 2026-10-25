@@ -320,3 +320,26 @@ def test_expired_prepare_backoff_blocked_by_other_key_repolls_at_sixty_seconds(t
         patch.setattr(maintenance, "_run_pass", lambda *args: ("model_prepare_exhausted", None))
         result = maintenance.run_incremental_embedding_pass(tmp_path / "lcm.db", config, slice_state={})
         assert result["continue"] and result["delay"] >= 60
+
+
+@pytest.mark.parametrize("run,clears", [
+    ({"apply": True, "error": None, "embedded": 1, "status": "partial"}, True),
+    ({"apply": True, "error": None, "embedded": 0, "status": "complete"}, True),
+    ({"apply": True, "error": "synthetic write error", "embedded": 1, "status": "error"}, False),
+    ({"apply": True, "error": None, "embedded": 0, "status": "partial"}, False),
+    ({"apply": False, "error": None, "embedded": 0, "status": "complete"}, False),
+])
+def test_manual_backfill_progress_clears_stale_failure(default_engine, monkeypatch, run, clears):
+    probe(monkeypatch)
+    monkeypatch.setattr(tools, "_embedding_readiness", lambda *a: "model: present; coverage: 0/1 summaries; chunks: catching up")
+    db_path = default_engine._store.db_path
+    maintenance._record(db_path, "summaries=error", "synthetic catch-up disk error")
+    assert "failing" in tools._embedding_provider_health_check(default_engine)["detail"]["reason"]
+    apply = run.pop("apply")
+    monkeypatch.setattr(command, "_embedding_backfill_summary_run", lambda *a, **k: run)
+    monkeypatch.setattr(command, "_embedding_backfill_report", lambda **k: "report")
+    assert command._embedding_backfill_summary_text(
+        default_engine, apply=apply, limit=10, retry_uncertain=False) == "report"
+    reason = tools._embedding_provider_health_check(default_engine)["detail"].get("reason", "")
+    assert ("failing" not in reason) is clears
+    assert (maintenance.incremental_embedding_state(db_path)[1] == 0) is clears

@@ -94,6 +94,7 @@ from .chunking import (
     group_by_store_id,
     normalize_content_policy,
 )
+from .embedding_maintenance import clear_incremental_embedding_failures
 from .embedding_maintenance import incremental_embedding_state as incremental_embedding_state
 from .engine_registry import live_bound_session_ids
 from .embedding_provider import (
@@ -3564,7 +3565,12 @@ def _embedding_backfill_summary_text(
         retry_uncertain=retry_uncertain, include_next_hint=include_next_hint,
         expected_dtype=expected_dtype,
     )
-    return str(result) if isinstance(result, str) else _embedding_backfill_report(**result)
+    if isinstance(result, str):
+        return result
+    if apply and not result["error"] and (result["embedded"] or result["status"] == "complete"):
+        # Operator progress supersedes an older automatic-pass failure in /lcm doctor (#1959).
+        clear_incremental_embedding_failures(engine._store.db_path)
+    return _embedding_backfill_report(**result)
 
 
 def _summary_backfill_estimates(

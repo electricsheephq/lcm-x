@@ -55,6 +55,14 @@ def incremental_embedding_state(db_path: str | Path) -> tuple[tuple[float, str] 
         return _LAST_PASS.get(identity), _FAILURES.get(identity, 0)
 
 
+def clear_incremental_embedding_failures(db_path: str | Path) -> None:
+    """Forget recorded pass failures once an operator backfill makes progress."""
+    with _STATE_LOCK:
+        identity = database_identity(db_path)
+        _FAILURES.pop(identity, None)
+        _FAILURE_WARNED.pop(identity, None)
+
+
 def _record(db_path: str | Path, outcome: str, failure: str | None) -> None:
     with _STATE_LOCK:
         identity = database_identity(db_path)
