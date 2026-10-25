@@ -573,13 +573,13 @@ raise SystemExit(cli.main({argv!r}))
                     pass
 
 
-@pytest.mark.parametrize("alias", ["exact", "symlink", "dotdot", "case", "hardlink"])
+@pytest.mark.parametrize("alias", ["exact", "symlink", "dotdot", "case", "hardlink", "nfd"])
 @pytest.mark.parametrize("exists", [False, True])
 def test_cli_refuses_metrics_sidecar_alias_before_open(tmp_path, monkeypatch, alias, exists):
     spec = importlib.util.spec_from_file_location("lme_cli", Path(__file__).resolve().parents[1] / "scripts/lcm_longmemeval.py")
     cli = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cli)
-    output = tmp_path / "output"
+    output = tmp_path / ("caf\u00e9" if alias == "nfd" else "output")
     output.mkdir()
     sidecar = output / "embedding-metrics.jsonl"
     if exists:
@@ -600,6 +600,10 @@ def test_cli_refuses_metrics_sidecar_alias_before_open(tmp_path, monkeypatch, al
             pytest.skip("hardlink requires existing target")
         dump = tmp_path / "hardlink.jsonl"
         os.link(sidecar, dump)
+    elif alias == "nfd":
+        if not (tmp_path / "cafe\u0301").exists():
+            pytest.skip("normalization-sensitive volume")
+        dump = tmp_path / "cafe\u0301" / "embedding-metrics.jsonl"
     dataset = tmp_path / lme.DATASET_COORDS["s"]["file"]
     dataset.write_text("[]")
     monkeypatch.setattr(cli, "load_questions_with_sha256", lambda *a, **k: (questions()[:1], "a" * 64))
@@ -651,3 +655,14 @@ def test_read_mode_resume_reconciles_metrics(tmp_path, monkeypatch, crash):
         file.write('{"question_id":')
     lme.run_harness(questions()[:2], resume=True, **args)
     assert list(map(json.loads, sidecar.read_text().splitlines())) == rows
+
+
+def test_reconcile_keeps_original_bytes_and_file_mode(tmp_path):
+    sidecar = tmp_path / "embedding-metrics.jsonl"
+    sidecar.write_bytes(b'{"question_id":"q0","wall_ms":4}\n{"question_id": "q1", "wall_ms": 6}\n'
+                        b'{"question_id":"qx","wall_ms":5}\n{"question_id":"q0","wall_ms":7}\n{"question_id":')
+    sidecar.chmod(0o640)
+    lme._reconcile_d1_metrics(sidecar, {"q0", "q1"})
+    # The newest row per checkpointed question survives byte for byte; un-checkpointed and torn rows go.
+    assert sidecar.read_bytes() == b'{"question_id":"q0","wall_ms":7}\n{"question_id": "q1", "wall_ms": 6}\n'
+    assert sidecar.stat().st_mode & 0o777 == 0o640
