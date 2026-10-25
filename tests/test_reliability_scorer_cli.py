@@ -301,3 +301,21 @@ def test_stop_turn_uses_disk_scorer_and_phase_b_exit(tmp_path, monkeypatch, caps
     assert cli.main(["--cell-dir", str(tmp_path)]) == 0
     assert json.loads(capsys.readouterr().out) == expected
     assert expected["verdict"] == ("FAIL" if damage else "PASS")
+
+
+def test_f4_unidentified_scenario_finding_refused(tmp_path, monkeypatch, capsys):
+    cell, path = cell_dir(tmp_path, "unused")
+    cell.update(id="continuity/test", transport="acp-process")
+    path.write_text(json.dumps(cell))
+    (tmp_path / "verdict.json").write_text('{"acp_session":"session-r2"}')
+    (tmp_path / "observer.jsonl").write_text("")
+    (tmp_path / "provider-requests.jsonl").write_text(json.dumps({
+        "role": "main", "unexpected": True, "turn": 1,
+        "current_user_missing": True, "current_user_projected": False}))
+    monkeypatch.setattr(cli.bars, "score", lambda *_: {"verdict": "PASS"})
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--cell-dir", str(tmp_path)])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "continuity F4 scenario findings are unavailable on disk" in captured.err

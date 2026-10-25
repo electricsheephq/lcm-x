@@ -133,7 +133,10 @@ def main(argv=None) -> int:
             report = {"verdict": "UNSUPPORTED", "reason": reason} if reason else bars.score(cell, a.cell_dir)
             if f4:
                 requests = read_jsonl(a.cell_dir / "provider-requests.jsonl")
-                unique = {r["rid"]: r for r in requests if r.get("role") == "main" and r.get("unexpected")}
+                candidates = [r for r in requests if r.get("role") == "main" and r.get("unexpected")]
+                if any("rid" not in r for r in candidates):
+                    refuse("continuity F4 scenario findings are unavailable on disk")
+                unique = {r["rid"]: r for r in candidates}
                 if any(not r.get("current_user_missing") or any(k not in r for k in (
                         "turn", "current_user_projected")) for r in unique.values()):
                     refuse("continuity F4 scenario findings are unavailable on disk")
