@@ -264,3 +264,17 @@ def test_env_reset_to_omitted_drops_consent(monkeypatch, form, enabled):
     assert cloned._embeddings_enabled_supplied is False
     assert cloned.embeddings_enabled == LCMConfig(embedding_provider=config.embedding_provider,
                                                   embedding_model=config.embedding_model).embeddings_enabled
+
+
+def test_doctor_reports_completed_chunk_catchup(tmp_path, monkeypatch):
+    engine = _engine(tmp_path, LCMConfig())
+    probe = {"available": True, "provider": "fastembed", "model": "BAAI/bge-small-en-v1.5"}
+    try:
+        _seed(engine)
+        monkeypatch.setattr(tools, "_lcm_recall_catchup_reason", lambda *a, **k: None)
+        assert tools._embedding_readiness(engine, probe).split("chunks: ", 1)[1].startswith("caught up")
+        backlog = "chunk semantic index catching up (3 rows not yet embedded)"
+        monkeypatch.setattr(tools, "_lcm_recall_catchup_reason", lambda *a, **k: backlog)
+        assert f"chunks: {backlog}" in tools._embedding_readiness(engine, probe)
+    finally:
+        engine.shutdown()

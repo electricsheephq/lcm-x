@@ -505,10 +505,10 @@ Useful environment variables:
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `24` | Minimum hours between startup FTS5 deep integrity-checks (O(index size)). `0` checks every startup (previous behavior); a negative value never checks on startup. Structural checks always run regardless. |
 | `LCM_ENABLE_SLASH_COMMAND` | `false` | Enable the optional `/lcm` operator command surface |
 | `LCM_SENDER_CAPTURE` | `true` | Profile-aware, non-field toggle; `0` disables pending sender associations. Nullable columns remain; no historical backfill. Stores an unverified gateway session principal without changing stored or delivered text |
-| `LCM_EMBEDDINGS_ENABLED` | `false` | Opt in to embedding warmup, backfill, and semantic retrieval storage |
+| `LCM_EMBEDDINGS_ENABLED` | unset (local on) | Unset turns on local `fastembed` semantic recall; model warmup and index catch-up run in the background. `false` opts out without loading or downloading a model. Non-local providers need an explicit `true` |
 | `LCM_RERANK_WINDOW_LIMIT` | `0` | Optional positive cap on the `lcm_recall` rerank delivery window; `0` keeps the historical window unchanged, while a bound can stabilize the delivery set at `k ≤ limit` |
 | `LCM_RERANK_MARGIN` | `0.0` | Optional positive relevance-gap gate that holds the incoming rank-1 `lcm_recall` candidate unless the rerank challenger clears the margin |
-| `LCM_EMBEDDING_PROVIDER` | empty | Embedding provider: `voyage`, `ollama`, `fastembed`, or `openai-compatible` (`openai`/`siliconflow` aliases resolve to that provider identity) |
+| `LCM_EMBEDDING_PROVIDER` | empty (`fastembed`) | Embedding provider: `voyage`, `ollama`, `fastembed`, or `openai-compatible` (`openai`/`siliconflow` aliases resolve to that provider identity) |
 | `LCM_EMBEDDING_MODEL` | empty | Provider model identifier registered by `/lcm embed warmup` |
 | `LCM_EMBEDDING_BASE_URL` | empty | Required API root for `openai-compatible`; `/embeddings` is appended after trailing-slash normalization |
 | `LCM_EMBEDDING_API_KEY_ENV` | `LCM_EMBEDDING_API_KEY` | Name of the environment variable holding the OpenAI-compatible endpoint key; store the value in an operator secret manager, never in config/docs |

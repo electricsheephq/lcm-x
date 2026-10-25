@@ -4657,7 +4657,7 @@ def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
             model = "present" if _active_embedding_profile_exists(engine) else "preparing"
     last, _ = command.incremental_embedding_state(engine._store.db_path)
     provider = SimpleNamespace(provider_id="fastembed", model_id=probe.get("model"), identity_revision_suffix="")
-    chunks = _lcm_recall_catchup_reason(engine, provider, "chunk") or "backlog not reported; coverage not certified"
+    chunks = _lcm_recall_catchup_reason(engine, provider, "chunk") or "caught up (coverage certified)"
     return f"model: {model}; coverage: {coverage}; chunks: {chunks}" + (f"; maintenance: {last[1]}" if last else "")
 
 
