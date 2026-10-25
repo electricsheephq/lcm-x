@@ -264,6 +264,7 @@ def test_explicit_local_prepare_keeps_recall_answering(make_engine, monkeypatch,
 @pytest.mark.parametrize("prepare_fails", [False, True])
 @pytest.mark.parametrize("mode", ["hybrid", "semantic"])
 def test_grep_defers_process_cold_local_model(make_engine, monkeypatch, tmp_path, prepare_fails, mode):
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda _c: {"available": True})
     entered, release = threading.Event(), threading.Event()
     cache = tmp_path / "disk-warm-model"
     cache.mkdir()

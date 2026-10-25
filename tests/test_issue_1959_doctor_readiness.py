@@ -213,3 +213,110 @@ def test_agent_reason_omits_operator_details_and_empty_suffix(default_engine, mo
     with pytest.raises(RuntimeError, match="^local semantic recall preparing; using full-text recall$"):
         probe(monkeypatch, "preparing")
         tools._lcm_grep_resolve_provider(default_engine)
+
+
+def test_live_catchup_lease_prevents_false_stall(default_engine, monkeypatch):
+    probe(monkeypatch)
+    clock = [1000.0]
+    monkeypatch.setattr(tools.time, "time", lambda: clock[0])
+    monkeypatch.setattr(tools, "_embedding_readiness", lambda *a: "model: present; coverage: 0/1 summaries; chunks: catching up")
+    monkeypatch.setattr(command, "_embedding_current_profile", lambda conn: {
+        "identity_hash": "fixture", "provider": "fastembed", "model_name": "test"})
+    command._record_embedding_catchup(default_engine._store.db_path, "summary", "fixture", 1)
+    ttl = command._embedding_backfill_lease_ttl_s()
+    conn = default_engine._dag.connection
+    lease = command._acquire_embedding_backfill_lease(conn, ttl_s=ttl, heartbeat_s=60)
+    assert lease is not None
+    clock[0] += ttl + 1
+    assert lease.renew(now=clock[0])
+    conn.commit()
+    check = tools._embedding_provider_health_check(default_engine)
+    assert check["detail"]["informational"]
+    assert "status: issues-found" not in render_doctor(collect_doctor(default_engine))
+    clock[0] += ttl + 1
+    check = tools._embedding_provider_health_check(default_engine)
+    assert not check["detail"]["informational"] and "stalled" in check["detail"]["reason"]
+    assert "status: issues-found" in render_doctor(collect_doctor(default_engine))
+    maintenance._record(default_engine._store.db_path, "summaries=error", "synthetic catch-up disk error")
+    assert lease.renew(now=clock[0])
+    conn.commit()
+    check = tools._embedding_provider_health_check(default_engine)
+    assert not check["detail"]["informational"] and "failing" in check["detail"]["reason"]
+    assert "synthetic catch-up disk error" in doctor_guidance_for_check(check)["operator_action"]
+
+
+@pytest.mark.parametrize("cpus", [2, 8])
+@pytest.mark.parametrize("reason", ["summary catch-up stalled (no recent catch-up progress)",
+    "summary catch-up failing (last catch-up attempt recorded an error: synthetic disk error)"])
+def test_stall_guidance_is_actionable_on_every_host(cpus, reason):
+    check = {"check": "embedding_provider_health", "status": "warn", "detail": {
+        "available": True, "cpu_limited": cpus <= 2, "reason": reason,
+        "readiness": "model: present; coverage: 0/1 summaries; chunks: catching up"}}
+    guidance = doctor_guidance_for_check(check)
+    assert guidance["action"] == "inspect"
+    assert reason in guidance["operator_action"]
+    assert "`/lcm embed backfill --apply`" in guidance["operator_action"]
+    assert "`/lcm doctor`" in guidance["operator_action"]
+    assert "companion" not in guidance["operator_action"]
+    assert "CPU-limited as expected" not in guidance["rationale"]
+
+
+@pytest.mark.parametrize("raw", ["{", "[]", "null", '{"updated_at": []}',
+    '{"updated_at": null}', '{"updated_at": "not-a-time"}'])
+def test_malformed_catchup_receipt_falls_back_to_maintenance(default_engine, monkeypatch, raw):
+    probe(monkeypatch)
+    monkeypatch.setattr(tools.time, "time", lambda: 2000.0)
+    monkeypatch.setattr(tools, "_embedding_readiness", lambda *a: "model: present; coverage: 0/1 summaries; chunks: catching up")
+    monkeypatch.setattr(command, "_embedding_current_profile", lambda conn: {
+        "identity_hash": "fixture", "provider": "fastembed", "model_name": "test"})
+    conn = default_engine._dag.connection
+    conn.execute("INSERT INTO metadata(key,value) VALUES(?,?)", ("embedding_catchup:summary:fixture", raw))
+    conn.commit()
+    db = maintenance.database_identity(default_engine._store.db_path)
+    maintenance._LAST_PASS[db] = (1000.0, "summaries=complete:1")
+    check = tools._embedding_provider_health_check(default_engine)
+    assert check["status"] == "warn" and "stalled" in check["detail"]["reason"]
+    text = render_doctor(collect_doctor(default_engine))
+    assert "status: issues-found" in text and "embedding_provider_health: fail" not in text
+    maintenance._LAST_PASS[db] = (2000.0, "summaries=complete:1")
+    assert tools._embedding_provider_health_check(default_engine)["detail"]["informational"]
+
+
+@pytest.mark.parametrize("state,available", [("preparing", True), ("unavailable", True), ("preparing", False)])
+def test_grep_and_recall_share_short_readiness_reason(default_engine, monkeypatch, state, available):
+    probe(monkeypatch, state, available=available)
+    recall = json.loads(tools.lcm_recall({"query": "fixture"}, engine=default_engine))
+    grep = json.loads(tools.lcm_grep({"query": "fixture", "mode": "semantic"}, engine=default_engine))
+    expected = f"local semantic recall {state if available else 'unavailable'}; using full-text recall"
+    assert grep["degraded_reason"] == recall["degraded_reason"] == expected
+
+
+def test_real_companion_reason_is_short_in_readiness(default_engine, monkeypatch):
+    from hermes_lcm import embedding_provider
+    monkeypatch.setattr(embedding_provider.importlib.util, "find_spec", lambda name: None)
+    real_probe = embedding_provider.probe_provider_availability(default_engine._config)
+    assert "install the dependency companion" in real_probe["detail"]
+    probe(monkeypatch, available=False, reason=real_probe["detail"])
+    text = render_doctor(collect_doctor(default_engine))
+    line = next(line for line in text.splitlines() if line.startswith("embedding_readiness:"))
+    assert line == "embedding_readiness: Local semantic recall unavailable (FastEmbed is not installed); full-text recall is active"
+    assert text.splitlines().count(f"embedding_enable_command: {companion_enable_command()}") == 1
+    assert companion_enable_command() not in line
+
+
+def test_expired_prepare_backoff_blocked_by_other_key_repolls_at_sixty_seconds(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(maintenance.time, "monotonic", lambda: clock[0])
+    config = LCMConfig()
+    key = maintenance._local_model_key(config)
+    maintenance._PREPARE[key] = ("unavailable", "offline")
+    maintenance._PREPARE_RETRY[key] = (6, clock[0] - 1)
+    class OtherPrepare:
+        def is_alive(self):
+            return True
+    with monkeypatch.context() as patch:
+        patch.setattr(maintenance, "_PREPARE_THREAD", OtherPrepare())
+        assert not REAL_PREPARE(tmp_path / "lcm.db", config, on_ready=lambda: None, owner="fixture")
+        patch.setattr(maintenance, "_run_pass", lambda *args: ("model_prepare_exhausted", None))
+        result = maintenance.run_incremental_embedding_pass(tmp_path / "lcm.db", config, slice_state={})
+        assert result["continue"] and result["delay"] >= 60

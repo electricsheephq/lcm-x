@@ -221,6 +221,7 @@ def test_prepare_start_failure_degrades_and_can_retry(tmp_path, monkeypatch, tra
 
 @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
 def test_stateless_grep_schedules_slow_model_off_turn(tmp_path, monkeypatch, transport, mode):
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda _c: {"available": True})
     config = LCMConfig(embeddings_enabled=True, embedding_provider="fastembed", embedding_query_timeout_s=0.25)
     config.stateless_session_patterns = ["ephemeral-*"]
     engine = _engine(tmp_path, config)
@@ -272,7 +273,7 @@ def test_blank_provider_is_unset_local(monkeypatch, raw):
     (("preparing", ""), True, "local semantic recall preparing;"),
     (("unavailable", "fixture uncached"), True, "local semantic recall unavailable;"),
 ])
-def test_readiness_cause_precedes_catchup(tmp_path, monkeypatch, transport, state, available, prefix):
+def test_unready_recall_has_single_readiness_sentence(tmp_path, monkeypatch, transport, state, available, prefix):
     engine = _engine(tmp_path, LCMConfig(embeddings_enabled=True, embedding_provider="fastembed"))
     try:
         _seed(engine)

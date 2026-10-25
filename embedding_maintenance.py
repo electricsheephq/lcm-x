@@ -58,7 +58,7 @@ def incremental_embedding_state(db_path: str | Path) -> tuple[tuple[float, str] 
 def _record(db_path: str | Path, outcome: str, failure: str | None) -> None:
     with _STATE_LOCK:
         identity = database_identity(db_path)
-        _LAST_PASS[identity] = (time.time(), outcome)
+        _LAST_PASS[identity] = (time.time(), f"{outcome}: {failure}" if failure else outcome)
         if failure is None:
             parts = [part.split("=", 1)[-1].split(":") for part in outcome.split()]
             wrote = any(len(part) == 2 and part[1].isdigit() and int(part[1]) > 0 for part in parts)
@@ -219,7 +219,7 @@ def run_incremental_embedding_pass(
         deferred = outcome in {"lease_held", "circuit_open", "model_preparing", "model_unavailable", "model_prepare_exhausted"}
         retry_at = _PREPARE_RETRY.get(_local_model_key(config), (0, 0.0))[1]
         slice_state.update(active_s=active, overrun_s=max(0.0, active - 1.0),
-                           delay=max(_LOCAL_IDLE_MULTIPLIER * active, (max(1.0, retry_at - time.monotonic()) if outcome in {"model_unavailable", "model_prepare_exhausted"} else 1.0) if deferred else 0.0))
+                           delay=max(_LOCAL_IDLE_MULTIPLIER * active, (max(60.0, retry_at - time.monotonic()) if outcome in {"model_unavailable", "model_prepare_exhausted"} else 1.0) if deferred else 0.0))
         if slice_state.pop("retry_wait", False):
             slice_state["delay"] = max(600.0, slice_state["delay"])
         slice_state["continue"] = deferred or (not failure and slice_state.get("continue", False))

@@ -713,6 +713,7 @@ def render_doctor(facts: DoctorFacts) -> str:
                 model_reason = readiness[len("model: unavailable("):].split("); coverage: ", 1)[0]
                 if "FastEmbed is not installed" in model_reason:
                     lines.append(f"embedding_enable_command: {companion_enable_command()}")
+                model_reason = model_reason.split(";", 1)[0]
                 readiness = f"Local semantic recall unavailable ({model_reason}); full-text recall is active"
             elif readiness.startswith("model: present;"):
                 coverage, _, chunks = readiness.split("; coverage: ", 1)[1].partition("; chunks: ")

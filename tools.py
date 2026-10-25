@@ -1817,6 +1817,9 @@ def _lcm_grep_resolve_provider(
 
     config = engine._config
     state = local_model_state(config)
+    if (embedding_provider_id(normalize_embedding_provider(config.embedding_provider)) == "fastembed"
+            and not probe_provider_availability(config).get("available")):
+        raise RuntimeError("local semantic recall unavailable; using full-text recall")
     if state is None and embedding_provider_id(normalize_embedding_provider(config.embedding_provider)) == "fastembed":
         start_local_model_prepare(engine._store.db_path, config)
         raise RuntimeError("local semantic recall preparing; using full-text recall")
@@ -2076,7 +2079,7 @@ def _lcm_grep_semantic(
     except TimeoutError:
         return _lcm_grep_deadline_error(mode, "provider_resolution")
     except Exception as exc:
-        return degraded(f"embedding provider unavailable: {exc}")
+        return degraded(str(exc) if str(exc).startswith("local semantic recall ") else f"embedding provider unavailable: {exc}")
     if provider is None:
         return degraded("embedding provider is not configured")
 
@@ -4833,20 +4836,28 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
             # configured summary identity, never count another corpus here.
             conn = command._embedding_read_connection(engine._store.db_path)
             try:
+                lease_row = conn.execute("SELECT value FROM metadata WHERE key=?", (command._EMBEDDING_BACKFILL_CLAIM_KEY,)).fetchone()
+                try:
+                    lease = json.loads(lease_row[0]) if lease_row else {}
+                    live_lease = isinstance(lease, dict) and bool(lease.get("owner")) and time.time() - command._embedding_lease_heartbeat(lease_row[0]) < _embedding_backfill_lease_ttl_s()
+                except (TypeError, ValueError):
+                    live_lease = False
                 profile = command._embedding_current_profile(conn)
                 if (profile is not None and embedding_provider_id(profile["provider"]) == "fastembed"
                         and profile["model_name"] == effective_embedding_model("fastembed", probe.get("model"))):
                     row = conn.execute("SELECT value FROM metadata WHERE key=?", (
                         f"embedding_catchup:summary:{profile['identity_hash']}",)).fetchone()
                     if row:
-                        record = json.loads(row[0])
-                        updated_at = record.get("updated_at", updated_at)
-                        if record.get("remaining") == 0 and not record.get("operator_retry"):
-                            updated_at = None  # Completed work does not date a new backlog.
+                        try:
+                            record = json.loads(row[0])
+                            receipt_time = float(record["updated_at"])
+                            updated_at = None if record.get("remaining") == 0 and not record.get("operator_retry") else receipt_time
+                        except (TypeError, ValueError, KeyError):
+                            pass  # No usable receipt: retain the maintenance fallback.
             finally:
                 conn.close()
-            problem = "failing (last catch-up attempt recorded an error)" if failures else (
-                "stalled (no recent catch-up progress)" if updated_at is not None and time.time() - updated_at > _embedding_backfill_lease_ttl_s() else "")
+            problem = f"failing (last catch-up attempt recorded an error: {last[1] if last else 'unknown'})" if failures else (
+                "stalled (no recent catch-up progress)" if not live_lease and updated_at is not None and time.time() - updated_at > _embedding_backfill_lease_ttl_s() else "")
             if problem:
                 detail.update(informational=False, reason=f"summary catch-up {problem}")
                 return {"check": "embedding_provider_health", "status": "warn", "detail": detail}
