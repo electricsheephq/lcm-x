@@ -40,10 +40,15 @@ uv run --no-project python bench/instruments/reliability/run_matrix.py \
   the current checkout; `--plugin-tree` relocates only the artifact's plugin-source lookup, in memory.
   That tree must be a clean tracked checkout root at the recorded SHA; subdirectories and dirty trees are
   refused with exit 2, and exported `GIT_DIR`/`GIT_WORK_TREE` are ignored.
-  R1 and R2 scorer-decided cells with retained DBs re-score, including the harness's never-fired gate.
+  Without `--plugin-tree`, the recorded plugin tree must still exist on this machine; otherwise exit 2
+  names the required override. R1 and R2 scorer-decided cells with retained DBs re-score, including the harness's never-fired gate.
   ACP-process cells take their session root from `verdict.json`; a missing `acp_session` is refused.
-  Exit 2 also refuses pre-run cells without `cell.json`, `stop_after_tool` cells, and continuity F4 failures
-  (including continuity FAIL with no failed bars): their scoring inputs or in-memory decisions are unavailable.
+  Exit 2 gives a reason for cells without `cell.json`, `phase-A.json` or a retained `db/lcm.db`, uploaded
+  ERROR verdicts, and drain cells outside acp-process: these cannot be decided by the offline scorer.
+  `stop_after_tool` cells use the same stop-turn scorer with disk-backed observer, transcript, provider,
+  `stop-*.json` snapshots and the last exit in `phase-B.json`; missing required files are refused.
+  ACP-process continuity cells recompute continuity and apply the harness's F4 step, reconstructing scenario
+  findings from the provider log. Missing F4 inputs or unrecorded scenario findings are refused with exit 2.
   Diagnostic records are sorted before sampling, so different `PYTHONHASHSEED` values produce the same
   scoring report; absolute paths and runner timings are not portable scoring fields.
   If a move fails, nothing is deleted and the error names both dirs. A caller that sandboxes host writes to one
