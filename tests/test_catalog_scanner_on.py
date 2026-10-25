@@ -76,7 +76,11 @@ def test_catalog_scanner_on(tmp_path):
                 "HERMES_HOME": str(tmp_path / "hermes"), "GIT_CONFIG_GLOBAL": "/dev/null",
                 "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "PYTHONDONTWRITEBYTECODE": "1",
                 "HERMES_DISABLE_LAZY_INSTALLS": "1", "PROBE_ENGINE": "lcm-x"}
-    for phase in ("candidate", "consent"):
+    catalog_source = host_source.with_name("plugins_cmd_catalog.py")
+    # Repin widening consent is a newer host capability, absent on the floor.
+    has_repin_consent = any(isinstance(node, ast.ClassDef) and node.name == "RepinConsentRequired"
+                           for node in ast.parse(catalog_source.read_text()).body)
+    for phase in (("candidate", "consent") if has_repin_consent else ("candidate",)):
         host_env["HERMES_HOME"] = str(tmp_path / ("hermes-" + phase))
         # Consent tests need an installed baseline even on hosts requiring --force.
         forces = (False, True) if blocks_caution and phase == "candidate" else (blocks_caution,)
