@@ -984,6 +984,16 @@ def _maybe_cache_harness_provider(provider, *, provider_name: str):
         return provider
     if not cache_path.strip():
         raise ValueError(f"{EMBED_CACHE_ENV} must be a non-empty SQLite path")
+    if os.environ.get("LCM_D1_CACHE_MODE"):
+        from importlib.metadata import version
+        from .d1_cache import D1Cache
+        if os.environ["LCM_D1_CACHE_MODE"] not in {"build", "read"}:
+            raise ValueError("D1 cache mode must be build or read")
+        if provider_name not in {"fastembed", "fast-embed", "stub"}:
+            raise ValueError("D1 cache requires a local independent-document provider")
+        return D1Cache(provider, cache_path, readonly=os.environ["LCM_D1_CACHE_MODE"] == "read",
+                       options={"dimension": provider.dim, "normalization": "fastembed-default",
+                                "mode": "document", "implementation": version("fastembed") if provider_name != "stub" else "stub-v1"})
     return ContentHashEmbeddingCache(
         provider,
         cache_path,
@@ -1039,7 +1049,13 @@ def resolve_harness_provider(
         # max_calls=0 disables the per-minute call-rate guard, matching the
         # bulk-backfill contract (resolve_provider(for_backfill=True)); the
         # harness embeds thousands of summaries in one pass.
-        resolved = FastembedProvider(
+        class HarnessFastembed(FastembedProvider):
+            def _cache_key(self):
+                model, cache, threads = super()._cache_key()
+                return model, cache, min(threads, max(1, int(os.environ.get("LCM_D1_ORT_THREADS", threads))))
+
+        provider_class = HarnessFastembed if "LCM_D1_ORT_THREADS" in os.environ else FastembedProvider
+        resolved = provider_class(
             model,
             cache_dir=_fastembed_cache_dir(),
             timeout=timeout,
@@ -2743,6 +2759,8 @@ def evaluate_question(
     cache_start_hits, cache_start_misses = _embed_cache_totals(
         (summary_provider, chunk_provider)
     )
+    d1_providers = {id(p): p for p in (summary_provider, chunk_provider)}.values()
+    d1_start = [sum(getattr(p, field, 0) for p in d1_providers) for field in ("wall_ms", "corruptions")]
     summary_name, model = _provider_binding(summary_provider, provider_name, "")
     chunk_name, chunk_model = _provider_binding(
         chunk_provider, summary_name, default_chunk_model(summary_name, model)
@@ -3320,6 +3338,11 @@ def evaluate_question(
             "hits": cache_end_hits - cache_start_hits,
             "misses": cache_end_misses - cache_start_misses,
         }
+        if hasattr(summary_provider, "manifest_hash"):
+            scored["embedding"] = dict(zip(("wall_ms", "corruptions"),
+                (sum(getattr(p, field, 0) for p in d1_providers) - before
+                 for field, before in zip(("wall_ms", "corruptions"), d1_start))))
+            scored["embedding"]["manifest_sha256"] = summary_provider.manifest_hash
         return scored
     finally:
         vector_store.close()
@@ -3888,8 +3911,11 @@ def _question_checkpoint_record(
             record["chunk_embedding_mode"] = chunk_embedding_mode
         if embed_cache_enabled is not None:
             record["embed_cache_enabled"] = embed_cache_enabled
+        if os.environ.get("LCM_D1_CACHE_MODE") == "read":
+            record["embedding"] = {"wall_ms": 0.0, "corruptions": 0}
         return record
     checkpoint_scored = copy.deepcopy(scored)
+    embedding = checkpoint_scored.pop("embedding", None)
     checkpoint_scored.pop("_candidate_rankings", None)
     scored_chunk_embedding_mode = checkpoint_scored.pop(
         "chunk_embedding_mode", chunk_embedding_mode
@@ -3922,6 +3948,8 @@ def _question_checkpoint_record(
         "embed_cache": embed_cache,
         "arms": checkpoint_scored,
     }
+    if embedding is not None:
+        record["embedding"] = embedding
     if scored_chunk_embedding_mode is not None:
         record["chunk_embedding_mode"] = scored_chunk_embedding_mode
     if embed_cache_enabled is not None:
