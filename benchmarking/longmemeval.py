@@ -991,8 +991,12 @@ def _maybe_cache_harness_provider(provider, *, provider_name: str):
             raise ValueError("D1 cache mode must be build or read")
         if provider_name not in {"fastembed", "fast-embed", "stub"}:
             raise ValueError("D1 cache requires a local independent-document provider")
+        product_sha, role = os.environ["LCM_D1_PRODUCT_SHA"], os.environ["LCM_D1_ROLE"]
+        if not re.fullmatch(r"[0-9a-f]{40}", product_sha) or not role.isidentifier():
+            raise ValueError("D1 cache requires a product commit SHA and role")
         return D1Cache(provider, cache_path, readonly=os.environ["LCM_D1_CACHE_MODE"] == "read",
                        options={"dimension": provider.dim, "normalization": "fastembed-default",
+                                "product_sha": product_sha, "role": role,
                                 "mode": "document", "implementation": version("fastembed") if provider_name != "stub" else "stub-v1"})
     return ContentHashEmbeddingCache(
         provider,
@@ -3911,11 +3915,9 @@ def _question_checkpoint_record(
             record["chunk_embedding_mode"] = chunk_embedding_mode
         if embed_cache_enabled is not None:
             record["embed_cache_enabled"] = embed_cache_enabled
-        if os.environ.get("LCM_D1_CACHE_MODE") == "read":
-            record["embedding"] = {"wall_ms": 0.0, "corruptions": 0}
         return record
     checkpoint_scored = copy.deepcopy(scored)
-    embedding = checkpoint_scored.pop("embedding", None)
+    checkpoint_scored.pop("embedding", None)
     checkpoint_scored.pop("_candidate_rankings", None)
     scored_chunk_embedding_mode = checkpoint_scored.pop(
         "chunk_embedding_mode", chunk_embedding_mode
@@ -3948,8 +3950,6 @@ def _question_checkpoint_record(
         "embed_cache": embed_cache,
         "arms": checkpoint_scored,
     }
-    if embedding is not None:
-        record["embedding"] = embedding
     if scored_chunk_embedding_mode is not None:
         record["chunk_embedding_mode"] = scored_chunk_embedding_mode
     if embed_cache_enabled is not None:
@@ -4431,6 +4431,9 @@ def run_harness(
             # survive a crash that predates the dirent reaching disk.
             _fsync_parent_directory(checkpoint_path)
 
+    embedding_metrics_file = None
+    if checkpoint_file is not None and os.environ.get("LCM_D1_CACHE_MODE") == "read":
+        embedding_metrics_file = checkpoint_path.with_name("embedding-metrics.jsonl").open("a" if resume else "w", encoding="utf-8")
     candidate_dump_file = None
     if dump_candidates_path is not None and not fully_completed_resume:
         dump_candidates_path = Path(dump_candidates_path)
@@ -4555,6 +4558,11 @@ def run_harness(
                         ),
                     )
                 if checkpoint_file is not None:
+                    if embedding_metrics_file is not None:
+                        metrics = {"wall_ms": 0.0, "corruptions": 0, **(scored.get("embedding", {}) if scored else {})}
+                        _write_checkpoint_record(embedding_metrics_file, {
+                            "question_id": question.question_id, **metrics, **record["embed_cache"],
+                        })
                     _write_checkpoint_record(checkpoint_file, record)
             except Exception as exc:
                 # A run-time privacy refusal (query texts are protected only
@@ -4570,6 +4578,8 @@ def run_harness(
             checkpoint_file.close()
         if candidate_dump_file is not None:
             candidate_dump_file.close()
+        if embedding_metrics_file is not None:
+            embedding_metrics_file.close()
 
     if resume and observed_question_ids != selected_ids:
         missing = sorted(selected_ids - observed_question_ids)

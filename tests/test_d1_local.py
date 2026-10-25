@@ -69,7 +69,7 @@ def test_ten_question_equivalence(tmp_path, monkeypatch):
         assert actual["embedding"]["wall_ms"] > 0
         assert actual["embedding"]["manifest_sha256"] == manifest_hash
         record = lme._question_checkpoint_record(question, actual)
-        assert record["embedding"] == actual["embedding"]
+        assert "embedding" not in record
         assert "embedding" not in record["arms"]
         proof.append({"question_id": question.question_id,
                       "baseline": {arm: {key: value for key, value in baseline[arm].items() if key != "latency_ms"} for arm in lme.ARMS},
@@ -99,7 +99,7 @@ def test_corrupt_entry_detected_recomputed_and_counted(tmp_path):
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("change", ["model", "dimension", "normalization", "mode"])
+@pytest.mark.parametrize("change", ["model", "dimension", "normalization", "mode", "product_sha", "role"])
 def test_model_and_options_cannot_cross(tmp_path, change):
     path = tmp_path / "cache.sqlite"
     D1Cache(Fake(), path, options=OPTIONS, readonly=False).embed_documents(["alpha"])
@@ -131,9 +131,10 @@ def driver():
     return module
 
 
-def test_parallel_driver_receipts_and_failure_isolation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("fault", ["exit", "torn"])
+def test_parallel_driver_receipts_and_failure_isolation(tmp_path, monkeypatch, fault):
     cli = driver()
-    monkeypatch.setattr(cli, "pin", lambda _: "a" * 40)
+    monkeypatch.setattr(cli, "pin", lambda tree: ("b" if str(tree).endswith("candidate-tree") else "a") * 40)
     shards = tmp_path / "shards"
     qid = 0
     for k, size in enumerate([85] * 5 + [75]):
@@ -152,7 +153,8 @@ def test_parallel_driver_receipts_and_failure_isolation(tmp_path, monkeypatch):
         cache = Path(env[lme.EMBED_CACHE_ENV])
         if "prewarm-cache" in command:
             assert env["LCM_D1_CACHE_MODE"] == "build"
-            D1Cache(Fake(), cache, options=OPTIONS, readonly=False).embed_documents(["shared"])
+            options = {**OPTIONS, "product_sha": env["LCM_D1_PRODUCT_SHA"], "role": env["LCM_D1_ROLE"]}
+            D1Cache(Fake(), cache, options=options, readonly=False).embed_documents(["shared"])
             return SimpleNamespace(returncode=0)
         assert env["LCM_D1_CACHE_MODE"] == "read"
         with lock:
@@ -163,12 +165,15 @@ def test_parallel_driver_receipts_and_failure_isolation(tmp_path, monkeypatch):
         time.sleep(0.015)
         out = Path(command[command.index("--output") + 1])
         out.mkdir(parents=True)
-        row = {"question_id": "q0", "embed_cache": {"hits": 2, "misses": 1},
-               "embedding": {"wall_ms": 4, "corruptions": 1}}
-        (out / "per_question_checkpoint.jsonl").write_text(json.dumps(row) + "\n")
+        row = {"question_id": "q0", "embed_cache": {"hits": 2, "misses": 1}}
+        torn = '{"question_id":' if fault == "torn" and out.name == "shard-1" else ""
+        (out / "per_question_checkpoint.jsonl").write_text(json.dumps(row) + "\n" + torn)
+        (out / "embedding-metrics.jsonl").write_text(json.dumps({
+            "question_id": "q0", "wall_ms": 4, "hits": 2, "misses": 1, "corruptions": 1,
+        }) + "\n")
         with lock:
             active -= 1
-        return SimpleNamespace(returncode=int(out.name == "shard-1"))
+        return SimpleNamespace(returncode=int(fault == "exit" and out.name == "shard-1"))
 
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
     out = tmp_path / "output"
@@ -176,21 +181,37 @@ def test_parallel_driver_receipts_and_failure_isolation(tmp_path, monkeypatch):
                      "--prepared-dir", str(tmp_path), "--shards-dir", str(shards),
                      "--aprime-dir", str(aa), "--output", str(out), "--scratch", str(tmp_path / "scratch")]) == 1
     receipt = json.loads((out / "d1-receipt.json").read_text())
+    if os.environ.get("D1_DRIVER_REPORT_DIR"):
+        Path(os.environ["D1_DRIVER_REPORT_DIR"], f"driver-{fault}.json").write_text(json.dumps(receipt, indent=2) + "\n")
     assert len(receipt["arms"]) == 16
-    assert sum(arm["exit_code"] for arm in receipt["arms"]) == 2
+    assert {(arm["role"], arm["arm"]) for arm in receipt["arms"]} == {
+        (role, name) for role in ("base", "candidate")
+        for name in [*(f"shard-{i}" for i in range(6)), "aa-A", "aa-Aprime"]
+    }
+    assert sum(arm["exit_code"] for arm in receipt["arms"]) == (2 if fault == "exit" else 0)
+    assert sum(bool(arm["parse_error"]) for arm in receipt["arms"]) == (2 if fault == "torn" else 0)
     assert peak == 3
     assert peak * max(caps) <= receipt["thread_budget"] == 8
     assert len(set(roots)) == len(roots) == 16
+    assert receipt["products"] == {"base": "a" * 40, "candidate": "b" * 40}
+    assert len(set(receipt["cache_manifests"].values())) == 2
     for arm in receipt["arms"]:
+        assert arm["product_sha"] == receipt["products"][arm["role"]]
+        assert arm["cache_manifest_sha256"] == receipt["cache_manifests"][arm["role"]]
+        assert arm["cache_manifest_sha256"] == hashlib.sha256((out / arm["role"] / "embeddings.manifest.json").read_bytes()).hexdigest()
+        if arm["parse_error"]:
+            assert "JSONDecodeError" in arm["parse_error"]
+            continue
         assert arm["cache_hit_rate"] == 2 / 3
         assert arm["cache_corruptions"] == 1
         assert arm["embedding_wall_ms"] == 4
-        assert arm["cache_manifest_sha256"] == hashlib.sha256((out / "embeddings.manifest.json").read_bytes()).hexdigest()
 
 
 def test_harness_cache_env_shim(tmp_path, monkeypatch):
     monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.sqlite"))
     monkeypatch.setenv("LCM_D1_CACHE_MODE", "build")
+    monkeypatch.setenv("LCM_D1_PRODUCT_SHA", "a" * 40)
+    monkeypatch.setenv("LCM_D1_ROLE", "base")
     builder = lme.resolve_harness_provider("stub", "")
     assert isinstance(builder, D1Cache)
     expected = builder.embed_documents(["exact text"])
@@ -200,6 +221,111 @@ def test_harness_cache_env_shim(tmp_path, monkeypatch):
     monkeypatch.setenv("LCM_D1_CACHE_MODE", "typo")
     with pytest.raises(ValueError, match="mode must be"):
         lme.resolve_harness_provider("stub", "")
+
+
+def test_role_bound_caches_score_with_their_own_vectors(tmp_path, monkeypatch):
+    class Candidate(Fake):
+        def embed_documents(self, texts):
+            return [[-x for x in vector] for vector in super().embed_documents(texts)]
+
+    question = questions()[0]
+    rankings, vectors, keys = {}, {}, {}
+    for role, sha, factory in (("base", "a" * 40, Fake), ("candidate", "b" * 40, Candidate)):
+        path = tmp_path / role / "cache.sqlite"
+        path.parent.mkdir()
+        monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(path))
+        monkeypatch.setenv("LCM_D1_CACHE_MODE", "build")
+        monkeypatch.setenv("LCM_D1_PRODUCT_SHA", sha)
+        monkeypatch.setenv("LCM_D1_ROLE", role)
+        monkeypatch.setattr(lme, "StubEmbedder", factory)
+        builder = lme.resolve_harness_provider("stub", "")
+        assert builder.options["product_sha"] == sha
+        assert builder.options["role"] == role
+        lme.prewarm_embedding_cache([question], builder)
+        vectors[role] = builder.embed_documents(["shared text"])
+        keys[role] = builder.content_sha256("shared text")
+        seal(path)
+        baseline = lme.evaluate_question(question, factory(), provider_name="stub", tmp_dir=tmp_path / f"{role}-raw", include_rankings=True, embeddings_enabled=True)
+        monkeypatch.setenv("LCM_D1_CACHE_MODE", "read")
+        cached = lme.resolve_harness_provider("stub", "")
+        actual = lme.evaluate_question(question, cached, provider_name="stub", tmp_dir=tmp_path / f"{role}-cached", include_rankings=True, embeddings_enabled=True)
+        assert actual["_candidate_rankings"] == baseline["_candidate_rankings"]
+        for arm in lme.ARMS:
+            for metric in ("recall@1", "recall@5", "recall@10", "ndcg@10", "turn"):
+                assert actual[arm][metric] == baseline[arm][metric]
+        assert cached.embed_documents(["shared text"]) == vectors[role]
+        assert cached.hits > 0 and cached.misses == 0
+        assert not cached._provider.documents
+        rankings[role] = actual["_candidate_rankings"]
+    assert keys["base"] != keys["candidate"]
+    assert vectors["base"] != vectors["candidate"]
+    assert rankings["base"] != rankings["candidate"]
+
+
+@pytest.mark.parametrize("dirty", [False, True])
+def test_pin_resolves_head_and_refuses_dirty_tree(tmp_path, monkeypatch, dirty):
+    cli = driver()
+    calls = []
+
+    def git(command, **kwargs):
+        calls.append(command)
+        if command[-1] == "--porcelain":
+            return b" M embedding_provider.py\n" if dirty else b""
+        assert command[-2:] == ["rev-parse", "HEAD"]
+        return "a" * 40 + "\n"
+
+    monkeypatch.setattr(cli.subprocess, "check_output", git)
+    if dirty:
+        with pytest.raises(ValueError, match="clean product"):
+            cli.pin(tmp_path)
+        assert len(calls) == 1
+    else:
+        assert cli.pin(tmp_path) == "a" * 40
+        assert calls[-1] == ["git", "-C", str(tmp_path), "rev-parse", "HEAD"]
+
+
+def test_cached_aa_checkpoint_compatible_with_release_scorer(tmp_path, monkeypatch):
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.sqlite"))
+    monkeypatch.setenv("LCM_D1_PRODUCT_SHA", "a" * 40)
+    monkeypatch.setenv("LCM_D1_ROLE", "base")
+    monkeypatch.setenv("LCM_D1_CACHE_MODE", "build")
+    builder = lme.resolve_harness_provider("stub", "")
+    lme.prewarm_embedding_cache(questions()[:2], builder)
+    manifest = seal(builder.cache_path)
+    monkeypatch.setenv("LCM_D1_CACHE_MODE", "read")
+    evaluate = lme.evaluate_question
+    wall_ms = 10
+
+    def timed(*args, **kwargs):
+        scored = evaluate(*args, **kwargs)
+        scored["embedding"]["wall_ms"] = wall_ms  # deterministic, different arm timings
+        return scored
+
+    monkeypatch.setattr(lme, "evaluate_question", timed)
+    runs, timings = [], []
+    for name in ("A", "Aprime"):
+        checkpoint = tmp_path / name / "per_question_checkpoint.jsonl"
+        lme.run_harness(questions()[:2], provider_name="stub", model="", tmp_dir=tmp_path / f"{name}-db",
+                        checkpoint_path=checkpoint, reuse_db_template=False)
+        runs.append({r["question_id"]: r for r in map(json.loads, checkpoint.read_text().splitlines()) if "question_id" in r})
+        metrics = list(map(json.loads, checkpoint.with_name("embedding-metrics.jsonl").read_text().splitlines()))
+        assert {r["question_id"] for r in metrics} == set(runs[-1])
+        assert all(r["hits"] > 0 and r["misses"] == 0 and r["manifest_sha256"] == manifest for r in metrics)
+        timings.append([r["wall_ms"] for r in metrics])
+        wall_ms += 10
+
+    # Minimal comparison from the v0.29.0-rc2 release kit's u-off/aa.py,
+    # VOLATILE/strip and disc_rows: only latency_ms and ingest_ms are volatile.
+    def strip(value):
+        if isinstance(value, dict):
+            return {k: strip(v) for k, v in value.items() if k not in {"latency_ms", "ingest_ms"}}
+        return value
+
+    a, b = runs
+    discordant = sorted(q for q in set(a) | set(b) if strip(a.get(q)) != strip(b.get(q)))
+    assert timings == [[10, 10], [20, 20]]
+    assert discordant == []
+    assert all("embedding" not in r and "embedding" not in r["arms"] for run in runs for r in run.values())
 
 
 def test_fastembed_thread_cap_without_loading_model(tmp_path, monkeypatch):

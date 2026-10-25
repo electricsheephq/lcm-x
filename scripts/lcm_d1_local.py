@@ -8,9 +8,9 @@ The prepared corpus must contain all 500 questions; shards must partition those
 IDs, and the A/A-prime prepared corpus contains 100 questions. Supply two
 ROLE=PATH product bindings. --output and --scratch must be fresh directories.
 Default concurrency is three, with at most floor(8/3)=2 ORT threads per child.
-The sealed SQLite cache and its hash manifest live in --output. Per-question
+Each role's sealed SQLite cache and hash manifest live in --output. Per-question
 embedding wall time (including cache reads and queries), hits/misses and
-corruptions live in the checkpoints; d1-receipt.json aggregates each arm.
+corruptions live in embedding-metrics.jsonl; d1-receipt.json aggregates each arm.
 """
 import argparse
 import importlib.util
@@ -21,7 +21,7 @@ import runpy
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -47,7 +47,11 @@ def worker(product, expected, instrument, *argv):
 def run_pool(tasks, jobs, launch):
     # Every child has disjoint roots; collect ALL statuses even after a failure.
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        return list(pool.map(launch, tasks))
+        futures = {pool.submit(launch, task): i for i, task in enumerate(tasks)}
+        results = [None] * len(tasks)
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+        return results
 
 
 def main(argv=None):
@@ -74,10 +78,9 @@ def main(argv=None):
         parser.error("require 500 distinct shard IDs and 100 placebo IDs")
     args.output.mkdir(parents=True, exist_ok=False)
     args.scratch.mkdir(parents=True, exist_ok=False)
-    cache = args.output.resolve() / "embeddings.sqlite"
+    caches = {role: args.output.resolve() / role / "embeddings.sqlite" for role in products}
     threads = args.thread_budget // args.jobs
-    env = dict(os.environ, LCM_LONGMEMEVAL_EMBED_CACHE=str(cache),
-               LCM_D1_ORT_THREADS=str(threads), OMP_NUM_THREADS=str(threads),
+    env = dict(os.environ, LCM_D1_ORT_THREADS=str(threads), OMP_NUM_THREADS=str(threads),
                HF_HUB_OFFLINE="1", PYTHONDONTWRITEBYTECODE="1")
     common = ["--dataset-label", "m", "--provider", "fastembed", "--model", "BAAI/bge-small-en-v1.5"]
     started = time.monotonic()
@@ -85,43 +88,54 @@ def main(argv=None):
     def invoke(role, name, command, mode):
         scratch = args.scratch.resolve() / role / name
         scratch.mkdir(parents=True)
-        child_env = dict(env, LCM_D1_CACHE_MODE=mode, HERMES_HOME=str(scratch / "home"), TMPDIR=str(scratch))
+        child_env = dict(env, LCM_LONGMEMEVAL_EMBED_CACHE=str(caches[role]),
+                         LCM_D1_PRODUCT_SHA=pins[role], LCM_D1_ROLE=role,
+                         LCM_D1_CACHE_MODE=mode, HERMES_HOME=str(scratch / "home"), TMPDIR=str(scratch))
         with (args.output / f"{role}-{name}.log").open("w") as log:
             return subprocess.run([sys.executable, str(Path(__file__).resolve()), "--worker", products[role], pins[role], instrument, *command], cwd=products[role], env=child_env, stdout=log, stderr=subprocess.STDOUT).returncode
 
     # Enumerate the product's actual chunk/summary units in each tree, including
     # the placebo corpus. Only this serial phase is allowed to write the cache.
+    from benchmarking.d1_cache import seal
+    manifests = {}
     for role in products:
+        caches[role].parent.mkdir()
         for name, prepared in (("preembed", args.prepared_dir), ("preembed-aa", args.aprime_dir)):
             command = ["prewarm-cache", "--prepared-dir", str(prepared.resolve()), "--shards-manifest", str(prepared.resolve()), *common]
             if invoke(role, name, command, "build"):
                 raise SystemExit("pre-embed failed; inspect its isolated log")
-    from benchmarking.d1_cache import seal
-    manifest_hash = seal(cache)
+        manifests[role] = seal(caches[role])
     tasks = [(role, path.parent.name, path.parent) for role in products for path in shards]
     tasks += [(role, name, args.aprime_dir) for role in products for name in ("aa-A", "aa-Aprime")]
 
     def launch(task):
         role, name, prepared = task
         out = args.output.resolve() / role / name
-        command = ["run", "--prepared-dir", str(prepared.resolve()), "--output", str(out), "--allow-external-output", "--dump-candidates", str(out / "candidates.jsonl"), *common]
-        rc = invoke(role, name, command, "read")
-        rows = [json.loads(line) for line in (out / "per_question_checkpoint.jsonl").read_text().splitlines()] if (out / "per_question_checkpoint.jsonl").exists() else []
-        rows = [row for row in rows if "question_id" in row]
-        hits = sum(row["embed_cache"]["hits"] for row in rows)
-        misses = sum(row["embed_cache"]["misses"] for row in rows)
-        return {"role": role, "arm": name, "exit_code": rc, "questions": len(rows),
-                "embedding_wall_ms": sum(row.get("embedding", {}).get("wall_ms", 0) for row in rows),
-                "cache_hits": hits, "cache_misses": misses, "cache_hit_rate": hits / (hits + misses) if hits + misses else None,
-                "cache_corruptions": sum(row.get("embedding", {}).get("corruptions", 0) for row in rows), "cache_manifest_sha256": manifest_hash}
+        status = {"role": role, "arm": name, "exit_code": 1, "parse_error": None,
+                  "product_sha": pins[role], "cache_manifest_sha256": manifests[role]}
+        try:
+            command = ["run", "--prepared-dir", str(prepared.resolve()), "--output", str(out), "--allow-external-output", "--dump-candidates", str(out / "candidates.jsonl"), *common]
+            status["exit_code"] = invoke(role, name, command, "read")
+            rows = [json.loads(line) for line in (out / "per_question_checkpoint.jsonl").read_text().splitlines()]
+            metrics = [json.loads(line) for line in (out / "embedding-metrics.jsonl").read_text().splitlines()]
+            hits, misses = (sum(row[field] for row in metrics) for field in ("hits", "misses"))
+            status.update(questions=sum("question_id" in row for row in rows),
+                          embedding_wall_ms=sum(row["wall_ms"] for row in metrics),
+                          cache_hits=hits, cache_misses=misses,
+                          cache_hit_rate=hits / (hits + misses) if hits + misses else None,
+                          cache_corruptions=sum(row["corruptions"] for row in metrics))
+        except Exception as exc:
+            status["parse_error"] = f"{type(exc).__name__}: {exc}"
+        return status
 
     arms = run_pool(tasks, args.jobs, launch)
     receipt = {"instrument_sha": instrument, "products": pins, "jobs": args.jobs,
+               "cache_manifests": manifests,
                "ort_threads_per_shard_cap": threads, "thread_budget": args.thread_budget,
                "wall_seconds": time.monotonic() - started, "arms": arms,
                "not_proven": "Eight-hour acceptance requires the complete quiet-window run; recall equivalence is a separate gate."}
     (args.output / "d1-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    return int(any(arm["exit_code"] for arm in arms))
+    return int(any(arm["exit_code"] or arm["parse_error"] for arm in arms))
 
 
 if __name__ == "__main__":
