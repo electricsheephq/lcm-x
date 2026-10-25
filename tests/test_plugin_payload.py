@@ -279,7 +279,7 @@ def assert_payload_markdown_paths(payload):
                     run = marker.group(1)
                     if fence is None:
                         fence = run
-                    elif run[0] == fence[0] and len(run) >= len(fence):
+                    elif run[0] == fence[0] and len(run) >= len(fence) and not line[marker.end():].strip():
                         fence = None
                     continue
                 if fence is None:
@@ -309,6 +309,8 @@ def assert_payload_markdown_paths(payload):
         for target, page_relative in targets:
             if target.startswith(("#", "//")) or re.match(r"^[\w+.-]+:", target):
                 continue
+            if not page_relative:
+                target = target.rstrip(".,;:!?")
             target = target.split("#")[0].split("?")[0]
             candidates = [(payload / target.lstrip("/")).resolve()] if target.startswith("/") else [
                 (page.parent / target).resolve()]
@@ -685,6 +687,18 @@ def test_nested_page_link_cannot_fall_back_to_payload_root(tmp_path, form):
 def test_payload_non_links_are_accepted(tmp_path, form):
     (tmp_path / "README.md").write_text(form)
     assert_payload_markdown_paths(tmp_path) == []
+
+
+def test_fence_with_trailing_text_does_not_close(tmp_path):
+    (tmp_path / "README.md").write_text("```md\n```example\n[missing](docs/missing.md)\n```\n")
+    assert_payload_markdown_paths(tmp_path) == []
+
+
+def test_bare_path_ignores_trailing_prose_punctuation(tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs/guide.md").write_text("fixture")
+    (tmp_path / "README.md").write_text("See docs/guide.md, for details.")
+    assert "docs/guide.md" in assert_payload_markdown_paths(tmp_path)
 
 
 @pytest.mark.parametrize("form", ['"https://example.com/a", docs/missing.md',

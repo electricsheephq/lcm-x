@@ -742,3 +742,12 @@ def test_compaction_progress_docs_url_falls_back_to_main(monkeypatch, version):
     monkeypatch.setattr(diagnostics, "_plugin_metadata", lambda: {"version": version})
     result = diagnostics.doctor_guidance_for_check({"check": "compaction_progress", "status": "warn"})
     assert "blob/main/docs/operations/store-wedge-inspect.md" in result["operator_action"]
+
+
+@pytest.mark.parametrize("version,ref", [
+    ("1.2.3-rc.", "main"),
+    ("1.2.3-rc.1+build.5", "v1.2.3-rc.1+build.5"),
+])
+def test_plugin_docs_url_version_identifiers(version, ref):
+    from hermes_lcm.runtime_identity import plugin_docs_url
+    assert f"/blob/{ref}/docs/embeddings-setup.md" in plugin_docs_url("docs/embeddings-setup.md", version)

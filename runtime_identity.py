@@ -58,7 +58,8 @@ def _plugin_metadata() -> dict[str, str]:
 def plugin_docs_url(path: str, version: str) -> str:
     """Link to a release's docs, or main when the loaded version is unknown."""
     release = isinstance(version, str) and re.fullmatch(
-        r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?", version)
+        r"\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+        r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?", version)
     ref = f"v{version}" if release else "main"
     return f"https://github.com/electricsheephq/lcm-x/blob/{ref}/{path}"
 
