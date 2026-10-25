@@ -26,7 +26,7 @@ from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
 from .ingest_policy import embedding_prefix_suffix
-from .runtime_identity import _plugin_metadata
+from .runtime_identity import _plugin_metadata, plugin_docs_url
 from .config import companion_enable_command, effective_embedding_model, LCMConfig, embedding_provider_id, lcm_env_get, normalize_embedding_provider, profile_bound
 from .tokens import count_tokens
 
@@ -2107,7 +2107,7 @@ def probe_provider_availability(config: LCMConfig) -> dict[str, Any]:
                 "`hermes plugins install electricsheephq/lcm-x/companions/"
                 "hermes-lcm-x-local-embeddings --ref <LCM-X-40-character-SHA>`; "
                 f"if already installed, run `{companion_enable_command()}`. Restart Hermes after enable; "
-                f"see https://github.com/electricsheephq/lcm-x/blob/v{_plugin_metadata()['version']}/docs/embeddings-setup.md",
+                f"see {plugin_docs_url('docs/embeddings-setup.md', _plugin_metadata()['version'])}",
             )
         return result(True, "fastembed is importable")
 

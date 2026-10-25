@@ -4,6 +4,7 @@ import ast
 import fnmatch
 import hashlib
 import json
+import re
 from pathlib import Path
 import subprocess
 
@@ -99,14 +100,30 @@ def build(source, out, manifest, assets=ASSETS, *, allow_dirty_tooling=False):
     if any(p.split("/")[0] in FORBIDDEN for p in selected):
         raise ValueError("forbidden payload path")
     data = {p: read(p) for p in sorted(selected)}
-    data["README.md"] = README_TEMPLATE.read_text().replace("@SOURCE_SHA@", sha).encode()
+    template = README_TEMPLATE.read_text()
+    omitted_links = []
+    if not checkout:
+        kept_lines = []
+        source_prefix = "https://github.com/electricsheephq/lcm-x/blob/@SOURCE_SHA@/"
+        for line in template.splitlines(keepends=True):
+            links = re.findall(r"\]\(([^)]+)\)", line)
+            if any(not link.startswith(source_prefix) for link in links):
+                raise ValueError("README template link is not source-SHA-pinned")
+            targets = [link.removeprefix(source_prefix) for link in links]
+            missing = [target for target in targets if target not in paths]
+            omitted_links.extend(missing)
+            if not missing:
+                kept_lines.append(line)
+        template = "".join(kept_lines)
+    data["README.md"] = template.replace("@SOURCE_SHA@", sha).encode()
     data = dict(sorted(data.items()))
     if len(data) > MAX_FILES or sum(map(len, data.values())) > MAX_TOTAL_BYTES or any(
             len(value) > MAX_FILE_BYTES for value in data.values()):
         raise ValueError("payload exceeds host limit")
     tooling_sha = subprocess.check_output(["git", "-C", str(ASSETS.parent.parent), "rev-parse", "HEAD"]).decode().strip()
     result = dict(source_sha=sha, tooling_sha=tooling_sha, allowlist_sha256=hashlib.sha256(assets.read_bytes()).hexdigest(),
-                  builder_version=VERSION, tooling_dirty=tooling_dirty, file_count=len(data),
+                  builder_version=VERSION, tooling_dirty=tooling_dirty, readme_omitted_links=omitted_links,
+                  file_count=len(data),
                   total_bytes=sum(map(len, data.values())), files=[
                       dict(path=p, bytes=len(value), sha256=hashlib.sha256(value).hexdigest()) for p, value in data.items()])
     Path(out).mkdir(parents=True, exist_ok=False)

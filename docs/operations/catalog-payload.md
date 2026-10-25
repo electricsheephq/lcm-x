@@ -19,6 +19,8 @@ The builder renders `plugin/README.md` from the reviewed
 `scripts/payload/README.md.tmpl`. It contains catalog install/enable commands and
 absolute source-SHA-pinned links, and is hashed in the manifest like every asset.
 Builder version 2 adds this README and the `tooling_dirty` manifest field.
+In SHA mode, the builder omits template links absent from the source commit and
+records their source paths in `readme_omitted_links` (empty when none are omitted).
 
 Each dist commit contains `plugin/` and `payload-manifest.json`. The commit message
 is `payload: <tag> <source-sha>`; the workflow prints the dist SHA and attaches the
@@ -54,6 +56,10 @@ Checkout mode refuses staged or unstaged tracked changes. Untracked receipts are
 ignored and never selected. The drift gate rescans payload Python for reviewed
 file-relative and dynamic-import sites in `tests/fixtures/payload-reviewed-sites.json`;
 new or removed sites require review of the committed baseline.
+The payload link check reads text as UTF-8. Invalid encoding and NUL bytes in
+text files fail with the file name, while binary assets are skipped.
+Files with a suffix in `PAYLOAD_TEXT_SUFFIXES` must be valid text; all other files
+are checked as text only if they decode as UTF-8 and contain no NUL bytes.
 
 ## Catalog pin and rollback
 

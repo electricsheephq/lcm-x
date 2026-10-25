@@ -1566,3 +1566,12 @@ def test_missing_fastembed_docs_url_uses_plugin_version(monkeypatch):
         LCMConfig(embedding_provider="fastembed", embedding_model="fixture"))
     assert result["detail"].endswith(
         f"see https://github.com/electricsheephq/lcm-x/blob/v{_plugin_metadata()['version']}/docs/embeddings-setup.md")
+
+
+@pytest.mark.parametrize("version", ["unknown", "", "not a version"])
+def test_missing_fastembed_docs_url_falls_back_to_main(monkeypatch, version):
+    monkeypatch.setattr(provider_mod, "_plugin_metadata", lambda: {"version": version})
+    monkeypatch.setattr(provider_mod.importlib.util, "find_spec", lambda name: None)
+    result = provider_mod.probe_provider_availability(
+        LCMConfig(embedding_provider="fastembed", embedding_model="fixture"))
+    assert "blob/main/docs/embeddings-setup.md" in result["detail"]

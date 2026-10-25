@@ -7,7 +7,7 @@ from sqlite3 import connect
 from pathlib import Path
 from typing import Any
 
-from .runtime_identity import _plugin_metadata
+from .runtime_identity import _plugin_metadata, plugin_docs_url
 from .config import companion_enable_command, containment_base_dir
 
 
@@ -289,7 +289,7 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
         command = ("inspect lcm_status zero_leaf_streak and the 'LCM compaction stop' lines: reason= names what stops "
                    "the leaf, and for a retained occurrence blocked= gives its store_id, role and kind; stored rows stay intact and "
                    "reachable (lcm_grep / lcm_expand); a new session clears a stop that persists; "
-                   f"offline diagnosis: https://github.com/electricsheephq/lcm-x/blob/v{_plugin_metadata()['version']}/docs/operations/store-wedge-inspect.md")
+                   f"offline diagnosis: {plugin_docs_url('docs/operations/store-wedge-inspect.md', _plugin_metadata()['version'])}")
         warning_only = True
         rationale = ("over-threshold passes that store no leaf leave the session over its threshold, so every turn pays "
                      "for the whole prompt; this is an operating state, not persisted-state corruption")
