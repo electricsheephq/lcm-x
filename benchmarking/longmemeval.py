@@ -613,6 +613,13 @@ def _embedding_privacy_context(
     return config, embedding_privacy_revision(config)
 
 
+def _effective_embedding_model(provider: str, model: str) -> str:
+    """The product's effective model; trees before #1186 have no resolver, so the configured model is effective."""
+    from hermes_lcm import config as config_module
+
+    return getattr(config_module, "effective_embedding_model", lambda _provider, configured: configured)(provider, model)
+
+
 def _ensure_hermes_lcm_package() -> None:
     """Make this source checkout importable as ``hermes_lcm`` (no plugin registration)."""
     ensure_agent_context_engine_importable()
@@ -1003,8 +1010,7 @@ def resolve_harness_provider(
         resolved = StubEmbedder()
     else:
         _ensure_hermes_lcm_package()
-        from hermes_lcm.config import effective_embedding_model
-        model = effective_embedding_model(provider, model)
+        model = _effective_embedding_model(provider, model)
     if provider != "stub" and not model:
         raise ValueError(f"--model is required for --provider {provider}")
     if provider in {"fastembed", "fast-embed"}:
@@ -4162,11 +4168,11 @@ def run_harness(
         raise ValueError("shipped_default cannot override explicit embedding settings")
     if shipped_default or provider_name != "stub":
         _ensure_hermes_lcm_package()
-        from hermes_lcm.config import LCMConfig, effective_embedding_model
+        from hermes_lcm.config import LCMConfig
         if shipped_default:
             defaults = LCMConfig()
             provider_name, model, embeddings_enabled = defaults.embedding_provider, defaults.embedding_model, defaults.embeddings_enabled
-        model = effective_embedding_model(provider_name, model)
+        model = _effective_embedding_model(provider_name, model)
     _reset_privacy_counts()
     dataset_report: dict[str, Any] = dataset_coordinates(dataset_label)
     if source_sha256 is not None:

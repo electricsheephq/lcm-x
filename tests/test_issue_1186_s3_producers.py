@@ -200,3 +200,62 @@ def test_default_cli_rejects_every_explicit_embedding_setting(tmp_path, capsys, 
                          "--allow-external-output", "--shipped-default", *setting])
     assert error.value.code == 2
     assert "cannot override explicit embedding settings" in capsys.readouterr().err
+
+
+def _older_tree_config():
+    import dataclasses
+
+    @dataclasses.dataclass
+    class OlderTreeConfig:
+        database_path: str = ""
+        embeddings_enabled: bool = False
+        embedding_provider: str = ""
+        embedding_model: str = ""
+
+    return OlderTreeConfig
+
+
+@pytest.mark.parametrize("older", [True, False], ids=["older-tree-config", "current-config"])
+def test_bridge_config_matches_the_measured_tree_fields(bridge_module, tmp_path, monkeypatch, older):
+    if older:
+        monkeypatch.setattr(config_module, "LCMConfig", _older_tree_config())
+    monkeypatch.setenv("HERMES_LCM_REPO", str(ROOT))
+    monkeypatch.setenv("HERMES_MB_WORKDIR", str(tmp_path))
+    monkeypatch.setenv("HERMES_MB_PROVIDER", "off")
+    monkeypatch.delenv("HERMES_MB_MODEL", raising=False)
+    config = bridge_module.Bridge()._config(tmp_path / "store.db")
+    assert config.database_path == str(tmp_path / "store.db") and config.embeddings_enabled is False
+    if older:
+        assert not hasattr(config, "recall_delivery_unit") and not hasattr(config, "embeddings_enabled_explicit")
+    else:
+        assert config.recall_delivery_unit == "hits" and config.embeddings_enabled_explicit is True
+
+
+def test_bridge_certifies_trees_without_the_longmemeval_helper(bridge_module, monkeypatch):
+    import benchmarking.longmemeval as lme
+    from hermes_lcm import command
+
+    assert bridge_module._local_certifier() is lme.certify_local_recall_store
+    monkeypatch.delattr(lme, "certify_local_recall_store")
+    certify = bridge_module._local_certifier()
+    assert certify is bridge_module._certify_local_recall_store
+    calls = []
+    monkeypatch.setattr(command, "_embedding_backfill_summary_run",
+                        lambda *args, **kwargs: calls.append(("summary", kwargs)) or {"status": "complete"})
+    monkeypatch.setattr(command, "_chunk_backfill_run",
+                        lambda *args, **kwargs: calls.append(("chunk", kwargs)) or {"status": "complete"})
+    certify(object(), "store.db")
+    assert [name for name, _ in calls] == ["summary", "chunk"]
+    assert calls[1][1]["policy"] == "conversational" and calls[1][1]["confirm_raw_text"] is True
+    monkeypatch.setattr(command, "_chunk_backfill_run", lambda *args, **kwargs: {"status": "partial"})
+    with pytest.raises(RuntimeError, match="catch-up incomplete"):
+        certify(object(), "store.db")
+
+
+def test_longmemeval_measures_trees_without_the_model_resolver(monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    assert lme._effective_embedding_model("fastembed", "") == "BAAI/bge-small-en-v1.5"
+    monkeypatch.delattr(config_module, "effective_embedding_model")
+    assert lme._effective_embedding_model("fastembed", "") == ""
+    assert lme._effective_embedding_model("fastembed", "explicit-local") == "explicit-local"
