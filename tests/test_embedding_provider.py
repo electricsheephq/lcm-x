@@ -1557,3 +1557,12 @@ def test_resolve_provider_openai_compatible(monkeypatch):
 
     config.embedding_provider = "siliconflow"
     assert isinstance(resolve_provider(config), OpenAICompatibleProvider)
+
+
+def test_missing_fastembed_docs_url_uses_plugin_version(monkeypatch):
+    from hermes_lcm.runtime_identity import _plugin_metadata
+    monkeypatch.setattr(provider_mod.importlib.util, "find_spec", lambda name: None)
+    result = provider_mod.probe_provider_availability(
+        LCMConfig(embedding_provider="fastembed", embedding_model="fixture"))
+    assert result["detail"].endswith(
+        f"see https://github.com/electricsheephq/lcm-x/blob/v{_plugin_metadata()['version']}/docs/embeddings-setup.md")

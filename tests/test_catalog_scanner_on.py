@@ -35,7 +35,7 @@ def test_catalog_scanner_on(tmp_path):
     commits = {}
     for label, source in [("baseline", "77b2b4f795fb6a4f84c55abf6d0441da4469971e"), ("candidate", str(ROOT))]:
         out = tmp_path / label / "plugin"
-        builder.build(source, out, receipts / f"{label}-manifest.json")
+        builder.build(source, out, receipts / f"{label}-manifest.json", allow_dirty_tooling=True)
         index_env = dict(env, GIT_INDEX_FILE=str(tmp_path / f"{label}.index"))
         run(["git", "read-tree", "--empty"], repo, index_env)
         for path in sorted(out.rglob("*")):

@@ -36,9 +36,9 @@ jobs:
           git check-ref-format "refs/tags/$SOURCE_TAG"
           source_sha=$(git rev-parse "refs/tags/$SOURCE_TAG^{commit}")
           for attempt in {0..60}; do
-            if gh release view "$SOURCE_TAG"; then break; fi
+            if [[ "$(gh release view "$SOURCE_TAG" --json isDraft --jq .isDraft)" == false ]]; then break; fi
             if [[ "$attempt" == 60 ]]; then
-              echo "STOP: no GitHub release for $SOURCE_TAG after 10 min; nothing pushed; re-run with workflow_dispatch once the release exists"
+              echo "STOP: no published GitHub release for $SOURCE_TAG after 10 min; nothing pushed; re-run with workflow_dispatch once the release is published"
               exit 1
             fi
             sleep 10
