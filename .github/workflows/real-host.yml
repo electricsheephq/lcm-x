@@ -77,6 +77,25 @@ jobs:
             tests/test_real_long_session.py \
             --junitxml=real-host-results.xml
 
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: (success() || failure()) && (matrix.host == 'upstream-main' || matrix.host == 'ref-0.21.5')
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: scanner-source
+      - name: catalog-scanner-on
+        if: (success() || failure()) && (matrix.host == 'upstream-main' || matrix.host == 'ref-0.21.5')
+        working-directory: scanner-source
+        run: python -m pytest tests/test_catalog_scanner_on.py -q -ra --junitxml=catalog-scanner-on.xml
+
+      - name: Upload catalog scanner receipts
+        if: always() && (matrix.host == 'upstream-main' || matrix.host == 'ref-0.21.5')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: catalog-scanner-on-${{ matrix.host }}
+          path: scanner-source/catalog-scanner-1946/
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

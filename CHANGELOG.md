@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- **Summaries ending with a doubled closer are kept.** Some small summary models end an otherwise valid summary with `</lcm-summary>` twice. LCM-X sliced off only one, so the second became the last line and the summary was discarded as `check=closing_hint` (logged as `reason=no_content`), leaving the backlog uncompacted until a retry happened to succeed. A run of identical `</lcm-summary>` closers at the very end now counts as one and is logged as `tolerated repeated_closer`. The closer carries no nonce; the nonce opener, body minimum and closing-hint checks are unchanged (#1948).
+
 ## v0.29.0 (agentic memory)
 
 - Feature: default-off, read-only `lcm_memory lookup/list` with cited multi-session mentions, labelled times and compatible assertion facts; existing default schemas and recall/context bytes stay unchanged. (Refs #1862)

@@ -583,8 +583,8 @@ def _check_summary_contract(content: str, nonce: str, max_tokens: int) -> tuple[
 
     ``failed_check`` is "" when accepted, else ``envelope``, ``nonce_count``, ``short_body`` or ``closing_hint``.
     ``tolerated`` names the known formatting mistakes that were accepted (#612): the ``</summary>`` closer, one
-    ``<summary>`` wrapper around the whole body, one layer of quotes or emphasis on the closing hint, and
-    ``unclosed_envelope`` (#1163). A missing closer is safe because it carries no nonce and the closing-hint check
+    ``<summary>`` wrapper around the whole body, one layer of quotes or emphasis on the closing hint,
+    ``unclosed_envelope`` (#1163) and ``repeated_closer`` (a run of ``</lcm-summary>`` closers at the very end). A missing closer is safe because it carries no nonce and the closing-hint check
     still anchors the body; it is not accepted when a closer appears anywhere after the opener (text written past
     a closed envelope) or when the body holds any tag-like token or a reasoning header line (an unclosed reasoning block). The
     nonce opening tag, its uniqueness, the body minimum and a recognised closing hint are still required.
@@ -598,6 +598,16 @@ def _check_summary_contract(content: str, nonce: str, max_tokens: int) -> tuple[
     if not stripped.endswith(closing_tag) and stripped.endswith("</summary>"):
         closing_tag = "</summary>"
         tolerated.append("summary_closer")
+    elif stripped.endswith(closing_tag):
+        # A run of identical closers at the very end collapses to one (``repeated_closer``). The closer carries
+        # no nonce, so a repeat is as safe as the single closer; the closing-hint check still anchors the body.
+        # Only whitespace may separate them, and `</summary>` is never collapsed: there a pair is #612's wrapper.
+        before = stripped[: -len(closing_tag)].rstrip()
+        if before.endswith(closing_tag):
+            while before.endswith(closing_tag):
+                before = before[: -len(closing_tag)].rstrip()
+            stripped = before + "\n" + closing_tag
+            tolerated.append("repeated_closer")
     # No count check on the closing tag. The body is extracted by slicing from
     # both ends, so an interior `</lcm-summary>` cannot affect what is extracted
     # -- it only ever caused a valid summary to be discarded. And unlike the

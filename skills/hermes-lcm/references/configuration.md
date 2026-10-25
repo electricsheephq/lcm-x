@@ -29,12 +29,9 @@ Restart Hermes after changing plugin or context-engine configuration. Verify wit
 
 ## Installation
 
-An existing checkout can install profile-aware plugin and skill links:
-
-```bash
-./scripts/install.sh
-HERMES_PROFILE=myprofile ./scripts/install.sh
-```
+An existing source checkout can install profile-aware plugin and skill links with
+the [source installer](https://github.com/electricsheephq/lcm-x/blob/main/scripts/install.sh). Run it from that checkout;
+set `HERMES_PROFILE=myprofile` to select a named profile.
 
 The installer exposes both:
 
@@ -53,8 +50,8 @@ active profile. `HERMES_HOME` sets that root; printed commands preserve both cho
 A profile-shaped `HERMES_HOME=<root>/profiles/<name>` selects that profile; a conflicting `HERMES_PROFILE` is refused before links.
 The installer requires canonical lowercase, unpadded ASCII profile names
 (1–64 letters/digits, `_` or `-` after the first character). Use
-`HERMES_PROFILE=default ./scripts/install.sh` for `Default` or
-`HERMES_PROFILE=work ./scripts/install.sh` for padded `Work`; other spellings are
+`HERMES_PROFILE=default` with the source installer for `Default` or
+`HERMES_PROFILE=work` with the source installer for padded `Work`; other spellings are
 refused before links or host calls. Native Hermes CLI aliases remain available.
 
 ## High-impact controls
@@ -85,7 +82,7 @@ information. For an explicit opt-in on a small host:
 export LCM_EMBEDDINGS_ENABLED=true
 ```
 
-Use `docs/operator-guide.md` as the complete current source. Start with:
+Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/operator-guide.md) as the complete current source. Start with:
 
 - `LCM_CONTEXT_THRESHOLD` (default `0.75`): when normal context pressure triggers compaction;
 - `LCM_FRESH_TAIL_COUNT` (default `24`) and `LCM_FRESH_TAIL_MAX_TOKENS` (default `24000`): newest messages kept raw, and their token cap;
@@ -101,7 +98,7 @@ Use `docs/operator-guide.md` as the complete current source. Start with:
 - `LCM_HOST_MESSAGE_UID` (default `shadow`; `off`, `shadow`, `on`; env only): on a host whose messages carry `message_uid`, record which stored row each uid was bound to in the droppable `host_uid_bindings` table and count agreement with the existing identity matching; ingest decisions are unchanged. `/lcm doctor` reports `host_uid_*` counts. `off`: no capture, no table writes, no counts, no log line. Under `shadow` and `on`, canonical uid evidence can also exclude a proven hidden re-ingest copy of an assistant message from leaf summary input (the row stays stored and searchable); `off` disables that. `on` behaves exactly like `shadow`: both record count-only would-reject alias UID-conflict diagnostics in the debug log without changing matching, stored rows, bindings, or ingest writes. `off` performs no UID/binding reads on this diagnostic path. Unknown values behave as `shadow` and warn once. No-op on hosts without uids;
 - `FASTEMBED_CACHE_PATH` (fastembed's own variable, not an `LCM_*` key): the model cache the local `fastembed` provider loads from (default: the user cache directory); it may be a shared, read-only cache. A read-only cache must be pre-seeded, because preparation cannot download into it. Bge-small uses one ONNX Runtime intra-op thread; other models use two;
 - `LCM_IGNORE_SESSION_PATTERNS` and `LCM_STATELESS_SESSION_PATTERNS`: storage ownership boundaries;
-- summary/embedding provider settings only after confirming credentials, cost, and data handling; see `docs/embeddings-setup.md`, section "A host update can remove fastembed", for the embedding-dependency recovery note. Known cloud providers protect provider-bound copies automatically with the configured nonempty known pattern list while durable storage stays raw. `LCM_SENSITIVE_PATTERNS_ENABLED=true` is a separate irreversible durable-ingest opt-in. `LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly sends raw cloud copies under the `privacy:off` vector revision; warmup binds the chosen posture and later query/backfill calls fail closed on identity drift.
+- summary/embedding provider settings only after confirming credentials, cost, and data handling; see [docs/embeddings-setup.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/embeddings-setup.md), section "A host update can remove fastembed", for the embedding-dependency recovery note. Known cloud providers protect provider-bound copies automatically with the configured nonempty known pattern list while durable storage stays raw. `LCM_SENSITIVE_PATTERNS_ENABLED=true` is a separate irreversible durable-ingest opt-in. `LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly sends raw cloud copies under the `privacy:off` vector revision; warmup binds the chosen posture and later query/backfill calls fail closed on identity drift.
 
 `LCM_EMBEDDING_QUERY_PREFIX` / `LCM_EMBEDDING_DOCUMENT_PREFIX` default to `""` and apply only to Ollama and OpenAI-compatible embeddings.
 Environment values override `lcm.embedding_query_prefix` and `lcm.embedding_document_prefix` in YAML; quote values such as `"search_query: "` to keep whitespace.
@@ -142,7 +139,7 @@ Both native context-engine schemas and plugin-registry registration advertise
 `LCM_ADAPTIVE_RETRIEVAL_ENABLED=true` exposes `lcm_retrieve`;
 `LCM_ENTITIES_ENABLED=1` exposes read-only `lcm_memory` and creates the
 `entity_memory_v1` family (six tables) on first flag-on open. The tables stay
-after the flag is turned off; see the [ADR rollback and forget boundary](../../../docs/entities-adr.md#d11-forget-e2).
+after the flag is turned off; see the [ADR rollback and forget boundary](https://github.com/electricsheephq/lcm-x/blob/main/docs/entities-adr.md#d11-forget-e2).
 Entity scope follows the Hermes profile name, falling back to the resolved home
 path. Renaming a profile starts a new entity scope; rekey is a follow-up. Restart after
 changing these loaded process flags. `LCM_DISABLED_TOOLS` (comma-separated
@@ -152,7 +149,7 @@ The manifest continues to declare all 16 tools.
 
 ### Recall ranking
 
-- `LCM_RECALL_ARM_WEIGHTS` (default `fts=0.5,summary=1.0,chunk=1.0`): per-arm RRF weights for `lcm_recall`; see `docs/retrieval-tools.md`.
+- `LCM_RECALL_ARM_WEIGHTS` (default `fts=0.5,summary=1.0,chunk=1.0`): per-arm RRF weights for `lcm_recall`; see [docs/retrieval-tools.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/retrieval-tools.md).
 - `LCM_RECALL_FTS_ANCHOR` (default `true`, #950): with two or more arms, keeps the full-text arm's best match inside the `lcm_recall` ranked window when fusion pushed it out (at most one session displaced). The hit keeps its own score; `provenance.fts_anchor = {fired, position, delivered}` reports the move and whether the anchored hit is in the returned hits after `answer_ready` selection and the response cap (`delivered` is `null` when the anchor did not fire). Embeddings-off output is unchanged, and an `fts` weight of `0` turns it off. It is inert for `limit` below `4` (displacing one of three or fewer hits costs more than it gains; frozen in #950), and proactive recall does not use it. Set `false` to restore the previous order. Managed (evaOS fleet) profiles can set it only after a provisioning release adds it to the environment allowlist.
 
 ### Summary circuit
@@ -176,7 +173,7 @@ A 400 or 404 saying the route cannot serve its model (unknown model, model not f
 
 ## Generated scalar environment reference
 
-Regenerate this table with `python scripts/gen_config_reference.py` from the
+Regenerate this table with the [reference generator](https://github.com/electricsheephq/lcm-x/blob/main/scripts/gen_config_reference.py) from the
 checkout root. It lists every scalar registry entry using the declared constructor
 default, without reading the environment, credentials, or host configuration.
 `""` is an empty string; `null` means unset (automatic provider-dependent protection

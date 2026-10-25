@@ -209,6 +209,8 @@ rather than running unbounded stdlib `re` matches.
 
 ### Install the plugin
 
+Catalog installs use the [generated runtime payload](docs/operations/catalog-payload.md) pinned to an immutable dist commit.
+
 Canonical install path: clone LCM-X as a general user plugin into
 `plugins/hermes-lcm-x`.
 
