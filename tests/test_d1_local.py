@@ -573,6 +573,98 @@ raise SystemExit(cli.main({argv!r}))
                     pass
 
 
+def test_interrupt_after_leader_exit_cleans_grandchild_and_receipt(tmp_path, monkeypatch):
+    cli = driver()
+    argv = driver_args(tmp_path)
+    monkeypatch.setattr(cli, "pin", lambda _: "a" * 40)
+    grand_pid = tmp_path / "grand.pid"
+    grand = ("import os,signal,time; from pathlib import Path; "
+             "signal.signal(signal.SIGINT,signal.SIG_IGN); signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+             f"Path({str(grand_pid)!r}).write_text(str(os.getpid())); print('ready',flush=True); time.sleep(60)")
+    worker = ("import subprocess,sys; "
+              f"p=subprocess.Popen([sys.executable,'-c',{grand!r}],stdout=subprocess.PIPE,text=True); "
+              "assert p.stdout.readline().strip() == 'ready'")
+    original_wait = subprocess.Popen.wait
+    original_run = cli.run_child
+    interrupt = None
+    leaders = []
+
+    def wait_then_interrupt(child, *args, **kwargs):
+        result = original_wait(child, *args, **kwargs)
+        if not leaders:
+            assert result == 0 and pid_gone(child.pid)
+            assert grand_pid.exists() and not pid_gone(int(grand_pid.read_text()))
+            leaders.append(child.pid)
+            interrupt[0] = signal.SIGINT
+        return result
+
+    def fake_run(command, **kwargs):
+        nonlocal interrupt
+        interrupt = kwargs["interrupt"]
+        Path(kwargs["env"]["LCM_D1_THREAD_REPORT"]).write_text(json.dumps({"effective_intra_op_threads": 2}))
+        kwargs.pop("cwd")
+        return original_run([sys.executable, "-c", worker], **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "wait", wait_then_interrupt)
+    monkeypatch.setattr(cli, "run_child", fake_run)
+    try:
+        result = cli.main(argv)
+        wait_until(lambda: pid_gone(int(grand_pid.read_text())), seconds=3)
+        assert result == 130
+        receipt = json.loads((tmp_path / "out/d1-receipt.json").read_text())
+        assert receipt["interrupted"] is True
+        assert receipt["preembed"] == [{"role": "base", "arm": "preembed", "exit_code": 130, "timed_out": False}]
+    finally:
+        for leader in leaders:
+            cli.signal_group(leader, signal.SIGKILL)
+        if grand_pid.exists():
+            wait_until(lambda: pid_gone(int(grand_pid.read_text())))
+
+
+@pytest.mark.parametrize("exists,insensitive", [(False, False), (True, False), (True, True)])
+def test_distinct_normalized_sidecar_paths_are_accepted(tmp_path, monkeypatch, exists, insensitive):
+    monkeypatch.setenv("LCM_D1_CACHE_MODE", "read")
+    output = tmp_path / "caf\u00e9"
+    output.mkdir()
+    sidecar = output / "embedding-metrics.jsonl"
+    dump = tmp_path / "cafe\u0301" / sidecar.name
+    if exists:
+        sidecar.write_text("preserve\n")
+        # APFS cannot host distinct NFC/NFD entries: simulate their distinct
+        # filesystem identities, including an authoritative False on samefile.
+        path_exists = Path.exists
+        monkeypatch.setattr(Path, "exists", lambda path: True if path == dump else path_exists(path))
+        monkeypatch.setattr(lme.os.path, "samefile", lambda a, b: False)
+    monkeypatch.setattr(lme, "_d1_normalization_insensitive", lambda parent: insensitive, raising=False)
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    lme._validate_d1_sidecar_alias(output / "per_question_checkpoint.jsonl", dump)
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+def test_nfc_paths_never_probe_normalization(tmp_path, monkeypatch):
+    monkeypatch.setenv("LCM_D1_CACHE_MODE", "read")
+    output = tmp_path / "output"
+    output.mkdir()
+    def no_probe(parent):
+        raise AssertionError("probe must not run when both names are NFC")
+    monkeypatch.setattr(lme, "_d1_normalization_insensitive", no_probe)
+    lme._validate_d1_sidecar_alias(output / "per_question_checkpoint.jsonl", tmp_path / "other" / "dump.jsonl")
+    with pytest.raises(ValueError, match="must not alias"):
+        lme._validate_d1_sidecar_alias(output / "per_question_checkpoint.jsonl", output / "embedding-metrics.jsonl")
+
+
+def test_unprobeable_normalization_refuses_equivalent_spelling(tmp_path, monkeypatch):
+    monkeypatch.setenv("LCM_D1_CACHE_MODE", "read")
+    output = tmp_path / "caf\u00e9"
+    output.mkdir()
+    def broken_probe(parent):
+        raise PermissionError("grandparent not writable")
+    monkeypatch.setattr(lme, "_d1_normalization_insensitive", broken_probe)
+    with pytest.raises(ValueError, match="must not alias"):
+        lme._validate_d1_sidecar_alias(output / "per_question_checkpoint.jsonl",
+                                       tmp_path / "cafe\u0301" / "embedding-metrics.jsonl")
+
+
 @pytest.mark.parametrize("alias", ["exact", "symlink", "dotdot", "case", "hardlink", "nfd"])
 @pytest.mark.parametrize("exists", [False, True])
 def test_cli_refuses_metrics_sidecar_alias_before_open(tmp_path, monkeypatch, alias, exists):
