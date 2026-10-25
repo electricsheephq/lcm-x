@@ -36,7 +36,7 @@ def test_d1_bridge_accepts_pre_1938_signature(bridge_module, tmp_path, monkeypat
     assert not hasattr(config, "embeddings_enabled_explicit")
 
 
-@pytest.mark.parametrize("producer", ["replay", "steady_state", "stress", "lifecycle", "rebind", "sweep", "fuzz"])
+@pytest.mark.parametrize("producer", ["replay", "steady_state", "stress", "lifecycle", "rebind", "sweep", "fuzz", "stubbing"])
 def test_deterministic_producers_pin_off(producer, tmp_path, monkeypatch):
     from benchmarking.replay import _ensure_hermes_lcm_package
     from benchmarking.types import LCMPolicy
@@ -75,6 +75,9 @@ def test_deterministic_producers_pin_off(producer, tmp_path, monkeypatch):
                 _load("scripts/benchmark_threshold_full_sweep.py")._run_policy(
                     tmp_path, name="fixture", full_sweep=False, messages=[],
                     fresh_tail_messages=1, leaf_chunk_tokens=20)
+            elif producer == "stubbing":
+                _load("benchmarks/benchmark_active_tool_stubbing.py")._run_mode(
+                    tmp_path, [], enabled=True, stub_threshold_tokens=20)
             else:
                 _load("bench/instruments/occurrence_fuzz/driver.py").run(
                     {}, tmp_path / "fuzz", config_module, engine, SimpleNamespace(bad=[]))
@@ -94,15 +97,6 @@ def test_bridge_off_record_has_no_provider_or_model(bridge_module, tmp_path, mon
     assert record["embeddings_enabled"] is False
     assert record["provider"] == record["model"] == ""
     assert json.loads((tmp_path / "effective-config.json").read_text()) == record
-
-
-def test_fmp_off_record_has_no_provider_or_model(tmp_path):
-    import benchmarking.longmemeval as lme
-    from bench.fmp.stores import Stores
-
-    store = Stores(tmp_path, "off", ROOT, "fixture", lme)
-    assert store.identity["effective_config"] == {
-        "embeddings_enabled": False, "embedding_provider": "", "embedding_model": ""}
 
 
 @pytest.mark.parametrize("provider", ["fastembed", "fast-embed", "voyage"])

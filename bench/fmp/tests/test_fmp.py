@@ -41,6 +41,11 @@ def stores(tmp_path, lme):
     return Stores(tmp_path / "stores", "off", REPO, "synthetic-sha", lme)
 
 
+def test_fmp_off_record_has_no_provider_or_model(stores):
+    assert stores.identity["effective_config"] == {
+        "embeddings_enabled": False, "embedding_provider": "", "embedding_model": ""}
+
+
 def test_datasets(question):
     assert question.is_abstention and question.question_date.startswith("2025-01-03")
     item = {"sample_id": "c0", "conversation": {"speaker_a": "A", "speaker_b": "B",

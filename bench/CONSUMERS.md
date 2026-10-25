@@ -2,8 +2,10 @@
 
 Refs #1959 and #1186. This inventory covers producer configuration after the
 local-recall default flip. It records selection and output identity, not model
-readiness, retrieval quality or release acceptance. Product readers are outside
-this producer-only inventory.
+readiness, retrieval quality or release acceptance. Product tools and defaults-only readers are listed as exemptions below.
+The constructor sweep covers `bench/`, `benchmarking/`, `benchmarks/` and
+`scripts/`: eight deterministic constructor sites pin OFF, and 15 retained default-reading
+sites are accounted for (including four Track S reads and three backfill reads).
 
 ## Producers with omitted embedding settings
 
@@ -13,6 +15,7 @@ background preparation on a new tree; it must not masquerade as an OFF run.
 
 | Producer / consumer | Selection | Effective record or explicit OFF pin |
 | --- | --- | --- |
+| `benchmarks/benchmark_active_tool_stubbing.py::_run_mode` | Deterministic assembly latency and token savings | Pins OFF; background model preparation is outside the timed workload. |
 | `benchmarking/replay.py::_config_from_policy` (including `scripts/lcm_benchmark.py`) | policy@v1 deterministic compaction | Pins `embeddings_enabled=False`; background model work is outside this policy. |
 | `benchmarking/steady_state.py::_build_engine` | Ingest/preflight timing | Pins OFF to isolate the measured hot path. |
 | `benchmarking/stress.py::StressRun.make_engine` | Deterministic stress cases | Defaults explicitly OFF; a named embedding case can explicitly override it. |
@@ -37,6 +40,10 @@ background preparation on a new tree; it must not masquerade as an OFF run.
 | Reliability dependency qualification | Explicit LOCAL provider/model, separate readiness checks. |
 | Reliability `scorers/externalized.py` | Reads default externalization policy only; does not start an embedding engine. |
 | `scripts/gen_config_reference.py` | Reads declared defaults to generate reference text; does not run a model. |
+| Track S `run_s_lcmx.py::dry_run` and local catch-up `tests/test_fix_round.py::test_5_product_defaults` | Defaults-only `LCMConfig()` comparisons; Track S serializes the effective defaults with `config_dict`, and the catch-up test compares policy fields without starting a default-config engine. |
+| `scripts/store_wedge_inspect.py::_ReadEngine` | Product inspection tool: `LCMConfig(**config)` supplies replay-policy fields to a read-only facade; no `LCMEngine` or embedding execution. |
+| `scripts/backfill_externalized_tool_outputs.py` (three `from_env()` sites) | Product backfill tool: preserves runtime configuration for protection/externalization policy; does not select a benchmark arm. |
+| `scripts/import_lossless_claw.py` (`from_env()`) | Product import tool: reads protection policy for imported data; does not select a benchmark arm. |
 | `scripts/maintainer_gate.py` | Generic risk classification; does not select or execute an embedding arm. |
 
 Release-gauntlet instruments, product doctor/readiness behavior and historical
