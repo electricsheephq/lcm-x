@@ -64,7 +64,7 @@ Plan, todo and goal survival across a compaction is host behaviour. Fixes are pr
 
 ## H2 — memory that wins (now)
 
-Where LCM-X stands (2026-10-19):
+Where LCM-X stands (2026-10-19; BEAM 10M added 2026-10-26):
 
 - **Shared-reader board (OmniMemEval).** On 2026-10-18 we ran LCM-X v0.28.0-rc1 on OmniMemEval's harness, which runs every system with one gpt-4.1-mini reader and one gpt-4o-mini judge. Local semantic recall was on, with 20 hits per question. These rows are contributor-run, and upstream accepted them with our adapter on 2026-10-21 (MemTensor/OmniMemEval#11; see [benchmarks/RESULTS.md](benchmarks/RESULTS.md)). Per-question outputs, a script that recomputes every cell from them, and a manifest of commits, settings, commands and hashes are published as the [evidence release](https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-results-20261018).
 
