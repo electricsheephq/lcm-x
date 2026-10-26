@@ -36,33 +36,43 @@ def strongest_entries(data):
 
 SHARED_FIELDS = (
     "run_date", "lcmx_version", "executable_identity", "config", "harness_commit",
-    "claim_class", "source_url", "evidence_url",
+    "claim_class", "source_url", "evidence_url", "disclosures", "harness_commits",
 )
 
 
 def shared_metadata(entries):
-    """Page-level metadata is rendered once, so every reported entry must agree on it."""
+    """Refuse divergent metadata within one run group."""
     first = entries[0]
     for entry in entries[1:]:
         for field in SHARED_FIELDS:
-            if entry[field] != first[field]:
+            if entry.get(field) != first.get(field):
                 raise ValueError(f"{entry['benchmark']} differs from {first['benchmark']} on {field}")
     return first
 
 
+def run_groups(entries):
+    groups = {}
+    for entry in entries:
+        key = tuple(entry[field] for field in ("run_date", "harness_commit", "evidence_url"))
+        groups.setdefault(key, []).append(entry)
+    return [(shared_metadata(group), group) for group in groups.values()]
+
+
 def render_readme_results(data):
-    """Keep numbers in one generated README table; this subsection points to it."""
-    shared_metadata(reported_entries(data))
+    """Summarize the two strongest reproduced placements in a short subsection."""
+    run_groups(reported_entries(data))
     return (
         "### Results\n\n"
-        "See the [benchmark highlights](#benchmark-highlights) above and "
+        + "; ".join(f'{e["benchmark"]} {placement(data, e["benchmark"])}' for e in strongest_entries(data))
+        + " among backends in the upstream reproduced Result Summary.\n"
+        + "See the [benchmark highlights](#benchmark-highlights) above and "
         "[results, configuration, evidence and disclosures](benchmarks/RESULTS.md).\n"
     )
 
 
 def render_highlights(data, *, release_notes=False):
     """Render the README and release-note showcase from the public snapshot."""
-    first = shared_metadata(reported_entries(data))
+    first = run_groups(reported_entries(data))[0][0]
     entries = sorted(
         reported_entries(data),
         key=lambda entry: int(placement(data, entry["benchmark"]).split()[0][:-2]),
@@ -99,7 +109,8 @@ def render_highlights(data, *, release_notes=False):
 
 def render_results(data):
     entries = reported_entries(data)
-    first = shared_metadata(entries)
+    groups = run_groups(entries)
+    first = groups[0][0]
     not_run = [entry["benchmark"] for entry in data["entries"] if entry["status"] == "not_run"]
     # A submitted entry carries its own run metadata; it joins the table only once upstream accepts it.
     submitted = [entry for entry in data["entries"] if entry["status"] == "submitted"]
@@ -109,7 +120,7 @@ def render_results(data):
         f'{data["board"]}: {data["description"]}',
         "The LCM-X maintainers ran these rows on the unchanged upstream pipeline and prompts.",
         f'Claim class: **{first["claim_class"]}**.',
-        "Placements count only listed backends with a score in the pinned upstream summary; higher scores rank first.",
+        "Placements count only backends with a score in the pinned upstream reproduced Result Summary; higher scores rank first.",
         "The upstream page does not claim an optimal configuration for every backend.",
         "",
         "| Benchmark | Metric | LCM-X value | Placement | Links |",
@@ -121,11 +132,15 @@ def render_results(data):
             f'{placement(data, entry["benchmark"])} | '
             f'[Source]({entry["source_url"]}#result-summary) · [Evidence]({entry["evidence_url"]}) |'
         )
+    for metadata, group in groups:
+        lines += [
+            "",
+            f'Run date: {metadata["run_date"]}. LCM-X {metadata["lcmx_version"]}; {metadata["executable_identity"]}. '
+            + "Benchmarks: " + ", ".join(entry["benchmark"] for entry in group) + ".",
+            f'Configuration: {metadata["config"]["embeddings"]} embeddings; top-k {metadata["config"]["top_k"]}.',
+            f'Harness: [`{metadata["harness_commit"]}`](https://github.com/electricsheephq/OmniMemEval/tree/{metadata["harness_commit"]}).',
+        ]
     lines += [
-        "",
-        f'Run date: {first["run_date"]}. LCM-X {first["lcmx_version"]}; {first["executable_identity"]}.',
-        f'Configuration: {first["config"]["embeddings"]} embeddings; top-k {first["config"]["top_k"]}.',
-        f'Harness: [`{first["harness_commit"]}`](https://github.com/electricsheephq/OmniMemEval/tree/{first["harness_commit"]}).',
         "",
         "## Disclosures",
         "",
@@ -135,6 +150,7 @@ def render_results(data):
         *(
             f'Submitted upstream, pending review: {entry["benchmark"]} {entry["metric"]} {entry["value"]:.2f} '
             f'([upstream review]({entry["source_url"]}) · [Evidence]({entry["evidence_url"]})); '
+            f'{entry["config"]["embeddings"]} embeddings; top-k {entry["config"]["top_k"]}; '
             f'{entry["run_date"]} run, LCM-X {entry["lcmx_version"]}, harness '
             + " and ".join(f'`{c["sha"][:8]}` ({c["role"]})'
                            for c in entry.get("harness_commits") or [{"sha": entry["harness_commit"], "role": "all stages"}])
