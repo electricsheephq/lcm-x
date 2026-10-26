@@ -18,17 +18,17 @@ This page states what we are building and how we will know it works. The [roadma
    - The one rewrite is a cleanup (on by default from v0.27.0) that moves a large tool output into a file and leaves a reference the agent can expand.
    - Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`).
 2. **The right evidence at the right moment.**
-   - Recall finds what matters across months of history. Full-text search is built in today; local semantic search is built in and on by default from v0.29.0 if it passes its measurement, and a built-in reranker follows in v0.29.0 once it passes its measurement (today reranking needs the Voyage cloud provider).
+   - Recall finds what matters across months of history. Full-text search is built in today; local semantic search is built in and on by default from v0.29.0 if it passes its measurement, and a built-in reranker follows once it passes its measurement, re-screened in v0.32.0 (today reranking needs the Voyage cloud provider).
    - Next (v0.31.0): evidence the agent needs is put in front of it before it answers, not only when it thinks to search.
    - The agent can always open the exact source behind what it was shown.
 3. **Memory that grows.**
-   - Next (v0.30.0): from the record, LCM-X will derive what an agent should know about its user and its work: facts, preferences, entities, events and their times.
+   - Next (v0.32.0): from the record, LCM-X will derive what an agent should know about its user and its work: facts, preferences, entities, events and their times.
    - Each derived memory links to the turns it came from. Derived memory is a view of the record, never a replacement for it.
 4. **Long sessions keep working.**
    - The same record runs the context window: a session can run for weeks and the model stays inside its window. Today the user waits for compaction (p90 about 55 s); v0.31.0 removes that wait.
    - Anything compacted can be recovered exactly.
 5. **One memory, any harness.**
-   - Next (from v0.30.0): the memory an agent builds in Hermes becomes available in other harnesses, Claude Code first, then Codex, OpenClaw and any MCP client.
+   - Next (from v0.33.0): the memory an agent builds in Hermes becomes available in other harnesses, Claude Code first, then Codex, OpenClaw and any MCP client.
    - Each event keeps a stable identity across hosts, so the record stays lossless when several harnesses share it.
 6. **We measure it.** Claims about recall, continuity and speed come with a pinned commit, a configuration and a published number. From v0.29.0 our rows are read and judged by current frontier models; earlier rows name the judge they used.
 
@@ -38,14 +38,14 @@ This page states what we are building and how we will know it works. The [roadma
 - **A durable store** (SQLite) with:
   - a summary DAG;
   - externalized large outputs;
-  - full-text search, with optional semantic search and cloud reranking today; local semantic search (built in and on by default from v0.29.0 if it passes its measurement), a built-in reranker (v0.29.0) and source-linked derived memory (v0.30.0) next.
-- **Agent tools** (`lcm_*`), **operator commands** (`/lcm`, the doctor), and, from v0.30.0, a service endpoint so other harnesses can read the same memory (writes from other harnesses in v0.32.0).
+  - full-text search, with optional semantic search and cloud reranking today; local semantic search (built in and on by default from v0.29.0 if it passes its measurement), a built-in reranker and source-linked derived memory (v0.32.0) next.
+- **Agent tools** (`lcm_*`), **operator commands** (`/lcm`, the doctor), and, from v0.33.0, a service endpoint so other harnesses can read the same memory (writes from other harnesses with v0.34.0).
 
 ## What LCM-X is not
 
 - **Not a filing cabinet.** Keeping everything is the floor; the product is the right evidence at the moment of need.
 - **Not a lossy fact store.** A derived memory never replaces the record it came from; every one links back to its source.
-- **Not a fork of any host.** LCM-X integrates through each host's public contract: the Hermes plugin today, hooks and MCP for other hosts from v0.30.0.
+- **Not a fork of any host.** LCM-X integrates through each host's public contract: the Hermes plugin today, hooks and MCP for other hosts from v0.33.0.
 
 ## Principles
 
@@ -54,7 +54,7 @@ This page states what we are building and how we will know it works. The [roadma
   - A feature becomes the default when it passes one pre-declared, paired measurement on held-out questions, read by a frontier model.
   - The measurement must show a significant gain in evidence or answer quality.
   - It ships on even when it uses more tokens; we publish tokens per query beside every number, and every default can be turned off. Token cost is not a gate; losslessness and the user's wait are.
-- **Built in, not bolted on.** From v0.29.0 the default install includes local semantic search, on by default if it passes its measurement, and a local reranker, if it passes its measurement. Cloud providers are optional upgrades. The built-in models are the best we can run locally, chosen by measurement and checked again when better open models ship ([#1715](https://github.com/electricsheephq/lcm-x/issues/1715)).
+- **Built in, not bolted on.** From v0.29.0 the default install includes local semantic search, on by default if it passes its measurement; a local reranker follows if it passes its measurement. Cloud providers are optional upgrades. The built-in models are the best we can run locally, chosen by measurement and checked again when better open models ship ([#1715](https://github.com/electricsheephq/lcm-x/issues/1715)).
 - **Local first, offline capable.** The memory layer needs no cloud: one SQLite database, with a folder beside it for large externalized payloads, and local embeddings, built in from v0.29.0. With a local summariser model it runs fully offline. So agents on laptops today, and on-device agents and robots later (research), keep their whole memory on the device.
 - **The user's wait is a product metric.** Compaction time and prompt-cache breaks count as much as summary quality.
 - **Defaults target the best measured quality.** We choose, tune and gate defaults on the reference machine: an Apple M-series laptop (M3 or newer) with 16 GB of RAM. Smaller hosts are an option, not a priority. They adapt on their own, using shorter time budgets and lighter work and falling back to full-text search instead of making the user wait, and they never lower the default that everyone else gets. Robots and on-device agents are expected to carry more compute than the reference machine, not less.
