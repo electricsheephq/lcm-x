@@ -51,6 +51,16 @@ promote D1 and D4/D8; host-integration changes promote Phase C cells. The releas
 records the promotion decision per rc with the diff-scope proof
 (`git diff <prevGA>..rcN --name-only`).
 
+**Conditional promotions.** When D5 uses its integrity-only path (b), or the patch-only
+integrity-only alternative in the release-manager decisions below, D7 and D5-B are promoted
+into that rc: those paths gate on latency receipts bound to the same rc, which a weekly M
+receipt cannot supply.
+
+**Blockers follow selection.** A row's GA blocker applies when the row is selected for the
+rc (R, the release's T rows, a promotion or the full tier). In particular, D2's rule that an
+unrun D2 is not green (the #1824 implementation boundary) blocks GA only in a release that
+selects D2; otherwise D2 runs in M and its receipt is recorded there.
+
 Tiering must still catch a replay that keeps row counts but loses timestamps or source
 attribution, so recall returns the wrong historical state. The ingest→D1/D4 promotion
 covers this defect class.
@@ -193,7 +203,7 @@ A/A′ prerequisite is mandatory; an OFF placebo cannot qualify LOCAL.
 ### Maximum-configuration gate (from v0.30.0)
 
 **Activation:** from v0.30.0 rc1, every score-sensitive change named in the release's
-gate (today #1607, #1589, #1590 and #1188) also runs on the cloud-embedding (Voyage)
+gate (today #1607, #1589 and #1590) also runs on the cloud-embedding (Voyage)
 arm of the #1963 ablation. This promotes that recorded arm to a gate under D6.
 **Pass rule:** it must pass D8's existing non-inferiority rule there: in each named
 category, the lower 95% bound of the paired candidate-minus-comparison difference is
@@ -201,7 +211,9 @@ strictly above −2 points, using D8's same cluster bootstrap and seed 1607. D4'
 rule and the arm's own valid D4 A/A′ placebo in the same session are required, as are D8's per-category
 placebo, recall-health and degraded-rate rules. A non-significant loss is not
 non-inferior. A win on the default configuration alone is recorded as an experiment,
-not adopted. Latency and cost claims for a default continue to use RFM-v1.
+not adopted. Agentic delivery (#1188) is outside D8's single-shot scope, so its
+cloud-embedding arm stays recorded in D6 until this spec gives agentic delivery a pass rule.
+Latency and cost claims for a default continue to use RFM-v1.
 
 ### Reference-machine measurement fixture — RFM-v1 (#1186)
 
