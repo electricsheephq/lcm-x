@@ -64,7 +64,7 @@ Plan, todo and goal survival across a compaction is host behaviour. Fixes are pr
 
 ## H2 — memory that wins (now)
 
-Where LCM-X stands (2026-10-19):
+Where LCM-X stands (2026-10-19; BEAM 10M added 2026-10-26):
 
 - **Shared-reader board (OmniMemEval).** On 2026-10-18 we ran LCM-X v0.28.0-rc1 on OmniMemEval's harness, which runs every system with one gpt-4.1-mini reader and one gpt-4o-mini judge. Local semantic recall was on, with 20 hits per question. These rows are contributor-run, and upstream accepted them with our adapter on 2026-10-21 (MemTensor/OmniMemEval#11; see [benchmarks/RESULTS.md](benchmarks/RESULTS.md)). Per-question outputs, a script that recomputes every cell from them, and a manifest of commits, settings, commands and hashes are published as the [evidence release](https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-results-20261018).
 
@@ -79,7 +79,7 @@ Where LCM-X stands (2026-10-19):
 - **Inside Hermes, against its built-in compressor** (100 LongMemEval questions, one reader, 2026-10-10): LCM-X with local semantic recall 79, Hermes built-in 78, no difference. With pre-answer evidence LCM-X scores 89 (p = .027), with a higher p90 answer time (#1111).
 - **LongMemEval-S with a frontier reader.** 85.8% for v0.26.1 with local semantic recall and 72.2% without embeddings (reader gpt-6.1-sol, the benchmark's gpt-4o judge). A frontier model given the full history and no memory system scores 92%.
 - **LongMemEval-V2 Small.** 66.1% on an older tree under its fixed reader and judge, below the 69.9% coding-agent baseline. Not submitted.
-- **Not entered yet:** BEAM 10M, DolphinBench, LifeBench, and LongMemEval-M answer rows.
+- **BEAM 10M:** [accepted upstream on 2026-10-26](https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md#result-summary) (63.32, 1st of 12 reproduced backends). **Not entered yet:** DolphinBench, LifeBench, and LongMemEval-M answer rows.
 - **What others report.** Leading systems self-report 92–96% on LongMemEval-S. On OmniMemEval, two systems that self-report about 94 score 72 and 56.
 
 Where we lose, ranked by measured size (each issue holds the evidence):
@@ -102,7 +102,7 @@ The plan:
    - A ≤30-minute development loop is a kill/futility screen: it only sees large effects. A nightly factorial run on ≥400 clustered questions promotes; an untouched cohort confirms. Delivery, sufficiency and embeddings are measured together.
    - Every screen gets a power check before it is commissioned. No bar the baseline cannot meet. Measure the noise floor (the same configuration twice) and a second judge before using ±2-point bars. The development split overlaps the benchmark sets, so a benchmark rerun after a development-split choice reports the held-out score beside the total.
    - **Frontier-model rows (#1189):** frontier readers, two frontier judges from different families on the same blinded answers, published prompts, question ids and configurations, and a same-reader full-context baseline. Agentic and single-retrieval rows stay in separate tables.
-   - **Shared-reader boards:** OmniMemEval (BEAM 10M; the other rows were accepted upstream on 2026-10-21), DolphinBench (run inside Hermes), LifeBench and LongMemEval-V2. LongMemEval-M answer rows are judged by frontier models.
+   - **Shared-reader boards:** OmniMemEval (BEAM 10M [accepted upstream on 2026-10-26](https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md#result-summary): 63.32, 1st of 12 reproduced backends; the other rows were accepted upstream on 2026-10-21), DolphinBench (run inside Hermes), LifeBench and LongMemEval-V2. LongMemEval-M answer rows are judged by frontier models.
    - **Recall QA target:** ≥90% on LongMemEval-S and LoCoMo (non-adversarial) under the matched public protocol. A rank is claimed only on matched rows that hold under a second judge.
    - **Bench honesty:** two corrections to the LoCoMo/LongMemEval gate adapter are in flight: conversation speaker names were not kept (other adapters in the same harness keep them), and summary nodes carried no source lineage. Each correction lands with a paired old-vs-new adapter row on a fixed product release. Earlier gate rows stay as recorded and are compared only with rows from the same adapter.
    - Results are published in the repository scoreboard with tokens per query and cost (#898, #1067).

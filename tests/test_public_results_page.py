@@ -38,7 +38,7 @@ def test_entries_have_provenance_and_match_snapshot(data):
     snapshot = data["snapshot"]
     lcmx = next(row["scores"] for row in snapshot["rows"] if row["backend"] == "LCM-X")
     assert {entry["benchmark"] for entry in data["entries"]} == set(snapshot["benchmarks"])
-    assert sum(entry["status"] == "reported" for entry in data["entries"]) == 5
+    assert sum(entry["status"] == "reported" for entry in data["entries"]) == 6
     for entry in data["entries"]:
         for field in (
             "board", "benchmark", "metric", "lcmx_version", "executable_identity",
@@ -56,12 +56,12 @@ def test_entries_have_provenance_and_match_snapshot(data):
             assert lcmx[entry["benchmark"]] is None and entry["value"] is not None
             continue
         assert entry["source_url"] == snapshot["source_url"]
-        assert "/blob/f7476c55/" in entry["source_url"]
+        assert "/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/" in entry["source_url"]
         assert entry["claim_class"] == "contributor-run, accepted upstream"
         assert entry["value"] == lcmx[entry["benchmark"]]
     assert [entry["benchmark"] for entry in data["entries"] if entry["status"] == "not_run"] == []
     assert [(entry["benchmark"], entry["value"]) for entry in data["entries"]
-            if entry["status"] == "submitted"] == [("BEAM 10M", 63.32)]
+            if entry["status"] == "submitted"] == []
 
 
 def test_page_values_and_placements_match_snapshot(data):
@@ -87,16 +87,8 @@ def test_page_values_and_placements_match_snapshot(data):
         assert suffix == expected_suffix
         assert entry["source_url"] in links and entry["evidence_url"] in links
     assert "Not yet run" not in page
-    submitted = next(entry for entry in data["entries"] if entry["status"] == "submitted")
-    line = next(line for line in page.splitlines() if line.startswith("Submitted upstream, pending review: "))
-    assert "BEAM 10M nugget score 63.32 " in line and submitted["source_url"] in line
-    assert submitted["evidence_url"] in line and submitted["disclosures"] in page
-    # A resumed run names every harness commit with its role, ending at the one that scored it.
-    assert [c["sha"][:8] for c in submitted["harness_commits"]] == ["cd955c46", "282be0b8"]
-    assert submitted["harness_commits"][-1]["sha"] == submitted["harness_commit"]
-    for commit in submitted["harness_commits"]:
-        assert f'`{commit["sha"][:8]}` ({commit["role"]})' in line
-    assert "| BEAM 10M |" not in page
+    assert "Submitted upstream, pending review" not in page
+    assert "| BEAM 10M | nugget score | 63.32 | 1st of 12 |" in page
     expected_review = "our Agent Memory Leaderboard Cycle 2 entry; the board publishes its own results."
     assert f"In review: {expected_review}" in page
     assert page.split("In review:")[1].strip() == expected_review
@@ -111,28 +103,93 @@ def test_readme_results_only_quote_sourced_claims(data):
     assert subsection.rstrip() == renderer.render_readme_results(data).rstrip()
     assert "[benchmark highlights](#benchmark-highlights)" in subsection
     assert "(benchmarks/RESULTS.md)" in subsection
-    assert not re.search(r"\d", subsection)
+    assert 3 <= len(subsection.strip().splitlines()) <= 6
+    for entry in renderer.strongest_entries(data):
+        assert f'{entry["benchmark"]} {renderer.placement(data, entry["benchmark"])}' in subsection
 
 
-def test_divergent_entry_metadata_is_refused(data):
-    import copy
-    changed = copy.deepcopy(data)
-    reported = [entry for entry in changed["entries"] if entry["status"] == "reported"]
-    reported[1]["run_date"] = "2099-01-01"
-    with pytest.raises(ValueError, match="run_date"):
-        renderer.render_results(changed)
-    with pytest.raises(ValueError, match="run_date"):
-        renderer.render_readme_results(changed)
+def test_same_group_divergent_metadata_is_refused(data):
+    data["entries"][1]["config"]["top_k"] = 99
+    for render in (renderer.render_results, renderer.render_readme_results, renderer.render_highlights):
+        with pytest.raises(ValueError, match="config"):
+            render(data)
+
+
+def test_reported_harness_commits_render_with_roles(data):
+    page = renderer.render_results(data)
+    for entry in renderer.reported_entries(data):
+        if "harness_commits" not in entry:
+            continue
+        assert [c["sha"][:8] for c in entry["harness_commits"]] == ["cd955c46", "282be0b8"]
+        for commit in entry["harness_commits"]:
+            assert f'`{commit["sha"][:8]}` ({commit["role"]})' in page
+        assert entry["harness_commits"][-1]["sha"] == entry["harness_commit"]
+
+
+def test_page_has_no_duplicate_disclosure_paragraph(data):
+    page = renderer.render_results(data)
+    shared = data["entries"][0]["disclosures"]
+    assert page.count(shared) == 1
+    beam = next(e for e in data["entries"] if e["benchmark"] == "BEAM 10M")
+    assert beam["disclosures"].startswith("BEAM 10M:")
+    assert "63.32 +/- 40.02 (per-question SD)" in beam["disclosures"]
+    assert "one run" in beam["disclosures"]
+
+
+@pytest.mark.parametrize("field", ["claim_class", "source_url"])
+def test_cross_group_page_metadata_difference_is_refused(data, field):
+    entry = next(e for e in data["entries"] if e["benchmark"] == "BEAM 10M")
+    entry[field] = "different"
+    for render in (renderer.render_results, renderer.render_readme_results, renderer.render_highlights):
+        with pytest.raises(ValueError, match=field):
+            render(data)
+
+
+def two_group_data(data):
+    entry = next(e for e in data["entries"] if e["benchmark"] == "BEAM 10M")
+    entry.update(status="reported")
+    return data
+
+
+def test_two_group_render_lists_only_beam10m_in_second_group(data):
+    page = renderer.render_results(two_group_data(data))
+    assert page.count("Run date:") == page.count("Configuration:") == page.count("Harness:") == 2
+    line = next(line for line in page.splitlines() if line.startswith("Run date: 2026-10-22"))
+    assert "Benchmarks: BEAM 10M." in line
+    assert "BEAM 100K" not in line
+
+
+def test_cross_group_metadata_difference_is_allowed(data):
+    data = two_group_data(data)
+    entry = next(e for e in data["entries"] if e["benchmark"] == "BEAM 10M")
+    entry["config"]["top_k"] = 99
+    assert "top-k 99" in renderer.render_results(data)
+    renderer.render_readme_results(data)
+    renderer.render_highlights(data)
 
 
 def test_not_run_line_renders_only_when_an_entry_is_not_run(data):
-    import copy
-    changed = copy.deepcopy(data)
-    entry = next(entry for entry in changed["entries"] if entry["status"] == "submitted")
+    data = two_group_data(data)
+    entry = next(e for e in data["entries"] if e["benchmark"] == "LoCoMo")
     entry.update(status="not_run", value=None)
-    page = renderer.render_results(changed)
-    assert "Not yet run: BEAM 10M." in page
+    page = renderer.render_results(data)
+    assert "Not yet run: LoCoMo." in page
     assert "Submitted upstream, pending review" not in page
+
+
+def test_submitted_line_discloses_configuration(data):
+    entry = next(e for e in data["entries"] if e["benchmark"] == "BEAM 10M")
+    entry["status"] = "submitted"
+    page = renderer.render_results(data)
+    line = next(line for line in page.splitlines() if line.startswith("Submitted upstream, pending review:"))
+    assert f'{entry["config"]["embeddings"]} embeddings; top-k {entry["config"]["top_k"]}' in line
+
+
+def test_accepted_beam10m_group_discloses_configuration(data):
+    page = renderer.render_results(two_group_data(data))
+    group = page.split("Run date: 2026-10-22", 1)[1].split("## Disclosures", 1)[0]
+    assert "Benchmarks: BEAM 10M." in group
+    assert "local fastembed BAAI/bge-small-en-v1.5 embeddings; top-k 20" in group
 
 
 def highlight_block():
@@ -205,7 +262,8 @@ def test_release_notes_match_readme_table():
 
 
 def test_submitted_highlight_has_review_link_without_placement(data):
-    submitted = next(entry for entry in data["entries"] if entry["status"] == "submitted")
+    submitted = next(entry for entry in data["entries"] if entry["benchmark"] == "BEAM 10M")
+    submitted["status"] = "submitted"
     row = next(row for row in table_rows(renderer.render_highlights(data))
                if row.startswith(f'| {submitted["benchmark"]} |'))
     assert row == (

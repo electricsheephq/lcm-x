@@ -2,7 +2,7 @@
   "board": "OmniMemEval",
   "description": "An open evaluation harness that requests the same data, prompts, answer model, judge model and metric logic for every backend within each benchmark (the disclosure below states how the LCM-X rows requested the models).",
   "snapshot": {
-    "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
+    "source_url": "https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md",
     "benchmarks": [
       "LoCoMo",
       "LongMemEval",
@@ -172,7 +172,7 @@
           "LoCoMo": 78.83,
           "LongMemEval": 87.0,
           "BEAM 100K": 71.84,
-          "BEAM 10M": null,
+          "BEAM 10M": 63.32,
           "PersonaMem v2": 33.96,
           "HaluMem": 81.68
         }
@@ -194,7 +194,7 @@
       },
       "run_date": "2026-10-18",
       "harness_commit": "162640314863db64b5af62138b5b81776516d1ff",
-      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
+      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md",
       "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-results-20261018",
       "claim_class": "contributor-run, accepted upstream",
       "disclosures": "The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed."
@@ -213,7 +213,7 @@
       },
       "run_date": "2026-10-18",
       "harness_commit": "162640314863db64b5af62138b5b81776516d1ff",
-      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
+      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md",
       "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-results-20261018",
       "claim_class": "contributor-run, accepted upstream",
       "disclosures": "The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed."
@@ -232,7 +232,7 @@
       },
       "run_date": "2026-10-18",
       "harness_commit": "162640314863db64b5af62138b5b81776516d1ff",
-      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
+      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md",
       "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-results-20261018",
       "claim_class": "contributor-run, accepted upstream",
       "disclosures": "The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed."
@@ -242,7 +242,7 @@
       "benchmark": "BEAM 10M",
       "metric": "nugget score",
       "value": 63.32,
-      "status": "submitted",
+      "status": "reported",
       "lcmx_version": "v0.28.0",
       "executable_identity": "v0.28.0 release",
       "config": {
@@ -261,10 +261,10 @@
           "role": "conversation 7's 10 ingest sessions, search, answer and evaluation"
         }
       ],
-      "source_url": "https://github.com/MemTensor/OmniMemEval/pull/18",
+      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md",
       "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-beam10m-results-20261022",
-      "claim_class": "contributor-run, submitted upstream",
-      "disclosures": "BEAM 10M (submitted, not yet accepted): one run of 200 questions, so no run-to-run variance. Ingestion of 90 sessions ran at harness `cd955c46`; conversation 7's 10 sessions and every later stage ran at `282be0b8`, which adds the null-time-anchor fix. Answer and judge calls went through OpenRouter, with the same model-receipt limitation as above."
+      "claim_class": "contributor-run, accepted upstream",
+      "disclosures": "BEAM 10M: reported upstream as 63.32 +/- 40.02 (per-question SD), one run. Harness 282be0b8 applied the null-time-anchor fix, ingested conversation 7's 10 sessions, and ran search, answer and evaluation; cd955c46 ingested the other 90 sessions."
     },
     {
       "board": "OmniMemEval",
@@ -280,7 +280,7 @@
       },
       "run_date": "2026-10-18",
       "harness_commit": "162640314863db64b5af62138b5b81776516d1ff",
-      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
+      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md",
       "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-results-20261018",
       "claim_class": "contributor-run, accepted upstream",
       "disclosures": "The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed."
@@ -299,7 +299,7 @@
       },
       "run_date": "2026-10-18",
       "harness_commit": "162640314863db64b5af62138b5b81776516d1ff",
-      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
+      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md",
       "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-results-20261018",
       "claim_class": "contributor-run, accepted upstream",
       "disclosures": "The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed."

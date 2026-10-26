@@ -12,16 +12,16 @@
 
 <!-- results-highlights:start -->
 <a id="benchmark-highlights"></a>
-**Benchmark highlights** ([OmniMemEval](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md), contributor-run, accepted upstream)
+**Benchmark highlights** ([OmniMemEval](https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md), contributor-run, accepted upstream)
 
 | Benchmark | LCM-X | Placement |
 | --- | ---: | --- |
-| BEAM 100K | 71.84 | [1st of 12](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary) |
-| LongMemEval | 87.00 | [2nd of 13](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary) |
-| LoCoMo | 78.83 | [5th of 15](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary) |
-| HaluMem | 81.68 | [5th of 13](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary) |
-| PersonaMem v2 | 33.96 | [8th of 13](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary) |
-| BEAM 10M | 63.32 | [in upstream review](https://github.com/MemTensor/OmniMemEval/pull/18) |
+| BEAM 100K | 71.84 | [1st of 12](https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md#result-summary) |
+| BEAM 10M | 63.32 | [1st of 12](https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md#result-summary) |
+| LongMemEval | 87.00 | [2nd of 13](https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md#result-summary) |
+| LoCoMo | 78.83 | [5th of 15](https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md#result-summary) |
+| HaluMem | 81.68 | [5th of 13](https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md#result-summary) |
+| PersonaMem v2 | 33.96 | [8th of 13](https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md#result-summary) |
 
 Configuration, evidence and disclosures: [benchmarks/RESULTS.md](benchmarks/RESULTS.md).
 <!-- results-highlights:end -->
@@ -175,6 +175,7 @@ gaps, and proof boundaries.
 
 ### Results
 
+BEAM 100K 1st of 12; BEAM 10M 1st of 12 among backends in the upstream reproduced Result Summary.
 See the [benchmark highlights](#benchmark-highlights) above and [results, configuration, evidence and disclosures](benchmarks/RESULTS.md).
 
 ## LCM vs built-in compression
