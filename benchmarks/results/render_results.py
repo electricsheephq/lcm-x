@@ -53,6 +53,9 @@ def shared_metadata(entries):
 def run_groups(entries):
     groups = {}
     for entry in entries:
+        for field in ("claim_class", "source_url"):
+            if entry[field] != entries[0][field]:
+                raise ValueError(f"{entry['benchmark']} differs from {entries[0]['benchmark']} on {field}")
         key = tuple(entry[field] for field in ("run_date", "harness_commit", "evidence_url"))
         groups.setdefault(key, []).append(entry)
     return [(shared_metadata(group), group) for group in groups.values()]
@@ -140,6 +143,12 @@ def render_results(data):
             f'Configuration: {metadata["config"]["embeddings"]} embeddings; top-k {metadata["config"]["top_k"]}.',
             f'Harness: [`{metadata["harness_commit"]}`](https://github.com/electricsheephq/OmniMemEval/tree/{metadata["harness_commit"]}).',
         ]
+        if metadata.get("harness_commits"):
+            lines.append("Harness stages: " + " and ".join(
+                f'`{commit["sha"][:8]}` ({commit["role"]}) '
+                f'([commit](https://github.com/electricsheephq/OmniMemEval/tree/{commit["sha"]}))'
+                for commit in metadata["harness_commits"]
+            ) + ".")
     lines += [
         "",
         "## Disclosures",

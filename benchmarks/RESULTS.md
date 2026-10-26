@@ -21,11 +21,12 @@ Harness: [`162640314863db64b5af62138b5b81776516d1ff`](https://github.com/electri
 
 Run date: 2026-10-22. LCM-X v0.28.0; v0.28.0 release. Benchmarks: BEAM 10M.
 Configuration: local fastembed BAAI/bge-small-en-v1.5 embeddings; top-k 20.
-Harness: [`cd955c46a40a5d7f386cdfaec711ef8c966ff97d`](https://github.com/electricsheephq/OmniMemEval/tree/cd955c46a40a5d7f386cdfaec711ef8c966ff97d).
+Harness: [`282be0b82281d41eb6684b38e93b9bac544fb20b`](https://github.com/electricsheephq/OmniMemEval/tree/282be0b82281d41eb6684b38e93b9bac544fb20b).
+Harness stages: `cd955c46` (90 ingest sessions) ([commit](https://github.com/electricsheephq/OmniMemEval/tree/cd955c46a40a5d7f386cdfaec711ef8c966ff97d)) and `282be0b8` (conversation 7's 10 ingest sessions, search, answer and evaluation) ([commit](https://github.com/electricsheephq/OmniMemEval/tree/282be0b82281d41eb6684b38e93b9bac544fb20b)).
 
 ## Disclosures
 
 The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed.
-The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed. Conversation 7 was ingested with the null-time-anchor fix (harness 282be0b8); one run; the +/- figure is the per-question SD.
+BEAM 10M: reported upstream as 63.32 +/- 40.02 (per-question SD), one run. Harness 282be0b8 applied the null-time-anchor fix, ingested conversation 7's 10 sessions, and ran search, answer and evaluation; cd955c46 ingested the other 90 sessions.
 
 In review: our Agent Memory Leaderboard Cycle 2 entry; the board publishes its own results.

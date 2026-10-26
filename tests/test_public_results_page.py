@@ -115,9 +115,39 @@ def test_same_group_divergent_metadata_is_refused(data):
             render(data)
 
 
+def test_reported_harness_commits_render_with_roles(data):
+    page = renderer.render_results(data)
+    for entry in renderer.reported_entries(data):
+        if "harness_commits" not in entry:
+            continue
+        assert [c["sha"][:8] for c in entry["harness_commits"]] == ["cd955c46", "282be0b8"]
+        for commit in entry["harness_commits"]:
+            assert f'`{commit["sha"][:8]}` ({commit["role"]})' in page
+        assert entry["harness_commits"][-1]["sha"] == entry["harness_commit"]
+
+
+def test_page_has_no_duplicate_disclosure_paragraph(data):
+    page = renderer.render_results(data)
+    shared = data["entries"][0]["disclosures"]
+    assert page.count(shared) == 1
+    beam = next(e for e in data["entries"] if e["benchmark"] == "BEAM 10M")
+    assert beam["disclosures"].startswith("BEAM 10M:")
+    assert "63.32 +/- 40.02 (per-question SD)" in beam["disclosures"]
+    assert "one run" in beam["disclosures"]
+
+
+@pytest.mark.parametrize("field", ["claim_class", "source_url"])
+def test_cross_group_page_metadata_difference_is_refused(data, field):
+    entry = next(e for e in data["entries"] if e["benchmark"] == "BEAM 10M")
+    entry[field] = "different"
+    for render in (renderer.render_results, renderer.render_readme_results, renderer.render_highlights):
+        with pytest.raises(ValueError, match=field):
+            render(data)
+
+
 def two_group_data(data):
     entry = next(e for e in data["entries"] if e["benchmark"] == "BEAM 10M")
-    entry.update(status="reported", harness_commit="cd955c46a40a5d7f386cdfaec711ef8c966ff97d")
+    entry.update(status="reported")
     return data
 
 

@@ -250,7 +250,7 @@
         "top_k": 20
       },
       "run_date": "2026-10-22",
-      "harness_commit": "cd955c46a40a5d7f386cdfaec711ef8c966ff97d",
+      "harness_commit": "282be0b82281d41eb6684b38e93b9bac544fb20b",
       "harness_commits": [
         {
           "sha": "cd955c46a40a5d7f386cdfaec711ef8c966ff97d",
@@ -264,7 +264,7 @@
       "source_url": "https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md",
       "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-beam10m-results-20261022",
       "claim_class": "contributor-run, accepted upstream",
-      "disclosures": "The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed. Conversation 7 was ingested with the null-time-anchor fix (harness 282be0b8); one run; the +/- figure is the per-question SD."
+      "disclosures": "BEAM 10M: reported upstream as 63.32 +/- 40.02 (per-question SD), one run. Harness 282be0b8 applied the null-time-anchor fix, ingested conversation 7's 10 sessions, and ran search, answer and evaluation; cd955c46 ingested the other 90 sessions."
     },
     {
       "board": "OmniMemEval",
