@@ -1,4 +1,0 @@
-# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/access_context/model.py
-# hypothesis_version: 6.141.1
-
-['+00:00', ':', 'AccessContextV1', 'Z', 'actor_type', 'agent', 'audience', 'collection', 'collection:', 'contract_revision', 'conversation_id', 'conversation_lane', 'delegation_chain', 'deployment_id', 'expires_at', 'grants', 'human', 'issued_at', 'lease_generation', 'lease_id', 'membership_revision', 'narrowing', 'operation', 'ownership_generation', 'policy_revision', 'principal_id', 'profile_id', 'profile_incarnation', 'read_policy_ref', 'revocation_epoch', 'scope_mismatch', 'service', 'session_id', 'source_kind', 'tenant_id', 'v1']

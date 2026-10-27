@@ -1,4 +1,0 @@
-# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/ingest_pem_model.py
-# hypothesis_version: 6.141.1
-
-['"', '"\'),.;:]}', "'", '+/=', '/', '000b', '000c', '001c', '001d', '001e', '002F', '002f', '0085', '2028', '2029', '>+- \t', 'PRIVATE KEY-----', '[0-9a-fA-F]{32,128}', '[A-Za-z0-9+/=\\t\\\\ ]*', '[A-Za-z0-9+/]{16,}', '\\', '\\\\[rnfu]|[\\"\']', 'n', 'nf', 'r', 't', 'u']

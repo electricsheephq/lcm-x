@@ -1,4 +1,0 @@
-# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/ingest_integrity.py
-# hypothesis_version: 6.141.1
-
-[0.0, '"', "'", '*.json', ',', '[', '\\', '\\1', '\\\\+([\\"\'])', '\\\\+[\\"\']', '\\n', '\\r', '`', '```', 'arguments', 'base64_like', 'content', 'content_chars', 'content_len', 'data_uri_base64', 'dummy-', 'dummy_', 'example-', 'example_', 'externalized_ref', 'fake-', 'fake_', 'field', 'heartbeat_noise_rows', 'ingest_payload', 'kind', 'largest_content', 'largest_content_rows', 'largest_tool_calls', 'length', 'placeholder-', 'placeholder_', 'role', 'session_id', 'source', 'store_id', 'suspicious_category', 'tool', 'tool_calls', 'tool_calls_len', 'utf-8', '{']

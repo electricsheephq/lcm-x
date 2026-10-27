@@ -1,4 +1,0 @@
-# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/tool_registry.py
-# hypothesis_version: 6.141.1
-
-['assertions_enabled', 'entities_enabled', 'lcm_compile_evidence', 'lcm_compute', 'lcm_describe', 'lcm_doctor', 'lcm_evidence_pack', 'lcm_expand', 'lcm_expand_query', 'lcm_grep', 'lcm_inspect', 'lcm_load_session', 'lcm_memory', 'lcm_query_state', 'lcm_recall', 'lcm_recent', 'lcm_retrieve', 'lcm_status', '❓', '🏥', '💚', '📊', '📋', '📦', '🔍', '🔎', '🕒', '🗂️', '🧠', '🧭', '🧮', '🧷', '🧾']

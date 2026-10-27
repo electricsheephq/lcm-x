@@ -1,4 +1,0 @@
-# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/rollup_builder.py
-# hypothesis_version: 6.141.1
-
-[1000.0, 256, 1000, 4096, ',', ', ', ':', '<rollup>:', '?', 'covered_end', 'covered_start', 'custom_instructions', 'day', 'fallback_models', 'fingerprint', 'l2_budget_ratio', 'missing', 'model', 'month', 'node_id', 'nodes', 'period_start', 'prompt_version', 'ready', 'reasoning_effort', 'rollup_id', 'source_fingerprint', 'status', 'summary', 'summary at level 3', 'timeout', 'token_count', 'utf-8', 'week']

@@ -1,4 +1,0 @@
-# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/search_query.py
-# hypothesis_version: 6.141.1
-
-[0.0, 0.001, 0.5, 1.0, 1.5, 500, 5000, ' OR ', '"', '"\'()[]{}.,;', '"()*^-:{}.', '"([^"]+)"', '"[^"]*"|[^\\s"]+', '%', '(', ')', '*', '...', 'AND', 'M', 'NEAR', 'NFC', 'NOT', 'OR', '[-:/]+', '[\\w-]+', '\\', '\\%', '\\\\', '\\_', '_', 'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'd', 'did', 'do', 'does', 'for', 'from', 'fts5: syntax error', 'had', 'has', 'have', 'how', 'hybrid', 'i', 'in', 'is', 'it', 'll', 'm', 'malformed match', 'me', 'my', 'of', 'on', 'or', 're', 'recency', 'relevance', 's', 't', 'that', 'the', 'to', 'unterminated string', 've', 'was', 'were', 'what', 'when', 'where', 'which', 'who', 'why', 'with', 'you', 'your']

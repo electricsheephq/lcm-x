@@ -1,4 +1,0 @@
-# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/occurrence_time.py
-# hypothesis_version: 6.141.1
-
-[0.0, 256, 1200, 4096, '%B %d %Y', '%B %d, %Y', '%Y-%m-%d', '%Y-%m/%d', '%Y/%m-%d', '%Y/%m/%d', '%b %d %Y', '%b %d, %Y', '(?<=\\d)T(?=\\d{2}:)', '(?=', ')', '-', '/', 'A', 'An', 'I', 'In', 'My', 'On', 'The', 'We', '\\1', '\\1, \\2', 'char_end', 'char_start', 'count', 'day', 'event_at', 'event_date', 'event_time_source', 'explicit', 'friday', 'monday', 'month', 'observed_at', 'occurrence-time-v1', 'policy_version', 'precision', 'quote', 'reason', 'relative_to_session', 'saturday', 'session_date', 'simple', 'stored_at', 'sunday', 'support', 'surrogatepass', 'thursday', 'today', 'tuesday', 'unit', 'unknown', 'utf-8', 'wednesday', 'week', 'weekday', 'year', 'yesterday']

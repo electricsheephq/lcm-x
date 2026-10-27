@@ -1,4 +1,0 @@
-# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/runtime_identity.py
-# hypothesis_version: 6.141.1
-
-['"', "'", '--abbrev-ref', '--get', '--porcelain', '-C', '.git', ':', 'HEAD', 'config', 'git', 'main', 'name', 'plugin.yaml', 'plugin_git_branch', 'plugin_git_commit', 'plugin_git_dirty', 'plugin_git_remote', 'remote.origin.url', 'rev-parse', 'status', 'unknown', 'utf-8', 'version']

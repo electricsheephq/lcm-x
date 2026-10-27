@@ -1,4 +1,0 @@
-# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/expand_tools.py
-# hypothesis_version: 6.141.1
-
-[500, 4000, 'children', 'content', 'content_bytes', 'content_chars', 'content_offset', 'content_preview', 'content_truncated', 'conversation_id', 'count', 'created_at', 'current session', 'depth', 'depths', 'error', 'exact_ref', 'expand_hint', 'expanded', 'externalized', 'externalized_note', 'externalized_payload', 'externalized_ref', 'externalized_refs', 'field_path', 'from_current_session', 'has_more', 'include_exact_ref', 'kind', 'max_tokens', 'messages', 'next_content_offset', 'node_id', 'nodes', 'pagination', 'raw_message', 'role', 'session_id', 'source', 'source_limit', 'source_offset', 'source_tokens', 'source_type', 'store_id', 'store_message_count', 'timestamp', 'token_count', 'tokens', 'tool_call_id', 'tool_calls', 'tool_result', 'total_source_tokens', 'total_tokens']

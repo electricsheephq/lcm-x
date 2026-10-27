@@ -1,4 +1,0 @@
-# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/level3_repair.py
-# hypothesis_version: 6.141.1
-
-[0.4, 256, 512, 1000, '\n\n---\n\n', ', ', 'BEGIN IMMEDIATE', 'NULL', '[]', '_config', 'ancestor', 'ancestors', 'ancestors_by_depth', 'backup', 'bound_tokens', 'calls', 'child nodes', 'depth', 'error', 'flagged', 'flagged_leaves', 'flagged_nodes', 'fragment', 'groups', 'l3_truncate_tokens', 'leaf', 'levels', 'message rows', 'messages', 'model', 'node_id', 'nodes', 'nodes_fts', 'ok', 'outcome', 'partial', 'pending', 'provenance_table', 'reason', 'refused', 'repair:', 'repaired', 'rolled back', 'rollups_scheduled', 'second_scan', 'session_id', 'sessions', 'skipped', 'sources', 'sources missing: ', 'sources_stored', 'status', 'store_id', 'summary_nodes', 'top']

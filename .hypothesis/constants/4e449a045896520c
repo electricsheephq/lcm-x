@@ -1,4 +1,0 @@
-# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/sanitize.py
-# hypothesis_version: 6.141.1
-
-['analysis', 'assistant', 'chain_of_thought', 'content', 'input_text', 'internal', 'output_text', 'reasoning', 'redacted_thinking', 'role', 'scratchpad', 'text', 'thinking', 'thought', 'tool_calls', 'type', 'value']

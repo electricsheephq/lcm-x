@@ -1,4 +1,0 @@
-# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/bypass.py
-# hypothesis_version: 6.141.1
-
-[0.0, 0.25, 0.5, 0.8, 500, '(unknown)', 'ContextCompressor', '_last_summary_error', '_thread_context', 'active session', 'api_key', 'api_mode', 'assistant', 'base_url', 'compression_count', 'content', 'foreground_budget', 'host_fallback', 'ignored session', 'message_uid', 'model', 'noop', 'omitted_marker', 'on_session_end', 'on_session_reset', 'on_session_start', 'protect_first_n', 'protect_last_n', 'provider', 'quiet_mode', 'role', 'stateless session', 'text', 'threshold_percent', 'tool', 'tool_call_id', 'tool_calls', 'update_model', 'user', 'value', '…']

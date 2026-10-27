@@ -1,4 +1,0 @@
-# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/maintenance.py
-# hypothesis_version: 6.141.1
-
-[160, '%Y%m%d_%H%M%S', '.json', '.tmp', '_assertions', '_conn', '_db_lock', '_lifecycle', '_query_views', 'backup_path', 'backup_size', 'bytes', 'db_path', 'error', 'exists', 'files', 'ok', 'path', 'scan_error', 'unreadable']

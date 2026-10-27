@@ -1,4 +1,0 @@
-# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/extraction.py
-# hypothesis_version: 6.141.1
-
-[0.2, 2000, '%Y-%m-%d', ', ', '<', 'NOTHING_TO_EXTRACT', '[Media attachment]', '[Structured content]', '\\n{3,}', ']', 'a', 'active_memory', 'active_memory_plugin', 'audio', 'audio_url', 'content', 'extraction', 'file_id', 'file_url', 'filename', 'hindsight-memories', 'hindsight_memories', 'id', 'image', 'image_url', 'input_image', 'input_text', 'max_tokens', 'messages', 'mime_type', 'name', 'output_image', 'output_text', 'relevant-memories', 'relevant_memories', 'role', 'task', 'temperature', 'text', 'timeout', 'type', 'url', 'user', 'utf-8', 'value', 'video', 'video_url']
