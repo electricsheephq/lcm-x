@@ -38,7 +38,6 @@ from .fresh_tail import tool_group_safe_end
 from . import leaf_prep
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_content import text_content_for_pattern_matching
-from .message_analysis import _tool_call_id
 from .reconcile import (
     _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
     _COMPACTION_COMMIT_PROOF_VERSION,
@@ -130,7 +129,6 @@ class _CompressionState:
     sweep_step_seconds: Dict[str, float] = field(default_factory=dict)
     preexisting_dependent_reply_records: list[dict[str, str]] = field(default_factory=list)
     unattributed_leaf_refused: bool = False
-    store_complete_input_empty: bool = False
 
     focus_topic: Optional[str] = None
     explicit_focus_topic: bool = False
@@ -715,7 +713,7 @@ class CompactionMixin:
                 return self._compress_bypassed(messages, current_tokens, focus_topic, force)
         self._last_compress_leaves = None
         self._last_hidden_backlog = None
-        self._compress_escaped, self._zero_leaf_keep_sanitized = [], False
+        self._compress_escaped = []
         self._compress_forced_overflow = False
         self._last_compression_noop_reason = ""  # #1162: a fit's cause belongs to this pass
         _summary_call.error = None  # the thread-local summary failure must not outlive its pass
@@ -1733,7 +1731,7 @@ class CompactionMixin:
         self._objective_only_noop = False
         self._compress_dropped_ignored_rows = False
         self._compress_host_rows_consumed = self._compress_hidden_rows_consumed = 0
-        self._compress_escaped, self._zero_leaf_keep_sanitized = [], False
+        self._compress_escaped = []
         # Preflight handoffs are one-shot instructions for this invocation.
         # Consume them before every early return so a later unrelated turn can
         # never inherit stale cleanup-only state.
@@ -2375,26 +2373,6 @@ class CompactionMixin:
                     self._start_sweep_budget_hold(turn_paced=first_hang)
 
 
-    @staticmethod
-    def _tool_pairing_ids(messages):
-        """Call/result id multisets: the zero-leaf rider must keep pairing repairs."""
-        return (Counter(_tool_call_id(c) for m in messages if m.get("role") == "assistant"
-                        for c in m.get("tool_calls") or ()),
-                Counter(m.get("tool_call_id") for m in messages if m.get("role") == "tool"))
-
-    def _zero_leaf_result(self, messages, result, *, eligible=True):
-        """#1162: keep the host object unless this pass performed an exempted rewrite."""
-        if not self._retained_escape_enabled or not eligible:
-            return result
-        if not self._zero_leaf_keep_sanitized:
-            self._ingest_cursor = len(messages)
-            self._write_generated_ignored_placeholder_hash_counts(
-                self._generated_placeholder_digest_budget_for_active_replay(messages))
-            self._write_generated_ignored_placeholder_hash_ordinals(
-                self._generated_placeholder_digest_ordinals_for_active_replay(messages))
-            return messages
-        return result
-
     def _finish_without_leaf(
         self, state: _CompressionState, messages: List[Dict[str, Any]],
         warn_rejected: Callable[[], None],
@@ -2464,27 +2442,7 @@ class CompactionMixin:
                     active_context_messages,
                     insert_missing_tool_stubs=False,
                 )
-            drop_only = state.dropped_replayed_scaffold_messages and len(sanitized_messages) < len(messages)
-            remaining = iter(sanitized_messages)
-            next_row = next(remaining, None)
-            for row in messages if drop_only else ():
-                if row == next_row:
-                    next_row = next(remaining, None)
-                elif not self._is_replayed_context_scaffold_message(row):
-                    drop_only = False
-            drop_only = drop_only and next_row is None
-            self._zero_leaf_keep_sanitized = bool(state.resumed_prefix or state.pre_leaf_condensation_passes
-                                                 or state.ingest_cleanup_changed_active_context or drop_only
-                                                 or self._tool_pairing_ids(messages) != self._tool_pairing_ids(sanitized_messages))
-            sanitized_messages = self._zero_leaf_result(messages, sanitized_messages,
-                                                        eligible=state.store_complete_input_empty)
-            if self._retained_escape_enabled and state.store_complete_input_empty and sanitized_messages is messages:
-                self._last_compression_status = "noop"
-                self._last_compression_noop_reason = state.noop_reason
-                hidden_label = self._hidden_backlog_label()
-                logger.info("LCM compression no-op: %s%s", state.noop_reason,
-                            f", hidden_rows={hidden_label}" if hidden_label is not None else "")
-            elif sanitized_messages != state.working_messages or state.ingest_cleanup_changed_active_context:
+            if sanitized_messages != state.working_messages or state.ingest_cleanup_changed_active_context:
                 # _ingest_messages() already advanced the cursor to the original
                 # active-context length. If the host continues from a sanitized
                 # or reassembled context, keeping the old cursor could make the
@@ -3198,7 +3156,6 @@ class CompactionMixin:
             state.sweep_stop_reason = "time_budget_exhausted"
             return "break", None
         if leaf.anchored_input == []:
-            state.store_complete_input_empty = True
             blocked = self._store_complete_blocked
             state.noop_reason = (_RETAINED_NOOP_REASON + " (store_id=%d role=%s kind=%s)" % blocked[:3]
                                  if blocked else self._store_complete_empty_reason or "leaf input is empty")
@@ -3544,8 +3501,6 @@ class CompactionMixin:
         state.unattributed_leaf_refused = unattributed_leaf_refused
         state.threshold_full_sweep_active = threshold_full_sweep_active
         state._compress_started = _compress_started
-        self._zero_leaf_keep_sanitized = bool(force_overflow or resumed_prefix or pre_leaf_condensation_passes
-                                             or ingest_cleanup_changed_active_context)
         transfer, returned = self._finish_without_leaf(state, messages, warn_rejected)
         if transfer == "return":
             return returned

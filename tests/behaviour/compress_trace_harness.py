@@ -553,7 +553,6 @@ OBSERVED_ATTRIBUTES = (
     "_working_leaf_chunk_tokens",
     "_write_generated_ignored_placeholder_hash_counts",
     "_write_generated_ignored_placeholder_hash_ordinals",
-    "_zero_leaf_keep_sanitized",
     "compression_count",
     "context_length",
     "threshold_tokens",

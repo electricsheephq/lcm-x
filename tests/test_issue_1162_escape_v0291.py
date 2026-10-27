@@ -1,4 +1,4 @@
-"""#1162 v0.29.1: retained-store escape, covered-view restart and identity no-op."""
+"""#1162 v0.29.1: retained-store escape, covered-view restart and base zero-leaf repairs."""
 from collections import Counter
 import inspect
 import hashlib
@@ -78,6 +78,37 @@ def test_b5_empty_input_keeps_tool_pairing_repair(tmp_path, summaries, lines, mo
         assert out is not view
         assert not any(m.get("tool_call_id") == "orphan" for m in out)
         assert engine._last_compression_status == "sanitized"
+    finally:
+        engine.shutdown()
+
+
+def test_b6_assembled_empty_input_keeps_late_result_repair(tmp_path, summaries, lines, monkeypatch):
+    engine = _engine(tmp_path, False)
+    call, late_result = _turn("late", 100.0, tool=True)[1:3]
+    user = {"role": "user", "content": "a later user turn"}
+    # A system anchor keeps assembly's provider-leading-role guard from
+    # discarding the leading assistant before the pairing repair is returned.
+    view = [{"role": "system", "content": "You are helpful"}, call, user, late_result]
+    try:
+        engine.ingest(view)
+        state = _CompressionState(working_messages=view, anchor_source_messages=view,
+                                  dropped_replayed_scaffold_messages=True,
+                                  budget=engine._new_foreground_budget())
+        def no_source(*_args, **_kwargs):
+            engine._store_complete_empty_reason = "leaf input has no stored source rows (input_rows_without_source=0)"
+            return []
+        monkeypatch.setattr(engine, "_identity_anchor_summary_input", no_source)
+        action, out = engine._prepare_leaf_input(state, _LeafState(to_compact=[call]), set(), lambda *_a: 0)
+        assert action == "break" and out is None
+        # Assembly drops late T(X) and inserts a stub T(X) immediately after A.
+        # Its id multiset is unchanged, so the removed rider suppressed this repair.
+        expected = engine._assemble_context(view[0], view[1:])
+        assert expected[1:] == [call, expected[2], user]
+        assert expected[2]["role"] == "tool" and expected[2]["tool_call_id"] == late_result["tool_call_id"]
+        assert expected[2]["content"] != late_result["content"] and late_result not in expected
+        action, out = engine._finish_without_leaf(state, view, lambda: None)
+        assert action == "return" and out == expected and out is not view
+        assert engine._last_compression_status == "sanitized" and not summaries
     finally:
         engine.shutdown()
 
@@ -394,74 +425,6 @@ def test_t7_cross_host_tool_group(tmp_path, summaries, lines, reverse):
         engine.shutdown()
 
 
-@pytest.mark.parametrize("growth", [False, True])
-@pytest.mark.parametrize("enabled", [True, False], ids=["rider", "kill_switch"])
-def test_t8_zero_leaf_identity(tmp_path, summaries, lines, monkeypatch, growth, enabled):
-    engine, view = _reorder(tmp_path, False)
-    engine._retained_escape_enabled = enabled
-    try:
-        # Inject only the no-source walk boundary; all finish/fit/proof/hold
-        # processing is the product engine path.
-        def no_source(*_a, **_k):
-            engine._store_complete_empty_reason = "leaf input has no stored source rows (input_rows_without_source=0)"
-            engine._store_complete_blocked = None
-            return []
-        monkeypatch.setattr(engine, "_identity_anchor_summary_input", no_source)
-        sanitize = engine._sanitize_active_context_messages
-        def changed(rows, **kwargs):
-            out = [dict(m) for m in sanitize(rows, **kwargs)]
-            if out:
-                out[0] = {**out[0], "content": "sanitized different text"}
-            if growth:
-                out.append({"role": "user", "content": "extra repair row"})
-            return out
-        monkeypatch.setattr(engine, "_sanitize_active_context_messages", changed)
-        out = engine.compress(view, current_tokens=10000)
-        if not enabled:
-            assert out is not view and out[0]["content"] == "sanitized different text"
-            assert len(out) == len(view) + growth
-            assert engine._last_compression_status == "sanitized"
-            return
-        assert out is view
-        assert engine._ingest_cursor == len(view)
-        assert engine._last_compression_status == "noop"
-        assert engine._last_compression_noop_reason.startswith("leaf input has no stored source rows")
-        assert engine._compress_commit_reason == "identity_noop"
-        assert engine._no_progress_hold is not None
-    finally:
-        engine.shutdown()
-
-
-def test_t8_retained_group_cut_identity(tmp_path, summaries, lines, monkeypatch):
-    engine = _engine(tmp_path, False)
-    call, result = _turn("tool", 100.0, tool=True)[1:3]
-    prefix = {"role": "user", "content": "prefix" + PAD}
-    view = [call, result]
-    try:
-        engine.ingest([prefix, *view])
-        mapping = {id(m): int(r["store_id"]) for m, r in zip([prefix, *view], _rows(engine))}
-        original = engine._identity_anchor_summary_input
-        def after_prefix(*args, **kwargs):
-            # The real walk retries at the retained call, then I9 cuts the group.
-            return engine._store_complete_input([result], {}, mapping, view, [result],
-                                                mapping[id(prefix)], [], 10000, allow_retained_escape=True)
-        monkeypatch.setattr(engine, "_identity_anchor_summary_input", after_prefix)
-        state = _CompressionState(working_messages=view, anchor_source_messages=view,
-                                  budget=engine._new_foreground_budget())
-        leaf = _LeafState(to_compact=[result])
-        action, out = engine._prepare_leaf_input(state, leaf, set(), lambda *_a: 0)
-        assert action == "break" and out is None and state.store_complete_input_empty
-        assert state.noop_reason.startswith("leaf would end before an unresolved retained occurrence")
-        assert engine._store_complete_escaped == [] and not summaries
-        monkeypatch.setattr(engine, "_identity_anchor_summary_input", original)
-        monkeypatch.setattr(engine, "_sanitize_active_context_messages", lambda *_a, **_k: [*view, prefix])
-        action, out = engine._finish_without_leaf(state, view, lambda: None)
-        assert action == "return" and out is view
-        assert engine._last_compression_status == "noop"
-    finally:
-        engine.shutdown()
-
-
 def test_t8_ordinary_cleanup_control(tmp_path, summaries, lines):
     engine = _engine(tmp_path, False, fresh_tail_count=2, leaf_chunk_tokens=4000)
     view = [{"role": "system", "content": "You are helpful"},
@@ -473,30 +436,6 @@ def test_t8_ordinary_cleanup_control(tmp_path, summaries, lines):
         assert out[-1]["content"] == "Visible answer"
         assert engine._last_compression_status == "sanitized"
         assert engine._last_compression_noop_reason == "" and not summaries
-    finally:
-        engine.shutdown()
-
-
-def test_t8_cleanup_and_drop_only_exemptions(tmp_path, summaries, lines, monkeypatch):
-    engine = _engine(tmp_path, False)
-    raw = [{"role": "user", "content": "raw host"}]
-    cleaned = [{"role": "user", "content": "quarantine placeholder"}]
-    try:
-        state = _CompressionState(working_messages=cleaned, anchor_source_messages=raw,
-                                  ingest_cleanup_changed_active_context=True, noop_reason="cleanup",
-                                  store_complete_input_empty=True, budget=engine._new_foreground_budget())
-        monkeypatch.setattr(engine, "_refresh_raw_backlog_debt", lambda *_a, **_k: None)
-        action, out = engine._finish_without_leaf(state, raw, lambda: None)
-        assert action == "return" and out == cleaned and out is not raw
-        scaffold = {"role": "user", "content": "replayed scaffold"}
-        view = [scaffold, *raw]
-        state = _CompressionState(working_messages=raw, anchor_source_messages=raw,
-                                  dropped_replayed_scaffold_messages=True, noop_reason="scaffold",
-                                  store_complete_input_empty=True, budget=engine._new_foreground_budget())
-        monkeypatch.setattr(engine, "_assemble_context", lambda *_a, **_k: raw)
-        monkeypatch.setattr(engine, "_is_replayed_context_scaffold_message", lambda m: m is scaffold)
-        action, out = engine._finish_without_leaf(state, view, lambda: None)
-        assert action == "return" and out == raw and out is not view
     finally:
         engine.shutdown()
 
