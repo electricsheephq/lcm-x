@@ -30,7 +30,7 @@ healthy CPU-limited host needs only an explicit opt-in if semantic recall is wan
 
 | Option | Cost | Signup | Install | Best for |
 |---|---|---|---|---|
-| Voyage AI | 200M free tokens per model for voyage-4 / voyage-context-4, then paid usage | yes; check the dashboard for your current limits | none | best quality, zero local footprint |
+| Voyage AI | 200M free tokens per model for voyage-4-lite / voyage-4 / voyage-4-large / voyage-context-4, then paid usage | yes; check the dashboard for your current limits | none | best quality, zero local footprint |
 | fastembed | $0 | no | Host-managed dependency companion (ONNX, no torch) | local default — no accounts, no daemon |
 | Ollama | $0 | no | Ollama app/daemon | you already run Ollama |
 | OpenAI-compatible | provider pricing | yes (per provider) | none | reuse an existing `/v1/embeddings` service (SiliconFlow, llama.cpp, vLLM) |
@@ -61,6 +61,7 @@ export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=voyage
 export LCM_EMBEDDING_MODEL=voyage-4-lite   # or voyage-4 / voyage-4-large
 export VOYAGE_API_KEY=...
+export LCM_ENABLE_SLASH_COMMAND=1   # registers /lcm for the commands below
 ```
 
 Then verify in Hermes:

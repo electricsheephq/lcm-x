@@ -93,6 +93,7 @@ export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=voyage
 export LCM_EMBEDDING_MODEL=voyage-4-lite
 export VOYAGE_API_KEY=...
+export LCM_ENABLE_SLASH_COMMAND=1   # registers /lcm for the setup commands
 ```
 
 Restart Hermes, then run `/lcm embed warmup`, `/lcm embed backfill` (dry run),
