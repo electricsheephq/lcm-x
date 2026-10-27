@@ -204,6 +204,7 @@ def test_r3_gap_fill_never_rehydrates_a_row_the_view_shows(tmp_path, monkeypatch
     """R4 gap-fill: A answers {alpha, beta}, B only beta, the view shows alpha and beta: both rows are shown,
     none is rehydrated into the summarizer input."""
     engine = _engine(tmp_path)
+    engine._retained_escape_enabled = False  # #1162: preserve the base gap-fill characterization.
     try:
         x = _u("[X] later user row" + PAD, 2.0)
         engine.ingest([_u("alpha", 1.0), _u("beta", 1.0), x])
@@ -211,6 +212,24 @@ def test_r3_gap_fill_never_rehydrates_a_row_the_view_shows(tmp_path, monkeypatch
         [b_id], [x_id] = _ids(engine, "beta"), _ids(engine, x["content"])
         out = engine._identity_anchor_summary_input([x], {id(x): x_id}, view=[_u("alpha", 1.0), _u("beta", 1.0), x])
         assert not [ids for _row, ids in out or () if b_id in ids], out
+    finally:
+        engine.shutdown()
+
+
+def test_r3_gap_fill_shown_row_escapes_from_stored_bytes(tmp_path, monkeypatch):
+    # Under v0.29.1 a shown row that blocks the contiguous prefix is summarised
+    # from stored bytes and the host copy stays live (#1162).
+    engine = _engine(tmp_path)
+    try:
+        x = _u("[X] later user row" + PAD, 2.0)
+        engine.ingest([_u("alpha", 1.0), _u("beta", 1.0), x])
+        _forms_first(engine, monkeypatch, {"alpha": ["beta", "alpha"]})
+        [b_id], [x_id] = _ids(engine, "beta"), _ids(engine, x["content"])
+        out = engine._identity_anchor_summary_input([x], {id(x): x_id}, view=[_u("alpha", 1.0), _u("beta", 1.0), x])
+        claimed = [sid for _row, ids in out or () for sid in ids]
+        assert b_id in claimed
+        assert (b_id, "user", "shown") in engine._store_complete_escaped
+        assert len(claimed) == len(set(claimed))
     finally:
         engine.shutdown()
 

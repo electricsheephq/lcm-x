@@ -14,6 +14,9 @@ from hermes_lcm.dag import SummaryNode
 from tests.harness import make_engine, pin_char_counter
 from tests.test_issue_1162_retained_escape import _reorder
 
+# These tests arm the hold through the old retained stop; hold logic does not depend on why no leaf was written.
+pytestmark = pytest.mark.usefixtures("retained_stop_control")
+
 KEY = "compaction_no_progress:v1:S"
 
 
@@ -103,6 +106,12 @@ def test_h3_default_helpers_recheck_auxiliary_scope_without_mutation(tmp_path, m
         assert read.call_count == 1
     finally:
         engine.shutdown()
+
+
+@pytest.fixture
+def retained_stop_control(monkeypatch):
+    # B4: all hold controls use the pre-escape retained stop.
+    monkeypatch.setattr(engine_module.LCMEngine, "_retained_escape_enabled", False)
 
 
 @pytest.mark.parametrize("consumer", ["threshold", "preflight", "direct"])
