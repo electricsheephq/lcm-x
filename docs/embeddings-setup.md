@@ -44,9 +44,9 @@ removing providers*).
 
 Every account gets **200M free tokens per model** for `voyage-4-lite` (recommended),
 `voyage-4`, `voyage-4-large`, and `voyage-context-4` (used by the chunk corpus).
-Older models, including `voyage-3.5`, `voyage-3-large`, and `voyage-context-3`, no
-longer include free tokens. See [pricing](https://docs.voyageai.com/docs/pricing)
-(checked 2026-10-27). Adding a payment method raises
+`voyage-3.5`, `voyage-3-large`, and `voyage-context-3` no longer include free tokens.
+Allowances for other models (for example the code and domain models) are listed on
+[pricing](https://docs.voyageai.com/docs/pricing) (checked 2026-10-27). Adding a payment method raises
 [usage-tier rate limits](https://docs.voyageai.com/docs/rate-limits); the free tokens
 still apply. Check the dashboard for your current limits.
 
