@@ -82,6 +82,24 @@ information. For an explicit opt-in on a small host:
 export LCM_EMBEDDINGS_ENABLED=true
 ```
 
+### Free cloud embeddings (Voyage AI)
+
+Local FastEmbed stays the default and needs no account. Voyage AI offers every
+account 200M free tokens per model for `voyage-4-lite`, `voyage-4`,
+`voyage-4-large`, and `voyage-context-4`. Set these in Hermes' environment:
+
+```bash
+export LCM_EMBEDDINGS_ENABLED=true
+export LCM_EMBEDDING_PROVIDER=voyage
+export LCM_EMBEDDING_MODEL=voyage-4-lite
+export VOYAGE_API_KEY=...
+```
+
+Restart Hermes, then run `/lcm embed warmup`, `/lcm embed backfill` (dry run),
+`/lcm embed backfill --apply`, then `/lcm status`. Cloud privacy filtering is on
+by default for provider-bound copies; durable storage stays raw. See
+[Voyage setup, key creation and current limits](../../../docs/embeddings-setup.md#option-1--voyage-ai-free-tier).
+
 Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/operator-guide.md) as the complete current source. Start with:
 
 - `LCM_CONTEXT_THRESHOLD` (default `0.75`): when normal context pressure triggers compaction;

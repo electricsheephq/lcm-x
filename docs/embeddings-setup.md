@@ -30,7 +30,7 @@ healthy CPU-limited host needs only an explicit opt-in if semantic recall is wan
 
 | Option | Cost | Signup | Install | Best for |
 |---|---|---|---|---|
-| Voyage AI | free tier (200M tokens for the voyage-4 group), then ~$0.02–0.12 per million tokens | yes (no credit card) | none | best quality, zero local footprint |
+| Voyage AI | 200M free tokens per model for voyage-4 / voyage-context-4, then paid usage | yes; check the dashboard for your current limits | none | best quality, zero local footprint |
 | fastembed | $0 | no | Host-managed dependency companion (ONNX, no torch) | local default — no accounts, no daemon |
 | Ollama | $0 | no | Ollama app/daemon | you already run Ollama |
 | OpenAI-compatible | provider pricing | yes (per provider) | none | reuse an existing `/v1/embeddings` service (SiliconFlow, llama.cpp, vLLM) |
@@ -42,25 +42,35 @@ removing providers*).
 
 ## Option 1 — Voyage AI (free tier)
 
-The Voyage-4 generation (`voyage-4`, `voyage-4-large`, `voyage-4-lite`) carries **200 million free
-tokens for that model group**, and signup does not require a credit card. For a personal LCM corpus
-(thousands of summaries), that free allotment covers initial backfill and years of queries; past it,
-embedding costs $0.02/M (`voyage-4-lite`), $0.06/M (`voyage-4`), or $0.12/M (`voyage-4-large`). A
-query embeds exactly one short vector, so a semantic or hybrid query costs a fraction of a cent.
-Voyage documents its allotments and rate tiers on its
-[pricing](https://docs.voyageai.com/docs/pricing) and
-[rate-limits](https://docs.voyageai.com/docs/rate-limits) pages — treat those as the source of
-truth; the numbers above were verified 2026-07.
+Every account gets **200M free tokens per model** for `voyage-4-lite` (recommended),
+`voyage-4`, `voyage-4-large`, and `voyage-context-4` (used by the chunk corpus).
+Older models, including `voyage-3.5`, `voyage-3-large`, and `voyage-context-3`, no
+longer include free tokens. See [pricing](https://docs.voyageai.com/docs/pricing)
+(checked 2026-10-27). Adding a payment method raises
+[usage-tier rate limits](https://docs.voyageai.com/docs/rate-limits); the free tokens
+still apply. Check the dashboard for your current limits.
+
+At the [API keys dashboard](https://dashboard.voyageai.com/organization/api-keys),
+choose "Create new secret key" and set `VOYAGE_API_KEY` in Hermes' environment
+([key setup](https://docs.voyageai.com/docs/api-key-and-installation)). Set the
+following environment variables and restart Hermes. The model line is required;
+LCM-X has no default Voyage model.
 
 ```bash
-# Set VOYAGE_API_KEY from dash.voyageai.com
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=voyage
 export LCM_EMBEDDING_MODEL=voyage-4-lite   # or voyage-4 / voyage-4-large
+export VOYAGE_API_KEY=...
+```
+
+Then verify in Hermes:
+
+```text
 # Cloud provider-bound copies are protected automatically. Durable storage stays raw.
 /lcm embed warmup                   # probes API; registers model, dimensions, privacy revision
 /lcm embed backfill                 # dry run: shows counts + estimated tokens, writes nothing
 /lcm embed backfill --apply         # embeds your history in bounded batches
+/lcm status                        # checks the active provider and coverage
 ```
 
 Known cloud providers protect every provider-bound copy — embedding documents
