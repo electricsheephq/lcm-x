@@ -915,6 +915,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("summary_model", "LCM_SUMMARY_MODEL", str),
     _EnvFieldSpec("native_recovery", "LCM_NATIVE_RECOVERY", bool),
     _EnvFieldSpec("survival_fit", "LCM_SURVIVAL_FIT", bool),
+    _EnvFieldSpec("per_node_emission", "LCM_PER_NODE_EMISSION", bool),
     _EnvFieldSpec("survival_reserve", "LCM_SURVIVAL_RESERVE", float),
     _EnvFieldSpec("summary_circuit_breaker_failure_threshold", "LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD", int),
     _EnvFieldSpec("summary_circuit_breaker_cooldown_seconds", "LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS", int),
@@ -1434,6 +1435,8 @@ class LCMConfig:
     native_recovery: bool = False
     # #582: fit an over-window compress() result by dropping the oldest stored user turns (never a row).
     survival_fit: bool = True
+    # Emit one summary message per frontier node (default-off; host-gated).
+    per_node_emission: bool = False
     # Share of the model window the survival fit keeps free for the response and host overhead.
     survival_reserve: float = 0.15
     # #614: leaf summary target = min(max, max(min, int(source_tokens * ratio))); the L1 call

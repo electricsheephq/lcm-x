@@ -199,6 +199,16 @@ def _model_only_display_metadata_key() -> Optional[str]:
         return None
 
 
+@lru_cache(maxsize=1)
+def _host_keeps_lcm_summary_rows_unmerged() -> bool:
+    """True when the host's sequence repair does NOT merge consecutive LCM summary rows."""
+    try:
+        from agent.agent_runtime_helpers import _is_lcm_summary_row
+        return callable(_is_lcm_summary_row)
+    except (ImportError, AttributeError):
+        return False
+
+
 def _model_only_display_metadata_keys() -> frozenset:
     """Every key that can hide a row: the literal key and the host-advertised one."""
     return frozenset(k for k in ("model_only", _model_only_display_metadata_key()) if k)
@@ -9724,6 +9734,11 @@ class LCMEngine(
             summary_role = "user"
         else:
             summary_role = "assistant" if last_role != "assistant" else "user"
+        _per_node = (
+            self._config.per_node_emission
+            and retained_user_msg is None
+            and _host_keeps_lcm_summary_rows_unmerged()
+        )
         # #653: (selection group, node id) per part; the anchor goes first, then each depth, deepest first.
         part_keys: list[tuple[int, Optional[int]]] = []
         for candidate_index, candidate in enumerate(anchor_candidates):
@@ -9755,6 +9770,7 @@ class LCMEngine(
                     summary_parts.append(_summary_part_text(node))
 
         retained_generated_context_parts: list[str] = []
+        summary_messages: list[Dict[str, Any]] = []
         summary_message: Optional[Dict[str, Any]] = None
         if summary_parts:
             summary_budget, anchor_part = self._resolve_survival_prefix_budget(
@@ -9763,25 +9779,38 @@ class LCMEngine(
             selection = select_prefix(summary_parts, PrefixBudgetFacts(
                 part_keys=part_keys, summary_role=summary_role, summary_budget=summary_budget,
                 assembly_cap=assembly_cap, survival_fit=self._config.survival_fit,
-                count_message_tokens=count_message_tokens,
+                count_message_tokens=count_message_tokens, per_node=_per_node,
             ))
             kept_indexes, selected_parts = selection.kept_indexes, selection.selected_parts
             active_summary_node_ids.update(
                 part_keys[i][1] for i in kept_indexes if part_keys[i][1] is not None)
             if selected_parts:
-                combined = "\n\n---\n\n".join(selected_parts)
-                if retained_user_msg is not None:
-                    retained_generated_context_parts.append(combined)
+                if _per_node:
+                    for part in selected_parts:
+                        msg = {"role": "user", "content": part, "_compressed_summary": True}
+                        result.append(msg)
+                        summary_messages.append(msg)
+                        emission_candidates.append({
+                            "kind": ("objective" if part.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary"),
+                            "span": part,
+                            "full_identity": _emission_identity(msg),
+                            "row": msg,
+                        })
+                    summary_message = summary_messages[-1]
                 else:
-                    summary_message = {"role": summary_role, "content": combined}
-                    result.append(summary_message)
-                    summary_candidate = {
-                        "kind": "objective" if combined.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary",
-                        "span": combined,
-                        "full_identity": _emission_identity(summary_message),
-                        "row": summary_message,
-                    }
-                    emission_candidates.append(summary_candidate)
+                    combined = "\n\n---\n\n".join(selected_parts)
+                    if retained_user_msg is not None:
+                        retained_generated_context_parts.append(combined)
+                    else:
+                        summary_message = {"role": summary_role, "content": combined}
+                        result.append(summary_message)
+                        summary_candidate = {
+                            "kind": ("objective" if combined.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary"),
+                            "span": combined,
+                            "full_identity": _emission_identity(summary_message),
+                            "row": summary_message,
+                        }
+                        emission_candidates.append(summary_candidate)
 
         # Proactive memory injection (SPEC F, default-off). One bounded block is
         # placed adjacent to the summary prefix — a stable position below the
@@ -9814,7 +9843,18 @@ class LCMEngine(
         carried_tail, tail_selected = self._emit_summary_carrier(
             summary_message, leading_msg, result, tail_selected, summary_candidate, carried_tail,
         )
-        self._mint_assembled_engine_uids(result, emission_candidates, summary_message, carried_tail,
+        if _per_node and carried_tail is not None and summary_message is not None and summary_messages:
+            _last_candidate = next((c for c in reversed(emission_candidates)
+                                    if c.get("row") is summary_message), None)
+            if _last_candidate is not None:
+                _last_candidate.update({
+                    "kind": "carrier",
+                    "span": f"{summary_message['content']}\n\n",
+                    "full_identity": _emission_identity(result[-1]),
+                    "row": result[-1],
+                })
+        _summary_rows = summary_messages or ([summary_message] if summary_message is not None else [])
+        self._mint_assembled_engine_uids(result, emission_candidates, _summary_rows, carried_tail,
                                          proactive_msg, generated_context_row, tail_selected)
         result.extend(tail_selected)
 
@@ -10119,7 +10159,7 @@ class LCMEngine(
             self._clear_folded_tail_lineage()
         return result
 
-    def _mint_assembled_engine_uids(self, result, candidates, summary_message, carried_tail, recall_row,
+    def _mint_assembled_engine_uids(self, result, candidates, summary_messages, carried_tail, recall_row,
                                     context_row, tail_selected) -> None:
         """B2 (R4-1, R3-5 site 2; B1's gate): engine uids on the rows this assembly generated, in emitted order.
         A carrier keeps the summary's uid and absorbs the tail user row's identity as the host's
@@ -10128,11 +10168,15 @@ class LCMEngine(
             return
         carrier = result[-1] if carried_tail is not None else None
         specs: dict = {}
-        if summary_message is not None:
-            content = summary_message["content"]
+        for sm in summary_messages:
+            content = sm["content"]
             kind = "objective" if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary"
-            specs[id(carrier or summary_message)] = (kind, hashlib.sha256(content.encode("utf-8")).hexdigest(),
-                                                     "carrier" if carrier is not None else kind)
+            specs[id(sm)] = (kind, hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                             "carrier" if sm is carrier else kind)
+        if carrier is not None and id(carrier) not in specs and summary_messages:
+            content = summary_messages[-1]["content"]
+            kind = "objective" if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary"
+            specs[id(carrier)] = (kind, hashlib.sha256(content.encode("utf-8")).hexdigest(), "carrier")
         if recall_row is not None:
             specs[id(recall_row)] = ("recall", None, "recall")
         if context_row is not None:

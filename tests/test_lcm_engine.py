@@ -11539,6 +11539,103 @@ class TestEngineCompress:
         )
         assert summary_block["role"] == "user"
 
+    def test_assemble_context_emits_one_message_per_frontier_node(self, engine, monkeypatch):
+        """Each uncondensed frontier node is its own emitted message.
+
+        A single joined blob re-prefills the whole summary prefix on every
+        compaction because appending one node changes the joined string. One
+        message per node keeps the stable nodes byte-identical (provider
+        prompt-cache hit) and re-prefills only the newest node + fresh tail.
+        """
+        # Per-node emission is default-off and host-gated; enable both for this test.
+        engine._config.per_node_emission = True
+        monkeypatch.setattr(lcm_engine, "_host_keeps_lcm_summary_rows_unmerged", lambda: True)
+        for content, created in (("alpha frontier summary", 1.0), ("bravo frontier summary", 2.0)):
+            engine._dag.add_node(SummaryNode(
+                session_id=engine._session_id, depth=0, summary=content, token_count=30,
+                source_token_count=4000, source_ids=[], source_type="messages", created_at=created,
+            ))
+        system_msg = {"role": "system", "content": "You are an agent."}
+        tail = [{"role": "user", "content": "do the thing"}, {"role": "assistant", "content": "working"}]
+
+        result = engine._assemble_context(system_msg, tail)
+
+        summaries = [m for m in result if isinstance(m.get("content"), str) and "frontier summary" in m["content"]]
+        assert len(summaries) == 2, f"expected one message per node, got {len(summaries)}"
+        assert not any("alpha" in m["content"] and "bravo" in m["content"] for m in summaries)
+        assert "alpha frontier summary" in summaries[0]["content"]
+        assert "bravo frontier summary" in summaries[1]["content"]
+        assert all(m["role"] == "user" for m in summaries)
+
+        engine._dag.add_node(SummaryNode(
+            session_id=engine._session_id, depth=0, summary="charlie frontier summary",
+            token_count=30, source_token_count=4000, source_ids=[], source_type="messages", created_at=3.0,
+        ))
+        result2 = engine._assemble_context(system_msg, tail)
+        summaries2 = [m for m in result2 if isinstance(m.get("content"), str) and "frontier summary" in m["content"]]
+        assert len(summaries2) == 3
+        assert [dict(m) for m in summaries] == [dict(m) for m in summaries2[:2]], \
+            "stable prefix messages must be byte-identical across reassembly"
+
+    def test_assemble_context_joined_blob_is_the_default(self, engine):
+        """Per-node emission is default-off: two frontier nodes stay one joined blob.
+
+        The joined layout is the provider-cache-safe default everywhere; only
+        hosts that keep LCM summary rows unmerged (and opted in) get per-node.
+        """
+        for content, created in (("alpha frontier summary", 1.0), ("bravo frontier summary", 2.0)):
+            engine._dag.add_node(SummaryNode(
+                session_id=engine._session_id, depth=0, summary=content, token_count=30,
+                source_token_count=4000, source_ids=[], source_type="messages", created_at=created,
+            ))
+        system_msg = {"role": "system", "content": "You are an agent."}
+        tail = [{"role": "user", "content": "do the thing"}, {"role": "assistant", "content": "working"}]
+
+        result = engine._assemble_context(system_msg, tail)
+        summaries = [m for m in result if isinstance(m.get("content"), str) and "frontier summary" in m["content"]]
+        assert len(summaries) == 1, f"expected the joined blob by default, got {len(summaries)} rows"
+        assert "alpha frontier summary" in summaries[0]["content"]
+        assert "bravo frontier summary" in summaries[0]["content"]
+
+    def test_per_node_budget_prices_each_message_separately(self):
+        """Per-node selection prices N messages as N role overheads, not one blob.
+
+        A joined-blob price undercounts by (n-1) role overheads and lets the
+        assembly exceed summary_budget after emission; per-node pricing must
+        drop parts until every emitted message fits its own budget slice.
+        """
+        from hermes_lcm.assembly_plan import PrefixBudgetFacts, select_prefix
+
+        def count(msg):
+            # 4 tokens of role overhead per message + content length in "tokens".
+            return 4 + len(msg["content"].split())
+
+        parts = ["one two three four", "five six seven eight"]  # 8 tokens each as messages
+        keys = [(0, 1), (0, 2)]
+        facts_joined = PrefixBudgetFacts(
+            part_keys=keys, summary_role="user", summary_budget=16, assembly_cap=None,
+            survival_fit=False, count_message_tokens=count)
+        facts_per_node = PrefixBudgetFacts(
+            part_keys=keys, summary_role="user", summary_budget=16, assembly_cap=None,
+            survival_fit=False, count_message_tokens=count, per_node=True)
+        # Joined blob: 4 overhead + 8 words + 1 separator word = 13 <= 16 -> both kept.
+        assert len(select_prefix(parts, facts_joined).kept_indexes) == 2
+        # Per node at the same budget: 8 + 8 = 16 <= 16 -> both kept (fits exactly).
+        assert len(select_prefix(parts, facts_per_node).kept_indexes) == 2
+        # Per node: 8 + 8 = 16 <= 16 here, so use a tighter budget to prove the
+        # per-message arithmetic dominates the joined arithmetic.
+        facts_joined_tight = PrefixBudgetFacts(
+            part_keys=keys, summary_role="user", summary_budget=15, assembly_cap=None,
+            survival_fit=False, count_message_tokens=count)
+        facts_per_node_tight = PrefixBudgetFacts(
+            part_keys=keys, summary_role="user", summary_budget=15, assembly_cap=None,
+            survival_fit=False, count_message_tokens=count, per_node=True)
+        # Joined: 4 + 9 = 13 <= 15 -> both kept (blob price hides the second overhead).
+        assert len(select_prefix(parts, facts_joined_tight).kept_indexes) == 2
+        # Per node: 8 + 8 = 16 > 15 -> only the newest part fits its own message.
+        kept = select_prefix(parts, facts_per_node_tight).kept_indexes
+        assert kept == (1,), f"per-node pricing must drop the older part, kept={kept}"
+
     def test_assemble_context_summary_role_is_user_without_system_anchor(self, engine):
         """Gateway-style assembly (no system anchor) must not lead with ``assistant``.
 
