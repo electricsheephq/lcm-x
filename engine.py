@@ -2481,6 +2481,7 @@ class LCMEngine(
         # Only a hold armed here owns a local floor; restart readers must
         # continue checking the current persisted proof on every admission.
         self._no_progress_local_hold = self._no_progress_hold
+        self._no_progress_local_hold_conversation = self._hold_conversation_key()
         if reason in _TURN_END_HOLD_REASONS:
             logger.info("LCM automatic compaction held until turn end (cap %.0fs): %s",
                         _SWEEP_BUDGET_HOLD_SECONDS, reason)
@@ -2491,6 +2492,12 @@ class LCMEngine(
         """#651: never latches; it ends at its time (a stored leaf clears it in compress())."""
         if not managed_scope and self._bypasses_lcm_context_management():
             return False
+        if (self._no_progress_hold is not None and self._no_progress_hold[1] == "no_progress"
+                and getattr(self, "_no_progress_local_hold", None) is not None
+                and self._hold_conversation_key() != getattr(self, "_no_progress_local_hold_conversation", None)):
+            self._no_progress_hold = None
+            self._no_progress_local_hold = None
+            self._no_progress_local_hold_conversation = None
         if self._no_progress_hold is None or (
                 self._no_progress_hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)
                 and self._no_progress_hold is not getattr(self, "_no_progress_local_hold", None)):
@@ -8956,6 +8963,10 @@ class LCMEngine(
             passes += 1
             self._no_progress_candidate = False  # #909/#651: a stored condensation is progress
             self._clear_persisted_no_progress_hold()
+            if self._no_progress_hold is not None and self._no_progress_hold[1] == "no_progress":
+                self._no_progress_hold = None
+                self._no_progress_local_hold = None
+                self._no_progress_local_hold_conversation = None
             if (budget := self._foreground_call_budget()) is not None:
                 budget.progress = budget.progress or "condensation"
             try:

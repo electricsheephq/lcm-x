@@ -5,9 +5,13 @@ from unittest.mock import Mock
 import pytest
 
 import hermes_lcm.engine as engine_module
+import hermes_lcm.escalation as escalation
 from hermes_lcm.dag import SummaryNode
 from tests.test_issue_1880_persisted_hold import (
     KEY, _r1_tail_engine, _r1_views, _reorder, arm, isolated as isolated, rebuild,
+)
+from tests.test_issue_909_condensation_starves_leaf import (
+    SUMMARY, _frontier, _view, make_engine as make_engine,
 )
 
 
@@ -160,3 +164,55 @@ def test_scoped_maxima_use_indexes(tmp_path):
         assert any("idx_nodes_session_node" in row[3] for row in node_plan)
     finally:
         engine.shutdown()
+
+
+def test_local_hold_rebind_checks_conversation_proof(tmp_path, clock):
+    engine, view = local_hold(tmp_path)
+    try:
+        old = engine._conversation_id
+        record = engine._store.read_metadata_json(KEY)
+        assert not engine.should_compress(10_000)
+        clock[0] = 100
+        engine.on_session_start("S", conversation_id="new", context_length=200_000)
+        assert engine.should_compress(10_000)
+        assert engine._no_progress_hold is None
+        assert engine._no_progress_local_hold is None
+        engine.on_session_start("S", conversation_id=old, context_length=200_000)
+        engine._ingest_messages(view)
+        assert engine._no_progress_fingerprint() == record["fingerprint"]
+        assert not engine.should_compress(10_000)
+        assert engine._no_progress_local_hold is None  # Persisted proof, not the discarded local floor.
+        engine._ingest_messages(extended(view))
+        assert engine.should_compress(10_000)  # A changed proof cannot regain the local floor.
+        assert engine._store.read_metadata_json(KEY) == record
+    finally:
+        engine.shutdown()
+
+
+def test_committed_condensation_releases_local_hold(make_engine, monkeypatch, clock):
+    engine = make_engine(foreground_hard_seconds=100)
+    source_ids = _frontier(engine)
+    view = _view()
+    engine.ingest(view)
+    engine._no_progress_observed_tokens = engine.threshold_tokens + 1
+    engine._no_progress_proof_fingerprint = engine._no_progress_fingerprint()
+    engine._start_no_progress_hold("no_progress", persist=True)
+    assert engine._store.read_metadata_json(KEY) is not None
+    assert not engine.should_compress(engine.threshold_tokens + 1)
+
+    def provider(*args, **kwargs):
+        clock[0] += 55
+        return SUMMARY
+
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", escalation.summarize_with_escalation)
+    monkeypatch.setattr(escalation, "_invoke_summary_llm", provider)
+    engine.compress(view, current_tokens=engine.threshold_tokens + 1, bypass_cooldown=True)
+    telemetry = engine.get_status()["threshold_full_sweep"]
+    assert telemetry["pre_leaf_condensation_passes"] == 1
+    assert telemetry["leaf_passes"] == 0
+    assert any(node.depth > 0 and node.source_ids == source_ids
+               for node in engine._dag.get_session_nodes("S"))
+    assert engine._store.read_metadata_json(KEY) is None
+    assert engine.should_compress(engine.threshold_tokens + 1)
+    assert engine._no_progress_hold is None
+    assert engine._no_progress_local_hold is None
