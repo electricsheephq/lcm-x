@@ -425,6 +425,47 @@ def test_t7_cross_host_tool_group(tmp_path, summaries, lines, reverse):
         engine.shutdown()
 
 
+@pytest.mark.parametrize("reverse", [False, True], ids=["retained_result", "retained_call"])
+def test_b7_padded_ids_keep_escape_group_whole(tmp_path, summaries, lines, reverse):
+    from tests.test_host_uid_shadow import _state_db
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path, False, fresh_tail_count=1, leaf_chunk_tokens=1)
+    user, call, result, reply = _turn("X", 100.0, tool=True)
+    call["tool_calls"][0]["id"] = result["tool_call_id"] = " a "
+    stored = [*_turn("T0", 50.0), user, call, result, reply,
+              *[row for i in range(2, 6) for row in _turn(f"T{i}", 100.0 * i)]]
+    try:
+        engine.ingest(stored)
+        before = _rows(engine)
+        mapping = {id(m): int(r["store_id"]) for m, r in zip(stored, before)}
+        chunk = [result] if reverse else [call]
+        # Exercise the escape itself at the group boundary, in both directions.
+        out = engine._store_complete_input(chunk, {}, mapping, [call, result], chunk,
+                                          mapping[id(call)] - 1, [], 10000, escape_retained=True)
+        assert out == []  # neither half may be consumed while the host retains the other
+        assert not engine._store_complete_escaped
+        moved = call if reverse else result
+        view = [m for m in stored if m is not moved] + [dict(moved)]
+        engine._ingest_cursor = len(view)
+        for _ in range(4):
+            view, _ = _passes(engine, view, 1, lines)
+            for text in summaries:
+                if "[Tool calls:" in text:
+                    # Base may repair a moved result with a stub; check the actual
+                    # leaf input, rather than requiring that stub's stored ID.
+                    assert "[TOOL RESULT a]:" in text
+            calls = Counter(str(c.get("id") or "").strip()
+                            for m in view for c in m.get("tool_calls") or ())
+            results = Counter(str(m.get("tool_call_id") or "").strip()
+                              for m in view if m.get("role") == "tool")
+            assert calls == results  # no orphaned call or result in assembled context
+            assert all(n == 1 for n in results.values())
+        assert _rows(engine) == before
+        _audit(engine)
+    finally:
+        engine.shutdown()
+
+
 def test_t8_ordinary_cleanup_control(tmp_path, summaries, lines):
     engine = _engine(tmp_path, False, fresh_tail_count=2, leaf_chunk_tokens=4000)
     view = [{"role": "system", "content": "You are helpful"},

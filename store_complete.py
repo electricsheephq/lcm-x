@@ -281,15 +281,17 @@ class StoreCompleteMixin:
             return max(ids_of(message, claims.get(id(message), ())), default=0)
 
         def calls(messages):
-            return {_tool_call_id(call) for m in messages for call in m.get("tool_calls") or ()}
+            return {_tool_call_id(call) for m in messages for call in m.get("tool_calls") or ()} - {""}
+
+        def results(messages):
+            return {str(m.get("tool_call_id") or "").strip() for m in messages if m.get("role") == "tool"} - {""}
 
         retained = ([text[sid] for sid in escaped if sid in text] +
                     [m for m in view if id(m) not in in_chunk]) if escape_retained else []
-        cross = (calls(chunk) & {m.get("tool_call_id") for m in retained}) | (
-            calls(retained) & {m.get("tool_call_id") for m in chunk})
+        cross = (calls(chunk) & results(retained)) | (calls(retained) & results(chunk))
         group_cut = min((sid for sid, m in [*[(int(r["store_id"]), r) for r in rows],
                                            *[(position(m), m) for m in chunk]]
-                         if sid > frontier and (calls([m]) & cross or m.get("tool_call_id") in cross)), default=None)
+                         if sid > frontier and (calls([m]) & cross or results([m]) & cross)), default=None)
 
         out, used, excluded, dependent, index = [], 0, [], False, 0
         group: list = []  # the open tool group: [call ids, its index in out, used before it, answered ids]
