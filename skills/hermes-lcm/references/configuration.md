@@ -98,7 +98,7 @@ export VOYAGE_API_KEY=...
 Restart Hermes, then run `/lcm embed warmup`, `/lcm embed backfill` (dry run),
 `/lcm embed backfill --apply`, then `/lcm status`. Cloud privacy filtering is on
 by default for provider-bound copies; durable storage stays raw. See
-[Voyage setup, key creation and current limits](../../../docs/embeddings-setup.md#option-1--voyage-ai-free-tier).
+[Voyage setup, key creation and current limits](https://github.com/electricsheephq/lcm-x/blob/main/docs/embeddings-setup.md#option-1--voyage-ai-free-tier).
 
 Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/operator-guide.md) as the complete current source. Start with:
 
