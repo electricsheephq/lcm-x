@@ -429,8 +429,9 @@ class StoreCompleteMixin:
                     chunk, given_claims, full_map, view, raw_chunk, frontier, carry,
                     budget if blocked_row else lifted, accounted_ids, scale=scale, scanned=(rows, truncated),
                     copy_lookup=copy_lookup, escape_retained=bool(blocked_row) or escape_retained,
-                    allow_retained_escape=bool(blocked_row))
-                self._store_complete_blocked = blocked_row
+                    allow_retained_escape=not escape_retained)
+                if blocked_row is not None:
+                    self._store_complete_blocked = blocked_row
                 return result
         if not out or (not any(ids_of(m, ids) for m, ids in out)
                        and all(self._is_context_summary_content(m.get("content")) for m in chunk)):

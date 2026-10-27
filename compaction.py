@@ -152,6 +152,7 @@ class _LeafState:
     summary_input_chunk: List[Dict[str, Any]] = field(default_factory=list)
     selected_raw_chunk: List[Dict[str, Any]] = field(default_factory=list)
     prepared: Any = None
+    pending_escapes: list = field(default_factory=list)
     sources: Dict[int, Dict[str, Any]] = field(default_factory=dict)
     anchor_claims: Dict[int, List[int]] = field(default_factory=dict)
     compacted_chunk: List[Dict[str, Any]] = field(default_factory=list)
@@ -781,10 +782,8 @@ class CompactionMixin:
                     and len(result) >= len(messages)
                     and count_messages_tokens(result) >= count_messages_tokens(messages)):
                 # #904: published hidden leaves advance the frontier, not the host-visible list.
-                if not self._retained_escape_enabled:
-                    sanitized = self._sanitize_active_context_messages(messages)
-                    result = messages if sanitized == messages else sanitized
-                result = self._zero_leaf_result(messages, result)
+                sanitized = self._sanitize_active_context_messages(messages)
+                result = messages if sanitized == messages else sanitized
                 self._ingest_cursor = len(result)
                 if not force and not bypass_cooldown and not self._compress_forced_overflow:
                     self._start_no_progress_hold("hidden_only")
@@ -2922,7 +2921,17 @@ class CompactionMixin:
     ) -> tuple[Literal["next", "break", "continue", "return"], Optional[List[Dict[str, Any]]]]:
         """Advance the committed leaf and choose the next loop transfer."""
         self._last_compacted_store_id = leaf.published_frontier
-        self._record_retained_escape(getattr(self, "_store_complete_escaped", []))
+        self._record_retained_escape(leaf.pending_escapes)
+        escaped = leaf.pending_escapes
+        if escaped and not self._compress_escaped:
+            sid, role, kind = escaped[0]
+            more = ", +%d more: %s" % (len(escaped) - 1, ",".join(str(s[0]) for s in escaped[1:])) if len(escaped) > 1 else ""
+            logger.warning("LCM retained-occurrence fallback: leaf includes %d retained row(s) whole "
+                           "(store_id=%d role=%s kind=%s%s) frontier=%d; the host view still holds them, "
+                           "so their content is also summarised; source rows stay stored; cause: "
+                           "host order disagrees with store order (#1162)",
+                           len(escaped), sid, role, kind, more, self._store_complete_frontier())
+        self._compress_escaped.extend(row for row in escaped if row not in self._compress_escaped)
         self._compress_host_rows_consumed += leaf.selected_raw_len
         self._compress_hidden_rows_consumed += len(leaf.compacted_chunk) - len(leaf.compacted_positions)
         self._invalidate_rollups_for_published_node(leaf.node)
@@ -3184,16 +3193,7 @@ class CompactionMixin:
             state.noop_reason = (_RETAINED_NOOP_REASON + " (store_id=%d role=%s kind=%s)" % blocked[:3]
                                  if blocked else self._store_complete_empty_reason or "leaf input is empty")
             return "break", None
-        escaped = getattr(self, "_store_complete_escaped", [])
-        if escaped and not self._compress_escaped:
-            sid, role, kind = escaped[0]
-            more = ", +%d more: %s" % (len(escaped) - 1, ",".join(str(s[0]) for s in escaped[1:])) if len(escaped) > 1 else ""
-            logger.warning("LCM retained-occurrence fallback: leaf includes %d retained row(s) whole "
-                           "(store_id=%d role=%s kind=%s%s) frontier=%d; the host view still holds them, "
-                           "so their content is also summarised; source rows stay stored; cause: "
-                           "host order disagrees with store order (#1162)",
-                           len(escaped), sid, role, kind, more, self._store_complete_frontier())
-        self._compress_escaped.extend(row for row in escaped if row not in self._compress_escaped)
+        leaf.pending_escapes = list(self._store_complete_escaped)
         leaf.publication_excluded_store_ids.extend(self._store_complete_excluded)
         leaf_map = self._compress_run.store_ids_by_message_id or {}
         if not any(claims for _message, claims in leaf.anchored_input or ()) and not any(

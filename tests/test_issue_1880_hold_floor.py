@@ -9,10 +9,15 @@ import hermes_lcm.escalation as escalation
 from hermes_lcm.dag import SummaryNode
 from tests.test_issue_1880_persisted_hold import (
     KEY, _r1_tail_engine, _r1_views, _reorder, arm, isolated as isolated, rebuild,
+    retained_stop_control as retained_stop_control,
 )
 from tests.test_issue_909_condensation_starves_leaf import (
     SUMMARY, _frontier, _view, make_engine as make_engine,
 )
+
+
+# These tests arm the hold through the old retained stop; hold logic does not depend on why no leaf was written.
+pytestmark = pytest.mark.usefixtures("retained_stop_control")
 
 
 @pytest.fixture

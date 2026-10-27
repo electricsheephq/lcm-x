@@ -1,6 +1,8 @@
 """#1162 v0.29.1: retained-store escape, covered-view restart and identity no-op."""
 from collections import Counter
 import inspect
+import hashlib
+import json
 import logging
 import math
 
@@ -205,9 +207,6 @@ def test_t7_cross_host_tool_group(tmp_path, summaries, lines, reverse):
                                             mapping[id(prefix)], [], 10000, escape_retained=True)
         assert out == []
         assert not engine._store_complete_escaped
-        assembled = engine._sanitize_active_context_messages([prefix, call, result])
-        assert sum(m.get("tool_call_id") == "call_tool" for m in assembled) == 1
-        assert sum(bool(m.get("tool_calls")) for m in assembled) == 1
     finally:
         engine.shutdown()
 
@@ -379,5 +378,194 @@ def test_t11_prepared_escape_promotes(tmp_path, summaries, lines, monkeypatch):
         assert engine._store_complete_escaped == [(1, "user", "shown")]
         assert engine._prepared_leaf_summary(prepared)(leaf.summary_input_chunk)[2] == prepared.summary
         assert not any("host_unit_split" in s for _, s in lines)
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("moved", ["result", "pair"])
+def test_t7_returned_tool_groups(tmp_path, summaries, lines, moved):
+    from tests.test_host_uid_shadow import _state_db
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path, False, fresh_tail_count=1, leaf_chunk_tokens=1)
+    user, call, result, reply = _turn("X", 100.0, tool=True)
+    stored = [*_turn("T0", 50.0), user, call, result, reply,
+              *[row for i in range(2, 6) for row in _turn(f"T{i}", 100.0 * i)]]
+    try:
+        engine.ingest(stored)
+        moved_rows = [result] if moved == "result" else [call, result]
+        view = [m for m in stored if all(m is not r for r in moved_rows)] + [dict(r) for r in moved_rows]
+        engine._ingest_cursor = len(view)
+        for _ in range(4):
+            view, _ = _passes(engine, view, 1, lines)
+            calls = Counter(c["id"] for m in view for c in m.get("tool_calls") or ())
+            results = Counter(m["tool_call_id"] for m in view if m.get("role") == "tool")
+            assert calls == results  # each call/result pair is both present or both absent
+            assert all(n == 1 for n in results.values())  # no orphaned or doubled result
+        _audit(engine)
+    finally:
+        engine.shutdown()
+
+
+def test_t12b_contiguity_lift_reaches_retained_row(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    big = " lorem ipsum dolor sit amet" * 400
+    c1, c2 = ({"role": "user", "content": n + PAD} for n in ("c1", "c2"))
+    r2, r3, r5 = ({"role": "user", "content": n + big} for n in ("r2", "r3", "r5"))
+    retained = {"role": "user", "content": "R" + PAD}
+    try:
+        engine.ingest([c1, r2, r3, retained, r5, c2])
+        ids = [int(r["store_id"]) for r in _rows(engine)]
+        mapping = {id(c1): ids[0], id(c2): ids[5]}
+        chunk, view = [c2, c1], [c2, c1, dict(retained)]
+        for _ in range(2):
+            out = engine._store_complete_input(chunk, {}, mapping, view, chunk, 0, [],
+                                                count_messages_tokens(chunk), allow_retained_escape=True)
+            if out:
+                break
+        assert out
+        assert (ids[3], "user", "shown") in engine._store_complete_escaped
+        assert ids[3] in [sid for _m, claims in out for sid in claims]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("payload", ['{not json', '[{"store_id": 1}]', '["abc"]',
+                                     '[{"store_id":"x","identity_sha256":"d"}]', None, "unreadable"])
+def test_b4_corrupt_memo_fails_closed(tmp_path, summaries, lines, monkeypatch, payload):
+    engine, view = _reorder(tmp_path, False)
+    try:
+        key = engine._replay_snapshot_metadata_key("retained_escape")
+        if payload not in (None, "unreadable"):
+            with engine._store._write_lock:
+                engine._store._conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", (key, payload))
+                engine._store._conn.commit()
+        engine._retained_escape_memos = {}
+        with monkeypatch.context() as patch:
+            if payload == "unreadable":
+                read = engine._store.read_metadata_json
+                def unreadable(k, *args, **kwargs):
+                    if k == key:
+                        raise OSError("synthetic metadata read failure")
+                    return read(k, *args, **kwargs)
+                patch.setattr(engine._store, "read_metadata_json", unreadable)
+            assert not engine._retained_escape_covered_view({"role": "user", "content": "unknown"})
+            assert engine._retained_escape_memo() == {}
+        _, trace = _passes(engine, view, 3, lines)
+        assert all(t["status"] != "error" for t in trace)
+        memo = engine._store.read_metadata_json(key)
+        assert memo and all(isinstance(i["identity_sha256"], str) and int(i["store_id"]) > 0 for i in memo)
+        _audit(engine)
+    finally:
+        engine.shutdown()
+
+
+def test_b4_memo_write_failure_keeps_committed_pass(tmp_path, summaries, lines, monkeypatch):
+    engine, view = _reorder(tmp_path, False)
+    try:
+        key = engine._replay_snapshot_metadata_key("retained_escape")
+        write = engine._store.write_metadata_json
+        def unavailable(keys, *args, **kwargs):
+            if key in keys:
+                raise OSError("synthetic metadata write failure")
+            return write(keys, *args, **kwargs)
+        monkeypatch.setattr(engine._store, "write_metadata_json", unavailable)
+        _, trace = _passes(engine, view, 2, lines)
+        assert trace[-1]["leaves"] >= 1 and trace[-1]["status"] == "compacted"
+        assert _covered(engine)[_r_id(engine)] == 1
+        _audit(engine)
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("rewrite", [False, True])
+def test_b4_memo_matches_shown_host_rewrite(tmp_path, summaries, lines, rewrite):
+    from tests.test_host_uid_shadow import _state_db
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path, False, fresh_tail_count=1, leaf_chunk_tokens=1)
+    retained = {"role": "user", "content": "[R] retained occurrence" + PAD + ("\n\n" if rewrite else ""),
+                "message_uid": "retained-r"}
+    stored = [*_turn("T1", 100.0), retained,
+              *[row for i in range(2, 6) for row in _turn(f"T{i}", 100.0 * i)]]
+    try:
+        engine.ingest(stored)
+        sid = _r_id(engine)
+        row = next(r for r in _rows(engine) if int(r["store_id"]) == sid)
+        live = dict(retained)
+        if rewrite:
+            live["content"] = retained["content"].rstrip()
+            payload = {"version": 1, "content": live["content"], "stripped": ["", "\n\n"],
+                       "stored_sha256": hashlib.sha256(row["content"].encode()).hexdigest()}
+            engine._store.write_metadata_json([f"host_rewrite_identity:{sid}"], json.dumps(payload, sort_keys=True))
+            engine._host_rewrite_state()[1].pop(sid, None)
+        view = [m for m in stored if m is not retained] + [live]
+        engine._ingest_cursor = len(view)
+        assert engine._message_replay_identity(live, strip_carrier=False) in engine._stored_row_forms(row)
+        view, trace = _passes(engine, view, 2, lines)
+        assert any(" escaped=" in t["line"] for t in trace)
+        assert engine._identity_anchor_covered_view(view[-1], {})
+        engine._retained_escape_memos = {}  # prove the persisted forms, too
+        assert engine._retained_escape_covered_view(view[-1])
+        assert not _conflicts(lines)
+    finally:
+        engine.shutdown()
+
+
+def test_b4_memo_cap_counts_rows_not_forms(tmp_path, summaries, lines, monkeypatch):
+    engine = _engine(tmp_path, False)
+    try:
+        engine.ingest([{"role": "user", "content": f"row {i}"} for i in range(257)])
+        rows = _rows(engine)
+        original = engine._stored_row_forms
+        def forms(row):
+            form = next(iter(original(row)))
+            return {form, (form[0], form[1] + " alternate", *form[2:])}
+        monkeypatch.setattr(engine, "_stored_row_forms", forms)
+        engine._record_retained_escape([(int(r["store_id"]), "user", "shown") for r in rows])
+        memo = engine._retained_escape_memo()
+        assert len(set(memo.values())) == 256 and len(memo) == 512
+        assert int(rows[0]["store_id"]) not in memo.values()
+    finally:
+        engine.shutdown()
+
+
+def test_b4_summary_failure_does_not_report_escape(tmp_path, summaries, lines, monkeypatch):
+    import hermes_lcm.engine as engine_module
+    engine, view = _reorder(tmp_path, False)
+    try:
+        view, _ = _passes(engine, view, 1, lines)
+        def boom(**_kwargs):
+            raise RuntimeError("synthetic route down")
+        monkeypatch.setattr(engine_module, "summarize_with_escalation", boom)
+        for _ in range(2):
+            start = len(lines)
+            with pytest.raises(RuntimeError, match="synthetic route down"):
+                engine.compress(view, current_tokens=10_000)
+            emitted = [message for _level, message in lines[start:]]
+            stop = next(m for m in emitted if m.startswith("LCM compaction stop:"))
+            assert "reason=error leaves=0" in stop and " escaped=" not in stop
+            assert not any("retained-occurrence fallback:" in m for m in emitted)
+            assert not engine._compress_escaped
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("bound", [True, False])
+def test_t6b_cold_resume_after_no_leaf_condensation(tmp_path, summaries, lines, bound):
+    engine, view = _reorder(tmp_path, True, bound=bound)
+    try:
+        view, trace = _passes(engine, view, 2, lines)
+        if bound:
+            assert any(" escaped=" in t["line"] for t in trace)
+        else:
+            assert _covered(engine)[_r_id(engine)] == 1  # unbound ingest keeps a copy, so R is hidden
+        assert trace[-1]["leaves"] == 0 and "progress=condensation" in trace[-1]["line"]
+        retained = next(r["content"] for r in _rows(engine) if r["content"].startswith("[R] retained"))
+        engine.shutdown()
+        engine = _engine(tmp_path, True, fresh_tail_count=1, leaf_chunk_tokens=1)
+        engine.ingest(view)
+        # A duplicate here is open #1286 (I1 exception #259); base produces the
+        # same duplicate for unbound sessions. This cell asserts no loss only.
+        assert any(r["content"] == retained for r in _rows(engine))
+        _audit(engine)
     finally:
         engine.shutdown()

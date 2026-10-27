@@ -23,6 +23,7 @@ R6 (supersede on positive evidence) hooks the host-rewrite capture.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -1270,22 +1271,43 @@ class IdentityAnchorMixin:
         key = self._replay_snapshot_metadata_key("retained_escape")
         cache = self.__dict__.setdefault("_retained_escape_memos", {})
         if key not in cache:
-            payload = self._store.read_metadata_json(key)
-            cache[key] = {item["identity_sha256"]: int(item["store_id"])
-                          for item in payload} if isinstance(payload, list) else {}
+            memo = {}
+            try:
+                payload = self._store.read_metadata_json(key)
+                for item in payload if isinstance(payload, list) else ():
+                    if not isinstance(item, dict) or not isinstance(item.get("identity_sha256"), str):
+                        continue
+                    try:
+                        sid = int(item.get("store_id"))
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if sid > 0:
+                        memo[item["identity_sha256"]] = sid
+            except Exception:
+                logger.debug("LCM retained escape metadata load failed", exc_info=True)
+            cache[key] = memo
         return cache[key]
+
+    @staticmethod
+    def _retained_escape_digest(identity) -> str:
+        return hashlib.sha256(json.dumps(list(identity), ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
     def _record_retained_escape(self, escaped) -> None:
         if not escaped:
             return
-        memo = dict(self._retained_escape_memo())
-        for sid, row in self._store.get_batch([sid for sid, _role, _kind in escaped]).items():
-            memo[self._replay_identity_sha256(row, stored_row=True)] = sid
-        memo = dict(sorted(memo.items(), key=lambda item: item[1])[-256:])
-        rows = [{"store_id": sid, "identity_sha256": digest} for digest, sid in memo.items()]
-        key = self._replay_snapshot_metadata_key("retained_escape")
-        self._store.write_metadata_json([key], json.dumps(rows, sort_keys=True), skip_unchanged=True)
-        self._retained_escape_memos[key] = memo
+        try:
+            memo = dict(self._retained_escape_memo())
+            for sid, row in self._store.get_batch([sid for sid, _role, _kind in escaped]).items():
+                for form in self._stored_row_forms(row):
+                    memo[self._retained_escape_digest(form)] = sid
+            recent = set(sorted(set(memo.values()))[-256:])  # cap rows, not their alternate forms
+            memo = {digest: sid for digest, sid in memo.items() if sid in recent}
+            rows = [{"store_id": sid, "identity_sha256": digest} for digest, sid in sorted(memo.items())]
+            key = self._replay_snapshot_metadata_key("retained_escape")
+            self._store.write_metadata_json([key], json.dumps(rows, sort_keys=True), skip_unchanged=True)
+            self._retained_escape_memos[key] = memo
+        except Exception:
+            logger.debug("LCM retained escape metadata write failed", exc_info=True)
 
     def _retained_escape_covered_view(self, message, frontier=None) -> bool:
         if not self._retained_escape_enabled:
@@ -1294,7 +1316,8 @@ class IdentityAnchorMixin:
         if not memo:
             return False
         frontier = self._store_complete_frontier() if frontier is None else frontier
-        return 0 < memo.get(self._replay_identity_sha256(message), 0) <= frontier
+        identity = self._message_replay_identity(message, strip_carrier=False)
+        return 0 < memo.get(self._retained_escape_digest(identity), 0) <= frontier
 
     def _identity_anchor_view_key(self, message) -> Optional[tuple]:
         """A view row's occurrence key ``(stamp, form)`` as the ingest site keys it; None for LCM's own scaffold
