@@ -38,6 +38,7 @@ from .fresh_tail import tool_group_safe_end
 from . import leaf_prep
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_content import text_content_for_pattern_matching
+from .message_analysis import _tool_call_id
 from .reconcile import (
     _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
     _COMPACTION_COMMIT_PROOF_VERSION,
@@ -2374,6 +2375,13 @@ class CompactionMixin:
                     self._start_sweep_budget_hold(turn_paced=first_hang)
 
 
+    @staticmethod
+    def _tool_pairing_ids(messages):
+        """Call/result id multisets: the zero-leaf rider must keep pairing repairs."""
+        return (Counter(_tool_call_id(c) for m in messages if m.get("role") == "assistant"
+                        for c in m.get("tool_calls") or ()),
+                Counter(m.get("tool_call_id") for m in messages if m.get("role") == "tool"))
+
     def _zero_leaf_result(self, messages, result, *, eligible=True):
         """#1162: keep the host object unless this pass performed an exempted rewrite."""
         if not self._retained_escape_enabled or not eligible:
@@ -2466,7 +2474,8 @@ class CompactionMixin:
                     drop_only = False
             drop_only = drop_only and next_row is None
             self._zero_leaf_keep_sanitized = bool(state.resumed_prefix or state.pre_leaf_condensation_passes
-                                                 or state.ingest_cleanup_changed_active_context or drop_only)
+                                                 or state.ingest_cleanup_changed_active_context or drop_only
+                                                 or self._tool_pairing_ids(messages) != self._tool_pairing_ids(sanitized_messages))
             sanitized_messages = self._zero_leaf_result(messages, sanitized_messages,
                                                         eligible=state.store_complete_input_empty)
             if self._retained_escape_enabled and state.store_complete_input_empty and sanitized_messages is messages:
@@ -2921,8 +2930,9 @@ class CompactionMixin:
     ) -> tuple[Literal["next", "break", "continue", "return"], Optional[List[Dict[str, Any]]]]:
         """Advance the committed leaf and choose the next loop transfer."""
         self._last_compacted_store_id = leaf.published_frontier
-        self._record_retained_escape(leaf.pending_escapes)
-        escaped = leaf.pending_escapes
+        published_ids = set(leaf.source_store_ids)
+        escaped = [row for row in leaf.pending_escapes if row[0] in published_ids]
+        self._record_retained_escape(escaped)
         if escaped and not self._compress_escaped:
             sid, role, kind = escaped[0]
             more = ", +%d more: %s" % (len(escaped) - 1, ",".join(str(s[0]) for s in escaped[1:])) if len(escaped) > 1 else ""

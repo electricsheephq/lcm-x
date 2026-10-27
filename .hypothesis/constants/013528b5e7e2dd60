@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/emission_projection.py
+# hypothesis_version: 6.141.1
+
+[b'\n\n', ',', ':', 'EmissionProjection', 'bytes', 'carrier', 'content', 'conversation_id', 'emissions', 'engine_uid', 'full_identity', 'generated_span_bytes', 'hermes_home', 'index', 'kind', 'merge_base', 'message_uid', 'name', 'objective', 'of', 'output', 'output_multiplicity', 'output_occurrence', 'recovery', 'recovery_base', 'reset_epoch', 'retained_source', 'role', 'row', 'same_prefix_ordinal', 'scope', 'session_id', 'sha256', 'span', 'store_id', 'suffix_length', 'suffix_sha256', 'summary', 'tool', 'tool_call_id', 'tool_calls', 'tool_name', 'unknown', 'user', 'utf-8', 'version']

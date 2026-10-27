@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/leaf_prep.py
+# hypothesis_version: 6.141.1
+
+[0.1, 0.15, 0.3, 0.4, 5.0, 2000, 50000, ',', ':', '?mode=ro', '[Expand for details:', '_Probe', '_compress_run', '_session_id', 'assistant', 'binding_changed', 'cached_leaves', 'content', 'current_session_id', 'custom_instructions', 'failed', 'fence_conflict', 'frontier_moved', 'host_unit_split', 'jobs_enqueued', 'jobs_superseded', 'l2_budget_ratio', 'l3_truncate_tokens', 'lcm-leaf-prep', 'leaf_chunk_tokens', 'leaf_target_ratio', 'prep:', 'prep_guard_full', 'prepared', 'promoted', 'queued_jobs', 'rejected', 'role', 'sensitive_patterns', 'stale_evicted', 'store', 'store_id', 'summary_model', 'system', 'tool', 'tool_calls', 'user', 'utf-8', 'wasted']

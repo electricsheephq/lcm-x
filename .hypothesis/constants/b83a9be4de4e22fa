@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/dag.py
+# hypothesis_version: 6.141.1
+
+[-1.0, 0.0, 2e-07, 5.0, 3600.0, 100, 256, 512, 1000, ' AND n.depth < ?', ' OR ', '(', ')', ',', '-inf', '1 = 1', '?', 'BEGIN IMMEDIATE', 'IMMEDIATE', 'SummaryNode', '_conn', 'check_same_thread', 'children', 'count', 'depth', 'earliest_at', 'error', 'escalation_level', 'expand_hint', 'hybrid', 'inf', 'isolation_level', 'latest_at', 'm.source', 'messages', 'model', 'n.created_at', 'node_id', 'nodes', 'nodes_fts', 'num_sources', 'relevance', 'session_id = ?', 'source_token_count', 'source_tokens', 'source_type', 'summary', 'summary IS NOT NULL', 'summary_dag.add_node', 'summary_nodes', 'timeout', 'token_count', 'tokens', 'unrecorded']

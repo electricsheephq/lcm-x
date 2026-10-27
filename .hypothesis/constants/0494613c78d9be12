@@ -1,0 +1,4 @@
+# file: /Users/m1/Codex/scratch/20261028-lcmx-v0291/hoststub/agent/context_engine.py
+# hypothesis_version: 6.141.1
+
+[0.75, 100, 'compression_count', 'context_length', 'error', 'last_prompt_tokens', 'threshold_tokens', 'usage_percent']

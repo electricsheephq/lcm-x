@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/access_policy/resolution.py
+# hypothesis_version: 6.141.1
+
+['_CatalogLookup', '_store', 'active', 'connection', 'lcm_rollup_state', 'lcm_rollups', 'lcm_teams_enabled', 'membership_revision', 'messages', 'not_store_backed', 'ok', 'policy_revision', 'revocation_epoch', 'scope', 'session_id', 'summary_nodes', 'unreadable']

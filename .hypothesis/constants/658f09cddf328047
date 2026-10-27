@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/assertion_state.py
+# hypothesis_version: 6.141.1
+
+[100, 500, ',', ':', 'accepted', 'active', 'addressee', 'assertion_id', 'assistant', 'assistant:self', 'attribution', 'cancelled', 'cancels', 'commitment', 'confirms', 'contradicts', 'current', 'declined', 'first_person', 'from_assertion_id', 'fulfilled', 'fulfills', 'kind', 'lifecycle_status', 'object', 'object_value', 'pending', 'polarity', 'predicate_key', 'recommendation', 'relation_type', 'reversed', 'reverses', 'scope_key', 'semantic_state', 'speaker_role', 'subject_key', 'superseded', 'supersedes', 'third_party', 'to_assertion_id', 'unanswered', 'unknown', 'unresolved_conflict', 'user', 'user:self', 'value_text']

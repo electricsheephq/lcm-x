@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/access_context/validation.py
+# hypothesis_version: 6.141.1
+
+['context_id', 'context_present', 'context_well_formed', 'conversation_id', 'conversation_lane', 'deployment_id', 'enforcing', 'fail_closed', 'lease_current', 'lease_id', 'membership_revision', 'not_expired', 'not_revoked', 'owner', 'owner_only', 'ownership_current', 'policy_revision', 'principal_id', 'profile_id', 'profile_incarnation', 'read_policy_ref', 'request_id', 'revision_supported', 'revocation_epoch', 'scope_permitted', 'session_id', 'source_kind', 'standard_unmanaged', 'target_resolution', 'tenant_id']

@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/lifecycle_state.py
+# hypothesis_version: 6.141.1
+
+[0.0, 30.0, 3600.0, 200, ' OR ', ') AND ', '?mode=ro', 'BEGIN IMMEDIATE', '_conn', 'categories', 'check_same_thread', 'cid', 'classification', 'conversation_id', 'count', 'current_bound_at', 'current_session_id', 'debt_kind', 'debt_size_estimate', 'debt_updated_at', 'description', 'empty_lifecycle_rows', 'frontier', 'isolation_level', 'last_finalized_at', 'last_reset_at', 'last_rollover_at', 'lifecycle_rows', 'messages', 'messages_total', 'name', 'notice', 'now', 'pass', 'read_only', 'recommended_action', 'sample_session_ids', 'severity', 'sid', 'state_db_checked', 'state_db_error', 'state_only_sessions', 'state_sessions_total', 'status', 'summary', 'summary_nodes', 'summary_nodes_total', 'timeout', 'updated_at', 'warn']

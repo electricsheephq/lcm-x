@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/cpu_capacity.py
+# hypothesis_version: 6.141.1
+
+[1.0, ' - ', ',', '/proc/self/cgroup', '/proc/self/mountinfo', '011', '012', '040', '134', ':', '\\', 'cgroup', 'cgroup2', 'cpu', 'cpu.cfs_period_us', 'cpu.cfs_quota_us', 'cpu.max']

@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/survival_codec.py
+# hypothesis_version: 6.141.1
+
+[600, 1024, 1200, '\n...\n', 'arguments', 'content', 'function', 'lcm_survival_fit', 'role', 'store_id', 'tool_call_id', 'tool_calls']

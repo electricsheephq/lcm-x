@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/entity_store.py
+# hypothesis_version: 6.141.1
+
+[5.0, "'[]'", '))', '1', '; ', 'BEGIN IMMEDIATE', 'COMMIT', 'NFKC', 'NULL', 'P', 'PRAGMA query_only=ON', 'ROLLBACK', 'a.source_store_ids', 'access_scope', 'active', 'add_alias', 'add_note', 'agent', 'alias_id', 'check_same_thread', 'create_entity', 'ent_', 'entity_id', 'event_id', 'fact', 'host_file_revision', 'id', 'isolation_level', 'key_id', 'lcm_entities', 'lcm_entity_aliases', 'lcm_entity_keys', 'lcm_memory_events', 'lcm_memory_notes', 'm.access_scope', 'n.cites', 'name', 'norm', 'note_', 'note_id', 'override_key', 'person', 'platform_id', 'principal_is_owner', 'restore_alias', 'retire_alias', 'retired_at', 'rev_', 'row_id', 'rowid', 'set_entity_status', 'supersede_note', 'superseded_by', 't.alias_id=:id', 't.cites', 't.entity_id=:id', 't.event_id>:id', 't.note_id=:id', 't.revision_id=:id', 't.source_store_ids', 'timeout', 'uri']

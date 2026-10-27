@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/summary_attempt.py
+# hypothesis_version: 6.141.1
+
+[400, 404, 429, '\\b1301\\b', 'billing', 'body', 'content_filter', 'contentfilter', 'context length', 'context limit', 'context window', 'context_length', 'credits', 'does not exist', 'free tier', 'input too long', 'insufficient', 'is not a valid model', 'max context', 'maximum context', 'model', 'model not found', 'model not supported', 'model_not_found', 'model_not_supported', 'no such model', 'not_found_error', 'payment', 'prompt is too long', 'quota', 'rate limit', 'rate_limit', 'request too large', 'response', 'sensitive', 'status', 'status_code', 'text', 'timed out', 'timeout', 'token limit', 'too many requests', 'too many tokens', 'unknown model', 'unsupported model']

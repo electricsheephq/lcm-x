@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/sqlite_util.py
+# hypothesis_version: 6.141.1
+
+[0.0, 1.0, '"', "'", 'COMMIT', 'PRAGMA busy_timeout', 'ROLLBACK', '_T', '_lcm_real', '_lcm_trace', 'locked', 'sqlite_errorcode', 'sqlite_errorname']

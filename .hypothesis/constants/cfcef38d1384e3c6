@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/command_status.py
+# hypothesis_version: 6.141.1
+
+['(never)', '(no profile)', '(uninitialized)', '(unknown)', ', ', '; ', 'LCM status', 'attributed_messages', 'chunks', 'config_sources', 'conversational', 'embedding_prefix', 'embeddings_enabled', 'error', 'identity_hash', 'in flight', 'ingest_protection', 'last_rotate_at', 'messages_total', 'rotate_backup_path', 'rotate_backup_size', 'runtime_identity', 'seconds', 'source_lineage', 'summaries', 'uncertain']

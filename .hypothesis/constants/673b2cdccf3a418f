@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/host_uid_emit.py
+# hypothesis_version: 6.141.1
+
+['_canonical_row', '_db_row_snapshot', '_row_id', '_tool_call_uid', '_tool_call_uids', 'call_id', 'id', 'message_uid', 'off', 'tool_call_id', '|']

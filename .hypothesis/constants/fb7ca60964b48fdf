@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/host_uid.py
+# hypothesis_version: 6.141.1
+
+[1.0, 256, 500, 512, '(none)', '.', '?mode=ro', '_branched_from', '_delegate_from', '_engine_uids_pending', '_host_uid_counters', '_host_uid_read_error', '_reset_from', 'agree', 'agree_bind', 'agree_new', 'alias_candidate', 'anchor_replay', 'assistant', 'bound.version_new', 'canonical', 'compression', 'content', 'cursor', 'disagree', 'end_reason', 'engine', 'entries', 'errors', 'generated.agree', 'host_uid:counters', 'id', 'identity', 'in_transaction', 'matched', 'message_uid', 'messages', 'model_config', 'no_uid', 'off', 'parent_session_id', 'plan', 'position_proof', 'read_error', 'replay.', 'replayed', 'role', 'session_id', 'skipped.invalid_uid', 'skipped.no_uid', 'skipped.not_stored', 'source', 'store_id', 'stored_new', 'tool', 'tool_calls', 'tool_segment', 'unbound.agree_new', 'unknown', 'unresolved', 'utf-8', 'version', 'version_new']

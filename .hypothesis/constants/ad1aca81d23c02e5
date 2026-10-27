@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/reset_state.py
+# hypothesis_version: 6.141.1
+
+[0.0, 'action', 'idle', 'local', 'no_proof', 'none', 'not run', 'reason']

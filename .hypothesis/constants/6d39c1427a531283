@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/rollup_store.py
+# hypothesis_version: 6.141.1
+
+[5.0, 256, 900, ', ', '_conn', 'built_at', 'check_same_thread', 'covered_end', 'covered_start', 'day', 'error', 'event_id', 'generation', 'last_build_cursor', 'lease_nonce', 'month', 'next_day', 'node_id', 'period_kind', 'period_start', 'rollup_id', 'scope', 'source_fingerprint', 'source_node_ids', 'status', 'summary', 'temporal_rollups_v1', 'timeout', 'token_count', 'week']

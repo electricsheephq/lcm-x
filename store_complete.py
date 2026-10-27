@@ -222,7 +222,8 @@ class StoreCompleteMixin:
 
     def _store_complete_input(self, chunk, claims, full_map, view, raw_chunk, frontier, carry, budget,
                               accounted_ids=(), scale: int = 1, scanned=None, copy_lookup=None,
-                              escape_retained: bool = False, allow_retained_escape: bool = False) -> Optional[list]:
+                              escape_retained: bool = False, allow_retained_escape: bool = False,
+                              lift_allowed: bool = True) -> Optional[list]:
         """``[(input_row, [store_id, ...]), ...]`` in store order; ``[]`` when the leaf cannot start
         (a retained occurrence, no source rows, or a contiguity cut); None: today's input."""
         from .identity_anchor import _match_occurrences
@@ -398,7 +399,8 @@ class StoreCompleteMixin:
                 return self._store_complete_input(chunk, given_claims, full_map, view, raw_chunk, frontier, carry,
                                                   budget, accounted_ids, scale=_SCAN_EXTEND, scanned=scanned,
                                                   copy_lookup=copy_lookup, escape_retained=escape_retained,
-                                                  allow_retained_escape=allow_retained_escape)
+                                                  allow_retained_escape=allow_retained_escape,
+                                                  lift_allowed=lift_allowed and not escape_retained)
             else:  # the documented oversized-group exception: admitted as read
                 logger.warning("LCM store-complete leaf: a first tool group is still open after a %d-row scan; "
                                "admitted as read (frontier=%d)", _SCAN_LIMIT * scale, frontier)
@@ -418,18 +420,19 @@ class StoreCompleteMixin:
         if copy_proofs and not any(ids_of(m, ids) for m, ids in out):
             return self._store_complete_input(chunk, given_claims, full_map, view, raw_chunk, frontier, carry,
                                               budget, accounted_ids, scale=scale, scanned=(rows, truncated), copy_lookup=({}, set()),
-                                              escape_retained=escape_retained, allow_retained_escape=allow_retained_escape)
+                                              escape_retained=escape_retained, allow_retained_escape=allow_retained_escape,
+                                              lift_allowed=lift_allowed and not escape_retained)
         if not out and allow_retained_escape and self._retained_escape_enabled:
             blocked_row = self._store_complete_blocked
             lifted = self._context_aware_leaf_cap() or max(budget, 1) * _SCAN_EXTEND
-            if (blocked_row and not escape_retained) or (not blocked_row and
+            if (blocked_row and not escape_retained) or (not blocked_row and lift_allowed and
                     self._store_complete_empty_reason == "leaf input cannot form a contiguous stored prefix"
                     and lifted > budget):
                 result = self._store_complete_input(
                     chunk, given_claims, full_map, view, raw_chunk, frontier, carry,
                     budget if blocked_row else lifted, accounted_ids, scale=scale, scanned=(rows, truncated),
                     copy_lookup=copy_lookup, escape_retained=bool(blocked_row) or escape_retained,
-                    allow_retained_escape=not escape_retained)
+                    allow_retained_escape=not escape_retained, lift_allowed=lift_allowed and bool(blocked_row))
                 if blocked_row is not None:
                     self._store_complete_blocked = blocked_row
                 return result

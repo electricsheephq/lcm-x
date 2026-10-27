@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/schema_families.py
+# hypothesis_version: 6.141.1
+
+['embedding', 'embeddings_v1', 'entity', 'entity_memory_v1', 'lcm_embedding', 'lcm_embedding_binary', 'lcm_embedding_meta', 'lcm_entit', 'lcm_entities', 'lcm_entity_aliases', 'lcm_entity_keys', 'lcm_memory_', 'lcm_memory_events', 'lcm_memory_notes', 'malformed index', 'malformed table', 'memory', 'missing object', 'v0.20.0', 'v0.25.0-rc1']

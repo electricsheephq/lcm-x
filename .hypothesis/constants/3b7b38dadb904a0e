@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/summary_outcome.py
+# hypothesis_version: 6.141.1
+
+[0.9, 1.0, 'accepted', 'budget_cut', 'config_error', 'content_filter', 'context_length', 'failure', 'no_content', 'not_shorter', 'rejected', 'rejection', 'timed out', 'timeout']

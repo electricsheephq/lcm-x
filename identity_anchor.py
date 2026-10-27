@@ -1283,8 +1283,12 @@ class IdentityAnchorMixin:
                         continue
                     if sid > 0:
                         memo[item["identity_sha256"]] = sid
+            except (ValueError, TypeError):  # includes JSONDecodeError from the store's decoder
+                logger.debug("LCM retained escape metadata corrupt; caching empty memo", exc_info=True)
+                memo = {}
             except Exception:
                 logger.debug("LCM retained escape metadata load failed", exc_info=True)
+                return {}  # retry later; an unread memo must never be replaced by a partial write
             cache[key] = memo
         return cache[key]
 
@@ -1297,13 +1301,15 @@ class IdentityAnchorMixin:
             return
         try:
             memo = dict(self._retained_escape_memo())
+            key = self._replay_snapshot_metadata_key("retained_escape")
+            if key not in self._retained_escape_memos:
+                return  # this call's metadata load failed
             for sid, row in self._store.get_batch([sid for sid, _role, _kind in escaped]).items():
                 for form in self._stored_row_forms(row):
                     memo[self._retained_escape_digest(form)] = sid
             recent = set(sorted(set(memo.values()))[-256:])  # cap rows, not their alternate forms
             memo = {digest: sid for digest, sid in memo.items() if sid in recent}
             rows = [{"store_id": sid, "identity_sha256": digest} for digest, sid in sorted(memo.items())]
-            key = self._replay_snapshot_metadata_key("retained_escape")
             self._store.write_metadata_json([key], json.dumps(rows, sort_keys=True), skip_unchanged=True)
             self._retained_escape_memos[key] = memo
         except Exception:
@@ -1316,8 +1322,11 @@ class IdentityAnchorMixin:
         if not memo:
             return False
         frontier = self._store_complete_frontier() if frontier is None else frontier
-        identity = self._message_replay_identity(message, strip_carrier=False)
-        return 0 < memo.get(self._retained_escape_digest(identity), 0) <= frontier
+        for strip_carrier in (False, True):
+            identity = self._message_replay_identity(message, strip_carrier=strip_carrier)
+            if 0 < memo.get(self._retained_escape_digest(identity), 0) <= frontier:
+                return True
+        return False
 
     def _identity_anchor_view_key(self, message) -> Optional[tuple]:
         """A view row's occurrence key ``(stamp, form)`` as the ingest site keys it; None for LCM's own scaffold

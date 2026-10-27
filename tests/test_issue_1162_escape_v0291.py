@@ -21,6 +21,189 @@ lines = _shared_lines
 summaries = _shared_summaries
 
 
+@pytest.mark.parametrize("ctx", [32_000, 0])
+@pytest.mark.parametrize("compress", [False, True], ids=["direct", "compress"])
+def test_b5_lift_is_bounded(tmp_path, summaries, lines, monkeypatch, ctx, compress):
+    from hermes_lcm import store_complete
+    from hermes_lcm.store_complete import StoreCompleteMixin
+    monkeypatch.setattr(store_complete, "_SCAN_LIMIT", 2)
+    engine = _engine(tmp_path, False, fresh_tail_count=2, leaf_chunk_tokens=400)
+    engine.context_length = ctx
+    c1, c2 = ({"role": "user", "content": n + PAD, "timestamp": t}
+              for n, t in (("c1", 1.0), ("c2", 3.0)))
+    hidden = [{"role": "user", "content": f"h{i}" + " lorem ipsum dolor sit amet" * 40}
+              for i in range(6)]
+    tail = [r for i in range(2, 5) for r in _turn(f"T{i}", 100.0 * i)] if compress else []
+    calls = []
+    original = StoreCompleteMixin._store_complete_input
+    def counted(self, *args, **kwargs):
+        calls.append((args[7], kwargs))
+        assert len(calls) <= 4, calls  # fail promptly instead of exhausting Python's stack
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(StoreCompleteMixin, "_store_complete_input", counted)
+    try:
+        engine.ingest([c1, *hidden, c2, *tail])
+        ids = [int(r["store_id"]) for r in _rows(engine)]
+        chunk, view = [c2, c1], [c2, c1, *tail]
+        engine._ingest_cursor = len(view)
+        if compress:
+            engine.compress(view, current_tokens=10_000)
+            assert engine._last_compression_status in ("noop", "compacted")
+        else:
+            out = engine._store_complete_input(chunk, {}, {id(c1): ids[0], id(c2): ids[7]},
+                                               view, chunk, 0, [], count_messages_tokens(chunk),
+                                               allow_retained_escape=True)
+            assert out == []
+            assert len(calls) == 2  # original budget, then exactly one lifted budget
+            assert calls[1][0] > calls[0][0]
+        assert 1 < len(calls) <= 4
+    finally:
+        engine.shutdown()
+
+
+def test_b5_empty_input_keeps_tool_pairing_repair(tmp_path, summaries, lines, monkeypatch):
+    engine, view = _reorder(tmp_path, False)
+    view.insert(1, {"role": "tool", "tool_call_id": "orphan", "content": "orphan result"})
+    engine._ingest_cursor = len(view)
+    reached = []
+    def no_source(*_args, **_kwargs):
+        reached.append(True)
+        engine._store_complete_empty_reason = "leaf input has no stored source rows (input_rows_without_source=0)"
+        engine._store_complete_blocked = None
+        return []
+    monkeypatch.setattr(engine, "_identity_anchor_summary_input", no_source)
+    try:
+        out = engine.compress(view, current_tokens=10_000)
+        assert reached and not summaries
+        assert out is not view
+        assert not any(m.get("tool_call_id") == "orphan" for m in out)
+        assert engine._last_compression_status == "sanitized"
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("separator", ["\n\n---\n\n", "\n\n"])
+def test_b5_memo_covers_carrier(tmp_path, summaries, lines, separator):
+    engine, view = _reorder(tmp_path, False)
+    try:
+        view, _ = _passes(engine, view, 2, lines)
+        content = view[0]["content"]
+        end = engine._verified_lcm_summary_prefix_end(content)
+        assert end > 0
+        carrier = {"role": "user", "content": content[:end] + separator + view[-1]["content"]}
+        assert engine._generated_context_carrier_remainder(carrier) == view[-1]["content"]
+        engine._retained_escape_memos = {}  # prove persisted reload, not just this pass's cache
+        assert engine._retained_escape_covered_view(carrier)
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("lookup_first", [False, True], ids=["record_read_fails", "lookup_read_fails"])
+def test_b5_transient_memo_read_preserves_older_entries(tmp_path, summaries, lines, monkeypatch, lookup_first):
+    engine, view = _reorder(tmp_path, False)
+    try:
+        old_id, new_id = int(_rows(engine)[0]["store_id"]), _r_id(engine)
+        engine._record_retained_escape([(old_id, "user", "shown")])
+        key = engine._replay_snapshot_metadata_key("retained_escape")
+        read = engine._store.read_metadata_json
+        prior = read(key)
+        engine._retained_escape_memos = {}
+        reads = []
+        def transient(k, *args, **kwargs):
+            if k == key:
+                reads.append(k)
+                if len(reads) == 1:
+                    raise OSError("synthetic transient metadata read failure")
+            return read(k, *args, **kwargs)
+        monkeypatch.setattr(engine._store, "read_metadata_json", transient)
+        if lookup_first:
+            assert not engine._retained_escape_covered_view(view[-1])
+        else:
+            engine._record_retained_escape([(new_id, "user", "shown")])
+            assert read(key) == prior  # a failed read cannot replace the persisted memo
+        engine._record_retained_escape([(new_id, "user", "shown")])
+        assert len(reads) == 2
+        assert {old_id, new_id} <= {int(item["store_id"]) for item in read(key)}
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("sweep,backlog,limit", [(True, 0, 3), (True, 12, 4),
+                                               (False, 0, 10), (False, 12, 20)])
+def test_b5_automatic_drain_without_clearing_holds(tmp_path, summaries, lines, sweep, backlog, limit):
+    # Automatic host gate; no force, bypass, hold reset or _passes helper.
+    engine, view = _reorder(tmp_path, sweep)
+    if backlog:
+        engine.shutdown()
+        from tests.test_host_uid_shadow import _state_db
+        (tmp_path / "backlog").mkdir()
+        _state_db(tmp_path / "backlog", [("S", None, None)])
+        engine = _engine(tmp_path / "backlog", sweep, fresh_tail_count=1, leaf_chunk_tokens=400)
+        hidden = [r for i in range(backlog) for r in _turn(f"H{i}", 10.0 * i)]
+        retained = {"role": "user", "content": "[R] retained" + PAD, "message_uid": "retained-r"}
+        live = [r for i in range(1, 5) for r in _turn(f"L{i}", 1000.0 + i)]
+        engine.ingest([*hidden, retained, *live])
+        view = [*live, retained]
+        engine._ingest_cursor = len(view)
+    try:
+        engine._config.dynamic_leaf_chunk_enabled = False
+        engine._config.context_threshold = 0.003
+        engine.update_model(engine.model, 200_000)
+        trace = []
+        for turn in range(1, limit + 1):
+            blocked = engine._automatic_compression_blocked()
+            if not blocked:
+                view = engine.compress(view, current_tokens=10_000)
+            assert not engine._no_progress_hold or engine._no_progress_hold[1] != "no_progress"
+            engine.note_turn_complete()  # the only between-turn action
+            assert not engine._no_progress_hold or engine._no_progress_hold[1] != "no_progress"
+            trace.append((turn, blocked, _frontier(engine), count_messages_tokens(view)))
+            if count_messages_tokens(view) <= engine.threshold_tokens:
+                break
+        assert trace[-1][-1] <= engine.threshold_tokens, trace
+        assert len(trace) <= limit
+        print(f"B5 automatic drain sweep={sweep} backlog={backlog} turns={len(trace)} limit={limit}")
+        _audit(engine)
+    finally:
+        engine.shutdown()
+
+
+def test_b5_rescue_reports_only_published_escapes(tmp_path, summaries, lines, monkeypatch):
+    import hermes_lcm.engine as engine_module
+    from tests.test_host_uid_shadow import _state_db
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path, False, fresh_tail_count=1, leaf_chunk_tokens=400)
+    r1, r2 = ({"role": "user", "content": f"[R{i}] retained occurrence" + PAD,
+               "message_uid": f"retained-r{i}"} for i in (1, 2))
+    stored = [r1, r2, *[r for i in range(1, 7) for r in _turn(f"T{i}", 100.0 * i)]]
+    calls = []
+    def summarize(**kwargs):
+        calls.append(("[R1]" in kwargs["text"], "[R2]" in kwargs["text"]))
+        if len(calls) == 1:
+            raise RuntimeError("maximum context length exceeded")
+        return "Earlier turns.\nExpand for details about: turns", 1
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", summarize)
+    try:
+        engine.ingest(stored)
+        view = [m for m in stored if m is not r1 and m is not r2] + [dict(r1), dict(r2)]
+        engine._ingest_cursor = len(view)
+        ids = {r["content"][:4]: int(r["store_id"]) for r in _rows(engine)}
+        r1_id, r2_id = ids["[R1]"], ids["[R2]"]
+        engine.compress(view, current_tokens=10_000)
+        assert calls[0] == (True, True) and calls[-1] == (True, False), calls
+        assert _covered(engine)[r1_id] == 1 and _covered(engine)[r2_id] == 0
+        assert set(engine._retained_escape_memo().values()) == {r1_id}
+        assert engine._compress_escaped == [(r1_id, "user", "shown")]
+        warnings = [s for lvl, s in lines if lvl >= logging.WARNING and "retained-occurrence fallback:" in s]
+        assert len(warnings) == 1 and f"store_id={r1_id} role=user kind=shown" in warnings[0]
+        assert "leaf includes 1 retained row(s)" in warnings[0] and "+1 more" not in warnings[0]
+        stop = next(s for _lvl, s in lines if s.startswith("LCM compaction stop:"))
+        assert stop.endswith(f" escaped=store_id:{r1_id},role:user,kind:shown,n:1")
+        _audit(engine)
+    finally:
+        engine.shutdown()
+
+
 def _covered(engine):
     return Counter(int(row[0]) for row in engine._store.connection.execute(
         "SELECT source.value FROM summary_nodes AS node, json_each(node.source_ids) AS source "

@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/ingest_persisted.py
+# hypothesis_version: 6.141.1
+
+[1024, '\x00', '\n...', '\r\n...', ',', '.', '..', '</persisted-output>', '<persisted-output>', 'O_NOFOLLOW', 'O_NONBLOCK', '[0-9a-f]{64}', 'body', 'count', 'ctime_ns', 'hermes-results', 'mtime_ns', 'name', 'password_assignment', 'path', 'preview', 'rb', 'sha256', 'size', 'surrogatepass', 'utf-8']

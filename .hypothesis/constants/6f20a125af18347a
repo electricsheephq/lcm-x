@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/embedding_maintenance.py
+# hypothesis_version: 6.141.1
+
+[0.0, 0.001, 0.82, 1.0, 60.0, 300.0, 600.0, 1800.0, '/', ':', '; ', '=', 'available', 'chunk_gapfill_scan', 'chunks', 'circuit_open', 'complete', 'continue', 'cycle_progress', 'cycle_remaining', 'deadline', 'delay', 'detail', 'embedded', 'embedding_model', 'embedding_provider', 'embeddings_enabled', 'error', 'error: ', 'failed', 'fast-embed', 'fastembed', 'identity_hash', 'lease_held', 'maintenance_slice', 'model_preparing', 'model_unavailable', 'no_profile', 'no_progress', 'ollama', 'ollama_base_url', 'preparing', 'present', 'privacy_withheld', 'process_exit', 'provider', 'provider_unavailable', 'reason', 'refused', 'remaining', 'retry_wait', 'row_backoff', 'rows_written', 'selected', 'skipped', 'slice_budget', 'stage', 'status', 'stop_reason', 'stopped', 'summaries', 'unavailable', 'uncertain', 'vectors_written']

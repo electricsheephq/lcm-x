@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/access_policy/fail_closed.py
+# hypothesis_version: 6.141.1
+
+['count_candidates', 'denial_reason', 'hydrate_targets', 'issue_handle', 'rank_candidates', 'select_collection', 'tenant_id', 'value']

@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/sender_capture.py
+# hypothesis_version: 6.141.1
+
+[200, 256, 900, 1024, 'Cc', 'Cs', 'LCM_SENDER_CAPTURE', '[a-z0-9_.-]{1,32}', '_host_rewrite_store', '_host_rewrite_watch', '_merged_turn_prefix', 'conversation_history', 'display_kind', 'gateway', 'gateway_principal', 'id', 'is_bot', 'message_uid', 'platform', 'role', 'sender_id', 'session_id', 'turn_author', 'turn_id', 'user']

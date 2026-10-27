@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/access_context/denials.py
+# hypothesis_version: 6.141.1
+
+['Decision', 'PublicDecision', 'context_expired', 'context_id', 'context_invalid', 'context_missing', 'context_revoked', 'conversation_id', 'denial_reason', 'deployment_id', 'detail', 'lease_generation', 'lease_id', 'lease_stale', 'membership_revision', 'ownership_changed', 'ownership_generation', 'policy_revision', 'principal_id', 'profile_id', 'request_id', 'revocation_epoch', 'scope_forbidden', 'scope_mismatch', 'session_id', 'target_id', 'tenant_id']

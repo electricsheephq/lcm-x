@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/rollup_periods.py
+# hypothesis_version: 6.141.1
+
+[256, '(\\d+)d', 'day', 'last (\\d+)h', 'lcm_lineage_current', 'lcm_lineage_frontier', 'lcm_lineage_seen', 'month', 'nodes', 'period is required', 'today', 'week', 'yesterday']

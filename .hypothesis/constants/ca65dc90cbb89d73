@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/ingest_content.py
+# hypothesis_version: 6.141.1
+
+[0.0, 0.015, 0.03, 0.08, 0.1, 0.5, 0.98, 1.0, 120, 128, 256, 1000, 4096, 65536, '"', '(?:/|\\\\/|\\\\u002[fF])', '+/=_-', '-', '.json', '/', '<key>', '=', '?', '[0-9a-fA-F]+', '[A-Za-z0-9_]+', '[^A-Za-z0-9_.:/-]+', '[{', '\\', '\\"', '\\s+', '^[A-Za-z0-9+/=_-]+$', 'assistant', 'audio', 'audio_url', 'content', 'heartbeat_progress', 'high_repetition', 'image', 'image_url', 'input_image', 'media_payload', 'output_image', 'raw_payload', 'role', 'system', 'tool', 'tool_result', 'type', 'unknown', 'utf-8', 'video', 'video_url']

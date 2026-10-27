@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/ingest_policy.py
+# hypothesis_version: 6.141.1
+
+['+prefix:', ',', ', ', '; ', '[^a-z0-9]+', ']', '_', 'access', 'accesstoken', 'active', 'active_patterns', 'all', 'api', 'api_key', 'apikey', 'apitoken', 'authorization', 'authtoken', 'auto', 'bearer_token', 'bearertoken', 'clientsecret', 'default', 'digest', 'document', 'embedding_prefix', 'embedding_provider', 'enabled', 'key', 'lossless_recovery', 'name', 'off', 'ollama', 'on', 'openai', 'openai-compatible', 'passphrase', 'passwd', 'password', 'password_assignment', 'patterns', 'placeholder_format', 'privacy:off', 'privacy:v3', 'private_key', 'pwd', 'query', 'secret', 'secret_quoted', 'secret_unquoted', 'secretkey', 'sensitive_patterns', 'siliconflow', 'source', 'surrogatepass', 'token', 'unknown', 'unknown_patterns', 'utf-8', 'voyage', 'voyageai']

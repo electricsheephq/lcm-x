@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/access_policy/teams_policy.py
+# hypothesis_version: 6.141.1
+
+['access_scope', 'admin', 'allowed', 'assertions_rebuild', 'backup', 'chunk_backfill', 'collection_allowlist', 'collection_id', 'denial_reason', 'embedding_backfill', 'kind', 'operation_allowlist', 'partition_key', 'read', 'required_scope', 'session_id', 'source_session_id', 'target_access_scopes', 'tenant_id', 'value', 'write']

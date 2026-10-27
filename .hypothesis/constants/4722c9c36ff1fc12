@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1162-escape-v0291/placeholder_ledger.py
+# hypothesis_version: 6.141.1
+
+[-512, '\x00', '[0-9a-f]{16}', '_tool_call_uid', 'assistant', 'content', 'ignored_tool_call', 'message_uid', 'role', 'store', 'store_id', 'system', 'tool', 'tool_call_id', 'tool_calls', 'user', 'utf-8']
