@@ -720,15 +720,46 @@ def _condensation_source_text(nodes) -> str:
 
 _SUMMARY_DEPTH_LABELS = {0: "Recent", 1: "Session Arc", 2: "Durable"}
 
+_EXPAND_HINT_PLAIN_MARKER = "Expand for details about:"
+
+
+def _split_trailing_expand_hint(body: Any) -> tuple[str, str]:
+    """Split a body ending in a plain 'Expand for details about:' hint line.
+
+    Returns (body_without_hint_line, hint_text); hint is '' when the final
+    non-blank line is not such a line. The summariser contract ends every leaf
+    body with that line, so assembly must not append the bracketed duplicate
+    on top of it (~230 chars per leaf).
+    """
+    if not isinstance(body, str):
+        return "", ""
+    lines = body.rstrip("\n").splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        stripped = lines[i].strip()
+        if not stripped:
+            continue
+        if stripped.startswith(_EXPAND_HINT_PLAIN_MARKER) and len(stripped) > len(_EXPAND_HINT_PLAIN_MARKER):
+            return "\n".join(lines[:i]), stripped[len(_EXPAND_HINT_PLAIN_MARKER):].strip()
+        break
+    return body, ""
+
 
 def _summary_part_text(node) -> str:
-    """One frontier node as context assembly renders it in the summary prefix."""
+    """One frontier node as context assembly renders it in the summary prefix.
+
+    Ends with exactly one bracketed expand hint; when the body already ends
+    with the plain hint line (summariser contract), that line is stripped so
+    the leaf carries the hint once, not twice.
+    """
     label = _SUMMARY_DEPTH_LABELS.get(node.depth, f"Depth-{node.depth}")
-    return (
-        f"[{label} Summary (d{node.depth}, node {node.node_id})]\n"
-        f"{node.summary}\n"
-        f"[Expand for details: {node.expand_hint}]"
-    )
+    body = node.summary
+    if body.endswith("\n"):
+        body = body[:-1]
+    stripped_body, plain_hint = _split_trailing_expand_hint(body)
+    hint = node.expand_hint or plain_hint
+    if plain_hint and hint:
+        return f"[{label} Summary (d{node.depth}, node {node.node_id})]\n{stripped_body}\n[Expand for details: {hint}]"
+    return f"[{label} Summary (d{node.depth}, node {node.node_id})]\n{body}\n[Expand for details: {node.expand_hint}]"
 
 
 def _visible_reply_text(message: Any) -> str:
@@ -6672,13 +6703,16 @@ class LCMEngine(
             # session's summary is content (#484 item 11j).
             if node is None or node.session_id != session_id or int(node.depth) != int(header.group(1)):
                 return None, []
-            label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(node.depth, f"Depth-{node.depth}")
-            part = (
-                f"[{label} Summary (d{node.depth}, node {node.node_id})]\n"
-                f"{node.summary}\n[Expand for details: {node.expand_hint}]"
-            )
+            # Accept both the deduped rendering (one bracket hint) and the
+            # legacy double-hint rows rendered before the dedup.
+            part = _summary_part_text(node)
             if not content.startswith(part, pos):
-                return None, []
+                label = _SUMMARY_DEPTH_LABELS.get(node.depth, f"Depth-{node.depth}")
+                legacy = (f"[{label} Summary (d{node.depth}, node {node.node_id})]\n"
+                          f"{node.summary}\n[Expand for details: {node.expand_hint}]")
+                if not content.startswith(legacy, pos):
+                    return None, []
+                part = legacy
             pos += len(part)
             node_ids.append(int(node.node_id))
             if content.startswith("\n\n---\n\n", pos) and self._LCM_SUMMARY_PART_HEADER_RE.match(content, pos + 7):
