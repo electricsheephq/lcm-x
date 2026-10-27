@@ -67,6 +67,7 @@ class Scenario:
     setup: str = ""
     expiry_checkpoint: int = 0
     window: int = 200000
+    escape_retained: bool = True
 
 
 SCENARIOS = (
@@ -97,6 +98,9 @@ SCENARIOS = (
              overrides=(("ignore_message_patterns", ["IGNORE THIS ROW"]), ("leaf_chunk_tokens", 20000))),
     Scenario("stop-resumed-anchor", setup="resume-anchor", mode="open-circuit"),
     Scenario("stop-reason-retained", setup="retained-proof", shape="no-system", retry=True,
+             escape_retained=False,
+             overrides=(("fresh_tail_count", 1), ("leaf_chunk_tokens", 1))),
+    Scenario("stop-reason-retained-escape", setup="retained-proof", shape="no-system", retry=True,
              overrides=(("fresh_tail_count", 1), ("leaf_chunk_tokens", 1))),
     Scenario("stop-reason-unattributed", setup="rotated", retry=True,
              overrides=(("fresh_tail_pressure_yield_enabled", False),)),
@@ -211,6 +215,8 @@ SCENARIOS = (
     Scenario("explicit-focus", focus="Preserve source coverage."),
     Scenario("no-system-prompt", shape="no-system"),
     Scenario("retained-tail-occurrence", shape="retained", overrides=(("fresh_tail_count", 1),
+             ("leaf_chunk_tokens", 1)), retry=True, escape_retained=False),
+    Scenario("retained-tail-occurrence-escape", shape="retained", overrides=(("fresh_tail_count", 1),
              ("leaf_chunk_tokens", 1)), retry=True),
     Scenario("replayed-summary-scaffold", setup="replay", retry=True),
     Scenario("stub-first-exit", shape="tools", force=False, current_tokens=12001, overrides=(
@@ -415,6 +421,7 @@ OBSERVED_ATTRIBUTES = (
     "_committed_replay_drops",
     "_compaction_request",
     "_compress_dropped_ignored_rows",
+    "_compress_escaped",
     "_compress_forced_overflow",
     "_compress_hidden_rows_consumed",
     "_compress_host_rows_consumed",
@@ -507,6 +514,7 @@ OBSERVED_ATTRIBUTES = (
     "_refresh_raw_backlog_debt",
     "_remember_generated_ignored_dependent_reply",
     "_replay_occurrences",
+    "_retained_escape_enabled",
     "_run_pre_compaction_extraction",
     "_run_threshold_sweep_condensation",
     "_sanitize_active_context_messages",
@@ -523,6 +531,7 @@ OBSERVED_ATTRIBUTES = (
     "_store_complete_copy_exclusion_proofs",
     "_store_complete_cut",
     "_store_complete_empty_reason",
+    "_store_complete_escaped",
     "_store_complete_excluded",
     "_stored_publication_filter_exclusions",
     "_stub_first_exit",
@@ -544,6 +553,7 @@ OBSERVED_ATTRIBUTES = (
     "_working_leaf_chunk_tokens",
     "_write_generated_ignored_placeholder_hash_counts",
     "_write_generated_ignored_placeholder_hash_ordinals",
+    "_zero_leaf_keep_sanitized",
     "compression_count",
     "context_length",
     "threshold_tokens",
@@ -996,6 +1006,8 @@ def observe(case: Scenario, root: Path) -> Trace:
             _state_db(root, [("S", None, None)])
         context: Any = engine_context
         with context(root, window=case.window, conversation_id="trace-conversation", **settings) as engine:
+            # #1162 B3: retain base stop characterizations alongside escape-on twins.
+            engine._retained_escape_enabled = case.escape_retained
             view = transcript(case)
             if case.setup == "prepared-input-price-change":
                 from types import ModuleType
@@ -1191,6 +1203,7 @@ def observe(case: Scenario, root: Path) -> Trace:
                 return sqlite3.SQLITE_OK
 
             publication_race = False
+            snapshot_proofs: dict[str, str] = {}
 
             def trace_sql(connection: str, sql: str) -> None:
                 nonlocal publication_race
@@ -1222,6 +1235,14 @@ def observe(case: Scenario, root: Path) -> Trace:
                 if sql.lstrip().startswith("--") or re.search(r"(['\"])(main|temp)\1\s*\.", sql):
                     return
                 normalized = canonical.text(sql.strip())
+                if (case.name == "stop-reason-retained-escape"
+                        and "'host_occurrence_snapshot:" in normalized):
+                    # The proof includes generated node IDs. Preserve digest equality/transitions
+                    # in this new twin, as for _no_progress_proof_fingerprint, not their random bytes.
+                    normalized = re.sub(
+                        r'("proof_sha256": ")([0-9a-f]{64})(")',
+                        lambda match: match[1] + snapshot_proofs.setdefault(
+                            match[2], f"<snapshot-proof-{len(snapshot_proofs)}>") + match[3], normalized)
                 if re.match(r"(?:--\s*)?(?:INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)\b",
                             normalized, re.IGNORECASE):
                     # Normalize whitespace outside literals only: literal whitespace is data.

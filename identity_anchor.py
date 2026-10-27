@@ -1263,7 +1263,38 @@ class IdentityAnchorMixin:
             budget = count_messages_tokens(chunk)
         return self._store_complete_input(chunk, claims, full_map, view, raw_chunk, frontier, carry,
                                           max(budget, count_messages_tokens(chunk)), accounted_ids,
-                                          copy_lookup=copy_lookup)
+                                          copy_lookup=copy_lookup, allow_retained_escape=self._retained_escape_enabled)
+
+    def _retained_escape_memo(self) -> dict:
+        """Session-scoped identities of escape-covered rows; never a source claim."""
+        key = self._replay_snapshot_metadata_key("retained_escape")
+        cache = self.__dict__.setdefault("_retained_escape_memos", {})
+        if key not in cache:
+            payload = self._store.read_metadata_json(key)
+            cache[key] = {item["identity_sha256"]: int(item["store_id"])
+                          for item in payload} if isinstance(payload, list) else {}
+        return cache[key]
+
+    def _record_retained_escape(self, escaped) -> None:
+        if not escaped:
+            return
+        memo = dict(self._retained_escape_memo())
+        for sid, row in self._store.get_batch([sid for sid, _role, _kind in escaped]).items():
+            memo[self._replay_identity_sha256(row, stored_row=True)] = sid
+        memo = dict(sorted(memo.items(), key=lambda item: item[1])[-256:])
+        rows = [{"store_id": sid, "identity_sha256": digest} for digest, sid in memo.items()]
+        key = self._replay_snapshot_metadata_key("retained_escape")
+        self._store.write_metadata_json([key], json.dumps(rows, sort_keys=True), skip_unchanged=True)
+        self._retained_escape_memos[key] = memo
+
+    def _retained_escape_covered_view(self, message, frontier=None) -> bool:
+        if not self._retained_escape_enabled:
+            return False
+        memo = self._retained_escape_memo()
+        if not memo:
+            return False
+        frontier = self._store_complete_frontier() if frontier is None else frontier
+        return 0 < memo.get(self._replay_identity_sha256(message), 0) <= frontier
 
     def _identity_anchor_view_key(self, message) -> Optional[tuple]:
         """A view row's occurrence key ``(stamp, form)`` as the ingest site keys it; None for LCM's own scaffold
@@ -1294,9 +1325,11 @@ class IdentityAnchorMixin:
                 return store_id
         return None
 
-    def _identity_anchor_covered_view(self, message, full_map) -> bool:
+    def _identity_anchor_covered_view(self, message, full_map, frontier=None) -> bool:
         """#563: a live user row that no store row maps and whose text is exactly a recorded composite
         (R2 witness) or its survivor, every constituent already covered (at or below the frontier)."""
+        if id(message) not in full_map and self._retained_escape_covered_view(message, frontier):
+            return True  # #1162: any role, including an unmapped host copy after a cold resume
         stamp = _normalize_observed_at(message.get("timestamp"))
         if message.get("role") != "user" or id(message) in full_map:
             return False
@@ -1327,9 +1360,10 @@ class IdentityAnchorMixin:
         if not chunk or len(chunk) >= len(candidates) or not identity_anchor_enabled():
             return chunk
         full_map, self._identity_anchor_text_memo = self._compress_run.store_ids_by_message_id or {}, {}
+        frontier = self._store_complete_frontier()
         end = len(chunk)
-        if all(self._identity_anchor_covered_view(message, full_map) for message in chunk):
-            while end < len(candidates) and self._identity_anchor_covered_view(candidates[end], full_map):
+        if all(self._identity_anchor_covered_view(message, full_map, frontier) for message in chunk):
+            while end < len(candidates) and self._identity_anchor_covered_view(candidates[end], full_map, frontier):
                 end += 1
             if end >= len(candidates):
                 return chunk

@@ -129,6 +129,7 @@ class _CompressionState:
     sweep_step_seconds: Dict[str, float] = field(default_factory=dict)
     preexisting_dependent_reply_records: list[dict[str, str]] = field(default_factory=list)
     unattributed_leaf_refused: bool = False
+    store_complete_input_empty: bool = False
 
     focus_topic: Optional[str] = None
     explicit_focus_topic: bool = False
@@ -712,6 +713,7 @@ class CompactionMixin:
                 return self._compress_bypassed(messages, current_tokens, focus_topic, force)
         self._last_compress_leaves = None
         self._last_hidden_backlog = None
+        self._compress_escaped, self._zero_leaf_keep_sanitized = [], False
         self._compress_forced_overflow = False
         self._last_compression_noop_reason = ""  # #1162: a fit's cause belongs to this pass
         _summary_call.error = None  # the thread-local summary failure must not outlive its pass
@@ -779,8 +781,10 @@ class CompactionMixin:
                     and len(result) >= len(messages)
                     and count_messages_tokens(result) >= count_messages_tokens(messages)):
                 # #904: published hidden leaves advance the frontier, not the host-visible list.
-                sanitized = self._sanitize_active_context_messages(messages)
-                result = messages if sanitized == messages else sanitized
+                if not self._retained_escape_enabled:
+                    sanitized = self._sanitize_active_context_messages(messages)
+                    result = messages if sanitized == messages else sanitized
+                result = self._zero_leaf_result(messages, result)
                 self._ingest_cursor = len(result)
                 if not force and not bypass_cooldown and not self._compress_forced_overflow:
                     self._start_no_progress_hold("hidden_only")
@@ -951,17 +955,19 @@ class CompactionMixin:
             blocked = (getattr(self, "_store_complete_blocked", None)
                        if budget.selected and retained and not bypassed else None)
             exited = getattr(self, "_stub_first_exit_now", None) if reason != "error" and not bypassed else None
+            escaped = getattr(self, "_compress_escaped", []) if not bypassed else []
             if exited:  # #671: the free cuts reached the target before any model call
                 reason = "stub_first_exit"
             logger.info("LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs "
-                        "finalize=%.1fs backlog_tokens=%d%s%s%s%s", reason, budget.leaves, budget.progress or "none", elapsed,
+                        "finalize=%.1fs backlog_tokens=%d%s%s%s%s%s", reason, budget.leaves, budget.progress or "none", elapsed,
                         pre, calls, finalize,
                         self._raw_backlog_tokens(result) if isinstance(result, list) and not bypassed else 0,
                         f" host={budget.host:.1f}s" if budget.host > 0 else "",
                         " tokens_before={tokens_before} tokens_after={tokens_after} target={target_tokens} "
                         "backlog_rows={backlog_rows}".format(**exited) if exited else "",
                         " blocked=store_id:%d,role:%s,kind:%s" % blocked[:3] if blocked else empty_input,  # #1162
-                        f" failure={self._survival_fit_reason}" if reason == "error" and self._survival_fit_reason else "")
+                        f" failure={self._survival_fit_reason}" if reason == "error" and self._survival_fit_reason else "",
+                        " escaped=store_id:%d,role:%s,kind:%s,n:%d" % (*escaped[0], len(escaped)) if escaped else "")
         except Exception:
             logger.debug("LCM compaction stop line failed", exc_info=True)
         if self._bypasses_lcm_context_management():
@@ -1361,7 +1367,7 @@ class CompactionMixin:
         claims; None when no leaf can start there. The loop's store-complete state is restored afterwards."""
         saved = getattr(self, "_store_complete_excluded", []), getattr(self, "_store_complete_cut", False)
         saved_diagnostics = (getattr(self, "_store_complete_blocked", None),
-                             getattr(self, "_store_complete_empty_reason", ""))
+                             getattr(self, "_store_complete_empty_reason", ""), getattr(self, "_store_complete_escaped", []))
         selected_input = [message for message in chunk if id(message) not in dependent_reply_message_ids]
         self._store_complete_excluded, self._store_complete_cut = [], False
         try:
@@ -1391,7 +1397,7 @@ class CompactionMixin:
             return consumption
         finally:
             self._store_complete_excluded, self._store_complete_cut = saved
-            self._store_complete_blocked, self._store_complete_empty_reason = saved_diagnostics
+            self._store_complete_blocked, self._store_complete_empty_reason, self._store_complete_escaped = saved_diagnostics
 
     def _reject_prepared_chain(self, leaf, reason: str) -> None:
         """#787: the first rejection ends the chain from ``leaf`` on, each leaf counted under ``reason``."""
@@ -1727,6 +1733,7 @@ class CompactionMixin:
         self._objective_only_noop = False
         self._compress_dropped_ignored_rows = False
         self._compress_host_rows_consumed = self._compress_hidden_rows_consumed = 0
+        self._compress_escaped, self._zero_leaf_keep_sanitized = [], False
         # Preflight handoffs are one-shot instructions for this invocation.
         # Consume them before every early return so a later unrelated turn can
         # never inherit stale cleanup-only state.
@@ -2368,6 +2375,19 @@ class CompactionMixin:
                     self._start_sweep_budget_hold(turn_paced=first_hang)
 
 
+    def _zero_leaf_result(self, messages, result, *, eligible=True):
+        """#1162: keep the host object unless this pass performed an exempted rewrite."""
+        if not self._retained_escape_enabled or not eligible:
+            return result
+        if not self._zero_leaf_keep_sanitized:
+            self._ingest_cursor = len(messages)
+            self._write_generated_ignored_placeholder_hash_counts(
+                self._generated_placeholder_digest_budget_for_active_replay(messages))
+            self._write_generated_ignored_placeholder_hash_ordinals(
+                self._generated_placeholder_digest_ordinals_for_active_replay(messages))
+            return messages
+        return result
+
     def _finish_without_leaf(
         self, state: _CompressionState, messages: List[Dict[str, Any]],
         warn_rejected: Callable[[], None],
@@ -2437,7 +2457,26 @@ class CompactionMixin:
                     active_context_messages,
                     insert_missing_tool_stubs=False,
                 )
-            if sanitized_messages != state.working_messages or state.ingest_cleanup_changed_active_context:
+            drop_only = state.dropped_replayed_scaffold_messages and len(sanitized_messages) < len(messages)
+            remaining = iter(sanitized_messages)
+            next_row = next(remaining, None)
+            for row in messages if drop_only else ():
+                if row == next_row:
+                    next_row = next(remaining, None)
+                elif not self._is_replayed_context_scaffold_message(row):
+                    drop_only = False
+            drop_only = drop_only and next_row is None
+            self._zero_leaf_keep_sanitized = bool(state.resumed_prefix or state.pre_leaf_condensation_passes
+                                                 or state.ingest_cleanup_changed_active_context or drop_only)
+            sanitized_messages = self._zero_leaf_result(messages, sanitized_messages,
+                                                        eligible=state.store_complete_input_empty)
+            if self._retained_escape_enabled and state.store_complete_input_empty and sanitized_messages is messages:
+                self._last_compression_status = "noop"
+                self._last_compression_noop_reason = state.noop_reason
+                hidden_label = self._hidden_backlog_label()
+                logger.info("LCM compression no-op: %s%s", state.noop_reason,
+                            f", hidden_rows={hidden_label}" if hidden_label is not None else "")
+            elif sanitized_messages != state.working_messages or state.ingest_cleanup_changed_active_context:
                 # _ingest_messages() already advanced the cursor to the original
                 # active-context length. If the host continues from a sanitized
                 # or reassembled context, keeping the old cursor could make the
@@ -2883,6 +2922,7 @@ class CompactionMixin:
     ) -> tuple[Literal["next", "break", "continue", "return"], Optional[List[Dict[str, Any]]]]:
         """Advance the committed leaf and choose the next loop transfer."""
         self._last_compacted_store_id = leaf.published_frontier
+        self._record_retained_escape(getattr(self, "_store_complete_escaped", []))
         self._compress_host_rows_consumed += leaf.selected_raw_len
         self._compress_hidden_rows_consumed += len(leaf.compacted_chunk) - len(leaf.compacted_positions)
         self._invalidate_rollups_for_published_node(leaf.node)
@@ -3128,6 +3168,7 @@ class CompactionMixin:
         self._store_complete_excluded, self._store_complete_cut, self._store_complete_blocked = [], False, None
         self._store_complete_copy_exclusion_proofs = {}
         self._store_complete_empty_reason = ""
+        self._store_complete_escaped = []
         step_started = time.monotonic() if state.threshold_full_sweep_active else 0.0
         leaf.anchored_input = self._identity_anchor_summary_input(
             selected_input, self._compress_run.store_ids_by_message_id, state.working_messages, leaf.selected_raw_chunk,
@@ -3138,10 +3179,21 @@ class CompactionMixin:
             state.sweep_stop_reason = "time_budget_exhausted"
             return "break", None
         if leaf.anchored_input == []:
+            state.store_complete_input_empty = True
             blocked = self._store_complete_blocked
             state.noop_reason = (_RETAINED_NOOP_REASON + " (store_id=%d role=%s kind=%s)" % blocked[:3]
                                  if blocked else self._store_complete_empty_reason or "leaf input is empty")
             return "break", None
+        escaped = getattr(self, "_store_complete_escaped", [])
+        if escaped and not self._compress_escaped:
+            sid, role, kind = escaped[0]
+            more = ", +%d more: %s" % (len(escaped) - 1, ",".join(str(s[0]) for s in escaped[1:])) if len(escaped) > 1 else ""
+            logger.warning("LCM retained-occurrence fallback: leaf includes %d retained row(s) whole "
+                           "(store_id=%d role=%s kind=%s%s) frontier=%d; the host view still holds them, "
+                           "so their content is also summarised; source rows stay stored; cause: "
+                           "host order disagrees with store order (#1162)",
+                           len(escaped), sid, role, kind, more, self._store_complete_frontier())
+        self._compress_escaped.extend(row for row in escaped if row not in self._compress_escaped)
         leaf.publication_excluded_store_ids.extend(self._store_complete_excluded)
         leaf_map = self._compress_run.store_ids_by_message_id or {}
         if not any(claims for _message, claims in leaf.anchored_input or ()) and not any(
@@ -3482,6 +3534,8 @@ class CompactionMixin:
         state.unattributed_leaf_refused = unattributed_leaf_refused
         state.threshold_full_sweep_active = threshold_full_sweep_active
         state._compress_started = _compress_started
+        self._zero_leaf_keep_sanitized = bool(force_overflow or resumed_prefix or pre_leaf_condensation_passes
+                                             or ingest_cleanup_changed_active_context)
         transfer, returned = self._finish_without_leaf(state, messages, warn_rejected)
         if transfer == "return":
             return returned

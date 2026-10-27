@@ -105,6 +105,13 @@ def test_h3_default_helpers_recheck_auxiliary_scope_without_mutation(tmp_path, m
         engine.shutdown()
 
 
+@pytest.fixture
+def retained_stop_control(monkeypatch):
+    # B2: this retained-stop control alone runs without the escape or rider.
+    monkeypatch.setattr(engine_module.LCMEngine, "_retained_escape_enabled", False)
+
+
+@pytest.mark.usefixtures("retained_stop_control")
 @pytest.mark.parametrize("consumer", ["threshold", "preflight", "direct"])
 def test_red1_rebuilt_retained_noop(tmp_path, monkeypatch, consumer):
     view, before = arm(tmp_path)
