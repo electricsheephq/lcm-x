@@ -2478,6 +2478,9 @@ class LCMEngine(
         self._no_progress_hold_persisted = bool(reason == "no_progress" and persist)
         if self._no_progress_hold_persisted:
             self._persist_no_progress_hold()
+        # Only a hold armed here owns a local floor; restart readers must
+        # continue checking the current persisted proof on every admission.
+        self._no_progress_local_hold = self._no_progress_hold
         if reason in _TURN_END_HOLD_REASONS:
             logger.info("LCM automatic compaction held until turn end (cap %.0fs): %s",
                         _SWEEP_BUDGET_HOLD_SECONDS, reason)
@@ -2489,11 +2492,15 @@ class LCMEngine(
         if not managed_scope and self._bypasses_lcm_context_management():
             return False
         if self._no_progress_hold is None or (
-                self._no_progress_hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)):
+                self._no_progress_hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)
+                and self._no_progress_hold is not getattr(self, "_no_progress_local_hold", None)):
             return self._persisted_no_progress_hold_active(managed_scope=True)
         if time.monotonic() < self._no_progress_hold[0]:
             return True
+        persisted = self._no_progress_hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)
         self._no_progress_hold = None
+        if persisted:
+            return self._persisted_no_progress_hold_active(managed_scope=True)
         return False
 
     def _no_progress_metadata_warning(self) -> None:
@@ -2566,8 +2573,8 @@ class LCMEngine(
                         else "survival" if ceiling is not None and tokens >= ceiling
                         else "threshold" if self.threshold_tokens > 0 and tokens >= self.threshold_tokens
                         else "below")
-            # MAX(primary key) and lifecycle's indexed conversation lookup are
-            # bounded. Global maxima conservatively invalidate on other sessions.
+            # Scoped maxima and lifecycle's conversation lookup use indexes;
+            # activity in another conversation/session cannot invalidate proof.
             # The open store's resolved path is invariant for this binding. Cache
             # only that identity, never metadata or the current fingerprint.
             store_path = self._store.db_path
@@ -2575,9 +2582,15 @@ class LCMEngine(
             if bound_store is None or bound_store[0] is not self._store or bound_store[1] != store_path:
                 bound_store = (self._store, store_path, str(Path(store_path).resolve()))
                 self._no_progress_bound_store = bound_store
-            state = [replay, bound_store[2], self._store.max_store_id(),
+            message_max = self._store._conn.execute(
+                "SELECT COALESCE(MAX(store_id), 0) FROM messages WHERE conversation_id = ? AND session_id = ?",
+                (self._conversation_id, self._session_id)).fetchone()[0]
+            node_max = self._dag._conn.execute(
+                "SELECT COALESCE(MAX(node_id), 0) FROM summary_nodes WHERE session_id = ?",
+                (self._session_id,)).fetchone()[0]
+            state = [replay, bound_store[2], message_max,
                      self._store_complete_frontier(),
-                     self._dag._conn.execute("SELECT COALESCE(MAX(node_id), 0) FROM summary_nodes").fetchone()[0],
+                     node_max,
                      pressure, tokens // 1024, tokens, int(self.context_length or 0), self.threshold_tokens,
                      yield_ready,
                      route,
