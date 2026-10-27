@@ -466,6 +466,24 @@ def test_b7_padded_ids_keep_escape_group_whole(tmp_path, summaries, lines, rever
         engine.shutdown()
 
 
+def test_b7_padded_result_cuts_at_frontier_call(tmp_path):
+    from tests.test_host_uid_shadow import _state_db
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path, False, fresh_tail_count=1, leaf_chunk_tokens=1)
+    user, call, result, reply = _turn("X", 100.0, tool=True)
+    call["tool_calls"][0]["id"] = result["tool_call_id"] = " a "
+    stored = [*_turn("T0", 50.0), user, call, result, reply]
+    try:
+        engine.ingest(stored)
+        mapping = {id(m): int(r["store_id"]) for m, r in zip(stored, _rows(engine))}
+        # The call sits at the frontier, so only the result side of group_cut can stop the chunk.
+        out = engine._store_complete_input([result], {}, mapping, [call, result], [result],
+                                          mapping[id(call)], [], 10000, escape_retained=True)
+        assert out == []
+    finally:
+        engine.shutdown()
+
+
 def test_t8_ordinary_cleanup_control(tmp_path, summaries, lines):
     engine = _engine(tmp_path, False, fresh_tail_count=2, leaf_chunk_tokens=4000)
     view = [{"role": "system", "content": "You are helpful"},
