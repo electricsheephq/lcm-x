@@ -278,6 +278,20 @@ immediately while background catch-up continues. An explicit
 `LCM_EMBEDDINGS_ENABLED` value or programmatic config keeps control;
 see [small-host behavior](docs/embeddings-setup.md).
 
+### Optional: free Voyage AI embeddings
+
+For stronger recall, Voyage AI offers every account free tokens per model; local FastEmbed stays the default and needs no account.
+
+```bash
+export LCM_EMBEDDINGS_ENABLED=true
+export LCM_EMBEDDING_PROVIDER=voyage
+export LCM_EMBEDDING_MODEL=voyage-4-lite
+export VOYAGE_API_KEY=...
+export LCM_ENABLE_SLASH_COMMAND=1   # registers /lcm for the setup commands
+```
+
+After setting these in Hermes' environment and restarting, run `/lcm embed warmup`, `/lcm embed backfill` (dry run), `/lcm embed backfill --apply`, then `/lcm status`. See [Voyage setup and key creation](docs/embeddings-setup.md#option-1--voyage-ai-free-tier) and [cloud privacy](#cloud-embedding-privacy).
+
 ### Activate it
 
 The plugin has two names:
@@ -396,6 +410,7 @@ cloud vectors from a pre-v0.23.1 identity require privacy-policy warmup, an
 identity check from the warmup/profile output, and the finite monotonic
 dry-run/apply loop in the operator guide before semantic coverage is complete.
 
+<a id="cloud-embedding-privacy"></a>
 Cloud embeddings are a separate opt-in. Provider-bound copies use the configured
 sensitive-pattern catalog by default, while durable messages and FTS remain raw.
 `LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly opts out and binds vectors to

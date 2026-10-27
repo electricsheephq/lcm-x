@@ -252,7 +252,8 @@ def test_red4_isolation_recovery_and_no_rearm(tmp_path, monkeypatch):
         other.shutdown()
 
 
-def test_red3_new_tail_makes_previous_history_eligible(tmp_path):
+def test_red3_new_tail_makes_previous_history_eligible(tmp_path, monkeypatch):
+    # v0.29.1 #1880: restores the v0.28.1 local hold floor
     engine = make_engine(tmp_path, window=200_000, session_id="S", conversation_id="conv",
                          fresh_tail_count=4, leaf_chunk_tokens=100,
                          fresh_tail_pressure_yield_enabled=False, context_threshold=0.001,
@@ -270,6 +271,9 @@ def test_red3_new_tail_makes_previous_history_eligible(tmp_path):
         assert not engine.should_compress(10_000)
         view += [{"role": "user" if i % 2 == 0 else "assistant", "content": f"new tail {i} " * 50}
                  for i in range(8)]
+        assert not engine.should_compress_preflight(view)
+        deadline = engine._no_progress_hold[0]
+        monkeypatch.setattr(engine_module.time, "monotonic", lambda: deadline + 1)
         assert engine.should_compress_preflight(view)
         engine.compress(view, current_tokens=10_000)
         assert engine._last_compress_leaves[1] >= 1
@@ -302,6 +306,7 @@ def test_red4_unreadable_metadata_and_failed_ingest(tmp_path, monkeypatch, caplo
 
 @pytest.mark.parametrize("setting", ["leaf_target_ratio", "leaf_target_min_tokens", "leaf_target_max_tokens"])
 def test_leaf_target_invalidation_and_bound_store_identity(tmp_path, monkeypatch, setting):
+    # v0.29.1 #1880: restores the v0.28.1 local hold floor
     # Embedding-cache paths are outside this bound-store path-resolution probe.
     monkeypatch.setattr(engine_module.LCMEngine, "_schedule_embedding_maintenance", lambda self: None)
     view, _ = arm(tmp_path)
@@ -317,13 +322,20 @@ def test_leaf_target_invalidation_and_bound_store_identity(tmp_path, monkeypatch
 
         monkeypatch.setattr(engine_module.Path, "resolve", observe_resolve)
         metadata_read = Mock(wraps=engine._store.read_metadata_json)
-        indexed_read = Mock(wraps=engine._store.max_store_id)
+        indexed_reads = []
+
+        def observe_query(query):
+            if query == ("SELECT COALESCE(MAX(store_id), 0) FROM messages "
+                         "WHERE conversation_id = 'conv' AND session_id = 'S'"):
+                indexed_reads.append(query)
+
         monkeypatch.setattr(engine._store, "read_metadata_json", metadata_read)
-        monkeypatch.setattr(engine._store, "max_store_id", indexed_read)
+        engine._store._conn.set_trace_callback(observe_query)
         assert not engine.should_compress(10_000)
-        reads = metadata_read.call_count, indexed_read.call_count
+        assert indexed_reads
+        reads = metadata_read.call_count, len(indexed_reads)
         assert not engine.should_compress(10_000)
-        assert metadata_read.call_count > reads[0] and indexed_read.call_count > reads[1]
+        assert metadata_read.call_count > reads[0] and len(indexed_reads) > reads[1]
         assert len(resolved_paths) == 1  # Steady admission reuses only the bound path.
         value = getattr(engine._config, setting)
         setattr(engine._config, setting, value + (0.01 if setting.endswith("ratio") else 1))
