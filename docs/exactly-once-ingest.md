@@ -127,12 +127,12 @@ A replay with an unchanged stamp writes nothing except the view vector.
 
 Two definitions:
 - **The durable cursor** is the newest ingest vector. A cold start finds the anchored run against it (§3.4.2). At P1 that run is one more candidate in today's cursor choice, never a replacement for tail matching (§5); at P2 it is the classifier's base.
-- **identity_digest** is a per-store salted digest of the PRE-redaction identity tuple (M4). A redaction-policy change therefore cannot change a ledger-era identity (#758), and the salt stops the digests being used to look up candidate texts. Pre-ledger rows keep today's matching until they are migrated (§3.6).
+- **identity_digest** is a per-store salted digest of the PRE-redaction identity tuple (M4). A redaction-policy change therefore cannot change a ledger-era identity (#758), The salt stops precomputed lookups across stores. A reader of the same file holds the salt and can still test a guessed text, so the digests are not a confidentiality control. Pre-ledger rows keep today's matching until they are migrated (§3.6).
 
 ### 3.2 One transaction per ingest
 In order:
 1. **Outside the lock:** compute every row's digests and the prefix chain, take a ledger snapshot (the lineage's vectors, marks and view_seq), and classify against it (§3.4). The view factories must be pure and cheap, because a retry re-runs them.
-2. **`BEGIN IMMEDIATE`,** opened explicitly before the first read of this phase. Today it starts at the first INSERT, so the reads run outside the lock (L5-7). Then re-read view_seq and marks; if either changed, classify again inside the lock under the same rules and budget.
+2. **`BEGIN IMMEDIATE`,** opened explicitly before the first read of this phase. Today it starts at the first INSERT, so the reads run outside the lock (L5-7). Then re-read view_seq, the marks and the store's write generation (`PRAGMA data_version`, store.py:1196-1200). The write generation also moves when an older reader on another connection commits an `alt_stamp` relation or an observed_at backfill. If any of them changed, classify again inside the lock under the same rules and budget.
 3. **Insert the rows.**
    - `messages.observed_at` is written ONCE at INSERT from the row's own stamp, and never updated.
    - At P2 the observed_at backfill UPDATEs are retired, so an old row never takes a new stamp (#1512). At P1 today's NULL-only backfill stays, inside the ingest transaction, because today's anchor finds its candidates through observed_at (identity_anchor.py:291).
@@ -169,10 +169,10 @@ The pieces:
   - This is the write a fit-only rotation was missing (#2029, #606).
   - A failure of this write is handled inside the exit function, not by the generic exception handler.
 - **If that write fails:**
-  - Set a process-wide unproven mark that holds the returned generated rows' digests. It lives at module level, so every engine instance and clone in the process sees it.
+  - Set a process-wide unproven mark. Each entry holds the store, the lineage, the emission descriptor, the output index and the row's digest. It lives at module level, so every engine instance and clone in the process sees it.
   - Return the unrewritten list where it fits. If the list is over-window (#582), return the fit.
   - Every later ingest in the process first retries the emission write inside a SAVEPOINT, then classifies. The mark clears on success.
-  - While the mark holds, a returned generated row that comes back is stored NEW with `generated_unproven` and `possible_replay_of` to its source rows.
+  - While the mark holds, a generated row that comes back to the same store and lineage with a digest in the mark is stored NEW, with `generated_unproven` and `possible_replay_of` to its source rows.
   - After a restart the mark is gone. The row still carries an LCM generated marker and has no descriptor, so it is stored NEW with `generated_unproven`. It also gets `possible_replay_of` when its digest matches a rendering of one of the lineage's DAG nodes. The row is visible, never silent (Astra 4, L5-1; this replaces r3.1's "plain NEW").
   - P1 makes the marker universal: every generated kind carries one (the summary header, the carrier tag, the scaffold prefix). A user row that contains the marker text is flagged visibly, never lost.
 - **Adoption.** The emission becomes adopted on the host's boundary signal (engine.py:4444) or when an incoming view anchors on it.
@@ -445,6 +445,8 @@ Sources: the r3.2 findings of the Codex reviewer (A) and of the Claude reviewer 
 - A6 and C6: the retained-prefix witness is unreachable for [R] → [R+N1], and an emission merged into V[0] has no anchor. Select the previous vector independently of the run; split an emission-merged V[0] by its descriptor before the search; let the run start at a small V[i] with an empty leading gap.
 - C8: P2's first ingest of a lineage that still has unbound pre-ledger rows runs P2 migration over them once, so #758(a) stays measurable.
 - C9: the first ingest that binds a generated row records its observed stamp, for every kind, so the #1003 veto arms.
+- PR review 1: after a rollback, an older reader can backfill `messages.observed_at` with no relation. At re-upgrade, import those backfills as legacy stamp observations, so the stamp veto sees them. Named regression: downgrade, backfill, re-upgrade.
+- PR review 2: rank 5's target includes superseded occurrences, so an incoming row equal to a superseded one is counted as REPLAY. Exclude superseded occurrences from the lo_d/hi_d counts; a match to one takes the NEW path with `supersedes` and `possible_replay_of`. Named regression: x, then x superseded by x', then x again.
 - C11: the 4M-cell budget against one h2 core; M14's trigger strength; "in every LIS" with several same-stamp candidates; a history base never pairs supersedes (#7).
 
 ## 6. Decisions (the release manager decides; review may challenge them)
