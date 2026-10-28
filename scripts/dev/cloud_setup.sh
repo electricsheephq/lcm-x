@@ -4,6 +4,8 @@
 # supported Hermes runtimes bundle, the hermes-agent ContextEngine stub and the rollback-reader
 # commits. Each of those is CI's own step script, read from .github/ at run time, so this
 # script follows CI when CI changes. A green run here is advisory; GitHub CI gates.
+# The script owns the checkout's .venv: it creates or recreates it and removes the YAML
+# libraries from it, so run it in a sandbox checkout, not one whose .venv you manage.
 #
 # Usage, from anywhere in the checkout (needs network, python3 >= 3.11 with venv, curl,
 # unzip, gcc, sha256sum):
@@ -18,11 +20,18 @@ mkdir -p "$cache"
 
 "${PYTHON:-python3}" -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
   || { echo "cloud_setup: Python >= 3.11 is required" >&2; exit 1; }
-# Recreate a missing venv, or one copied or moved from another path (its scripts' shebangs point there).
+# Reuse .venv only when it was made here, on Python >= 3.11, without the system site packages
+# (a system PyYAML would stay importable). Otherwise recreate it; a venv copied or moved from
+# another path keeps shebangs that point there.
+reuse=0
 case "$(head -1 .venv/bin/pip 2>/dev/null)" in
-  "#!$repo/.venv/bin/python"*) ;;
-  *) "${PYTHON:-python3}" -m venv --clear .venv ;;
+  "#!$repo/.venv/bin/python"*) reuse=1 ;;
 esac
+if [ "$reuse" = 1 ]; then
+  .venv/bin/python -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null || reuse=0
+  if grep -qsiE '^include-system-site-packages *= *true' .venv/pyvenv.cfg; then reuse=0; fi
+fi
+[ "$reuse" = 1 ] || "${PYTHON:-python3}" -m venv --clear .venv
 export PATH="$repo/.venv/bin:$PATH"
 # PyYAML only to read the workflow files; it is removed again below, because CI's main
 # pytest run has no PyYAML (config.py falls back to its own parser without it).
@@ -76,12 +85,13 @@ fi
 # step below installs both, so a re-run removes both again.
 python -m pip uninstall -q -y PyYAML ruamel.yaml ruamel.yaml.clib 2>/dev/null || true
 
-# Keep the venv and the SQLite library for every later shell.
-cat > "$cache/env.sh" <<EOF
-export PATH="$repo/.venv/bin:\$PATH"
-export LD_LIBRARY_PATH="$cache/sqlite-runtime\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
-EOF
-grep -qsF "$cache/env.sh" "$HOME/.bashrc" || echo ". \"$cache/env.sh\"" >> "$HOME/.bashrc"
+# Keep the venv and the SQLite library for every later shell. Paths are shell-quoted, so a path
+# with spaces or `$` in it is read as written.
+printf 'export PATH=%q:"$PATH"\nexport LD_LIBRARY_PATH=%q"${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n' \
+  "$repo/.venv/bin" "$cache/sqlite-runtime" > "$cache/env.sh"
+source_line=". $(printf '%q' "$cache/env.sh")"
+grep -qsF "$cache/env.sh" "$HOME/.bashrc" || grep -qsxF "$source_line" "$HOME/.bashrc" \
+  || echo "$source_line" >> "$HOME/.bashrc"
 if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
   cat "$cache/env.sh" >> "$CLAUDE_ENV_FILE"
 fi
@@ -99,11 +109,12 @@ PY
 if [ "$(id -u)" = 0 ]; then
   # 14 tests in test_issue_1186_dependency_companion, test_stemmed_recall_index and
   # test_track_s_integrity fail as root and pass as any other user (PR #2038).
-  echo "cloud_setup: warning: running as root; some tests fail as root. Run pytest as a non-root user." >&2
+  echo "cloud_setup: warning: running as root. Some tests fail as root, and another user may not be able" \
+    "to read this checkout's .venv or $cache. Run this setup and pytest as the same non-root user." >&2
 fi
 cat <<EOF
 Run the suite as CI does (each shell first loads the environment):
-  . "$cache/env.sh"
+  $source_line
   ulimit -n 1024
   python -m pytest tests/ -q -m "not latency" -n 4 --ignore=tests/test_embedding_privacy.py
   python -m pytest tests/test_embedding_privacy.py -q -m "not latency"
