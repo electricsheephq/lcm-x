@@ -29,7 +29,6 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .host_uid import _valid_uid
@@ -65,14 +64,8 @@ _RECOVERY_THRESHOLD_SHARE = 0.95  # #608: a recovery attempt's request fits unde
 
 
 def survival_counter_store_key(store: Any) -> str:
-    """#719: one lost-write marker per database file, however its path is spelled."""
-    raw = str(store.db_path)
-    if raw == ":memory:":
-        return f":memory:{id(store)}"
-    try:
-        return str(Path(raw).resolve())
-    except (OSError, RuntimeError):  # a symlink loop keeps the spelled path
-        return raw
+    """#719: one lost-write marker per database file: the identity the store fixed when it opened the file."""
+    return str(getattr(store, "db_identity", None) or store.db_path)
 
 
 def _carries_survival_notice(raw: Any, text: str) -> bool:
