@@ -199,11 +199,19 @@ class SurvivalFitMixin:
         if before <= budget:
             return result
         if exit_fit and window_budget is not None and before > window_budget:
-            return self._survival_fit(messages, result, observed_tokens, reason[len("exit_fit:"):],
-                                      after_exception=after_exception, summary_failure=summary_failure, fit_cause=fit_cause)
-        plan, persisted = self._plan_survival_fit(
-            messages, result, observed_tokens, before, budget, reason, exit_fit=exit_fit,
-            after_exception=after_exception, window_cap=window_cap, request_cap=request_cap)
+            # #2039: keep exit headroom when whole turns suffice, with the plain at-risk semantics.
+            reason = reason[len("exit_fit:"):]
+            plan, persisted = self._plan_survival_fit(
+                messages, result, observed_tokens, before, budget, reason, exit_fit=True,
+                after_exception=after_exception, window_cap=window_cap, request_cap=request_cap)
+            if plan is None:
+                return self._survival_fit(messages, result, observed_tokens, reason,
+                                          after_exception=after_exception, summary_failure=summary_failure, fit_cause=fit_cause)
+            exit_fit = False
+        else:
+            plan, persisted = self._plan_survival_fit(
+                messages, result, observed_tokens, before, budget, reason, exit_fit=exit_fit,
+                after_exception=after_exception, window_cap=window_cap, request_cap=request_cap)
         if plan is None:
             return result
         fitted = self._apply_survival_fit(result, plan, before, budget, reason,
