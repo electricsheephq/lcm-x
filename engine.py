@@ -1417,7 +1417,6 @@ class LCMEngine(
         self._pending_reset_session_id: str = ""
         self._pending_reset_conversation_id: str = ""
         self._pending_reset_frontier_store_id: int = 0
-        self._pending_reset_drops_summaries = False
         self._compression_boundary_ingest_pending = False
         self._compression_boundary_active_placeholder_digest_budget: dict[str, int] = {}
         self._compression_boundary_active_placeholder_digest_ordinals: dict[str, set[int]] = {}
@@ -3565,7 +3564,6 @@ class LCMEngine(
         self._pending_reset_session_id = ""
         self._pending_reset_conversation_id = ""
         self._pending_reset_frontier_store_id = 0
-        self._pending_reset_drops_summaries = False
 
     def _finalize_pending_reset_boundary(self, session_id: str) -> None:
         if not self._pending_reset_session_id:
@@ -3588,11 +3586,6 @@ class LCMEngine(
             self._pending_reset_session_id,
             frontier_store_id=frontier_store_id,
         )
-        if self._pending_reset_drops_summaries and int(self._last_compacted_store_id or 0) < frontier_store_id:
-            # #752: the reset deleted the summaries behind this pre-reset frontier and nothing
-            # published since covers it. Keep the reset newer than this finalize, so a later
-            # resume binds at 0 instead of skipping the rows no summary covers any more.
-            self._lifecycle.record_reset(self._pending_reset_conversation_id)
         self._clear_pending_reset_boundary()
 
     def _raw_backlog_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -5745,9 +5738,6 @@ class LCMEngine(
         self._pending_reset_session_id = self._session_id
         self._pending_reset_conversation_id = self._conversation_id
         self._pending_reset_frontier_store_id = self._last_compacted_store_id
-        # Set only after the deletion below returns: a reset whose deletion fails left the summaries in place.
-        drops_summaries = bool(self._session_id) and self._config.new_session_retain_depth >= 0
-        self._pending_reset_drops_summaries = False
         super().on_session_reset()
         self._lifecycle.record_reset(self._conversation_id)
         if self._session_id:
@@ -5765,18 +5755,29 @@ class LCMEngine(
         #    N  → keep nodes at depth >= N (e.g. 2 keeps d2+)
         retain = self._config.new_session_retain_depth
         if self._session_id and retain != -1:
-            if retain == 0:
-                self._dag.delete_session_nodes(
+            min_depth = retain if retain > 0 else None
+            # #752: read before deleting, while the retained nodes' lineage still resolves.
+            first_lost = self._dag.first_unretained_row(self._session_id, min_depth)
+            observed = self._lifecycle.get_by_conversation(self._conversation_id)
+            if min_depth is None:
+                deleted = self._dag.delete_session_nodes(
                     self._session_id,
                     on_deleted_batch=self._purge_embeddings_for_nodes,
                 )
             else:
-                self._dag.delete_below_depth(
+                deleted = self._dag.delete_below_depth(
                     self._session_id,
-                    retain,
+                    min_depth,
                     on_deleted_batch=self._purge_embeddings_for_nodes,
                 )
-        self._pending_reset_drops_summaries = drops_summaries
+            if deleted and first_lost is not None:
+                # Rows from first_lost on lost their only summaries: record the frontier the retained nodes
+                # still cover, so a resume, rotation or another engine re-summarises instead of skipping them.
+                retained_frontier = first_lost - 1
+                self._lifecycle.rewind_reset_frontier(
+                    self._conversation_id, self._session_id, retained_frontier, observed=observed)
+                self._pending_reset_frontier_store_id = min(
+                    int(self._pending_reset_frontier_store_id or 0), retained_frontier)
 
     def _purge_embeddings_for_nodes(
         self,

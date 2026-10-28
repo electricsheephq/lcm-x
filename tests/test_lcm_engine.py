@@ -21580,7 +21580,7 @@ class TestSessionRollover:
         status = engine.get_status()
         assert status["lifecycle"]["current_session_id"] == "compress-new"
         assert status["lifecycle"]["last_finalized_session_id"] == "compress-old"
-        assert status["lifecycle"]["last_finalized_frontier_store_id"] == store_id
+        assert status["lifecycle"]["last_finalized_frontier_store_id"] == store_id - 1
 
     def test_reset_before_compression_boundary_mismatch_finalizes_pending_old_session(self, engine):
         engine.on_session_start("bound-after-reset", platform="telegram", context_length=200000)
@@ -21618,7 +21618,7 @@ class TestSessionRollover:
         assert old_state is not None
         assert old_state.current_session_id is None
         assert old_state.last_finalized_session_id == "bound-after-reset"
-        assert old_state.last_finalized_frontier_store_id == store_id
+        assert old_state.last_finalized_frontier_store_id == store_id - 1
         assert engine._pending_reset_session_id == ""
 
     def test_on_session_start_recovers_durable_lifecycle_state_after_restart(self, engine, monkeypatch):
@@ -21773,7 +21773,7 @@ class TestSessionRollover:
         assert after_failure is not None
         assert after_failure.current_frontier_store_id == frontier_before_failure
 
-    def test_rollover_resets_active_frontier_but_preserves_last_finalized_frontier(self, engine, monkeypatch):
+    def test_rollover_resets_active_frontier_but_records_the_retained_frontier(self, engine, monkeypatch):
         engine.on_session_start("frontier-old", platform="cli", context_length=200000)
         monkeypatch.setattr(
             lcm_engine,
@@ -21790,7 +21790,8 @@ class TestSessionRollover:
             {"role": "assistant", "content": "zeta"},
         ]
         engine.compress(messages)
-        old_frontier = engine._last_compacted_store_id
+        leaves = [n for n in engine._dag.get_session_nodes("frontier-old") if n.source_type == "messages"]
+        first = min(sid for n in leaves for sid in n.source_ids)
 
         engine.rollover_session("frontier-old", "frontier-new", previous_messages=[], platform="cli", context_length=200000)
 
@@ -21799,7 +21800,7 @@ class TestSessionRollover:
         assert state.current_session_id == "frontier-new"
         assert state.current_frontier_store_id == 0
         assert state.last_finalized_session_id == "frontier-old"
-        assert state.last_finalized_frontier_store_id == old_frontier
+        assert state.last_finalized_frontier_store_id == first - 1
         assert state.last_rollover_at is not None
         assert state.last_reset_at is not None
 

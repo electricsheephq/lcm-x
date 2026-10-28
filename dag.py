@@ -881,6 +881,34 @@ class SummaryDAG:
             ).fetchone()
         return None if row is None or row[0] is None else int(row[0])
 
+    def first_unretained_row(self, session_id: str, min_depth: Optional[int]) -> Optional[int]:
+        """#752: the smallest of ``session_id``'s OWN rows held by a leaf that a reset deletes
+        (depth < min_depth; every node when None) and covered by no retained node through its lineage.
+        Read BEFORE deleting: afterwards a retained node's lineage no longer resolves. None: nothing is lost.
+        """
+        with self._db_lock:
+            row = self._conn.execute(
+                """WITH RECURSIVE kept(source_type, source_id) AS (
+                       SELECT n.source_type, CAST(j.value AS INTEGER)
+                       FROM summary_nodes n, json_each(n.source_ids) j
+                       WHERE n.session_id = :sid AND :depth IS NOT NULL AND n.depth >= :depth
+                       UNION
+                       SELECT child.source_type, CAST(j.value AS INTEGER)
+                       FROM summary_nodes child
+                       JOIN kept ON kept.source_type = 'nodes' AND child.node_id = kept.source_id
+                       JOIN json_each(child.source_ids) j
+                   )
+                   SELECT MIN(CAST(j.value AS INTEGER))
+                   FROM summary_nodes n, json_each(n.source_ids) j
+                   JOIN messages m ON m.store_id = CAST(j.value AS INTEGER) AND m.session_id = :sid
+                   WHERE n.session_id = :sid AND n.source_type = 'messages'
+                     AND (:depth IS NULL OR n.depth < :depth)
+                     AND NOT EXISTS (SELECT 1 FROM kept k
+                                     WHERE k.source_type = 'messages' AND k.source_id = CAST(j.value AS INTEGER))""",
+                {"sid": session_id, "depth": min_depth},
+            ).fetchone()
+        return None if row is None or row[0] is None else int(row[0])
+
     def source_message_ids(self, node_id: int, *, limit: int) -> List[int]:
         """Resolve a node to the store_ids of the messages underneath it.
 
