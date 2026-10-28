@@ -521,7 +521,46 @@ def test_t12_contiguity_budget_lift(tmp_path, summaries, lines):
         out = engine._store_complete_input(chunk, {}, mapping, chunk, chunk, 0, [], 1,
                                             scanned=(stored, False), allow_retained_escape=True)
         assert out and engine._store_complete_blocked is None
-        assert {sid for _, ids in out for sid in ids} | {mapping[id(m)] for m, _ in out if id(m) in mapping} == {1, 2, 3}
+        # #2007: the leaf input is in store order, not the host's [row 2, row 0] order.
+        assert [sid for m, ids in out for sid in [*ids, *([mapping[id(m)]] if id(m) in mapping else [])]] == [1, 2, 3]
+    finally:
+        engine.shutdown()
+
+
+def _leaf_ids(engine, out) -> list:
+    full_map = engine._compress_run.store_ids_by_message_id or {}
+    return [sid for m, ids in out for sid in [*ids, *([full_map[id(m)]] if id(m) in full_map else [])]]
+
+
+def test_2007_identity_anchor_input_in_store_order(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    rows = [{"role": "user", "content": f"row {i}" + PAD, "timestamp": 10.0 * (i + 1)} for i in range(3)]
+    try:
+        engine.ingest(rows)
+        view = [rows[2], rows[0]]  # the host moved row 0 after row 2; row 1 is hidden
+        full_map = engine._get_store_id_map_for_messages(view)
+        engine._compress_run.store_ids_by_message_id = full_map
+        out = engine._identity_anchor_summary_input(view, full_map, view, view, budget=4000)
+        assert out and _leaf_ids(engine, out) == [1, 2, 3]
+        assert [m["content"] for m, _ids in out] == [r["content"] for r in rows]
+    finally:
+        engine.shutdown()
+
+
+def test_2007_reordered_tool_group_stays_whole_in_store_order(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    user, call, result, reply = _turn("X", 100.0, tool=True)
+    later = {"role": "user", "content": "later" + PAD, "timestamp": 200.0}
+    try:
+        engine.ingest([user, call, result, reply, later])
+        view = [user, later, call, result, reply]  # the host moved the tool group after a later row
+        full_map = engine._get_store_id_map_for_messages(view)
+        engine._compress_run.store_ids_by_message_id = full_map
+        out = engine._identity_anchor_summary_input(view, full_map, view, view, budget=4000)
+        assert out and _leaf_ids(engine, out) == [1, 2, 3, 4, 5]
+        roles = [m.get("role") for m, _ids in out]
+        assert roles[1:3] == ["assistant", "tool"] and out[1][0].get("tool_calls")
+        assert out[2][0]["tool_call_id"] == out[1][0]["tool_calls"][0]["id"]
     finally:
         engine.shutdown()
 

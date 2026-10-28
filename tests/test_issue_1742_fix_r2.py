@@ -175,7 +175,7 @@ def test_attribution_budget_floor(tmp_path, monkeypatch):
         assert count_messages_tokens(chunk) > 60
         mapping = engine._get_store_id_map_for_messages(view)
         attributed = engine._identity_anchor_summary_input(chunk, mapping, view, chunk, budget=60)
-        assert [ids for _message, ids in attributed] == [[], [1]]
+        assert [ids for _message, ids in attributed] == [[1], []]  # #2007: store order (claim 1, then mapped 2)
         engine.compress(copy.deepcopy(view), current_tokens=count_messages_tokens(view), force=True)
         assert engine._last_compacted_store_id == 2
     finally:

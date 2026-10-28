@@ -277,8 +277,8 @@ class StoreCompleteMixin:
         def ids_of(message, ids) -> list:
             return list(ids) + ([full_map[id(message)]] if id(message) in full_map else [])
 
-        def position(message) -> int:
-            return max(ids_of(message, claims.get(id(message), ())), default=0)
+        def position(message, ids=None) -> int:
+            return max(ids_of(message, claims.get(id(message), ()) if ids is None else ids), default=0)
 
         def calls(messages):
             return {_tool_call_id(call) for m in messages for call in m.get("tool_calls") or ()} - {""}
@@ -448,7 +448,20 @@ class StoreCompleteMixin:
         emitted = sum(1 for message, _ids in out if id(message) in in_chunk)
         self._store_complete_escaped = [(sid, m.get("role"), escaped[sid])
                                         for m, ids in out for sid in ids if sid in escaped]
-        if emitted == len(out) == len(chunk) and not excluded and not any(ids for _m, ids in out):
+        # #2007: the walk above decides WHICH rows the leaf takes (a host prefix of the chunk, which
+        # _leaf_consumption consumes); the summarizer reads them in store order. A unit is a row with a
+        # store id plus the tool results and id-less rows (position 0) after it: a tool group stays whole,
+        # an id-less row stays behind its neighbour, leading ones stay first; the stable sort keeps an
+        # in-order leaf as built.
+        units: list = []
+        for message, ids in out:
+            if not units or (message.get("role") != "tool" and position(message, ids)):
+                units.append([])
+            units[-1].append((message, ids))
+        out = [pair for unit in sorted(units, key=lambda u: next((p for p in (position(*pair) for pair in u) if p), 0))
+               for pair in unit]
+        if (emitted == len(out) == len(chunk) and not excluded and not any(ids for _m, ids in out)
+                and all(m is c for (m, _ids), c in zip(out, chunk))):
             return None  # nothing hidden, claimed or excluded: today's input and mapping
         last = max(s for m, ids in out for s in ids_of(m, ids)) if any(ids_of(m, ids) for m, ids in out) else frontier
         self._store_complete_excluded = [store_id for store_id in excluded if store_id < last]
