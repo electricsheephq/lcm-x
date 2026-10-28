@@ -369,6 +369,8 @@ def test_environment_read_inventory():
     allowed = {
         ("config.py", "lcm_env"): "sole resolver: explicit single-profile/old-host fallback",
         ("config.py", "from_env"): "identity check to distinguish routed snapshot from process mapping",
+        ("config.py", "_lcm_absolute_threshold_tokens_with_source"):
+            "identity check to distinguish routed snapshot from process mapping",
         ("config.py", "containment_base_dir"): "LCM_HERMES_BASE_DIR: operator containment root stays process-wide",
         ("embedding_provider.py", "__init__"): "FASTEMBED_CACHE_PATH: process-wide model download cache",
         ("inactive_record.py", "_process_start"): "LC_ALL=C subprocess for ps process identity, not profile configuration",
@@ -423,7 +425,7 @@ def test_environment_read_inventory():
                 failures.append(f"{relative}:{node.lineno}: unclassified environment read")
             if key == ("config.py", "lcm_env"):
                 assert isinstance(parents[node], ast.Return), "only the legacy mapping fallback is allowed"
-            if key == ("config.py", "from_env"):
+            if key in {("config.py", "from_env"), ("config.py", "_lcm_absolute_threshold_tokens_with_source")}:
                 assert isinstance(parents[node], ast.Compare) and isinstance(parents[node].ops[0], ast.IsNot)
             if key == ("embedding_provider.py", "__init__"):
                 call = parents.get(parents.get(node))
@@ -542,6 +544,35 @@ def test_stamped_scope_without_home_override(host, scheduled_profiles, monkeypat
     if background:
         assert engine.drain_embedding_maintenance(timeout=3)
     assert seen == [(str(home), "fixture-B", 23)]
+
+
+def test_nonrouted_yaml_absolute_threshold_uses_host_resolver(host, load_profile, tmp_path, monkeypatch):
+    """A raw home spelling must not bypass the host's normalization."""
+    host.routed = False
+    monkeypatch.setenv("HERMES_HOME", f"  {tmp_path}  ")
+    monkeypatch.delenv("LCM_ABSOLUTE_THRESHOLD_TOKENS", raising=False)
+    (tmp_path / "config.yaml").write_text("lcm:\n  context_threshold_tokens: 20000\n")
+    monkeypatch.setattr(sys.modules["hermes_cli.config"], "get_hermes_home", lambda: tmp_path)
+    module, _ = load_profile(register=False)
+    config = importlib.import_module(module.__name__ + ".config")
+
+    assert config.lcm_env() is os.environ
+    resolved = config.LCMConfig.from_env()
+    assert resolved.absolute_threshold_tokens == 20000
+    assert resolved.config_sources["absolute_threshold_tokens"] == "config_yaml:lcm.context_threshold_tokens"
+
+
+def test_routed_yaml_absolute_threshold_without_home(host, load_profile, tmp_path, monkeypatch):
+    """A routed resolver failure must not borrow the launch home's YAML."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text("lcm:\n  context_threshold_tokens: 20000\n")
+    module, _ = load_profile(register=False)
+    config = importlib.import_module(module.__name__ + ".config")
+    monkeypatch.setattr(config, "lcm_env", lambda: {})
+
+    resolved = config.LCMConfig.from_env()
+    assert resolved.absolute_threshold_tokens == 0
+    assert resolved.config_sources["absolute_threshold_tokens"] == "default"
 
 
 def test_stamped_scope_yaml_absolute_threshold_missing(host, scheduled_profiles):

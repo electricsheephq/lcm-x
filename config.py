@@ -590,7 +590,7 @@ def _hermes_compression_threshold_with_source_and_warning(default: float) -> tup
 
 
 def _lcm_absolute_threshold_tokens_with_source(
-    default: int, raw_env: str | None,
+    default: int, raw_env: str | None, *, env: Mapping[str, str] | None = None,
 ) -> tuple[int, str, str | None]:
     """Resolve the absolute compaction trigger (#48).
 
@@ -599,10 +599,14 @@ def _lcm_absolute_threshold_tokens_with_source(
     lcm.context_threshold. An empty env value counts as unset, as the engine has
     always treated it. Otherwise ``lcm.context_threshold_tokens`` applies; 0 or an
     absent key means no absolute trigger.
+    Routed reads use only their resolved home; non-routed reads use the host resolver.
     """
     value, source, warning = default, "default", None
-    home = lcm_env_get("HERMES_HOME")
-    cfg = _load_hermes_config_yaml(Path(home) / "config.yaml") if home else _load_hermes_config_yaml()
+    if env is not None and env is not os.environ:
+        home = env.get("HERMES_HOME")
+        cfg = _load_hermes_config_yaml(Path(home) / "config.yaml") if home else {}
+    else:
+        cfg = _load_hermes_config_yaml()
     lcm_section = cfg.get("lcm") if isinstance(cfg, dict) else None
     raw_yaml = lcm_section.get("context_threshold_tokens") if isinstance(lcm_section, dict) else None
     if raw_yaml not in (None, {}, "{}", "null", "~", ""):
@@ -1567,7 +1571,7 @@ class LCMConfig:
         if source == _FLOORED_COMPRESSION_THRESHOLD_SOURCE and floor_warning:
             config_source_warnings.append(floor_warning)
         c.absolute_threshold_tokens, source, warning = _lcm_absolute_threshold_tokens_with_source(
-            c.absolute_threshold_tokens, env.get("LCM_ABSOLUTE_THRESHOLD_TOKENS")
+            c.absolute_threshold_tokens, env.get("LCM_ABSOLUTE_THRESHOLD_TOKENS"), env=env
         )
         _record("absolute_threshold_tokens", source, warning)
         # Per-model threshold overrides: load from lcm.model_thresholds in
