@@ -1196,6 +1196,7 @@ class LCMEngine(
         # Track which store_ids have been ingested into the DAG
         self._frontier = FrontierState()
         self._last_compacted_store_id: int = 0
+        self._bound_reset_at: float | None = None
 
         # Cursor: index in the current messages list up to which all
         # messages have been persisted.  After compress() shortens the
@@ -3376,6 +3377,7 @@ class LCMEngine(
         conversation_id: str | None = None,
     ) -> None:
         state = self._lifecycle.bind_session(session_id, conversation_id=conversation_id)
+        self._bound_reset_at = state.last_reset_at
         self._rearm_embedding_maintenance()
         if getattr(self, "_survival_overhead_observation", None) is not None and \
                 self._survival_overhead_observation[0] != state.conversation_id:
@@ -4355,6 +4357,19 @@ class LCMEngine(
             )
         self._update_model_pending_session_start = False
 
+    def _adopt_foreign_reset_frontier(self, state: Any) -> None:
+        #752 R3: a still-bound sibling may have rewound this row after our bind.
+        if (state is not None and state.current_session_id == self._session_id
+                and state.last_reset_at is not None and state.last_reset_at != self._bound_reset_at):
+            previous = int(self._last_compacted_store_id or 0)
+            frontier = int(state.current_frontier_store_id or 0)
+            self._frontier_holder().bind_frontier(frontier)
+            self._bound_reset_at = state.last_reset_at
+            logger.info(
+                "LCM adopted lifecycle frontier %d for %s after another engine's reset (in-process %d)",
+                frontier, self._session_id, previous,
+            )
+
     def _rebind_after_unadopted_compaction_commit(self) -> None:
         """This engine is bound to (session, conversation), but the conversation's lifecycle row is
         unbound and was last finalized by this session: an end ran with no start after it. The host
@@ -4364,12 +4379,14 @@ class LCMEngine(
         covers any engine or process that unbinds it.
 
         Re-bind it as that start would. bind_session restores the session's own finalized
-        frontier (#5: never another session's, never from the in-process value); a reset after the
+        frontier (#5: never another session's, never from the in-process value). A still-bound engine first
+        adopts the row's frontier after another engine's reset (#752 R3). A reset after the
         finalize means the host is moving on, so nothing is re-bound then.
         """
         if not self._session_id or not self._conversation_id or self._bypasses_lcm_context_management():
             return
         state = self._lifecycle.get_by_conversation(self._conversation_id)
+        self._adopt_foreign_reset_frontier(state)
         if state is None or state.current_session_id is not None or state.last_finalized_session_id != self._session_id:
             return
         if state.last_reset_at is not None and (state.last_finalized_at or 0) < state.last_reset_at:
@@ -4378,6 +4395,7 @@ class LCMEngine(
         state = self._lifecycle.rebind_own_finalized(self._session_id, state.conversation_id)
         if state is None:
             return  # another session holds the row now: nothing written, the frontier unchanged
+        self._bound_reset_at = state.last_reset_at
         frontier = int(state.current_frontier_store_id or 0)
         if int(self._last_compacted_store_id or 0) != frontier:
             logger.warning(
@@ -4415,6 +4433,9 @@ class LCMEngine(
             if state.last_finalized_session_id != session_id:
                 return False
             state = self._lifecycle.bind_session(session_id, conversation_id=state.conversation_id)
+        else:
+            self._adopt_foreign_reset_frontier(state)  # a still-bound row only; an unbound one is #2048
+        self._bound_reset_at = state.last_reset_at
         resumable_finalized = (
             state.last_finalized_frontier_store_id
             if state.last_finalized_session_id == session_id
@@ -4630,6 +4651,10 @@ class LCMEngine(
             if source_session_id and previous_session_id == source_session_id
             else 0
         )
+        #752 R3: do not carry a local frontier from before another engine's reset.
+        if (source_state is not None and source_state.last_reset_at is not None
+                and source_state.last_reset_at != self._bound_reset_at):
+            process_local_frontier = 0
         pending_reset_frontier = int(
             self._pending_reset_frontier_store_id
             if self._pending_reset_session_id
@@ -5739,7 +5764,8 @@ class LCMEngine(
         self._pending_reset_conversation_id = self._conversation_id
         self._pending_reset_frontier_store_id = self._last_compacted_store_id
         super().on_session_reset()
-        self._lifecycle.record_reset(self._conversation_id)
+        state = self._lifecycle.record_reset(self._conversation_id)
+        self._bound_reset_at = state.last_reset_at if state is not None else None
         if self._session_id:
             try:
                 self._store.write_metadata_json(

@@ -1,4 +1,8 @@
 {
+  "_bound_reset_at": {
+    "lifetime": "session",
+    "why": "Rebound at lifecycle bind/adopt boundaries and on the engine's own reset."
+  },
   "_frontier": {
     "lifetime": "process",
     "why": "Owned by one engine for its lifetime; session transitions update the held values without replacing the holder."
