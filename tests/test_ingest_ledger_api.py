@@ -254,6 +254,29 @@ def test_owned_writers_and_readers(store):
     assert not conn.in_transaction
 
 
+def test_stamp_reliability_counts_mixed_kinds(store):
+    conn = store.connection
+    with store.atomic():
+        ids = ledger.insert_bindings(conn, "L", [binding(1), binding(2), binding(3)])
+        for occ_id, kind in zip(ids, ("alt_stamp", "alt_stamp", "carried_stamp")):
+            for number in range(4):
+                assert ledger.add_stamp_observation(conn, "L", occ_id, str(number), kind, 0) == ledger.STAMP_WRITTEN
+                if occ_id == ids[-1] and number == 3:
+                    assert ledger.marks(conn, "L")["stamp_policy"] == "stamp_unreliable"
+                else:
+                    assert ledger.marks(conn, "L") is None
+
+
+def test_stamp_reliability_counts_each_occurrence_once(store):
+    conn = store.connection
+    with store.atomic():
+        first, second = ledger.insert_bindings(conn, "L", [binding(1), binding(2)])
+        for occ_id, kind in ((first, "alt_stamp"), (first, "carried_stamp"), (second, "alt_stamp")):
+            for number in range(4):
+                assert ledger.add_stamp_observation(conn, "L", occ_id, str(number), kind, 0) == ledger.STAMP_WRITTEN
+                assert ledger.marks(conn, "L") is None
+
+
 def test_copied_context_cannot_write_from_worker_and_missing_stamp_reads_nothing(store):
     conn, statements = store.connection, []
     with store.atomic():

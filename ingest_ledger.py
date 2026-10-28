@@ -275,8 +275,8 @@ def add_stamp_observation(conn, lineage, occ_id, stamp, kind, view_seq, source="
     if conn.execute("SELECT count(*) FROM stamp_observations WHERE occ_id=? AND kind=?", (occ_id, kind)).fetchone()[0] >= 4:
         return STAMP_CAPPED
     conn.execute("INSERT INTO stamp_observations VALUES (?,?,?,?,?,?)", (lineage, occ_id, stamp, kind, view_seq, source))
-    capped = conn.execute("SELECT count(*) FROM (SELECT occ_id FROM stamp_observations "
-                          "WHERE lineage=? AND kind=? GROUP BY occ_id HAVING count(*)>=4)", (lineage, kind)).fetchone()[0]
+    capped = conn.execute("SELECT count(DISTINCT occ_id) FROM (SELECT occ_id FROM stamp_observations "
+                          "WHERE lineage=? GROUP BY occ_id,kind HAVING count(*)>=4)", (lineage,)).fetchone()[0]
     if capped >= 3:
         _update_mark(conn, lineage, "stamp_policy", "stamp_unreliable")
     return STAMP_WRITTEN
