@@ -1,0 +1,5 @@
+Candidate source cd68a230e5d78cf7a8ad372e338cfd89acb528c6
+Old reader v0.28.1 fafc21b977731da04bdae374cee36288c104adeb
+CANDIDATE_WRITE_OK metadata-only; schema unchanged; synthetic row preserved
+OLD_READER_OK v0.28.1; schema unchanged; rows and unknown metadata key preserved
+No schema or message/DAG format changes. Existing metadata key/value JSON only; old readers ignore the new versioned key. Probe uses one synthetic message and the candidate-written ordinary hold record shape; no runtime or customer data.

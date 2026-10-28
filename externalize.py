@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import codecs
 import contextvars
+from contextlib import contextmanager
 import hashlib
 import json
 import logging
@@ -21,12 +22,72 @@ import time
 from pathlib import Path
 from typing import Any, BinaryIO, Dict
 
+try:
+    from .config import containment_base_dir
+except ImportError:  # Standalone reliability scorer / older bench imports.
+    from config import containment_base_dir
+
 DEFAULT_LARGE_OUTPUT_DIRNAME = "lcm-large-outputs"
 _EXTERNALIZED_REF_RE = re.compile(
     r"\[(?:Externalized|GC'd externalized) (?:tool output|payload):.*?;\s*ref=([^;\]\s]+)\]"
 )
 _EXTERNALIZED_SEARCH_HEADER_BYTES = 64 * 1024
 _EXTERNALIZED_SEARCH_TAIL_BYTES = 64 * 1024
+
+_payload_lookup_memo: contextvars.ContextVar[dict[Path, tuple[dict[str, set[str]], set[str]]] | None] = (
+    contextvars.ContextVar("lcm_payload_lookup_memo", default=None)
+)
+_PAYLOAD_NAME_PREFIX_RE = re.compile(r"(?<=_)[0-9a-f]{12}(?=_)")
+
+
+@contextmanager
+def payload_lookup_scope():
+    """Reuse one directory index within an assembly, including nested scopes."""
+    if _payload_lookup_memo.get() is not None:
+        yield
+        return
+    token = _payload_lookup_memo.set({})
+    try:
+        yield
+    finally:
+        _payload_lookup_memo.reset(token)
+
+
+def _index_payload_name(index: dict[str, set[str]], name: str) -> None:
+    # Index every matching segment, not just filenames minted by this module:
+    # the lookup's *_{digest_prefix}_*.json glob accepts arbitrary surrounding text.
+    if not name.endswith(".json"):
+        return
+    for match in _PAYLOAD_NAME_PREFIX_RE.finditer(name):
+        index.setdefault(match.group(), set()).add(name)
+
+
+def _payload_lookup_candidates(storage_dir: Path, digest_prefix: str):
+    memo = _payload_lookup_memo.get()
+    if memo is None:
+        yield sorted(storage_dir.glob(f"*_{digest_prefix}_*.json"))
+        return
+    if storage_dir not in memo:
+        index: dict[str, set[str]] = {}
+        try:
+            with os.scandir(storage_dir) as entries:
+                for entry in entries:
+                    _index_payload_name(index, entry.name)
+        except OSError:
+            pass  # The existing glob below remains the miss fallback.
+        memo[storage_dir] = (index, set())
+    index, globbed = memo[storage_dir]
+    yield [storage_dir / name for name in sorted(index.get(digest_prefix, ()))]
+    # Reached only when none of the indexed candidates passed the existing checks.
+    # Another process's writes after this digest's glob wait until the next scope;
+    # this module's writes keep the index current throughout the scope.
+    if digest_prefix in globbed:
+        return
+    candidates = sorted(storage_dir.glob(f"*_{digest_prefix}_*.json"))
+    for path in candidates:
+        _index_payload_name(index, path.name)
+    globbed.add(digest_prefix)
+    yield candidates
 
 
 def _placeholder_metadata(value: Any) -> str:
@@ -131,7 +192,7 @@ def get_large_output_storage_dir(config, hermes_home: str = "", *, create: bool)
     if configured:
         path = Path(configured).expanduser().resolve()
         # Check containment for configured paths when LCM_HERMES_BASE_DIR is set
-        env_base = os.environ.get("LCM_HERMES_BASE_DIR")
+        env_base = containment_base_dir()
         if env_base:
             allowed_base = Path(env_base).expanduser().resolve()
             try:
@@ -153,7 +214,7 @@ def get_large_output_storage_dir(config, hermes_home: str = "", *, create: bool)
         path = base / DEFAULT_LARGE_OUTPUT_DIRNAME
         # Check containment within allowed base for default/hermes_home-based paths
         # Only enforced when LCM_HERMES_BASE_DIR is explicitly set
-        env_base = os.environ.get("LCM_HERMES_BASE_DIR")
+        env_base = containment_base_dir()
         if env_base:
             allowed_base = Path(env_base).expanduser().resolve()
             try:
@@ -195,6 +256,9 @@ def _write_externalized_payload(path: Path, payload: Dict[str, Any]) -> None:
     finally:
         if fd >= 0:
             os.close(fd)
+    memo = _payload_lookup_memo.get()
+    if memo is not None and path.parent in memo:
+        _index_payload_name(memo[path.parent][0], path.name)
 
 
 def _replace_externalized_payload(path: Path, payload: Dict[str, Any]) -> None:
@@ -570,10 +634,233 @@ def _externalized_summary(path: Path, payload: Dict[str, Any]) -> Dict[str, Any]
 # placeholder limit that v0.24.7 readers (``is_externalized_placeholder``) enforce.
 _PLACEHOLDER_TOOL_NAME_MAX_CHARS = 64
 _PLACEHOLDER_MAX_CHARS = 512
+# #1016: the ``raw_payload`` stub's head/tail preview is sized to the room the 512 rule leaves,
+# so v0.26.1 and older readers (rollback) still recognize the stub.
+_RAW_PAYLOAD_PREVIEW_MIN_CHARS = 40
+_RAW_PAYLOAD_PREVIEW_JOINER = " ... "
+# Only this many chars per ``room`` char are scanned at each end of a large payload, so a
+# multi-megabyte message is never split or copied whole to build a few hundred preview chars.
+_RAW_PAYLOAD_PREVIEW_SCAN_FACTOR = 8
+_RAW_PAYLOAD_PREVIEW_TRANSLATION = str.maketrans({"[": "(", "]": ")", ";": ",", '"': "'"})
+# The replay identity matcher (here and in v0.26.1) skips a stub that holds this kind.
+_RAW_PAYLOAD_PREVIEW_QUARANTINE_RE = re.compile("quarantined_assistant_output", re.IGNORECASE)
+# Context scanned before the tail window: enough to hold the label of a cut credential and the BEGIN
+# line of a cut PEM key (an 8192-bit RSA key is about 6.4k chars).
+_RAW_PAYLOAD_PREVIEW_CONTEXT = 8192
+# The catalog's credential-value alphabet; a run of it cut by the tail scan's start is dropped.
+_RAW_PAYLOAD_PREVIEW_CUT_RUN_RE = re.compile(r"[A-Za-z0-9._~+/=-]*")
 
 
-def _build_externalized_placeholder(summary: Dict[str, Any]) -> str:
+def _raw_payload_preview_text(text: str) -> str:
+    from .ingest_protection import redact_catalog_sensitive_text
+
+    # Redact before collapsing and slicing: a slice that cuts a credential's label blinds every detector.
+    text = " ".join(redact_catalog_sensitive_text(text).split())
+    text = _RAW_PAYLOAD_PREVIEW_QUARANTINE_RE.sub("quarantined-assistant-output", text)
+    return text.translate(_RAW_PAYLOAD_PREVIEW_TRANSLATION).replace("ref=", "ref_")
+
+
+def _raw_payload_preview(content: str, room: int) -> str:
+    """#1016: a deterministic, whitespace-collapsed head/tail preview of at most ``room`` chars that
+    cannot forge stub syntax: ``[``/``]``/``;`` are mapped and ``ref=`` is neutralized, so no
+    recognizer (fullmatch or finditer) can read a ref, or the end of the stub, out of the user's text.
+    Each scan window is redacted with the full sensitive-pattern catalog first, whatever the config."""
+    content = content or ""
+    keep = room - len(_RAW_PAYLOAD_PREVIEW_JOINER)
+    head = keep * 7 // 10
+    window = room * _RAW_PAYLOAD_PREVIEW_SCAN_FACTOR
+    if len(content) > 2 * window:
+        head_text = _raw_payload_preview_text(content[:window])[:head]
+        # The tail scan reaches back far enough to see the label or PEM BEGIN line of a credential the
+        # window cuts, and drops a credential-alphabet run its own start cuts, so no unlabeled tail of a
+        # credential reaches the preview.
+        start = max(window, len(content) - window - _RAW_PAYLOAD_PREVIEW_CONTEXT)
+        tail_scan = content[start:]
+        if _RAW_PAYLOAD_PREVIEW_CUT_RUN_RE.fullmatch(content[start - 1]):
+            tail_scan = tail_scan[_RAW_PAYLOAD_PREVIEW_CUT_RUN_RE.match(tail_scan).end() :]
+        tail_text = _raw_payload_preview_text(tail_scan)[-(keep - head):]
+        return f"{head_text}{_RAW_PAYLOAD_PREVIEW_JOINER}{tail_text}"
+    text = _raw_payload_preview_text(content)
+    if len(text) <= room:
+        return text
+    return f"{text[:head]}{_RAW_PAYLOAD_PREVIEW_JOINER}{text[len(text) - (keep - head):]}"
+
+
+def _media_payload_text_part(part: Dict[str, Any]) -> str | None:
+    """Match the text field shapes accepted by assistant structured-part cleanup."""
+    from .message_content import _extract_text_part_value
+
+    for key in ("text", "content", "value"):
+        value = part.get(key)
+        text = _extract_text_part_value(value)
+        if text is None and isinstance(value, dict):
+            nested = value.get("text")
+            text = nested if isinstance(nested, str) else None
+        if text is not None:
+            return text
+    return None
+
+
+# A media repr above this is never parsed or previewed (it only bounds a pathological AST); a few MiB
+# of media bytes in a repr parse in milliseconds.
+_MEDIA_REPR_PARSE_LIMIT = 64 * 1_048_576
+# Parse memory and time grow with the number of tokens, not bytes: a repr holding more than this many
+# significant tokens (separators, operators, numbers, adjacent string literals) is never parsed. A string
+# or bytes literal is one token however large, so a caption beside MiBs of image bytes is still parsed.
+_MEDIA_REPR_ELEMENT_LIMIT = 50_000
+_MEDIA_REPR_IGNORED_TOKENS = {"NEWLINE", "NL", "COMMENT", "INDENT", "DEDENT", "ENDMARKER", "ENCODING"}
+
+
+def _media_repr_exceeds_element_limit(content: str) -> bool:
+    import io
+    import tokenize
+
+    # Every token spans at least one character, so short content never needs the tokenizer.
+    if len(content) <= _MEDIA_REPR_ELEMENT_LIMIT:
+        return False
+    ignored = {getattr(tokenize, name) for name in _MEDIA_REPR_IGNORED_TOKENS}
+    count = 0
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(content).readline):
+            if token.type not in ignored:
+                count += 1
+                if count > _MEDIA_REPR_ELEMENT_LIMIT:
+                    return True
+    except (tokenize.TokenError, SyntaxError):
+        # The parser rejects untokenizable input at the same point, before building an AST.
+        return False
+    return False
+
+
+def _media_payload_preview_content(content: str) -> str:
+    """Extract text only; remove opaque media before the bounded preview slices it."""
+    import ast
+
+    from .ingest_content import _MEDIA_VALUE_KEYS, _replace_wrapped_base64_blocks
+
+    media_keys = set(_MEDIA_VALUE_KEYS)
+    # Descriptor fields hold one opaque leaf; a dict or list under them is an envelope and is walked.
+    descriptor_keys = {
+        "data", "mime_type", "mimetype", "mime", "content_type", "content-type", "contenttype",
+        "media_type", "media-type", "mediatype", "format", "encoding", "detail",
+    }
+    media_descriptor_keys = media_keys | (descriptor_keys - {"format", "encoding", "detail"})
+    text_types = {"text", "input_text", "output_text"}
+    containers = (dict, list, tuple, set, frozenset)
+    generic_repr = False
+
+    try:
+        value = json.loads(content)
+    except json.JSONDecodeError:
+        value = content
+        stripped = content.strip()
+        # A dict repr may start with any key type (0, None, a tuple), but always spans {...}; an empty
+        # {} or [] followed by prose cannot be a container repr.
+        repr_like = re.match(r"\s*(?:\[\s*(?:[\{\('\"]|b['\"])|\{\s*(?:['\"]|b['\"]))", content)
+        if repr_like or (stripped.startswith("{") and stripped.endswith("}")):
+            # Normalization may have used repr for non-JSON media parts. Never preview that repr, and
+            # never preview an oversized candidate unparsed: it may be a repr with a non-string first key.
+            if len(content) > _MEDIA_REPR_PARSE_LIMIT:
+                return ""
+            if _media_repr_exceeds_element_limit(content):
+                return ""
+            parsed, ok = None, False
+            try:
+                parsed, ok = ast.literal_eval(content), True
+            except (ValueError, SyntaxError, RecursionError, TypeError, MemoryError):
+                pass
+            if repr_like and not ok:
+                return ""
+            # A brace-spanned string is a repr only when it parses to a dict; otherwise it is prose.
+            if repr_like or isinstance(parsed, dict):
+                value = parsed
+                # A parsed repr dict is a generic mapping unless it is a text part: walk it untyped so a
+                # caption beside a non-text "type" field survives, as the unparsed repr text did on main.
+                kind = parsed.get("type") if isinstance(parsed, dict) else None
+                generic_repr = isinstance(parsed, dict) and not (isinstance(kind, str) and kind in text_types)
+                # A top-level set or tuple repr holds its text directly, like a list.
+                if isinstance(parsed, (set, frozenset)):
+                    value = sorted(parsed, key=repr)
+                elif isinstance(parsed, tuple):
+                    value = list(parsed)
+    if isinstance(value, dict):
+        value = [value]
+    if isinstance(value, list):
+        parts = []
+        for part in value:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                if "type" in part and not generic_repr:
+                    if isinstance(part.get("type"), str) and part["type"] in text_types:
+                        text = _media_payload_text_part(part)
+                        if text:
+                            parts.append(text)
+                else:
+                    stack = [(part, 0)]
+                    while stack:
+                        leaf, depth = stack.pop()
+                        if depth > 32:
+                            continue
+                        if isinstance(leaf, str):
+                            parts.append(leaf)
+                        elif isinstance(leaf, dict):
+                            media_descriptor = any(str(k).lower() in media_descriptor_keys for k in leaf)
+                            stack.extend((v, depth + 1) for k, v in reversed(list(leaf.items()))
+                                         if (key := str(k).lower()) not in media_keys
+                                         and (not media_descriptor or key not in descriptor_keys
+                                              or isinstance(v, containers)))
+                        elif isinstance(leaf, (list, tuple)):
+                            stack.extend((v, depth + 1) for v in reversed(leaf))
+                        elif isinstance(leaf, (set, frozenset)):
+                            # Parsed reprs can hold sets; sort them so the preview is deterministic.
+                            stack.extend((v, depth + 1) for v in sorted(leaf, key=repr, reverse=True))
+        text = "\n".join(parts)
+    else:
+        text = value if isinstance(value, str) else ""
+    # Strip even short media bodies with lenient headers; the header bound keeps scanning linear.
+    text = re.sub(
+        r"data:[^,\n]{0,256}?;base64,(?:[A-Za-z0-9+/=_-]|\\/|\\u002[fF])*",
+        "", text or "", flags=re.IGNORECASE,
+    )
+    # Bare media-sized runs only: retain shorter identifiers, hashes and filenames.
+    text = re.sub(r"[A-Za-z0-9+/_-]{256,}={0,2}", "", text)
+    text = _replace_wrapped_base64_blocks(text, lambda _: "").strip()
+    text = re.sub(r"<img\s+src\s*=\s*(['\"])\s*\1\s*/?>|background\s*:\s*url\(\s*\)",
+                  "", text, flags=re.IGNORECASE)
+    return text if any(ch.isalnum() for ch in text) else ""
+
+
+def _build_externalized_placeholder(summary: Dict[str, Any], *, content: str | None = None) -> str:
     kind = _placeholder_metadata(summary.get("kind", "tool_result") or "tool_result")
+    if kind == "media_payload" and content:
+        try:
+            content = _media_payload_preview_content(content)
+        except MemoryError:
+            raise
+        except Exception:
+            return _build_externalized_placeholder(summary)
+    if kind in {"raw_payload", "media_payload"} and content:
+        # #1016: say what the payload holds and how to read it, within the 512 rule; ``ref=`` stays last.
+        ref = summary.get("ref", "")
+        head = (
+            f"[Externalized payload: kind={kind}; role={_placeholder_metadata(summary.get('role') or '?')}; "
+            f"chars={summary.get('content_chars', 0)}; bytes={summary.get('content_bytes', 0)}; "
+        )
+        rest = f'read it with lcm_expand(externalized_ref="{ref}"); ref={ref}]'
+        # Strictly under the 512 rule, as raw_payload stubs always were.
+        room = _PLACEHOLDER_MAX_CHARS - 1 - len(head) - len(rest) - len('preview=""; ')
+        if room >= _RAW_PAYLOAD_PREVIEW_MIN_CHARS:
+            try:
+                return f'{head}preview="{_raw_payload_preview(content, room)}"; {rest}'
+            except MemoryError:
+                raise
+            except Exception:
+                if kind != "media_payload":
+                    raise
+                return _build_externalized_placeholder(summary)
+        if len(head) + len(rest) < _PLACEHOLDER_MAX_CHARS:
+            return f"{head}{rest}"
     if kind != "tool_result":
         role = _placeholder_metadata(summary.get("role") or "?")
         return (
@@ -994,31 +1281,33 @@ def find_externalized_payload_for_message(
         return None
 
     digest_prefix = _content_digest_prefix(content)
-    candidates = sorted(storage_dir.glob(f"*_{digest_prefix}_*.json"))
-    fallback_match = None
-    for path in candidates:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if kind is not None and payload.get("kind", "tool_result") != kind:
-            continue
-        if (payload.get("tool_call_id") or "") != (tool_call_id or ""):
-            continue
-        payload_role = payload.get("role") or ""
-        if role and payload_role and payload_role != role:
-            continue
-        if payload.get("content") != content:
-            continue
-        summary = _externalized_summary(path, payload)
-        payload_session_id = (payload.get("session_id") or "")
-        if session_id:
-            if payload_session_id == session_id:
-                return summary
-            continue
-        if fallback_match is None:
-            fallback_match = summary
-    return fallback_match
+    for candidates in _payload_lookup_candidates(storage_dir, digest_prefix):
+        fallback_match = None
+        for path in candidates:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if kind is not None and payload.get("kind", "tool_result") != kind:
+                continue
+            if (payload.get("tool_call_id") or "") != (tool_call_id or ""):
+                continue
+            payload_role = payload.get("role") or ""
+            if role and payload_role and payload_role != role:
+                continue
+            if payload.get("content") != content:
+                continue
+            summary = _externalized_summary(path, payload)
+            payload_session_id = (payload.get("session_id") or "")
+            if session_id:
+                if payload_session_id == session_id:
+                    return summary
+                continue
+            if fallback_match is None:
+                fallback_match = summary
+        if fallback_match is not None:
+            return fallback_match
+    return None
 
 
 def find_externalized_tool_result_content_for_call(
@@ -1182,6 +1471,7 @@ def maybe_externalize_tool_output(
     force: bool = False,
     tool_name: str = "",
     write: bool = True,
+    create_storage: bool = True,
 ) -> Dict[str, Any] | None:
     return maybe_externalize_payload(
         content,
@@ -1194,6 +1484,7 @@ def maybe_externalize_tool_output(
         force=force,
         tool_name=tool_name,
         write=write,
+        **({} if create_storage else {"create_storage": False}),
     )
 
 
@@ -1210,8 +1501,10 @@ def maybe_externalize_payload(
     metadata: Dict[str, Any] | None = None,
     tool_name: str = "",
     write: bool = True,
+    create_storage: bool = True,
 ) -> Dict[str, Any] | None:
-    """Externalize one normalized payload if configured (``write=False``: the placeholder it would get, no file).
+    """Externalize one normalized payload if configured (``write=False``: the placeholder it would get, no file;
+    ``create_storage=False``, #787 background preparation only: no storage directory is created either).
 
     Returns a dict with a compact placeholder and the durable JSON payload path,
     or ``None`` when disabled, below threshold and not forced, or storage is
@@ -1226,7 +1519,11 @@ def maybe_externalize_payload(
         return None
 
     try:
-        storage_dir = resolve_large_output_storage_dir(config, hermes_home=hermes_home)
+        storage_dir = (
+            resolve_large_output_storage_dir(config, hermes_home=hermes_home)
+            if create_storage
+            else get_large_output_storage_dir(config, hermes_home=hermes_home, create=False)  # #787 worker
+        )
     except OSError as exc:
         logger.warning("Large payload externalization skipped (non-blocking): %s", exc)
         return None
@@ -1258,7 +1555,7 @@ def maybe_externalize_payload(
             # #680: the supplied name wins (an older payload may hold none, or another call's).
             existing = {**existing, "tool_name": tool_name}
         return {
-            "placeholder": _build_externalized_placeholder(existing),
+            "placeholder": _build_externalized_placeholder(existing, content=content),
             "path": existing_path,
             "payload": existing,
         }
@@ -1308,7 +1605,8 @@ def maybe_externalize_payload(
             "content_chars": payload["content_chars"],
             "content_bytes": payload["content_bytes"],
             "ref": path.name,
-        }
+        },
+        content=content,
     )
     return {
         "placeholder": placeholder,

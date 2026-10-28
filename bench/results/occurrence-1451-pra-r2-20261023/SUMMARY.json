@@ -1,0 +1,107 @@
+{
+  "status": "LOCAL_PROOFS_COMPLETE_REMOTE_PENDING",
+  "calibration": "RED",
+  "base": {
+    "sha": "ddf0455688ea0ac9f52a477863a7dd2a3bcc4ab0",
+    "rows_before": 16,
+    "rows_after": 17,
+    "new_uid_rows": 1,
+    "exit_code": 0
+  },
+  "r1_head": {
+    "sha": "c8fbd958e6f13f8272e30172298e7bef134a76e9",
+    "rows_before": 16,
+    "rows_after": 16,
+    "new_uid_rows": 0,
+    "exit_code": 1
+  },
+  "local_fix": {
+    "rows_before": 16,
+    "rows_after": 17,
+    "new_uid_rows": 1,
+    "exit_code": 0
+  },
+  "tests": {
+    "atomic_durability": 35,
+    "r1_fault_merge": 26,
+    "r1_restored_assertions": 3,
+    "census_corpus": 266
+  },
+  "pending": [
+    "one normal push",
+    "PR body update",
+    "exact-head remote full CI"
+  ],
+  "pushes": 0,
+  "free_gb": 179,
+  "minimum_bulk_admission_gb": 150,
+  "proof_boundary": "synthetic fault-path evidence only; not merge/release/runtime/customer proof",
+  "measured_sha": "a2f5158972d9cd736a77c03fd23bf22fa399e683",
+  "matrix_vs_base": {
+    "attached_true_to_false": 960,
+    "base_error_cells": 172,
+    "base_loss_cells": 622,
+    "base_recorded_mismatch": 0,
+    "base_snap_dicts": 3168,
+    "base_snap_no_output_length": 3168,
+    "base_unexpected_rows": 0,
+    "cand_error_cells": 0,
+    "cand_loss_cells": 594,
+    "cand_recorded_mismatch": 0,
+    "cand_snap_dicts": 3168,
+    "cand_snap_no_output_length": 0,
+    "cand_unexpected_rows": 0,
+    "changed_cells": 176,
+    "dup_or_growth_rise_cells": 0,
+    "new_or_increased_loss_cells": 0
+  },
+  "matrix_vs_r1": {
+    "attached_true_to_false": 0,
+    "base_error_cells": 0,
+    "base_loss_cells": 594,
+    "base_recorded_mismatch": 0,
+    "base_snap_dicts": 3168,
+    "base_snap_no_output_length": 0,
+    "base_unexpected_rows": 0,
+    "cand_error_cells": 0,
+    "cand_loss_cells": 594,
+    "cand_recorded_mismatch": 0,
+    "cand_snap_dicts": 3168,
+    "cand_snap_no_output_length": 0,
+    "cand_unexpected_rows": 0,
+    "changed_cells": 0,
+    "dup_or_growth_rise_cells": 0,
+    "new_or_increased_loss_cells": 0
+  },
+  "fault_grid": {
+    "runs": 264,
+    "replacement_variant_runs": 132,
+    "fired_faults": 192,
+    "replacement_fired_faults": 96,
+    "keys_unchanged": 192,
+    "one_warning_after_rollback": 192,
+    "not_durable": 192,
+    "durable_reader_unavailable": 192,
+    "escaped_exceptions": 0
+  },
+  "census": {
+    "publication_attempts": 384,
+    "valid_publications": 372,
+    "valid_rejected": 0,
+    "intentional_invalid_count": 12,
+    "scope": "8 selected affected files, including all6 original counterexample files; observe-only; null retry bypass excluded from publication census"
+  },
+  "cost": {
+    "samples": 200,
+    "base_sha": "ddf0455688ea0ac9f52a477863a7dd2a3bcc4ab0",
+    "candidate_sha": "a2f5158972d9cd736a77c03fd23bf22fa399e683",
+    "base_median_ms": 1.5781035,
+    "candidate_median_ms": 1.3960005,
+    "paired_median_delta_ms": -0.17143750000000002,
+    "allowed_delta_ms": 0.15781035000000002,
+    "pass_gate": true,
+    "method": "20 warmup pairs then 200 pairs; AB/BA alternating; timed _record_compress_commit_proof only on same synthetic compaction; no concurrent samples"
+  },
+  "compatibility": "3 passed in 12.67s; actual v0.28.1 writer upgrade plus rollback",
+  "retry_cold_parity": "candidate JSON exactly equals BASE missing-snapshot control;16->17, no attached metadata"
+}

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+from fnmatch import fnmatchcase
 from typing import Any
 
 
@@ -18,8 +19,13 @@ REQUIRED_CI_CHECK_PAIRS = (
     ("test (3.12)", 15368),
     ("test (3.13)", 15368),
     ("test (3.14)", 15368),
+    ("bench-tests", 15368),
+    ("tests-ran", 15368),
 )
-REQUIRED_CHECK_PAIRS = REQUIRED_CI_CHECK_PAIRS
+# Required on the PR head and merge group. Differential does not run on pushes to main;
+# the merge-group run covers the merged tree and must be verified on the merge commit.
+REQUIRED_PR_ONLY_CHECK_PAIRS = (("differential", 15368),)
+REQUIRED_CHECK_PAIRS = REQUIRED_CI_CHECK_PAIRS + REQUIRED_PR_ONLY_CHECK_PAIRS
 # Changed-path risk map for the land-pr review obligation. It is a readiness hint
 # only: it names the review lanes land-pr requires and never fails readiness.
 REVIEW_POLICY_FILES = {
@@ -30,6 +36,97 @@ REVIEW_POLICY_FILES = {
 MEMORY_MIGRATION_FILES = {
     "scripts/backfill_externalized_tool_outputs.py",
     "scripts/import_lossless_claw.py",
+}
+# Modules that directly shape main-model context, summary requests, stored turn
+# content/identity/ownership, compaction selection/commit/progress, or host
+# compress/rebind (docs/process/turn-path-probe-packet.md). Reachability alone
+# does not qualify: explicit tools/commands and default-off features stay out.
+# Default model-facing tool schemas count as context; persistence plumbing alone
+# does not qualify, but row-content policy and compaction commit ownership do.
+TURN_PATH_FILES = {
+    "__init__.py", "assembly_plan.py", "aux_session.py", "bypass.py", "codex_routing.py", "compaction.py",
+    "compaction_policy.py", "compaction_request.py", "compress_run.py",
+    "dag.py", "engine.py", "escalation.py", "externalize.py", "extraction.py", "fresh_tail.py",
+    "host_uid.py", "host_uid_emit.py", "identity_anchor.py", "ingest_protection.py",
+    "leaf_prep.py", "lifecycle_state.py", "message_analysis.py", "message_content.py", "placeholder_ledger.py",
+    "prefix_matching.py", "reconcile.py", "sanitize.py", "sender_capture.py", "store_complete.py",
+    "summary_attempt.py", "summary_input_clip.py", "summary_outcome.py", "survival_codec.py",
+    "survival_fit.py", "tokens.py", "tool_pairs.py",
+    "config.py",  # Defaults and loaders set fresh-tail cuts, filters and summary requests.
+    "db_bootstrap.py",  # Conversation-range selection shapes compaction inputs and ownership.
+    "diagnostics.py",  # State-db path resolution decides foreground branch restoration/rebind.
+    "engine_registry.py",  # Post-turn hooks select the clone that ingests each session turn.
+    "message_patterns.py",  # Pattern matches omit rows from ingest, replay and compaction.
+    "model_routing.py",  # Sets provider, model and effort on the summary request.
+    "plugin_identity.py",  # Engine-name matching gates post-turn ingest and clone resolution.
+    "rollup_builder.py",  # Default-on maintenance builds and sends rollup summary requests.
+    "rollup_periods.py",  # Default-on rollups select period boundaries and summary source rows.
+    "rollup_store.py",  # Default-on rollups select sources and publish derived summaries.
+    "schemas.py",  # Default model-facing tool descriptions are part of the model context.
+    "session_patterns.py",  # Session matches choose LCM management versus host fallback.
+    "sqlite_util.py",  # Owns the transaction/retry that commits a leaf and its frontier.
+    "store.py",  # Ingest protection and row normalization decide what a turn stores.
+    "tool_registry.py",  # Selects model-facing schemas exposed on the default turn.
+    "reset_state.py",  # resets the ingest cursor and compaction progress on rotation
+    "frontier_state.py",  # Holds the ingest cursor and compaction frontier each turn reads and writes.
+    "emission_projection.py", "recognition_matching.py",  # Split out of engine paths by #1294.
+    # Split out of ingest_protection.py: what one ingested turn stores and how it is checked.
+    "ingest_content.py", "ingest_integrity.py", "ingest_pem_model.py",
+    "ingest_pem_scan.py", "ingest_persisted.py", "ingest_policy.py",
+}
+# Explicit exclusions: classify every top-level Python module, not just reachable dependencies.
+NON_TURN_PATH_FILES = {
+    "entity_ops.py",  # Default-off entity event operations and resolved view.
+    "entity_store.py",  # Default-off entity-memory persistence.
+    "adaptive_retrieval.py",  # Default-off adaptive retrieval controller.
+    "answer_contract.py",  # Default-off pre-answer requirements.
+    "assertion_extraction.py",  # Default-off structured extraction.
+    "assertion_rebuild.py",  # Explicit opt-in assertion rebuild.
+    "assertion_state.py",  # Default-off assertion query state.
+    "assertion_store.py",  # Default-off assertion persistence.
+    "chunking.py",  # Explicit chunk backfill or default-off embeddings.
+    "command.py",  # Explicit commands or default-off embedding backfill.
+    "command_auth.py",  # Explicit slash-command authorization only.
+    "command_doctor.py",  # Read-only /lcm doctor text diagnostics only.
+    "command_router.py",  # Explicit slash-command grammar only.
+    "command_status.py",  # Operator status rendering only.
+    "cpu_capacity.py",  # Explicit recall/doctor policy; no ingest or context shaping.
+    "embedding_maintenance.py",  # Default-off embedding maintenance.
+    "embedding_provider.py",  # Default-off embedding provider path.
+    "evidence_compiler.py",  # Default-off hook or explicit evidence tool.
+    "evidence_pack.py",  # Explicit evidence tool or default-off compiler.
+    "evidence_tools.py",  # Explicit evidence tool handlers only.
+    "expand_query_tools.py",  # Explicit lcm_expand_query tool handler only.
+    "expand_tools.py",  # Explicit lcm_describe/lcm_expand tool handlers only.
+    "expansion_evidence.py",  # Explicit expansion context/provenance only.
+    "guidance.py",  # Exported policy loader unused by default prompt.
+    "host_evidence.py",  # Unwired opt-in host evidence helper.
+    "inactive_record.py",  # Inactive-plugin diagnostic receipts only.
+    "inspect_tools.py",  # Explicit lcm_inspect tool handler; read-only metadata.
+    "level3_repair.py",  # Explicit repair or read-only doctor scan.
+    "maintenance.py",  # Explicit backup, repair or rotation only.
+    "memory_tools.py",  # Default-off, read-only entity cards.
+    "occurrence_time.py",  # Retrieval metadata; never durable turn occurrence.
+    "preanswer_evidence.py",  # Unwired opt-in pre-answer helper.
+    "presets.py",  # Status/dry-run suggestions; no live config mutation.
+    "query_view_store.py",  # Default-off query views; optional-schema verification.
+    "reasoning.py",  # Explicit computation or default-off pre-answer hook.
+    "recall_delivery.py",  # Explicit recall; proactive assembly defaults off.
+    "recall_session.py",  # Default-off session delivery for explicit recall only.
+    "recent.py",  # Explicit recent-history tool response only.
+    "requirements_compiler.py",  # Default-off pre-answer compilation.
+    "retrieval_context.py",  # Retrieval-reader connection bindings only.
+    "retrieval_core.py",  # Explicit retrieval; proactive assembly defaults off.
+    "runtime_identity.py",  # Status/doctor provenance fields only.
+    "schema_families.py",  # Verifier finding types/compatibility metadata only.
+    "scope_storage.py",  # Explicit Teams scope setup/backfill; not wired to default turn.
+    "search_query.py",  # Retrieval query parsing/ranking; no ingest caller.
+    "selective_compiler.py",  # Two default-off pre-answer compiler gates.
+    "selective_recall.py",  # Default-off pre-answer session bundle.
+    "sqlite_session.py",  # Connection/transaction plumbing; caller owns rows and compaction policy.
+    "tools.py",  # Explicit tool handlers; proactive assembly defaults off.
+    "trajectory_store.py",  # Independent trajectory corpus; optional-schema verification only.
+    "vector_store.py",  # Default-off vector persistence/retrieval.
 }
 FINDING_GATE_CLASSES = {"MERGE_BLOCKING", "RELEASE_BLOCKING", "NON_BLOCKING"}
 TERMINAL_FINDING_DISPOSITIONS = {
@@ -65,6 +162,7 @@ def _trusted_checks(
     checks: list[dict[str, Any]],
     target_sha: str,
     required_pairs: tuple[tuple[str, int], ...] = REQUIRED_CHECK_PAIRS,
+    allow_multiple: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     matched: list[dict[str, Any]] = []
     blockers: list[str] = []
@@ -82,13 +180,25 @@ def _trusted_checks(
             if check.get("status") == "completed"
             and check.get("conclusion") == "success"
         ]
-        if len(exact) > 1:
+        if len(exact) > 1 and not allow_multiple:
             blockers.append(f"TRUSTED_CHECK_DUPLICATE:{context}:{integration_id}")
-        elif len(passing) != 1:
+        elif not passing or len(passing) != len(exact):
             blockers.append(f"TRUSTED_CHECK_UNSATISFIED:{context}:{integration_id}")
         else:
             matched.append({"context": context, "integration_id": integration_id})
     return matched, blockers
+
+
+def _active_main_policy(policy: dict[str, Any]) -> bool:
+    refs = policy.get("conditions", {}).get("ref_name", {})
+    return (
+        policy.get("enforcement") == "active"
+        and bool(set(refs.get("include", [])) & {"~DEFAULT_BRANCH", "refs/heads/main"})
+        and not any(
+            ref in {"~DEFAULT_BRANCH", "~ALL"} or fnmatchcase("refs/heads/main", ref)
+            for ref in refs.get("exclude", [])
+        )
+    )
 
 
 def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str, Any]]]:
@@ -106,7 +216,9 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
         or policy.get("base_ref") != "main"
         or not policy.get("base_sha")
         or policy.get("ruleset_id") != RULESET_ID
-        or policy.get("strict_required_status_checks_policy") is not True
+        or not _active_main_policy(policy)
+        or policy.get("strict_required_status_checks_policy") is not False
+        or policy.get("merge_queue") != {"merge_method": "MERGE", "grouping_strategy": "ALLGREEN", "max_entries_to_merge": 1}
         or [_pair(item) for item in policy.get("required_checks", [])]
         != list(REQUIRED_CHECK_PAIRS)
     ):
@@ -180,6 +292,8 @@ def _named_risks(paths: list[str]) -> list[str]:
         for path in paths
     ):
         risks.append("lcm-memory-preservation")
+    if any(path in TURN_PATH_FILES for path in paths):
+        risks.append("turn-path")
     return risks
 
 
@@ -193,13 +307,20 @@ def review_lanes_hint(changed_files: Any) -> dict[str, Any]:
             "required_review_lanes": ["acceptance", "adversarial"],
         }
     risks = _named_risks(paths)
-    return {
+    hint = {
         "changed_files": "supplied",
         "named_risks": risks,
         "required_review_lanes": (
             ["acceptance", "adversarial"] if risks else ["acceptance"]
         ),
     }
+    if "turn-path" in risks:
+        hint["turn_path_probe_packet"] = [
+            "Consumer enumeration: rg call sites for every changed helper and effects on each consumer.",
+            "Previous-GA differential row: tests/differential (opt-in).",
+            "Sibling shapes: neighbouring windows, row roles, and recovery paths.",
+        ]
+    return hint
 
 
 def _landing_authorization_gate(data: dict[str, Any], head_sha: str) -> list[str]:
@@ -325,7 +446,9 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
         or policy.get("base_ref") != "main"
         or not policy.get("base_sha")
         or policy.get("ruleset_id") != RULESET_ID
-        or policy.get("strict_required_status_checks_policy") is not True
+        or not _active_main_policy(policy)
+        or policy.get("strict_required_status_checks_policy") is not False
+        or policy.get("merge_queue") != {"merge_method": "MERGE", "grouping_strategy": "ALLGREEN", "max_entries_to_merge": 1}
         or [_pair(item) for item in policy.get("required_checks", [])]
         != list(REQUIRED_CHECK_PAIRS)
     ):
@@ -359,7 +482,7 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
         blockers.append("ISSUE_DISPOSITION_UNVERIFIED")
 
     matched, check_blockers = _trusted_checks(
-        data.get("checks", []), merge_commit, REQUIRED_CI_CHECK_PAIRS
+        data.get("checks", []), merge_commit, allow_multiple=True
     )
     blockers.extend(check_blockers)
     decision = _decision_for(blockers, "post_merge")

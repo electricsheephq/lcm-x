@@ -1,0 +1,11 @@
+--- a/escalation.py
++++ b/escalation.py
+@@ -1101,7 +1101,7 @@
+             if result is None:
+                 circuit_breaker.record_failure(route_key)
+             else:
+-                circuit_breaker.record_rejection(route_key)
++                circuit_breaker.record_failure(route_key)
+     if skipped == len(chain):
+         (logger.debug if all(circuit_breaker.in_config_episode(route_key_prefix + m) for m in chain) else logger.warning)(
+             "LCM summary fallback chain exhausted: all routes are temporarily open")

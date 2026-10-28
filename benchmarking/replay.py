@@ -102,12 +102,21 @@ def _config_from_policy(policy: LCMPolicy, database_path: Path):
     from hermes_lcm.config import LCMConfig
 
     return LCMConfig(
+        embeddings_enabled=False,  # policy@v1 measures deterministic compaction, not semantic recall.
         fresh_tail_count=policy.fresh_tail_count,
         leaf_chunk_tokens=policy.leaf_chunk_tokens,
         context_threshold=policy.context_threshold,
         incremental_max_depth=policy.incremental_max_depth,
         condensation_fanin=policy.condensation_fanin,
         dynamic_leaf_chunk_enabled=policy.dynamic_leaf_chunk_enabled,
+        # Pinned to policy@v1 semantics: LCMPolicy does not carry these, so the
+        # pre-#1013 defaults are passed explicitly and a default flip cannot
+        # silently change existing policy@v1 runs.
+        fresh_tail_max_tokens=0,
+        threshold_full_sweep_enabled=False,
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
         database_path=str(database_path),
     )
 

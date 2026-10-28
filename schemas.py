@@ -11,7 +11,7 @@ LCM_GREP = {
         "node expansion is intentionally deferred. Use lcm_expand(store_id=...) on a cross-session message hit "
         "to drill into its full content. Set content_scope='externalized' or 'both' to opt into bounded, active-session "
         "search over recoverable payload sidecars. For Hermes-tracked session history outside the LCM database, use session_search. "
-        "For open-ended cross-conversation recall by meaning ('have we ever discussed…'), prefer lcm_recall."
+        "For open-ended cross-conversation recall ('have we ever discussed…'), prefer lcm_recall."
     ),
     "parameters": {
         "type": "object",
@@ -20,7 +20,7 @@ LCM_GREP = {
                 "type": "string",
                 "enum": ["full_text", "semantic", "hybrid"],
                 "description": (
-                    "Retrieval mode. 'full_text' preserves the historical FTS behavior byte-for-byte. "
+                    "Retrieval mode. 'full_text' searches indexed terms and quoted phrases. "
                     "'semantic' searches embedded summaries and degrades to full-text on provider timeout or transient unavailability. "
                     "'hybrid' fuses full-text and semantic ranks with reciprocal-rank fusion (RRF)."
                 ),
@@ -29,9 +29,10 @@ LCM_GREP = {
             "query": {
                 "type": "string",
                 "description": (
-                    "Search query (FTS5 syntax: keywords, phrases, OR/NOT). "
-                    "FTS5 defaults to AND matching, so prefer 1-3 distinctive terms or one quoted multi-word phrase. "
-                    "Wrap exact phrases in quotes. Short CJK fragments and emoji-heavy queries may use substring fallback instead of plain FTS token matching."
+                    "Indexed history full-text query: AND by default; uppercase OR/NOT, quoted phrases, and term* prefixes "
+                    "(at least 2 alphanumeric characters) are honoured. In mode='full_text', zero hits with multiple terms retry once "
+                    "as any-term matching (retried='any_term'), except top-level OR/NOT queries and CJK/emoji substring searches. "
+                    "content_scope='externalized' matches the literal query text; operators and retry do not apply."
                 ),
             },
             "limit": {
@@ -143,7 +144,8 @@ LCM_GREP = {
 LCM_RECALL = {
     "name": "lcm_recall",
     "description": (
-        "Search the agent's entire memory across ALL conversations and all time by meaning. "
+        "Search memory across ALL conversations and all time: semantic matching when embeddings are enabled, "
+        "full-text matching otherwise. "
         "Returns the most relevant memories — summaries and verbatim excerpts — ranked by relevance, "
         "recency, and relatedness to the current conversation, each with an expand_hint handle to the "
         "original content: verbatim excerpts get lcm_expand(store_id=...), current-session summary hits get "
@@ -162,8 +164,8 @@ LCM_RECALL = {
             "query": {
                 "type": "string",
                 "description": (
-                    "Natural-language description of what to recall. Searched by meaning across every "
-                    "conversation and keyword-matched over raw history; distinctive phrasing recalls best."
+                    "What to recall across conversations: semantic matching with embeddings enabled, "
+                    "full-text otherwise; distinctive phrasing recalls best."
                 ),
             },
             "limit": {
@@ -1047,7 +1049,7 @@ LCM_EXPAND = {
         "Mode selection (exactly one): node_id returns the source messages or lower-depth summaries "
         "that were compacted into a summary node, defaulting to the active session unless an explicit "
         "matching session_id is supplied; externalized_ref "
-        "(current session only) returns a stored externalized payload's content; store_id returns "
+        "(current session by default, or an explicit session_id) returns a stored externalized payload's content; store_id returns "
         "a single raw message by store_id and works across sessions, suitable for drilling into "
         "cross-session lcm_grep results. Output is bounded by max_tokens; raw recovery is pageable "
         "via content_offset (and source_offset/source_limit for node_id mode). For Hermes-tracked "
@@ -1066,13 +1068,13 @@ LCM_EXPAND = {
             "session_id": {
                 "type": "string",
                 "description": (
-                    "Optional explicit LCM session id for node_id mode only. Must be non-empty and "
-                    "match the node; it is rejected with externalized_ref or store_id mode."
+                    "Optional explicit LCM session id for node_id or externalized_ref mode. Must be non-empty "
+                    "and own the node or payload (including compression-rotation predecessors for payloads); rejected with store_id."
                 ),
             },
             "externalized_ref": {
                 "type": "string",
-                "description": "Externalized payload ref filename to expand instead of a summary node. Current-session only.",
+                "description": "Externalized payload ref filename to expand instead of a summary node. Defaults to the current session and its compression-rotation predecessors; pass session_id for another session's payload.",
             },
             "store_id": {
                 "type": "integer",
@@ -1082,7 +1084,8 @@ LCM_EXPAND = {
                     "content paged by content_offset. If the row references an externalized payload, "
                     "the ref is surfaced via 'externalized_ref'; payload metadata and content are "
                     "session-scoped, so a cross-session row also includes 'externalized_note' "
-                    "explaining that the ref is for traceability only and cannot be expanded in this version."
+                    "and, for rows with a recorded session, 'externalized_expand_hint' with the "
+                    "explicit-session call to read the payload."
                 ),
             },
             "max_tokens": {
@@ -1253,5 +1256,22 @@ LCM_EXPAND_QUERY = {
             },
         },
         "required": ["prompt"],
+    },
+}
+
+LCM_MEMORY = {
+    "name": "lcm_memory",
+    "description": "Read cited entity mentions across this profile's sessions; lookup a name and aliases, optionally rank mentions for a question, or list assertion subjects. Default off; no writes or model calls. Counts and first/last times cover all matching rows; carried times include time_uncertain: carried; snippets and facts are capped. Namespace ambiguity is shown, never resolved automatically.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["lookup", "list"]},
+            "name": {"type": "string", "description": "Required for lookup."},
+            "aliases": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+            "question": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200,
+                      "description": "Lookup: default 20, cap 50. List: default 50, cap 200."},
+        },
+        "required": ["action"],
     },
 }

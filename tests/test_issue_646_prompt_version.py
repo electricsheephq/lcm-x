@@ -277,7 +277,7 @@ def test_t19_config_without_the_field_uses_version_1_everywhere():
     engine._config = old
     engine._summary_circuit_breaker = None
     engine._summary_spend_guard = None
-    engine._serialize_messages = lambda messages: "historical transcript"
+    engine._serialize_messages_with_clip = lambda messages: ("historical transcript", False)
     with patch("hermes_lcm.engine.count_messages_tokens", return_value=8000), \
             patch("hermes_lcm.engine.summarize_with_escalation",
                   return_value=("valid summary", 1)) as summarize:
