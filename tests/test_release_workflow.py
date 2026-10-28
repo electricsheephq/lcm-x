@@ -4,8 +4,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
-IDENTITY_VERSION = "0.29.0"
-RC_TAG = "0.29.0-rc2"
+IDENTITY_VERSION = "0.29.1"
+RC_TAG = "0.29.1-rc1"
 RELEASE_NOTES = REPO_ROOT / ".github" / "release-notes" / f"v{RC_TAG}.md"
 
 
@@ -105,7 +105,7 @@ def test_release_candidate_notes_cover_only_the_merged_release_scope():
     section_headers = [line for line in lines if line.startswith("## ")]
 
     assert notes.startswith(f"# v{RC_TAG} — ")
-    assert any(header.startswith("## Changes since v0.28.1") for header in section_headers)
+    assert any(header.startswith("## Changes since v0.29.0") for header in section_headers)
     assert any(header.startswith("## Qualification") for header in section_headers)
     assert any(header.startswith("## Known issues") for header in section_headers)
     assert "## On by default in this release" in section_headers

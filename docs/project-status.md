@@ -31,7 +31,7 @@ The [published GA notes](https://github.com/electricsheephq/lcm-x/releases/tag/v
 
 The source snapshot used for this reconciliation is `main@c10ff1b8c3ae8ef50cbb1be2e16e09457eb692dc`. Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
 
-Main continues toward the v0.29.1 patch (see the [roadmap](../ROADMAP.md)). Releases with product code are rc-first under `bench/specs/RELEASE-READINESS-V1.md`; the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
+Main carries the forward identity `0.29.1` (`hermes-lcm-x`), first tagged as `v0.29.1-rc1`; `v0.29.0` remains the latest stable release. The candidate is not qualified yet (see the [roadmap](../ROADMAP.md)). Releases with product code are rc-first under `bench/specs/RELEASE-READINESS-V1.md`; the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
 
 ## Reference-agent acceptance state
 
