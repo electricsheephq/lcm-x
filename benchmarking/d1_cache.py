@@ -1,6 +1,7 @@
 """D1 harness-only sealed cache; product chunking/retrieval remain untouched."""
 import hashlib
 import json
+import os
 import sqlite3
 import time
 from contextlib import closing
@@ -22,11 +23,48 @@ def seal(path):
     return hashlib.sha256(manifest.encode()).hexdigest()
 
 
+def merge(parts, target):
+    parts = list(parts)
+    identities = []
+    for part in parts:
+        with closing(sqlite3.connect(part)) as db:
+            identities.append(db.execute("SELECT identity FROM binding").fetchone()[0])
+    if len(set(identities)) != 1:
+        raise ValueError("D1 cache part model/options mismatch")
+    entries, duplicates = 0, 0
+    with closing(sqlite3.connect(target)) as db, db:
+        db.execute("CREATE TABLE binding (identity TEXT NOT NULL)")
+        db.execute("CREATE TABLE entries (key TEXT PRIMARY KEY, dim INTEGER, payload BLOB, checksum TEXT)")
+        db.execute("INSERT INTO binding VALUES (?)", (identities[0],))
+        for part in parts:
+            with closing(sqlite3.connect(part)) as source:
+                for key, dim, payload, checksum in source.execute("SELECT key, dim, payload, checksum FROM entries"):
+                    existing = db.execute("SELECT dim, payload, checksum FROM entries WHERE key=?", (key,)).fetchone()
+                    if existing is not None:
+                        if existing != (dim, payload, checksum):
+                            raise ValueError("D1 cache conflicting duplicate key")
+                        duplicates += 1
+                    else:
+                        db.execute("INSERT INTO entries VALUES (?,?,?,?)", (key, dim, payload, checksum))
+                        entries += 1
+    return entries, duplicates
+
+
 class D1Cache(ContentHashEmbeddingCache):
     """Exact document boundary, one options binding per DB, read-only fallbacks."""
 
     def __init__(self, provider, path, *, options, readonly=True):
         self.readonly = readonly
+        self.partition = None
+        partition = os.environ.get("LCM_D1_BUILD_PARTITION") if not readonly else None
+        if partition is not None:
+            values = partition.split("/")
+            if len(values) != 2 or not all(value.isdecimal() for value in values):
+                raise ValueError("D1 build partition must be i/P with 0 <= i < P")
+            i, count = map(int, values)
+            if not 0 <= i < count:
+                raise ValueError("D1 build partition must be i/P with 0 <= i < P")
+            self.partition = i, count
         self.options = options
         self.identity = json.dumps(
             [provider.provider_id, provider.model_id, options], sort_keys=True,
@@ -90,6 +128,10 @@ class D1Cache(ContentHashEmbeddingCache):
             found = self._lookup(keys)
             self.hits += sum(key in found for key in keys)
             self.misses += sum(key not in found for key in keys)
+            if self.partition is not None:
+                i, count = self.partition
+                # prewarm_embedding_cache.flush_batch discards these placeholder vectors.
+                found.update((key, [0.0] * self.dim) for key in keys if int(key[:16], 16) % count != i)
             missing = dict((key, text) for key, text in zip(keys, texts) if key not in found)
             if missing:
                 self.provider_dispatches += 1
