@@ -556,7 +556,7 @@
   {
     "id": "admin-slash-doctor",
     "category": "admin",
-    "module": "command.py",
+    "module": "command_doctor.py",
     "entry_point": "_doctor_text",
     "authority_requirement": "admin_only",
     "discloses": [
@@ -870,6 +870,30 @@
       "sites": [
         "engine.py:LCMEngine._schedule_rollup_maintenance"
       ]
+    }
+  },
+  {
+    "id": "retrieval-lcm-memory",
+    "category": "retrieval",
+    "module": "tools.py",
+    "entry_point": "lcm_memory",
+    "authority_requirement": "read_scoped",
+    "discloses": [
+      "existence",
+      "count",
+      "ranking",
+      "content"
+    ],
+    "notes": "Read-only entity cards over this profile; names are labels, not access grants.",
+    "hook": {
+      "required": true,
+      "sites": [
+        "engine.py:LCMEngine.handle_tool_call"
+      ]
+    },
+    "target_binding": {
+      "target_free": true,
+      "reason": "Searches the current profile store only, across stored sessions."
     }
   }
 ]

@@ -5,11 +5,17 @@ whose pattern does not hold is a harness finding, not a product one.
 """
 from __future__ import annotations
 
+P8_CONTROLS = {"p8-control/archived": "FAIL", "p8-control/other-active": "FAIL",
+               "p8-control/random-snapshot": "FAIL", "p8-control/none": "PASS"}
+# The four pre-uid CI hosts lack the flush seams (no scorable B9, measured at 2f4b7d54). upstream-uid (2667c960) shows
+# the full pattern on both transports (#866: local R1+R2 at main f0e38c61 and at 8ab4eb5b).
+P8_MUST_SUPPORT = {None: ("upstream-uid",), "acp-process": ("upstream-uid",)}
+
 CONTROLS = {
     # Differential: the host's post-commit-proof persist strip (#494), fixed by #498 (ae1fb16d; 47bd28e7 is its
     # parent). The baseline must stay green at both refs, the trailing-whitespace shape red only before the fix.
     # customer-0.21.2 does not strip the persisted prompt, so it is not part of the pattern.
-    "PC-1": {"refs": ["47bd28e7", "ae1fb16d"], "hosts": ["eva-0.21.5", "rs34-0.21.5", "upstream-main"],
+    "PC-1": {"refs": ["47bd28e7", "ae1fb16d"], "hosts": ["ref-0.21.5", "rs34-0.21.5", "upstream-main"],
              "cells": ["baseline/in-place/acp", "acp-trailing/in-place"],
              "expect": {("47bd28e7", "baseline/in-place/acp"): "PASS", ("47bd28e7", "acp-trailing/in-place"): "FAIL",
                         ("ae1fb16d", "baseline/in-place/acp"): "PASS", ("ae1fb16d", "acp-trailing/in-place"): "PASS"},

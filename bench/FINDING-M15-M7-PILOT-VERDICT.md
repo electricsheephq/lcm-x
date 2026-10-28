@@ -112,7 +112,7 @@ conditional search), and the upper bound should then be closer to attainable.
 ## 4c. Instrument near-miss: the dispatch packet named the wrong repo
 
 My packet named `lme-v2-official` as the harness repo. **L3 did not run from there** — it ran from a
-worktree of a *different clone* (`/Volumes/LEXAR/repos/LongMemEval-V2` @ d8f1d90). `lme-v2-official` lacks
+worktree of a *different clone* (`LongMemEval-V2` @ d8f1d90). `lme-v2-official` lacks
 `READER_PROVIDER_JSON` provider/quantization pinning (L3 pins **fp8 / SiliconFlow / no-fallbacks**), lacks
 the reader malformed-body retry and no-choices error class, and has *removed* the `--evaluator-base-url`
 argument L3 passes. Running where I specified would have broken parity **in the serving-precision

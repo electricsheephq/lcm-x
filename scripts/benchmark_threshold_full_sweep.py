@@ -59,6 +59,7 @@ def _run_policy(
     from hermes_lcm.tokens import count_messages_tokens
 
     config = LCMConfig(
+        embeddings_enabled=False,  # Time compaction policy without background model work.
         fresh_tail_count=fresh_tail_messages,
         leaf_chunk_tokens=leaf_chunk_tokens,
         dynamic_leaf_chunk_enabled=True,
@@ -67,6 +68,7 @@ def _run_policy(
         threshold_full_sweep_enabled=full_sweep,
         summary_prefix_target_tokens=1_000_000,
         database_path=str(root / f"{name}.db"),
+        temporal_rollups_enabled=False,  # time the two compaction policies only (#1013 part B)
     )
     engine = LCMEngine(config=config, hermes_home=str(root / f"{name}-home"))
     engine._session_id = f"synthetic-{name}"

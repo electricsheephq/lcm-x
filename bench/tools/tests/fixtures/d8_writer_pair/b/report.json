@@ -1,0 +1,207 @@
+{
+  "recallConfig": "OFF",
+  "datasetSha256": "16137dbdbb97bf57d02e991cb2ccbd6cfff476f1d0d3f6cf43966c2ea4eb6a59",
+  "datasetPath": "./synthetic.json",
+  "questionSetSha256": "bbadeb719be3ea73799a7bf63f77eb5235258972214c11caade888eb8207032c",
+  "promptVersion": "sha256:25cb037ed030569b00939262257d248daa78300b5b25bdccd204dc1d48d71149",
+  "readerPromptVersion": "sha256:daf0ca85b8f281e095c2eb757c4185d0909b03a69e9decde303a7ee3f8329e86",
+  "scoringPath": "openai:fixture-judge/default/score-v1",
+  "answerPresentationMode": "raw_json_v1",
+  "provider": "fixture",
+  "benchmark": "longmemeval",
+  "runId": "b",
+  "dataSourceRunId": "b",
+  "judge": "fixture-judge",
+  "answeringModel": "fixture-reader",
+  "timestamp": "2026-10-21T16:50:34.458Z",
+  "summary": {
+    "totalQuestions": 2,
+    "correctCount": 2,
+    "accuracy": 1
+  },
+  "latency": {
+    "ingest": {
+      "min": 0,
+      "max": 0,
+      "mean": 0,
+      "median": 0,
+      "p95": 0,
+      "p99": 0,
+      "stdDev": 0,
+      "count": 0
+    },
+    "indexing": {
+      "min": 0,
+      "max": 0,
+      "mean": 0,
+      "median": 0,
+      "p95": 0,
+      "p99": 0,
+      "stdDev": 0,
+      "count": 0
+    },
+    "search": {
+      "min": 0,
+      "max": 0,
+      "mean": 0,
+      "median": 0,
+      "p95": 0,
+      "p99": 0,
+      "stdDev": 0,
+      "count": 0
+    },
+    "answer": {
+      "min": 0,
+      "max": 0,
+      "mean": 0,
+      "median": 0,
+      "p95": 0,
+      "p99": 0,
+      "stdDev": 0,
+      "count": 0
+    },
+    "evaluate": {
+      "min": 0,
+      "max": 0,
+      "mean": 0,
+      "median": 0,
+      "p95": 0,
+      "p99": 0,
+      "stdDev": 0,
+      "count": 0
+    },
+    "total": {
+      "min": 0,
+      "max": 0,
+      "mean": 0,
+      "median": 0,
+      "p95": 0,
+      "p99": 0,
+      "stdDev": 0,
+      "count": 0
+    }
+  },
+  "byQuestionType": {
+    "single-session-user": {
+      "total": 1,
+      "correct": 1,
+      "accuracy": 1,
+      "latency": {
+        "search": {
+          "min": 0,
+          "max": 0,
+          "mean": 0,
+          "median": 0,
+          "p95": 0,
+          "p99": 0,
+          "stdDev": 0,
+          "count": 0
+        },
+        "answer": {
+          "min": 0,
+          "max": 0,
+          "mean": 0,
+          "median": 0,
+          "p95": 0,
+          "p99": 0,
+          "stdDev": 0,
+          "count": 0
+        },
+        "total": {
+          "min": 0,
+          "max": 0,
+          "mean": 0,
+          "median": 0,
+          "p95": 0,
+          "p99": 0,
+          "stdDev": 0,
+          "count": 0
+        }
+      }
+    },
+    "knowledge-update": {
+      "total": 1,
+      "correct": 1,
+      "accuracy": 1,
+      "latency": {
+        "search": {
+          "min": 0,
+          "max": 0,
+          "mean": 0,
+          "median": 0,
+          "p95": 0,
+          "p99": 0,
+          "stdDev": 0,
+          "count": 0
+        },
+        "answer": {
+          "min": 0,
+          "max": 0,
+          "mean": 0,
+          "median": 0,
+          "p95": 0,
+          "p99": 0,
+          "stdDev": 0,
+          "count": 0
+        },
+        "total": {
+          "min": 0,
+          "max": 0,
+          "mean": 0,
+          "median": 0,
+          "p95": 0,
+          "p99": 0,
+          "stdDev": 0,
+          "count": 0
+        }
+      }
+    }
+  },
+  "questionTypeRegistry": {},
+  "evaluations": [
+    {
+      "questionId": "one_abs",
+      "questionType": "single-session-user",
+      "question": "Synthetic question",
+      "score": 1,
+      "label": "correct",
+      "explanation": "",
+      "hypothesis": "Synthetic answer",
+      "groundTruth": "Synthetic answer",
+      "searchResults": [],
+      "recallHealth": {
+        "coverage": {
+          "fts": "ok"
+        },
+        "degraded": false,
+        "degradedReason": null,
+        "timeout": false
+      },
+      "searchDurationMs": 0,
+      "answerDurationMs": 0,
+      "totalDurationMs": 0
+    },
+    {
+      "questionId": "two",
+      "questionType": "knowledge-update",
+      "question": "Synthetic question",
+      "score": 1,
+      "label": "correct",
+      "explanation": "",
+      "hypothesis": "Synthetic answer",
+      "groundTruth": "Synthetic answer",
+      "searchResults": [],
+      "recallHealth": {
+        "coverage": {
+          "fts": "ok"
+        },
+        "degraded": false,
+        "degradedReason": null,
+        "timeout": false
+      },
+      "searchDurationMs": 0,
+      "answerDurationMs": 0,
+      "totalDurationMs": 0
+    }
+  ]
+}

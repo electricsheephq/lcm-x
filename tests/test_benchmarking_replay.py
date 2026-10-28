@@ -7,6 +7,7 @@ import sys
 import pytest
 
 import benchmarking.h3_composition_replay as h3_composition_replay
+import benchmarking.replay as replay_module
 import hermes_lcm.engine as lcm_engine
 
 from benchmarking.fixtures import make_synthetic_fixture
@@ -92,6 +93,19 @@ def test_replay_defaults_partial_summary_profile_failure_mode_to_none(tmp_path):
     assert metrics.summary_failure_mode is SummaryFailureMode.NONE
 
 
+def test_config_from_policy_pins_pre_1013_defaults_policy_does_not_carry(tmp_path):
+    """#1013 flipped these LCMConfig defaults; LCMPolicy does not carry them, so policy@v1 runs keep
+    the pre-#1013 values (fresh_tail_count, leaf_chunk_tokens, context_threshold come from the policy)."""
+    config = replay_module._config_from_policy(_small_policy(), tmp_path / "lcm.db")
+
+    assert config.fresh_tail_max_tokens == 0
+    assert config.threshold_full_sweep_enabled is False
+    # #1013 part B: policy@v1 keeps the feature-off defaults it does not carry.
+    assert config.large_output_externalization_enabled is False
+    assert config.large_output_active_replay_stubbing_enabled is False
+    assert config.temporal_rollups_enabled is False
+
+
 def test_replay_above_threshold_compresses_and_reports_canary_recall(tmp_path):
     fixture = make_synthetic_fixture(
         name="pressure",
@@ -100,7 +114,8 @@ def test_replay_above_threshold_compresses_and_reports_canary_recall(tmp_path):
         filler_words=80,
     )
     # #582: a window the compacted list fits (at 400 its ~550 tokens overflow and the survival fit trims it)
-    policy = _small_policy(context_length=700)
+    # #998: 750 (was 700) leaves room for the lcm_recall clause in the LCM note
+    policy = _small_policy(context_length=750)
 
     metrics = run_replay(fixture, policy, output_dir=tmp_path)
 

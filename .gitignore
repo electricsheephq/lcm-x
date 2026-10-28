@@ -19,6 +19,7 @@ ENV/
 .tox/
 .coverage
 htmlcov/
+catalog-scanner-1946/
 
 # IDE / Editor
 .zed/

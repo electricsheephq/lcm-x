@@ -1,0 +1,25 @@
+{
+  "runId": "X",
+  "dataSourceRunId": "X",
+  "provider": "hermes-lcm",
+  "benchmark": "longmemeval",
+  "judge": "judge",
+  "answeringModel": "reader",
+  "recallConfig": "OFF",
+  "evaluations": [
+    {
+      "questionId": "q000",
+      "score": 1,
+      "label": "correct",
+      "hypothesis": "fixture",
+      "recallHealth": {
+        "coverage": {
+          "fts": "ok"
+        },
+        "degraded": false,
+        "timeout": false,
+        "degradedReason": null
+      }
+    }
+  ]
+}

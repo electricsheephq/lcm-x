@@ -67,6 +67,8 @@ def test_pull_request_template_separates_behavior_and_release_evidence():
     assert "Artifact or redacted trace:" in template
     assert "Proof boundary—what this does not prove:" in template
     assert "## Release-note impact" in template
+    assert "When the hint names `turn-path`" in template
+    assert "`turn_path_probe_packet`" in template
     assert "accepted issue, PR head, checks, reviews, threads, and authorization" in template
     assert "immediately before any authorized GitHub write" in template
 
@@ -201,7 +203,7 @@ def test_codeowners_and_landing_policy_use_exact_head_ci_and_review_obligation()
     step_positions = [
         merge_section.index(step)
         for step in ('test "$current_head" = "$head"', "Repeat the paginated thread query",
-                     "Post one merge receipt comment", "--match-head-commit")
+                     "Post one merge receipt comment", "enqueuePullRequest")
     ]
     assert step_positions == sorted(step_positions)
     assert "its `state` is not `DISMISSED` or `PENDING`, and its `user.login` is not the PR author" in (
@@ -209,7 +211,8 @@ def test_codeowners_and_landing_policy_use_exact_head_ci_and_review_obligation()
     )
     assert "lists only pointers" in landing
     assert "Never restate verdicts" in landing
-    assert "--merge --match-head-commit" in landing
+    assert "expectedHeadOid:$h" in landing
+    assert "gh pr merge" not in landing
     assert "The output is a review, not a receipt" in " ".join(review.split())
 
 

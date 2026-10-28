@@ -273,10 +273,17 @@ def main() -> int:
     except RuntimeError as exc:
         parser.error(str(exc))
     metrics = evaluate(embedder)
+    effective = None
+    if args.live_provider:
+        effective = {"embeddings_enabled": True, "embedding_provider": embedder.provider_id,
+                     "embedding_model": embedder.model_id}
     if args.json:
-        print(json.dumps(metrics, sort_keys=True, separators=(",", ":")))
+        print(json.dumps({**metrics, **({"effective_config": effective} if effective else {})},
+                         sort_keys=True, separators=(",", ":")))
     else:
         print(_markdown(metrics))
+        if effective:
+            print("\nEffective config: " + json.dumps(effective, sort_keys=True))
     return 0
 
 

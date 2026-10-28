@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import logging
 import math
 import sqlite3
@@ -18,7 +19,7 @@ import time
 import uuid
 from collections import OrderedDict
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -35,11 +36,43 @@ from .db_bootstrap import (
     verify_chunk_schema,
     verify_embedding_schema,
 )
+from .sqlite_session import ConnectionPolicy, open_connection
 from .sqlite_util import _is_sqlite_locked_error
 
 logger = logging.getLogger(__name__)
 
 _monotonic = time.monotonic
+
+
+@contextmanager
+def _interrupt_read_on_deadline(connection, deadline):
+    """Own cancellation of a private read connection without hot GIL callbacks."""
+    stop = threading.Event()
+
+    def interrupt_when_expired():
+        if stop.wait(max(0.0, deadline - _monotonic())):
+            return
+        while not stop.is_set():
+            try:
+                connection.interrupt()
+            except sqlite3.ProgrammingError:
+                return
+            # Cancellation stays sticky across statements started after expiry.
+            stop.wait(0.01)
+
+    watchdog = None
+    if deadline is not None:
+        watchdog = threading.Thread(
+            target=interrupt_when_expired, name="sqlite-read-deadline", daemon=True,
+        )
+        watchdog.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        if watchdog is not None:
+            # Drain BEFORE the owner closes the connection: no close/interrupt race.
+            watchdog.join()
 
 
 def _prescreen_deadline_expired(deadline: float | None, scanned_rows: int) -> bool:
@@ -87,7 +120,7 @@ _CHUNK_TASK = "chunk"
 # Tasks this store can encode. Summary and chunk corpora coexist in the shared
 # profile table, each keyed by its own canonical identity (task is part of the
 # identity hash), so their vectors never collide.
-_SUPPORTED_TASKS = frozenset({_DEFAULT_TASK, _CHUNK_TASK})
+_SUPPORTED_TASKS = frozenset({_DEFAULT_TASK, _CHUNK_TASK, "summary+prefix", "chunk+prefix"})
 
 # Candidate-enumeration sentinel: SQLite reads a negative LIMIT as "no limit",
 # so a full-corpus scan enumerates every live candidate for the identity.
@@ -175,22 +208,6 @@ class EmbeddingIdentity:
             ]
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _identity_hash(
-    provider: str,
-    model_name: str,
-    revision: str,
-    dim: int,
-    dtype: str,
-    byteorder: str,
-    task: str,
-) -> str:
-    """Return the stable canonical-identity hash for an embedding profile."""
-    identity = EmbeddingIdentity.canonical(
-        provider, model_name, revision, dim, dtype, byteorder, task
-    )
-    return identity.identity_hash
 
 
 def _load_numpy():
@@ -373,15 +390,16 @@ class VectorStore:
         # data_version), defeating the cross-process cache invalidation. Write
         # atomicity is preserved via the explicit BEGIN IMMEDIATE in
         # _write_transaction.
-        self._conn = sqlite3.connect(
-            str(self.db_path),
-            timeout=5.0,
-            check_same_thread=False,
-            isolation_level=None,
-        )
-        refuse_schema_version_too_new(self._conn)
-        configure_connection(self._conn)
-        self._conn.row_factory = sqlite3.Row
+        open_connection(ConnectionPolicy(
+            database=str(self.db_path),
+            connect_kwargs=(
+                ("timeout", 5.0), ("check_same_thread", False), ("isolation_level", None),
+            ),
+            before_row_factory=(refuse_schema_version_too_new, configure_connection),
+            row_factory=sqlite3.Row,
+            on_open=lambda conn: setattr(self, "_conn", conn),
+            on_setup_error=None,
+        ))
         run_versioned_migrations(self._conn)
         self._ensure_embedding_schema()
         self._conn.commit()
@@ -508,7 +526,7 @@ class VectorStore:
         ).fetchone()
 
     def _resolve_profile(
-        self, model_name: str, provider: str | None = None
+        self, model_name: str, provider: str | None = None, revision_suffix: str | None = None
     ) -> sqlite3.Row | None:
         """Resolve a model name to its profile, preferring the current/active one.
 
@@ -535,24 +553,24 @@ class VectorStore:
                 SELECT identity_hash, model_name, provider, revision, dim, dtype,
                        byteorder, task, registered_at, active, archived_at, data_version
                 FROM lcm_embedding_profile
-                WHERE model_name = ? AND provider = ? AND task = ?
+                WHERE model_name = ? AND provider = ? AND task IN (?, 'summary+prefix') AND (? IS NULL OR CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ?)
                 ORDER BY (active = 1 AND archived_at IS NULL) DESC,
                          registered_at DESC, identity_hash DESC
                 LIMIT 1
                 """,
-                (model_name, provider, _DEFAULT_TASK),
+                (model_name, provider, _DEFAULT_TASK, revision_suffix, revision_suffix),
             ).fetchone()
         return self._conn.execute(
             """
             SELECT identity_hash, model_name, provider, revision, dim, dtype,
                    byteorder, task, registered_at, active, archived_at, data_version
             FROM lcm_embedding_profile
-            WHERE model_name = ? AND task = ?
+            WHERE model_name = ? AND task IN (?, 'summary+prefix') AND (? IS NULL OR CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ?)
             ORDER BY (active = 1 AND archived_at IS NULL) DESC,
                      registered_at DESC, identity_hash DESC
             LIMIT 1
             """,
-            (model_name, _DEFAULT_TASK),
+            (model_name, _DEFAULT_TASK, revision_suffix, revision_suffix),
         ).fetchone()
 
     @staticmethod
@@ -582,7 +600,7 @@ class VectorStore:
             SELECT identity_hash, model_name, provider, revision, dim, dtype,
                    byteorder, task, registered_at, active, archived_at, data_version
             FROM lcm_embedding_profile
-            WHERE active = 1 AND archived_at IS NULL AND task = ?
+            WHERE active = 1 AND archived_at IS NULL AND task IN (?, 'summary+prefix')
             ORDER BY registered_at DESC, identity_hash DESC
             LIMIT 1
             """,
@@ -590,13 +608,14 @@ class VectorStore:
         ).fetchone()
 
     def _resolve_chunk_profile(
-        self, model_name: str, *, provider: str | None = None
+        self, model_name: str, *, provider: str | None = None, revision_suffix: str | None = None
     ) -> sqlite3.Row | None:
         """Resolve a profile by model (+optional provider) within task='chunk'."""
         base = (
             "SELECT identity_hash, model_name, provider, revision, dim, dtype, "
             "byteorder, task, registered_at, active, archived_at, data_version "
-            "FROM lcm_embedding_profile WHERE model_name = ? AND task = ?"
+            "FROM lcm_embedding_profile WHERE model_name = ? AND task IN (?, 'chunk+prefix')"
+            " AND (? IS NULL OR CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ?)"
         )
         order = (
             " ORDER BY (active = 1 AND archived_at IS NULL) DESC, "
@@ -605,10 +624,10 @@ class VectorStore:
         if provider is not None:
             return self._conn.execute(
                 base + " AND provider = ?" + order,
-                (str(model_name), _CHUNK_TASK, str(provider).strip().lower()),
+                (str(model_name), _CHUNK_TASK, revision_suffix, revision_suffix, str(provider).strip().lower()),
             ).fetchone()
         return self._conn.execute(
-            base + order, (str(model_name), _CHUNK_TASK)
+            base + order, (str(model_name), _CHUNK_TASK, revision_suffix, revision_suffix)
         ).fetchone()
 
     @staticmethod
@@ -670,6 +689,7 @@ class VectorStore:
         dim: int,
         *,
         revision: str = "",
+        revision_suffix: str = "",
         dtype: str = _VECTOR_DTYPE,
         byteorder: str = _VECTOR_BYTEORDER,
         task: str = _DEFAULT_TASK,
@@ -684,9 +704,10 @@ class VectorStore:
         needs no re-backfill). Exactly one profile is left active. Returns the
         identity hash.
         """
-        revision = self._prescreen_revision(revision, dtype=dtype)
+        revision = self._prescreen_revision(revision, dtype=dtype) + revision_suffix
         canonical = EmbeddingIdentity.canonical(
-            provider, model_name, revision, dim, dtype, byteorder, task
+            provider, model_name, revision, dim, dtype, byteorder,
+            task + ("+prefix" if revision_suffix else ""),
         )
         if not canonical.model_name:
             raise ValueError("model_name must not be empty")
@@ -698,6 +719,18 @@ class VectorStore:
 
         identity = canonical.identity_hash
         with self._write_transaction():
+            # rc1's revision-only profiles may contain unprefixed rollback writes.
+            # Quarantine only profile metadata; never copy those derived vectors.
+            for row in self._conn.execute(
+                "SELECT * FROM lcm_embedding_profile WHERE task IN ('summary', 'chunk') "
+                "AND instr(revision, '+prefix:') > 0"
+            ).fetchall():
+                retired = replace(self._identity_from_profile(row), task="retired:" + row["task"])
+                self._conn.execute(
+                    "UPDATE lcm_embedding_profile SET identity_hash=?, task=?, active=0, archived_at=? "
+                    "WHERE identity_hash=?",
+                    (retired.identity_hash, retired.task, self._now(), row["identity_hash"]),
+                )
             existing = self._profile_by_identity(identity)
             if existing is None:
                 self._conn.execute(
@@ -740,8 +773,8 @@ class VectorStore:
             # its own active profile.
             self._conn.execute(
                 "UPDATE lcm_embedding_profile SET active = 0 "
-                "WHERE identity_hash != ? AND task = ?",
-                (identity, canonical.task),
+                "WHERE identity_hash != ? AND replace(task, '+prefix', '') = ?",
+                (identity, task),
             )
         return identity
 
@@ -1125,8 +1158,9 @@ class VectorStore:
         """Load ids into a unique per-call temp table in bounded chunks for JOINs.
 
         Avoids the ``WHERE id IN (?, ?, ...)`` host-parameter cap
-        (SQLITE_MAX_VARIABLE_NUMBER) that failed at ~33k ids: ``executemany``
-        binds one row at a time, so an arbitrary number of ids can be staged.
+        (SQLITE_MAX_VARIABLE_NUMBER) that failed at ~33k ids: each insert binds
+        at most 500 IDs, so an arbitrary number of IDs can be staged without
+        paying a separate SQLite statement for every row.
 
         The table name is unique per call (the store's connection is shared
         across threads, ``check_same_thread=False``); a single reused name meant
@@ -1138,11 +1172,12 @@ class VectorStore:
         try:
             for offset in range(0, len(ids), _ID_INSERT_CHUNK):
                 rows = [
-                    (str(value),)
+                    str(value)
                     for value in ids[offset:offset + _ID_INSERT_CHUNK]
                 ]
-                self._conn.executemany(
-                    f"INSERT OR IGNORE INTO {table}(id) VALUES(?)",
+                placeholders = ",".join("(?)" for _ in rows)
+                self._conn.execute(
+                    f"INSERT OR IGNORE INTO {table}(id) VALUES{placeholders}",
                     rows,
                 )
             yield table
@@ -1689,60 +1724,6 @@ class VectorStore:
             )
         return {str(row[0]) for row in rows}
 
-    def _filtered_candidate_indexes(
-        self,
-        embedded_ids: Sequence[str],
-        *,
-        since: float | None,
-        until: float | None,
-        conversation_ids: Sequence[str] | None,
-        source: str | None,
-    ) -> list[int]:
-        if not embedded_ids:
-            return []
-        if conversation_ids is not None and not list(conversation_ids):
-            return []
-        unique_ids = list(dict.fromkeys(str(value) for value in embedded_ids))
-        columns = self._table_columns("summary_nodes")
-        if (since is not None or until is not None) and "latest_at" not in columns:
-            return []
-        recency_expr = "sn.latest_at"
-        with self._temp_id_table(unique_ids) as table:
-            where = ["1 = 1"]
-            args: list[object] = []
-            if "suppressed_at" in columns:
-                where.append("sn.suppressed_at IS NULL")
-            if since is not None:
-                where.append(f"{recency_expr} >= ?")
-                args.append(float(since))
-            if until is not None:
-                where.append(f"{recency_expr} <= ?")
-                args.append(float(until))
-            with self._optional_temp_id_table(conversation_ids) as conversation_table:
-                conversation_join = (
-                    f"JOIN {conversation_table} c ON c.id = sn.session_id"
-                    if conversation_table is not None
-                    else ""
-                )
-                rows = self._conn.execute(
-                    f"""
-                    SELECT t.id
-                    FROM {table} t
-                    JOIN summary_nodes sn ON sn.node_id = CAST(t.id AS INTEGER)
-                    {conversation_join}
-                    WHERE {' AND '.join(where)}
-                    """,
-                    args,
-                ).fetchall()
-            allowed = {str(row[0]) for row in rows}
-            if source:
-                allowed &= self._source_allowed_ids(table, source)
-        return [
-            index
-            for index, embedded_id in enumerate(embedded_ids)
-            if str(embedded_id) in allowed
-        ]
-
     # -- Two-stage KNN (binary Hamming prescreen -> int8/float rescore) -----
     #
     # SPEC C1: when the active identity has a sign-bit prescreen column, KNN runs
@@ -1830,9 +1811,9 @@ class VectorStore:
                 if conversation_table is not None
                 else ""
             )
-            rows = self._conn.execute(
+            return self._fetch_binary_matrix(numpy,
                 f"""
-                SELECT b.chunk_id, b.bits
+                SELECT b.chunk_id AS binary_id, b.bits
                 FROM lcm_chunk_binary b
                 JOIN lcm_chunk_meta cm
                   ON cm.chunk_id = b.chunk_id AND cm.identity_hash = b.identity_hash
@@ -1841,8 +1822,7 @@ class VectorStore:
                 WHERE {' AND '.join(where)}
                 """,
                 args,
-            ).fetchall()
-        return self._binary_rows_to_matrix(numpy, rows)
+            )
 
     def _load_embedding_binary_matrix(
         self,
@@ -1883,9 +1863,9 @@ class VectorStore:
                 if conversation_table is not None
                 else ""
             )
-            rows = self._conn.execute(
+            return self._fetch_binary_matrix(numpy,
                 f"""
-                SELECT b.embedded_id, b.bits
+                SELECT b.embedded_id AS binary_id, b.bits
                 FROM lcm_embedding_binary b
                 JOIN lcm_embedding_meta m
                   ON m.embedded_id = b.embedded_id AND m.identity_hash = b.identity_hash
@@ -1894,8 +1874,7 @@ class VectorStore:
                 WHERE {' AND '.join(where)}
                 """,
                 args,
-            ).fetchall()
-        return self._binary_rows_to_matrix(numpy, rows)
+            )
 
     def _cached_binary_matrix(
         self, cache: "OrderedDict[tuple[str, int], tuple[list[str], Any]]",
@@ -1939,6 +1918,7 @@ class VectorStore:
         if remaining <= 0:
             raise _PrescreenDeadlineExpired()
         conn: sqlite3.Connection | None = None
+        reader: VectorStore | None = None
         expired = [False]
 
         def interrupt_if_expired() -> int:
@@ -1978,26 +1958,63 @@ class VectorStore:
                 check_same_thread=False,
             )
             conn.row_factory = sqlite3.Row
-            conn.set_progress_handler(interrupt_if_expired, 1000)
             reader = copy.copy(self)
+            reader._borrowed_view = True
             reader._conn = conn
             reader._write_lock = threading.RLock()
             reader._cache_lock = threading.RLock()
-            loaded = loader(reader)
-            if _monotonic() >= deadline:
-                raise _PrescreenDeadlineExpired()
-            return loaded
+            with _interrupt_read_on_deadline(conn, deadline):
+                loaded = loader(reader)
+                if _monotonic() >= deadline:
+                    raise _PrescreenDeadlineExpired()
+                return loaded
         except sqlite3.OperationalError as exc:
-            if expired[0] or _monotonic() >= deadline:
+            if (getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT
+                    or expired[0] or _monotonic() >= deadline):
                 raise _PrescreenDeadlineExpired() from exc
             raise
         finally:
             if conn is not None:
                 conn.close()
+            if reader is not None:
+                reader._conn = None
 
     def _read_with_deadline(self, loader, deadline: float | None):
         """Run a candidate read through the shared interruptible read path."""
         return self._load_binary_with_deadline(loader, deadline)
+
+    def _fetch_binary_matrix(self, numpy, sql, args):
+        # Both aggregates consume the same scan stream, pairing IDs and bytes
+        # in the row-wise loader's order without materialization or a temp sort.
+        packed = f"""SELECT json_group_array(json_array(binary_id, length(bits))),
+                            group_concat(hex(bits), '') FROM ({sql})"""
+        try:
+            metadata, hex_bits = self._conn.execute(packed, args).fetchone()
+        except (sqlite3.Error, MemoryError) as exc:
+            code = getattr(exc, "sqlite_errorcode", 0) & 0xff
+            if not isinstance(exc, MemoryError) and code not in (
+                sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM,
+                sqlite3.SQLITE_FULL, sqlite3.SQLITE_IOERR,
+            ):
+                raise
+            return self._binary_rows_to_matrix(numpy, self._conn.execute(sql, args).fetchall())
+        raw = bytes.fromhex(hex_bits or "")
+        del hex_bits
+        metadata = json.loads(metadata)
+        if metadata and metadata[0][1] and all(row[1] == metadata[0][1] for row in metadata):
+            ids = [str(row[0]) for row in metadata]
+            return ids, numpy.frombuffer(raw, dtype=numpy.uint8).reshape(len(ids), metadata[0][1])
+        offset = 0
+
+        def rows():
+            nonlocal offset
+            for ident, width in metadata:
+                width = int(width)
+                end = offset + width
+                yield ident, raw[offset:end]
+                offset = end
+
+        return self._binary_rows_to_matrix(numpy, rows())
 
     @staticmethod
     def _binary_rows_to_matrix(numpy: Any, rows: Sequence[sqlite3.Row]) -> tuple[list[str], Any]:
@@ -2106,6 +2123,7 @@ class VectorStore:
         scan_max_rows: int = 0,
         scan_budget_s: float = 0.0,
         deadline: float | None = None,
+        revision_suffix: str | None = None,
     ) -> KNNResult:
         operation_started = _monotonic()
         k = int(k)
@@ -2124,7 +2142,7 @@ class VectorStore:
         # active. An unbackfilled identity resolves to None → coverage "none" →
         # the caller degrades to full_text.
         profile = (
-            self._resolve_profile(str(model), provider=provider)
+            self._resolve_profile(str(model), provider=provider, revision_suffix=revision_suffix)
             if model is not None
             else self._current_profile()
         )
@@ -2661,6 +2679,11 @@ class VectorStore:
         chunk_ids: Sequence[str],
         dtype: str = _VECTOR_DTYPE,
     ) -> tuple[list[int], list[str], list[str], list[list[float]]]:
+        """Decode eligible chunk BLOBs, skipping malformed SQLite storage values.
+
+        CROSS JOIN keeps selected IDs outermost, using the existing unique
+        (chunk_id, identity_hash) indexes instead of scanning the identity.
+        """
         rowids: list[int] = []
         out_ids: list[str] = []
         kinds: list[str] = []
@@ -2672,17 +2695,22 @@ class VectorStore:
                 f"""
                 SELECT v.rowid, v.chunk_id, v.vec
                 FROM {table} t
-                JOIN lcm_chunk_vectors v
+                CROSS JOIN lcm_chunk_vectors v
                   ON v.chunk_id = t.id AND v.identity_hash = ?
-                JOIN lcm_chunk_meta m
+                CROSS JOIN lcm_chunk_meta m
                   ON m.chunk_id = v.chunk_id AND m.identity_hash = v.identity_hash
                 WHERE m.archived = 0
                 """,
                 (identity_hash,),
             ).fetchall()
         for row in rows:
+            blob = row["vec"]
+            # SQLite permits non-BLOB storage; bytes(integer) allocates zeros.
+            # Reject it before conversion, consistently with the NumPy loader.
+            if not isinstance(blob, (bytes, bytearray, memoryview)):
+                continue
             try:
-                vector = self._decode_stored_vec(bytes(row["vec"]), dim, dtype)
+                vector = self._decode_stored_vec(bytes(blob), dim, dtype)
             except (TypeError, ValueError):
                 continue
             if vector is None:
@@ -2725,16 +2753,65 @@ class VectorStore:
         chunk_ids: Sequence[str],
         dtype: str,
     ) -> tuple[list[int], list[str], list[str], Any]:
-        """Decode one chunk candidate set into a NumPy matrix (no cache)."""
-        rowids, loaded_ids, kinds, raw_vectors = self._load_chunk_vectors_for_ids(
-            identity_hash, dim, chunk_ids, dtype
-        )
+        """Load one chunk candidate set into a NumPy matrix (no cache).
+
+        Float32 vectors are stored as little-endian BLOBs. Build their
+        matrix directly from those bytes instead of materializing Python floats.
+        Other storage dtypes retain the established decoder path.
+        CROSS JOIN fixes candidate-first lookups through the existing unique
+        (chunk_id, identity_hash) indexes, independent of total identity size.
+        """
+        if dtype != _VECTOR_DTYPE:
+            rowids, loaded_ids, kinds, raw_vectors = self._load_chunk_vectors_for_ids(
+                identity_hash, dim, chunk_ids, dtype
+            )
+            matrix = (
+                numpy.asarray(raw_vectors, dtype=numpy.float32)
+                if raw_vectors
+                else numpy.empty((0, dim), dtype=numpy.float32)
+            )
+            return rowids, loaded_ids, kinds, matrix
+        if not chunk_ids:
+            return [], [], [], numpy.empty((0, dim), dtype=numpy.float32)
+
+        rowids: list[int] = []
+        loaded_ids: list[str] = []
+        blobs: list[bytes] = []
+        expected_bytes = dim * 4
+        with self._temp_id_table(chunk_ids) as table:
+            rows = self._conn.execute(
+                f"""
+                SELECT v.rowid, v.chunk_id, v.vec
+                FROM {table} t
+                CROSS JOIN lcm_chunk_vectors v
+                  ON v.chunk_id = t.id AND v.identity_hash = ?
+                CROSS JOIN lcm_chunk_meta m
+                  ON m.chunk_id = v.chunk_id AND m.identity_hash = v.identity_hash
+                WHERE m.archived = 0
+                """,
+                (identity_hash,),
+            ).fetchall()
+        for row in rows:
+            blob = row["vec"]
+            # SQLite permits non-BLOB storage; bytes(integer) allocates zeros.
+            # Reject it before conversion, consistently with the Python loader.
+            if not isinstance(blob, (bytes, bytearray, memoryview)):
+                continue
+            try:
+                blob = bytes(blob)
+            except (TypeError, ValueError):
+                continue
+            if len(blob) != expected_bytes:
+                continue
+            rowids.append(int(row["rowid"]))
+            loaded_ids.append(str(row["chunk_id"]))
+            blobs.append(blob)
         matrix = (
-            numpy.asarray(raw_vectors, dtype=numpy.float32)
-            if raw_vectors
+            numpy.frombuffer(b"".join(blobs), dtype=numpy.dtype("<f4")).reshape(len(blobs), dim)
+            if blobs
             else numpy.empty((0, dim), dtype=numpy.float32)
         )
-        return rowids, loaded_ids, kinds, matrix
+        return rowids, loaded_ids, ["chunk"] * len(loaded_ids), matrix
 
     def knn_chunks(
         self,
@@ -2750,6 +2827,7 @@ class VectorStore:
         scan_max_rows: int = 0,
         scan_budget_s: float = 0.0,
         deadline: float | None = None,
+        revision_suffix: str | None = None,
     ) -> KNNResult:
         """Chunk KNN with the summary coverage contract.
 
@@ -2773,7 +2851,7 @@ class VectorStore:
         if source is not None and "source" not in message_columns:
             return KNNResult(coverage="none", reason="unverifiable_provenance")
         profile = (
-            self._resolve_chunk_profile(str(model), provider=provider)
+            self._resolve_chunk_profile(str(model), provider=provider, revision_suffix=revision_suffix)
             if model is not None
             else self._current_chunk_profile()
         )
@@ -2934,7 +3012,7 @@ class VectorStore:
             SELECT identity_hash, model_name, provider, revision, dim, dtype,
                    byteorder, task, registered_at, active, archived_at, data_version
             FROM lcm_embedding_profile
-            WHERE active = 1 AND archived_at IS NULL AND task = ?
+            WHERE active = 1 AND archived_at IS NULL AND task IN (?, 'chunk+prefix')
             ORDER BY registered_at DESC, identity_hash DESC
             LIMIT 1
             """,
@@ -2942,6 +3020,10 @@ class VectorStore:
         ).fetchone()
 
     def close(self) -> None:
+        if getattr(self, "_borrowed_view", False):
+            # The deadline loader owns its connection; the pooled store owns
+            # the shared caches, including any fills made through this view.
+            return
         conn = getattr(self, "_conn", None)
         if conn is not None:
             try:
