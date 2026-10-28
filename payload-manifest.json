@@ -1,12 +1,12 @@
 {
-  "source_sha": "9aaf609e073c0998a770da515a06605b2dfcab1f",
-  "tooling_sha": "9aaf609e073c0998a770da515a06605b2dfcab1f",
+  "source_sha": "0eb6e8736ac0361341b3f29ebfb8e30e5b4dabc5",
+  "tooling_sha": "0eb6e8736ac0361341b3f29ebfb8e30e5b4dabc5",
   "allowlist_sha256": "83b8bf2418d229639abd5bd72bae468b6263549fa601bb763943864add830f07",
   "builder_version": 2,
   "tooling_dirty": false,
   "readme_omitted_links": [],
   "file_count": 118,
-  "total_bytes": 4344321,
+  "total_bytes": 4344670,
   "files": [
     {
       "path": "LICENSE",
@@ -16,7 +16,7 @@
     {
       "path": "README.md",
       "bytes": 1094,
-      "sha256": "daaf347d65e6d0636ed23b434d1cdef3a47db2c83a219d2a1cb699d4ae2a2420"
+      "sha256": "6146d84560fc59259bed1e83b5ff7233175232ea5e921cc1be23b6af7d435072"
     },
     {
       "path": "__init__.py",
@@ -250,8 +250,8 @@
     },
     {
       "path": "identity_anchor.py",
-      "bytes": 98116,
-      "sha256": "fa219aabe905cd93921738543e501cbd08409986d69c89c54b38d664e9848941"
+      "bytes": 98465,
+      "sha256": "759ccb2b6959a32e01ce404c4841b2a81f0ee94abc3dea3a43d18a9b75d2694d"
     },
     {
       "path": "inactive_record.py",
