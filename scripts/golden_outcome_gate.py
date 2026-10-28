@@ -16,12 +16,15 @@ OUTCOME_HEADS = {
         "cold-return ", "next-raise ", "cold-raise ", "aliases-0 ", "aliases-1 ",
         "next-aliases ", "payloads-after ", "payloads-cold ", "quarantine-payloads-after ",
     ),
-    # Compress: returned context, propagated failures and assembled messages.
-    "compress": ("return ", "raise ", "message ", "assemble raise "),
-    # Reconcile: returned cursor/result, propagated failures and caller input.
-    "reconcile": ("return ", "raise ", "input-after ", "aliases-after "),
-    # Assembly: output rows/identity, caller input/identity and persisted payloads.
-    "assembly": ("row ", "result aliases ", "input after ", "input aliases after ", "payload "),
+    # Compress: returned context, propagated failures, assembled messages, stored rows/DAG/lifecycle and cursor.
+    "compress": ("return ", "raise ", "message ", "assemble raise ",
+                 "attr _store=", "attr _dag=", "attr _lifecycle=", "attr _ingest_cursor="),
+    # Reconcile: returned cursor/result, propagated failures, caller input, stored rows/DAG/lifecycle and cursor.
+    "reconcile": ("return ", "raise ", "input-after ", "aliases-after ",
+                  "attr _store=", "attr _dag=", "attr _lifecycle=", "attr _ingest_cursor="),
+    # Assembly: output rows/identity, caller input/identity, persisted payloads and stored rows/DAG.
+    "assembly": ("row ", "result aliases ", "input after ", "input aliases after ", "payload ",
+                 "after _store ", "after _dag "),
 }
 ALLOWLIST = "tests/fixtures/golden_outcome_changes.json"
 

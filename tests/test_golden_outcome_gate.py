@@ -89,7 +89,26 @@ def test_every_outcome_head_is_gated_and_noise_is_ignored(family):
     for head in OUTCOME_HEADS[family]:
         assert compare(family, {"case": [head + "old"]}, {"case": [head + "new"]}, {}) == 1
     assert outcomes(family, ["sql changed", "attr changed", "attrs changed", "log changed",
-                             "before changed", "after changed", "helper return changed"]) == []
+                             "before changed", "after changed", "helper return changed",
+                             "attr _store_complete_cut=changed", "attr _compress_run=changed",
+                             "after _compress_run changed", "before _store changed"]) == []
+
+
+# Written from the harnesses, not from OUTCOME_HEADS: events that snapshot stored rows or final state.
+STORED_STATE_EVENTS = {
+    "ingest": ["state-after rows=1", "cold-state rows=1"],
+    "compress": ["attr _store=sha12/len=0/1", "attr _dag=[]", "attr _lifecycle=sha12/len=0/1",
+                 "attr _ingest_cursor=0"],
+    "reconcile": ["attr _store=sha12/len=0/1", "attr _dag=[]", "attr _lifecycle=sha12/len=0/1",
+                  "attr _ingest_cursor=0"],
+    "assembly": ["after _store sha256=0 chars=1", "after _dag sha256=0 chars=1"],
+}
+
+
+@pytest.mark.parametrize("family,event", [(family, event) for family, events in STORED_STATE_EVENTS.items()
+                                          for event in events])
+def test_stored_state_changes_fail_unlisted(family, event):
+    assert compare(family, {"case": [event]}, {"case": [event + " changed"]}, {}) == 1
 
 
 @pytest.mark.parametrize("target,text", [("ingest_trace.json", "[]"),
@@ -108,6 +127,8 @@ def test_usage_errors_exit_two(repo):
     assert run(root, "--base-ref", "missing-ref").returncode == 2
 
 
-def test_current_ingest_golden_compared_with_itself():
-    current = golden((ROOT / "tests/fixtures/ingest_trace.json").read_text(encoding="utf-8"))
-    assert compare("ingest", current, current, {}) == 0
+@pytest.mark.parametrize("family", OUTCOME_HEADS)
+def test_current_golden_compared_with_itself(family):
+    current = golden((ROOT / f"tests/fixtures/{family}_trace.json").read_text(encoding="utf-8"))
+    assert compare(family, current, current, {}) == 0
+    assert all(outcomes(family, events) for events in current.values())
