@@ -978,17 +978,31 @@ def test_voyage_token_preprocessing_is_inside_absolute_deadline(monkeypatch, lat
         assert transport.calls == []
 
 
-def test_voyage_does_not_dispatch_next_split_after_deadline(monkeypatch):
+def test_voyage_does_not_dispatch_next_split_after_deadline(monkeypatch, latency_check):
     monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
     monkeypatch.setattr(provider_mod, "count_tokens", lambda _text: 1)
     transport = FakeTransport(_voyage_success(1), _voyage_success(1))
+    now = [0.0]
+    if not latency_check:
+        # #791: a logical clock, so a slow runner cannot expire the deadline during the first split.
+        monkeypatch.setattr(time, "monotonic", lambda: now[0])
+        original_join = threading.Thread.join
+
+        def join(worker, timeout=None):
+            assert timeout is not None and 0 < timeout <= 0.02
+            return original_join(worker, timeout=10)  # scheduling guard, no elapsed assertion
+
+        monkeypatch.setattr(threading.Thread, "join", join)
     provider = VoyageProvider(
         "voyage-test", transport=transport, timeout=0.02, max_batch_items=1
     )
 
     batches = provider.embed_document_batches(["first", "second"])
     assert next(batches).indexes == (0,)
-    time.sleep(0.03)
+    if latency_check:
+        time.sleep(0.03)
+    else:
+        now[0] += 0.03
     with pytest.raises(VoyageError, match="deadline exceeded"):
         next(batches)
     assert len(transport.calls) == 1
