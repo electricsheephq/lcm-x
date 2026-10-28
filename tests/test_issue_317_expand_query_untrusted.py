@@ -7,7 +7,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-import hermes_lcm.tools as lcm_tools
+import hermes_lcm.expand_query_tools as expand_query_tools
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
@@ -36,7 +36,7 @@ def auxiliary(monkeypatch):
 
 
 def _synthesize(context_blocks=None, prompt="When is rollout?"):
-    return lcm_tools._synthesize_expansion_answer(
+    return expand_query_tools._synthesize_expansion_answer(
         prompt=prompt, context_blocks=context_blocks or [], model="any", max_tokens=200, timeout=10.0,
     )
 
@@ -138,7 +138,7 @@ def test_forged_closing_tag_cannot_end_fence(auxiliary):
 
 def test_reply_echoing_nonce_fails_closed(auxiliary):
     auxiliary(lambda kwargs: f"Echoed fence: {_nonce(kwargs)}")
-    with pytest.raises(lcm_tools._ExpansionSynthesisError):
+    with pytest.raises(expand_query_tools._ExpansionSynthesisError):
         _synthesize()
 
 
