@@ -337,6 +337,27 @@ def test_unbound_in_place_boundary_adopts_rewound_finalized_frontier(tmp_path, m
         engine_a.shutdown()
 
 
+def test_keep_all_reset_never_adopts_a_siblings_stale_low_finalize(tmp_path, monkeypatch):
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
+    engines, host = [_engine(tmp_path, new_session_retain_depth=-1) for _ in range(2)], []
+    try:
+        for engine, turns in zip(engines, (range(1, 9), range(9, 17))):  # B compacts past A's frontier
+            engine.on_session_start("S1", platform="cli", context_length=200_000)
+            _ingest_turns(engine, host, turns)
+            engine.compress(list(host), force=True)
+        engines[0].on_session_end("S1", host)  # finalizes A's stale-low in-process frontier
+        engines[0].on_session_reset()
+        engines[1].on_session_start(
+            "S1", boundary_reason="compression", old_session_id="S1", platform="cli", context_length=200_000
+        )
+        _ingest_turns(engines[1], host, range(17, 25))
+        engines[1].compress(list(host), force=True)
+        assert engines[1]._last_compression_status == "compacted"
+    finally:
+        for engine in engines:
+            engine.shutdown()
+
+
 def test_compression_rotation_after_resume_does_not_restore_the_pre_reset_frontier(tmp_path, monkeypatch):
     engine = _compact_then_new_then_resume(tmp_path, monkeypatch)
     try:

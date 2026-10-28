@@ -4359,6 +4359,8 @@ class LCMEngine(
 
     def _adopt_foreign_reset_frontier(self, state: Any, frontier: int | None = None) -> None:
         #752 R3: a still-bound sibling may have rewound this row after our bind.
+        if self._config.new_session_retain_depth < 0:
+            return  # #2048 shape 6: such a reset deletes nothing and never rewinds, so there is nothing to adopt
         if (state is not None and state.current_session_id == self._session_id
                 and state.last_reset_at is not None and state.last_reset_at != self._bound_reset_at):
             previous = int(self._last_compacted_store_id or 0)
