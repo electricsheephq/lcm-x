@@ -156,6 +156,12 @@ Rules:
 - A rank-1 disagreement blocks any rebind.
 - Concurrent writers serialize on the lock. The UNIQUE indexes are a backstop that sends the loser back to classify again (M5).
 - Today's decision evidence (the C1 data) is written inside the same transaction and gets no commit of its own. The classifier reads it back on the same connection. Under the fallback in step 2 it is staged in memory instead.
+- **At P1 the writers on the ingest path defer to the ingest transaction's owner** (`store.atomic`, store.py:1757):
+  - `backfill_observed_at_many` and the insert retry wrapper (sqlite_util.py:53-74) drop their own `with conn:`, which would commit or roll back the open transaction;
+  - `_host_uid_write` (store.py:1325) and `_host_uid_count` (host_uid.py:479) join the transaction instead of refusing it;
+  - `update_metadata_json` (store.py:1784), which opens its own `BEGIN IMMEDIATE`, is not called inside it;
+  - a SQLITE_BUSY_SNAPSHOT inside the transaction rolls it back, and the ingest retries once from classification;
+  - the tests that pin the own-transaction rule change with them (test_host_uid_shadow.py:1012 and the ingest-trace golden test).
 - Faulted ingests close here (#1815: three shapes that duplicate or skip the retry). A failed transaction leaves no partial evidence, and the retry classifies again.
 - Each ingest counts its lock-hold time, rows classified, rank-5 DP cells, bytes written, cost fallbacks and re-spacings. These are the §5 instruments.
 
