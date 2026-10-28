@@ -403,6 +403,32 @@ def delete_host_uid_bindings(conn: sqlite3.Connection, rows_sql: str, args: tupl
         conn.execute(f"DELETE FROM host_uid_bindings WHERE store_id IN ({rows_sql})", args)
 
 
+def delete_ingest_ledger_rows(conn: sqlite3.Connection, rows_sql: str, args: tuple = ()) -> None:
+    """Join the caller's forget/purge transaction; never create absent ledger tables.
+
+    Bindings are kept forever except explicit forget/purge of user data.
+    Marks stay: a lower actual maximum must never be mistaken for rollback.
+    """
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='occurrence_bindings'").fetchone():
+        return
+    lineages = {row[0] for row in conn.execute(
+        f"SELECT DISTINCT lineage FROM occurrence_bindings WHERE store_id IN ({rows_sql})", args)}
+    emission_match = (
+        "(json_valid(source_store_ids) AND EXISTS (SELECT 1 FROM json_each("
+        "CASE WHEN json_valid(source_store_ids) THEN source_store_ids ELSE '[]' END) "
+        f"WHERE CAST(value AS INTEGER) IN ({rows_sql}))) OR "
+        f"next_occ_id IN (SELECT occ_id FROM occurrence_bindings WHERE store_id IN ({rows_sql})) OR "
+        f"recovered_store_id IN ({rows_sql})"
+    )
+    lineages.update(row[0] for row in conn.execute(
+        f"SELECT DISTINCT lineage FROM ledger_emissions WHERE {emission_match}", args * 3))
+    conn.execute(f"DELETE FROM ledger_emissions WHERE {emission_match}", args * 3)
+    conn.execute("DELETE FROM stamp_observations WHERE occ_id IN "
+                 f"(SELECT occ_id FROM occurrence_bindings WHERE store_id IN ({rows_sql}))", args)
+    conn.execute(f"DELETE FROM occurrence_bindings WHERE store_id IN ({rows_sql})", args)
+    conn.executemany("DELETE FROM ingest_views WHERE lineage=?", ((lineage,) for lineage in lineages))
+
+
 def delete_chunk_inflight(conn: sqlite3.Connection, rows_sql: str, args: tuple = ()) -> None:
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='lcm_embedding_backfill_inflight'").fetchone():
         conn.execute(
@@ -837,7 +863,8 @@ class MessageStore:
 
     def delete_session_messages(self, session_id: str) -> int:
         """Delete all messages for a session. Returns count deleted."""
-        with self._write_lock:
+        with self.atomic(immediate=True):
+            delete_ingest_ledger_rows(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_message_relations(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_host_uid_bindings(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_chunk_inflight(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
@@ -845,7 +872,6 @@ class MessageStore:
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),
             )
-            self._commit()
             deleted = cur.rowcount if cur.rowcount is not None else 0
             return deleted
 
@@ -1316,15 +1342,28 @@ class MessageStore:
 
     def ensure_ingest_ledger(self) -> None:
         """Idempotently create the ledger and its per-store metadata in one transaction."""
+        deleted = {}
         with self._write_lock:
             if self._conn.in_transaction or self._transaction_owner.owns(self._conn):
                 raise sqlite3.OperationalError("ingest ledger setup requires its own transaction")
             with self.atomic(immediate=True):
-                self._ensure_ingest_ledger_schema()
+                if not self._ingest_ledger_tables_exist():
+                    self._ensure_ingest_ledger_schema()
+                if not self._conn.execute("SELECT 1 FROM ledger_meta WHERE key='digest_salt'").fetchone():
+                    counts = {table: self._conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                              for table in _INGEST_LEDGER_TABLES if table != "ledger_meta"}
+                    if any(counts.values()):
+                        for table in counts:
+                            self._conn.execute(f"DELETE FROM {table}")
+                        self._conn.execute("INSERT INTO ledger_meta(key,value) VALUES ('salt_epoch',1) "
+                                           "ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1")
+                        deleted = counts
                 self._conn.executemany("INSERT OR IGNORE INTO ledger_meta(key, value) VALUES (?, ?)", (
                     ("digest_salt", secrets.token_bytes(32)), ("ledger_format", 1), ("view_seq", 0),
                 ))
             self._ingest_ledger_schema_ready = True
+            if deleted:
+                logger.warning("ingest ledger salt_missing: cleared ledger rows %s", deleted)
 
     def ingest_ledger_salt(self) -> bytes | None:
         """Read the store salt without creating a pre-ledger store's schema."""
