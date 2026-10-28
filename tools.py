@@ -191,8 +191,7 @@ def _is_inside_named_profile(path: Path, home: Path) -> bool:
         profiles.stat()
     except FileNotFoundError:
         return False
-    # A dangling profile link names no directory, so nothing can sit inside it.
-    profile_dirs = (profiles, *(entry for entry in profiles.iterdir() if entry.exists()))
+    profile_dirs = (profiles, *profiles.iterdir())
     for parent in (path, *path.parents):
         if parent.is_relative_to(home):
             if any(os.path.samefile(parent, profile) for profile in profile_dirs):
