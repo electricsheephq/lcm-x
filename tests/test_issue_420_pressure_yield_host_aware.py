@@ -14,7 +14,7 @@ def _stub_summarizer(chunk, focus_topic=None, **_kwargs):
 
 
 def _make_engine(tmp_path, monkeypatch):
-    config = LCMConfig()
+    config = LCMConfig(fresh_tail_max_tokens=0)
     config.database_path = str(tmp_path / "lcm_pressure_yield.db")
     config.fresh_tail_count = 128
     engine = LCMEngine(config=config)
@@ -71,6 +71,7 @@ def _assert_host_shaped_sequence(engine, messages, observed):
     preflight_streaks = []
     for _round in range(3):
         # The host next attempts compression after the hold window expires.
+        engine._clear_persisted_no_progress_hold()
         engine._no_progress_hold = None
         messages = engine.compress(list(messages), current_tokens=observed)
         compress_streaks.append(engine._pressure_yield_blocked_streak)
@@ -132,6 +133,7 @@ def test_replay_diff_preflight_counts_host_pressure(tmp_path, monkeypatch):
     try:
         engine.compress(list(messages), current_tokens=OVER)
         assert engine._pressure_yield_blocked_streak == 1
+        engine._clear_persisted_no_progress_hold()
         engine._no_progress_hold = None
         original_ingest = engine._ingest_messages
 
@@ -147,6 +149,15 @@ def test_replay_diff_preflight_counts_host_pressure(tmp_path, monkeypatch):
         # Observation uses host pressure; the request gate uses replay tokens.
         assert engine.should_compress_preflight(list(messages)) is False
         assert engine._pressure_yield_blocked_streak == 2
+
+        assert engine.should_compress_preflight(list(messages)) is False
+        assert engine._pressure_yield_blocked_streak == 3
+        engine._clear_persisted_no_progress_hold()
+        engine._no_progress_hold = None
+        result = engine.compress(list(messages), current_tokens=OVER)
+        assert engine._last_compression_status == "compacted"
+        assert len(result) < len(messages)
+        assert engine._pressure_yield_blocked_streak == 0
     finally:
         engine.shutdown()
 
@@ -159,12 +170,32 @@ def test_preflight_returns_unchanged_under_host_pressure(tmp_path, monkeypatch):
         hold = engine._no_progress_hold
         assert hold is not None
         for held in (False, True):
-            engine._no_progress_hold = hold if held else None
+            if held:
+                engine._start_no_progress_hold("no_progress")
+            else:
+                engine._clear_persisted_no_progress_hold()
+                engine._no_progress_hold = None
             engine.update_from_response({"prompt_tokens": 0})
             without_host_pressure = engine.should_compress_preflight(list(messages))
             engine.update_from_response({"prompt_tokens": OVER})
             with_host_pressure = engine.should_compress_preflight(list(messages))
 
             assert with_host_pressure is without_host_pressure is False
+    finally:
+        engine.shutdown()
+
+
+def test_bare_compress_observes_estimate_only(tmp_path, monkeypatch):
+    """#428 item 1 limit: compaction.py:1791-1799 uses the estimate without current_tokens."""
+    engine = _make_engine(tmp_path, monkeypatch)
+    messages = _messages(80)
+    try:
+        assert count_messages_tokens(messages) < engine.threshold_tokens < OVER
+        engine.compress(list(messages), current_tokens=OVER)
+        assert engine._pressure_yield_blocked_streak == 1
+        engine.update_from_response({"prompt_tokens": OVER})
+
+        engine.compress(list(messages))
+        assert engine._pressure_yield_blocked_streak == 0
     finally:
         engine.shutdown()
