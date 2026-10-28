@@ -609,6 +609,94 @@ def test_2007_result_of_a_hidden_call_keeps_store_order(tmp_path, summaries, lin
         engine.shutdown()
 
 
+def _call(*names, content=""):
+    return {"role": "assistant", "content": content, "tool_calls": [
+        {"id": name, "type": "function", "function": {"name": "read_file", "arguments": "{}"}} for name in names]}
+
+
+def _result(name, text):
+    return {"role": "tool", "tool_call_id": name, "content": text + PAD}
+
+
+def test_2007_unmatched_tool_row_between_siblings(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    user = {"role": "user", "content": "user" + PAD, "timestamp": 100.0}
+    call, result_a, result_b = _call("call_A", "call_B"), _result("call_A", "result A"), _result("call_B", "result B")
+    stray = {"role": "tool", "content": "tool row without a call id" + PAD}
+    try:  # stored u1 call2 A3 stray4 B5; the host puts B first and the stray row between B and A
+        assert _anchored_ids(engine, [user, call, result_a, stray, result_b],
+                             [user, call, result_b, stray, result_a]) == [1, 2, 3, 5, 4]
+    finally:
+        engine.shutdown()
+
+
+def _walk_order(engine, stored, chunk, mapping, claims):
+    engine.ingest(stored)
+    full = {id(m): s for m, s in mapping}
+    out = engine._store_complete_input(chunk, {id(m): c for m, c in claims}, full, chunk, chunk, 0, [],
+                                       100_000, scanned=(_rows(engine), False))
+    assert out
+    return [m for m, _ids in out]
+
+
+@pytest.mark.parametrize("shape", ["G", "H"])
+def test_2007_result_never_precedes_an_id_less_call(tmp_path, summaries, lines, shape):
+    # A regression guard: a call row without a store id (position 0) stays ahead of its results.
+    engine = _engine(tmp_path, False)
+    try:
+        if shape == "G":  # out [U2, C(no id, c), X3, R1->c]
+            result, user, later = _result("c", "result c"), {"role": "user", "content": "U" + PAD}, \
+                {"role": "user", "content": "X" + PAD}
+            call = _call("c", content="unstored call")
+            order = _walk_order(engine, [result, user, later], [user, call, later, result],
+                                [(user, 2), (later, 3)], [(result, [1])])
+            pairs = [(call, result)]
+        else:  # out [C1(a), Ra3, C(no id, b), Rb2->b]
+            call_a, result_b, result_a = _call("a"), _result("b", "result b"), _result("a", "result a")
+            call_b = _call("b", content="unstored call")
+            order = _walk_order(engine, [call_a, result_b, result_a], [call_a, result_a, call_b, result_b],
+                                [(call_a, 1), (result_a, 3)], [(result_b, [2])])
+            pairs = [(call_a, result_a), (call_b, result_b)]
+        position = {id(m): i for i, m in enumerate(order)}
+        assert all(position[id(c)] < position[id(r)] for c, r in pairs), [m["content"][:12] for m in order]
+    finally:
+        engine.shutdown()
+
+
+def test_2007_repeated_call_id_answers_the_latest_call(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    first = {"role": "user", "content": "first" + PAD, "timestamp": 100.0}
+    second = {"role": "user", "content": "second" + PAD, "timestamp": 200.0}
+    call_1, result_1 = _call("call_0", content="first call"), _result("call_0", "first result")
+    call_2, result_2 = _call("call_0", content="second call"), _result("call_0", "second result")
+    try:  # the host moves the first turn's tool group after the second turn's
+        assert _anchored_ids(engine, [first, call_1, result_1, second, call_2, result_2],
+                             [first, second, call_2, result_2, call_1, result_1]) == [1, 2, 3, 4, 5, 6]
+    finally:
+        engine.shutdown()
+
+
+def test_2007_in_order_tool_shapes_returned_as_built(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    user = {"role": "user", "content": "user" + PAD, "timestamp": 100.0}
+    hidden = {"role": "user", "content": "hidden" + PAD, "timestamp": 150.0}
+    call, result_a, result_b = _call("call_A", "call_B"), _result("call_A", "result A"), _result("call_B", "result B")
+    stray = {"role": "tool", "content": "tool row without a call id" + PAD}
+    again, result_c = _call("call_A", content="again"), _result("call_A", "result again")
+    stored = [user, hidden, call, result_a, result_b, stray, again, result_c]
+    view = [m for m in stored if m is not hidden]
+    try:
+        engine.ingest(stored)
+        full_map = engine._get_store_id_map_for_messages(view)
+        engine._compress_run.store_ids_by_message_id = full_map
+        out = engine._identity_anchor_summary_input(view, full_map, view, view, budget=4000)
+        assert _leaf_ids(engine, out) == list(range(1, len(stored) + 1))
+        assert [m for m, _ids in out if any(m is v for v in view)] == view
+        assert [m["content"] for m, _ids in out] == [m["content"] for m in stored]
+    finally:
+        engine.shutdown()
+
+
 def test_t11_prepared_escape_promotes(tmp_path, summaries, lines, monkeypatch):
     engine = _engine(tmp_path, False, fresh_tail_count=1, leaf_chunk_tokens=1000,
                      context_threshold=0.75, background_leaf_prep_enabled=True)
