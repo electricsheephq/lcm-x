@@ -44,6 +44,7 @@ escalation: Any = importlib.import_module("hermes_lcm.escalation")
 dag: Any = importlib.import_module("hermes_lcm.dag")
 tokens: Any = importlib.import_module("hermes_lcm.tokens")
 leaf_prep: Any = importlib.import_module("hermes_lcm.leaf_prep")
+host_uid_emit: Any = importlib.import_module("hermes_lcm.host_uid_emit")
 harness: Any = importlib.import_module("tests.harness")
 GOLDEN = Path(__file__).parents[1] / "fixtures" / "compress_trace.json"
 Trace = list[str]
@@ -988,6 +989,9 @@ def observe(case: Scenario, root: Path) -> Trace:
         pin(patch)
         install_clock(patch, clock)
         patch.setattr(leaf_prep, "_LEAF_PREP", leaf_prep._LeafPrep())
+        # The goldens are traces of a host without message uids; a uid-capable host (agent.message_metadata)
+        # adds _absorbed_message_uids to merged rows (#2027 item 45). Pin the probe so every host replays them.
+        patch.setattr(host_uid_emit, "_host_uid_capability", False)
         patch.setenv("HERMES_HOME", str(root / "home"))
         if case.setup == "no-identity":
             patch.setenv("LCM_IDENTITY_ANCHOR", "false")
