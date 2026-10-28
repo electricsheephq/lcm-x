@@ -4,6 +4,8 @@
 
 LCM-X keeps a lossless record of everything an agent sees and does. Today it runs the context window from that record and lets the agent recall the exact source. It is becoming the layer that derives active memory from the record, puts the right evidence in front of the model unasked, and serves any harness.
 
+**The objective:** everything the agent has seen is kept, used correctly when it matters, at shipped defaults, in any harness, without the user noticing.
+
 It is built on Lossless Context Management (the [LCM paper](https://papers.voltropy.com/LCM) by Ehrlich & Blackman, Voltropy PBC, 2026):
 - every message is kept in a durable store;
 - older turns are folded into a summary DAG;
@@ -14,7 +16,10 @@ This page states what we are building and how we will know it works. The [roadma
 ## The promise
 
 1. **Nothing is lost by default.**
-   - Raw rows are stored once and kept, and every summary and derived memory links back to the rows it came from.
+   - Every message, tool result and subagent's work the agent sees is kept verbatim and never deleted. Raw rows are stored once, and every summary and derived memory links back to the rows it came from.
+   - The promise covers everything the agent sees and does: subagent sessions ([#1931](https://github.com/electricsheephq/lcm-x/issues/1931)), retries, crashes and restarts ([#1837](https://github.com/electricsheephq/lcm-x/issues/1837), [#1838](https://github.com/electricsheephq/lcm-x/issues/1838), [#1451](https://github.com/electricsheephq/lcm-x/issues/1451)), and every harness LCM-X serves (from v0.33.0).
+   - Every release is gated on 0 lost rows. A known exception is a bug against this promise, not a limit of it: each one is tracked and listed in that release's Known issues.
+   - **Nothing lost from view** is the second level: what is kept also stays within the model's reach. Rows dropped from the model's working set ([#2004](https://github.com/electricsheephq/lcm-x/issues/2004)) and compaction that never engages ([#1998](https://github.com/electricsheephq/lcm-x/issues/1998)) are bugs against it.
    - The one rewrite is a cleanup (on by default from v0.27.0) that moves a large tool output into a file and leaves a reference the agent can expand.
    - Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`).
 2. **The right evidence at the right moment.**
@@ -82,6 +87,10 @@ This page states what we are building and how we will know it works. The [roadma
   - We publish prompts, question ids, configurations and harness commits.
   - Each table carries a same-reader full-context baseline where one fits.
   - Agentic rows (the reader drives LCM-X's tools) and single-retrieval rows are reported separately.
+- **The objective scorecard.** From v0.29.1, each release reports one row against the objective, with six cells: kept in store, kept in view, used correctly, at shipped defaults, any harness, unnoticed.
+   - Each cell is read from a gate that already exists, links its receipt and states its claim class. A cell with no gate result stays in the table, empty.
+   - Kept in store: the lossless gates (0 lost and 0 duplicate rows). Used correctly: facts kept and the never-below-Hermes-built-in floor, per fact class ([#1595](https://github.com/electricsheephq/lcm-x/issues/1595)). At shipped defaults: the board targets, run with the default configuration ([#2018](https://github.com/electricsheephq/lcm-x/issues/2018)). Any harness: the cross-harness parity audit (from v0.33.0). Unnoticed: compaction wait and tokens per turn. Kept in view has no gate yet, so its cell stays empty until one exists.
+- **Boards are targets, not gates.** Our own benchmark ([#1964](https://github.com/electricsheephq/lcm-x/issues/1964)) becomes a headline measure only after it validly scores LCM-X against Hermes built-in at shipped defaults.
 - **Shared-reader boards.** We enter boards that run every system with the same models. Until local semantic recall becomes the default (v0.29.0), we enter the configuration we ship to the managed fleet, labelled as such; after that, the shipped default. We report where we place.
 - **Compaction parity.** Facts kept, instruction continuity and compaction wall time against other compaction systems, on the same material, three seeds.
 - **Lifecycle reliability.** Every release candidate runs a real-host gauntlet (install, upgrade, rollback, restart, rotation, long sessions). Only a candidate that passes the [release spec](bench/specs/RELEASE-READINESS-V1.md) becomes GA. v0.27.0 shipped with two disclosed exceptions; #1305 proposes a narrow spec clause for those two cases only.

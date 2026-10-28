@@ -8,7 +8,8 @@
 
 **Lossless context memory for [Hermes Agent](https://github.com/NousResearch/hermes-agent).**
 
-> Bounded context, unbounded memory. Nothing is ever lost.
+> Bounded context, unbounded memory. [Nothing is ever lost.](VISION.md#the-promise)
+> Known exceptions are bugs against that promise, listed in the latest release's [Known issues](https://github.com/electricsheephq/lcm-x/releases/latest).
 
 <!-- results-highlights:start -->
 <a id="benchmark-highlights"></a>
