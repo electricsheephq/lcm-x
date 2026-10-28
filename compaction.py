@@ -712,8 +712,7 @@ class CompactionMixin:
         with self._bypass_compression_binding() as bypassed:
             if bypassed:
                 # #1931: a delegated child's rows are stored before the host's compaction rewrites its view.
-                self._store_delegate_child_turn(self._bypass_lcm_session_id(), messages, require_agent=True)
-                return self._compress_bypassed(messages, current_tokens, focus_topic, force)
+                return self._compress_delegate_child_bypassed(messages, current_tokens, focus_topic, force)
         self._last_compress_leaves = None
         self._last_hidden_backlog = None
         self._compress_escaped = []

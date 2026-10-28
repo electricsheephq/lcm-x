@@ -5137,6 +5137,7 @@ class LCMEngine(
                         or preserve_ambiguous_no_frame_old_session
                     ),
                 )
+                self._handoff_delegate_child_compression(old_session_id, session_id)
                 logger.info(
                     "LCM auxiliary session %s compressed to %s — keeping boundary stateless",
                     old_session_id,
@@ -5149,6 +5150,7 @@ class LCMEngine(
                     session_id,
                     new_platform=str(kwargs.get("platform") or ""),
                 )
+                self._handoff_delegate_child_compression(old_session_id, session_id)
                 self._clear_thread_context_stateless()
                 if previous_session_id and previous_session_id != session_id:
                     self._finalize_pending_reset_boundary(previous_session_id)
@@ -5177,6 +5179,7 @@ class LCMEngine(
             return
 
         if self._is_live_auxiliary_child_session(session_id, previous_session_id, kwargs):
+            self._remember_delegate_child_auxiliary(session_id)
             explicit_parent_id = str(kwargs.get("parent_session_id") or "")
             if explicit_parent_id:  # #1931: a lineage source if this child turns out to be a delegate
                 with self._auxiliary_session_lock:
@@ -5335,6 +5338,9 @@ class LCMEngine(
                 if current_thread_session_id == session_id:
                     self._clear_thread_context_stateless(session_id)
             return
+        if session_id != self._session_id and self._stored_delegate_child_link(session_id):
+            self._store_delegate_child_turn(session_id, messages)
+            return  # a persisted child link survives hook expiry and engine replacement
         current_session_bypasses = session_id == self._session_id and self._bypasses_lcm_context_management()
         ended_session_directly_bypasses = self._ended_session_directly_bypasses_lcm(session_id)
         direct_bypass_normal_conversation_id = self._lcm_session_last_normal_conversation_id.get(session_id)

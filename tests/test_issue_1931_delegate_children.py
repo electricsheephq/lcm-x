@@ -9,6 +9,8 @@ of the parent may change. AUXILIARY sessions keep storing nothing.
 import importlib
 import json
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -38,6 +40,14 @@ class Agent:
 
     def end(self, engine, history):
         engine.on_session_end(self.session_id, list(history))
+
+    def compress(self, engine, history):
+        return engine.compress(history, current_tokens=1_000_000, force=True)
+
+    def rotate(self, engine, session_id):
+        old = self.session_id
+        self.session_id = session_id
+        engine.on_session_start(session_id, platform="subagent", boundary_reason="compression", old_session_id=old)
 
 
 def child_view(n_final=0):
@@ -174,9 +184,9 @@ def test_unmatched_child_view_is_a_visible_fallback(host, caplog):
     before = module("aux_session").delegate_child_store_counts().get("fallbacks", 0)
     with caplog.at_level("WARNING"):
         child.turn(ctx, [{"role": "user", "content": "an unrelated history"}], parent)
-    assert len(child_rows(parent)) == 3
+    assert [row["content"] for row in child_rows(parent)] == [row["content"] for row in child_view()] + ["an unrelated history"]
     assert module("aux_session").delegate_child_store_counts()["fallbacks"] == before + 1
-    assert any("delegated child child" in r.getMessage() and "rows not stored" in r.getMessage()
+    assert any("delegated child child" in r.getMessage() and "counted identities" in r.getMessage()
                for r in caplog.records)
 
 
@@ -256,3 +266,299 @@ def test_recall_scopes_for_child_rows(host):
     parent._store.delete_session_messages("grandchild")
     assert sorted(r[0] for r in lineage_rows(parent)) == ["child", "sibling-child"]
     assert sessions(session_scope="session", session_id="child") == {"child": "subagent of parent"}
+
+
+@pytest.mark.parametrize("pattern_kind", ["IGNORE", "STATELESS"])
+@pytest.mark.parametrize("target", ["bound-parent", "recorded-parent", "host-parent", "child"])
+def test_platform_patterns_exclude_delegate_storage(host, tmp_path, monkeypatch, pattern_kind, target):
+    monkeypatch.setenv(f"LCM_{pattern_kind}_SESSION_PATTERNS", "subagent" if target == "child" else "cron:*")
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cron", context_length=200_000)
+    if target == "recorded-parent":
+        parent.on_session_start("foreground", platform="cli", context_length=200_000)
+        ctx.hooks["subagent_start"][0](child_session_id="child", parent_session_id="parent")
+        parent._store_delegate_child_turn("child", child_view(), platform="subagent")
+    elif target == "host-parent":
+        with sqlite3.connect(tmp_path / "state.db") as conn:
+            conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, parent_session_id TEXT)")
+            conn.execute("INSERT INTO sessions VALUES ('parent', 'cron', NULL)")
+        other = clone(ctx)
+        child = Agent("child", **DELEGATE)
+        child.start(other)
+        child.turn(ctx, child_view(), other)
+    else:
+        Agent("child", **DELEGATE).turn(ctx, child_view(), parent)
+    assert child_rows(parent) == []
+    assert lineage_rows(parent) == []
+
+
+@pytest.mark.parametrize("markers", [
+    {**DELEGATE, "_memory_write_origin": "background_review"},
+    {**DELEGATE, "enabled_toolsets": ["memory", "skills"]},
+], ids=["background-review", "memory-only"])
+@pytest.mark.parametrize("seen_at", ["start", "turn"])
+def test_auxiliary_classification_survives_frame_free_end(host, tmp_path, markers, seen_at):
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    ctx.hooks["subagent_start"][0](child_session_id="child", parent_session_id="parent")
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, parent_session_id TEXT)")
+        conn.execute("INSERT INTO sessions VALUES ('child', 'subagent', 'parent')")
+    aux = Agent("child", **markers)
+    if seen_at == "start":
+        aux.start(parent)
+    else:
+        aux.turn(ctx, child_view(), parent)
+    parent.on_session_end("child", child_view(1))  # no agent frame; both delegate signals remain
+    assert child_rows(parent) == []
+    assert lineage_rows(parent) == []
+
+
+def test_lineage_write_retried_on_identical_view(host, monkeypatch):
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    original = parent._store.record_session_lineage
+    attempts = []
+
+    def fail_once(*args, **kwargs):
+        attempts.append(args)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("synthetic link failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(parent._store, "record_session_lineage", fail_once)
+    child = Agent("child", **DELEGATE)
+    child.turn(ctx, child_view(), parent)
+    assert len(child_rows(parent)) == 3 and lineage_rows(parent) == []
+    child.turn(ctx, child_view(), parent)
+    assert len(child_rows(parent)) == 3
+    assert lineage_rows(parent) == [("child", "parent", "parent_frame")]
+    assert len(attempts) == 2
+
+
+def test_stored_lineage_survives_stop_and_frame_free_end(host):
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    ctx.hooks["subagent_start"][0](child_session_id="child", parent_session_id="parent")
+    Agent("child", parent="").turn(ctx, child_view())  # resident-conflict store point
+    ctx.hooks["subagent_stop"][0](child_session_id="child")
+    parent.on_session_end("child", child_view(1))
+    assert [row["content"] for row in child_rows(parent)] == [row["content"] for row in child_view(1)]
+    assert lineage_rows(parent) == [("child", "parent", "subagent_start")]
+
+
+def test_delegate_without_parent_warns_and_counts(host, caplog):
+    load, clone = host
+    ctx, module = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    before = module("aux_session").delegate_child_store_counts().get("fallbacks", 0)
+    with caplog.at_level("WARNING"):
+        Agent("child", parent="", **DELEGATE).turn(ctx, child_view())
+    assert child_rows(parent) == [] and lineage_rows(parent) == []
+    assert module("aux_session").delegate_child_store_counts()["fallbacks"] == before + 1
+    assert any("delegated child child" in record.message and "parent identity" in record.message
+               for record in caplog.records)
+
+
+def test_overlapping_store_points_across_clones_append_once(host, monkeypatch):
+    load, clone = host
+    ctx, module = load()
+    first, second = clone(ctx), clone(ctx)
+    for engine in (first, second):
+        engine.on_session_start("parent", platform="cli", context_length=200_000)
+    ctx.hooks["subagent_start"][0](child_session_id="child", parent_session_id="parent")
+    entered, release = threading.Event(), threading.Event()
+    aux = module("aux_session")
+    lock = getattr(aux, "_DELEGATE_STORE_LOCK", threading.RLock())
+
+    class ObservedLock:
+        def __enter__(self):
+            if entered.is_set():
+                release.set()  # contender is at the lock while the first append is held
+            lock.acquire()
+
+        def __exit__(self, *args):
+            lock.release()
+
+    monkeypatch.setattr(aux, "_DELEGATE_STORE_LOCK", ObservedLock(), raising=False)
+    append_first = first._append_off_current_session_end_suffix
+    append_second = second._append_off_current_session_end_suffix
+
+    def hold_first(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return append_first(*args, **kwargs)
+
+    def racing_second(*args, **kwargs):
+        release.set()  # without the fix, both suffixes have already been matched
+        return append_second(*args, **kwargs)
+
+    monkeypatch.setattr(first, "_append_off_current_session_end_suffix", hold_first)
+    monkeypatch.setattr(second, "_append_off_current_session_end_suffix", racing_second)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        one = pool.submit(first._store_delegate_child_turn, "child", child_view())
+        assert entered.wait(5)
+        two = pool.submit(second._store_delegate_child_turn, "child", child_view())
+        assert one.result(timeout=10) + two.result(timeout=10) == 3
+    assert [row["content"] for row in child_rows(first)] == [row["content"] for row in child_view()]
+
+
+def test_session_lineage_is_known_to_schema_stamp_doctor(host):
+    load, clone = host
+    ctx, module = load()
+    engine = clone(ctx)
+    bootstrap = module("db_bootstrap")
+    # A complete core schema keeps this check about the one additive table.
+    with engine._store.atomic():
+        bootstrap.set_schema_version(engine._store.connection, bootstrap.SCHEMA_VERSION + 1)
+    before = bootstrap.classify_version_mismatch(engine._store.connection)
+    assert before == bootstrap.VERSION_MISMATCH_INTERIM_STAMP
+    engine._store.record_session_lineage("child", "parent", source="subagent_start")
+    assert bootstrap.classify_version_mismatch(engine._store.connection) == before
+
+
+def test_grep_schema_current_names_delegated_descendants(host):
+    load, _ = host
+    _, module = load()
+    schema = module("schemas").LCM_GREP
+    description = schema["parameters"]["properties"]["session_scope"]["description"]
+    assert "active session and its delegated descendants" in description
+
+
+@pytest.mark.parametrize("route", ["shared", "clone"])
+@pytest.mark.parametrize("rotate", [False, True], ids=["same-id", "rotated-id"])
+def test_compress_bypass_stores_before_rewrite_and_resumes(host, monkeypatch, route, rotate):
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    before = parent_state(parent)
+    engine = parent if route == "shared" else clone(ctx)
+    child = Agent("child", **DELEGATE)
+    child.start(engine)
+    view = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i} " + "payload " * 400}
+            for i in range(12)]
+    monkeypatch.setattr(engine, "_get_host_fallback_compressor", lambda: None)
+    monkeypatch.setattr(engine, "_bypass_compaction_target_tokens", lambda **kwargs: 64)
+    compacted = child.compress(engine, view)  # actual bypass compressor, in the child's frame
+    assert [row["content"] for row in child_rows(engine)] == [row["content"] for row in view]
+    assert compacted != view and len(compacted) < 3
+    if rotate:
+        child.rotate(engine, "continued")
+    for i in range(2):
+        compacted = [*compacted, {"role": "assistant", "content": f"after compression {i}"}]
+        child.turn(ctx, compacted, engine)
+        child.turn(ctx, compacted, engine)
+    child.end(engine, compacted)
+    continued = child_rows(engine, "continued") if rotate else []
+    assert [row["content"] for row in [*child_rows(engine), *continued]] == (
+        [row["content"] for row in view] + ["after compression 0", "after compression 1"])
+    if rotate:
+        assert ("continued", "child", "compression") in lineage_rows(engine)
+        assert set(engine._store.session_lineage_descendants("parent")) == {"child", "continued"}
+        assert [row["content"] for row in continued] == ["after compression 0", "after compression 1"]
+    assert parent_state(parent) == before
+
+
+@pytest.mark.parametrize("kept", [1, 2])
+def test_short_stored_tail_recovers_later_turns(host, kept):
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    original = child_view(3)
+    child.turn(ctx, original, parent)
+    rewritten = [{"role": "user", "content": "rewritten head"}, *original[-kept:]]
+    for i in range(2):
+        rewritten = [*rewritten, {"role": "assistant", "content": f"later {i}"}]
+        child.turn(ctx, rewritten, parent)
+        child.turn(ctx, rewritten, parent)
+    assert [row["content"] for row in child_rows(parent)] == (
+        [row["content"] for row in original] + ["later 0", "later 1"])
+
+
+@pytest.mark.parametrize("shape", ["repeated", "rewritten"])
+def test_unanchored_multiset_preserves_new_occurrences(host, shape, caplog):
+    load, clone = host
+    ctx, module = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    original = [{"role": "user", "content": "old head"},
+                {"role": "assistant", "content": "repeat"},
+                {"role": "user", "content": "repeat"},
+                {"role": "assistant", "content": "repeat"}]
+    child.turn(ctx, original, parent)
+    if shape == "repeated":
+        view = original[-3:] * 2
+        unseen = original[-3:]
+    else:
+        view = [{**row, "content": "rewritten " + row["content"]} for row in original]
+        unseen = view[:]
+    view = [*view, {"role": "user", "content": "new turn"}]
+    before = module("aux_session").delegate_child_store_counts().get("fallbacks", 0)
+    with caplog.at_level("WARNING"):
+        child.turn(ctx, view, parent)
+        child.turn(ctx, view, parent)
+    expected = [*original, *unseen, view[-1]]
+    assert [(row["role"], row["content"]) for row in child_rows(parent)] == [
+        (row["role"], row["content"]) for row in expected]
+    assert module("aux_session").delegate_child_store_counts()["fallbacks"] > before
+    assert any("counted identities" in record.message for record in caplog.records)
+
+
+def test_restart_counts_compression_predecessors(host):
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    original = child_view(2)
+    child.turn(ctx, original, parent)
+    child.rotate(parent, "continued")
+    ctx2, _ = load()  # fresh module and engines: no in-memory boundary or handoff map
+    resumed = clone(ctx2)
+    resumed.on_session_start("parent", platform="cli", context_length=200_000)
+    view = child_view() + [{"role": "assistant", "content": "after restart"}]
+    for _ in range(2):
+        child.turn(ctx2, view, resumed)
+    view.append({"role": "user", "content": "next turn"})
+    child.turn(ctx2, view, resumed)
+    assert [row["content"] for row in child_rows(resumed)] == [row["content"] for row in original]
+    assert [row["content"] for row in child_rows(resumed, "continued")] == ["after restart", "next turn"]
+    assert ("continued", "child", "compression") in lineage_rows(resumed)
+
+
+def test_store_during_compression_does_not_publish_stale_boundary(host, monkeypatch):
+    load, clone = host
+    ctx, _ = load()
+    parent, other = clone(ctx), clone(ctx)
+    for engine in (parent, other):
+        engine.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    child.start(parent)
+    original = child_view(3)
+    concurrent = {"role": "user", "content": "concurrently stored turn"}
+    compacted = [{"role": "user", "content": "compacted head"}, original[-1]]
+
+    def compress_with_store(*args):
+        assert other._store_delegate_child_turn("child", [*original, concurrent], platform="subagent") == 1
+        return compacted
+
+    monkeypatch.setattr(parent, "_compress_bypassed", compress_with_store)
+    result = child.compress(parent, original)
+    later = {"role": "assistant", "content": "later turn"}
+    child.turn(ctx, [*result, concurrent, later], parent)
+    child.turn(ctx, [*result, concurrent, later], parent)
+    assert [row["content"] for row in child_rows(parent)] == [
+        row["content"] for row in [*original, concurrent, later]]

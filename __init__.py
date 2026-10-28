@@ -814,7 +814,7 @@ def register(ctx):
                 # #1931: a delegated child the engine bypassed is stored under its own id; never raises.
                 store_child = getattr(active_engine, "_store_delegate_child_turn", None)
                 if session_id and callable(store_child):
-                    store_child(session_id, history, **flags)
+                    store_child(session_id, history, platform=platform, **flags)
 
             def _bind_and_ingest(active_engine):
                 # The host-supplied engine or genuinely cold plugin prototype

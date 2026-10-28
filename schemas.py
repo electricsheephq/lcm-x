@@ -4,7 +4,7 @@ LCM_GREP = {
     "name": "lcm_grep",
     "description": (
         "Search the plugin-local LCM database for past conversation content using full-text, semantic, or hybrid retrieval. "
-        "Default scope is the active session and returns both raw messages and summary nodes across all depths. "
+        "Default scope includes the active session and its delegated descendants, with raw messages and active-session summary nodes across all depths. "
         "Broader scopes ('all' or 'session') must be requested explicitly and exist for bounded archive recovery "
         "over rows already present in lcm.db, including externally backfilled rows that may carry source strings "
         "such as openclaw-lcm:* . In broader scopes only raw-message hits are returned; cross-session summary "
@@ -76,7 +76,7 @@ LCM_GREP = {
                 "enum": ["current", "all", "session"],
                 "description": (
                     "Scope of the search across the plugin-local LCM database. "
-                    "'current' (default) restricts to the active session and preserves historical behavior. "
+                    "'current' (default) includes the active session and its delegated descendants. "
                     "'all' searches every session in the local LCM database. "
                     "'session' restricts to the session_id supplied via the session_id parameter. "
                     "Cross-session search returns snippets and message store_ids; cross-session summary node expansion is deferred. "
