@@ -1,0 +1,9 @@
+plugin.yaml
+LICENSE
+skills/hermes-lcm/SKILL.md
+skills/hermes-lcm/references/architecture.md
+skills/hermes-lcm/references/configuration.md
+skills/hermes-lcm/references/diagnostics.md
+skills/hermes-lcm/references/recall-policy.md
+skills/hermes-lcm/references/recall-tools.md
+skills/hermes-lcm/references/session-lifecycle.md

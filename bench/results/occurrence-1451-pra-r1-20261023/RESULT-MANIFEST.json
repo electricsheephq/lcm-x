@@ -1,0 +1,104 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "occurrence-1451-pra-r1-20261023-public-summary",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "lcmx-occurrence-pr-a-r1-public-summary",
+  "claim_class": "advisory",
+  "created": "2026-10-23T05:12:04Z",
+  "settled": "2026-10-23T05:12:05Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "f1df74ca5a051e33fca221fee06a5ba9c12b4f25",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "stream_compare.py supplied-BASE r1; stream_compare.py r0 r1; paired cost; faults and compatibility",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "occurrence-matrix-r1",
+      "metric": "new_or_increased_loss_cells",
+      "value": 0.0,
+      "n": 1296,
+      "baseline_run": "supplied-base-5df5a3c",
+      "source": "SUMMARY.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "SUMMARY.json",
+      "role": "headline",
+      "sha256": "c1f947cc3e0498ba4cc798a74fcedb9fbdd00918ed597b4ec4680a7c58b004c0",
+      "bytes": 2737
+    },
+    {
+      "path": "CONSUMERS.md",
+      "role": "headline",
+      "sha256": "dadeea12f727cda0ba476aab2792888a457b6b7f4b2cba5432688072f50c1fe0",
+      "bytes": 4967
+    },
+    {
+      "path": "CHANGED-CELLS-base.md",
+      "role": "headline",
+      "sha256": "4ec21b2836f8afe9f84ddf0be8fcb29c84b57afc56da8bc4175275ba2d93061c",
+      "bytes": 15237
+    },
+    {
+      "path": "CHANGED-CELLS-r0.md",
+      "role": "headline",
+      "sha256": "238e66854788fb69af667dc62a5aea758eac225e5cc0c7c069954fd44b12c7ac",
+      "bytes": 257
+    },
+    {
+      "path": "fault-summary.json",
+      "role": "headline",
+      "sha256": "2d62d09fcea8e9d26df16389a2242826bf4d59ba8825488be2f77d7fab5e3fa4",
+      "bytes": 204
+    },
+    {
+      "path": "census-summary.json",
+      "role": "headline",
+      "sha256": "1544d2af1e610bfc69ea62c8a3e8cf09612084c1d404b8b29ee5cd1289dcdeb4",
+      "bytes": 387
+    },
+    {
+      "path": "cost.json",
+      "role": "headline",
+      "sha256": "abe85095fc3583315247a330c44088e94e6be237a73bea11ced3dde8917f04dd",
+      "bytes": 489
+    },
+    {
+      "path": "cost-samples.json",
+      "role": "headline",
+      "sha256": "60e96dc2227b1e495a2ec67395833fe268158c4f3b07777c87997fdcc556b7b3",
+      "bytes": 21680
+    }
+  ],
+  "rescore": {
+    "command": null,
+    "inputs": [],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "CHANGED-CELLS-base.md",
+    "CHANGED-CELLS-r0.md",
+    "CONSUMERS.md",
+    "RESULT.md",
+    "SUMMARY.json",
+    "census-summary.json",
+    "cost-samples.json",
+    "cost.json",
+    "fault-summary.json"
+  ],
+  "local_raw": "/Users/m1/repos/worktrees/lcm-x-1451-pra/bench/results/occurrence-1451-pra-r1-20261023",
+  "publication_boundary": "Public summary only; full raw and re-score inputs retained; T2 unpublished."
+}

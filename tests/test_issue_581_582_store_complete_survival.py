@@ -40,6 +40,7 @@ def summaries(monkeypatch):
 
 def _engine(tmp_path, session="S", context_length=200_000, **config) -> LCMEngine:
     settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
+                "threshold_full_sweep_enabled": False,  # #1013: pin the pre-#1013 single-pass compaction
                 "database_path": str(tmp_path / "lcm.db"), **config}
     engine = LCMEngine(config=LCMConfig(**settings))
     engine.on_session_start(session, platform="telegram", context_length=context_length, conversation_id="conv")
@@ -72,13 +73,20 @@ def _covered(engine) -> list[int]:
             if node.source_type == "messages" for store_id in node.source_ids]
 
 
-def _assert_contiguous(engine) -> None:
+def _assert_contiguous(engine, copy_proofs=None) -> None:
     """Every owned row at or below the frontier is covered by a summary exactly once, or excluded by an
-    existing rule (none are here): the publication proof, re-checked from the outside."""
+    existing rule (none are here), or a proven copy whose earlier byte-equal twin is covered:
+    the publication proof, re-checked from the outside over non-copies."""
     covered = Counter(_covered(engine))
     frontier = _frontier(engine)
     below = [int(row["store_id"]) for row in _rows(engine) if int(row["store_id"]) <= frontier]
-    assert below and all(covered[store_id] == 1 for store_id in below), (frontier, below, covered)
+    copies = copy_proofs or {}
+    rows = {int(row["store_id"]): row for row in _rows(engine)}
+    columns = ("role", "content", "tool_call_id", "tool_calls", "tool_name")
+    for copy, twin in copies.items():
+        assert twin < copy <= frontier and covered[twin] == 1 and covered[copy] == 0
+        assert all(rows[copy].get(key) == rows[twin].get(key) for key in columns)
+    assert below and all(covered[store_id] == 1 for store_id in below if store_id not in copies), (frontier, below, covered)
 
 
 def _eva_store(tmp_path):
@@ -115,6 +123,7 @@ def test_a_eva_shape_publishes_and_the_frontier_advances_over_passes(tmp_path, s
             live = engine.compress(live)
             statuses.append(engine._last_compression_status)
             frontiers.append(_frontier(engine))
+            engine.note_turn_complete()  # #904: each hidden drain pass belongs to a new foreground turn
             engine.on_session_start("S", boundary_reason="compression", old_session_id="S",
                                     platform="telegram", conversation_id="conv")
         after = [(int(r["store_id"]), r["role"], r["content"]) for r in _rows(engine)]
@@ -154,8 +163,12 @@ def test_b_hidden_only_leaf_consumes_no_host_row(tmp_path, summaries):
 def test_c_leaf_ends_before_a_retained_occurrence(tmp_path, summaries):
     """R (an unstamped user row) is stored early; the host re-orders it into the fresh tail. The leaf
     never covers R while the view retains it, and publication never conflicts."""
+    from tests.test_host_uid_shadow import _state_db
+
+    # #1403: canonical identity proves that the reordered NULL row is the retained occurrence.
+    _state_db(tmp_path, [("S", None, None)])
     engine = _engine(tmp_path, fresh_tail_count=1, leaf_chunk_tokens=1)
-    r = {"role": "user", "content": "[R] retained occurrence" + PAD}
+    r = {"role": "user", "content": "[R] retained occurrence" + PAD, "message_uid": "retained-r"}
     stored = [*_turn("T1", 100.0), r, *[row for i in range(2, 6) for row in _turn(f"T{i}", 100.0 * i)]]
     try:
         engine.ingest(stored)
@@ -167,7 +180,7 @@ def test_c_leaf_ends_before_a_retained_occurrence(tmp_path, summaries):
             view = engine.compress(view)
             statuses.append(engine._last_compression_status)
         assert "error" not in statuses, engine._last_compression_noop_reason
-        assert r_id not in _covered(engine) and _frontier(engine) < r_id
+        assert r_id in _covered(engine) and _frontier(engine) >= r_id  # #1162: escape covers retained R from stored bytes.
         assert _frontier(engine) > 0
         _assert_contiguous(engine)
     finally:
@@ -481,6 +494,51 @@ def test_e_survival_fit_after_an_injected_publication_conflict(tmp_path, summari
         engine.shutdown()
 
 
+def test_issue_1180_stop_line_names_publication_failure(tmp_path, summaries, host_estimator, caplog):
+    engine = _engine(tmp_path, context_length=WINDOW)
+    view = _long_view()
+    try:
+        engine.ingest(view)
+
+        def conflict(*args, **kwargs):
+            raise LifecyclePublicationConflictError("injected conflict (ids only)")
+
+        engine._lifecycle.stage_compaction_publication = conflict
+        with caplog.at_level(logging.INFO, logger="hermes_lcm"):
+            result = engine.compress(view, current_tokens=host_estimator(view))
+        _assert_fitted(engine, view, result, host_estimator)
+        stops = [r.getMessage() for r in caplog.records if r.getMessage().startswith("LCM compaction stop:")]
+        assert len(stops) == 1 and "reason=error " in stops[0]
+        assert "failure=publication_invariant_conflict" in stops[0].split()
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("fitted", [False, True], ids=["raised", "fitted"])
+def test_issue_1180_stop_line_names_compress_exception(tmp_path, monkeypatch, host_estimator, caplog, fitted):
+    engine = _engine(tmp_path, context_length=WINDOW)
+    view = _long_view() if fitted else _turn("short", 100.0)
+    try:
+        engine.ingest(view)
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("injected compress failure")
+
+        monkeypatch.setattr(engine, "_compress_impl", fail)
+        with caplog.at_level(logging.INFO, logger="hermes_lcm"):
+            if fitted:
+                result = engine.compress(view, current_tokens=host_estimator(view))
+                _assert_fitted(engine, view, result, host_estimator)
+            else:
+                with pytest.raises(RuntimeError, match="injected compress failure"):
+                    engine.compress(view, current_tokens=host_estimator(view))
+        stops = [r.getMessage() for r in caplog.records if r.getMessage().startswith("LCM compaction stop:")]
+        assert len(stops) == 1 and "reason=error " in stops[0]
+        assert "failure=exception:RuntimeError" in stops[0].split()
+    finally:
+        engine.shutdown()
+
+
 def test_e_survival_fit_after_a_sweep_deadline(tmp_path, summaries, host_estimator, monkeypatch):
     monkeypatch.setattr(lcm_compaction, "_THRESHOLD_FULL_SWEEP_MAX_SECONDS", 0.0)
     engine = _engine(tmp_path, context_length=WINDOW, context_threshold=0.5, threshold_full_sweep_enabled=True)
@@ -514,9 +572,15 @@ def test_e_survival_fit_after_a_lock_after_commit(tmp_path, summaries, host_esti
         engine.shutdown()
 
 
-def test_f_newest_turn_over_budget_is_projected(tmp_path, summaries, host_estimator):
+@pytest.mark.parametrize("rollups", [False, True], ids=["unstubbed", "rollups-only"])
+def test_f_newest_turn_over_budget_is_projected(tmp_path, summaries, host_estimator, rollups):
     """The newest user turn alone is over the window: a bounded projection, never empty, raw rows intact."""
-    engine = _engine(tmp_path, context_length=WINDOW)
+    engine = _engine(tmp_path, context_length=WINDOW,
+        # #1013: survival projection fixtures cover the unstubbed path, with and without rollups
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=rollups,
+    )
     call = {"id": "call_big", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
     big = {"role": "tool", "tool_call_id": "call_big", "content": "row " * 12_000}
     view = [*_long_view(4), {"role": "user", "content": "[N] newest", "timestamp": 99.0},
@@ -531,6 +595,34 @@ def test_f_newest_turn_over_budget_is_projected(tmp_path, summaries, host_estima
         assert result[-1]["content"] != big["content"] and result[-1]["tool_call_id"] == "call_big"
         stored = [r for r in _rows(engine) if r["role"] == "tool" and r["content"] == big["content"]]
         assert len(stored) == 1  # the raw row stays stored verbatim
+    finally:
+        engine.shutdown()
+
+
+def test_part_b_on_path_keeps_newest_objective_and_durable_tool_data(tmp_path, summaries, host_estimator):
+    from hermes_lcm.externalize import extract_externalized_ref, load_externalized_payload
+
+    # #1013 part B: a durable externalized result need not take the survival projection path.
+    engine = _engine(tmp_path, context_length=WINDOW, large_output_externalization_enabled=True,
+                     large_output_active_replay_stubbing_enabled=True, temporal_rollups_enabled=True)
+    call = {"id": "call_big", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
+    big = {"role": "tool", "tool_call_id": "call_big", "content": "row " * 12_000}
+    view = [*_long_view(4), {"role": "user", "content": "[N] newest", "timestamp": 99.0},
+            {"role": "assistant", "content": "", "tool_calls": [call]}, big]
+    try:
+        engine.ingest(view)
+        engine._lifecycle.stage_compaction_publication = lambda *a, **k: (_ for _ in ()).throw(
+            LifecyclePublicationConflictError("injected"))
+        result = engine.compress(view, current_tokens=host_estimator(view))
+        assert host_estimator(result) <= TARGET
+        assert any(row.get("content") == "[N] newest" for row in result)
+        stored = [row for row in _rows(engine) if row["role"] == "tool" and row.get("tool_call_id") == "call_big"]
+        assert len(stored) == 1
+        ref = extract_externalized_ref(stored[0]["content"])
+        assert ref
+        payload = load_externalized_payload(ref, config=engine._config, hermes_home=engine._hermes_home)
+        assert payload and payload["content"] == big["content"]
+        assert result[-1]["tool_call_id"] == big["tool_call_id"]
     finally:
         engine.shutdown()
 
@@ -672,7 +764,12 @@ def test_r3b_a_fitted_list_resumes_cold_without_new_rows(tmp_path, summaries, ho
     """R3-B (Q3, Q2): the host adopts the fitted list (a projected newest user row and the reply after it;
     a projected tool row; a list-content system slot carrying the notice) and a cold process resumes it:
     only the new turn is stored, never the notice, never the earlier reply again."""
-    engine = _engine(tmp_path, context_length=WINDOW)
+    engine = _engine(tmp_path, context_length=WINDOW,
+        # #1013 part B: survival projection fixtures cover the unstubbed path
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     view = view_of()
     try:
         engine.ingest(view)
@@ -683,7 +780,12 @@ def test_r3b_a_fitted_list_resumes_cold_without_new_rows(tmp_path, summaries, ho
         engine.on_session_end("S", fitted)
     finally:
         engine.shutdown()
-    cold = _engine(tmp_path, context_length=WINDOW)
+    cold = _engine(tmp_path, context_length=WINDOW,
+        # #1013 part B: survival projection fixtures cover the unstubbed path
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     try:
         new = _turn("NEW", 500.0)
         cold.ingest([*fitted, *new])
@@ -844,7 +946,12 @@ def test_rc2_a_new_reply_after_a_projected_user_row_is_stored(tmp_path, summarie
 
 def _projected_tool_fit(tmp_path, host_estimator, **patches):
     """The big-tool view fitted after an injected conflict: (fitted list, its projected tool message)."""
-    engine = _engine(tmp_path, context_length=WINDOW)
+    engine = _engine(tmp_path, context_length=WINDOW,
+        # #1013 part B: survival projection fixtures cover the unstubbed path
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     view = _big_tool_view()
     engine.ingest(view)
     _conflicted(engine)
@@ -870,7 +977,12 @@ def test_r4_b_a_new_message_never_takes_a_projected_rows_identity(tmp_path, summ
     before = len(_rows(engine))
     engine.on_session_end("S", fitted)
     engine.shutdown()
-    cold = _engine(tmp_path, context_length=WINDOW)
+    cold = _engine(tmp_path, context_length=WINDOW,
+        # #1013 part B: survival projection fixtures cover the unstubbed path
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     try:
         cold.ingest([new if m is projected else m for m in fitted])
         added = _rows(cold)[before:]
@@ -890,7 +1002,12 @@ def test_r4_b_a_failed_metadata_write_never_stores_a_projection(tmp_path, summar
     engine, fitted, _projected = _projected_tool_fit(tmp_path, host_estimator, write_metadata_json=refuse)
     before = len(_rows(engine))
     engine.shutdown()
-    cold = _engine(tmp_path, context_length=WINDOW)
+    cold = _engine(tmp_path, context_length=WINDOW,
+        # #1013 part B: survival projection fixtures cover the unstubbed path
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     try:
         new = _turn("NEW", 500.0)
         cold.ingest([*fitted, *new])
@@ -1034,7 +1151,12 @@ def test_r6_1_a_restamped_copy_of_an_unstamped_sources_projection_is_that_row(tm
     before = len(_rows(engine))
     engine.on_session_end("S", fitted)
     engine.shutdown()
-    cold = _engine(tmp_path, context_length=WINDOW)
+    cold = _engine(tmp_path, context_length=WINDOW,
+        # #1013 part B: survival projection fixtures cover the unstubbed path
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     try:
         restamped = [{**m, "timestamp": 500.0} if m is projected else m for m in fitted]
         full = [*restamped, *_turn("NEW", 900.0)]
@@ -1159,8 +1281,9 @@ def _run_scan_cap_leaves(tmp_path, monkeypatch, caplog, cap, call_pos, parallel=
         monkeypatch.setattr(lcm_store_complete, "_SCAN_LIMIT", cap)
     engine = _engine(tmp_path, leaf_chunk_tokens=500_000)
     serialized: list[list] = []
-    real = engine._serialize_messages
-    monkeypatch.setattr(engine, "_serialize_messages", lambda messages: serialized.append(list(messages)) or real(messages))
+    real = engine._serialize_messages_with_clip
+    monkeypatch.setattr(engine, "_serialize_messages_with_clip",
+                        lambda messages, session_id=None: serialized.append(list(messages)) or real(messages, session_id))
     try:
         tail, call_id = _scan_cap_store(engine, call_pos, parallel, calls)
         if covered_before:  # every row before the call is already covered by a summary (excluded, not in the leaf)
@@ -1170,6 +1293,7 @@ def _run_scan_cap_leaves(tmp_path, monkeypatch, caplog, cap, call_pos, parallel=
             view = engine.compress(list(tail))
             assert engine._last_compression_status == "compacted", engine._last_compression_noop_reason
             first = set(_covered(engine))
+            engine.note_turn_complete()  # #904: the following user turns release the hidden-only hold
             engine.on_session_start("S", boundary_reason="compression", old_session_id="S",
                                     platform="telegram", conversation_id="conv")
             view = [*view, *[m for j in range(6) for m in (  # the host continues past the retained tail

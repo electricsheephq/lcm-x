@@ -1,0 +1,768 @@
+"""Payload contract, including mutations of imports, assets and shipped paths (#1946)."""
+import ast
+from collections import Counter
+import hashlib
+import importlib.util
+import json
+import re
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
+import io
+import tokenize
+from types import SimpleNamespace
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+PAYLOAD_TEXT_SUFFIXES = {
+    ".md", ".py", ".yaml", ".yml", ".txt", ".json", ".sh", ".toml",
+    ".cfg", ".ini", ".j2", ".html", ".css", ".js",
+}
+
+
+@pytest.fixture
+def builder():
+    path = ROOT / "scripts/build_plugin_payload.py"
+    assert path.is_file(), "payload builder is required"
+    spec = importlib.util.spec_from_file_location("payload_builder", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def git(root, *args):
+    return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
+
+
+def commit(root):
+    git(root, "add", ".")
+    git(root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "commit", "--allow-empty", "-m", "fixture update")
+
+
+@pytest.fixture
+def source(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    files = {
+        "__init__.py": "from . import core\n",
+        "core.py": "from .package.child import VALUE\n",
+        "package/__init__.py": "",
+        "package/child.py": "VALUE = 1\n",
+        "plugin.yaml": "name: fixture\n",
+        "LICENSE": "fixture license\n",
+        "skills/hermes-lcm/SKILL.md": "fixture skill\n",
+        "README.md": "fixture setup\n",
+        "docs/embeddings-setup.md": "fixture embeddings\n",
+        "docs/operations/catalog-payload.md": "fixture payload\n",
+    }
+    for name, data in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(data)
+    git(root, "init", "-b", "main")
+    git(root, "add", ".")
+    git(root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "commit", "-m", "fixture")
+    return root
+
+
+def build(builder, source, tmp_path, assets=None):
+    allowlist = tmp_path / "assets.txt"
+    allowlist.write_text(assets or "plugin.yaml\nLICENSE\nskills/hermes-lcm/**\n")
+    # Fixture generation may share tooling with pytest/xdist outputs; provenance
+    # admission is tested in isolated tooling repos below. Publication stays strict.
+    return builder.build(str(source), tmp_path / "payload", tmp_path / "manifest.json", allowlist,
+                         allow_dirty_tooling=True)
+
+
+def test_import_closure_and_manifest(builder, source, tmp_path):
+    result = build(builder, source, tmp_path)
+    paths = [row["path"] for row in result["files"]]
+    assert paths == sorted(paths)
+    assert {"__init__.py", "core.py", "package/__init__.py", "package/child.py"} <= set(paths)
+    assert result["source_sha"] == git(source, "rev-parse", "HEAD")
+    assert result["builder_version"] == 2
+    assert result["tooling_sha"] == git(ROOT, "rev-parse", "HEAD")
+    assert result["allowlist_sha256"] == hashlib.sha256((tmp_path / "assets.txt").read_bytes()).hexdigest()
+    assert result["file_count"] == len(paths)
+    assert result == json.loads((tmp_path / "manifest.json").read_text())
+    for row in result["files"]:
+        data = (tmp_path / "payload" / row["path"]).read_bytes()
+        assert row["sha256"] == hashlib.sha256(data).hexdigest()
+        assert row["bytes"] == len(data)
+    assert result["total_bytes"] == sum(row["bytes"] for row in result["files"])
+
+
+@pytest.mark.parametrize("text", ["from .missing import value", "from . import missing",
+                                        "import hermes_lcm.missing"])
+def test_unresolved_local_import_is_refused(builder, source, tmp_path, text):
+    (source / "core.py").write_text(text)
+    commit(source)
+    with pytest.raises(ValueError, match="unresolved local import"):
+        build(builder, source, tmp_path)
+    assert not (tmp_path / "payload").exists()
+
+
+@pytest.mark.parametrize("assets", ["plugin.yaml\nLICENSE\n", "plugin.yaml\nLICENSE\nmissing.md\n"])
+def test_missing_or_unlisted_assets_refused(builder, source, tmp_path, assets):
+    with pytest.raises(ValueError, match="asset"):
+        build(builder, source, tmp_path, assets)
+
+
+@pytest.mark.parametrize("prefix", ["tests", "bench", "scripts", ".github"])
+def test_development_import_mutation_refused(builder, source, tmp_path, prefix):
+    (source / prefix).mkdir()
+    (source / prefix / "__init__.py").write_text("")
+    (source / "core.py").write_text(f"from . import {prefix}" if prefix != ".github" else "")
+    git(source, "add", ".")
+    commit(source)
+    assets = "plugin.yaml\nLICENSE\nskills/hermes-lcm/**\n" + prefix + "/**\n"
+    with pytest.raises(ValueError, match="forbidden payload path"):
+        build(builder, source, tmp_path, assets)
+
+
+def test_external_symlink_refused(builder, source, tmp_path):
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside")
+    (source / "skills/hermes-lcm/escape.md").symlink_to(outside)
+    git(source, "add", ".")
+    commit(source)
+    with pytest.raises(ValueError, match="symlink"):
+        build(builder, source, tmp_path)
+
+
+@pytest.mark.parametrize("limit,value", [("MAX_FILE_BYTES", 8), ("MAX_FILES", 2), ("MAX_TOTAL_BYTES", 20)])
+def test_limits_refused_before_writing(builder, source, tmp_path, monkeypatch, limit, value):
+    monkeypatch.setattr(builder, limit, value)
+    with pytest.raises(ValueError, match="limit"):
+        build(builder, source, tmp_path)
+    assert not (tmp_path / "payload").exists()
+
+
+def test_git_sha_source_matches_checkout(builder, source, tmp_path, monkeypatch):
+    monkeypatch.chdir(source)
+    result = build(builder, git(source, "rev-parse", "HEAD"), tmp_path)
+    assert result["source_sha"] == git(source, "rev-parse", "HEAD")
+    assert "package/child.py" in {row["path"] for row in result["files"]}
+
+
+def test_checkout_drift_gate(builder, tmp_path):
+    result = builder.build(str(ROOT), tmp_path / "payload", tmp_path / "manifest.json")
+    paths = {row["path"] for row in result["files"]}
+    # Re-derive using only the staged tree: a missing import cannot use the source checkout.
+    builder.closure(tmp_path / "payload", paths, lambda p: (tmp_path / "payload" / p).read_bytes())
+    assert result["file_count"] <= builder.MAX_FILES
+    assert result["total_bytes"] <= builder.MAX_TOTAL_BYTES
+    assert all(row["bytes"] <= builder.MAX_FILE_BYTES for row in result["files"])
+    assert not any(p.split("/")[0] in {"tests", "bench", "scripts", ".github"} for p in paths)
+    # Reviewed file-read sites from the #1946 measure lane: standalone config, skill
+    # registration and guidance recall policy. engine/runtime_identity __file__ sites
+    # only report provenance; bypass/host_uid_emit import host-owned modules.
+    assert "config.py" in paths
+    assert (tmp_path / "payload/skills/hermes-lcm/references/recall-policy.md").read_text().strip()
+    assert {p.relative_to(ROOT).as_posix() for p in (ROOT / "skills/hermes-lcm").rglob("*") if p.is_file()} <= paths
+    assert_reviewed_sites(tmp_path / "payload")
+
+
+def reviewed_sites(payload):
+    sites = []
+    names = {"import_module", "__import__", "spec_from_file_location", "get_data", "SourceFileLoader"}
+    trees = {path: ast.parse(path.read_bytes()) for path in sorted(payload.rglob("*.py"))}
+    def module(path):
+        relative = path.parent if path.name == "__init__.py" else path.with_suffix("")
+        return ".".join(relative.relative_to(payload).parts)
+    roots = set()
+    for path, tree in trees.items():
+        for assignment in tree.body:
+            if isinstance(assignment, (ast.Assign, ast.AnnAssign)) and assignment.value is not None:
+                if any((isinstance(n, ast.Name) and n.id == "__file__") or
+                       (isinstance(n, ast.Attribute) and n.attr == "__file__") for n in ast.walk(assignment.value)):
+                    targets = assignment.targets if isinstance(assignment, ast.Assign) else [assignment.target]
+                    roots.update(f"{module(path)}.{n.id}".strip(".") for target in targets for n in ast.walk(target)
+                                 if isinstance(n, ast.Name))
+    for path, tree in trees.items():
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        aliases = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                aliases.update((a.asname or a.name.split(".")[0], a.name if a.asname else a.name.split(".")[0])
+                               for a in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                prefix = list(path.parent.relative_to(payload).parts)
+                prefix = prefix[:len(prefix) - node.level + 1] if node.level else []
+                origin = ".".join([*prefix, node.module or ""]).strip(".")
+                aliases.update((a.asname or a.name, (origin + "." + a.name).strip(".")) for a in node.names)
+
+        def canonical(node):
+            text = ast.unparse(node)
+            first, dot, rest = text.partition(".")
+            return aliases.get(first, first) + dot + rest
+
+        for node in ast.walk(tree):
+            dynamic_getattr = (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                               and node.func.id == "getattr" and node.args
+                               and isinstance(node.args[0], (ast.Name, ast.Attribute))
+                               and canonical(node.args[0]).split(".")[0] == "importlib")
+            if dynamic_getattr or (isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load)
+                    and (canonical(node).split(".")[-1] in names | {"__file__"}
+                         or canonical(node).split(".")[-2:] == ["__spec__", "origin"]
+                         or canonical(node).startswith("importlib.resources")
+                         or canonical(node) in roots or f"{module(path)}.{canonical(node)}".strip(".") in roots)):
+                # Include the enclosing expression so a changed asset path is drift too.
+                expression = node
+                while isinstance(parent := parents.get(expression), ast.expr) and not isinstance(
+                        parent, (ast.Dict, ast.List, ast.Tuple, ast.Set)):
+                    expression = parent
+                sites.append([path.relative_to(payload).as_posix(), ast.unparse(expression)])
+    return sorted(sites)
+
+
+def assert_reviewed_sites(payload):
+    expected = json.loads((ROOT / "tests/fixtures/payload-reviewed-sites.json").read_text())
+    actual = reviewed_sites(payload)
+    assert actual == expected, (actual, expected)
+
+
+@pytest.mark.parametrize("site", ["__file__", "import_module(name)", "__import__(name)",
+                                       "spec_from_file_location(name, path)", "importlib.resources.files(name)",
+                                       "from importlib import resources as r; r.files(name)",
+                                       "from importlib import import_module as im; im(name)",
+                                       "Path(config.__file__)", "Path(sys.modules[__name__].__file__)",
+                                       "list(map(import_module, names))", "_load = importlib.import_module",
+                                       "functools.partial(importlib.util.spec_from_file_location, name)",
+                                       "_load = __import__"])
+def test_new_unreviewed_site_mutation_fails(builder, tmp_path, monkeypatch, site):
+    monkeypatch.chdir(ROOT)
+    payload = tmp_path / "payload"
+    builder.build(git(ROOT, "rev-parse", "HEAD"), payload, tmp_path / "manifest.json", allow_dirty_tooling=True)
+    assert_reviewed_sites(payload)
+    with (payload / "__init__.py").open("a") as stream:
+        stream.write("\n" + site + "\n")
+    with pytest.raises(AssertionError):
+        assert_reviewed_sites(payload)
+    print(f"new reviewed-site mutation rejected: {site}")
+
+
+@pytest.mark.parametrize("module,prefix", [("runtime_identity.py", ""),
+                                                ("guidance.py", "from .runtime_identity import _PLUGIN_ROOT\n")])
+def test_reviewed_root_data_flow_mutations_fail(builder, tmp_path, monkeypatch, module, prefix):
+    monkeypatch.chdir(ROOT)
+    payload = tmp_path / "payload"
+    builder.build(git(ROOT, "rev-parse", "HEAD"), payload, tmp_path / "manifest.json", allow_dirty_tooling=True)
+    assert_reviewed_sites(payload)
+    with (payload / module).open("a") as stream:
+        stream.write("\n" + prefix + '(_PLUGIN_ROOT / "prompts" / "extra.md").read_text()\n')
+    with pytest.raises(AssertionError):
+        assert_reviewed_sites(payload)
+    print(f"M03/M04 data-flow mutation rejected: {module}")
+
+
+def assert_payload_markdown_paths(payload):
+    repo_dirs = {p.split("/")[0] for p in git(ROOT, "ls-files").splitlines() if "/" in p}
+    checked = []
+    for page in sorted(p for p in payload.rglob("*") if p.is_file()):
+        known_text = page.suffix.lower() in PAYLOAD_TEXT_SUFFIXES
+        try:
+            text = page.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            if not known_text:
+                continue
+            raise AssertionError(f"{page}: non-UTF-8 payload text") from exc
+        if "\x00" in text and not known_text:
+            continue
+        assert "\x00" not in text, f"{page}: binary-in-text payload file"
+        if page.suffix == ".py":
+            # Source comments are not runtime-facing references.
+            text = tokenize.untokenize(t for t in tokenize.generate_tokens(io.StringIO(text).readline)
+                                       if t.type != tokenize.COMMENT)
+        if page.suffix == ".md":
+            visible, fence = [], None
+            for line in text.splitlines(keepends=True):
+                marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+                if marker and not (fence is None and marker.group(1)[0] == "`"
+                                   and "`" in line[marker.end():]):
+                    run = marker.group(1)
+                    if fence is None:
+                        fence = run
+                    elif run[0] == fence[0] and len(run) >= len(fence) and not line[marker.end():].strip():
+                        fence = None
+                    continue
+                if fence is None:
+                    visible.append(line)
+            text = "".join(visible)
+            text = re.sub(r"(?m)^(\s*)\[\^[^\]]+\]:\s*", r"\1", text)
+        # Absolute URLs name external resources, not files in the installed payload.
+        text = re.sub(r"!?\[[^\]]*\]\(https?://[^)]*\)", "", text)
+        text = re.sub(r"<https?://[^>]+>", "", text)
+        if page.suffix == ".py":
+            text = re.sub(r'''plugin_docs_url\(\s*(['"])docs/[^'"]+\1''', "plugin_docs_url(", text)
+        url_parts = r'''[^\s`<>()"',]|\([^()\n]*\)'''
+        if page.suffix == ".py":
+            # Quoted f-string expressions belong to the URL token, not surrounding prose.
+            url_parts = r"\{[^{}\n]*\}|" + url_parts
+        text = re.sub(r"https?://(?:" + url_parts + r")*", "", text)
+        targets = []
+        if page.suffix == ".md":
+            targets += [(target, True) for target in re.findall(r"!?\[[^\]]*\]\(\s*<?([^\s)>]+)", text)]
+            targets += [(target, True) for target in re.findall(r"^\s*\[[^\]]+\]:\s*<?([^\s>]+)", text, re.M)]
+            for match in re.finditer(r"(?<![\w/])(?:\.{1,2}/)*(?:[\w.-]+/)*[\w.-]+\.(?:md|py|sh|json|ya?ml|txt)\b", text):
+                target = match.group()
+                if "/" not in target and not target.endswith(".md"):
+                    continue  # Bare host config filenames are not repository references.
+                if ("/" in target and target.split("/")[0] not in repo_dirs | {".", ".."}
+                        and not (page.parent / target.split("/")[0]).is_dir()):
+                    continue  # e.g. Hermes-owned agent/ and hermes_cli/ source references.
+                targets.append((target, False))
+        targets += [(target, False) for target in re.findall(r"(?<![\w/])/?docs/[^\s`\"'<>)]*", text)]
+        for target, page_relative in targets:
+            if target.startswith(("#", "//")) or re.match(r"^[\w+.-]+:", target):
+                continue
+            if not page_relative:
+                target = target.rstrip(".,;:!?")
+            target = target.split("#")[0].split("?")[0]
+            candidates = [(payload / target.lstrip("/")).resolve()] if target.startswith("/") else [
+                (page.parent / target).resolve()]
+            if not target.startswith("/") and not page_relative:
+                candidates.append((payload / target).resolve())
+            assert any(p.is_relative_to(payload.resolve()) and p.exists() for p in candidates), (page, target)
+            checked.append(target)
+    return checked
+
+
+def test_payload_markdown_link_integrity(builder, tmp_path, monkeypatch):
+    monkeypatch.chdir(ROOT)
+    payload = tmp_path / "payload"
+    builder.build(git(ROOT, "rev-parse", "HEAD"), payload, tmp_path / "manifest.json", allow_dirty_tooling=True)
+    assert "references/configuration.md" in assert_payload_markdown_paths(payload)  # Positive control.
+    page = payload / "skills/hermes-lcm/references/configuration.md"
+    with page.open("a") as stream:
+        stream.write("\nSee `docs/operator-guide.md`.\n")
+    with pytest.raises(AssertionError, match="docs/operator-guide"):
+        assert_payload_markdown_paths(payload)
+    print("relative docs mutation rejected; shipped reference positive control passed")
+
+
+def test_scanner_skip_guard_requires_both_host_variables(monkeypatch):
+    import os
+
+    tree = ast.parse((ROOT / "tests/test_catalog_scanner_on.py").read_text())
+    mark = next(n.value for n in tree.body if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in n.targets))
+    for python, src in [("", ""), ("python", ""), ("", "src"), ("python", "src")]:
+        monkeypatch.setenv("LCM_REAL_HERMES_PYTHON", python)
+        monkeypatch.setenv("LCM_REAL_HERMES_SRC", src)
+        skip = eval(compile(ast.Expression(mark), "skip guard", "eval"), dict(pytest=pytest, os=os))
+        assert skip.args[0] == (not (python and src))
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_dirty_checkout_refused(builder, source, tmp_path, staged):
+    (source / "core.py").write_text("CHANGED = True\n")
+    if staged:
+        git(source, "add", "core.py")
+    with pytest.raises(ValueError, match="dirty"):
+        build(builder, source, tmp_path)
+    assert not (tmp_path / "payload").exists()
+
+
+def test_untracked_receipt_does_not_change_payload(builder, source, tmp_path):
+    (source / "receipt.json").write_text("{}")
+    result = build(builder, source, tmp_path)
+    assert "receipt.json" not in {row["path"] for row in result["files"]}
+
+
+@pytest.mark.parametrize("mutation", ["extra", "removed", "critical"])
+def test_scanner_occurrence_mutations_fail(tmp_path, mutation):
+    probe = ast.parse((ROOT / "tests/fixtures/catalog_scanner_probe.py").read_text())
+    function = next(node for node in probe.body if isinstance(node, ast.FunctionDef) and node.name == "observe")
+    rows = [("proc_access", "high", "cpu_capacity.py")] * 2 + [
+        ("python_subprocess", "medium", "inactive_record.py"),
+        ("python_subprocess", "medium", "runtime_identity.py")]
+    namespace = dict(Counter=Counter, json=json, Path=Path, phase="candidate", events=[],
+                     expected=ROOT / "tests/fixtures/catalog-scanner-findings.json",
+                     guard=SimpleNamespace(PLUGIN_SCANNER_VERSION="fixture"))
+    result = SimpleNamespace(verdict="caution", findings=[])
+    namespace["original"] = lambda *a, **kw: result
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "observe", "exec"), namespace)
+
+    def findings(values):
+        result.findings = [SimpleNamespace(pattern_id=r, severity=s, file=f) for r, s, f in values]
+
+    findings(rows)
+    assert namespace["observe"]() is result
+    if mutation == "extra":
+        rows.append(rows[0])
+    elif mutation == "removed":
+        rows.pop(0)
+    else:
+        rows.append(("fixture_critical", "critical", "cpu_capacity.py"))
+    findings(rows)
+    with pytest.raises(AssertionError) as error:
+        namespace["observe"]()
+    print(f"scanner mutation {mutation} rejected: {error.value}")
+
+
+def test_workflow_ref_and_queue_contract():
+    workflow = (ROOT / ".github/workflows/real-host.yml").read_text()
+    original_checkout = workflow.split("      - name: Set up Python (harness)")[0]
+    assert "ref:" not in original_checkout
+    assert "path: scanner-source" in workflow
+    regressions = workflow.index("      - name: Run real-host regressions")
+    scanner = workflow.index("      - name: catalog-scanner-on")
+    assert regressions < scanner  # Scanner failure cannot suppress the legacy suite.
+    publication = (ROOT / ".github/workflows/plugin-payload.yml").read_text()
+    assert "  queue: max\n" in publication
+    assert "  cancel-in-progress: false\n" in publication
+
+
+def test_release_order_and_idempotence(source, tmp_path):
+    import os
+    import shutil
+
+    # Exercise the actual workflow shell against local Git and a stub gh, never GitHub.
+    (source / "scripts").mkdir()
+    shutil.copyfile(ROOT / "scripts/build_plugin_payload.py", source / "scripts/build_plugin_payload.py")
+    (source / "release").mkdir()
+    (source / "release/payload-assets.txt").write_text("plugin.yaml\nLICENSE\nskills/hermes-lcm/**\n")
+    (source / "scripts/payload").mkdir()
+    (source / "scripts/payload/README.md.tmpl").write_text((ROOT / "scripts/payload/README.md.tmpl").read_text())
+    commit(source)
+    git(source, "tag", "v1")
+    origin = tmp_path / "origin.git"
+    git(tmp_path, "init", "--bare", str(origin))
+    git(source, "remote", "add", "origin", str(origin))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text(f"#!{shutil.which('python3')}\nimport os, pathlib, sys\n"
+                  "with open(os.environ['GH_LOG'], 'a') as log: log.write(repr(sys.argv[1:])+'\\n')\n"
+                  "if sys.argv[1:3] == ['release','view']:\n"
+                  " p=pathlib.Path(os.environ['GH_VIEW_COUNT']); n=int(p.read_text()) if p.exists() else 0\n"
+                  " p.write_text(str(n+1))\n"
+                  " if n < int(os.environ.get('GH_FAIL_VIEW', '0')): sys.exit(1)\n"
+                  " print('true' if n < int(os.environ.get('GH_DRAFT_VIEW', '0')) else 'false')\n"
+                  "if sys.argv[1:3] == ['release','upload']:\n"
+                  " pathlib.Path(os.environ['GH_UPLOAD']).write_bytes(pathlib.Path(sys.argv[4]).read_bytes())\n")
+    gh.chmod(0o755)
+    sleeper = bin_dir / "sleep"
+    sleeper.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SLEEP_LOG\"\n")
+    sleeper.chmod(0o755)
+    git_wrapper = bin_dir / "git"
+    git_wrapper.write_text(f"#!{shutil.which('python3')}\nimport os, sys\n"
+                           "if sys.argv[1] == 'push':\n"
+                           " with open(os.environ['PUSH_LOG'], 'a') as log: log.write('push\\n')\n"
+                           f"os.execv({shutil.which('git')!r}, [{shutil.which('git')!r}, *sys.argv[1:]])\n")
+    git_wrapper.chmod(0o755)
+    shell = textwrap.dedent((ROOT / ".github/workflows/plugin-payload.yml").read_text().split("        run: |\n")[1])
+    base_env = dict(os.environ, PATH=f"{bin_dir}:{Path(sys.executable).parent}:" + os.environ["PATH"], SOURCE_TAG="v1",
+                    PUSH_LOG=str(tmp_path / "push.log"), GH_LOG=str(tmp_path / "gh.log"), GH_UPLOAD=str(tmp_path / "uploaded.json"),
+                    GITHUB_REPOSITORY="fixture/repo")
+
+    def publish(label, failures=0, tag="v1", drafts=0):
+        scratch = tmp_path / label
+        scratch.mkdir()
+        env = dict(base_env, RUNNER_TEMP=str(scratch), SOURCE_TAG=tag, GH_FAIL_VIEW=str(failures),
+                   GH_DRAFT_VIEW=str(drafts), GH_VIEW_COUNT=str(scratch / "views"), SLEEP_LOG=str(scratch / "sleeps"))
+        completed = subprocess.run(["bash", "-e", "-c", shell], cwd=source, env=env,
+                                   capture_output=True, text=True, timeout=60)
+        print(f"publication {label}: exit={completed.returncode}\n{completed.stdout}{completed.stderr}")
+        return completed
+
+    missing = publish("missing", 1000)
+    assert missing.returncode == 1
+    assert "STOP: no published GitHub release for v1 after 10 min; nothing pushed; re-run with workflow_dispatch once the release is published" in missing.stdout
+    assert (tmp_path / "missing/sleeps").read_text().splitlines() == ["10"] * 60
+    assert not (tmp_path / "missing/plugin").exists()
+    assert not (tmp_path / "uploaded.json").exists()
+    assert not (tmp_path / "push.log").exists()
+    refs = git(origin, "for-each-ref", "refs/heads/dist")
+    assert refs == "", missing.stdout + missing.stderr
+    draft = publish("draft", drafts=1000)
+    assert draft.returncode == 1
+    assert not (tmp_path / "push.log").exists()
+    assert not (tmp_path / "draft/plugin").exists()
+    assert (tmp_path / "draft/sleeps").read_text().splitlines() == ["10"] * 60
+    first = publish("first", 3, drafts=5)
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert (tmp_path / "first/views").read_text() == "6"
+    assert (tmp_path / "first/sleeps").read_text().splitlines() == ["10"] * 5
+    gh_calls = (tmp_path / "gh.log").read_text().splitlines()
+    assert sum("'upload'" in line for line in gh_calls) == 1
+    assert (tmp_path / "push.log").read_text().splitlines() == ["push"]
+    dist = git(origin, "rev-parse", "dist")
+    assert git(origin, "rev-list", "--count", "dist") == "1"
+    stored = git(origin, "show", dist + ":payload-manifest.json")
+    assert json.loads(stored)["tooling_sha"] == git(source, "rev-parse", "HEAD")
+    # A later tooling checkout must reuse the old manifest, not rebuild provenance.
+    commit(source)
+    second = publish("second")
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert git(origin, "rev-parse", "dist") == dist
+    assert json.loads((tmp_path / "uploaded.json").read_text()) == json.loads(stored)
+    assert git(origin, "rev-list", "--count", "dist") == "1"
+    git(source, "tag", "v2")
+    next_tag = publish("next", tag="v2")
+    assert next_tag.returncode == 0, next_tag.stdout + next_tag.stderr
+    tip = git(origin, "rev-parse", "dist")
+    assert git(origin, "rev-parse", "dist^") == dist
+    older = publish("older")
+    assert older.returncode == 0, older.stdout + older.stderr
+    assert git(origin, "rev-parse", "dist") == tip
+    assert json.loads((tmp_path / "uploaded.json").read_text()) == json.loads(stored)
+
+
+# #1960 P1 regressions: keep these independent of the reviewed-site baseline.
+def test_payload_readme_template(builder, source, tmp_path):
+    result = build(builder, source, tmp_path)
+    readme = tmp_path / "payload/README.md"
+    assert readme.is_file()
+    text = readme.read_text()
+    assert "hermes plugins install hermes-lcm-x" in text
+    assert "hermes plugins enable hermes-lcm-x" in text
+    links = re.findall(r"\]\(([^)]+)\)", text)
+    assert links
+    assert all(link.startswith(f"https://github.com/electricsheephq/lcm-x/blob/{result['source_sha']}/")
+               for link in links)
+    assert_payload_markdown_paths(tmp_path / "payload")
+    row = next(row for row in result["files"] if row["path"] == "README.md")
+    assert row["sha256"] == hashlib.sha256(readme.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("form", ["[guide](/docs/missing.md)", "![image](docs/missing.png)",
+                                  "[directory](docs/missing/)", "[extensionless](docs/missing)",
+                                  "[directory](missing/)", "[extensionless](missing)",
+                                  "[parent](../missing)", "[reference][guide]\n\n[guide]: docs/missing"])
+def test_payload_relative_link_forms_rejected(tmp_path, form):
+    (tmp_path / "README.md").write_text(form)
+    with pytest.raises(AssertionError):
+        assert_payload_markdown_paths(tmp_path)
+
+
+@pytest.mark.parametrize("filename", ["plugin.yaml", "asset.txt", "module.py", "asset.data"])
+def test_payload_non_markdown_docs_rejected(tmp_path, filename):
+    (tmp_path / filename).write_text('help: "docs/missing.md"')
+    with pytest.raises(AssertionError, match="docs/missing"):
+        assert_payload_markdown_paths(tmp_path)
+
+
+@pytest.mark.parametrize("literal", [
+    'f"https://github.com/electricsheephq/lcm-x/blob/v{metadata()[\'version\']}/docs/guide.md"',
+    '"https://example.com/docs/x.md"',
+])
+def test_payload_relative_links_positive(tmp_path, literal):
+    (tmp_path / "module.py").write_text(f"DOCS = {literal}\n")
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets/image.png").write_bytes(b"fixture")
+    (tmp_path / "guide").write_text("fixture")
+    (tmp_path / "README.md").write_text(
+        "![image](assets/image.png) [directory](assets/) [extensionless](/guide) "
+        "[anchor](#section) [mail](mailto:example@example.invalid) "
+        "[docs/guide.md](https://github.com/electricsheephq/lcm-x/blob/v1/docs/guide.md)")
+    assert_payload_markdown_paths(tmp_path)
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+@pytest.mark.parametrize("staged", [False, True, "untracked"])
+def test_sha_dirty_tooling(builder, source, tmp_path, monkeypatch, allowed, staged):
+    release = source / "release"
+    release.mkdir()
+    assets = release / "payload-assets.txt"
+    assets.write_text("plugin.yaml\nLICENSE\nskills/hermes-lcm/**\n")
+    commit(source)
+    monkeypatch.setattr(builder, "ASSETS", assets)
+    monkeypatch.chdir(source)
+    if staged == "untracked":
+        (source / "pytest-receipt.json").write_text("{}")
+    else:
+        (source / "core.py").write_text("CHANGED = True\n")
+        if staged:
+            git(source, "add", "core.py")
+    args = [git(source, "rev-parse", "HEAD"), tmp_path / "payload", tmp_path / "manifest.json", assets]
+    if allowed:
+        result = builder.build(*args, allow_dirty_tooling=True)
+        assert result["tooling_dirty"] is True
+    else:
+        with pytest.raises(ValueError, match="dirty tooling.*--allow-dirty-tooling"):
+            builder.build(*args)
+        assert not (tmp_path / "payload").exists()
+
+
+def test_payload_wait_requires_published_release():
+    workflow = (ROOT / ".github/workflows/plugin-payload.yml").read_text()
+    wait = workflow.split("for attempt in {0..60}; do", 1)[1].split("set +e", 1)[0]
+    assert "--json isDraft" in wait
+    assert "false" in wait
+    assert "sleep 10" in wait
+    assert "--force" not in workflow and " push -f" not in workflow
+
+
+@pytest.mark.parametrize("site", ["__spec__.origin", "pkgutil.get_data(name, path)",
+                                  "module.__spec__.origin", "sys.modules[__name__].__spec__.origin",
+                                  "SourceFileLoader(name, path)",
+                                  'getattr(importlib, "import_module")(name)'])
+def test_loader_api_drift(tmp_path, site):
+    (tmp_path / "module.py").write_text(site)
+    assert reviewed_sites(tmp_path), site
+
+
+@pytest.mark.parametrize("package", ["", "package/"])
+def test_package_relative_root_drift(tmp_path, package):
+    root = tmp_path / package
+    root.mkdir(exist_ok=True)
+    (root / "__init__.py").write_text('ROOT = Path(__file__).parent\n')
+    (root / "consumer.py").write_text('from . import ROOT as R\n(R / "extra.md").read_text()\n')
+    assert [package + "consumer.py", "(R / 'extra.md').read_text()"] in reviewed_sites(tmp_path)
+
+
+def test_fixture_sha_build_allows_recorded_dirty_tooling(builder, source, tmp_path, monkeypatch):
+    release = source / "release"
+    release.mkdir()
+    assets = release / "payload-assets.txt"
+    assets.write_text("plugin.yaml\nLICENSE\nskills/hermes-lcm/**\n")
+    commit(source)
+    monkeypatch.setattr(builder, "ASSETS", assets)
+    monkeypatch.chdir(source)
+    (source / "pytest-receipt.json").write_text("{}")
+    result = build(builder, git(source, "rev-parse", "HEAD"), tmp_path)
+    assert result["tooling_dirty"] is True
+
+
+def test_catalog_scanner_fixture_sha_build_twice(builder, source, tmp_path, monkeypatch):
+    release = source / "release"
+    release.mkdir()
+    assets = release / "payload-assets.txt"
+    assets.write_text("plugin.yaml\nLICENSE\nskills/hermes-lcm/**\n")
+    commit(source)
+    monkeypatch.setattr(builder, "ASSETS", assets)
+    monkeypatch.setattr(builder.build, "__defaults__", (assets,))
+    monkeypatch.chdir(source)
+    receipts = source / "catalog-scanner-1946"
+    receipts.mkdir()
+    (source / "earlier-test-output.txt").write_text("untracked fixture output")
+    tree = ast.parse((ROOT / "tests/test_catalog_scanner_on.py").read_text())
+    call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                and ast.unparse(node.func) == "builder.build")
+    expression = compile(ast.Expression(call), "scanner fixture build", "eval")
+    for label in ("first", "second"):
+        result = eval(expression, dict(builder=builder, source=git(source, "rev-parse", "HEAD"),
+                                       out=tmp_path / label / "plugin", receipts=receipts, label=label))
+        assert result["tooling_dirty"] is True
+    assert "catalog-scanner-1946/" in (ROOT / ".gitignore").read_text().splitlines()
+
+
+def test_clean_default_sha_build_records_tooling_clean(builder, source, tmp_path, monkeypatch):
+    release = source / "release"
+    release.mkdir()
+    assets = release / "payload-assets.txt"
+    assets.write_text("plugin.yaml\nLICENSE\nskills/hermes-lcm/**\n")
+    commit(source)
+    monkeypatch.setattr(builder, "ASSETS", assets)
+    monkeypatch.chdir(source)
+    result = builder.build(git(source, "rev-parse", "HEAD"), tmp_path / "payload",
+                           tmp_path / "manifest.json", assets)
+    assert result["tooling_dirty"] is False
+    assert json.loads((tmp_path / "manifest.json").read_text())["tooling_dirty"] is False
+
+
+def test_payload_readme_companion_source_sha(builder, source, tmp_path):
+    result = build(builder, source, tmp_path)
+    command = ("hermes plugins install electricsheephq/lcm-x/companions/"
+               f"hermes-lcm-x-local-embeddings --ref {git(source, 'rev-parse', 'HEAD')}")
+    assert command in (tmp_path / "payload/README.md").read_text()
+    assert result["source_sha"] in command
+
+
+def test_sha_readme_omits_links_missing_at_source(builder, source, tmp_path, monkeypatch):
+    (source / "docs/embeddings-setup.md").unlink()
+    commit(source)
+    monkeypatch.chdir(source)
+    result = build(builder, git(source, "rev-parse", "HEAD"), tmp_path)
+    readme = (tmp_path / "payload/README.md").read_text()
+    assert "[Embedding setup]" not in readme
+    assert "docs/embeddings-setup.md" in result["readme_omitted_links"]
+    assert "[Catalog payload and provenance]" in readme
+
+
+@pytest.mark.parametrize("form", ["[x](./x.md)", "[x][ref]\n\n[ref]: ./x.md"])
+def test_nested_page_link_cannot_fall_back_to_payload_root(tmp_path, form):
+    (tmp_path / "x.md").write_text("root only")
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested/page.md").write_text(form)
+    with pytest.raises(AssertionError, match="x.md"):
+        assert_payload_markdown_paths(tmp_path)
+
+
+@pytest.mark.parametrize("form", ["[^1]: Footnote text",
+                                  "<https://example.com/docs/missing.md>",
+                                  "~~~info `code`\n[missing](docs/missing.md)\n~~~",
+                                  "```md\n[missing](docs/missing.md)\n```"])
+def test_payload_non_links_are_accepted(tmp_path, form):
+    (tmp_path / "README.md").write_text(form)
+    assert assert_payload_markdown_paths(tmp_path) == []
+
+
+def test_fence_with_trailing_text_does_not_close(tmp_path):
+    (tmp_path / "README.md").write_text("```md\n```example\n[missing](docs/missing.md)\n```\n")
+    assert assert_payload_markdown_paths(tmp_path) == []
+
+
+def test_bare_path_ignores_trailing_prose_punctuation(tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs/guide.md").write_text("fixture")
+    (tmp_path / "README.md").write_text("See docs/guide.md, for details.")
+    assert "docs/guide.md" in assert_payload_markdown_paths(tmp_path)
+
+
+@pytest.mark.parametrize("form", ['"https://example.com/a", docs/missing.md',
+                                  '"https://example.com/a",docs/missing.md'])
+def test_bare_url_does_not_swallow_following_docs_path(tmp_path, form):
+    (tmp_path / "README.md").write_text(form)
+    with pytest.raises(AssertionError, match="docs/missing.md"):
+        assert_payload_markdown_paths(tmp_path)
+
+
+def test_non_utf8_payload_text_names_file(tmp_path):
+    (tmp_path / "bad.md").write_bytes(b"bad: \xff")
+    with pytest.raises(AssertionError, match="bad.md.*UTF-8"):
+        assert_payload_markdown_paths(tmp_path)
+
+
+@pytest.mark.parametrize("filename", ["bad.md", "bad.yaml"])
+def test_nul_payload_text_names_file(tmp_path, filename):
+    (tmp_path / filename).write_bytes(b"bad: \x00")
+    with pytest.raises(AssertionError, match=filename + ".*binary-in-text"):
+        assert_payload_markdown_paths(tmp_path)
+
+
+def test_payload_markdown_reference_definitions(tmp_path):
+    page = tmp_path / "README.md"
+    for target in ("docs/missing.md", "missing"):
+        page.write_text(f"[x]: {target}\n")
+        with pytest.raises(AssertionError):
+            assert_payload_markdown_paths(tmp_path)
+    page.write_text("[x]: https://github.com/electricsheephq/lcm-x/blob/v0.29.1/docs/missing.md\n")
+    assert_payload_markdown_paths(tmp_path)
+
+
+def test_backtick_in_fence_info_keeps_links_visible(tmp_path):
+    (tmp_path / "README.md").write_text("```x``` then [m](missing.md)\n[n](missing2.md)\n")
+    with pytest.raises(AssertionError, match=r"'missing\.md'"):
+        assert_payload_markdown_paths(tmp_path)
+
+
+@pytest.mark.parametrize("literal", ['"see docs/missing.md or https://example.com/x"',
+                                     "f'run per docs/missing.md; https://x.example/{v}'"])
+def test_python_url_literal_keeps_docs_paths_visible(tmp_path, literal):
+    (tmp_path / "m.py").write_text(f"MSG = {literal}\n")
+    with pytest.raises(AssertionError, match="docs/missing.md"):
+        assert_payload_markdown_paths(tmp_path)
+
+
+@pytest.mark.parametrize("filename", ["model.onnx", "store.sqlite", "f.woff2"])
+@pytest.mark.parametrize("data", [b"asset\xff", b"asset\x00"])
+def test_binary_payload_assets_are_sniffed_and_skipped(tmp_path, filename, data):
+    (tmp_path / filename).write_bytes(data)
+    assert assert_payload_markdown_paths(tmp_path) == []

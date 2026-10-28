@@ -15,7 +15,7 @@ dispatch. No execution before owner go (new lane; full-run spend needs sizing)._
 ## What the official machinery already provides (recon receipts, adapter worktree)
 
 **PATH PIN (cold-start):** all files below live in the official-benchmark adapter worktree
-`/Volumes/LEXAR/hermes-work/wt-bench-h1-v2adapter` (branch `bench/h1-v2-adapter`, org fork
+`wt-bench-h1-v2adapter` (branch `bench/h1-v2-adapter`, org fork
 100yenadmin/LongMemEval-V2) — NOT in the hermes-lcm repo. This is the authoritative checkout; ignore other
 longmemeval clones on disk. Full P0 protocol pin (file:line cites): comment on issue #145.
 
@@ -49,6 +49,6 @@ Latency recorded for LAFS honesty (expect ours faster: indexed store vs raw-file
 submission decision (owner).
 
 ## Rails
-- All artifacts under session-notes hermes-benchprog-h1/artifacts/H6-*; snapshot-first; manifests frozen+sha256
+- All artifacts in local run `2026-07-23/hermes-benchprog-h1` (raw data kept locally; not published), artifacts `H6-*`; snapshot-first; manifests frozen+sha256
   before launches; no re-ingest (clone); Sol-stream ceiling respected; every run's model/effort/binary pinned in
   the run manifest. Published-number comparisons always cite tier + consumer + latency.
