@@ -1,0 +1,184 @@
+{
+  "non-inferiority": {
+    "INCOMPLETE": false,
+    "answer_presentation_modes": {
+      "baseline": "raw_json_v1",
+      "candidate": "raw_json_v1"
+    },
+    "categories": {
+      "abstention": {
+        "baseline": {
+          "INCOMPLETE": false,
+          "degraded": 0,
+          "missing": 0,
+          "rate_points": 0.0,
+          "total": 1
+        },
+        "candidate": {
+          "INCOMPLETE": false,
+          "degraded": 0,
+          "missing": 0,
+          "rate_points": 0.0,
+          "total": 1
+        },
+        "clusters": 1,
+        "difference_points": 0.0,
+        "interval_pass": true,
+        "lower_bound_points": 0.0,
+        "paired_n": 1,
+        "pass": true,
+        "upper_bound_points": 0.0
+      },
+      "knowledge-update": {
+        "baseline": {
+          "INCOMPLETE": false,
+          "degraded": 0,
+          "missing": 0,
+          "rate_points": 0.0,
+          "total": 1
+        },
+        "candidate": {
+          "INCOMPLETE": false,
+          "degraded": 0,
+          "missing": 0,
+          "rate_points": 0.0,
+          "total": 1
+        },
+        "clusters": 1,
+        "difference_points": 0.0,
+        "interval_pass": true,
+        "lower_bound_points": 0.0,
+        "paired_n": 1,
+        "pass": true,
+        "upper_bound_points": 0.0
+      }
+    },
+    "d8_row": false,
+    "excluded_absent_from_baseline": 0,
+    "identities_missing_both": [
+      "datasetSha",
+      "dataset.path",
+      "dataset.sha256",
+      "answererProvenance.model",
+      "answererProvenance.configuredModel",
+      "answererProvenance.reasoningEffort",
+      "judgeProvenance.model",
+      "judgeProvenance.configuredModel",
+      "judgeProvenance.reasoningEffort"
+    ],
+    "mode": "non-inferiority",
+    "pass": true,
+    "rate_pass": true,
+    "recall_configs": {
+      "baseline": "OFF",
+      "candidate": "OFF"
+    },
+    "runs": {
+      "baseline": {
+        "INCOMPLETE": false,
+        "degraded": 0,
+        "missing": 0,
+        "rate_points": 0.0,
+        "total": 2
+      },
+      "candidate": {
+        "INCOMPLETE": false,
+        "degraded": 0,
+        "missing": 0,
+        "rate_points": 0.0,
+        "total": 2
+      }
+    }
+  },
+  "placebo": {
+    "INCOMPLETE": false,
+    "answer_presentation_modes": {
+      "baseline": "raw_json_v1",
+      "candidate": "raw_json_v1"
+    },
+    "categories": {
+      "abstention": {
+        "baseline": {
+          "INCOMPLETE": false,
+          "degraded": 0,
+          "missing": 0,
+          "rate_points": 0.0,
+          "total": 1
+        },
+        "candidate": {
+          "INCOMPLETE": false,
+          "degraded": 0,
+          "missing": 0,
+          "rate_points": 0.0,
+          "total": 1
+        },
+        "clusters": 1,
+        "difference_points": 0.0,
+        "interval_pass": true,
+        "lower_bound_points": 0.0,
+        "paired_n": 1,
+        "pass": true,
+        "upper_bound_points": 0.0
+      },
+      "knowledge-update": {
+        "baseline": {
+          "INCOMPLETE": false,
+          "degraded": 0,
+          "missing": 0,
+          "rate_points": 0.0,
+          "total": 1
+        },
+        "candidate": {
+          "INCOMPLETE": false,
+          "degraded": 0,
+          "missing": 0,
+          "rate_points": 0.0,
+          "total": 1
+        },
+        "clusters": 1,
+        "difference_points": 0.0,
+        "interval_pass": true,
+        "lower_bound_points": 0.0,
+        "paired_n": 1,
+        "pass": true,
+        "upper_bound_points": 0.0
+      }
+    },
+    "d8_row": false,
+    "excluded_absent_from_baseline": 0,
+    "identities_missing_both": [
+      "datasetSha",
+      "dataset.path",
+      "dataset.sha256",
+      "answererProvenance.model",
+      "answererProvenance.configuredModel",
+      "answererProvenance.reasoningEffort",
+      "judgeProvenance.model",
+      "judgeProvenance.configuredModel",
+      "judgeProvenance.reasoningEffort"
+    ],
+    "mode": "placebo",
+    "pass": true,
+    "rate_pass": null,
+    "recall_configs": {
+      "baseline": "OFF",
+      "candidate": "OFF"
+    },
+    "runs": {
+      "baseline": {
+        "INCOMPLETE": false,
+        "degraded": 0,
+        "missing": 0,
+        "rate_points": 0.0,
+        "total": 2
+      },
+      "candidate": {
+        "INCOMPLETE": false,
+        "degraded": 0,
+        "missing": 0,
+        "rate_points": 0.0,
+        "total": 2
+      }
+    }
+  }
+}

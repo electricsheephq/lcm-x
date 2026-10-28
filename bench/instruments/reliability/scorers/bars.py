@@ -1,4 +1,4 @@
-"""Bars B1-B8 over one finished cell: its DB copy (db/lcm.db), transcript.jsonl and phase-*.json.
+"""Bars B1-B8 over one finished cell: its DB copies (lcm.db, state.db), transcript.jsonl and phase-*.json.
 
 The expected transcript is what the host HELD for each attempt (the probe records the user row the host
 kept after its persist override and consecutive-user merge), so the bars compare LCM's store with the
@@ -14,15 +14,16 @@ ran (tool dispatch, native attempts, tool groups) is UNSUPPORTED, never PASS.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from . import chronology, host_parity, multiset, summary, tool_calls, tool_groups
+from . import chronology, continuity, drain, externalized, host_parity, multiset, projections, summary, tool_calls, tool_groups, host_rewrite
 
-ALL_BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8")
+ALL_BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
 
 
 def _candidate_phases(cell: dict, phases: list[dict]) -> list[dict]:
@@ -89,10 +90,10 @@ def attempts(events: list[dict]) -> list[dict]:
     return out
 
 
-def lineage(cell_dir: Path, root: str = "S0"):
+def lineage(cell_dir: Path, root: str = "S0", db_dir: Path | None = None):
     """store session id -> lineage: "chat" for ``root`` (R1: S0; R2: the ACP session id) and its compression
     descendants, else the root session."""
-    parents, state = {}, cell_dir / "db" / "state.db"
+    parents, state = {}, Path(db_dir or cell_dir / "db") / "state.db"
     if state.exists():
         con = sqlite3.connect(f"file:{state}?mode=ro", uri=True)
         try:
@@ -142,6 +143,20 @@ def scenario_gaps(cell: dict, events: list[dict], atts: list[dict], tg: dict, bo
             sum(1 for e in events if e["event"] == "compaction" and e.get("compression_status") == "host_native")
         if not tried:
             gaps.append("native cell with zero native recovery attempts")
+    if fr := next((f for f in cell.get("faults", []) if f["kind"] == "forced_recovery"), None):
+        forced = [a for a in atts if a["prefix"] == "T" and a["turn"] == fr["turn"]]
+        if not forced or any(not tool_calls.completed(a) or not a["reply"] for a in forced):
+            gaps.append("forced recovery turn did not complete with its scripted reply")
+        for a in forced:
+            for d in a["tool_dispatch"]:
+                if not d.get("ok"):
+                    gaps.append(f"{a['tag']}: recovery tool dispatch failed ({d.get('id')})")
+        marked = [e for e in events if e["event"] == "compaction" and e.get("compression_status") == "overflow_recovery"
+                  and e.get("turn") == fr["turn"] and e.get("recovery_marker")]
+        if not marked:
+            gaps.append("no marked overflow_recovery on the forced recovery turn")
+        elif not any(e.get("prior_compaction") for e in marked):
+            gaps.append("marked recovery had no earlier committed compaction (v4 proof not proven)")
     return gaps
 
 
@@ -151,6 +166,9 @@ def expected_items(atts: list[dict], notices=()) -> list[tuple[str, str]]:
     items = []
     for i, a in enumerate(atts):
         text = a["held"] if a["held"] is not None else a["persist"]
+        # reconcile.py's generated objective carrier is a projection, never a stored user row.
+        if text.startswith("[Current user objective preserved from compacted history]\n"):
+            text = a["persist"]
         nxt = next((b for b in atts[i + 1:] if b["prefix"] == a["prefix"]), None)
         cand = multiset.norm(text)
         folded = (nxt is not None and not a["reply"] and nxt["held"] is not None and cand
@@ -174,17 +192,60 @@ def source_ids(src) -> list:
     return ids if isinstance(ids, list) else []
 
 
+def drained_coverage(final, stored, nodes, group):
+    """Join a witnessed final tail to committed source IDs, failing closed on ambiguity."""
+    proof = {"stored_ids": [], "covered_ids": [], "protected_ids": [], "uncovered_ids": [], "valid": False}
+    observations = (final or {}).get("tail_observations") or []
+    if not observations or any(o != observations[0] for o in observations):
+        return proof
+    try:
+        observed = observations[0]
+        boundary, rows, sid = observed["boundary"], observed["rows"], observed["session"]
+        start = boundary["start"]
+        if (not sid or sid != final["session"] or group(sid) != "chat" or final.get("engine_calls") != 1
+                or type(start) is not int or not 0 <= start <= len(rows)
+                or type(boundary["count"]) is not int or boundary["count"] != len(rows) - start):
+            return proof
+        raw = {i: (s, r, c) for i, s, r, c in stored if group(s) == "chat"}
+        covered, protected = set(), set()
+        for _nid, session, src in nodes:
+            ids = source_ids(src)
+            if group(session) != "chat":
+                if any(type(i) is int and i in raw for i in ids):
+                    return proof
+                continue
+            if not ids or any(type(i) is not int or i not in raw for i in ids):
+                return proof
+            covered.update(ids)
+        non_tail = Counter((row["role"], row["sha256"]) for row in rows[:start])
+        for row in rows[start:]:
+            matches = [i for i, (_s, role, content) in raw.items() if role == row["role"]
+                       and hashlib.sha256((content or "").encode()).hexdigest() == row["sha256"]]
+            if len(matches) > 1 or (matches and (non_tail[(row["role"], row["sha256"])]
+                                                or matches[0] in protected)):
+                return proof
+            protected.update(matches)
+        proof.update(stored_ids=sorted(raw), covered_ids=sorted(covered), protected_ids=sorted(protected),
+                     uncovered_ids=sorted(set(raw) - covered - protected), boundary=boundary,
+                     session=sid, valid=bool(raw))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        pass  # absent/malformed observer evidence never licenses a noop
+    return proof
+
+
 def tag_counts(texts, pattern):
     counts = Counter()
     for text in texts:
-        for tag in set(re.findall(pattern, text or "")):
+        for tag in sorted(set(re.findall(pattern, text or ""))):
             counts[tag] += 1
     return counts
 
 
-def score(cell: dict, cell_dir: Path) -> dict:
+def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
+    """``db_dir`` holds the cell's lcm.db / state.db copies (run_matrix: the cell's scratch dir); default <cell>/db."""
     events, phases = load(cell_dir)
-    db = cell_dir / "db" / "lcm.db"
+    db_dir = Path(db_dir or cell_dir / "db")
+    db = db_dir / "lcm.db"
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
         full = con.execute("select store_id, session_id, role, content, tool_calls, tool_call_id from messages"
@@ -194,14 +255,18 @@ def score(cell: dict, cell_dir: Path) -> dict:
     finally:
         con.close()
     atts = attempts(events)
-    group = lineage(cell_dir, cell.get("chat_root", "S0"))
+    group = lineage(cell_dir, cell.get("chat_root", "S0"), db_dir)
     groups = sorted({attempt_group(a, group) for a in atts} | {group(sid) for _s, sid, _r, _c in stored})
     notices = {x for p in phases for x in p.get("failed_turn_notices") or []}
     plugin = cell.get("plugin") or (json.loads((cell_dir / "cell.json").read_text()).get("plugin")
                                     if (cell_dir / "cell.json").exists() else None) or {}
-    host, host_why = host_parity.load(cell_dir / "db" / "state.db", group, plugin.get("tree"))
+    host, host_why = host_parity.load(db_dir / "state.db", group, plugin.get("tree"))
+    b2_full, ext, ext_ids = externalized.resolve(full, db_dir.parent / "hermes-home")
+    b2_stored = [r[:4] for r in b2_full]
+    projection_receipts = projections.verify(atts, b2_full, events, group, plugin.get("tree"))
+    multiset.merge_witnesses(host, events, group)
     per = {g: (expected_items([a for a in atts if attempt_group(a, group) == g], notices),
-               [r for r in stored if group(r[1]) == g]) for g in groups}
+               [r for r in b2_stored if group(r[1]) == g]) for g in groups}
     applicable = [b for b in cell.get("bars") or ALL_BARS
                   if (b != "B6" or cell.get("tool_plan")) and (b != "B7" or cell.get("native_recovery"))
                   and (b != "B5" or cell.get("min_compactions", 5) > 0)]
@@ -217,7 +282,7 @@ def score(cell: dict, cell_dir: Path) -> dict:
         have_a = tag_counts([c for _s, _sid, r, c in rows if r == "assistant"], reply_pat)
         hg = None if host is None else host.get(g, {})
         mism = {}
-        for k in set(want_u) | set(have_u):
+        for k in sorted(set(want_u) | set(have_u)):
             ids = [s for s, _sid, r, c in rows if r == "user" and k in re.findall(user_pat, c or "")] \
                 if have_u[k] > want_u[k] else []
             lic = host_parity.b1_licence(k, want_u[k], have_u[k], hg, ids)
@@ -225,7 +290,7 @@ def score(cell: dict, cell_dir: Path) -> dict:
             if want_u[k] + (lic or {}).get("licensed", 0) != have_u[k]:
                 mism[f"{label}{k}"] = {"expected": want_u[k], "stored": have_u[k]}
         mism.update({f"reply {label}{k}": {"expected": want_a[k], "stored": have_a[k]}
-                     for k in set(want_a) | set(have_a) if want_a[k] != have_a[k]})
+                     for k in sorted(set(want_a) | set(have_a)) if want_a[k] != have_a[k]})
         want_c = continue_positions(items, reply_pat)
         have_c = continue_positions([(r, c) for _s, _sid, r, c in rows if r in ("user", "assistant")], reply_pat)
         if want_c != have_c:
@@ -242,19 +307,38 @@ def score(cell: dict, cell_dir: Path) -> dict:
     keys = ("expected_items", "missing_keys", "deficit_rows", "duplicated_keys", "surplus_rows",
             "stored_rows_not_expected", "split_keys")
     numbers["B2"] = {k: sum(m[k] for m in b2_parts.values()) for k in keys}
+    numbers["B2"]["verified_survival_projections"] = projection_receipts
+    numbers["B2"]["embedded_span_credits"] = [dict(c, session=g) for g, m in b2_parts.items()
+                                               for c in m["embedded_span_credits"]]
+    numbers["B2"]["held_composites_as_parts"] = [dict(c, session=g) for g, m in b2_parts.items()
+                                                 for c in m["held_composites_as_parts"]][:10]
     numbers["B2"]["per_session"] = {g: m["verdict"] for g, m in b2_parts.items()}
     numbers["B2"]["host_parity_licensed"] = host_parity.summary(
         [dict(r, session=g) for g, m in b2_parts.items() for r in m["host_parity_licensed"]], host_why)
-    bound = tool_calls.bind(atts, lambda a: attempt_group(a, group))
-    tools = tool_calls.compare(bound["expected"], bound["loose"], tool_calls.stored_keys(full, group))
+    bound = tool_calls.bind(atts, lambda a: attempt_group(a, group),  # no host_sha in the cell: no licence
+                            license_wire_notices=cell.get("host_sha") in tool_calls.HOSTS_WITHOUT_POST_TOOL_REANCHOR)
+    # This emergency cell deliberately drops the active result before the next provider call. B2 still requires
+    # its durably stored bytes to match the real HOST dispatch; the unseen-result failure remains a B6 diagnostic.
+    recovery_turns = {f["turn"] for f in cell.get("faults", []) if f["kind"] == "forced_recovery"} & {
+        e.get("turn") for e in events if e["event"] == "compaction" and e.get("compression_status") == "overflow_recovery"
+        and e.get("recovery_marker")}
+    for a in atts:
+        for d in a["tool_dispatch"]:
+            if a["turn"] in recovery_turns and tool_calls.completed(a) and d.get("ok") and d.get("recovery_result_sha256") \
+                    and d.get("id") in {c["id"] for c in a["tool_issues"]} - {s["id"] for s in a["tool_seen"]}:
+                bound["expected"][(attempt_group(a, group), "tool", d["id"], d["recovery_result_sha256"])] += 1
+    tools = tool_calls.compare(bound["expected"], bound["loose"], tool_calls.stored_keys(b2_full, group))
+    externalized.mismatches(ext, b2_full, ext_ids, per, group, bound["expected"], bound["loose"], host, b2_parts)
+    numbers["B2"]["externalized"] = ext
     numbers["B2"].update(tools)
-    if tools["tool_missing_rows"] or tools["tool_surplus_rows"]:
+    numbers["B2"]["host_wire_notice_licensed"] = {"rows": len(bound["wire_notices"]), "records": bound["wire_notices"][:10]}
+    if tools["tool_missing_rows"] or tools["tool_surplus_rows"] or ext["deficit_rows"]:
         failed["B2"] = dict(numbers["B2"])
     if any(m["verdict"] != "PASS" for m in b2_parts.values()):
         bad = {g: m for g, m in b2_parts.items() if m["verdict"] != "PASS"}
-        failed["B2"] = {**numbers["B2"], "missing": [dict(e, session=g) for g, m in bad.items() for e in m["missing"]][:5],
-                        "duplicated": [dict(e, session=g) for g, m in bad.items() for e in m["duplicated"]][:5],
-                        "extra": [dict(e, session=g) for g, m in bad.items() for e in m["extra"]][:5]}
+        failed["B2"] = {**numbers["B2"], "missing": [dict(e, session=g) for g, m in bad.items() for e in m["missing"]],
+                        "duplicated": [dict(e, session=g) for g, m in bad.items() for e in m["duplicated"]],
+                        "extra": [dict(e, session=g) for g, m in bad.items() for e in m["extra"]]}
     conflicts = counted(cell, phases, "publication_invariant_conflict")
     numbers["B3"] = {"publication_invariant_conflict": conflicts}
     if conflicts:
@@ -275,11 +359,18 @@ def score(cell: dict, cell_dir: Path) -> dict:
     failed_turns = [t for p in phases for t in p.get("counters", {}).get("failed", [])]
     final = next((p["final_check"] for p in reversed(phases) if "final_check" in p), None)
     numbers["B4"] = {"failed_turns": failed_turns, "final_check": final}
+    coverage = numbers["B4"]["coverage"] = drained_coverage(final, stored, nodes, group)
+    drained = (coverage["valid"] and not coverage["uncovered_ids"]
+               and (final or {}).get("engine_status") == "noop" and not final.get("conflicts")
+               and not final.get("exception") and not final.get("rejection")
+               and final.get("noop_reason") == "no eligible raw backlog outside fresh tail"
+               and not any(a.get("conflicts") or a.get("exception") or a.get("engine_status") == "error"
+                           for a in final.get("attempts", [])))
     inconclusive = {}
     outcome = (final or {}).get("outcome", "published" if (final or {}).get("published") else "failed")
     if failed_turns or (cell.get("final_compaction_check", True) and outcome == "failed"):
         failed["B4"] = numbers["B4"]
-    elif cell.get("final_compaction_check", True) and outcome == "inconclusive":
+    elif cell.get("final_compaction_check", True) and outcome == "inconclusive" and not drained:
         inconclusive["B4"] = f"forced compaction ended {final.get('engine_status')!r} ({final.get('noop_reason')!r}) " \
                              f"after {len(final.get('attempts', []))} attempt(s) of {final.get('entry')}; backlog checks " \
                              f"{[c.get('turns_since_pass') for c in final.get('backlog_checks') or []]}"
@@ -293,7 +384,7 @@ def score(cell: dict, cell_dir: Path) -> dict:
         if any(group(session_of.get(i, f"missing:{i}") if type(i) is int else f"invalid:{i}") != group(sid)
                for i in ids):
             crossing.append(nid)
-    grow["cross_lineage_nodes"], grow["empty_source_nodes"] = crossing[:10], empty[:10]
+    grow["cross_lineage_nodes"], grow["empty_source_nodes"] = sorted(crossing)[:10], sorted(empty)[:10]
     numbers["B5"] = grow
     if not grow["ok"] or crossing or empty:
         failed["B5"] = {k: v for k, v in grow.items() if k != "depth0_sequence"} | {"depth0_tail": grow["depth0_sequence"][-8:]}
@@ -312,6 +403,23 @@ def score(cell: dict, cell_dir: Path) -> dict:
     numbers["B7"] = native
     if native["native_unusable"] or native["summary_generation_aborted"] or native["max_native_attempts_per_turn"] > 1:
         failed["B7"] = native
+    if cell.get("drain"):  # D1-D3 (scorers/drain.py): the drain/hidden-backlog cells
+        d_failed, d_inconclusive, numbers["drain"] = drain.score(cell, phases, cell_dir)
+        failed.update(d_failed)
+        inconclusive.update(d_inconclusive)
+    numbers["B9"] = host_rewrite.score(cell, cell_dir, phases)
+    if numbers["B9"]["verdict"] == "FAIL":
+        failed["B9"] = numbers["B9"]["failed_invariants"]
+    if numbers["B9"]["verdict"] == "UNSUPPORTED":
+        applicable = [b for b in applicable if b != "B9"]
+        if not applicable:  # a B9-only cell (the P8 controls) proves nothing without the audit: never PASS
+            return {"verdict": "UNSUPPORTED", "reason": "B9: " + numbers["B9"]["reason"], "applicable_bars": [],
+                    "failed_bars": {}, "inconclusive_bars": {}, "numbers": numbers}
+    if set(applicable) & {"C1", "F4"}:
+        window_failed, window_incomplete, window_numbers = continuity.score_window(events)
+        failed.update(window_failed)
+        inconclusive.update(window_incomplete)
+        numbers.update({b: v for b, v in window_numbers.items() if b in applicable})
     failed = {b: v for b, v in failed.items() if b in applicable}
     numbers["diagnostic"] = {
         "log_counts": {k: sum(p.get("log_counts", {}).get(k, 0) for p in phases)

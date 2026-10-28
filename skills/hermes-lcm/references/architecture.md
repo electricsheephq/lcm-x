@@ -15,6 +15,23 @@ Stable runtime identity and a later main checkout are separate proof planes.
 
 Raw messages are source truth. Summary nodes, embeddings, temporal rollups, query views, and assertions are derived and rebuildable layers with explicit provenance.
 
+Interrupted `on_turn_complete` callbacks persist rows only when the bound engine
+proves the incoming replay prefix belongs to its session under the stable-use
+lease and the history must not end in a still-mutable user row.
+Unproven ownership or an open user tail defers to completed-turn catch-up; metadata never
+rebinds an engine. See `session-lifecycle.md` for eligibility and late host rows.
+
+## LCM note carrier
+
+On Hermes, the LCM note appears in the `lcm-x` plugin system-prompt section after
+memory, only for a session served by an LCM-X engine. Its text is byte-stable and
+conditional because it appears before the first compaction too. It explains that
+LCM summaries are untrusted history and names the retrieval tools, including
+`lcm_expand(externalized_ref="R")` for externalized tool output. The section never
+enters the message store. Older hosts without the section API keep the existing
+in-band note path: when a host passes a leading system row, assembly appends the
+note only if that row does not already contain the LCM phrase.
+
 ## Cloud embedding privacy boundary
 
 Known cloud embedding paths transform provider input without rewriting durable source. That
@@ -26,7 +43,43 @@ placeholders; replaces matches with pattern-only placeholders; scans for residua
 and fails closed before transport on any invalid state. `LCM_EMBEDDING_PRIVACY_ENABLED=false`
 is an explicit opt-out that dispatches raw input under the `privacy:off` revision. Optional
 Voyage reranking is covered by the same resolution. A privacy-policy error on the
-`lcm_recall` path raises; it is never a silent degrade to full-text.
+`lcm_recall` path (an invalid catalog, a residual match, dispatch-time drift) raises; it is
+never a silent degrade to full-text. A stale vector identity is different: when no active
+cloud profile matches, or the stored vectors carry an older privacy revision, `lcm_recall`
+answers from its full-text arm (for every `include`) with `degraded=true` and an
+`embedding_identity_stale:` reason, sends no query to the stale arm, and reads none of its
+vectors. The remedy is `/lcm embed warmup`, then `/lcm embed backfill --apply`
+for summary-only staleness. The doctor's `stale_tasks` selects the corpus: add
+`--corpus chunks` for chunk-only staleness or `--corpus both` when both are stale.
+Chunk apply commands on cloud providers also require `--confirm-raw-text` on
+every invocation. This flag acknowledges sending raw message text to the named
+cloud provider, even with provider-input privacy enabled; inspect the doctor's
+emitted `remedy` and consent warning before applying it.
+Repeat the backfill apply only while `remaining` is above 0 and each run lowers it.
+Stop on `status: partial`, `status: error`, or `status: failed`, or if `remaining`
+stops falling, and inspect the warnings, errors, and detail output.
+
+With embeddings on and a registered profile, new leaf summaries are embedded by a bounded
+background pass after each published leaf summary and on session bind; new message chunks are
+embedded the same way only with fastembed or a loopback Ollama endpoint, because chunk consent
+(`--confirm-raw-text`) is per invocation. The pass shares the backfill lease and skips while a
+manual backfill holds it. `/lcm status` reports the backlog per corpus and the last pass.
+
+Background embedding maintenance follows the foreground session. A genuine session end (exit, `/new`, or an
+end after a cancelled compaction; never a compaction commit) stops scheduling new passes and drops this engine's
+queued passes without waiting; a pass already running is left to finish. Every live-session rebind re-arms
+maintenance and schedules a pass. Shutdown waits up to 2 s for an active pass. At process exit, maintenance
+stops at the next provider batch boundary and waits up to 10 s for that batch to publish; a pass or backfill cut
+short there reports `stop_reason: process_exit`, and the next pass picks up the unsent work. A backlog that holds
+steady between a session end and the next rebind is this designed pause, not a stalled pass.
+
+With fastembed configured explicitly, the first maintenance trigger in a process starts one background
+preparation of the local model (#1586). It runs the warmup path, the only path allowed to download, then
+registers the profiles and enqueues a catch-up pass for every live engine on that database. Retrieval never
+waits for it: while the model prepares or is unavailable, `lcm_recall` and semantic/hybrid `lcm_grep` answer
+from full text and report degraded with the model state. Neither starts model construction on the request
+path during these states. A failed preparation warns once and leaves the model `unavailable` with its reason for
+this process; the next process start retries. Only one preparation runs per process.
 
 Vector identity binds provider, model, dimension, storage shape, and the active
 privacy revision. A policy change requires a new warmup/identity rather than
@@ -47,6 +100,13 @@ endpoint locality must not be inferred solely from the provider name (#337).
 - Hermes `session_search` covers host-tracked history outside `lcm.db`.
 
 Do not silently treat those stores or scopes as interchangeable.
+
+## LOCAL catch-up
+
+Local embeddings are on by default with FastEmbed and its effective default model `BAAI/bge-small-en-v1.5`; cloud providers require explicit opt-in and a model. FastEmbed alternates summary/chunk maintenance slices, up to 32 items (keeping the first message whole if it exceeds that limit) and a one-second soft budget, and re-enqueues at the queue tail after at least 0.82 times the slice's active time. An already started message may overrun across bounded batches; its progress reports that overrun. SQLite connections and leases close before the interruptible wait. Remote providers retain one pass per trigger.
+Model preparation warms only the shared model; owner-tracked jobs register stores. Preparation retries at ten-minute intervals for the first six attempts per model per process; after that, background maintenance keeps retrying with a backoff that starts at five minutes and doubles to a 30-minute cap. Uncertain rows retain timestamp-based retry backoff. No progress, refusal or error stops catch-up visibly. Lease contention and open circuits defer work; restart resumes from persisted vectors/scan state. The default bge-small model uses one intra-op thread per process, which is not a CPU quota.
+The one-intra-op-thread ORT setting for `BAAI/bge-small-en-v1.5` intentionally applies process-wide to background maintenance, manual backfill, and foreground query embeddings through the shared model cache.
+The ready queue admits 64 databases and retains up to 64 overflow databases for automatic re-admission. Exhausting both bounded banks explicitly refuses admission with a database-scoped reason.
 
 ## V4 derived state
 

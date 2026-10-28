@@ -15,6 +15,22 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(scope="module", autouse=True)
+def restore_plugin_imports():
+    """StressRun reloads the plugin; retain the suite's original module identities."""
+    saved = {name: module for name, module in sys.modules.items()
+             if name == "hermes_lcm" or name.startswith("hermes_lcm.")}
+    package = sys.modules["hermes_lcm"]
+    attributes = vars(package).copy()
+    yield
+    for name in list(sys.modules):
+        if name == "hermes_lcm" or name.startswith("hermes_lcm."):
+            sys.modules.pop(name)
+    sys.modules.update(saved)
+    vars(package).clear()
+    vars(package).update(attributes)
+
+
 def _load_stress_cli():
     script_path = Path(__file__).resolve().parents[1] / "scripts" / "lcm_stress_check.py"
     spec = importlib.util.spec_from_file_location("lcm_stress_check_cli", script_path)

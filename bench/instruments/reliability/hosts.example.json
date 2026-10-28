@@ -1,5 +1,5 @@
 {"hosts": {
-  "eva-0.21.5": {"python": "/path/to/hermes-v0.21.5-venv/bin/python", "src": "/path/to/hermes-v0.21.5",
+  "ref-0.21.5": {"python": "/path/to/hermes-v0.21.5-venv/bin/python", "src": "/path/to/hermes-v0.21.5",
                  "sha": "f97608f178d1ffeca59860195ab7da295f7c8e5f", "hermes_version": "0.21.5"},
   "customer-0.21.2": {"python": "/path/to/customer-0.21.2/venv/bin/python", "src": "/path/to/customer-0.21.2/src",
                       "sha": "2d10969e7d6fab477c4aa4f7e4c9e4df1f524e9a", "hermes_version": "0.21.2"}

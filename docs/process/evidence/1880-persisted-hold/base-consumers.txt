@@ -1,0 +1,34 @@
+compaction.py:242:        return tokens >= self.threshold_tokens and not self._sweep_budget_hold_applies(tokens)
+compaction.py:352:                and self._sweep_budget_hold_applies(max(rough, replay_rough, self.last_prompt_tokens or 0))
+compaction.py:419:            if self._sweep_budget_hold_applies(max(rough, self.last_prompt_tokens or 0)):
+compaction.py:717:            elif not force and self._no_progress_hold_active() and self._no_progress_hold_blocks(
+compaction.py:762:                    self._start_no_progress_hold("hidden_only")
+compaction.py:768:                self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress")
+compaction.py:1812:                or self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
+compaction.py:1822:                    and self._sweep_budget_hold_applies(state.observed_prompt_tokens))
+compaction.py:2833:        self._no_progress_hold, self._no_progress_candidate = None, False  # #651: hidden-only leaves too
+engine.py:1386:        self._no_progress_hold: Optional[tuple[float, str]] = None
+engine.py:2452:    def _start_no_progress_hold(self, reason: str) -> None:
+engine.py:2455:        self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
+engine.py:2462:    def _no_progress_hold_active(self) -> bool:
+engine.py:2464:        if self._no_progress_hold is None:
+engine.py:2466:        if time.monotonic() < self._no_progress_hold[0]:
+engine.py:2468:        self._no_progress_hold = None
+engine.py:2471:    def _no_progress_hold_status(self) -> Optional[dict]:
+engine.py:2472:        if not self._no_progress_hold_active():
+engine.py:2474:        until, reason = self._no_progress_hold
+engine.py:2494:        self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
+engine.py:2524:            hold = self._no_progress_hold
+engine.py:2527:                self._no_progress_hold = None
+engine.py:2532:    def _automatic_compression_blocked(self, *, ignore_cooldown: bool = False) -> bool:
+engine.py:2540:        return self._no_progress_hold_blocks(tokens) or self._sweep_budget_hold_blocks(tokens)
+engine.py:2542:    def _no_progress_hold_blocks(self, tokens: int) -> bool:
+engine.py:2545:        if self._bypasses_lcm_context_management() or not self._no_progress_hold_active():
+engine.py:2549:        return self._sweep_budget_hold_applies(tokens)
+engine.py:2552:        """#625: the #608 hold at the host gate, with the exemptions of ``_no_progress_hold_blocks``."""
+engine.py:2557:        return self._sweep_budget_hold_applies(tokens)
+engine.py:2562:        status = self._no_progress_hold_status()
+engine.py:2586:    def _sweep_budget_hold_applies(self, tokens: Optional[int]) -> bool:
+engine.py:2589:        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active():
+engine.py:5797:            "no_progress_hold": self._no_progress_hold_status(),
+reset_state.py:71:        self._no_progress_hold, self._no_progress_candidate = None, False

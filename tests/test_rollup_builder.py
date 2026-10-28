@@ -12,6 +12,8 @@ import pytest
 import hermes_lcm.engine as engine_module
 import hermes_lcm.rollup_builder as builder_module
 import hermes_lcm.rollup_periods as periods_module
+from tests.timing_helpers import returns_while_blocked
+
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
 from hermes_lcm.engine import LCMEngine
@@ -463,6 +465,59 @@ def test_session_start_does_not_wait_for_slow_rollup_provider(tmp_path, monkeypa
 
     def slow_summarizer(_text, **_kwargs):
         provider_started.set()
+        if not release_provider.wait():
+            raise AssertionError("test did not release slow rollup provider")
+        return "completed in background", 1
+
+    original_drain = engine.drain_rollup_maintenance
+
+    def no_drain(timeout=None):
+        pytest.fail(f"lifecycle path unexpectedly drained maintenance with timeout={timeout!r}")
+
+    monkeypatch.setattr(engine, "drain_rollup_maintenance", no_drain)
+    try:
+        _add_node(engine._dag, scope, target_day, "source for slow rollup")
+        store = RollupStore(db_path)
+        try:
+            store.mark_stale_for_day(target_day, scope)
+            monkeypatch.setattr(
+                builder_module,
+                "summarize_with_escalation",
+                slow_summarizer,
+            )
+
+            returns_while_blocked(
+                lambda: engine.on_session_start(scope, conversation_id="slow-rollup-conversation"),
+                release_provider,
+            )
+            assert provider_started.wait(timeout=1)
+            release_provider.set()
+            assert original_drain(timeout=2)
+            assert store.get_rollup("day", target_day.isoformat(), scope)["status"] == "ready"
+        finally:
+            store.close()
+    finally:
+        monkeypatch.setattr(engine, "drain_rollup_maintenance", original_drain)
+        release_provider.set()
+        engine.shutdown()
+
+
+@pytest.mark.latency
+def test_session_start_does_not_wait_for_slow_rollup_provider_latency(tmp_path, monkeypatch):
+    db_path = tmp_path / "async-session-start.db"
+    config = LCMConfig(
+        database_path=str(db_path),
+        temporal_rollups_enabled=True,
+        rollup_builds_per_pass=1,
+    )
+    engine = LCMEngine(config=config)
+    scope = "slow-rollup-session"
+    target_day = date(2026, 7, 15)
+    provider_started = threading.Event()
+    release_provider = threading.Event()
+
+    def slow_summarizer(_text, **_kwargs):
+        provider_started.set()
         if not release_provider.wait(timeout=2):
             raise AssertionError("test did not release slow rollup provider")
         return "completed in background", 1
@@ -801,6 +856,50 @@ def test_rollup_background_failure_is_logged_without_breaking_bind(
 
 
 def test_engine_shutdown_does_not_wait_for_background_rollup_provider(
+    tmp_path,
+    monkeypatch,
+):
+    config = LCMConfig(
+        database_path=str(tmp_path / "shutdown-background-maintenance.db"),
+        temporal_rollups_enabled=True,
+    )
+    engine = LCMEngine(config=config)
+    maintenance_started = threading.Event()
+    release_maintenance = threading.Event()
+
+    def blocking_maintenance(*_args, **_kwargs):
+        maintenance_started.set()
+        if not release_maintenance.wait():
+            raise AssertionError("test did not release background maintenance")
+        return 0
+
+    monkeypatch.setattr(
+        engine_module,
+        "run_rollup_maintenance",
+        blocking_maintenance,
+    )
+    original_drain = engine.drain_rollup_maintenance
+
+    def no_drain(timeout=None):
+        pytest.fail(f"lifecycle path unexpectedly drained maintenance with timeout={timeout!r}")
+
+    monkeypatch.setattr(engine, "drain_rollup_maintenance", no_drain)
+    try:
+        engine.on_session_start(
+            "shutdown-maintenance-scope",
+            conversation_id="shutdown-maintenance-conversation",
+        )
+        assert maintenance_started.wait(timeout=1)
+
+        returns_while_blocked(engine.shutdown, release_maintenance)
+    finally:
+        monkeypatch.setattr(engine, "drain_rollup_maintenance", original_drain)
+        release_maintenance.set()
+        assert original_drain(timeout=2)
+
+
+@pytest.mark.latency
+def test_engine_shutdown_does_not_wait_for_background_rollup_provider_latency(
     tmp_path,
     monkeypatch,
 ):

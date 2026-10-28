@@ -1,0 +1,76 @@
+{
+  "measured_sha": "f1df74ca5a051e33fca221fee06a5ba9c12b4f25",
+  "matrix_cells": 1296,
+  "vs_base": {
+    "attached_true_to_false": 960,
+    "base_error_cells": 172,
+    "base_loss_cells": 622,
+    "base_recorded_mismatch": 0,
+    "base_snap_dicts": 3168,
+    "base_snap_no_output_length": 3168,
+    "base_unexpected_rows": 0,
+    "cand_error_cells": 0,
+    "cand_loss_cells": 594,
+    "cand_recorded_mismatch": 0,
+    "cand_snap_dicts": 3168,
+    "cand_snap_no_output_length": 0,
+    "cand_unexpected_rows": 0,
+    "changed_cells": 176,
+    "dup_or_growth_rise_cells": 0,
+    "new_or_increased_loss_cells": 0
+  },
+  "vs_r0": {
+    "attached_true_to_false": 0,
+    "base_error_cells": 0,
+    "base_loss_cells": 594,
+    "base_recorded_mismatch": 0,
+    "base_snap_dicts": 3168,
+    "base_snap_no_output_length": 0,
+    "base_unexpected_rows": 0,
+    "cand_error_cells": 0,
+    "cand_loss_cells": 594,
+    "cand_recorded_mismatch": 0,
+    "cand_snap_dicts": 3168,
+    "cand_snap_no_output_length": 0,
+    "cand_unexpected_rows": 0,
+    "changed_cells": 0,
+    "dup_or_growth_rise_cells": 0,
+    "new_or_increased_loss_cells": 0
+  },
+  "faults": {
+    "runs": 132,
+    "fired_faults": 96,
+    "keys_unchanged": 96,
+    "one_warning_after_rollback": 96,
+    "not_durable_and_snapshot_absent": 96,
+    "durable_reader_unavailable": 96,
+    "escaped_exceptions": 0
+  },
+  "census": {
+    "publication_attempts": 607,
+    "valid_publications": 606,
+    "valid_rejected": 0,
+    "intentional_invalid": [
+      {
+        "test": "tests/test_issue_1451_atomic_snapshot.py::test_invalid_writer_snapshot_never_gets_a_matching_digest",
+        "full": false,
+        "legacy": null
+      }
+    ],
+    "scope": "8 affected test files, all six original census counterexamples; observe-only plugin"
+  },
+  "cost": {
+    "samples": 200,
+    "base_sha": "10407e12e33c1d7b09fe0e05141153555aec5d62",
+    "candidate_sha": "f1df74ca5a051e33fca221fee06a5ba9c12b4f25",
+    "base_median_ms": 2.273625,
+    "candidate_median_ms": 1.8847079999999998,
+    "paired_median_delta_ms": -0.3723130000000002,
+    "allowed_delta_ms": 0.22736250000000002,
+    "pass_gate": true,
+    "method": "20 warmup pairs then 200 pairs; AB/BA alternating; timed _record_compress_commit_proof only on same synthetic compaction; no concurrent samples"
+  },
+  "product_lines": 126,
+  "proof_boundary": "Synthetic histories, injected faults and pinned old-writer/reader compatibility. No merge, release, runtime or customer proof.",
+  "test_adaptations_correction": "The r0 receipt was inaccurate: aggregate count bounds and content-multiset carry checks weakened the original assertions. r1 restores exact rows+1, child rows==2 and carried_ids<=covered_ids in the failed-write arm."
+}
