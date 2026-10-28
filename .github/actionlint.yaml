@@ -1,0 +1,5 @@
+# Native queue support: https://github.com/rhysd/actionlint/issues/657
+paths:
+  .github/workflows/plugin-payload.yml:
+    ignore:
+      - '^unexpected key "queue" for "concurrency" section'

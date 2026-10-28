@@ -1,0 +1,77 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "lcmx-1880-hold-cost-review-delta-20261023",
+  "project": "lcm-x",
+  "kind": "benchmark",
+  "status": "settled",
+  "owner_lane": "1880-part-b",
+  "claim_class": "advisory",
+  "created": "2026-10-23T04:03:48Z",
+  "settled": "2026-10-23T04:04:13Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "970e47f9b5ee33cd6cca2c71a27d777683eb412e",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python -B cost_probe.py --base BASE --candidate CANDIDATE --scratch SCRATCH --out RUN",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "#1880 synthetic admission review delta",
+      "metric": "unheld_cells_within_cost_bar",
+      "value": 4.0,
+      "n": 4,
+      "baseline_run": "10407e12",
+      "source": "summary.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "samples.jsonl",
+      "role": "per-item",
+      "sha256": "33a32ac2eabd1775f8905c8d65492bd00a62071fe5d089991b8b406912298160",
+      "bytes": 149261
+    },
+    {
+      "path": "summary.json",
+      "role": "per-item",
+      "sha256": "afcca901511821fcdc2b5555f8f0bfcc261549f3f5bf35a6ac592616b91b2bb2",
+      "bytes": 4765
+    },
+    {
+      "path": "cost_probe.py",
+      "role": "per-item",
+      "sha256": "79dd977525a14bb0232f9f0b7c27d4966fd6194f686a8cce24550836c717160a",
+      "bytes": 8615
+    },
+    {
+      "path": "score_cost.py",
+      "role": "per-item",
+      "sha256": "16aba56d7991c75c7863db00c32cef57cf91fc18d63a7687d632de1918bef35d",
+      "bytes": 1610
+    }
+  ],
+  "rescore": {
+    "command": "python score_cost.py .",
+    "inputs": [
+      "samples.jsonl",
+      "summary.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "cost_probe.py",
+    "samples.jsonl",
+    "score_cost.py",
+    "summary.json"
+  ]
+}

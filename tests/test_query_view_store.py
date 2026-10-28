@@ -516,7 +516,6 @@ def test_publication_source_cas_serializes_a_concurrent_source_update(
     token = views.claim_build(identity)
     validated = threading.Event()
     release_publish = threading.Event()
-    update_finished = threading.Event()
     publish_result: list[bool] = []
     errors: list[BaseException] = []
     original_validate = views._validate_dependency_current
@@ -541,7 +540,7 @@ def test_publication_source_cas_serializes_a_concurrent_source_update(
             errors.append(exc)
 
     def update_source():
-        conn = sqlite3.connect(messages.db_path, timeout=5)
+        conn = sqlite3.connect(messages.db_path, timeout=0)
         try:
             conn.execute(
                 "UPDATE messages SET content='I prefer coffee.' WHERE store_id=?",
@@ -550,20 +549,19 @@ def test_publication_source_cas_serializes_a_concurrent_source_update(
             conn.commit()
         finally:
             conn.close()
-            update_finished.set()
 
     publisher = threading.Thread(target=publish)
     publisher.start()
     assert validated.wait(timeout=5)
-    updater = threading.Thread(target=update_source)
-    updater.start()
-    assert not update_finished.wait(timeout=0.1)
-    release_publish.set()
-    publisher.join(timeout=5)
-    updater.join(timeout=5)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            update_source()
+    finally:
+        release_publish.set()
+        publisher.join(timeout=10)
+    update_source()
 
     assert not publisher.is_alive()
-    assert not updater.is_alive()
     assert errors == []
     assert publish_result == [True]
     lookup = views.lookup(identity, record_hit=False)

@@ -80,9 +80,14 @@ def _provider(monkeypatch, clock, default=30.0, **seconds) -> _Provider:
 def _engine(tmp_path, **config) -> LCMEngine:
     # l3_truncate_tokens under every leaf and condensation source here: these cells time model calls, so none
     # takes the no-call verbatim path (F2, PR 2) of a source within the level 3 bound.
-    settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
+    # #1013 part B: foreground-only providers/clocks exclude automatic rollup calls
+    settings = {"large_output_externalization_enabled": False,
+                "large_output_active_replay_stubbing_enabled": False, "temporal_rollups_enabled": False,
+                "fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
                 "threshold_full_sweep_enabled": True, "max_assembly_tokens": 100_000, "l3_truncate_tokens": 2,
-                "condensation_fanin": 2, "database_path": str(tmp_path / "lcm.db"), **config}
+                "condensation_fanin": 2, "database_path": str(tmp_path / "lcm.db"),
+                # #1119: these cells' arithmetic uses a 60 s configured call timeout; the product default is 120 s.
+                "summary_timeout_ms": 60_000, **config}
     engine = LCMEngine(config=LCMConfig(**settings))
     engine.on_session_start("S", platform="telegram", context_length=200_000, conversation_id="conv")
     return engine
@@ -153,6 +158,24 @@ def test_soft_target_stops_after_the_stored_leaf_whose_successor_would_end_past_
         engine.shutdown()
 
 
+def test_default_call_timeout_is_cut_to_the_hard_bound_and_leaves_no_fallback_room(
+        tmp_path, monkeypatch, clock, caplog):
+    # #1119: at the 120 s default one primary call may use the whole foreground budget (hard bound minus the
+    # finalize reserve), so a timed-out primary leaves no room for a fallback inside the same compaction.
+    engine = _engine(tmp_path, summary_model="primary", summary_fallback_models=["fallback"],
+                     summary_timeout_ms=LCMConfig().summary_timeout_ms)
+    provider = _provider(monkeypatch, clock, primary=None, fallback=20.0)
+    try:
+        _compress(engine, _view(), caplog)
+        assert LCMConfig().summary_timeout_ms == 120_000
+        assert [(model, round(timeout), round(started)) for model, timeout, started in provider.calls] == [
+            ("primary", 115, 0)]
+        assert _leaves(engine) == []
+        assert engine.get_status()["threshold_full_sweep"]["stop_reason"] == "time_budget_exhausted"
+    finally:
+        engine.shutdown()
+
+
 def test_first_leaf_is_admitted_past_the_soft_target(tmp_path, monkeypatch, clock, caplog):
     engine = _engine(tmp_path)
     provider = _provider(monkeypatch, clock, default=30.0)
@@ -187,8 +210,14 @@ def test_a_oversized_frontier_ends_by_60_and_no_leaf_starts_past_the_soft_target
     """Updated for addendum r2.1: the over-target condensation is the progress call; after it every call needs
     the soft target. With 29 s calls a second condensation fits (+29..+58); a third or the first leaf would end
     near +87, so the compaction stops at +58 with no leaf. (r2 asserted one condensation and a leaf ending by +58;
-    the r1 half-budget split admitted condensations at +0 and +29 and a first leaf ending at +87.)"""
-    engine = _engine(tmp_path)
+    the r1 half-budget split admitted condensations at +0 and +29 and a first leaf ending at +87.) #909's leaf
+    reserve makes the next condensation hit its reduced hard budget; the leaf still hits the soft target."""
+    engine = _engine(tmp_path,
+        # #1013 part B: foreground timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     for _ in range(8):  # 29 s walls (30 s would sit on the 60 s boundary with the real clock's slack)
         engine._foreground_estimates.record_call("", 29.0)
     provider = _provider(monkeypatch, clock, default=29.0)
@@ -197,7 +226,7 @@ def test_a_oversized_frontier_ends_by_60_and_no_leaf_starts_past_the_soft_target
         _compress(engine, _view(), caplog)
         telemetry = engine.get_status()["threshold_full_sweep"]
         assert telemetry["pre_leaf_condensation_passes"] == 2
-        assert telemetry["pre_leaf_condensation_stop_reason"] == "soft_target_reached"
+        assert telemetry["pre_leaf_condensation_stop_reason"] == "time_budget_exhausted"
         assert [round(started) for _model, _timeout, started in provider.calls] == [0, 29]  # two condensations
         assert telemetry["leaf_passes"] == 0 and clock.offset == pytest.approx(58.0)
         assert telemetry["stop_reason"] == "soft_target_reached"
@@ -212,7 +241,12 @@ def _condensations(engine) -> list:
 
 
 def test_r21_a_31s_estimates_and_3s_pre_work_condense_once_and_refuse_the_leaf(tmp_path, monkeypatch, clock, caplog):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: foreground timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     for _ in range(8):
         engine._foreground_estimates.record_call("", 31.0)
     provider = _provider(monkeypatch, clock, default=31.0)
@@ -250,7 +284,13 @@ def test_r21_b_15s_estimates_condense_then_store_a_leaf_by_60(tmp_path, monkeypa
 
 
 def test_r21_c_a_frontier_under_its_target_keeps_r2(tmp_path, monkeypatch, clock, caplog):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        summary_prefix_target_tokens=400,  # This timing case deliberately keeps its 390-token frontier below target.
+        # #1013 part B: foreground timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     provider = _provider(monkeypatch, clock, default=29.0)
     for index in range(3):  # 390 tokens: at or below the 400 token target
         engine._dag.add_node(SummaryNode(session_id="S", depth=0, summary=f"group {index}", token_count=130,
@@ -268,7 +308,12 @@ def test_r21_c_a_frontier_under_its_target_keeps_r2(tmp_path, monkeypatch, clock
 
 
 def test_r21_d_a_failed_condensation_leaves_rule_1_to_the_first_leaf(tmp_path, monkeypatch, clock, caplog):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: foreground timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     provider = _provider(monkeypatch, clock, default=30.0)
     real = provider.__call__
 
@@ -313,11 +358,16 @@ def test_r3_a_condensation_that_shrinks_the_frontier_is_progress_and_arms_no_hol
         engine.shutdown()
 
 
-def test_r3_b_a_stored_condensation_whose_frontier_did_not_fall_still_arms_the_hold(
+def test_r3_b_a_stored_condensation_whose_frontier_did_not_fall_arms_no_hold(
         tmp_path, monkeypatch, clock, caplog):
-    """Control: the condensation is stored, but the frontier reads the same after it; the pass stays a no-progress
-    candidate and the #651 hold is armed."""
-    engine = _engine(tmp_path)
+    """#909: a stored condensation is progress even if the frontier token count does not fall; the #651
+    no-progress hold must agree with the partial-progress classification."""
+    engine = _engine(tmp_path,
+        # #1013 part B: foreground timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     for _ in range(8):
         engine._foreground_estimates.record_call("", 31.0)
     _provider(monkeypatch, clock, default=31.0)
@@ -330,7 +380,7 @@ def test_r3_b_a_stored_condensation_whose_frontier_did_not_fall_still_arms_the_h
         assert len(_condensations(engine)) == 1
         assert telemetry["pre_leaf_condensation_stop_reason"] == "condensation_no_progress"
         assert telemetry["leaf_passes"] == 0 and len(result) >= len(view)
-        assert engine._no_progress_hold is not None and engine._no_progress_hold[1] == "no_progress"
+        assert engine._no_progress_hold is None
     finally:
         engine.shutdown()
 
@@ -391,6 +441,72 @@ def test_c_a_call_cut_by_the_budget_counts_no_failure_ends_the_chain_and_takes_o
     assert raised.value.reason == "time_budget_exhausted"
     assert [(model, round(timeout)) for model, timeout, _started in provider.calls] == [("m1", 40)]
     assert breaker._failures == {} and len(guard._calls) == 1
+
+
+def _provider_cut_at_stream_deadline(monkeypatch, clock, seam=True):
+    provider = _provider(monkeypatch, clock, default=None)
+    if seam:  # the host exports the stream-deadline seam, so the usable deadline is installed (#1099)
+        _host_module(monkeypatch, clock, [])
+    else:
+        monkeypatch.setitem(sys.modules, "agent.auxiliary_client", types.ModuleType("agent.auxiliary_client"))
+
+    def live_stream(prompt, max_tokens, model="", timeout=None, reasoning_effort=""):
+        provider.calls.append((model, timeout, clock.offset))
+        clock.offset += escalation._summary_call.stream_deadline - time.monotonic()
+        raise TimeoutError("Codex auxiliary Responses stream exceeded 114.6s hard ceiling")
+
+    monkeypatch.setattr(escalation, "_invoke_summary_llm", live_stream)
+    return provider
+
+
+def test_c_a_call_that_outlives_its_configured_timeout_to_the_usable_deadline_is_a_cut(monkeypatch, clock):
+    provider = _provider_cut_at_stream_deadline(monkeypatch, clock)
+    breaker, guard = escalation.SummaryCircuitBreaker(), escalation.SummarySpendGuard()
+    budget = escalation.ForegroundBudget(soft=0, hard=120.0, configured_timeout=60.0,
+                                         estimates=escalation.ForegroundEstimates())
+    clock.offset += 0.4  # about 114.6 s usable: the configured timeout is still 60 s
+    with pytest.raises(escalation.SweepBudgetExhausted) as raised:
+        escalation.summarize_with_escalation(
+            "source text " * 400, source_tokens=4000, token_budget=50, model="m1", fallback_models=["m2"],
+            timeout=60.0, circuit_breaker=breaker, spend_guard=guard, budget=budget)
+    assert raised.value.reason == budget.stop_reason == "time_budget_exhausted"
+    assert [(model, timeout) for model, timeout, _started in provider.calls] == [("m1", 60.0)]
+    assert clock.offset - provider.calls[0][2] == pytest.approx(114.6, abs=0.5)
+    assert breaker._failures == {} and len(guard._calls) == 1
+
+
+def test_c_a_full_window_deadline_hangs_open_each_route_before_the_next_compaction(monkeypatch, clock):
+    provider = _provider_cut_at_stream_deadline(monkeypatch, clock)
+    breaker = escalation.SummaryCircuitBreaker()
+    for _ in range(2):
+        budget = escalation.ForegroundBudget(soft=0, hard=120.0, configured_timeout=60.0,
+                                             estimates=escalation.ForegroundEstimates())
+        clock.offset += 0.4
+        with pytest.raises(escalation.SweepBudgetExhausted) as raised:
+            escalation.summarize_with_escalation(
+                "source text " * 400, source_tokens=4000, token_budget=50, model="m1", fallback_models=["m2"],
+                timeout=60.0, circuit_breaker=breaker, budget=budget)
+        assert raised.value.reason == "time_budget_exhausted"
+    assert [model for model, _timeout, _started in provider.calls] == ["m1", "m2"]
+    assert not breaker.allows("m1") and not breaker.allows("m2")
+    assert breaker._failures == {}
+    assert all(breaker.route_status([model])["last_error_class"] == "hung" for model in ("m1", "m2"))
+
+
+def test_c_a_call_past_its_timeout_on_a_host_without_the_deadline_seam_stays_a_route_failure(monkeypatch, clock):
+    """#1099 review: without the seam nothing installed the budget's deadline, so a provider that ignores its timeout
+    and fails late is the route's own failure and counts toward the circuit."""
+    provider = _provider_cut_at_stream_deadline(monkeypatch, clock, seam=False)
+    breaker = escalation.SummaryCircuitBreaker()
+    budget = escalation.ForegroundBudget(soft=0, hard=120.0, configured_timeout=60.0,
+                                         estimates=escalation.ForegroundEstimates())
+    clock.offset += 0.4
+    with pytest.raises(escalation.SweepBudgetExhausted):  # the fallback is refused: no usable time is left
+        escalation.summarize_with_escalation(
+            "source text " * 400, source_tokens=4000, token_budget=50, model="m1", fallback_models=["m2"],
+            timeout=60.0, circuit_breaker=breaker, budget=budget)
+    assert [model for model, _timeout, _started in provider.calls] == ["m1"]
+    assert breaker._failures == {"m1": 1}
 
 
 @pytest.mark.parametrize(("pre_work", "budget_cut"), [(54.0, False), (56.0, True)])
@@ -480,6 +596,9 @@ def test_d_a_tighter_host_deadline_is_kept(monkeypatch, clock):
 
 def test_e_a_121s_finalize_step_shows_in_the_stop_line_and_the_next_reserve_is_20s(
         tmp_path, monkeypatch, clock, caplog):
+    # Count simulated time, with positive bookkeeping ticks independent of serialization CPU time.
+    ticks = iter(i / 100_000 for i in range(100_000))
+    monkeypatch.setattr(clock, "_real", lambda: next(ticks))
     engine = _engine(tmp_path)
     _provider(monkeypatch, clock, default=10.0)
     _advance_on(monkeypatch, engine, "_refresh_raw_backlog_debt", clock, 121.0)
@@ -498,7 +617,15 @@ def test_e_a_121s_finalize_step_shows_in_the_stop_line_and_the_next_reserve_is_2
 # -- the INFO stop line ------------------------------------------------------------------------------------------
 
 def test_one_info_stop_line_per_compaction_whose_seconds_add_up(tmp_path, monkeypatch, clock, caplog):
-    engine = _engine(tmp_path)
+    # Count simulated time, with positive bookkeeping ticks independent of serialization CPU time.
+    ticks = iter(i / 100_000 for i in range(100_000))
+    monkeypatch.setattr(clock, "_real", lambda: next(ticks))
+    engine = _engine(tmp_path,
+        # #1013 part B: foreground timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     _provider(monkeypatch, clock, default=25.0)
     _advance_on(monkeypatch, engine, "_prepare_retained_user_anchor", clock, 3.0)
     try:

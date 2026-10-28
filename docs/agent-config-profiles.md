@@ -2,7 +2,7 @@
 
 Copy-paste starting points for common agent shapes. Every profile below is
 **additive to a stock install** — with none of these variables set, LCM runs
-exactly as before. Mix and match: the feature families are independent.
+at its defaults. Mix and match: the feature families are independent.
 
 For the full variable table see
 [Operator guide → Configuration](operator-guide.md#configuration); for what
@@ -12,6 +12,10 @@ each feature does and why, see [Feature overview](features-overview.md).
 
 1. **Environment variables (`LCM_*`) are the primary surface** and always win.
    Set them in the environment that launches Hermes.
+   On a multiplexed Hermes gateway, routed profiles do not read the gateway's
+   process environment: put these settings and provider keys in each profile's
+   `.env` or configured secret source instead. `LCM_HERMES_BASE_DIR` always comes
+   from the process environment.
 2. **`~/.hermes/config.yaml`** participates in three narrow, deliberate ways:
    - `plugins.enabled: [hermes-lcm-x]` + `context.engine: lcm-x` activate the
      plugin (see [Operator guide → Activate](operator-guide.md#activate));
@@ -26,14 +30,17 @@ each feature does and why, see [Feature overview](features-overview.md).
      (`LCM_EXPANSION_REASONING_EFFORT`); other keys under `lcm:` are ignored
      and reported by `/lcm doctor`;
    - when neither `LCM_CONTEXT_THRESHOLD` nor `lcm.context_threshold` is set,
-     LCM inherits the Hermes global `compression.threshold`, unless
-     `compression.enabled` is false; then LCM uses its own default.
+     LCM inherits the Hermes global `compression.threshold` raised to at least
+     its own default (`0.75`), unless `compression.enabled` is false; then LCM
+     uses its own default. Set one of the two LCM keys to go lower.
 3. **Summarization inherits Hermes auxiliary routing.** Rollup builds and
    compaction summaries go through the auxiliary model unless you override
    `LCM_SUMMARY_MODEL` — so a fully-local Hermes (local auxiliary model) makes
    every LCM feature below local too, including temporal rollups.
-4. Secrets stay in the environment: the only one LCM ever reads is
-   `VOYAGE_API_KEY`, and only when `LCM_EMBEDDING_PROVIDER=voyage`.
+4. Provider credentials follow the same routed-profile rule: LCM reads
+   `VOYAGE_API_KEY` for Voyage, and the variable named by
+   `LCM_EMBEDDING_API_KEY_ENV` (default `LCM_EMBEDDING_API_KEY`) with
+   `SILICONFLOW_API_KEY` as a fallback for OpenAI-compatible embeddings.
 
 Check what actually took effect at runtime with `/lcm status` (reports config
 sources) and `/lcm doctor` (flags ignored YAML keys and misconfiguration).
@@ -52,7 +59,10 @@ context:
 ```
 
 You get bounded active context, the summary DAG, lossless recovery, and the
-full `lcm_*` tool set at their tested defaults.
+full `lcm_*` tool set at their tested defaults. The defaults are the
+configuration the managed deployment runs: compaction at `0.75` of the window,
+a 24-message fresh tail capped at 24000 tokens, 24000-token leaf chunks, the
+threshold full sweep.
 
 ## Profile: heavy tool-use coding agent
 
@@ -62,23 +72,30 @@ byte recoverable.
 
 ```bash
 # Externalize oversized payloads out of lcm.db into recoverable files
+# Default true; kept explicit for older versions.
 export LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=true
 
 # Replace token-heavy tool results in the provider-visible prompt with refs
+# Default true; kept explicit for older versions.
 export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED=true
 # A new result is stubbed from 10000 tokens; at a compaction, older results
 # outside the fresh tail are stubbed from 2000 tokens (0 = the first-sight value)
 # export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS=10000
 # export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS=2000
+# An automatic compaction that these stubs alone bring under its target returns
+# with no summary call (#671); a share of the threshold lowers that target
+# (0 = the built-in min(threshold - leaf chunk, 0.95 x threshold))
+# export LCM_STUB_FIRST_EXIT_TARGET_RATIO=0.2
 
-# Cap the protected fresh tail by tokens (0 = off). Prevents one giant recent
-# tool result from pinning the whole budget; newest message and complete
-# assistant/tool groups are always retained.
-export LCM_FRESH_TAIL_MAX_TOKENS=24000
+# Default 24000: caps the protected fresh tail by tokens. Prevents one giant
+# recent tool result from pinning the whole budget; while LCM_FRESH_TAIL_COUNT
+# is nonzero, the newest message and complete assistant/tool groups are always
+# retained (LCM_FRESH_TAIL_COUNT=0 keeps no fresh tail).
+# export LCM_FRESH_TAIL_MAX_TOKENS=24000
 
-# Optional: at threshold, drain the whole raw backlog in one bounded sweep
-# (fewer, larger compactions — useful after long unattended runs)
-export LCM_THRESHOLD_FULL_SWEEP_ENABLED=true
+# On by default: at threshold, keep summarising the oldest raw chunks in one
+# bounded sweep (fewer compactions)
+# export LCM_THRESHOLD_FULL_SWEEP_ENABLED=true
 ```
 
 Recovery stays first-class: `lcm_describe`/`lcm_expand` read externalized
@@ -87,11 +104,17 @@ the agent needs "which run printed that error?".
 
 ## Profile: long-horizon personal / companion agent
 
+Optional session-pack recall: `export LCM_RECALL_DELIVERY_UNIT=session` returns
+source neighborhoods within a fixed 16,000 estimated-token / 64,000-character
+JSON budget. The default `hits` retains the existing response; session mode can
+return partial sessions and more messages than the ranked-seed `limit`.
+
 For agents that live for weeks and get asked "what did we do last Tuesday?"
 and "have we talked about this before?".
 
 ```bash
 # Time-indexed memory: day/week/month rollups + the lcm_recent tool
+# Default true; kept explicit for older versions.
 export LCM_TEMPORAL_ROLLUPS_ENABLED=true
 
 # Meaning-based recall: semantic + hybrid lcm_grep over summaries
@@ -122,6 +145,7 @@ No bytes leave the machine. Pair with a local Hermes auxiliary model so
 summarization is local too.
 
 ```bash
+# Default true; kept explicit for older versions.
 export LCM_TEMPORAL_ROLLUPS_ENABLED=true
 
 export LCM_EMBEDDINGS_ENABLED=true

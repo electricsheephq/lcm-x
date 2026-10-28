@@ -917,6 +917,7 @@ def test_dump_candidates_stub_has_header_rows_gold_and_null_markers(tmp_path):
             "recall_rerank": False,
             "recall_rerank_window": 0,
             "top_k": 10,
+            "fts_order": "relevance",
         }
     }
 
@@ -1074,6 +1075,34 @@ def test_fresh_recall_session_is_disjoint_from_haystack_and_neutralizes_scope(tm
     assert hits, "production recall returned no hits"
     # No hit belongs to the (fresh) current conversation, so the scope boost is inert.
     assert all(hit.get("from_current_session") is False for hit in hits)
+
+
+def test_harness_summary_nodes_carry_their_sessions_time_bounds(tmp_path):
+    """#950: the recall prior multiplies a summary hit by the recency of the node's latest_at. The harness built
+    nodes with created_at 1..N and no time bounds, so every summary hit sat at the recency floor (0.5) while every
+    message hit, stored at ingest time, scored about 1.0. Nodes now carry their session's bounds, as compaction sets."""
+    import sqlite3
+
+    from benchmarking.longmemeval import StubEmbedder
+    from hermes_lcm.tools import _lcm_recall_recency_boost
+
+    question = _synthetic_dataset()[0]
+    evaluate_question(question, StubEmbedder(), provider_name="stub", tmp_dir=tmp_path, embeddings_enabled=True)
+    conn = sqlite3.connect(tmp_path / f"{question.question_id}.db")
+    try:
+        nodes = conn.execute("SELECT session_id, earliest_at, latest_at FROM summary_nodes WHERE depth = 0").fetchall()
+        bounds = {
+            sid: (lo, hi)
+            for sid, lo, hi in conn.execute(
+                "SELECT session_id, MIN(timestamp), MAX(timestamp) FROM messages GROUP BY session_id"
+            )
+        }
+    finally:
+        conn.close()
+    assert nodes and bounds
+    assert {sid: (lo, hi) for sid, lo, hi in nodes if sid in bounds} == bounds
+    now = max(hi for _, hi in bounds.values())
+    assert min(_lcm_recall_recency_boost(hi, now=now) for _, _, hi in nodes if hi is not None) > 0.99
 
 
 def test_fresh_recall_session_avoids_haystack_collision():
@@ -2097,7 +2126,7 @@ def test_per_question_privacy_and_corpus_counts_resume_without_header_change(tmp
         "queries_changed": 0,
         "queries_blocked": 0,
     }
-    assert row["corpus_counts"] == {"messages": 2, "summary_nodes": 1, "chunks": 0}
+    assert row["corpus_counts"] == {"messages": 2, "summary_nodes": 1, "chunks": 2}
     assert row["embed_cache"] == {"hits": 0, "misses": 0}
     assert "corpus_counts" not in row["arms"]
     assert "embed_cache" not in row["arms"]
@@ -2261,7 +2290,7 @@ def test_resume_validates_restored_corpus_counts(tmp_path):
     assert json.loads(row_line)["corpus_counts"] == {
         "messages": 2,
         "summary_nodes": 1,
-        "chunks": 0,
+        "chunks": 2,
     }
 
     def _write(row):
@@ -2690,7 +2719,8 @@ def test_production_recall_accounts_separate_summary_and_chunk_queries(
         "production_lcm_recall_queries",
     )
 
-    def fake_recall(args, *, engine):
+    def fake_recall(args, *, engine, delivery_unit):
+        assert delivery_unit == "hits"
         engine._lcm_embedding_provider_cache[1].embed_query(args["query"])
         engine._lcm_chunk_provider_cache[1].embed_query(args["query"])
         return json.dumps({"hits": [], "degraded": False})
@@ -3432,3 +3462,111 @@ def test_provider_aliases_require_privacy_binding():
         "openai", "text-embedding-x", embeddings_enabled=True
     )
     assert revision is not None
+
+
+def test_fts_hits_rank_older_more_relevant_message_first(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    lme._ensure_hermes_lcm_package()
+    from hermes_lcm.store import MessageStore
+
+    store = MessageStore(str(tmp_path / "fts.db"))
+    try:
+        store.append_batch("older", [{"role": "user", "content": "orchard zebra"}])
+        store.append_batch("newer", [{"role": "user", "content": "orchard filler"}])
+        store._conn.execute("UPDATE messages SET timestamp = 1 WHERE session_id = 'older'")
+        store._conn.execute("UPDATE messages SET timestamp = 2 WHERE session_id = 'newer'")
+        store._conn.commit()
+        assert store.search("orchard OR zebra", allow_operators=True)[0]["session_id"] == "newer"
+        assert lme.fts_hits(store, "orchard zebra", 10)[0][0] == "older"
+        assert lme.fts_sessions(store, "orchard zebra", 10) == ["older", "newer"]
+        search = store.search
+        sorts = []
+
+        def capture(*args, **kwargs):
+            sorts.append(kwargs.get("sort"))
+            return search(*args, **kwargs)
+
+        monkeypatch.setattr(store, "search", capture)
+        lme.fts_hits(store, "orchard zebra", 10)
+        assert sorts == ["relevance"]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("order", [None, "recency"])
+def test_resume_rejects_previous_fts_order(tmp_path, order):
+    questions = _synthetic_dataset()[:1]
+    checkpoint = tmp_path / "checkpoint.jsonl"
+    kwargs = dict(provider_name="stub", model="", embeddings_enabled=False,
+                  checkpoint_path=checkpoint)
+    run_harness(questions, tmp_dir=tmp_path / "live", **kwargs)
+    lines = checkpoint.read_text().splitlines()
+    header = json.loads(lines[0])
+    binding = header["__checkpoint_header__"]
+    if order is None:
+        binding.pop("fts_order", None)
+    else:
+        binding["fts_order"] = order
+    checkpoint.write_text(json.dumps(header) + "\n" + "\n".join(lines[1:]) + "\n")
+    with pytest.raises(ValueError, match="configuration mismatch.*fts_order"):
+        run_harness(questions, tmp_dir=tmp_path / "resumed", resume=True, **kwargs)
+
+
+@pytest.mark.parametrize("value", [7, False, None, [], {}])
+@pytest.mark.parametrize("site", ["resume", "scoring"])
+def test_checkpoint_rejects_non_string_coverage_values(tmp_path, value, site):
+    import benchmarking.longmemeval as lme
+
+    checkpoint = tmp_path / "checkpoint.jsonl"
+    run_harness(_synthetic_dataset()[:1], provider_name="stub", model="",
+                embeddings_enabled=False, tmp_dir=tmp_path / "live",
+                checkpoint_path=checkpoint)
+    record = json.loads(checkpoint.read_text().splitlines()[1])
+    record["arms"]["lcm_recall"]["recall_health"] = {
+        "degraded": False, "coverage": {"fts": "ok", "summary": value},
+    }
+    with pytest.raises(ValueError, match="recall_health.*coverage"):
+        if site == "resume":
+            lme._validate_restored_checkpoint_metrics(record, line_number=2, path=checkpoint,
+                                                      embeddings_enabled=False)
+        else:
+            lme._accumulate_question_checkpoint(
+                record, by_category={}, overall=lme._new_arm_samples(), ingest_samples=[],
+                rerank_mode_counts={},
+                recall_health_counts=dict(fts_ok=0, fts_none=0, fts_absent=0,
+                                          degraded=0, unrecorded=0),
+                embeddings_enabled=False,
+            )
+
+
+@pytest.mark.parametrize("field,value", [("timeout", False), ("timeout", "yes"), ("degraded_reason", 3),
+                                         ("degraded_reason", None)])
+def test_checkpoint_rejects_malformed_phase_d_health_fields(tmp_path, field, value):
+    """#664 D1: a restored row's timeout is true when present and its degraded reason is a string."""
+    import benchmarking.longmemeval as lme
+
+    checkpoint = tmp_path / "checkpoint.jsonl"
+    run_harness(_synthetic_dataset()[:1], provider_name="stub", model="",
+                embeddings_enabled=False, tmp_dir=tmp_path / "live",
+                checkpoint_path=checkpoint)
+    record = json.loads(checkpoint.read_text().splitlines()[1])
+    health = record["arms"]["lcm_recall"]["recall_health"]
+    lme._validate_restored_checkpoint_metrics(record, line_number=2, path=checkpoint, embeddings_enabled=False)
+    record["arms"]["lcm_recall"]["recall_health"] = {**health, field: value}
+    with pytest.raises(ValueError, match=f"recall_health.{field}"):
+        lme._validate_restored_checkpoint_metrics(record, line_number=2, path=checkpoint, embeddings_enabled=False)
+
+
+def test_candidate_dump_header_binds_fts_order(tmp_path):
+    """A dump written under the earlier recency-ordered FTS arm (no fts_order) is never appended to."""
+    import benchmarking.longmemeval as lme
+
+    header = lme._candidate_dump_header(
+        provider="stub", model="", rerank=False, embeddings_enabled=False, dataset_label="s",
+        direct_source_sha256=None, manifest_sha256="m",
+    )
+    assert header[lme._DUMP_HEADER_KEY]["fts_order"] == "relevance"
+    legacy = {lme._DUMP_HEADER_KEY: {k: v for k, v in header[lme._DUMP_HEADER_KEY].items() if k != "fts_order"}}
+    with pytest.raises(ValueError):
+        lme._validate_candidate_dump_header(legacy, expected_header=header, path=tmp_path / "dump.jsonl")

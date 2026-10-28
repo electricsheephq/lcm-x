@@ -158,6 +158,32 @@ def test_injected_block_is_stripped_before_ingest(tmp_path, provider):
     assert strip_injected_context_blocks(msg["content"]).strip() == ""
 
 
+@pytest.mark.parametrize(
+    "time_fields, expected",
+    [
+        ({"event_time": "2026-01-02T03:04:05Z", "timestamp": 1704067200}, "2026-01-02 03:04 UTC"),
+        ({"timestamp": 1704067200}, "stored 2024-01-01 00:00 UTC"),
+        ({"event_time": "malformed", "timestamp": 1704067200}, "stored 2024-01-01 00:00 UTC"),
+        ({}, "unknown time"),
+        ({"timestamp": 0}, "unknown time"),
+    ],
+    ids=["event-time", "stored-time", "malformed-event-time", "unknown-time", "zero-timestamp"],
+)
+def test_proactive_recall_dates_memory(tmp_path, monkeypatch, provider, time_fields, expected):
+    import json
+
+    engine = _make_engine(tmp_path)
+    hit = {"snippet": "useful older context", "score": 0.016, "from_current_session": False, **time_fields}
+    monkeypatch.setattr(lcm_tools, "lcm_recall", lambda *a, **k: json.dumps({"hits": [hit]}))
+
+    msg = engine._build_proactive_recall_message(_tail(), "user", set())
+
+    assert msg is not None
+    assert f"- [{expected}] useful older context" in msg["content"]
+    if "event_time" in time_fields and time_fields["event_time"] != "malformed":
+        assert "2024-01-01" not in msg["content"]
+
+
 # ── Inert / byte-identical postures ──
 
 
@@ -238,6 +264,51 @@ def test_rerank_keeps_proactive_floor_on_reported_rrf_score(tmp_path, monkeypatc
 
     assert msg is not None
     assert "useful older context" in msg["content"]
+
+
+def test_proactive_recall_does_not_use_the_fts_anchor(tmp_path, monkeypatch, provider):
+    """The #950 FTS anchor is a tool-path ordering rule. Proactive recall asks
+    for 6 hits and then applies its score floor without refill, so an FTS-only
+    anchor (score below the floor) must not displace an eligible 6th hit."""
+    import json
+
+    engine = _make_engine(tmp_path)
+    # Seven matching summaries in seven sessions outrank the lone FTS message,
+    # whose fused position is therefore outside the first 6.
+    nodes = [
+        _seed_cross_session_hit(engine, session_id=f"session-{i}", summary=f"kanban dashboard sprint plan {i}")
+        for i in range(7)
+    ]
+    fts_store_id = engine._store.append("session-fts", {"role": "user", "content": QUERY})
+    recall_args = {"query": QUERY, "limit": 6, "scope_bias": 0.3, "include": "all"}
+    tool_path = json.loads(lcm_tools.lcm_recall(dict(recall_args), engine=engine))
+    assert tool_path["provenance"]["fts_anchor"]["fired"] is True
+    assert tool_path["hits"][-1]["store_id"] == fts_store_id
+    assert tool_path["hits"][-1]["score"] < engine._config.proactive_recall_min_score
+    off = json.loads(lcm_tools.lcm_recall(dict(recall_args), engine=engine, fts_anchor=False))
+    assert "fts_anchor" not in off["provenance"]
+    off_nodes = [hit.get("node_id") for hit in off["hits"]]
+    assert len(off_nodes) == 6 and set(off_nodes) <= set(nodes)
+    # Only the 6th hit is eligible: the first five are already in the prefix.
+    active = set(off_nodes[:5])
+
+    seen: list[dict] = []
+    real_recall = lcm_tools.lcm_recall
+
+    def _spy(args, **kwargs):
+        raw = real_recall(args, **kwargs)
+        seen.append(json.loads(raw))
+        return raw
+
+    monkeypatch.setattr(lcm_tools, "lcm_recall", _spy)
+    on_msg = engine._build_proactive_recall_message(_tail(), "user", active)
+    engine._config.recall_fts_anchor = False
+    off_msg = engine._build_proactive_recall_message(_tail(), "user", active)
+
+    assert [h.get("node_id") for h in seen[0]["hits"]] == off_nodes
+    assert seen[0]["hits"] == seen[1]["hits"]
+    assert on_msg is not None and on_msg == off_msg
+    assert "kanban dashboard sprint plan" in on_msg["content"]
 
 
 # ── Budget cap ──

@@ -15,7 +15,7 @@ Two fixes on `fix/phase1b-scan-and-query` (diff = `git diff e99f342..HEAD`, read
    byte-identical by default).
 
 ## Context you should trust
-Motivating measurements: FINDING-F31 in /Volumes/LEXAR/hermes-work/wt-ci-fix/bench/ — recall hit 0.000 at
+Motivating measurements: FINDING-F31 in the `wt-ci-fix` checkout's `bench/` directory — recall hit 0.000 at
 185k vectors because golds aged out of the 25k window; raw questions returned 100% empty at scale via
 FTS5-reject → LIKE full-scan → 8s timeout. Acceptance for the fixes is a zero-LLM instrument re-run
 (Phase 1B), NOT this PR's tests — so your review should especially protect measurement correctness.

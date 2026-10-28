@@ -1,0 +1,24 @@
+{
+  "base": "e5af80d7c96ee8fedfc4625d853874a844baacd9",
+  "admission_methods_byte_identical": {
+    "compaction.py:should_compress": "7293de836503cb648c0ad79105942d982d0041ecbccff6dbcc5dc1ffa5bc6792",
+    "compaction.py:should_compress_preflight": "77ff52e98dbb52b83365cd24b9be287c0aefe10a61b7ec34e1e009b2fba61d65",
+    "compaction.py:_begin_compression": "4e2c0a77a44cd2ef2e3596a3bc344770f9a0b219dffdcc222e0e8b5e345c9a4f",
+    "compaction.py:_ingest_compression_view": "45cdaf8531e6bf0dc6982e47e4ed475bc07a9c3fd932d7832aa94ee9862571c1",
+    "engine.py:_no_progress_hold_active": "c396a1085045be3e43d85de5c77e0f0ba3f47f18c3312d66ff1cc143e5c9316b",
+    "engine.py:_persisted_no_progress_hold_active": "2e654b53728c5c0b99c214afd793669929040a620cd5ef3412e963172cd4a1bd",
+    "engine.py:_no_progress_hold_blocks": "237779665bab7285ddc159658787b6463718bf9b7f5620292be20e558fe8c948",
+    "engine.py:_sweep_budget_hold_applies": "f928b747eded3a1244bddc8682a6fc0cee824b15766115a2e0e1cfb17564204e",
+    "engine.py:_automatic_compression_blocked": "db5bed63988d7016c71671213da57f6b306de5a9a8cb606e73d1239df4c44c9f",
+    "engine.py:_compression_block_reason": "6ab8c0ffdf661a6c0fe1128f31ace5390de23a3a24a1aa465246e32696bd5852",
+    "engine.py:_no_progress_fingerprint": "d029644337bb18fbb0b4b39654c8f57f8a16f3fe8d5196ff0f0078511549d354",
+    "engine.py:_start_no_progress_hold": "a330724710597ce73a35ed0a10ac5908805cb47bb75430083ab4409b5272963a"
+  },
+  "call_graph": [
+    "should_compress / should_compress_preflight -> _sweep_budget_hold_applies -> _no_progress_hold_active -> _persisted_no_progress_hold_active -> _no_progress_fingerprint (unchanged)",
+    "compress -> _compress_impl -> _finish_without_leaf -> snapshot fingerprint at completed verdict (r1)",
+    "compress -> successful commit-proof bookkeeping -> _start_no_progress_hold -> _persist_no_progress_hold -> compare snapshot/current fingerprint, persist or BASE local pacing (r1)",
+    "committed leaf / threshold-sweep condensation -> _clear_persisted_no_progress_hold (r1 corrupt JSON clearing only)"
+  ],
+  "cost_ruling": "No admission method changed; no cost rerun required under FIX ROUND r1."
+}

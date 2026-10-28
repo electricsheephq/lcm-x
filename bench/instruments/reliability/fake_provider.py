@@ -26,6 +26,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from bench.instruments.reliability.scorers.continuity import markers
+
 TAG = re.compile(r"\[([A-Z]\d{2,3})\] user")
 NONCE = re.compile(r'<lcm-summary nonce="([0-9a-f]+)">')
 
@@ -83,6 +85,17 @@ def normalize(body: dict, api: str) -> list[dict]:
     return out
 
 
+def tool_call_args(body: dict, api: str) -> list[str]:
+    """Assistant tool-call arguments as sent (``normalize`` keeps text only); scanned for the #659 probe nonces."""
+    out = []
+    for m in body.get("messages") or []:
+        if api == "openai":
+            out += [str((c.get("function") or {}).get("arguments") or "") for c in m.get("tool_calls") or [] if isinstance(c, dict)]
+        elif isinstance(m.get("content"), list):
+            out += [json.dumps(b.get("input")) for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"]
+    return out
+
+
 def usage_for(messages: list[dict], scale: float) -> int:
     return int((sum(len(m.get("content") or "") for m in messages) // 4 + 800) * scale)
 
@@ -98,8 +111,9 @@ def lcm_summary(messages: list[dict], n: int) -> str:
 
 
 class FakeProvider:
-    def __init__(self, log_path, main=None, usage_scale: float = 1.0, hold_cap: float = 120.0):
+    def __init__(self, log_path, main=None, usage_scale: float = 1.0, hold_cap: float = 120.0, continuity_context=None):
         self.log_path, self.main, self.usage_scale, self.hold_cap = log_path, main, usage_scale, hold_cap
+        self.continuity_context = continuity_context
         self.lock, self.n_summary, self.n_requests, self.in_flight = threading.Lock(), 0, 0, threading.Event()
         provider = self
 
@@ -127,8 +141,15 @@ class FakeProvider:
             def do_POST(self):
                 if route_of("POST", self.path) != "completion":
                     return self.unrouted()
-                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
-                return provider.serve(self, body, COMPLETION_PATHS[self.path])
+                want = int(self.headers.get("Content-Length") or 0)
+                receive_start_ns = time.monotonic_ns()
+                raw = self.rfile.read(want)
+                receive_end_ns = time.monotonic_ns()
+                if len(raw) < want:  # client closed mid-send; accounting checks whether a harness kill explains it
+                    return provider.log(rid=provider.next_rid(), ts=time.time(), method="POST", path=self.path,
+                                        route="completion", role=None, truncated=[len(raw), want],
+                                        receive_start_ns=receive_start_ns, receive_end_ns=receive_end_ns)
+                return provider.serve(self, json.loads(raw or b"{}"), COMPLETION_PATHS[self.path])
 
             def unrouted(self):
                 """Every other method/path is logged (the accounting makes it an ERROR) and refused."""
@@ -193,6 +214,11 @@ class FakeProvider:
                "api": api, "role": role, "model": body.get("model"), "stream": stream,
                "messages_sha256": hashlib.sha256(blob).hexdigest(), "messages": len(messages),
                "token_estimate": usage_for(messages, 1.0)}
+        context = self.continuity_context() if role == "main" and self.continuity_context else {}
+        if context.get("nonces"):
+            context = {**context, "tool_args": tool_call_args(body, api)}
+        rec["continuity"] = markers(messages, **context)
+        rec["current_user_tag"] = context.get("current")
         if role == "main":
             rec["tools"] = sorted((t.get("function") or t).get("name", "?") for t in body.get("tools") or [])
         try:
@@ -200,6 +226,8 @@ class FakeProvider:
         except Exception as exc:  # a scenario bug is a 500 the host sees, and it is in the log
             reply = {"status": 500, "error": f"scenario raised {exc!r}"[:300]}
         rec.update(reply.get("log") or {})
+        if rec.get("current_user_missing"):
+            rec["continuity"]["F4"] = False
         if reply.get("hold_until_killed") or reply.get("hold"):
             rec["fault"] = "hold_until_killed" if reply.get("hold_until_killed") else "slow"
             self.log(**rec, phase="held")
