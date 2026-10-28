@@ -2,6 +2,8 @@
 
 Placements are in view order with non-decreasing bounds. Natural gaps are
 clamped to the preceding gap, so a later supersedes joins it after earlier NEWs.
+A supersedes target outside its own view bounds uses the NEW gap instead;
+recording the supersedes link remains the caller's job.
 """
 
 from __future__ import annotations
@@ -127,7 +129,8 @@ def common_prefix_len(chain_a, chain_b):
 def plan_ordinals(existing, placements):
     """Return (new ordinals in placement order, changed old-to-new ordinals).
 
-    A supersedes target determines its natural gap, subject to view-order clamping.
+    A supersedes target inside [left, right) determines its natural gap; an
+    out-of-bounds target uses the NEW gap. View-order clamping then applies.
     Tied minimal windows choose the leftmost. Duplicate existing labels (part
     witnesses) share one label and therefore one re-spacing map entry.
     """
@@ -144,7 +147,7 @@ def plan_ordinals(existing, placements):
         if left_bound >= right_bound or left_bound < previous_left or right_bound < previous_right:
             raise LedgerError("placement bounds must be non-decreasing in view order")
         previous_left, previous_right = left_bound, right_bound
-        if supersedes is not None:
+        if supersedes is not None and left_bound <= supersedes < right_bound:
             gap = bisect_left(original, supersedes) + 1
         else:
             if left is not None and right is not None and left >= right:

@@ -133,6 +133,14 @@ def test_ordinal_examples():
             ledger.plan_ordinals([100, 200, 300], placements)
 
 
+@pytest.mark.parametrize("existing, placements, expected", [
+    ([100, 200, 300, 400], [ledger.Placement(100, 200, 400), ledger.Placement(200, 300)], [150, 250]),
+    ([100, 200, 300], [ledger.Placement(200, 300, 100)], [250]),
+])
+def test_supersedes_outside_view_bounds(existing, placements, expected):
+    assert ledger.plan_ordinals(existing, placements) == (expected, {})
+
+
 def test_seeded_ordinal_sequences_and_minimal_windows():
     rng = random.Random(2055)
     for _ in range(300):
@@ -144,14 +152,19 @@ def test_seeded_ordinal_sequences_and_minimal_windows():
                 left, right = existing[left_index - 1] if left_index else None, existing[gap] if gap < len(existing) else None
                 last_left = left_index
                 for _ in range(rng.randint(1, 3)):
-                    target = rng.choice(existing[max(0, left_index - 1):gap]) if gap and rng.randrange(2) else None
+                    target = rng.choice(existing) if rng.randrange(2) else None
                     placements.append(ledger.Placement(left, right, target))
-                    predecessor = target if target is not None else existing[gap - 1] if gap else None
+                    target_in_bounds = target is not None and (left is None or left <= target) and (right is None or target < right)
+                    predecessor = target if target_in_bounds else existing[gap - 1] if gap else None
                     position = expected.index(("old", predecessor)) + 1 if predecessor is not None else 0
                     position = max(position, cursor)
                     expected.insert(position, ("new", len(placements) - 1))
                     cursor = position + 1
             values, mapping = ledger.plan_ordinals(existing, placements)
+            assert all(a < b for a, b in zip(values, values[1:]))
+            for placement, value in zip(placements, values):
+                assert (mapping.get(placement.left, placement.left) if placement.left is not None else 0) < value
+                assert placement.right is None or value < mapping.get(placement.right, placement.right)
             moved = [mapping.get(value, value) for value in existing]
             actual = sorted([(("old", old), new) for old, new in zip(existing, moved)]
                             + [(("new", index), value) for index, value in enumerate(values)], key=lambda item: item[1])
