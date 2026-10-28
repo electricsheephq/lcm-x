@@ -17,7 +17,8 @@ Release dates are ceilings, not schedules: a release ships as soon as its gate p
 3. **Run the gauntlet** (phases A-D below) against the rc tag. Every phase produces a receipt
    file under the run artifacts directory; the GA cut references all of them. Phase D's full
    tier runs at the rc1 of every release, major, minor or patch (later rcs: its carry-forward rule).
-   From v0.31.0, the Tiers section below selects the required rows; v0.29.x and v0.30.0 keep running all phases.
+   From v0.31.0, and for patch releases from v0.29.1, the Tiers section below selects the required rows; the minor
+   releases v0.29.0 and v0.30.0 run all phases.
 4. **Fix-and-respin**: any P0/P1 finding → fix PR (through the gate) → `-rc2` → re-run.
    Carry-forward rule (every receipt binds an exact tree, so carrying needs proof): **Phase B
    re-runs on every respin** (it is diff-scoped by definition). Phases A and C may carry a prior
@@ -32,18 +33,21 @@ Release dates are ceilings, not schedules: a release ships as soon as its gate p
    `git diff --name-status rcN..GA` must show ONLY `A` (added) entries under `.github/release-notes/` — modifying or deleting existing notes is not the exception. GA notes =
    rc notes + gauntlet summary + receipt links.
 
-## Tiers (from v0.31.0)
+## Tiers (from v0.31.0; patch releases from v0.29.1)
 
 The tiers select which rows run; selected rows keep their existing pass, validity and
-carry-forward rules. From v0.31.0, this cadence supersedes the every-rc/every-rc1 labels
+carry-forward rules. From v0.31.0, and for patch releases from v0.29.1, this cadence supersedes the every-rc/every-rc1 labels
 below and the full-tier cadence in Pipeline step 3. Phase receipts account for the selected
 rows and identify rows assigned to M; an unrun selected gating row is never green.
 
 - **R, every release candidate:** Phase B, the CI-required checks, the Phase C live soak
   and the reference-agent window (D5), and the upgrade/rollback roundtrip.
 - **T, per release:** the rows behind that release's own gate, named in its milestone
-  and `ROADMAP.md`.
+  and `ROADMAP.md`. For a patch release, T is the rows the promotion map selects for its
+  diff, plus any row its milestone names.
 - **M, weekly on main:** every other row, run on the main tip once a week, with receipts kept.
+  Before v0.31.0 there is no weekly M run: a patch release's unselected rows are not run, and
+  its release notes list them as not run.
 
 **Promotion map.** Ingest, storage or retry changes promote Phase A, D1 and D4/D8 into
 the rc; compaction or summariser changes promote D2/D3 and D7; recall or delivery changes
