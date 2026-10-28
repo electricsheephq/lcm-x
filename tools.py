@@ -1104,8 +1104,12 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
     return _recent.lcm_recent(args, **kwargs)
 
 
+_SUBAGENT_SOURCE = "subagent"  # #1931: the source a delegated subagent's stored rows carry
+
+
 def _annotate_subagent_lineage(engine: "LCMEngine", hits: list[dict[str, Any]]) -> None:
-    """#1931: a hit from a delegated subagent session carries its parent link."""
+    """#1931: a hit from a delegated subagent session (its rows carry source 'subagent') names its parent."""
+    hits = [hit for hit in hits if hit.get("source") == _SUBAGENT_SOURCE]
     parents_of = getattr(getattr(engine, "_store", None), "session_lineage_parents", None)
     if not hits or not callable(parents_of):
         return
@@ -4562,8 +4566,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     fts_arm_index = arm_order.index("fts") if "fts" in arm_order else None
     now = time.time()
     scope_session_ids = set(_recent._recent_conversation_scope_session_ids(engine))
-    try:  # #1931: the current session's delegated subagents share its scope boost
-        scope_session_ids.update(engine._store.session_lineage_descendants(str(engine.current_session_id or "")))
+    try:  # #1931: the current session's delegated subagents share its scope boost (only child hits need it)
+        if any(entry.get("hit", {}).get("source") == _SUBAGENT_SOURCE for entry in ordered):
+            scope_session_ids.update(engine._store.session_lineage_descendants(str(engine.current_session_id or "")))
     except Exception as exc:
         logger.debug("LCM subagent scope read failed: %s", exc)
     ordered = apply_prior(ordered, scope_session_ids, now, scope_bias)
