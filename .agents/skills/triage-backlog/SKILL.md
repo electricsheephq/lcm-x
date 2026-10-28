@@ -137,7 +137,8 @@ actions. Require current non-author human code-owner approval, confirm the exact
 lifecycle transition, and stop if an active continuation would be archived or closed. Route
 private vulnerability handling outside this public triage workflow. For close and reopen, the
 release manager's decision under the code owner's recorded delegation (AGENTS.md, Maintainer And
-Bot Roles) is that approval; public security disclosure still needs the code owner.
+Bot Roles) is that approval, and the same holds for public data-integrity disclosure; public
+security disclosure still needs the code owner.
 
 If a maintainer explicitly authorizes one of the remaining GitHub metadata mutations:
 

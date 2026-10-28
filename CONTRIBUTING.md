@@ -144,7 +144,8 @@ cluster at a time. Invoking it does not authorize backlog sweeps or GitHub write
 assignees, and milestones still need one exact maintainer authorization and live read-back;
 public sensitive disclosure and close/reopen actions retain stronger owner and lifecycle gates.
 The code owner's delegated release manager (AGENTS.md, Maintainer And Bot Roles) holds maintainer
-authority for the actions listed there; other bots and contributor agents stay proposal-only.
+authority and stands for the code-owner approval for the actions listed there; other bots and
+contributor agents stay proposal-only.
 Open executable upstream work remains an active continuation instead of silently becoming an
 archive-only or closed record.
 

@@ -191,14 +191,17 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
 - Maintainers own feature acceptance, priority, compatibility decisions, terminal dispositions,
   and releases.
 - Release-manager delegation (recorded by the code owner on 2026-10-29; the code owner revokes
-  or narrows it by editing this bullet). The code owner delegates maintainer authority to one
+  or narrows it by editing this bullet; widening this bullet stays with the code owner). The code
+  owner delegates maintainer authority to one
   release-manager agent that acts through the code owner's own account and decides from data.
-  It covers: triage metadata and milestones; issue lifecycle (close as fixed once the issue's own
+  It covers: issue and feature acceptance, priority and compatibility decisions; triage metadata
+  and milestones; public data-integrity disclosure; issue lifecycle (close as fixed once the issue's own
   acceptance is met, as duplicate, or as not planned with the reason; reopen); merges through the
   `land-pr` barrier; rc tags; and GA cuts after the release gate passes. For these actions its
   decision is the maintainer authorization and the human code-owner approval that this file,
   CONTRIBUTING.md and `triage-backlog` require. Each action still re-fetches live state first,
-  leaves an evidence comment, and reads back the result. It does not cover bypassing checks or
+  leaves an evidence comment, and reads back the result. It decides `REVIEW_SKIPPED` lanes; on a PR
+  it authored it uses the fallback reviewer instead of skipping. It does not cover bypassing checks or
   the ruleset, force-pushes, deleting `main` or a published tag or release, repository settings,
   private vulnerability handling, or public security disclosure; those stay with the code owner.
   Other bots and contributor agents stay proposal-only.

@@ -240,6 +240,15 @@ def test_release_manager_delegation_is_recorded_and_bounded():
                      "repository settings", "private vulnerability handling", "public security disclosure"):
         assert excluded in policy, excluded
     assert "Other bots and contributor agents stay proposal-only." in policy
+    assert ("The code owner delegates maintainer authority to one release-manager agent that acts through the"
+            " code owner's own account and decides from data.") in policy
+    assert ("It does not cover bypassing checks or the ruleset, force-pushes, deleting `main` or a published tag"
+            " or release, repository settings, private vulnerability handling, or public security disclosure;"
+            " those stay with the code owner.") in policy
+    assert "widening this bullet stays with the code owner" in policy
+    assert "on a PR it authored it uses the fallback reviewer instead of skipping" in policy
+    assert "For close and reopen, the release manager's decision under the code owner's recorded delegation" in skill
     assert "release-manager delegation that stands for it" in skill
     assert "public security disclosure still needs the code owner" in skill
+    assert "stands for the code-owner approval for the actions listed there" in guide
     assert "other bots and contributor agents stay proposal-only" in guide
