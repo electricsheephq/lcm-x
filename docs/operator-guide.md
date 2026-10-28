@@ -322,14 +322,21 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.29.0` is the forward identity of the next minor release: the `v0.29.0-rc1`
-tag carries it first, the gauntlet runs at the last rc tag, and the GA tree must be
-that rc tree plus the GA release-notes file. The rollback target for this candidate
-is `v0.28.1`; take a SQLite-safe backup and verify ordered messages and summary
-provenance through rollback and re-upgrade. The current stable release is
+and tag. The current stable release is
+[v0.29.0](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.0)
+at `c13dea3783bdbd1aab52d83dff5d009bfade0bd2` (2026-10-28); see [project status](project-status.md).
+The rollback target for v0.29.0 is `v0.28.1`. Take a SQLite-safe backup first, and
+compare ordered raw messages and summary provenance through upgrade, rollback and
+re-upgrade. After a rollback to v0.28.1, the three chunk embedding triggers stay in
+the database and SQLite keeps running them; prefixed vectors use their own task names
+(`summary+prefix`, `chunk+prefix`), which v0.28.1 ignores (#1942); and v0.28.1
+ignores the `sender_id` and `sender_source` columns: values v0.29.0 stored stay in place, and rows
+v0.28.1 writes leave them empty.
+
+For the previous release,
 [v0.28.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.28.1)
-at `77b2b4f795fb6a4f84c55abf6d0441da4469971e` (2026-10-20); see [project status](project-status.md).
-The rollback target for v0.28.1 is `v0.28.0`. Chunk gap-fill bookkeeping
+at `77b2b4f795fb6a4f84c55abf6d0441da4469971e` (2026-10-20),
+the rollback target is `v0.28.0`. Chunk gap-fill bookkeeping
 is additive metadata, not a SQL schema migration. An old reader ignores the new
 coverage and scan records; re-upgrade revalidates short-turn coverage (#1536, #1548).
 Raw rows and FTS remain available during rollback. Keep a SQLite-safe backup and

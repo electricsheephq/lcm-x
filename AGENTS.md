@@ -199,8 +199,9 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   `hermes acp` soak), Phase D (release-over-release scorecard against the previous GA: recall
   flips, Track S facts kept, QA rows, latency) — before the GA tag. From v0.31.0 the spec's
   tiers select the rows each rc runs (the R tier plus promoted rows, the release's own gate
-  rows, and the full tier at its cadence); patch releases from v0.29.1 use the same tiers, and the
-  minor releases v0.29.0 and v0.30.0 run all phases.
+  rows, and the full tier at its cadence); patch releases from v0.29.1 use the same tiers, except
+  that before v0.31.0 there is no weekly M run, so a patch's unselected rows are not run and its
+  release notes list them as not run; the minor releases v0.29.0 and v0.30.0 run all phases.
 - The GA commit may differ from the passing rc tree by EXACTLY the release-notes addition
   (mechanically verified: `git diff rcN..GA --name-only` ⊆ `.github/release-notes/`); GA notes
   link the four phase receipts (A-D; under the tiers, those of the selected rows). A P0/P1 gauntlet finding means fix → new rc → re-run; the only

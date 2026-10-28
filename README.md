@@ -137,11 +137,12 @@ copy-paste setups per agent type. Externalization and temporal rollups are on by
 ## Project status
 
 The latest stable release is
-[`v0.28.1`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.28.1)
-at `77b2b4f795fb6a4f84c55abf6d0441da4469971e`, released 2026-10-20 (plugin `hermes-lcm-x`, engine `lcm-x`).
-This patch covers session continuity, replay matching, doctor diagnostics, short-turn
-coverage after rollback and routed-profile settings. See [project status](docs/project-status.md)
-for the release summary, disclosed qualification exceptions and current work.
+[`v0.29.0`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.0)
+at `c13dea3783bdbd1aab52d83dff5d009bfade0bd2`, released 2026-10-28 (plugin `hermes-lcm-x`, engine `lcm-x`).
+It turns local semantic recall on by default once its companion plugin is installed,
+returns fuller recall from long messages, and stores retried and stopped turns more
+reliably. See [project status](docs/project-status.md) for the release summary, the
+disclosed qualification decisions and current work.
 It requires Hermes 0.21.3 or newer (#1080). It carries
 the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
@@ -155,8 +156,7 @@ Stable release identity and the continuing `main` development line are
 separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
-The `main` line carries the forward identity `hermes-lcm-x v0.29.0` — agentic memory — which the
-`v0.29.0-rc1` tag carries first, on top of `v0.28.1`.
+The `v0.29.0` tag carries the identity `hermes-lcm-x v0.29.0`, on top of `v0.28.1`.
 An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
 The manifest declares 16 tools; runtime discovery advertises 13 by default,
@@ -1249,7 +1249,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.28.1` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.29.0` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License

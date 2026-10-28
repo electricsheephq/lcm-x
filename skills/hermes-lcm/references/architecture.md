@@ -101,7 +101,7 @@ endpoint locality must not be inferred solely from the provider name (#337).
 
 Do not silently treat those stores or scopes as interchangeable.
 
-## Explicit LOCAL catch-up
+## LOCAL catch-up
 
 Local embeddings are on by default with FastEmbed and its effective default model `BAAI/bge-small-en-v1.5`; cloud providers require explicit opt-in and a model. FastEmbed alternates summary/chunk maintenance slices, up to 32 items (keeping the first message whole if it exceeds that limit) and a one-second soft budget, and re-enqueues at the queue tail after at least 0.82 times the slice's active time. An already started message may overrun across bounded batches; its progress reports that overrun. SQLite connections and leases close before the interruptible wait. Remote providers retain one pass per trigger.
 Model preparation warms only the shared model; owner-tracked jobs register stores. Preparation retries at ten-minute intervals for the first six attempts per model per process; after that, background maintenance keeps retrying with a backoff that starts at five minutes and doubles to a 30-minute cap. Uncertain rows retain timestamp-based retry backoff. No progress, refusal or error stops catch-up visibly. Lease contention and open circuits defer work; restart resumes from persisted vectors/scan state. The default bge-small model uses one intra-op thread per process, which is not a CPU quota.
