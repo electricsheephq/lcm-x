@@ -477,15 +477,19 @@ class StoreCompleteMixin:
                 # A claim of a cut row (a composite or carrier the retry cannot re-identify) may reach this leaf
                 # only through the #1162 escape. Read as hidden input it would be summarised while its holder
                 # stays in view with no pending escape, and a later leaf would summarise that text again.
+                # A cut claim recorded as a copy exclusion would likewise lose its lineage to the holder.
                 cut_claims = {sid for message in chunk[len(prefix):] for sid in given_claims.get(id(message), ())}
                 escaped_ids = {sid for sid, *_ in self._store_complete_escaped}
-                if cut_claims & {sid for _message, ids in result for sid in ids} - escaped_ids:
+                excluded_ids = set(self._store_complete_excluded) | set(self._store_complete_copy_exclusion_proofs)
+                if cut_claims & ({sid for _message, ids in result for sid in ids} - escaped_ids | excluded_ids):
                     result = []
                 if result:
                     self._store_complete_cut = True
                     return result
                 self._store_complete_empty_reason, self._store_complete_blocked = _CONTIGUITY, None
                 self._store_complete_escaped, self._store_complete_order = [], {}
+                self._store_complete_excluded, self._store_complete_cut = [], False
+                self._store_complete_copy_exclusion_proofs = {}
         if not out or (not any(ids_of(m, ids) for m, ids in out)
                        and all(self._is_context_summary_content(m.get("content")) for m in chunk)):
             if not self._store_complete_blocked and not self._store_complete_empty_reason:
