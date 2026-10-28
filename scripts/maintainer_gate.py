@@ -44,6 +44,7 @@ MEMORY_MIGRATION_FILES = {
 # Default model-facing tool schemas count as context; persistence plumbing alone
 # does not qualify, but row-content policy and compaction commit ownership do.
 TURN_PATH_FILES = {
+    "ingest_ledger.py",  # P1b-2b's transaction-owned ingest ledger API.
     "__init__.py", "assembly_plan.py", "aux_session.py", "bypass.py", "codex_routing.py", "compaction.py",
     "compaction_policy.py", "compaction_request.py", "compress_run.py",
     "dag.py", "engine.py", "escalation.py", "externalize.py", "extraction.py", "fresh_tail.py",
