@@ -267,6 +267,10 @@ def host_message_uid_mode() -> str:
     return raw if raw in _HOST_MESSAGE_UID_MODES else "shadow"
 
 
+def identity_anchor_enabled() -> bool:
+    return _parse_bool_env("LCM_IDENTITY_ANCHOR", True, unknown=True, true_values=())
+
+
 def _parse_int_env_with_source(
     key: str,
     default: int,

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_lcm import config, db_bootstrap, identity_anchor
+from hermes_lcm import config, db_bootstrap
 from hermes_lcm.engine import LCMEngine
 from bench.instruments.reliability import plugin_tree
 
@@ -34,7 +34,7 @@ def test_legacy_boolean_edges(monkeypatch):
             for plugin in plugins:
                 assert plugin._env_flag_enabled("LCM_ENABLE_SLASH_COMMAND", default) is on
         for key, reader in (
-            ("LCM_IDENTITY_ANCHOR", identity_anchor.identity_anchor_enabled),
+            ("LCM_IDENTITY_ANCHOR", config.identity_anchor_enabled),
             ("LCM_FTS_INTEGRITY_BACKGROUND", db_bootstrap._background_integrity_enabled),
         ):
             monkeypatch.setenv(key, raw)
@@ -150,7 +150,7 @@ def test_boolean_policy_inventory():
                 assert key not in derived
                 derived[key] = tuple(policy[name] for name in policy_names)
     assert call_sites == {
-        ("__init__.py", "name"), ("identity_anchor.py", "'LCM_IDENTITY_ANCHOR'"),
+        ("__init__.py", "name"), ("config.py", "'LCM_IDENTITY_ANCHOR'"),
         ("db_bootstrap.py", "BACKGROUND_INTEGRITY_ENV"),
         ("sender_capture.py", "'LCM_SENDER_CAPTURE'"),
     }

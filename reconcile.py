@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
-from .config import host_message_uid_mode
+from .config import host_message_uid_mode, identity_anchor_enabled
 # Keep this facade: runtime callers and patch seams resolve projection here.
 from .emission_projection import (
     EmissionProjectionEntry as EmissionProjectionEntry,
@@ -44,7 +44,6 @@ from .externalize import (
     find_externalized_tool_result_content_for_call,
     load_externalized_payload,
 )
-from .identity_anchor import identity_anchor_enabled
 from .ingest_protection import (
     _add_inline_persisted_output_generation_metadata,
     _add_inline_persisted_output_identity_metadata,

@@ -15,7 +15,7 @@ import re
 import pytest
 
 from hermes_lcm import command, config, db_bootstrap, diagnostics
-from hermes_lcm import embedding_provider, externalize, identity_anchor, presets
+from hermes_lcm import embedding_provider, externalize, presets
 from hermes_lcm.engine import LCMEngine
 
 
@@ -265,7 +265,7 @@ DYNAMIC_ROWS = (
      ("shadow",) * 8 + ("on", "off") + ("shadow",) * 6),
     ("LCM_SQLITE_MMAP_SIZE", config.sqlite_mmap_size,
      (268435456,) * 4 + (1, 0) + (268435456,) * 9 + (HUGE,)),
-    ("LCM_IDENTITY_ANCHOR", identity_anchor.identity_anchor_enabled, SWITCH),
+    ("LCM_IDENTITY_ANCHOR", config.identity_anchor_enabled, SWITCH),
     ("LCM_FTS_INTEGRITY_BACKGROUND", db_bootstrap._background_integrity_enabled, SWITCH),
     ("LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS", db_bootstrap._integrity_check_interval_hours,
      tuple(24.0 if value is D else value for value in FLOAT)),
