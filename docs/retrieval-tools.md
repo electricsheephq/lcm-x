@@ -72,6 +72,9 @@ multiple sessions are merged and bounded by `max_results` before context
 expansion. For `externalized_ref` reads, the default is the current session and
 its compression-rotation predecessors; only `lcm_expand(externalized_ref=..., session_id=...)`
 selects another session, which must own the payload or have replaced its owner at a compression-boundary rotation.
+Explicit-session reads require the payload directory to be inside the profile's own Hermes home
+and not under its `profiles/` directory; a payload directory configured elsewhere is refused
+with the not-found error.
 
 `lcm_expand_query(output='evidence')` uses the same `context_max_tokens` budget,
 recursive DAG traversal, raw-hit deduplication, and pagination metadata as answer

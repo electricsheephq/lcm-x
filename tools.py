@@ -200,6 +200,8 @@ def _get_externalized_payload(
                 engine._config, hermes_home=engine._hermes_home, create=False
             ).resolve()
             storage_dir.relative_to(home)
+            if storage_dir.is_relative_to(home / "profiles"):
+                return None
             (storage_dir / ref).resolve().relative_to(storage_dir)
         except (OSError, RuntimeError, ValueError):
             return None

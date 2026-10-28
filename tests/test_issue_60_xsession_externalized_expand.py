@@ -9,14 +9,14 @@ from hermes_lcm.engine import LCMEngine
 from hermes_lcm.externalize import get_large_output_storage_dir, maybe_externalize_tool_output
 
 
-def _rotation_engine(tmp_path):
+def _rotation_engine(tmp_path, *, hermes_home=None):
     engine = LCMEngine(
         config=LCMConfig(
             database_path=str(tmp_path / "lcm.db"),
             large_output_externalization_enabled=True,
             large_output_externalization_threshold_chars=200,
         ),
-        hermes_home=str(tmp_path / "hermes"),
+        hermes_home=str(hermes_home or tmp_path / "hermes"),
     )
     engine.on_session_start("session-a", platform="discord", conversation_id="thread", context_length=200_000)
     return engine
@@ -151,6 +151,34 @@ def test_explicit_session_rejects_cross_profile_payload_path(tmp_path, path_mode
         assert _expand(other, externalized_ref=ref, session_id="session-a")["content"]
         assert _expand(engine, externalized_ref=ref, session_id="session-a") == {
             "error": f"Externalized payload {ref} not found in session session-a"
+        }
+    finally:
+        other.shutdown()
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("path_mode", ["configured_directory", "directory_symlink"])
+def test_explicit_session_rejects_nested_profile_payload_path(tmp_path, path_mode):
+    engine = _rotation_engine(tmp_path, hermes_home=tmp_path)
+    other_home = tmp_path / "profiles" / "work"
+    other_home.mkdir(parents=True)
+    other = _rotation_engine(other_home, hermes_home=other_home)
+    try:
+        _restart(other, session_id="work-session")
+        ref = _externalize(other, "work-session", "RESULT from nested profile " * 50)
+        other_storage = get_large_output_storage_dir(
+            other._config, hermes_home=other._hermes_home, create=False
+        )
+        if path_mode == "configured_directory":
+            engine._config.large_output_externalization_path = str(other_storage)
+        else:
+            storage = get_large_output_storage_dir(
+                engine._config, hermes_home=engine._hermes_home, create=False
+            )
+            storage.symlink_to(other_storage, target_is_directory=True)
+        assert _expand(other, externalized_ref=ref, session_id="work-session")["content"]
+        assert _expand(engine, externalized_ref=ref, session_id="work-session") == {
+            "error": f"Externalized payload {ref} not found in session work-session"
         }
     finally:
         other.shutdown()
