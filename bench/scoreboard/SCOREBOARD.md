@@ -2,25 +2,280 @@
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` (sha256: `1c208c8506850f0838dde19ec8c28bd56a328699c88a7dd039a928606a17561a`, rows: 11)
+Generated from `results.jsonl` + `results.d/*.json` (combined sha256: `64cac77fde034e41353e87b3e0155b69e70bc941335828c44a9ff24429f8a898`, rows: 82)
 
 ## Summary
 
 | Benchmark | Metric | Result | Tier | Date | Details |
 |---|---|---|---|---|---|
+| #1451 PR-A occurrence snapshot synthetic acceptance | new_loss_checkpoints | 0 new loss checkpoints across1296 cells; error cells172->0 | P | 2026-10-23 | [details](#occurrence-1451-pra-2026-10-23) |
+| #1451 PR-A r1 snapshot and positional proof acceptance | new_or_increased_loss_cells | 0/1296 new loss; error cells0; changed vs r0=0 | P | 2026-10-23 | [details](#occurrence-1451-pra-r1-2026-10-23) |
+| #1451 PR-A r2 publication-fault occurrence acceptance | new_or_increased_loss_cells | 0/1296 new loss; errors0; changed vsr1=0; calibrated fault regression fixed | P | 2026-10-23 | [details](#occurrence-1451-pra-r2-2026-10-23) |
+| ~~#1880 part A Amendment 1 synthetic preflight (10000 stored rows)~~ | ~~candidate_median_ms~~ | ~~0.1621250 -> 0.1664170 ms; PASS max(+10%, +0.05ms)~~ | ~~P~~ | ~~2026-10-23~~ | ~~[details](#issue-1880-preflight-cost-r2-10000-2026-10-23)~~ → [successor](#issue-1880-preflight-cost-r2-final-10000-2026-10-23) |
+| ~~#1880 part A Amendment 1 synthetic preflight (100000 stored rows)~~ | ~~candidate_median_ms~~ | ~~0.1662505 -> 0.1691875 ms; PASS max(+10%, +0.05ms)~~ | ~~P~~ | ~~2026-10-23~~ | ~~[details](#issue-1880-preflight-cost-r2-100000-2026-10-23)~~ → [successor](#issue-1880-preflight-cost-r2-final-100000-2026-10-23) |
+| #1880 part A final synthetic preflight (10000 stored rows) | candidate_median_ms | 0.1789795 -> 0.1924790 ms; PASS max(+10%, +0.05ms) | P | 2026-10-23 | [details](#issue-1880-preflight-cost-r2-final-10000-2026-10-23) |
+| #1880 part A final synthetic preflight (100000 stored rows) | candidate_median_ms | 0.1626040 -> 0.1726250 ms; PASS max(+10%, +0.05ms) | P | 2026-10-23 | [details](#issue-1880-preflight-cost-r2-final-100000-2026-10-23) |
+| #1880 persisted hold hosted synthetic admission | unheld_cells_within_cost_bar | 2/4 paired UNHELD cells PASS; both mismatch cells FAIL cost bar | P | 2026-10-23 | [details](#lcmx-1880-hold-cost-h2-linux-20261023) |
+| #1880 persisted hold hosted synthetic admission | unheld_cells_within_cost_bar | 4/4 paired UNHELD cells PASS; held paths zero model calls/scans/writes | P | 2026-10-23 | [details](#lcmx-1880-hold-cost-h3-hosted-20261023) |
+| #1880 persisted hold synthetic admission | unheld_cells_within_cost_bar | 4/4 steady unheld cells within the paired median cost bar | P | 2026-10-23 | [details](#1880-persisted-hold-cost-20261023) |
+| #1880 persisted hold synthetic admission | unheld_cells_within_cost_bar | 4/4 steady unheld cells within the paired median cost bar | P | 2026-10-23 | [details](#1880-persisted-hold-cost-integration-delta-20261023) |
+| #1880 persisted hold synthetic admission | unheld_cells_within_cost_bar | 4/4 steady unheld cells within the paired median cost bar | P | 2026-10-23 | [details](#1880-persisted-hold-cost-review-delta-20261023) |
 | AMA-Bench (open-ended, 208 episodes) | strict judged accuracy, fail-closed denominator | 1180/2496 = 47.3% (scored-only 1180/2460 = 48.0%) | F | 2026-08-02 | [details](#ama208-full-2026-08-02) |
+| BEAM-10M (200q) | nugget_score | 0.6332 ± 0.4002 (200 questions) | F | 2026-10-22 | [details](#beam-10m-v0280-20261022) |
+| Coverage marker round 3 (#1624 items 1-2, #1853) | cloud_status_after_one_pass_p50_ms | 12.578187 -> 0.585375 ms after one cloud maintenance pass | P | 2026-10-22 | [details](#coverage-marker-round3-2026-10-22) |
+| D5-A (engine-direct latency proxy) | max_lcm_owned_s | 49.1 s | P | 2026-10-16 | [details](#d5a-max-v0270-2026-10-16) |
+| D5-A (engine-direct latency proxy) | mean_wait_s_per_message | 7.9 s | P | 2026-10-16 | [details](#d5a-mean-wait-v0270-2026-10-16) |
+| D5-A (engine-direct latency proxy) | compaction_p90_s | 44.5 s | P | 2026-10-16 | [details](#d5a-p90-v0270-2026-10-16) |
+| D5-B (c1, live integration) | slowest_compaction_s | 48.7 s | P | 2026-10-16 | [details](#d5b-c1-slowest-v0270-2026-10-16) |
+| D5-B (c2, live integration) | slowest_compaction_s | 55.2 s | P | 2026-10-16 | [details](#d5b-c2-slowest-v0270-2026-10-16) |
+| D5-C (reference-agent real-use window) | max_lcm_owned_s | 116.3 | P | 2026-10-16 | [details](#d5c-max-v0270-2026-10-16) |
+| D5-C (reference-agent real-use window) | real_use_hours | 11.9 | P | 2026-10-16 | [details](#d5c-window-v0270-2026-10-16) |
+| E1b S0 sender capture: paired 200-message ingest | candidate_median_ms | 7.2074585 ms BASE to 7.236625 ms candidate (+0.405%); hook plus UPDATE 0.203125 ms | P | 2026-10-23 | [details](#e1b-s0-sender-capture-resume2-2026-10-23) |
 | Internal scale instrument (389×, 19,829 sessions / 199,641 messages) | p50_ms | 263.6 ms @ 19,829 sessions (24× vs pre-fix; 125 ms @ 8k) | P | 2026-07-30 | [details](#scale-curve-fastscan-2026-07-30) |
+| ~~Issue #1828 synthetic delivery acceptance (not a board score)~~ | ~~head_subset_cells~~ | ~~0 strict-subset regressions / 1502 cap cells~~ | ~~F~~ | ~~2026-10-23~~ | ~~[details](#issue-1828-refit-20261023)~~ → [successor](#issue-1828-refit-20261023-r2) |
+| Issue #1828 synthetic delivery acceptance (not a board score) | head_subset_cells | 0 strict-subset regressions / 1502 cap cells | F | 2026-10-23 | [details](#issue-1828-refit-20261023-r2) |
+| ~~Issue #1879 synthetic pinned-host reliability instrument acceptance~~ | ~~B2_deficit_rows~~ | ~~0 B2 deficits / 528 expected items; runtime B1 and surplus remain FAIL~~ | ~~F~~ | ~~2026-10-23~~ | ~~[details](#issue-1879-reliability-20261023)~~ → [successor](#issue-1879-reliability-20261023-delta1) |
+| Issue #1879 synthetic pinned-host reliability instrument acceptance | B2_deficit_rows | 0 B2 deficits / 528 expected items; runtime B1 and surplus remain FAIL | F | 2026-10-23 | [details](#issue-1879-reliability-20261023-delta1) |
+| LOCAL catch-up gap discovery (#1748; synthetic 250k store) | sqlite_vm_work_amplification_240k_vs_empty | 1.744911x VM work; 2x eligible-row visits; live max 1.000263x steady | P | 2026-10-21 | [details](#issue1748-gapwalk-2026-10-21) |
+| LOCAL catch-up idle duty (2-vCPU floor surrogate) | max_mean_cpu_cores | 0.551 cores (max mean across four 0.82 cells) | F | 2026-10-23 | [details](#local-idle-duty-floor-probe-2026-10-23) |
+| LoCoMo (1,986q, QA, OFF) | correct_count | 1,014/1,986 vs 987/1,986 | P | 2026-10-16 | [details](#locomo-qa-off-v0270-2026-10-16) |
+| LoCoMo (locomo10, 1,986q) | accuracy | 54.9% (1,091/1,986); OFF on the same release 49.7% | P | 2026-10-08 | [details](#locomo10-1986-qa-local-v0261-2026-10-08) |
+| LoCoMo (locomo10, 1,986q) | accuracy | 49.7% (987/1,986) | P | 2026-10-07 | [details](#locomo10-1986-qa-off-v0261-2026-10-07) |
 | LoCoMo (locomo10, 1,986q) | accuracy | 67.4% (1,339/1,986 MemScore) | F | 2026-08-26 | [details](#locomo10-1986-b3a-2026-08-26) |
 | LoCoMo (locomo10, 1,986q) | accuracy | 54.6% (1,085/1,986 MemScore) | F | 2026-08-02 | [details](#locomo10-1986-declared-2026-08-02) |
 | ~~LoCoMo (locomo10, 1,986q)~~ | ~~accuracy~~ | ~~47.0% (MemScore)~~ | ~~F~~ | ~~2026-07-30~~ | ~~[details](#locomo10-1986-arm-a-2026-07-30)~~ → [successor](#locomo10-1986-declared-2026-08-02) |
+| LongMemEval-M (R1-M, LOCAL, lcm_recall) | r10 | 0.9038 vs OFF 0.8733; +0.0305 (paired, p 0.0006) | P | 2026-10-16 | [details](#r1m-local-recall-r10-v0270-2026-10-16) |
+| LongMemEval-M (R1-M, OFF, fts) | per_question_flips | 0 | P | 2026-10-16 | [details](#r1m-off-fts-flips-v0270-2026-10-16) |
+| LongMemEval-M (R1-M, OFF, fts) | p50_ms | 11 | P | 2026-10-09 | [details](#r1m-off-fts-p50_ms-v0262-2026-10-09) |
+| LongMemEval-M (R1-M, OFF, fts) | p90_ms | 18 | P | 2026-10-09 | [details](#r1m-off-fts-p90_ms-v0262-2026-10-09) |
+| LongMemEval-M (R1-M, OFF, fts) | r10 | 0.8416 | P | 2026-10-09 | [details](#r1m-off-fts-r10-v0262-2026-10-09) |
+| LongMemEval-M (R1-M, OFF, lcm_recall) | per_question_flips | 260 (all #1035) | P | 2026-10-16 | [details](#r1m-off-recall-flips-v0270-2026-10-16) |
+| LongMemEval-M (R1-M, OFF, lcm_recall) | r10 | 0.8733 vs 0.8473; +0.0260 | P | 2026-10-16 | [details](#r1m-off-recall-r10-v0270-2026-10-16) |
+| LongMemEval-M (R1-M, OFF, lcm_recall) | p50_ms | 38 | P | 2026-10-09 | [details](#r1m-off-recall-p50_ms-v0262-2026-10-09) |
+| LongMemEval-M (R1-M, OFF, lcm_recall) | p90_ms | 95 | P | 2026-10-09 | [details](#r1m-off-recall-p90_ms-v0262-2026-10-09) |
+| LongMemEval-M (R1-M, OFF, lcm_recall) | r10 | 0.8473 | P | 2026-10-09 | [details](#r1m-off-recall-r10-v0262-2026-10-09) |
+| LongMemEval-S (500q, QA, OFF) | correct_count | 381/500 vs 363/500 | P | 2026-10-16 | [details](#longmemeval-s-qa-off-v0270-2026-10-16) |
 | LongMemEval-V1 (S, 500q) | accuracy | 455/500 (91.0%) | P | 2026-07-29 | [details](#longmemeval-v1-s500-accuracy-2026-07-29) |
 | LongMemEval-V1 (S, 500q) | latency_delta_s_per_q | −56.3 s/question vs vanilla (22% faster) | P | 2026-07-29 | [details](#longmemeval-v1-s500-latency-2026-07-29) |
+| LongMemEval-V1 MEDIUM (483q privacy-filtered set, retrieval row) | lcm_recall (primary arm): recall@10 / ndcg@10 / recall@1, fail-closed | recall@10 95.0% \| ndcg@10 0.860 \| recall@1 51.6% (456 scored + 27 abstention-excluded; 17 withheld by the production privacy filter; embeddings off on the same 456: 84.7%) | P | 2026-10-06 | [details](#longmemeval-v1-m483-retrieval-voyage-tracker-v0260-2026-10-06) |
+| LongMemEval-V1 MEDIUM (500q, retrieval row) | lcm_recall (primary arm): recall@10 / ndcg@10 / recall@1, fail-closed | recall@10 84.7% \| ndcg@10 0.764 \| recall@1 45.8% (470 scored + 30 abstention-excluded; 0 instrument failures) | P | 2026-10-05 | [details](#longmemeval-v1-m500-retrieval-default-v0260-2026-10-05) |
 | LongMemEval-V1 MEDIUM (500q, retrieval row) | lcm_recall (primary arm): recall@10 / ndcg@10 / recall@1, fail-closed | recall@10 95.6% \| ndcg@10 0.861 \| recall@1 50.0% (470 scored + 30 abstention-excluded; 0 instrument failures) | P | 2026-08-19 | [details](#longmemeval-v1-m500-retrieval-2026-08-19) |
+| LongMemEval-V1 MEDIUM (500q, retrieval row, R1-M) | lcm_recall (product arm): recall@10 / ndcg@10 / recall@1, session level, fail-closed | recall@10 84.7% \| ndcg@10 0.764 \| recall@1 45.8% (470 scored + 30 abstention-excluded; 0 failed) | P | 2026-10-05 | [details](#longmemeval-v1-m500-retrieval-fulltext-2026-10-05) |
+| LongMemEval-V1 SMALL (cleaned, 500q, QA row) | accuracy | 86.4% (432/500); OFF on the same release 72.6% | P | 2026-10-08 | [details](#longmemeval-v1-s500-qa-local-v0261-2026-10-08) |
+| LongMemEval-V1 SMALL (cleaned, 500q, QA row) | accuracy | 72.6% (363/500) | P | 2026-10-08 | [details](#longmemeval-v1-s500-qa-off-v0261-2026-10-08) |
 | LongMemEval-V2 (451q, agentic) | accuracy | 298/451 (66.1%) | P | 2026-07-27 | [details](#longmemeval-v2-451-agentic-2026-07-27) |
 | LongMemEval-V2 (451q, static) | accuracy | 123/451 (27.3%) — official static protocol, fixed weak reader | P | 2026-07-31 | [details](#longmemeval-v2-451-static-2026-07-31) |
 | LongMemEval-V2 static (451q) | judged accuracy, full set | 143/451 = 31.7% (web 97/240 = 40.4%, enterprise 46/211 = 21.8%) | F | 2026-08-03 | [details](#v2-static-451-sota-luna-2026-08-03) |
+| Occurrence retry three-way revert proof | cells_worse_than_main_on_loss | 0/1296 cells worse than main on loss; 25 named cells equal GA at every checkpoint | P | 2026-10-23 | [details](#revert-1637-occurrence-2026-10-23) |
+| PR #1860 fix-round acceptance | steady_status_p50_ms | 0.2709 -> 0.2622 ms certified-steady status | P | 2026-10-23 | [details](#coverage-marker-fix-r1c-2026-10-23) |
+| PR #1860 r2 initial read-only backlog acceptance | harmful_probe_differences | 0 harmful differences in 304 field comparisons; d3 initial backlog 1 (gap-fill) | P | 2026-10-23 | [details](#coverage-marker-fix-r2-2026-10-23) |
+| Phase C (four live host cells) | slowest_compaction_s | 93.0 s; bar <=145 s | P | 2026-10-16 | [details](#phase-c-max-v0270-2026-10-16) |
+| Recall row handoff (sessions) | busy_median_s | 3.297513 -> 0.112816 s | P | 2026-10-21 | [details](#row-handoff-v1-1749-sessions) |
+| Recall row handoff (vector.chunk) | busy_median_s | 8.160382 -> 0.335681 s | P | 2026-10-21 | [details](#row-handoff-v1-1749-vector.chunk) |
+| Recall row handoff (vector.summary) | busy_median_s | 1.656694 -> 0.117894 s | P | 2026-10-21 | [details](#row-handoff-v1-1749-vector.summary) |
+| Session-end attribution ordinary-turn overhead | maximum_paired_median_delta_ms | 4/4 scoped cells pass; INFO preflight +0.004043ms, ingest +0.003702ms | P | 2026-10-23 | [details](#session-end-attribution-cost-2026-10-23) |
+| Synthetic LOCAL exact chunk recall (#1586) | recall_250k_p50_s | 250k p50/p90 1.535/1.914s; selected-25k VM steps constant1,025,602 | P | 2026-10-23 | [details](#issue1586-chunk-load-20261023) |
+| Track S v3 (GLM summary route) | admission_proven_losses | 0; D3 PASS; 60/60 admitted at all 24 checkpoints | P | 2026-10-16 | [details](#track-s-admission-losses-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | compactions_per_100_messages | 12.3; bar <= 25 | P | 2026-10-16 | [details](#track-s-compactions-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | facts_kept_cp176 | 0.942 vs 0.933 (reported only) | P | 2026-10-16 | [details](#track-s-facts-cp176-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | facts_kept_cp304 | 0.778 vs 0.608; +16.9 pt; p 0.009 | P | 2026-10-16 | [details](#track-s-facts-cp304-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | mean_wait_s_per_message | 5.2 s; bar <= 15 s | P | 2026-10-16 | [details](#track-s-mean-wait-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | rows_dropped_by_survival_fits | 115 (FAIL, waived by release manager); bar 0 | P | 2026-10-16 | [details](#track-s-survival-drops-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | messages_waited_percent | 12%; bar <= 25% | P | 2026-10-16 | [details](#track-s-wait-share-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | compaction_wall_max_s | 115.1 s; bar <= 145 s | P | 2026-10-16 | [details](#track-s-wall-max-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | compaction_wall_p90_s | 64.5 s; bar <= 120 s | P | 2026-10-16 | [details](#track-s-wall-p90-v0270-2026-10-16) |
+| Track S v3 (slow summary route, #1128) | compactions_per_100_messages | 20.0 | P | 2026-10-16 | [details](#slow-route-compactions-v0270-2026-10-16) |
+| Track S v3 (slow summary route, #1128) | facts_kept | .872 | P | 2026-10-16 | [details](#slow-route-facts-v0270-2026-10-16) |
+| Track S v3 (slow summary route, #1128) | mean_wait_s_per_message | 8.1 s | P | 2026-10-16 | [details](#slow-route-mean-wait-v0270-2026-10-16) |
+| Track S v3 (slow summary route, #1128) | rows_dropped_by_survival_fits | 0 | P | 2026-10-16 | [details](#slow-route-survival-drops-v0270-2026-10-16) |
+| Track S v3 (slow summary route, #1128) | messages_waited_percent | 20% | P | 2026-10-16 | [details](#slow-route-wait-share-v0270-2026-10-16) |
+| Track S v3 (slow summary route, #1128) | compaction_wall_p90_s | 45.8 s | P | 2026-10-16 | [details](#slow-route-wall-p90-v0270-2026-10-16) |
 
 ## Row disclosures
+
+### <a id="1880-persisted-hold-cost-20261023"></a>1880-persisted-hold-cost-20261023
+
+**id:**
+1880-persisted-hold-cost-20261023
+
+**benchmark:**
+#1880 persisted hold synthetic admission
+
+**metric:**
+unheld_cells_within_cost_bar
+
+**value:**
+4
+
+**display:**
+4/4 steady unheld cells within the paired median cost bar
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+cd68a230e5d78cf7a8ad372e338cfd89acb528c6
+
+**harness_commit:**
+0b907f5c6b8f36dc1fcbd81e7a45febb73611b41
+
+**judge:**
+n/a; deterministic timing and query-plan probes
+
+**reader:**
+n/a; synthetic SQLite stores
+
+**retrieval_config:**
+10k/100k rows, absent and static valid nonmatching record, paired interleaved 200 admissions/arm after20 warmups; held warm n200 and reconstructed admission n20, construction/ingest excluded
+
+**dataset_exposure:**
+Synthetic only; no real-profile access or model traffic
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/0b907f5c6b8f36dc1fcbd81e7a45febb73611b41/docs/process/evidence/1880-persisted-hold/cost/RESULT.md
+
+**variance:**
+One run; raw paired timings retained; p50/p95 reported, no cross-run statistical claim
+
+**failclose:**
+All4 steady unheld cells satisfy max(base*1.10,base+0.05ms); held gates zero model calls/full-history scans/metadata writes; bounded indexed SQL plans
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/0b907f5c6b8f36dc1fcbd81e7a45febb73611b41/docs/process/evidence/1880-persisted-hold/cost/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/0b907f5c6b8f36dc1fcbd81e7a45febb73611b41/docs/process/evidence/1880-persisted-hold/cost/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/0b907f5c6b8f36dc1fcbd81e7a45febb73611b41/docs/process/evidence/1880-persisted-hold/cost/samples.jsonl
+- https://github.com/electricsheephq/lcm-x/blob/0b907f5c6b8f36dc1fcbd81e7a45febb73611b41/docs/process/evidence/1880-persisted-hold/cost/summary.json
+
+**caveats:**
+- T2 not published; no results disposed.
+- Separate preserved trials rewrote metadata per sample and measured additional writer churn; first trial used invalid timestamp fixture. Final specified steady-workload protocol is disclosed in the card.
+- Admission only; no engine construction, ingest, live latency, retained-occurrence repair, merge, release, runtime or customer claim.
+
+### <a id="1880-persisted-hold-cost-integration-delta-20261023"></a>1880-persisted-hold-cost-integration-delta-20261023
+
+**id:**
+1880-persisted-hold-cost-integration-delta-20261023
+
+**benchmark:**
+#1880 persisted hold synthetic admission
+
+**metric:**
+unheld_cells_within_cost_bar
+
+**value:**
+4
+
+**display:**
+4/4 steady unheld cells within the paired median cost bar
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+8fc7b6a5eb7fc2e9415e07636c6266b50f0758af
+
+**harness_commit:**
+df5359fdd25d621c091bec2e463c452ec36b3307
+
+**judge:**
+n/a; deterministic timing and query-plan probes
+
+**reader:**
+n/a; synthetic SQLite stores
+
+**retrieval_config:**
+10k/100k rows, absent and static valid nonmatching record, paired interleaved 200 admissions/arm after20 warmups; held warm n200 and reconstructed admission n20, construction/ingest excluded
+
+**dataset_exposure:**
+Synthetic only; no real-profile access or model traffic
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/df5359fdd25d621c091bec2e463c452ec36b3307/docs/process/evidence/1880-persisted-hold/cost-integration-delta/RESULT.md
+
+**variance:**
+One run; raw paired timings retained; p50/p95 reported, no cross-run statistical claim
+
+**failclose:**
+All4 steady unheld cells satisfy max(base*1.10,base+0.05ms); held gates zero model calls/full-history scans/metadata writes; bounded indexed SQL plans
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/df5359fdd25d621c091bec2e463c452ec36b3307/docs/process/evidence/1880-persisted-hold/cost-integration-delta/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/df5359fdd25d621c091bec2e463c452ec36b3307/docs/process/evidence/1880-persisted-hold/cost-integration-delta/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/df5359fdd25d621c091bec2e463c452ec36b3307/docs/process/evidence/1880-persisted-hold/cost-integration-delta/samples.jsonl
+- https://github.com/electricsheephq/lcm-x/blob/df5359fdd25d621c091bec2e463c452ec36b3307/docs/process/evidence/1880-persisted-hold/cost-integration-delta/summary.json
+
+**caveats:**
+- Recheck after consolidated local-versus-durable pacing, exact-pressure/settings and current-ingest public-cache correction; earlier runs retained separately.
+- Completed-proof setup explicitly passes persist=True outside measured admission; otherwise same steady protocol.
+- T2 not published; no results disposed.
+- Admission only; no construction/ingest, live latency, retained-occurrence repair, merge, release, runtime or customer claim.
+
+### <a id="1880-persisted-hold-cost-review-delta-20261023"></a>1880-persisted-hold-cost-review-delta-20261023
+
+**id:**
+1880-persisted-hold-cost-review-delta-20261023
+
+**benchmark:**
+#1880 persisted hold synthetic admission
+
+**metric:**
+unheld_cells_within_cost_bar
+
+**value:**
+4
+
+**display:**
+4/4 steady unheld cells within the paired median cost bar
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+970e47f9b5ee33cd6cca2c71a27d777683eb412e
+
+**harness_commit:**
+657b6a784f3da023efba1b1499cda44ace761462
+
+**judge:**
+n/a; deterministic timing and query-plan probes
+
+**reader:**
+n/a; synthetic SQLite stores
+
+**retrieval_config:**
+10k/100k rows, absent and static valid nonmatching record, paired interleaved 200 admissions/arm after20 warmups; held warm n200 and reconstructed admission n20, construction/ingest excluded
+
+**dataset_exposure:**
+Synthetic only; no real-profile access or model traffic
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/657b6a784f3da023efba1b1499cda44ace761462/docs/process/evidence/1880-persisted-hold/cost-review-delta/RESULT.md
+
+**variance:**
+One run; raw paired timings retained; p50/p95 reported, no cross-run statistical claim
+
+**failclose:**
+All4 steady unheld cells satisfy max(base*1.10,base+0.05ms); held gates zero model calls/full-history scans/metadata writes; bounded indexed SQL plans
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/657b6a784f3da023efba1b1499cda44ace761462/docs/process/evidence/1880-persisted-hold/cost-review-delta/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/657b6a784f3da023efba1b1499cda44ace761462/docs/process/evidence/1880-persisted-hold/cost-review-delta/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/657b6a784f3da023efba1b1499cda44ace761462/docs/process/evidence/1880-persisted-hold/cost-review-delta/samples.jsonl
+- https://github.com/electricsheephq/lcm-x/blob/657b6a784f3da023efba1b1499cda44ace761462/docs/process/evidence/1880-persisted-hold/cost-review-delta/summary.json
+
+**caveats:**
+- Recheck after completed-proof/settings/route review correction; prior steady row retained separately.
+- T2 not published; no results disposed.
+- Admission only; no engine construction, ingest, live latency, retained-occurrence repair, merge, release, runtime or customer claim.
 
 ### <a id="ama208-full-2026-08-02"></a>ama208-full-2026-08-02
 
@@ -73,14 +328,1576 @@ A/A' 30-episode fixed-seed subset (seed 20260802) EXECUTED: 27/30 pairs compared
 3/208 episodes failed (luna empty-content completions x3 retries; AttributeError in harness model_client.py:109) — 36 questions counted in denominator, never dropped
 
 **evidence:**
-- bench/specs/RUN-SHEET-AMA-208.md
-- bench/FINDING-F51-AMA-208-FIRST-FULL.md
-- session-notes 2026-08-02 hermes-ama-full208 (per-episode results, timing, telemetry)
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/RUN-SHEET-AMA-208.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F51-AMA-208-FIRST-FULL.md
+
+**local_raw:**
+- local run 2026-08-02 hermes-ama-full208 (per-episode results, timing, telemetry)
 
 **caveats:**
 - First full-208 disclosed number; GOALS target >=72.26% NOT met (gap -24.9pt); funnel decomposition queued
 - Accuracy RISES with episode size (large>800k tier 55.6% vs small 47.2%) — no context-scale degradation
 - Reader effort = model default (AMA custom-provider path exposes no effort surface)
+
+### <a id="beam-10m-v0280-20261022"></a>beam-10m-v0280-20261022
+
+**id:**
+beam-10m-v0280-20261022
+
+**benchmark:**
+BEAM-10M (200q)
+
+**metric:**
+nugget_score
+
+**value:**
+0.6331645923520923
+
+**display:**
+0.6332 ± 0.4002 (200 questions)
+
+**tier:**
+F
+
+**date:**
+2026-10-22
+
+**system_commit:**
+709099b3a397a7893a7abae8802ebe7bf605f79e (v0.28.0)
+
+**harness_commit:**
+cd955c46a40a5d7f386cdfaec711ef8c966ff97d (90 ingest sessions); 282be0b82281d41eb6684b38e93b9bac544fb20b (10 user-7 sessions and remaining stages)
+
+**judge:**
+Configured gpt-4o-mini-2024-07-18 via OpenRouter; receipt openai/gpt-4o-mini-2024-07-18; full prompts in scripts/utils/prompts.py (BEAM_RUBRIC_ITEM_JUDGE_PROMPT and BEAM_EVENT_ORDERING_JUDGE_PROMPT), called by scripts/beam/beam_eval.py at 282be0b82281d41eb6684b38e93b9bac544fb20b
+
+**reader:**
+Configured gpt-4.1-mini-2025-04-14 via OpenRouter; receipt openai/gpt-4.1-mini; per-question model fields absent
+
+**retrieval_config:**
+Released reference fleet config: LCMX_CONFIG=fleet, full chunk policy and delivery, local fastembed BAAI/bge-small-en-v1.5, top-k 20; workers 2, LLM workers 10; ALLOW_EMPTY_SEARCH=1; all skip-failed flags 0
+
+**dataset_exposure:**
+BEAM-10M hash 77532f4ec545f5b30ff39c235dc1829ead4ae628e6e14b1cb91f1f4dfe11f99f; null time anchor in user-7 session 0 fixed as disclosed; earlier conflated-store attempt excluded
+
+**breakdown:**
+abstention: mean 0.9250, population SD 0.1785, n=20; contradiction_resolution: mean 0.5875, population SD 0.1431, n=20; event_ordering: mean 0.1698, population SD 0.2026, n=20; information_extraction: mean 0.8000, population SD 0.4000, n=20; instruction_following: mean 0.7250, population SD 0.3945, n=20; knowledge_update: mean 0.6750, population SD 0.4548, n=20; multi_session_reasoning: mean 0.3750, population SD 0.4278, n=20; preference_following: mean 0.8750, population SD 0.3010, n=20; summarization: mean 0.7493, population SD 0.2156, n=20; temporal_reasoning: mean 0.4500, population SD 0.3921, n=20
+
+**variance:**
+NUM_RUNS=1; ± is per-question population SD, not run-to-run variance
+
+**failclose:**
+100 sessions/208696 messages; search, answer, eval each 200 success, zero final failed or skipped. Empty-search rows remain in denominator. One degraded chunk-arm warning; no successful arm retry established.
+
+**evidence:**
+- https://github.com/electricsheephq/OmniMemEval/releases/download/lcmx-v0.28.0-beam10m-results-20261022/lcmx-omnimemeval-beam10m-results-20261022.tar.gz
+
+**caveats:**
+- Two-SHA ingestion and sampler-v2 transition disclosed; no campaign latency claim from overwritten resumed ingestion statistics.
+- Per-question models and USD spend are absent from receipts; no direct-provider equivalence proven.
+- One public-text scanner match inside third-party benchmark output was reviewed by the release manager and kept unchanged.
+- Public evidence archive SHA-256: 653690d99ec53416f8ccce2a204ed33b0c25baaf96e2577f07acd5aa17c4318f. One run; no upstream acceptance or listing, multi-run variance, or customer value proven.
+- Tier F: one run with no A/A' noise floor or pre-registered gate. Reader and judge are both OpenAI models because OmniMemEval fixes that pair for every backend; the score is comparable across that board, not a cross-family score.
+
+### <a id="coverage-marker-fix-r1c-2026-10-23"></a>coverage-marker-fix-r1c-2026-10-23
+
+**id:**
+coverage-marker-fix-r1c-2026-10-23
+
+**benchmark:**
+PR #1860 fix-round acceptance
+
+**metric:**
+steady_status_p50_ms
+
+**value:**
+0.2622
+
+**display:**
+0.2709 -> 0.2622 ms certified-steady status
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+566c498c0ed8f256946e9aed2352a12ba571580b
+
+**harness_commit:**
+bba929e0aa76f57f8ddf939fff6a1854511eeaa2
+
+**judge:**
+n/a (deterministic instruments; no model judge)
+
+**reader:**
+n/a (synthetic SQLite workloads)
+
+**retrieval_config:**
+20k rows; paired/interleaved 200 samples per arm; exact base 91a039891afd969f9569897115990fe0c419e034. Unchanged r2 bounds and arrival-every-call probes; production source fixed at 566c498c.
+
+**dataset_exposure:**
+Generated fixtures only; no customer text or external provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/bba929e0aa76f57f8ddf939fff6a1854511eeaa2/RESULT.md
+
+**variance:**
+One run; paired/interleaved n=200 per steady arm, raw samples retained; arrival cost n=30 per tree sequential; no absolute cross-run performance claim.
+
+**failclose:**
+All four steady-cost cells within max(base*1.10,base+0.05ms); bounds/status/liveness pass. Oracle reuses accepted r1b outputs plus RM end-state probe: no new undercount/false-coverage/false-certificate events; temporary overcounts clear.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/bba929e0aa76f57f8ddf939fff6a1854511eeaa2/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/bba929e0aa76f57f8ddf939fff6a1854511eeaa2/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/bba929e0aa76f57f8ddf939fff6a1854511eeaa2/SUMMARY.json
+- https://github.com/electricsheephq/lcm-x/blob/bba929e0aa76f57f8ddf939fff6a1854511eeaa2/PROBE-TABLE.md
+
+**caveats:**
+- Advisory; exact-head remote CI pending at publication. No final-head review, merge, release, runtime or customer claim.
+- 19511 passed, 141 skipped, 63 xfailed, 29 warnings in the single full suite at 566c498c. Three post-summary synthetic-fixture shutdown import diagnostics retained; process exit 0.
+- Three accepted mid-history legacy overcounts; final remaining/oracle work counts equal base on all 1200 seed-runs. Marker serialization is not identical. Inherited false certificates remain confined to seeds 150,212,422,491.
+- NULL-parent original review probe ends at its first next(low): expected safe early return, not a passing pytest result. The committed empty/unproven regression passes in the full suite.
+- No committed r2 oracle probe exists on the PR; adding the after-convergence end-state record remains a follow-up.
+
+### <a id="coverage-marker-fix-r2-2026-10-23"></a>coverage-marker-fix-r2-2026-10-23
+
+**id:**
+coverage-marker-fix-r2-2026-10-23
+
+**benchmark:**
+PR #1860 r2 initial read-only backlog acceptance
+
+**metric:**
+harmful_probe_differences
+
+**value:**
+0
+
+**display:**
+0 harmful differences in 304 field comparisons; d3 initial backlog 1 (gap-fill)
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+59d6118ee2e211a8364ff8e06ee75f29c4d396af
+
+**harness_commit:**
+e8a922553d50ec47bfcbbe1aca0938b9b770ee46
+
+**judge:**
+n/a (deterministic probe differ and brute-force oracle; no model judge)
+
+**reader:**
+n/a (synthetic SQLite stores)
+
+**retrieval_config:**
+Unchanged r1c comparative probes at base91a03989, fixed566c498c and candidate59d6118e; status/embedded/false_rows/effective_false at each emitted step, 152 fields per comparator. Original r1b 600-seed arms with/without legacy plus existing RM convergence observation.
+
+**dataset_exposure:**
+Synthetic fixtures only; no customer data or external provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/e8a922553d50ec47bfcbbe1aca0938b9b770ee46/RESULT.md
+
+**variance:**
+One execution per probe/tree and original oracle arm; one convergence observation per arm; deterministic comparisons, no performance claim.
+
+**failclose:**
+Negative selfcheck detects fixed d3 initial harmful zero; candidate zero harmful against base and fixed. Zero new undercount/false-coverage/false-certificate oracle events, final policy/remaining/oracle work state equal base on all1200 seeds.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/e8a922553d50ec47bfcbbe1aca0938b9b770ee46/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/e8a922553d50ec47bfcbbe1aca0938b9b770ee46/probe-diff.json
+- https://github.com/electricsheephq/lcm-x/blob/e8a922553d50ec47bfcbbe1aca0938b9b770ee46/oracle-comparison.json
+- https://github.com/electricsheephq/lcm-x/blob/e8a922553d50ec47bfcbbe1aca0938b9b770ee46/SUMMARY.json
+
+**caveats:**
+- Parent review setup emits no truth: base skips; fixed/head stop before yield (expected negative). Unchanged F3 regression passes.
+- One full suite at59d6118e:19512 passed141 skipped63 xfailed29 warnings; exit0 with three inherited post-summary synthetic-fixture import diagnostics.
+- Inherited oracle limitations remain; equality is final work counts, not marker serialization. Preliminary scorer diagnostics corrected against preserved raw records without changing source, tests or thresholds.
+- Advisory merge-candidate fix only. Does not prove production backlog accuracy beyond these probes, independent final-head review, merge, release, runtime or customer behavior. Raw T2 not published; no results disposed.
+
+### <a id="coverage-marker-round3-2026-10-22"></a>coverage-marker-round3-2026-10-22
+
+**id:**
+coverage-marker-round3-2026-10-22
+
+**benchmark:**
+Coverage marker round 3 (#1624 items 1-2, #1853)
+
+**metric:**
+cloud_status_after_one_pass_p50_ms
+
+**value:**
+0.585375
+
+**display:**
+12.578187 -> 0.585375 ms after one cloud maintenance pass
+
+**tier:**
+P
+
+**date:**
+2026-10-22
+
+**system_commit:**
+c0b1f17e86868c5312e9752ac1d0594412856997 final metadata-only revision guard; stream and certified-steady measurements cef344e54167848829c22752c6a431191a763985 with explicit unchanged-path delta coverage; identity map linked
+
+**harness_commit:**
+5195676522b0a66f123e3e4c9e9e7d649f98559b public re-score; supplied r2/reviewer instruments and raw-input digests retained under T2 tag lcm-x/lcmx-1624-r3-20261022
+
+**judge:**
+n/a (deterministic instrument, no model judge)
+
+**reader:**
+n/a (synthetic SQLite workload, no answering model)
+
+**retrieval_config:**
+20k metadata-covered cloud rows; chunk revision2 and no initial coverage keys; one bounded metadata-only maintenance pass; no chunking or provider dispatch. Stream: 2000 enclosed4096-byte gap rows, batch32. Exact comparators and remaining scenarios in linked report.
+
+**dataset_exposure:**
+Generated synthetic rows only; no customer text or external provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/RESULT.md; per-measurement source map https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/MEASUREMENT-IDENTITIES.json; T2 tag lcm-x/lcmx-1624-r3-20261022
+
+**variance:**
+Cloud paired interleaved n60/arm; final after p50 .585375ms/IQR .087833ms versus fresh GA .5050835/.1077195. Stream paired n40/arm with p50/IQR; steady paired n200/arm; arrival n30 sequential pairs/tree. No cross-run absolute performance claim.
+
+**failclose:**
+0 new step mismatches in both600-seed oracle modes; false certificates only4accepted legacy seeds; same32 selected chunks; no timing samples omitted after declared warmup.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/ACCEPTANCE-SUMMARY.json
+- https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/MEASUREMENT-IDENTITIES.json
+
+**caveats:**
+- Local synthetic and unit-host evidence only; remote matrix, merge, release, runtime/customer readiness unproven.
+- One full suite at7852ad7d:1failed17460passed141skipped64xfailed. Introduced revision-promotion failure fixed; affected94+golden90 passed on content committedc0. Final full suite was not rerun.
+- Inherited legacy false-certificate seeds150/212/422/491 remain accepted; differential parity does not repair inherited baseline limitations.
+- Three golden traces explained; early cancellation preserves remaining backlog3 and zero dispatch while existing classifier changes partial to complete.
+
+### <a id="d5a-max-v0270-2026-10-16"></a>d5a-max-v0270-2026-10-16
+
+**id:**
+d5a-max-v0270-2026-10-16
+
+**benchmark:**
+D5-A (engine-direct latency proxy)
+
+**metric:**
+max_lcm_owned_s
+
+**value:**
+49.1
+
+**display:**
+49.1 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a; summary model gpt-6.1-sol through codex exec at reference-agent effort; host route differs
+
+**retrieval_config:**
+D5-A engine-direct proxy; 6 Track S runs appended as new sessions to a point-in-time reference-agent store copy (about 1.7 GB, 503,600 messages, 1,197 sessions); all agent LCM settings checked; context 272,000
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+60 progress compactions; p50 39.7 s; p90 44.5 s; max LCM-owned 49.1 s; compactions/100 messages 20.0; mean wait 7.9 s; waited 20%
+
+**variance:**
+6 runs; nearest-rank percentiles; pooled per-message rates; baseline field p90 86.9 s over 69 compactions, same served model/provider/effort, host default medium
+
+**failclose:**
+0 dropped rows, 0 summary-call failures, 0 circuit openings; 0 stop lines with host-compressor time
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D5-A PASS. Engine-direct proxy, not the reference agent own latency. Bars: progress compactions >=60, p90 <=86.9 s, max LCM-owned <=120 s, compactions/100 <=25, mean wait <=15 s, waited <=25%, drops/failures/circuit openings 0. LCM-owned = elapsed minus host.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="d5a-mean-wait-v0270-2026-10-16"></a>d5a-mean-wait-v0270-2026-10-16
+
+**id:**
+d5a-mean-wait-v0270-2026-10-16
+
+**benchmark:**
+D5-A (engine-direct latency proxy)
+
+**metric:**
+mean_wait_s_per_message
+
+**value:**
+7.9
+
+**display:**
+7.9 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a; summary model gpt-6.1-sol through codex exec at reference-agent effort; host route differs
+
+**retrieval_config:**
+D5-A engine-direct proxy; 6 Track S runs appended as new sessions to a point-in-time reference-agent store copy (about 1.7 GB, 503,600 messages, 1,197 sessions); all agent LCM settings checked; context 272,000
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+60 progress compactions; p50 39.7 s; p90 44.5 s; max LCM-owned 49.1 s; compactions/100 messages 20.0; mean wait 7.9 s; waited 20%
+
+**variance:**
+6 runs; nearest-rank percentiles; pooled per-message rates; baseline field p90 86.9 s over 69 compactions, same served model/provider/effort, host default medium
+
+**failclose:**
+0 dropped rows, 0 summary-call failures, 0 circuit openings; 0 stop lines with host-compressor time
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D5-A PASS. Engine-direct proxy, not the reference agent own latency. Bars: progress compactions >=60, p90 <=86.9 s, max LCM-owned <=120 s, compactions/100 <=25, mean wait <=15 s, waited <=25%, drops/failures/circuit openings 0. LCM-owned = elapsed minus host.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="d5a-p90-v0270-2026-10-16"></a>d5a-p90-v0270-2026-10-16
+
+**id:**
+d5a-p90-v0270-2026-10-16
+
+**benchmark:**
+D5-A (engine-direct latency proxy)
+
+**metric:**
+compaction_p90_s
+
+**value:**
+44.5
+
+**display:**
+44.5 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a; summary model gpt-6.1-sol through codex exec at reference-agent effort; host route differs
+
+**retrieval_config:**
+D5-A engine-direct proxy; 6 Track S runs appended as new sessions to a point-in-time reference-agent store copy (about 1.7 GB, 503,600 messages, 1,197 sessions); all agent LCM settings checked; context 272,000
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+60 progress compactions; p50 39.7 s; p90 44.5 s; max LCM-owned 49.1 s; compactions/100 messages 20.0; mean wait 7.9 s; waited 20%
+
+**variance:**
+6 runs; nearest-rank percentiles; pooled per-message rates; baseline field p90 86.9 s over 69 compactions, same served model/provider/effort, host default medium
+
+**failclose:**
+0 dropped rows, 0 summary-call failures, 0 circuit openings; 0 stop lines with host-compressor time
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D5-A PASS. Engine-direct proxy, not the reference agent own latency. Bars: progress compactions >=60, p90 <=86.9 s, max LCM-owned <=120 s, compactions/100 <=25, mean wait <=15 s, waited <=25%, drops/failures/circuit openings 0. LCM-owned = elapsed minus host.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="d5b-c1-slowest-v0270-2026-10-16"></a>d5b-c1-slowest-v0270-2026-10-16
+
+**id:**
+d5b-c1-slowest-v0270-2026-10-16
+
+**benchmark:**
+D5-B (c1, live integration)
+
+**metric:**
+slowest_compaction_s
+
+**value:**
+48.7
+
+**display:**
+48.7 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+literal canary checks; no full judge prompt in scorecard
+
+**reader:**
+not specified in the release scorecard
+
+**retrieval_config:**
+Hermes 0.21.7; fresh empty stores; GLM summary route; 40 material turns, restart and re-paste; context 128k, threshold .50, leaf chunk 8,000; no embedding provider key
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+D5-B c1: 5 compactions, 48.7 s slowest, probes 3/3 exact; c2: 6 compactions, 55.2 s slowest, probes 3/2 exact/1 recoverable; both: 0 loss, 0 duplicates, restart/re-paste PASS
+
+**variance:**
+2 live cells; no variance estimate; only sent canaries counted
+
+**failclose:**
+0 loss and 0 duplicates; doctor: no failing check in either cell; two warnings (embedding provider without key; lifecycle check), read as clean under the release-line rule
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D5-B PASS under release-line rule accepting recoverable stored probes and embedding/lifecycle doctor warnings. Strict doctor-clean wording would fail these and all Phase C cells; the release scorecard records the need for a spec clarification. Store scale covered separately by D5-A/C.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="d5b-c2-slowest-v0270-2026-10-16"></a>d5b-c2-slowest-v0270-2026-10-16
+
+**id:**
+d5b-c2-slowest-v0270-2026-10-16
+
+**benchmark:**
+D5-B (c2, live integration)
+
+**metric:**
+slowest_compaction_s
+
+**value:**
+55.2
+
+**display:**
+55.2 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+literal canary checks; no full judge prompt in scorecard
+
+**reader:**
+not specified in the release scorecard
+
+**retrieval_config:**
+Hermes 0.21.7; fresh empty stores; GLM summary route; 40 material turns, restart and re-paste; context 128k, threshold .50, leaf chunk 8,000; no embedding provider key
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+D5-B c1: 5 compactions, 48.7 s slowest, probes 3/3 exact; c2: 6 compactions, 55.2 s slowest, probes 3/2 exact/1 recoverable; both: 0 loss, 0 duplicates, restart/re-paste PASS
+
+**variance:**
+2 live cells; no variance estimate; only sent canaries counted
+
+**failclose:**
+0 loss and 0 duplicates; doctor: no failing check in either cell; two warnings (embedding provider without key; lifecycle check), read as clean under the release-line rule
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D5-B PASS under release-line rule accepting recoverable stored probes and embedding/lifecycle doctor warnings. Strict doctor-clean wording would fail these and all Phase C cells; the release scorecard records the need for a spec clarification. Store scale covered separately by D5-A/C.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="d5c-max-v0270-2026-10-16"></a>d5c-max-v0270-2026-10-16
+
+**id:**
+d5c-max-v0270-2026-10-16
+
+**benchmark:**
+D5-C (reference-agent real-use window)
+
+**metric:**
+max_lcm_owned_s
+
+**value:**
+116.3
+
+**display:**
+116.3
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+reference agent; exact answering model not specified in the release scorecard
+
+**retrieval_config:**
+reference agent real use on rc8; Hermes host moved to 0.22.2 at end of window
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+11.9 h; 4 answered organic turns plus 1 release-manager recall question under owner instruction; 2 progress compactions, 6 with LCM-owned time >=1 s; max 116.3 s; engine bound throughout
+
+**variance:**
+one real-use window; volume about two compactions/day, so volume latency bars judged by D5-A
+
+**failclose:**
+0 LCM-X tracebacks; 0 publication-invariant conflicts; no synthetic agent session
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SOAK-WINDOW-RECEIPT.md
+
+**caveats:**
+- D5-C PASS accepted at 11.9 h of declared 12 h when host changed; shortened-window decision disclosed. Bars: each LCM-owned stop <=120 s, 0 LCM-X tracebacks, 0 publication conflicts, engine bound, >=1 answered organic turn. The release asset records a 24 h post-GA re-read on Hermes 0.22.2 as continuing; it is outside this row.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="d5c-window-v0270-2026-10-16"></a>d5c-window-v0270-2026-10-16
+
+**id:**
+d5c-window-v0270-2026-10-16
+
+**benchmark:**
+D5-C (reference-agent real-use window)
+
+**metric:**
+real_use_hours
+
+**value:**
+11.9
+
+**display:**
+11.9
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+reference agent; exact answering model not specified in the release scorecard
+
+**retrieval_config:**
+reference agent real use on rc8; Hermes host moved to 0.22.2 at end of window
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+11.9 h; 4 answered organic turns plus 1 release-manager recall question under owner instruction; 2 progress compactions, 6 with LCM-owned time >=1 s; max 116.3 s; engine bound throughout
+
+**variance:**
+one real-use window; volume about two compactions/day, so volume latency bars judged by D5-A
+
+**failclose:**
+0 LCM-X tracebacks; 0 publication-invariant conflicts; no synthetic agent session
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SOAK-WINDOW-RECEIPT.md
+
+**caveats:**
+- D5-C PASS accepted at 11.9 h of declared 12 h when host changed; shortened-window decision disclosed. Bars: each LCM-owned stop <=120 s, 0 LCM-X tracebacks, 0 publication conflicts, engine bound, >=1 answered organic turn. The release asset records a 24 h post-GA re-read on Hermes 0.22.2 as continuing; it is outside this row.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="e1b-s0-sender-capture-resume2-2026-10-23"></a>e1b-s0-sender-capture-resume2-2026-10-23
+
+**id:**
+e1b-s0-sender-capture-resume2-2026-10-23
+
+**benchmark:**
+E1b S0 sender capture: paired 200-message ingest
+
+**metric:**
+candidate_median_ms
+
+**value:**
+7.236625
+
+**display:**
+7.2074585 ms BASE to 7.236625 ms candidate (+0.405%); hook plus UPDATE 0.203125 ms
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+1e506eb7f1454e4ded7b65f9712e59214e003e09
+
+**harness_commit:**
+a8e6481e115bb544a3f8e0d7401f8d5a78315a75
+
+**judge:**
+n/a (deterministic fixture timing and re-score; no model judge)
+
+**reader:**
+n/a (synthetic SQLite sessions)
+
+**retrieval_config:**
+200 serial interleaved pairs of fresh 200-message sessions; fallback token counter; embeddings and temporal rollups off in both arms. Baseline5df5a3c2736c01b46acf26906a510e41e367e73e.
+
+**dataset_exposure:**
+Synthetic fixtures only; no customer data or provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/a8e6481e115bb544a3f8e0d7401f8d5a78315a75/cost--RESULT.md
+
+**variance:**
+IQR BASE0.52371875ms/candidate0.54056225ms; hook0.0359685ms. Paired-delta median+0.078103ms. No confidence interval claimed.
+
+**failclose:**
+PASS: difference of arm medians+0.0291665ms within max(+10%,+0.05ms)=+0.72074585ms;600 timing rows retained and re-score passes.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/a8e6481e115bb544a3f8e0d7401f8d5a78315a75/cost--RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/a8e6481e115bb544a3f8e0d7401f8d5a78315a75/cost--summary.json
+- https://github.com/electricsheephq/lcm-x/blob/a8e6481e115bb544a3f8e0d7401f8d5a78315a75/acceptance--RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/a8e6481e115bb544a3f8e0d7401f8d5a78315a75/EVIDENCE-MAP.json
+
+**caveats:**
+- Measured dirty working aggregate554c626a2a7ce760577118343a5fe71ca4999241b84ee6d25080e8eaccb7daf3; all33 file hashes later verified exact in product commit1e506eb7f1454e4ded7b65f9712e59214e003e09. This registry-only commit does not change measured code.
+- Full local suite19940 passed,141 skipped,66 xfailed,38 deselected,zero failures/errors; exact62-test RED/GREEN/RED and8-file restoration recorded in acceptance card.
+- Unit/integration/compat and local fixture costs only; does not prove live-host sender correctness, native inbound verification, admitted-turn semantics, release or runtime readiness.
+- No private T2 publication or result disposal; all original local evidence retained.
+
+[registry row](results.d/e1b-s0-sender-capture-resume2-2026-10-23.json)
+
+### <a id="issue-1828-refit-20261023"></a>issue-1828-refit-20261023
+
+**id:**
+issue-1828-refit-20261023
+
+**benchmark:**
+Issue #1828 synthetic delivery acceptance (not a board score)
+
+**metric:**
+head_subset_cells
+
+**value:**
+0
+
+**display:**
+0 strict-subset regressions / 1502 cap cells
+
+**tier:**
+F
+
+**date:**
+2026-10-23
+
+**system_commit:**
+75149e5a5ef20f1e402dcff296b6749a935909c0; base e5a239ee1d02acf2068150583b7eff2576635d09
+
+**harness_commit:**
+75149e5a5ef20f1e402dcff296b6749a935909c0 tests/test_issue_1828_refit.py
+
+**judge:**
+none; deterministic set comparison and envelope maximality
+
+**reader:**
+none; engine-direct session delivery
+
+**retrieval_config:**
+two synthetic fixtures; session delivery; delta on; fallback token count; occurrence off; caps 1500-9000 step 10
+
+**dataset_exposure:**
+fully synthetic; no benchmark dataset
+
+**breakdown:**
+tests/fixtures/issue_1828_refit/summary.json: 1496 equal, 6 strict supersets, 0 strict subsets, 0 incomparable
+
+**variance:**
+deterministic cap scan; separate 300-run interleaved timing arms in the linked receipt; single machine
+
+**failclose:**
+0 excluded cap cells; 0 maximality failures
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/e9099749528efa5c27c8e8e5037d0465bc891d1f/tests/fixtures/issue_1828_refit/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/e9099749528efa5c27c8e8e5037d0465bc891d1f/tests/fixtures/issue_1828_refit/summary.json
+
+**caveats:**
+- Delivery correctness only; no board-score, quality, runtime or customer claim
+- T2 not published; original results retained
+
+**superseded_by:**
+issue-1828-refit-20261023-r2
+
+### <a id="issue-1828-refit-20261023-r2"></a>issue-1828-refit-20261023-r2
+
+**id:**
+issue-1828-refit-20261023-r2
+
+**benchmark:**
+Issue #1828 synthetic delivery acceptance (not a board score)
+
+**metric:**
+head_subset_cells
+
+**value:**
+0
+
+**display:**
+0 strict-subset regressions / 1502 cap cells
+
+**tier:**
+F
+
+**date:**
+2026-10-23
+
+**system_commit:**
+07510c16558eb3acca0dec0b274a82fa20b99f8d; base e5a239ee1d02acf2068150583b7eff2576635d09
+
+**harness_commit:**
+07510c16558eb3acca0dec0b274a82fa20b99f8d tests/test_issue_1828_refit.py
+
+**judge:**
+none; deterministic set comparison and envelope maximality
+
+**reader:**
+none; engine-direct session delivery
+
+**retrieval_config:**
+two synthetic fixtures; session delivery; delta on; fallback token count; occurrence off; caps 1500-9000 step 10
+
+**dataset_exposure:**
+fully synthetic; no benchmark dataset
+
+**breakdown:**
+tests/fixtures/issue_1828_refit/summary.json: 1496 equal, 6 strict supersets, 0 strict subsets, 0 incomparable
+
+**variance:**
+deterministic cap scan; separate 300-run interleaved timing arms in the linked receipt; single machine
+
+**failclose:**
+0 excluded cap cells; 0 maximality failures
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/003da0417809f0678028232d695606854b14758b/tests/fixtures/issue_1828_refit/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/003da0417809f0678028232d695606854b14758b/tests/fixtures/issue_1828_refit/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/003da0417809f0678028232d695606854b14758b/tests/fixtures/issue_1828_refit/summary.json
+
+**caveats:**
+- Delivery correctness only; no board-score, quality, runtime or customer claim
+- T2 not published; original results retained
+
+### <a id="issue-1879-reliability-20261023"></a>issue-1879-reliability-20261023
+
+**id:**
+issue-1879-reliability-20261023
+
+**benchmark:**
+Issue #1879 synthetic pinned-host reliability instrument acceptance
+
+**metric:**
+B2_deficit_rows
+
+**value:**
+0
+
+**display:**
+0 B2 deficits / 528 expected items; runtime B1 and surplus remain FAIL
+
+**tier:**
+F
+
+**date:**
+2026-10-23
+
+**system_commit:**
+4ec4d25d8ef08fcd681d0641ba3ffab3b6cbc26d; r2 baseline 03e53281065bb560a170a6cb642b8aef8ada5586
+
+**harness_commit:**
+4ec4d25d8ef08fcd681d0641ba3ffab3b6cbc26d
+
+**judge:**
+none; deterministic witness, hash, lineage and occurrence rules
+
+**reader:**
+none; scripted provider on pinned runtime and reference hosts
+
+**retrieval_config:**
+Three publication-failure/rotation-child-persistent cells plus reference-host continuity/survival-fit in-place and rotation; serial jobs=1, phase timeout=180, retained DBs; reference cells acp-process turn-timeout=60; unchanged declared targets.
+
+**dataset_exposure:**
+Synthetic scripted conversations; no customer data or real provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/9e3cc254d94503e0368da72f60ee8bed51356d1d/bench/instruments/reliability/results/issue-1879/summary.json
+
+**variance:**
+One fresh run per cell; both r2 and candidate scorers agree on each preserved new snapshot. Synthetic generated-carrier digests can differ across runs. No quality or performance claim.
+
+**failclose:**
+Missing witness, deleted/altered bytes, foreign lineage, forged views, future witnesses and span reuse remain negative. No movement toward PRODUCT_LOSS or UNRESOLVED.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/9e3cc254d94503e0368da72f60ee8bed51356d1d/bench/instruments/reliability/results/issue-1879/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/9e3cc254d94503e0368da72f60ee8bed51356d1d/bench/instruments/reliability/results/issue-1879/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/9e3cc254d94503e0368da72f60ee8bed51356d1d/bench/instruments/reliability/results/issue-1879/summary.json
+
+**caveats:**
+- Each runtime cell retains 18 B1 mismatches and 28 B2 surplus rows; reference cells PASS. Classification counts 0/55/0/0 cover previously diagnosed instrument discrepancies, not every residual surplus.
+- Instrument correctness only; no live-host, historical-product-preservation, runtime, customer or release claim.
+- T2 raw publication outside this ready-PR lane; full raw snapshots retained and no results disposed.
+
+**superseded_by:**
+issue-1879-reliability-20261023-delta1
+
+### <a id="issue-1879-reliability-20261023-delta1"></a>issue-1879-reliability-20261023-delta1
+
+**id:**
+issue-1879-reliability-20261023-delta1
+
+**benchmark:**
+Issue #1879 synthetic pinned-host reliability instrument acceptance
+
+**metric:**
+B2_deficit_rows
+
+**value:**
+0
+
+**display:**
+0 B2 deficits / 528 expected items; runtime B1 and surplus remain FAIL
+
+**tier:**
+F
+
+**date:**
+2026-10-23
+
+**system_commit:**
+4b6de87a66a16960c8739c6521741b0e8ed76f15; r2 baseline 03e53281065bb560a170a6cb642b8aef8ada5586
+
+**harness_commit:**
+4b6de87a66a16960c8739c6521741b0e8ed76f15
+
+**judge:**
+none; deterministic witness, hash, lineage and occurrence rules
+
+**reader:**
+none; scripted provider on pinned runtime and reference hosts
+
+**retrieval_config:**
+Three publication-failure/rotation-child-persistent cells plus reference-host continuity/survival-fit in-place and rotation; serial jobs=1, phase timeout=180, retained DBs; reference cells acp-process turn-timeout=60; unchanged declared targets.
+
+**dataset_exposure:**
+Synthetic scripted conversations; no customer data or real provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/d42408748b2c045b40534b004396565c07813924/bench/instruments/reliability/results/issue-1879/summary.json
+
+**variance:**
+One fresh run per cell; both r2 and candidate scorers agree on each preserved new snapshot. Synthetic generated-carrier digests can differ across runs. No quality or performance claim.
+
+**failclose:**
+Missing witness, deleted/altered bytes, foreign lineage, forged views, future witnesses and span reuse remain negative. No movement toward PRODUCT_LOSS or UNRESOLVED.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/d42408748b2c045b40534b004396565c07813924/bench/instruments/reliability/results/issue-1879/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/d42408748b2c045b40534b004396565c07813924/bench/instruments/reliability/results/issue-1879/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/d42408748b2c045b40534b004396565c07813924/bench/instruments/reliability/results/issue-1879/summary.json
+
+**caveats:**
+- Each runtime cell retains 18 B1 mismatches and 28 B2 surplus rows; reference cells PASS. Classification counts 0/55/0/0 cover previously diagnosed instrument discrepancies, not every residual surplus.
+- Instrument correctness only; no live-host, historical-product-preservation, runtime, customer or release claim.
+- T2 raw publication outside this ready-PR lane; full raw snapshots retained and no results disposed.
+- One verified conservative mixed span/parts regression corrected; final cells use nine disjoint observed-parts receipts per runtime cell, with unchanged credited keys and metrics.
+
+### <a id="issue-1880-preflight-cost-r2-10000-2026-10-23"></a>issue-1880-preflight-cost-r2-10000-2026-10-23
+
+**id:**
+issue-1880-preflight-cost-r2-10000-2026-10-23
+
+**benchmark:**
+#1880 part A Amendment 1 synthetic preflight (10000 stored rows)
+
+**metric:**
+candidate_median_ms
+
+**value:**
+0.16641699999999998
+
+**display:**
+0.1621250 -> 0.1664170 ms; PASS max(+10%, +0.05ms)
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+2cbb01e37e461ab439620514ecb05f92020620ae
+
+**harness_commit:**
+r2 synthetic full-preflight instrument retained with raw paired samples under T2 tag
+
+**judge:**
+n/a (deterministic timing)
+
+**reader:**
+n/a (CI host stub)
+
+**retrieval_config:**
+10 warmup pairs, 200 measured pairs; alternating base/candidate order, same synthetic session. Swap both changed engine methods and both compaction methods; baseline 10407e12e33c1d7b09fe0e05141153555aec5d62.
+
+**dataset_exposure:**
+Synthetic fixtures only; no customer or reference-agent data.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/93db6d73104b40ee30d8149f3599ec74667fde94/tests/fixtures/issue_1880_preflight_cost/RESULT.md
+
+**variance:**
+Single paired run; p10/p90 across measured pairs, no model judge or run-to-run variance estimate.
+
+**failclose:**
+Both marginal-median and paired-median increases pass max(base*10%, 0.05ms). No sample omissions after declared warmup.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/2cbb01e37e461ab439620514ecb05f92020620ae/tests/test_issue_1880_defer_size_cleanup.py
+
+**caveats:**
+- Synthetic engine preflight only. Does not prove the reference agent's host boundary latency is removed, part B hold behavior, merge, release, runtime or customer readiness.
+
+**superseded_by:**
+issue-1880-preflight-cost-r2-final-10000-2026-10-23
+
+### <a id="issue-1880-preflight-cost-r2-100000-2026-10-23"></a>issue-1880-preflight-cost-r2-100000-2026-10-23
+
+**id:**
+issue-1880-preflight-cost-r2-100000-2026-10-23
+
+**benchmark:**
+#1880 part A Amendment 1 synthetic preflight (100000 stored rows)
+
+**metric:**
+candidate_median_ms
+
+**value:**
+0.1691875
+
+**display:**
+0.1662505 -> 0.1691875 ms; PASS max(+10%, +0.05ms)
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+2cbb01e37e461ab439620514ecb05f92020620ae
+
+**harness_commit:**
+r2 synthetic full-preflight instrument retained with raw paired samples under T2 tag
+
+**judge:**
+n/a (deterministic timing)
+
+**reader:**
+n/a (CI host stub)
+
+**retrieval_config:**
+10 warmup pairs, 200 measured pairs; alternating base/candidate order, same synthetic session. Swap both changed engine methods and both compaction methods; baseline 10407e12e33c1d7b09fe0e05141153555aec5d62.
+
+**dataset_exposure:**
+Synthetic fixtures only; no customer or reference-agent data.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/93db6d73104b40ee30d8149f3599ec74667fde94/tests/fixtures/issue_1880_preflight_cost/RESULT.md
+
+**variance:**
+Single paired run; p10/p90 across measured pairs, no model judge or run-to-run variance estimate.
+
+**failclose:**
+Both marginal-median and paired-median increases pass max(base*10%, 0.05ms). No sample omissions after declared warmup.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/2cbb01e37e461ab439620514ecb05f92020620ae/tests/test_issue_1880_defer_size_cleanup.py
+
+**caveats:**
+- Synthetic engine preflight only. Does not prove the reference agent's host boundary latency is removed, part B hold behavior, merge, release, runtime or customer readiness.
+
+**superseded_by:**
+issue-1880-preflight-cost-r2-final-100000-2026-10-23
+
+### <a id="issue-1880-preflight-cost-r2-final-10000-2026-10-23"></a>issue-1880-preflight-cost-r2-final-10000-2026-10-23
+
+**id:**
+issue-1880-preflight-cost-r2-final-10000-2026-10-23
+
+**benchmark:**
+#1880 part A final synthetic preflight (10000 stored rows)
+
+**metric:**
+candidate_median_ms
+
+**value:**
+0.192479
+
+**display:**
+0.1789795 -> 0.1924790 ms; PASS max(+10%, +0.05ms)
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+8d71947d164346609fc0b59782ee01d0532e2646
+
+**harness_commit:**
+r2 final synthetic full-preflight instrument retained with raw paired samples under T2 tag
+
+**judge:**
+n/a (deterministic timing)
+
+**reader:**
+n/a (CI host stub)
+
+**retrieval_config:**
+10 warmup pairs, 200 measured pairs; alternating base/candidate order, same synthetic session. Swap both changed engine methods and both compaction methods; baseline 10407e12e33c1d7b09fe0e05141153555aec5d62.
+
+**dataset_exposure:**
+Synthetic fixtures only; no customer or reference-agent data.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/2a13447cc2ad4591a6d2f76a60a583d22cae12e8/tests/fixtures/issue_1880_preflight_cost_final/RESULT.md
+
+**variance:**
+Single paired run; p10/p90 across measured pairs, no model judge or run-to-run variance estimate.
+
+**failclose:**
+Both marginal-median and paired-median increases pass max(base*10%, 0.05ms). No sample omissions after declared warmup.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/2a13447cc2ad4591a6d2f76a60a583d22cae12e8/tests/fixtures/issue_1880_preflight_cost_final/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/2a13447cc2ad4591a6d2f76a60a583d22cae12e8/tests/fixtures/issue_1880_preflight_cost_final/RESULT.md
+
+**caveats:**
+- Synthetic engine preflight only. Does not prove the reference agent's host boundary latency is removed, part B hold behavior, merge, release, runtime or customer readiness.
+
+### <a id="issue-1880-preflight-cost-r2-final-100000-2026-10-23"></a>issue-1880-preflight-cost-r2-final-100000-2026-10-23
+
+**id:**
+issue-1880-preflight-cost-r2-final-100000-2026-10-23
+
+**benchmark:**
+#1880 part A final synthetic preflight (100000 stored rows)
+
+**metric:**
+candidate_median_ms
+
+**value:**
+0.172625
+
+**display:**
+0.1626040 -> 0.1726250 ms; PASS max(+10%, +0.05ms)
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+8d71947d164346609fc0b59782ee01d0532e2646
+
+**harness_commit:**
+r2 final synthetic full-preflight instrument retained with raw paired samples under T2 tag
+
+**judge:**
+n/a (deterministic timing)
+
+**reader:**
+n/a (CI host stub)
+
+**retrieval_config:**
+10 warmup pairs, 200 measured pairs; alternating base/candidate order, same synthetic session. Swap both changed engine methods and both compaction methods; baseline 10407e12e33c1d7b09fe0e05141153555aec5d62.
+
+**dataset_exposure:**
+Synthetic fixtures only; no customer or reference-agent data.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/2a13447cc2ad4591a6d2f76a60a583d22cae12e8/tests/fixtures/issue_1880_preflight_cost_final/RESULT.md
+
+**variance:**
+Single paired run; p10/p90 across measured pairs, no model judge or run-to-run variance estimate.
+
+**failclose:**
+Both marginal-median and paired-median increases pass max(base*10%, 0.05ms). No sample omissions after declared warmup.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/2a13447cc2ad4591a6d2f76a60a583d22cae12e8/tests/fixtures/issue_1880_preflight_cost_final/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/2a13447cc2ad4591a6d2f76a60a583d22cae12e8/tests/fixtures/issue_1880_preflight_cost_final/RESULT.md
+
+**caveats:**
+- Synthetic engine preflight only. Does not prove the reference agent's host boundary latency is removed, part B hold behavior, merge, release, runtime or customer readiness.
+
+### <a id="issue1586-chunk-load-20261023"></a>issue1586-chunk-load-20261023
+
+**id:**
+issue1586-chunk-load-20261023
+
+**benchmark:**
+Synthetic LOCAL exact chunk recall (#1586)
+
+**metric:**
+recall_250k_p50_s
+
+**value:**
+1.534937896009069
+
+**display:**
+250k p50/p90 1.535/1.914s; selected-25k VM steps constant1,025,602
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+measured59b2289558521289a71a0c959ce7a7b9854d0639; finalcdd4c2629ebca159de3f3093227206935d4ee06b removes only one SQL whitespace character; BASE2ce2de7ff93a6d2d8b60321033fdce5c117f59c4
+
+**harness_commit:**
+2ce2de7ff93a6d2d8b60321033fdce5c117f59c4 local_catchup instrument; RCA-derived adapter SHA256 d094bfd417a21e0cd30dbddbd4ed1a7c29ddbe8decb60e33121700456a54da0e retained in the result card
+
+**judge:**
+none; exact deterministic ID/score/coverage and matrix-byte comparison
+
+**reader:**
+BAAI/bge-small-en-v1.5 query embedding; no answer model
+
+**retrieval_config:**
+Generated covered store from run39768769622; float32/384; 25k exact batch; local FastEmbed/ORT2threads; no binary mirror; unchanged8sdeadline; canary+broadNL; two-arm interleaving; standard single-batch cache policy
+
+**dataset_exposure:**
+Synthetic generated stores only; no customer data or external provider traffic
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/4595b9fa7633dfd1048fe44a96f2695bd0740b3d/RESULT.md
+
+**variance:**
+One local window per size; ten measured public calls/arm after four declared warmups; same25k selected IDs twentypairedloads/arm/size;1k/10k cost200pairs per cold/warm cell. Host contention occurred; raw min/max/p90 retained. No cross-run absolute-performance claim.
+
+**failclose:**
+Candidate fullcoverage10/10 at62.5k,125k,250k; no measured calls omitted. BASE half/full ten deadline-censored calls each. Comparable completed results exact; half broadNL has no completed BASE comparison. VM regression RED1475->123393, GREEN819->817; all four small-cost cells within max(BASE*1.10,BASE+0.05ms).
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/4595b9fa7633dfd1048fe44a96f2695bd0740b3d/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/4595b9fa7633dfd1048fe44a96f2695bd0740b3d/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/4595b9fa7633dfd1048fe44a96f2695bd0740b3d/SUMMARY.json
+
+**caveats:**
+- Local synthetic only; not #1586 2-CPU floor, concurrent compaction/publication, release, runtime or customer proof.
+- BASE deadline-censored request latency is not successful exact-recall latency.
+- Indexed VM work for the fixed25kbatch is constant; observed wallclock medians60/70/79ms include cache/host variation.
+- Measured source and final SQL-serialization-only delta are explicit;95affectedtrace tests pass after preserving the existing trace. Full final-source CI is a separate PR gate.
+
+[registry row](results.d/issue1586-chunk-load-20261023.json)
+
+### <a id="issue1748-gapwalk-2026-10-21"></a>issue1748-gapwalk-2026-10-21
+
+**id:**
+issue1748-gapwalk-2026-10-21
+
+**benchmark:**
+LOCAL catch-up gap discovery (#1748; synthetic 250k store)
+
+**metric:**
+sqlite_vm_work_amplification_240k_vs_empty
+
+**value:**
+1.744911369193154
+
+**display:**
+1.744911x VM work; 2x eligible-row visits; live max 1.000263x steady
+
+**tier:**
+P
+
+**date:**
+2026-10-21
+
+**system_commit:**
+candidate 04b38508e2bb62e54fee4e1af5dcb7464537cc59; baseline f3cc8de918ba14c21ae246099652762a26255554
+
+**harness_commit:**
+04b38508e2bb62e54fee4e1af5dcb7464537cc59 tests/test_issue_1748_gapwalk.py and tests/_issue_1748_base_gapfill.py
+
+**judge:**
+n/a (deterministic SQLite instrumentation)
+
+**reader:**
+n/a (no model/provider)
+
+**retrieval_config:**
+250,000 synthetic user rows; limit 2000, SQL page 32; matching real priming/publication batches <=2000. Live: 100,000 rows, 60,000 filled, one newly published message between 20 passes, same limit/page and instrumentation in both arms.
+
+**dataset_exposure:**
+Synthetic generated store; no corpus, customer data or transcript.
+
+**breakdown:**
+Candidate 0/50k/240k filled: VM steps 65440/114187/114187; eligible-row visits 2000/4000/4000; statements 70/130/130. Base: VM steps 377804/17427766/82217766; visits 2000/52000/242000; statements 64/64/64. Live candidate steady 114225 VM steps; 20 arrival passes 47002-114255; base steady 20837804, arrivals 20838107-33802586. Selected rows 2000 in every measured cell.
+
+**variance:**
+One deterministic count comparison per fill level; no variance estimate. Wall time supplementary only.
+
+**failclose:**
+Matching cost base <=2x RED, candidate GREEN. Pre-fix live-arrival bound RED; candidate all 20 passes <=2x steady GREEN. Exact coverage passes 200 mixed seeds; first/existing walk DELETE and identity UPDATE races, eligibility edits and exhaustion CAS are RED pre-fix/GREEN candidate.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/04b38508e2bb62e54fee4e1af5dcb7464537cc59/tests/test_issue_1748_gapwalk.py
+- https://github.com/electricsheephq/lcm-x/blob/04b38508e2bb62e54fee4e1af5dcb7464537cc59/tests/compat/test_gapwalk_migration.py
+
+**caveats:**
+- Local synthetic product-performance and compatibility proof only; not the #1586 host floor, provider throughput, remote CI, release, runtime or customer readiness.
+- VM counts include traversal before instrumented eligible-row predicates. One deterministic observation per fill level and pass; no variance estimate; wall time supplementary.
+- The plain-text prior T2 tag covers the earlier run only. Fix-round remeasurement remains local; no new T2 publication was authorized.
+- Pre-token intermediate remeasurement is excluded; candidate values cover the final first-selection CAS token.
+
+### <a id="lcmx-1880-hold-cost-h2-linux-20261023"></a>lcmx-1880-hold-cost-h2-linux-20261023
+
+**id:**
+lcmx-1880-hold-cost-h2-linux-20261023
+
+**benchmark:**
+#1880 persisted hold hosted synthetic admission
+
+**metric:**
+unheld_cells_within_cost_bar
+
+**value:**
+2
+
+**display:**
+2/4 paired UNHELD cells PASS; both mismatch cells FAIL cost bar
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+849697b9e5eb24b921ea35799f94da55af3f2dcc
+
+**harness_commit:**
+29266c776d27fdf980c7e58f2cbfb74c12d6a519
+
+**judge:**
+n/a deterministic timing/query probes
+
+**reader:**
+n/a synthetic SQLite
+
+**retrieval_config:**
+Paired interleaved200 admissions per arm after20warmups; absent/static nonmatching record at10k/100k; held200,rebuilt-held20; genuine clean ingest/pressure setup and construction excluded. BASE10407e12e33c1d7b09fe0e05141153555aec5d62.
+
+**dataset_exposure:**
+Synthetic only; no real profile or model traffic
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-h2-failed-hosted/RESULT.md
+
+**variance:**
+One GitHub-hosted Ubuntu Python3.13 run; raw timings and p50/p95 retained. No cross-run/cross-machine speedup inference.
+
+**failclose:**
+Original max(BASE*1.10,BASE+0.05ms), no bounds change or dropped measured samples.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-h2-failed-hosted/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-h2-failed-hosted/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-h2-failed-hosted/samples.jsonl
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-h2-failed-hosted/summary.json
+
+**caveats:**
+- T2 not published; all results preserved.
+- Admission cost only; construction/ingest, live latency, #1162 repair and merge/release/runtime/customer readiness not proven.
+
+### <a id="lcmx-1880-hold-cost-h3-hosted-20261023"></a>lcmx-1880-hold-cost-h3-hosted-20261023
+
+**id:**
+lcmx-1880-hold-cost-h3-hosted-20261023
+
+**benchmark:**
+#1880 persisted hold hosted synthetic admission
+
+**metric:**
+unheld_cells_within_cost_bar
+
+**value:**
+4
+
+**display:**
+4/4 paired UNHELD cells PASS; held paths zero model calls/scans/writes
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+441c338ff49d3d1bd64a864a9191ce2723c509bb
+
+**harness_commit:**
+29266c776d27fdf980c7e58f2cbfb74c12d6a519
+
+**judge:**
+n/a deterministic timing/query probes
+
+**reader:**
+n/a synthetic SQLite
+
+**retrieval_config:**
+Paired interleaved200 admissions per arm after20warmups; absent/static nonmatching record at10k/100k; held200,rebuilt-held20; genuine clean ingest/pressure setup and construction excluded. BASE10407e12e33c1d7b09fe0e05141153555aec5d62.
+
+**dataset_exposure:**
+Synthetic only; no real profile or model traffic
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-final-hosted/RESULT.md
+
+**variance:**
+One GitHub-hosted Ubuntu Python3.13 run; raw timings and p50/p95 retained. No cross-run/cross-machine speedup inference.
+
+**failclose:**
+Original max(BASE*1.10,BASE+0.05ms), no bounds change or dropped measured samples.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-final-hosted/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-final-hosted/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-final-hosted/samples.jsonl
+- https://github.com/electricsheephq/lcm-x/blob/29266c776d27fdf980c7e58f2cbfb74c12d6a519/docs/process/evidence/1880-persisted-hold/cost-final-hosted/summary.json
+
+**caveats:**
+- T2 not published; all results preserved.
+- Admission cost only; construction/ingest, live latency, #1162 repair and merge/release/runtime/customer readiness not proven.
+
+### <a id="local-idle-duty-floor-probe-2026-10-23"></a>local-idle-duty-floor-probe-2026-10-23
+
+**id:**
+local-idle-duty-floor-probe-2026-10-23
+
+**benchmark:**
+LOCAL catch-up idle duty (2-vCPU floor surrogate)
+
+**metric:**
+max_mean_cpu_cores
+
+**value:**
+0.5505486880915895
+
+**display:**
+0.551 cores (max mean across four 0.82 cells)
+
+**tier:**
+F
+
+**date:**
+2026-10-23
+
+**system_commit:**
+0.82: 777f6756c3dd7f9976a45b4040d1f6697f0f5474; 1.0: 7f82e84b25d00fe8a5abcb38590c2b129abe4a8f. This PR applies the measured multiplier to current main; unrelated intervening changes were not remeasured.
+
+**harness_commit:**
+777f6756c3dd7f9976a45b4040d1f6697f0f5474 (0.82); 7f82e84b25d00fe8a5abcb38590c2b129abe4a8f (1.0)
+
+**judge:**
+No model judge; deterministic CPU sampling and coverage-pair gates in bench/instruments/local_catchup at the harness commits.
+
+**reader:**
+No answering model; one background FastEmbed process per cell.
+
+**retrieval_config:**
+Synthetic 250000-row mixed/short stores, upgrade/empty coverage pairs; embeddings enabled explicitly, fastembed BAAI/bge-small-en-v1.5, one ORT intra-op thread, float32, conversational chunks, embedding_max_batch_items=1000; idle multiplier 1.0 vs 0.82; at least two hours per cell with backlog throughout. No retrieval/recall latency claim.
+
+**dataset_exposure:**
+Synthetic corpus; no benchmark gold answers or customer data.
+
+**breakdown:**
+Eight per-cell summaries (four at 1.0, four at 0.82), CPU mean/p95 and labeled coverage projections: https://github.com/electricsheephq/lcm-x/blob/5147f75305b5d262dcb30a13a194f2c89e4a109c/bench/scoreboard/evidence/1586-idle-duty-probe-2026-10-23.json
+
+**variance:**
+One run per multiplier/shape, two baseline cells per run; no repeats, confidence intervals or A/A noise estimate.
+
+**failclose:**
+No cells excluded. The 1.0 mixed upgrade cell fails the coverage projection bar; CPU sampling is reported for every cell. Catch-up stops at the two-hour measurement bound with incomplete coverage.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/5147f75305b5d262dcb30a13a194f2c89e4a109c/bench/scoreboard/evidence/1586-idle-duty-probe-2026-10-23.json
+
+**caveats:**
+- Claim class: advisory; floor-surrogate only. The scoreboard value is measured CPU, never projected completion time.
+- At 0.82, maximum per-cell mean CPU 0.5505486880915895 and p95 rolling-60s CPU 0.6336526290227705 are under the 0.6/0.75-core bars.
+- Coverage projections are disclosed in the evidence only; they do not establish completed 72-hour catch-up. Mixed margin is about 6%; the full floor rerun is the judge.
+- Fault-finding yield: 1.0 fails one mixed coverage cell; 0.82 passes the probe coverage/CPU bars. No full-floor, recall-latency, customer-box or Mac 24-hour proof.
+- Source decision: https://github.com/electricsheephq/lcm-x/issues/1586#issuecomment-6359031801
+- Runs: https://github.com/electricsheephq/lcm-x/actions/runs/39888055698 ; https://github.com/electricsheephq/lcm-x/actions/runs/39888063665 ; https://github.com/electricsheephq/lcm-x/actions/runs/39888076007 ; https://github.com/electricsheephq/lcm-x/actions/runs/39888085612
+
+[registry row](results.d/local-idle-duty-floor-probe-2026-10-23.json)
+
+### <a id="locomo-qa-off-v0270-2026-10-16"></a>locomo-qa-off-v0270-2026-10-16
+
+**id:**
+locomo-qa-off-v0270-2026-10-16
+
+**benchmark:**
+LoCoMo (1,986q, QA, OFF)
+
+**metric:**
+correct_count
+
+**value:**
+1014
+
+**display:**
+1,014/1,986 vs 987/1,986
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Codex CLI with configured model/effort; identity and full prompt not specified in the release scorecard
+
+**reader:**
+Codex CLI 0.162.1 (baseline 0.161.0); configured model and effort recorded per call but not specified in the release scorecard
+
+**retrieval_config:**
+embeddings OFF; same harness pin, dataset, question ids and scorer as rc1; exact pin and remaining knobs not specified in the release scorecard
+
+**dataset_exposure:**
+99 documented corrupted-gold rows all ran, scored as-is; known-corruption ceiling about 95% (unchanged from the earlier LoCoMo rows)
+
+**breakdown:**
+adversarial 188 vs 204; multi-hop 201 vs 190; single-hop 59 vs 49; temporal 30 vs 28; world-knowledge 536 vs 516
+
+**variance:**
+lost 82 / gained 109; exact McNemar p 0.060 (gain, not significant); A/A prime discordance 21/1,986 (baseline 28/1,986)
+
+**failclose:**
+0 failed reader calls; failed calls count as wrong
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/scoreboard/results.jsonl#L17
+
+**caveats:**
+- D4 PASS. Bar: paired exact McNemar p < 0.05 with a net loss blocks; placebo discordance > 5% is INCONCLUSIVE. Categories recorded, not gated. Baseline v0.26.1, not v0.26.2.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
 
 ### <a id="locomo10-1986-arm-a-2026-07-30"></a>locomo10-1986-arm-a-2026-07-30
 
@@ -133,8 +1950,10 @@ arm A of a pre-registered A/A' pair; A' cancelled when harness bugs were found m
 pin discipline PASS; truncation bug meant 5.7% of delivered results were silently cut (fixed PR #3)
 
 **evidence:**
-- bench/FINDING-F46-LOCOMO-ARM-A-DECOMPOSITION (full §1-9 ledger)
-- session-notes 2026-07-30 hermes-locomo-deepdive artifacts
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F46-LOCOMO-ARM-A-DECOMPOSITION.md
+
+**local_raw:**
+- local run 2026-07-30 hermes-locomo-deepdive artifacts
 
 **caveats:**
 - published AS THE FAULT-FINDING RESULT IT IS: decomposition attributes the gap to instrument bugs (~+3pts ceiling), corrupted gold (~1.5-2pts), a config-class retrieval gap (fusion quota + chunk threshold, both since landed), and one genuine answer-layer weakness (adversarial speaker attribution — fact retrieved on 78.6% of wrong rows); declared-config re-run pending
@@ -194,10 +2013,12 @@ pre-registered A/A′ pair on fresh stores: 82/1,986 discordant (4.13%), aggrega
 0/1,986 incomplete both arms; paired failclose union-drop 0; PINS-POSTRUN PASS both arms (A′ postrun executed manually after the resume script exited pre-postrun — env pins verify a reconstruction from the script's own exports; sha-class pins verified against disk)
 
 **evidence:**
-- bench/FINDING-F61-LOCOMO-C2-B3A-ATTRIBUTION.md
-- bench/specs/RUN-SHEET-LOCOMO-C2-B3A.md (#316)
-- session-notes 2026-08-21 hermes-locomo-c2 artifacts (paid-aa-20260820T211813Z)
-- session-notes 2026-08-26 interim-review artifacts F61-recompute.txt
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F61-LOCOMO-C2-B3A-ATTRIBUTION.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/RUN-SHEET-LOCOMO-C2-B3A.md
+
+**local_raw:**
+- local run 2026-08-21 hermes-locomo-c2 artifacts (paid-aa-20260820T211813Z)
+- local run 2026-08-26 interim-review artifacts F61-recompute.txt
 
 **caveats:**
 - attribution is the lever, robustness is the prize: the adversarial (unanswerable) category nearly doubles (32.7 → 62.3) — the F59 §9 failure class (entity+recency-matched confusions from misattributed facts) attacked directly; every other category also rises, consistent with attribution improving retrieval binding generally
@@ -256,14 +2077,250 @@ pre-registered A/A′ pair on fresh stores: 69/1,986 discordant (3.47%), aggrega
 0/1,986 both arms; union-drop 0; pins signed pre+post both arms
 
 **evidence:**
-- bench/FINDING-F48-LOCOMO-DECLARED-CONFIG.md
-- bench/specs/RUN-SHEET-LOCOMO-DECLARED-CONFIG.md
-- session-notes 2026-07-31 hermes-locomo-declared artifacts
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F48-LOCOMO-DECLARED-CONFIG.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/RUN-SHEET-LOCOMO-DECLARED-CONFIG.md
+
+**local_raw:**
+- local run 2026-07-31 hermes-locomo-declared artifacts
 
 **caveats:**
 - +7.6 vs the superseded row is NOT pure retrieval: the judge rubric and adversarial gold changed between configs (both disclosed); corrupted gold unchanged (ceiling ≈95%)
 - initial publication claimed a single-hop regression from a label-scramble — corrected within hours (F48 §3-CORRECTION); the REAL new finding: the FTS arm is near-inert in delivery on this dataset in BOTH configs (3/49,650 vs 2/49,650) despite prose mode — under investigation
 - adversarial 32.7 is the measured-honest number against canonical abstention gold with the known B3 product weakness unfixed; Tier-F config; Voyage variant queues separately
+
+### <a id="locomo10-1986-qa-local-v0261-2026-10-08"></a>locomo10-1986-qa-local-v0261-2026-10-08
+
+**id:**
+locomo10-1986-qa-local-v0261-2026-10-08
+
+**benchmark:**
+LoCoMo (locomo10, 1,986q)
+
+**metric:**
+accuracy
+
+**value:**
+0.549
+
+**display:**
+54.9% (1,091/1,986); OFF on the same release 49.7%
+
+**tier:**
+P
+
+**date:**
+2026-10-08
+
+**system_commit:**
+lcm-x v0.26.1 (5fc3d1c6), the GA tag tree; no post-run delta
+
+**harness_commit:**
+memorybench-benchmark-tool @ c2da837 (983a32e plus the #976 fix: the reader's error text is kept when the reader exits non-zero; no other change)
+
+**judge:**
+gpt-6.1-sol @ low via Codex CLI 0.161.0 (subscription lane); full judge prompt in the harness at src/prompts/defaults.ts (sha256 7662f645…, unchanged since the 2026-08 rows)
+
+**reader:**
+gpt-6.1-sol @ medium via Codex CLI 0.161.0 (subscription lane); answer prompt src/providers/hermes-lcm/prompts.ts (sha256 ec37e514…)
+
+**retrieval_config:**
+embeddings LOCAL: fastembed BAAI/bge-small-en-v1.5 on CPU (HF offline), fused with full-text recall at the product's default fusion weights; otherwise product defaults, no fleet overlay, no speaker-attribution prefix; memorybench hermes-lcm bridge, HERMES_MB_EMBEDDINGS=on, HERMES_MB_PROVIDER=fastembed
+
+**dataset_exposure:**
+99 documented corrupted-gold rows all ran, scored as-is; known-corruption ceiling about 95%
+
+**breakdown:**
+by the harness's category labels: single-hop 34.8 (OFF 17.4; 282q) / multi-hop 58.9 (59.2; 321q) / temporal 49.0 (29.2; 96q) / world-knowledge 65.2 (61.4; 841q) / adversarial 46.9 (45.7; 446q); paired vs OFF: LOCAL-only correct 337, OFF-only 233
+
+**variance:**
+pre-registered A/A′, full rerun on fresh stores: 47/1,986 discordant (20 A-only, 27 A′-only); A 54.9% vs A′ 55.3%; paired OFF vs LOCAL over 1,986 questions: exact McNemar p ≈ 1.5e-5
+
+**failclose:**
+0 failed / 0 missing / 0 judge parse fallbacks in both arms; 0 call-record violations; 0 resumes and 0 watchdog restarts in either arm
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6059987795
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6049053842
+
+**caveats:**
+- not comparable to the 67.4% row (2026-08-26): that row's bridge-side speaker prefix (B3-A, +12.8 points on its own, productised as #995) and 10-token chunk-eligibility threshold are absent here; without the prefix the same earlier tree scored 54.6%
+- ingest p50 6.2 s per question against 0.7 s for OFF (CPU embedding); recall context about 6.9k tokens per question at the median against about 1.8k for OFF
+- measured on the benchmark bridge before its summary time-bounds fix (memorybench#10, #950); re-run on the fixed bridge before it serves as the release-over-release reference
+- category labels follow the harness; compare by these labels or by LoCoMo category id
+- claim class: a QA baseline through the benchmark bridge on the GA tree; it does not measure host-visible behaviour, the fleet overlay, or the Voyage configuration
+
+### <a id="locomo10-1986-qa-off-v0261-2026-10-07"></a>locomo10-1986-qa-off-v0261-2026-10-07
+
+**id:**
+locomo10-1986-qa-off-v0261-2026-10-07
+
+**benchmark:**
+LoCoMo (locomo10, 1,986q)
+
+**metric:**
+accuracy
+
+**value:**
+0.497
+
+**display:**
+49.7% (987/1,986)
+
+**tier:**
+P
+
+**date:**
+2026-10-07
+
+**system_commit:**
+lcm-x v0.26.1 (5fc3d1c6), the GA tag tree; no post-run delta
+
+**harness_commit:**
+memorybench-benchmark-tool @ 983a32e (branch bench/locomo-fulltext-arm; fails closed on Codex CLI error events and stops on a model reroute, lcm-x #965)
+
+**judge:**
+gpt-6.1-sol @ low via Codex CLI 0.161.0 (subscription lane); full judge prompt in the harness at src/prompts/defaults.ts (sha256 7662f645…, unchanged since the 2026-08 rows)
+
+**reader:**
+gpt-6.1-sol @ medium via Codex CLI 0.161.0 (subscription lane); answer prompt src/providers/hermes-lcm/prompts.ts (sha256 ec37e514…)
+
+**retrieval_config:**
+product defaults: embeddings OFF (full-text recall only), no fleet overlay, no speaker-attribution prefix at ingest; memorybench hermes-lcm bridge, HERMES_MB_EMBEDDINGS=off
+
+**dataset_exposure:**
+99 documented corrupted-gold rows all ran, scored as-is; known-corruption ceiling about 95% (unchanged from the earlier LoCoMo rows)
+
+**breakdown:**
+by the harness's category labels (as in the earlier rows): single-hop 17.4 (282q) / multi-hop 59.2 (321q) / temporal 29.2 (96q) / world-knowledge 61.4 (841q) / adversarial 45.7 (446q)
+
+**variance:**
+pre-registered A/A′, full rerun on fresh stores: 28/1,986 discordant (1.4%; 16 A-only, 12 A′-only; exact McNemar p = 0.57); A 49.7% vs A′ 49.5%
+
+**failclose:**
+0 failed / 0 missing / 0 judge parse fallbacks in both arms; 0 call-record violations; 0 watchdog restarts; A′ resumed 6 times under the same run id after 33 calls (21 answer, 12 judge) failed closed on Codex CLI error events, stores verified unchanged across every resume; the cause is not identified (harness kept no error text then, #976)
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6049053842
+
+**caveats:**
+- a NEW baseline for the full-text configuration; not comparable to the 67.4% row (2026-08-26), which used fastembed with fusion, a bridge-side speaker-attribution prefix written into stored message text (B3-A, +12.8 points on its own; not in the product, productised as #995), a 10-token chunk-eligibility threshold (v0.26.1 fixes it at 40) and the previous reader generation
+- category labels follow the harness and differ from the names some published tables use; compare by these labels or by LoCoMo category id
+- claim class: a QA baseline through the benchmark bridge on the GA tree; it does not measure host-visible behaviour, the fleet overlay, or the Voyage configuration
+
+### <a id="longmemeval-s-qa-off-v0270-2026-10-16"></a>longmemeval-s-qa-off-v0270-2026-10-16
+
+**id:**
+longmemeval-s-qa-off-v0270-2026-10-16
+
+**benchmark:**
+LongMemEval-S (500q, QA, OFF)
+
+**metric:**
+correct_count
+
+**value:**
+381
+
+**display:**
+381/500 vs 363/500
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Codex CLI with configured model/effort; identity and full prompt not specified in the release scorecard
+
+**reader:**
+Codex CLI 0.162.1 (baseline 0.161.0); configured model and effort recorded per call but not specified in the release scorecard
+
+**retrieval_config:**
+embeddings OFF; same harness pin, dataset, question ids and scorer as rc1; exact pin and remaining knobs not specified in the release scorecard
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+knowledge-update 69 vs 70; multi-session 67 vs 63; single-session-assistant 54 vs 53; single-session-preference 18 vs 13; single-session-user 70 vs 69; temporal-reasoning 103 vs 95
+
+**variance:**
+lost 9 / gained 27; exact McNemar p 0.004 (gain); A/A prime discordance 4/100 (baseline 1/100)
+
+**failclose:**
+0 failed reader calls; failed calls count as wrong
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D4 PASS. Bar: paired exact McNemar p < 0.05 with a net loss blocks; placebo discordance > 5% is INCONCLUSIVE. Categories recorded, not gated. Baseline v0.26.1, not v0.26.2.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="longmemeval-v1-m483-retrieval-voyage-tracker-v0260-2026-10-06"></a>longmemeval-v1-m483-retrieval-voyage-tracker-v0260-2026-10-06
+
+**id:**
+longmemeval-v1-m483-retrieval-voyage-tracker-v0260-2026-10-06
+
+**benchmark:**
+LongMemEval-V1 MEDIUM (483q privacy-filtered set, retrieval row)
+
+**metric:**
+lcm_recall (primary arm): recall@10 / ndcg@10 / recall@1, fail-closed
+
+**value:**
+0.9498
+
+**display:**
+recall@10 95.0% \| ndcg@10 0.860 \| recall@1 51.6% (456 scored + 27 abstention-excluded; 17 withheld by the production privacy filter; embeddings off on the same 456: 84.7%)
+
+**tier:**
+P
+
+**date:**
+2026-10-06
+
+**system_commit:**
+lcm-x v0.26.0-rc1 (8396706d); the v0.26.0 GA (867eb587) adds only the release notes, so the measured product tree is the GA's
+
+**harness_commit:**
+in-repo instrument (benchmarking/longmemeval.py) + Voyage runner bench/tools/v1m-rebank @ 8396706d
+
+**judge:**
+deterministic retrieval metrics (no LLM)
+
+**reader:**
+NONE: pure retrieval row
+
+**retrieval_config:**
+Voyage tracker: voyage-context-3, flat chunks, content-hash cache, production privacy filter. A cross-release tracker, not the production contextual Voyage path a customer enabling Voyage gets
+
+**dataset_exposure:**
+none documented
+
+**breakdown:**
+per-category table in https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6008203590
+
+**variance:**
+A/A' repeat: 0 discordant questions (1 ranking swap at rank 10, no recall change); recorded, not gating
+
+**failclose:**
+accounting closes to 500: 456 scored + 27 abstention + 17 privacy-excluded; failed 0
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6008203590
+
+**caveats:**
+- Compare with the 2026-08-19 voyage row (95.6% on 470) only with its confounds: the 17 privacy exclusions, the privacy:v3 reshaping, code changes since v0.22.0, and the full-text arm now live.
+- Voyage spend for the run: about $0.11 (1452 request units; the content-hash cache served the rest)
 
 ### <a id="longmemeval-v1-m500-retrieval-2026-08-19"></a>longmemeval-v1-m500-retrieval-2026-08-19
 
@@ -316,9 +2373,11 @@ A/A' 100q fixed-seed subset (seed 20260802): 95/95 scored questions per-question
 0/500 instrument failures; 30 abstention questions excluded by instrument design and counted
 
 **evidence:**
-- bench/FINDING-F53-V1M-FLAGSHIP-FIRST-ROW.md
-- bench/specs/RUN-SHEET-V1M-REGISTERED.md
-- session-notes 2026-08-19 v1m-launch2 artifacts + lme-runs/m-full2-shard-*
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F53-V1M-FLAGSHIP-FIRST-ROW.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/RUN-SHEET-V1M-REGISTERED.md
+
+**local_raw:**
+- local run 2026-08-19 v1m-launch2 artifacts + lme-runs/m-full2-shard-*
 
 **caveats:**
 - The 25q smoke's r@1 0.96 was a first-N sampling artifact (full-500 r@1 = 0.50); first-N smokes retired, seeded-random only
@@ -326,6 +2385,123 @@ A/A' 100q fixed-seed subset (seed 20260802): 95/95 scored questions per-question
 - FTS arm dark (prose flag unset) — disclosed; V1-M FTS-ON variant decided after LoCoMo C1
 - FROZEN vs current main (caveat appended 2026-08-26 per PR #368 review): row measured pre-v0.23.1 privacy trio (#332/#333/#338); the production lcm_recall arm may not be compared against post-v0.23.1 production-path rows until the registered re-bank (BASELINE-LEDGER privacy-trio boundary; FINDING-F53 reproducibility note). Reproducibility on current main is UNVERIFIED, not proven broken.
 - Re-bank status (caveat appended 2026-09-05 per FINDING-F62): the registered re-bank on the shipped posture (RUN-SHEET-V1M-REBANK, 22c12b21) PARKED at the pre-spend gate — the production provider-copy transform re-shapes 599 unit occurrences (248/500 questions) of this corpus and the residual validator refuses 3 distinct units (17 questions; §4.2 transform-change count 617 occurrences = 93 unique units, 258 questions), so the production lcm_recall arm is NOT EXECUTABLE over LongMemEval-M at 22c12b21; the raw path this row was measured on has not been re-run; the freeze above stands; next step is an owner decision (#380).
+
+### <a id="longmemeval-v1-m500-retrieval-default-v0260-2026-10-05"></a>longmemeval-v1-m500-retrieval-default-v0260-2026-10-05
+
+**id:**
+longmemeval-v1-m500-retrieval-default-v0260-2026-10-05
+
+**benchmark:**
+LongMemEval-V1 MEDIUM (500q, retrieval row)
+
+**metric:**
+lcm_recall (primary arm): recall@10 / ndcg@10 / recall@1, fail-closed
+
+**value:**
+0.8473
+
+**display:**
+recall@10 84.7% \| ndcg@10 0.764 \| recall@1 45.8% (470 scored + 30 abstention-excluded; 0 instrument failures)
+
+**tier:**
+P
+
+**date:**
+2026-10-05
+
+**system_commit:**
+lcm-x v0.26.0-rc1 (8396706d); the v0.26.0 GA (867eb587) adds only the release notes, so the measured product tree is the GA's
+
+**harness_commit:**
+in-repo instrument (benchmarking/longmemeval.py @ 8396706d)
+
+**judge:**
+deterministic retrieval metrics (no LLM)
+
+**reader:**
+NONE: pure retrieval row
+
+**retrieval_config:**
+product defaults: embeddings OFF (full-text recall only), no fleet overlay; this is the per-release gate configuration of the recall scorecard (#898)
+
+**dataset_exposure:**
+none documented
+
+**breakdown:**
+per-category table in https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6000141063
+
+**variance:**
+A/A' repeat: 0 discordant questions; gate = 0 per-question lcm_recall changes vs v0.25.1 (observed 0; net +0.000; no category moved)
+
+**failclose:**
+accounting closes to 500: 470 scored + 30 abstention; failed 0
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6000141063
+
+**caveats:**
+- Not comparable with the 2026-08-19 row (95.6%): that row ran with voyage-context-3 embeddings on; this row is the embeddings-off default.
+
+### <a id="longmemeval-v1-m500-retrieval-fulltext-2026-10-05"></a>longmemeval-v1-m500-retrieval-fulltext-2026-10-05
+
+**id:**
+longmemeval-v1-m500-retrieval-fulltext-2026-10-05
+
+**benchmark:**
+LongMemEval-V1 MEDIUM (500q, retrieval row, R1-M)
+
+**metric:**
+lcm_recall (product arm): recall@10 / ndcg@10 / recall@1, session level, fail-closed
+
+**value:**
+0.8473
+
+**display:**
+recall@10 84.7% \| ndcg@10 0.764 \| recall@1 45.8% (470 scored + 30 abstention-excluded; 0 failed)
+
+**tier:**
+P
+
+**date:**
+2026-10-05
+
+**system_commit:**
+lcm-x v0.25.1 (f47b55e031b507b424ff5f480d8f2a80d358f1f0), detached GA tree; no post-run delta
+
+**harness_commit:**
+instrument files (benchmarking/, scripts/lcm_longmemeval.py) from main 8396706d876720e52e7254407f8ee07fff54f555, overlay byte-equal to that commit
+
+**judge:**
+deterministic retrieval metrics (no LLM)
+
+**reader:**
+NONE (pure retrieval row)
+
+**retrieval_config:**
+full-text, embeddings off: embeddings_enabled=false, lcm_recall_mode=full_text, fts_order=relevance, provider=stub; vector arms run:false; no LCM_*/HERMES_MB_* overrides; 6 shards qid[i::6]
+
+**dataset_exposure:**
+longmemeval_m sha fb5413e3, prepared manifest 300cf936 (F53 lineage); no tuning on it
+
+**breakdown:**
+lcm_recall r@1 .458 / r@5 .786 / r@10 .847 / ndcg .764, turn r@10 .677 \| fts r@1 .451 / r@5 .779 / r@10 .842 / ndcg .756, turn r@10 .673 \| per-category r@10 lcm/fts: knowledge-update .965/.965, multi-session .754/.744, single-session-assistant 1.000/1.000, single-session-preference .533/.500, single-session-user .984/.984, temporal .807/.803
+
+**variance:**
+A/A' on the 100q F53 subset: 0/100 discordant rows and 0/100 discordant top-10 rankings; aggregate spread 0.00pt
+
+**failclose:**
+470 scored + 30 abstention (_abs) excluded + 0 failed = 500; coverage.fts none (failed search) = 0; degraded:true on all 470 (expected label for embeddings off)
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/RUN-SHEET-ROW1-FULLTEXT.md
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6000141063 (the v0.26.0-rc1 recall gate measured against this row: 0 per-question flips)
+
+**caveats:**
+- New baseline for the shipped default (full-text recall). Not comparable to the embeddings-on V1-M row (r@10 95.6%, v0.22.0): configuration difference, not a regression
+- Latency p50/p90 lcm_recall 49.4/141.8 ms, fts 12.7/24.9 ms, measured with 3 shards concurrent on a shared machine
+- Delivered context size per question UNMEASURED (harness records ids and metrics only)
+- The fts arm ranks by relevance in this instrument; earlier rows' fts arm is not comparable
+- Says nothing about live customer sessions, the embeddings-on configuration, or answer quality
 
 ### <a id="longmemeval-v1-s500-accuracy-2026-07-29"></a>longmemeval-v1-s500-accuracy-2026-07-29
 
@@ -357,10 +2533,10 @@ P
 fork train through 93a3ade; upstream PR #436 @ ccc76ee
 
 **judge:**
-LongMemEval official protocol judge; config in bench/release-kit (fork docs branch)
+gpt-5.6-sol @ low (F37 pins), not the official gpt-4o judge; official-judge (gpt-4o-2024-08-06) re-score 90.4% (#898 comment 6060571973)
 
 **reader:**
-per official V1 protocol (fixed reader); full config in F37/release kit
+gpt-5.6-sol @ medium via codex-cli 0.144.6 (F37 pins), not the official fixed reader
 
 **retrieval_config:**
 wave-1 delivery (answer_ready, evidence_cards_v1); pins per F32 (transport version pinned, 6e.13)
@@ -378,8 +2554,8 @@ bench/FINDING-F37 §per-type (fork docs branch)
 0 fail-closes (F32's 8 destroyed qids all scored; 7 correct)
 
 **evidence:**
-- bench/FINDING-F37
-- bench/release-kit/RELEASE-NOTES-R2
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F37-FULL500-CONFIRM.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/release-kit/RELEASE-NOTES-R2.md
 - upstream PR #436
 
 **caveats:**
@@ -436,11 +2612,131 @@ p < 1e-4 paired
 n/a
 
 **evidence:**
-- bench/FINDING-M12 lineage in PROGRAM-ARCHITECTURE
-- bench/release-kit/RELEASE-NOTES-R2
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-M12-AB-CLAIM-CORRECTION.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/PROGRAM-ARCHITECTURE.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/release-kit/RELEASE-NOTES-R2.md
 
 **caveats:**
 - accuracy A/B on the same instrument was NULL (M12) — the established claim is latency, not accuracy; we publish both facts together
+
+### <a id="longmemeval-v1-s500-qa-local-v0261-2026-10-08"></a>longmemeval-v1-s500-qa-local-v0261-2026-10-08
+
+**id:**
+longmemeval-v1-s500-qa-local-v0261-2026-10-08
+
+**benchmark:**
+LongMemEval-V1 SMALL (cleaned, 500q, QA row)
+
+**metric:**
+accuracy
+
+**value:**
+0.864
+
+**display:**
+86.4% (432/500); OFF on the same release 72.6%
+
+**tier:**
+P
+
+**date:**
+2026-10-08
+
+**system_commit:**
+lcm-x v0.26.1 (5fc3d1c6), the GA tag tree; no post-run delta
+
+**harness_commit:**
+memorybench-benchmark-tool @ 983a32e (branch bench/locomo-fulltext-arm; fails closed on Codex CLI error events and stops on a model reroute, lcm-x #965)
+
+**judge:**
+gpt-6.1-sol @ low via Codex CLI 0.161.0 (subscription lane); full judge prompt in the harness at src/prompts/defaults.ts (sha256 7662f645…, unchanged since the 2026-08 rows)
+
+**reader:**
+gpt-6.1-sol @ medium via Codex CLI 0.161.0 (subscription lane); answer prompt src/providers/hermes-lcm/prompts.ts (sha256 ec37e514…)
+
+**retrieval_config:**
+embeddings LOCAL: fastembed BAAI/bge-small-en-v1.5 on CPU (HF offline), fused with full-text recall at the product's default fusion weights; otherwise product defaults, no fleet overlay, no speaker-attribution prefix; memorybench hermes-lcm bridge, HERMES_MB_EMBEDDINGS=on, HERMES_MB_PROVIDER=fastembed
+
+**dataset_exposure:**
+none documented for the cleaned S set; all 500 questions ran and were scored
+
+**breakdown:**
+single-session-user 95.7 (OFF 98.6) / single-session-assistant 100 (94.6) / knowledge-update 92.3 (89.7) / temporal-reasoning 83.5 (71.4) / multi-session 76.7 (47.4) / single-session-preference 80.0 (43.3); paired vs OFF: LOCAL-only correct 81, OFF-only 12
+
+**variance:**
+A/A′ on the same 100-question subset: 0/100 discordant (A 85/100, A′ 85/100); paired OFF vs LOCAL over 500 questions: exact McNemar p ≈ 1e-13
+
+**failclose:**
+0 failed / 0 missing / 0 judge parse fallbacks in both arms; 0 call-record violations on the scored calls; arm A resumed once under the same run id (3 judge calls failed closed on Codex CLI error events and were re-run; no reroute recorded)
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6051649702
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6049527257
+
+**caveats:**
+- single-session-user is the only category that moves down (net 2 of 70), the same direction as the recall-row finding on fusion weights (#950); the fleet embeddings default stays OFF (owner decision)
+- ingest cost: about 48 s per question at p50 against about 0.5 s for OFF (the bridge embeds each question's haystack on CPU); recall context about 11.7k tokens per question at the median against 3.4k
+- not comparable to the 91.0% V1-S row (2026-07-29): that row used voyage-context-3 over prebuilt stores (not fastembed, as the first version of the evidence comment said; corrected on #898), evidence-card recall presentation (about 3.2k tokens per question against about 11.7k of raw JSON here), an older product tree and the previous reader generation; against the earlier banked V1-S row (444/500) the difference is -2.4 points
+- measured on the benchmark bridge before its summary time-bounds fix (memorybench#10, #950): summary hits were weighted at the recall prior's 0.5 floor, so this row understates the summary-vector arm; it is re-run on the fixed bridge before it serves as the release-over-release reference (on LongMemEval-M the same fix moved LOCAL R@10 by under 0.003)
+- claim class: a QA baseline through the benchmark bridge on the GA tree; it does not measure host-visible behaviour, the fleet overlay, or the Voyage configuration
+
+### <a id="longmemeval-v1-s500-qa-off-v0261-2026-10-08"></a>longmemeval-v1-s500-qa-off-v0261-2026-10-08
+
+**id:**
+longmemeval-v1-s500-qa-off-v0261-2026-10-08
+
+**benchmark:**
+LongMemEval-V1 SMALL (cleaned, 500q, QA row)
+
+**metric:**
+accuracy
+
+**value:**
+0.726
+
+**display:**
+72.6% (363/500)
+
+**tier:**
+P
+
+**date:**
+2026-10-08
+
+**system_commit:**
+lcm-x v0.26.1 (5fc3d1c6), the GA tag tree; no post-run delta
+
+**harness_commit:**
+memorybench-benchmark-tool @ 983a32e (branch bench/locomo-fulltext-arm; fails closed on Codex CLI error events and stops on a model reroute, lcm-x #965)
+
+**judge:**
+gpt-6.1-sol @ low via Codex CLI 0.161.0 (subscription lane); full judge prompt in the harness at src/prompts/defaults.ts (sha256 7662f645…, unchanged since the 2026-08 rows)
+
+**reader:**
+gpt-6.1-sol @ medium via Codex CLI 0.161.0 (subscription lane); answer prompt src/providers/hermes-lcm/prompts.ts (sha256 ec37e514…)
+
+**retrieval_config:**
+product defaults: embeddings OFF (full-text recall only), no fleet overlay, no speaker-attribution prefix at ingest; memorybench hermes-lcm bridge, HERMES_MB_EMBEDDINGS=off
+
+**dataset_exposure:**
+none documented for the cleaned S set; all 500 questions ran and were scored
+
+**breakdown:**
+single-session-user 98.6 (70q) / single-session-assistant 94.6 (56q) / knowledge-update 89.7 (78q) / temporal-reasoning 71.4 (133q) / multi-session 47.4 (133q) / single-session-preference 43.3 (30q)
+
+**variance:**
+pre-registered A/A′ on fresh stores over a fixed 100-question subset: 1/100 discordant; A 74/100 vs A′ 73/100 on the subset
+
+**failclose:**
+0 failed / 0 missing / 0 judge parse fallbacks in both arms; 0 call-record violations on the scored calls; arm A resumed 3 times under the same run id (9 calls failed closed on Codex CLI error events and were re-run; no reroute recorded)
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6049527257
+
+**caveats:**
+- a NEW baseline for the full-text configuration; not comparable to the 91.0% V1-S row (2026-07-29), which used voyage-context-3 over prebuilt stores, evidence-card recall presentation (about 3.2k tokens per question), an older product tree and the previous reader generation
+- answer-call input is about 23k tokens per question, most of it the CLI's own instructions; the recall context delivered to the reader is about 3k tokens
+- claim class: a QA baseline through the benchmark bridge on the GA tree; it does not measure host-visible behaviour, the fleet overlay, or the Voyage configuration
 
 ### <a id="longmemeval-v2-451-agentic-2026-07-27"></a>longmemeval-v2-451-agentic-2026-07-27
 
@@ -493,7 +2789,7 @@ single scored run; instrument-clean recount 298/444 = 67.1% excluding #166's 7 t
 7/451 rows scored 0 on EMPTY reader responses (HTTP 524, no retry) — instrument defect #166, fixed upstream-report #7; both numbers shown
 
 **evidence:**
-- bench/FINDING-F30
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F30-V2-FAILURE-DECOMPOSITION.md
 - upstream harness reports #6/#7
 - tag bench-H6-P4-298
 
@@ -543,7 +2839,7 @@ answer_ready delivery, full pin set (pins-treatment.yaml in run artifacts)
 none documented
 
 **breakdown:**
-per-question rows in run artifacts (session-notes 2026-07-30/hermes-v2-paired)
+per-question rows in run artifacts (local run 2026-07-30/hermes-v2-paired)
 
 **variance:**
 paired vs control (prior main @ e5acbbf) in the same run: net +3 (b=29/c=26, n=434) under a pre-registered non-inferiority gate, verdict PASS via blind adjudication; control re-measured 120/451 vs the banked R1 125/451 — single-run cross-build variance context for V2-static numbers
@@ -552,13 +2848,1113 @@ paired vs control (prior main @ e5acbbf) in the same run: net +3 (b=29/c=26, n=4
 17/451 union-dropped as instrument_failed (control 10, treatment 7), disclosed; adjusted 120/434
 
 **evidence:**
-- bench/FINDING-F47-V2-REBASELINE-GATE-PASS.md
-- bench/specs/GATE-V2-REBASELINE.yaml (frozen 41a749a7)
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F47-V2-REBASELINE-GATE-PASS.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/GATE-V2-REBASELINE.yaml
+
+**local_raw:**
 - run artifacts incl. ATTRIBUTION-DARCH2.json
 
 **caveats:**
 - static-protocol numbers on V2 are low-absolute by design (fixed weak reader); the agentic protocol row (298/451) is the capability surface
 - treatment arm completed via a documented append-only continuation after a transient EINTR fail-close (AMENDMENT-2; dataset freeze byte-identical across the gap, independently verified)
+
+### <a id="occurrence-1451-pra-2026-10-23"></a>occurrence-1451-pra-2026-10-23
+
+**id:**
+occurrence-1451-pra-2026-10-23
+
+**benchmark:**
+#1451 PR-A occurrence snapshot synthetic acceptance
+
+**metric:**
+new_loss_checkpoints
+
+**value:**
+0
+
+**display:**
+0 new loss checkpoints across1296 cells; error cells172->0
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+0eb95e50f4bae6ef0bcc305efde49c83f3d41fca; cost/compat e6e4f0e5586245e0cf87bb0fec52745c82f17fd0, same product tree
+
+**harness_commit:**
+Inherited occurrence matrix/scorer; public summary 5bd18e57921248a68029688c5c4efb583d3d4f2b
+
+**judge:**
+n/a (deterministic row-multiset and checkpoint comparison)
+
+**reader:**
+n/a (synthetic SQLite host histories)
+
+**retrieval_config:**
+1296 supplied reachable cells, every checkpoint; supplied baseline5df5a3c; requested implementation BASE10407e12; no carry rebind. Cost20warmup+200paired AB/BA, proof-commit path only.
+
+**dataset_exposure:**
+Synthetic fixtures only; no customer data, model judge or provider calls.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/5bd18e57921248a68029688c5c4efb583d3d4f2b/bench/results/occurrence-1451-pra-20261023/CHANGED-CELLS.md
+
+**variance:**
+One matrix execution; cost paired median delta -0.200084ms vs max(+10%,+0.05ms), pass. No cross-machine latency claim.
+
+**failclose:**
+No increased loss, duplicate or positive restart-growth checkpoint. Errors0; rollback reader v0.28.1 opens candidate store and ingests/replays with integrity ok.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/5bd18e57921248a68029688c5c4efb583d3d4f2b/bench/results/occurrence-1451-pra-20261023/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/5bd18e57921248a68029688c5c4efb583d3d4f2b/bench/results/occurrence-1451-pra-20261023/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/5bd18e57921248a68029688c5c4efb583d3d4f2b/bench/results/occurrence-1451-pra-20261023/SUMMARY.json
+- https://github.com/electricsheephq/lcm-x/blob/5bd18e57921248a68029688c5c4efb583d3d4f2b/bench/results/occurrence-1451-pra-20261023/cost-samples.json
+- https://github.com/electricsheephq/lcm-x/blob/334abbd926310340ff2bf1354b872e47bcd6b1b8/bench/results/occurrence-1451-pra-20261023/DELTA.md
+
+**caveats:**
+- Advisory source evidence; final remote CI and independent review tracked by PR. No merge/release/runtime/customer proof.
+- Inherited594 loss cells,482 duplicate cells and298 restart-growth cells remain PR-B scope.176 changed cells listed; no cell-average cancellation.
+- Supplied matrix baseline5df5a3c differs from requested BASE10407e12 by an unrelated ingest-ignore optimization; no fresh matrix on10407e12 claimed.
+- Public summary only; complete raw inputs preserved. T2 unpublished; no result disposal.
+- Legacy-only system-anchor correction: named1RED->1GREEN; legacy subset6passed. All5184preserved matrix snapshots include output_length, so changed legacy-only branch is outside every measured cell; matrix/cost not rerun. Measurement identities preserved.
+
+[registry row](results.d/occurrence-1451-pra-2026-10-23.json)
+
+### <a id="occurrence-1451-pra-r1-2026-10-23"></a>occurrence-1451-pra-r1-2026-10-23
+
+**id:**
+occurrence-1451-pra-r1-2026-10-23
+
+**benchmark:**
+#1451 PR-A r1 snapshot and positional proof acceptance
+
+**metric:**
+new_or_increased_loss_cells
+
+**value:**
+0
+
+**display:**
+0/1296 new loss; error cells0; changed vs r0=0
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+f1df74ca5a051e33fca221fee06a5ba9c12b4f25
+
+**harness_commit:**
+Inherited occurrence runner; independent per-checkpoint raw row-multiset scorer
+
+**judge:**
+deterministic; no model judge
+
+**reader:**
+synthetic SQLite host histories
+
+**retrieval_config:**
+Same1296 reachable cells as r0, everycheckpoint; 96 separate fired faults; actual v0.28.1 upgrade340/351
+
+**dataset_exposure:**
+Synthetic only; no customer data or provider calls
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/CHANGED-CELLS-base.md
+
+**variance:**
+One full matrix rerun; 200 paired AB/BA cost samples; paired median delta -0.372313ms vs allowed +0.2273625ms
+
+**failclose:**
+0 new loss-row multisets or duplicate/restart-growth rises; errors0; all96 atomic failures unavailable to durable reader
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/SUMMARY.json
+- https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/CONSUMERS.md
+- https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/CHANGED-CELLS-r0.md
+
+**caveats:**
+- Advisory; full final-head remote CI recorded separately in PR. No merge/release/runtime/customer proof.
+- 594 inherited loss cells remain; supplied BASE matrix5df5a3c differs from implementationBASE10407e12; no fresh10407 matrix claimed.
+- Focused census606 valid publications,0 rejects across8 affected files, including all6 original counterexamples; not a full-corpus census.
+- Public summary; full raw and re-score inputs retained; T2 unpublished; no result disposal.
+
+[registry row](results.d/occurrence-1451-pra-r1-2026-10-23.json)
+
+### <a id="occurrence-1451-pra-r2-2026-10-23"></a>occurrence-1451-pra-r2-2026-10-23
+
+**id:**
+occurrence-1451-pra-r2-2026-10-23
+
+**benchmark:**
+#1451 PR-A r2 publication-fault occurrence acceptance
+
+**metric:**
+new_or_increased_loss_cells
+
+**value:**
+0
+
+**display:**
+0/1296 new loss; errors0; changed vsr1=0; calibrated fault regression fixed
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+a2f5158972d9cd736a77c03fd23bf22fa399e683
+
+**harness_commit:**
+Inherited matrix/scorer; r2 expanded publication fault grid; permanent tests at measured source
+
+**judge:**
+deterministic; no model judge
+
+**reader:**
+synthetic SQLite host histories
+
+**retrieval_config:**
+Same1296 reachable cells as r1; 264 separate grid runs/192 fired faults,96 with timestamp+UID replacement; identity anchor off for replacement arm
+
+**dataset_exposure:**
+Synthetic only; no customer data or provider calls
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/CHANGED-CELLS-base.md
+
+**variance:**
+200 paired AB/BA; delta -0.17143750000000002ms; allowed +0.15781035000000002ms
+
+**failclose:**
+0 new/increased loss;0 errors;0 changed cells vsr1; all192 fired faults unchanged keys/one postrollback warning/unavailable durable reader;0 escaped exceptions
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/SUMMARY.json
+- https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/CONSUMERS.md
+- https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/CHANGED-CELLS-r1.md
+
+**caveats:**
+- Advisory synthetic proof; remote final-head CI tracked separately in PR. No merge/release/runtime/customer proof.
+- 594 inherited loss cells remain; supplied BASE matrix5df5a3c retained, calibration/cost BASEddf04556.
+- Focused census372 valid publications,0 rejected across8 selected files including all6 original counterexample files; not a full-corpus census.
+- Public summary only; full raw and re-score inputs retained; T2 unpublished; no result disposal.
+
+[registry row](results.d/occurrence-1451-pra-r2-2026-10-23.json)
+
+### <a id="phase-c-max-v0270-2026-10-16"></a>phase-c-max-v0270-2026-10-16
+
+**id:**
+phase-c-max-v0270-2026-10-16
+
+**benchmark:**
+Phase C (four live host cells)
+
+**metric:**
+slowest_compaction_s
+
+**value:**
+93.0
+
+**display:**
+93.0 s; bar <=145 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+four Phase C cells; host/config details in release receipts
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+maximum across four Phase C cells
+
+**variance:**
+4 cells; no variance estimate
+
+**failclose:**
+not specified in Phase D scorecard latency cell; see Phase C receipt
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/PHASE-C-RECEIPT.md
+
+**caveats:**
+- D5 gauntlet cells PASS; max bar 145 s.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-local-recall-r10-v0270-2026-10-16"></a>r1m-local-recall-r10-v0270-2026-10-16
+
+**id:**
+r1m-local-recall-r10-v0270-2026-10-16
+
+**benchmark:**
+LongMemEval-M (R1-M, LOCAL, lcm_recall)
+
+**metric:**
+r10
+
+**value:**
+0.9038
+
+**display:**
+0.9038 vs OFF 0.8733; +0.0305 (paired, p 0.0006)
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+scripts/lcm_longmemeval.py at the same tree (4e603ed65f137a909606afccfc735c691e363d25), stub provider for OFF, fastembed provider for LOCAL
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; embeddings LOCAL: fastembed BAAI/bge-small-en-v1.5 on CPU (HF offline, pre-warmed cache, 0 misses), otherwise product defaults including the full-text anchor; no fleet overlay. OFF arm in the same run: product defaults, embeddings off
+
+**dataset_exposure:**
+none documented; no new dataset audit
+
+**breakdown:**
+LOCAL R@1 0.4512, R@5 0.8346, R@10 0.9038, NDCG@10 0.7955 (OFF 0.4523 / 0.8049 / 0.8733 / 0.7776); per category R@10 delta: multi-session +0.046, temporal-reasoning +0.041, single-session-preference +0.167, worst single-session-user -0.0156
+
+**variance:**
+paired LOCAL vs OFF over 470 questions: 49 wins / 20 losses / 401 ties, exact sign test p 0.0006; LOCAL A/A prime 0 of 100 discordant; OFF arm 0 per-question differences vs the 2026-10-10 OFF row; LOCAL 0 per-question differences vs the 2026-10-10 LOCAL row
+
+**failclose:**
+470 scored + 30 abstention-excluded + 0 failed = 500 in each arm
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0-rc8/LOCAL-RECALL-RECEIPT.md
+
+**caveats:**
+- Retrieval recall only; no QA answer accuracy.
+- One run on one machine under other load; lcm_recall latency p50/p90/max OFF 77/163/384 ms, LOCAL 125/238/950 ms, recorded and not judged.
+- Pre-warmed embedding cache; cold-cache embedding cost is not measured.
+- Advisory claim class: it gated the managed fleet's per-profile LOCAL turn-on, not the GA. Nothing about customer sessions is proven.
+
+### <a id="r1m-off-fts-flips-v0270-2026-10-16"></a>r1m-off-fts-flips-v0270-2026-10-16
+
+**id:**
+r1m-off-fts-flips-v0270-2026-10-16
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, fts)
+
+**metric:**
+per_question_flips
+
+**value:**
+0
+
+**display:**
+0
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4523, R@5 0.8049, R@10 0.8733, NDCG@10 0.7776; turn R@10 0.7005, turn NDCG@10 0.5861; previous GA R@10 0.8473; net +0.0260; no category down; 11 hit@10 changes
+
+**variance:**
+A/A prime: 0 discordant rows; 260 recall flips all attributed to stemmed recall #1035; 0 fts flips; rc8 equals rc5 over all 500 questions and all 8 metric fields
+
+**failclose:**
+470 scored + 30 abstention-excluded + 0 failed = 500
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D1 PASS (attributed). Bar: 0 flips or every flip attributed and intended, net R@10 >= previous GA - 0.005, no category down more than 0.02.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-fts-p50_ms-v0262-2026-10-09"></a>r1m-off-fts-p50_ms-v0262-2026-10-09
+
+**id:**
+r1m-off-fts-p50_ms-v0262-2026-10-09
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, fts)
+
+**metric:**
+p50_ms
+
+**value:**
+11
+
+**display:**
+11
+
+**tier:**
+P
+
+**date:**
+2026-10-09
+
+**system_commit:**
+v0.26.2-rc2 (38be1f6c); measured candidate, published with v0.26.2
+
+**harness_commit:**
+benchmarking/longmemeval.py blob 5ddfece4; scripts/lcm_longmemeval.py blob 0a31802b at measured tag; equal to v0.26.1-rc1
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF, provider stub; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4578, R@5 0.7863, R@10 0.8473, NDCG@10 0.7637; turn R@10 0.6771, turn NDCG@10 0.5834; fts R@1 0.4514, R@5 0.7785, R@10 0.8416, NDCG@10 0.7559; turn R@10 0.6732, turn NDCG@10 0.5637
+
+**variance:**
+A/A' prepared-m-aprime100: 0 discordant rows and rankings; aggregate metrics equal; 0 per-question flips in either arm vs v0.26.1-rc1
+
+**failclose:**
+expected 500 = scored 470 + abstention-excluded 30 + failed 0; degraded_true 470; coverage.fts=ok 470
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.26.2/SCORECARD-FAST-TIER.md
+
+**caveats:**
+- PASS bar: 0 recall and fts flips vs v0.26.1-rc1 (previous GA tree plus notes). Latency recorded, not gated; shared-machine run under nice -n 19.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-fts-p90_ms-v0262-2026-10-09"></a>r1m-off-fts-p90_ms-v0262-2026-10-09
+
+**id:**
+r1m-off-fts-p90_ms-v0262-2026-10-09
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, fts)
+
+**metric:**
+p90_ms
+
+**value:**
+18
+
+**display:**
+18
+
+**tier:**
+P
+
+**date:**
+2026-10-09
+
+**system_commit:**
+v0.26.2-rc2 (38be1f6c); measured candidate, published with v0.26.2
+
+**harness_commit:**
+benchmarking/longmemeval.py blob 5ddfece4; scripts/lcm_longmemeval.py blob 0a31802b at measured tag; equal to v0.26.1-rc1
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF, provider stub; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4578, R@5 0.7863, R@10 0.8473, NDCG@10 0.7637; turn R@10 0.6771, turn NDCG@10 0.5834; fts R@1 0.4514, R@5 0.7785, R@10 0.8416, NDCG@10 0.7559; turn R@10 0.6732, turn NDCG@10 0.5637
+
+**variance:**
+A/A' prepared-m-aprime100: 0 discordant rows and rankings; aggregate metrics equal; 0 per-question flips in either arm vs v0.26.1-rc1
+
+**failclose:**
+expected 500 = scored 470 + abstention-excluded 30 + failed 0; degraded_true 470; coverage.fts=ok 470
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.26.2/SCORECARD-FAST-TIER.md
+
+**caveats:**
+- PASS bar: 0 recall and fts flips vs v0.26.1-rc1 (previous GA tree plus notes). Latency recorded, not gated; shared-machine run under nice -n 19.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-fts-r10-v0262-2026-10-09"></a>r1m-off-fts-r10-v0262-2026-10-09
+
+**id:**
+r1m-off-fts-r10-v0262-2026-10-09
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, fts)
+
+**metric:**
+r10
+
+**value:**
+0.8416
+
+**display:**
+0.8416
+
+**tier:**
+P
+
+**date:**
+2026-10-09
+
+**system_commit:**
+v0.26.2-rc2 (38be1f6c); measured candidate, published with v0.26.2
+
+**harness_commit:**
+benchmarking/longmemeval.py blob 5ddfece4; scripts/lcm_longmemeval.py blob 0a31802b at measured tag; equal to v0.26.1-rc1
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF, provider stub; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4578, R@5 0.7863, R@10 0.8473, NDCG@10 0.7637; turn R@10 0.6771, turn NDCG@10 0.5834; fts R@1 0.4514, R@5 0.7785, R@10 0.8416, NDCG@10 0.7559; turn R@10 0.6732, turn NDCG@10 0.5637
+
+**variance:**
+A/A' prepared-m-aprime100: 0 discordant rows and rankings; aggregate metrics equal; 0 per-question flips in either arm vs v0.26.1-rc1
+
+**failclose:**
+expected 500 = scored 470 + abstention-excluded 30 + failed 0; degraded_true 470; coverage.fts=ok 470
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.26.2/SCORECARD-FAST-TIER.md
+
+**caveats:**
+- PASS bar: 0 recall and fts flips vs v0.26.1-rc1 (previous GA tree plus notes). Latency recorded, not gated; shared-machine run under nice -n 19.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-recall-flips-v0270-2026-10-16"></a>r1m-off-recall-flips-v0270-2026-10-16
+
+**id:**
+r1m-off-recall-flips-v0270-2026-10-16
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, lcm_recall)
+
+**metric:**
+per_question_flips
+
+**value:**
+260
+
+**display:**
+260 (all #1035)
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4523, R@5 0.8049, R@10 0.8733, NDCG@10 0.7776; turn R@10 0.7005, turn NDCG@10 0.5861; previous GA R@10 0.8473; net +0.0260; no category down; 11 hit@10 changes
+
+**variance:**
+A/A prime: 0 discordant rows; 260 recall flips all attributed to stemmed recall #1035; 0 fts flips; rc8 equals rc5 over all 500 questions and all 8 metric fields
+
+**failclose:**
+470 scored + 30 abstention-excluded + 0 failed = 500
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D1 PASS (attributed). Bar: 0 flips or every flip attributed and intended, net R@10 >= previous GA - 0.005, no category down more than 0.02.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-recall-p50_ms-v0262-2026-10-09"></a>r1m-off-recall-p50_ms-v0262-2026-10-09
+
+**id:**
+r1m-off-recall-p50_ms-v0262-2026-10-09
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, lcm_recall)
+
+**metric:**
+p50_ms
+
+**value:**
+38
+
+**display:**
+38
+
+**tier:**
+P
+
+**date:**
+2026-10-09
+
+**system_commit:**
+v0.26.2-rc2 (38be1f6c); measured candidate, published with v0.26.2
+
+**harness_commit:**
+benchmarking/longmemeval.py blob 5ddfece4; scripts/lcm_longmemeval.py blob 0a31802b at measured tag; equal to v0.26.1-rc1
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF, provider stub; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4578, R@5 0.7863, R@10 0.8473, NDCG@10 0.7637; turn R@10 0.6771, turn NDCG@10 0.5834; fts R@1 0.4514, R@5 0.7785, R@10 0.8416, NDCG@10 0.7559; turn R@10 0.6732, turn NDCG@10 0.5637
+
+**variance:**
+A/A' prepared-m-aprime100: 0 discordant rows and rankings; aggregate metrics equal; 0 per-question flips in either arm vs v0.26.1-rc1
+
+**failclose:**
+expected 500 = scored 470 + abstention-excluded 30 + failed 0; degraded_true 470; coverage.fts=ok 470
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.26.2/SCORECARD-FAST-TIER.md
+
+**caveats:**
+- PASS bar: 0 recall and fts flips vs v0.26.1-rc1 (previous GA tree plus notes). Latency recorded, not gated; shared-machine run under nice -n 19.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-recall-p90_ms-v0262-2026-10-09"></a>r1m-off-recall-p90_ms-v0262-2026-10-09
+
+**id:**
+r1m-off-recall-p90_ms-v0262-2026-10-09
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, lcm_recall)
+
+**metric:**
+p90_ms
+
+**value:**
+95
+
+**display:**
+95
+
+**tier:**
+P
+
+**date:**
+2026-10-09
+
+**system_commit:**
+v0.26.2-rc2 (38be1f6c); measured candidate, published with v0.26.2
+
+**harness_commit:**
+benchmarking/longmemeval.py blob 5ddfece4; scripts/lcm_longmemeval.py blob 0a31802b at measured tag; equal to v0.26.1-rc1
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF, provider stub; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4578, R@5 0.7863, R@10 0.8473, NDCG@10 0.7637; turn R@10 0.6771, turn NDCG@10 0.5834; fts R@1 0.4514, R@5 0.7785, R@10 0.8416, NDCG@10 0.7559; turn R@10 0.6732, turn NDCG@10 0.5637
+
+**variance:**
+A/A' prepared-m-aprime100: 0 discordant rows and rankings; aggregate metrics equal; 0 per-question flips in either arm vs v0.26.1-rc1
+
+**failclose:**
+expected 500 = scored 470 + abstention-excluded 30 + failed 0; degraded_true 470; coverage.fts=ok 470
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.26.2/SCORECARD-FAST-TIER.md
+
+**caveats:**
+- PASS bar: 0 recall and fts flips vs v0.26.1-rc1 (previous GA tree plus notes). Latency recorded, not gated; shared-machine run under nice -n 19.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-recall-r10-v0262-2026-10-09"></a>r1m-off-recall-r10-v0262-2026-10-09
+
+**id:**
+r1m-off-recall-r10-v0262-2026-10-09
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, lcm_recall)
+
+**metric:**
+r10
+
+**value:**
+0.8473
+
+**display:**
+0.8473
+
+**tier:**
+P
+
+**date:**
+2026-10-09
+
+**system_commit:**
+v0.26.2-rc2 (38be1f6c); measured candidate, published with v0.26.2
+
+**harness_commit:**
+benchmarking/longmemeval.py blob 5ddfece4; scripts/lcm_longmemeval.py blob 0a31802b at measured tag; equal to v0.26.1-rc1
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF, provider stub; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4578, R@5 0.7863, R@10 0.8473, NDCG@10 0.7637; turn R@10 0.6771, turn NDCG@10 0.5834; fts R@1 0.4514, R@5 0.7785, R@10 0.8416, NDCG@10 0.7559; turn R@10 0.6732, turn NDCG@10 0.5637
+
+**variance:**
+A/A' prepared-m-aprime100: 0 discordant rows and rankings; aggregate metrics equal; 0 per-question flips in either arm vs v0.26.1-rc1
+
+**failclose:**
+expected 500 = scored 470 + abstention-excluded 30 + failed 0; degraded_true 470; coverage.fts=ok 470
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.26.2/SCORECARD-FAST-TIER.md
+
+**caveats:**
+- PASS bar: 0 recall and fts flips vs v0.26.1-rc1 (previous GA tree plus notes). Latency recorded, not gated; shared-machine run under nice -n 19.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-recall-r10-v0270-2026-10-16"></a>r1m-off-recall-r10-v0270-2026-10-16
+
+**id:**
+r1m-off-recall-r10-v0270-2026-10-16
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, lcm_recall)
+
+**metric:**
+r10
+
+**value:**
+0.8733
+
+**display:**
+0.8733 vs 0.8473; +0.0260
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4523, R@5 0.8049, R@10 0.8733, NDCG@10 0.7776; turn R@10 0.7005, turn NDCG@10 0.5861; previous GA R@10 0.8473; net +0.0260; no category down; 11 hit@10 changes
+
+**variance:**
+A/A prime: 0 discordant rows; 260 recall flips all attributed to stemmed recall #1035; 0 fts flips; rc8 equals rc5 over all 500 questions and all 8 metric fields
+
+**failclose:**
+470 scored + 30 abstention-excluded + 0 failed = 500
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D1 PASS (attributed). Bar: 0 flips or every flip attributed and intended, net R@10 >= previous GA - 0.005, no category down more than 0.02.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+- The instrument changed; the v0.26.2 row equals the pre-#1035 tree under the current instrument (0 flips), so the harness change moves nothing.
+
+### <a id="revert-1637-occurrence-2026-10-23"></a>revert-1637-occurrence-2026-10-23
+
+**id:**
+revert-1637-occurrence-2026-10-23
+
+**benchmark:**
+Occurrence retry three-way revert proof
+
+**metric:**
+cells_worse_than_main_on_loss
+
+**value:**
+0
+
+**display:**
+0/1296 cells worse than main on loss; 25 named cells equal GA at every checkpoint
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+07dd79d185b1e4968f5e3d94267e5417a4f2c26c
+
+**harness_commit:**
+4148a09d9ec57e9b0c049720c6cacf16eb21e938
+
+**judge:**
+n/a (deterministic identity projection and multiset host-ledger oracle)
+
+**reader:**
+n/a (synthetic host histories)
+
+**retrieval_config:**
+Warm/cold; compaction none/before/after; stamped/unstamped; six UID shapes; 0/1/3 restarts; snapshot present/missing/malformed/stale; identical/plus-one-user replay. 1296 reachable cells.
+
+**dataset_exposure:**
+Generated synthetic rows only; no customer text or provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/4148a09d9ec57e9b0c049720c6cacf16eb21e938/comparison.md
+
+**variance:**
+N/A: deterministic generated cells, one execution per tree/cell; checkpoint-wise comparison without cancellation.
+
+**failclose:**
+Zero checkpoint loss increases over main; all25 named cells equal GA on loss. All190 duplicate increases over main and four restart-growth increases match GA.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/4148a09d9ec57e9b0c049720c6cacf16eb21e938/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/4148a09d9ec57e9b0c049720c6cacf16eb21e938/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/4148a09d9ec57e9b0c049720c6cacf16eb21e938/three-way-comparison.json
+
+**caveats:**
+- Advisory synthetic evidence; no live-host, fleet, merge, release or customer claim.
+- 190 cells increase duplicates versus main; all increases match GA. Four cells increase restart-1 growth 0 to 2, also matching GA.
+- GA is not lossless: occ-0002 retry deficit is main4/revert2/GA2.
+- Raw inputs retained; T2 unpublished, no result disposal. Remote full suite pending.
+
+[registry row](results.d/revert-1637-occurrence-2026-10-23.json)
+
+### <a id="row-handoff-v1-1749-sessions"></a>row-handoff-v1-1749-sessions
+
+**id:**
+row-handoff-v1-1749-sessions
+
+**benchmark:**
+Recall row handoff (sessions)
+
+**metric:**
+busy_median_s
+
+**value:**
+0.11281608301214874
+
+**display:**
+3.297513 -> 0.112816 s
+
+**tier:**
+P
+
+**date:**
+2026-10-21
+
+**system_commit:**
+8d18e7943152d132f0af292911c88098b66685aa + fix.patch (sha256 fa8411c21ba78856c8f7afc5ce58cfb7eb443e173d859bd68f086437ab170748; exact measured file hashes in CODE.json)
+
+**harness_commit:**
+1b2aa454bad593116279ffc99854c80d79c0c06d
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+Generated 250k-message short corpus; 500 sessions; 250k chunk and 500 summary binary rows; 384-d int8; cold direct load; 8s deadline; Python 3.14.6 / SQLite 3.53.1; inherited nice 20; one busy in-process Python thread
+
+**dataset_exposure:**
+Generated only; no corpus text retained in evidence
+
+**breakdown:**
+base: busy median 3.297513 s (min 3.170188, max 4.272009, n=5, timeouts 0, past deadline 0); idle median 0.002511 s (n=5, timeouts 0); busy/idle 1313.16. candidate: busy median 0.112816 s (min 0.106986, max 0.142380, n=5, timeouts 0, past deadline 0); idle median 0.002110 s (n=5, timeouts 0); busy/idle 53.47. Fix-round limits (candidate vs base): 1m-128 deadline 4 vs 4, passed; 1m-128 memory 1127 vs 583, 1.933x, failed; 1m-128 speed 0.9685 vs 1.0825, 0.895x, passed; 1m-384 memory 2947 vs 1107, 2.662x, failed; 250k-48 speed 0.212 vs 0.2355, 0.900x, passed. Full per-run samples: https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/SAMPLES.json
+
+**variance:**
+5 idle/busy pairs per phase/site, interleaved base/candidate; fresh process per idle/busy pair; min/max in linked card
+
+**failclose:**
+Base chunk 5/5 busy deadline misses; candidate 0/5 at every site. RSS acceptance FAIL at both required widths.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/SAMPLES.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/LIMITS.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/CHECKS.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/CODE.json
+
+**caveats:**
+- Advisory on this Mac; no floor, smallest-host, release or runtime claim.
+- PARTIAL: prescribed memory changes miss the <=1.25x RSS target: 1.933x at 1M x 128 B and 2.662x at 1M x 384 B. Whole-stream hex aggregation remains the limiting mechanism.
+- Session busy median improves in this remeasurement; earlier regression is not reproduced. Timing noise is large; no universal session speedup claim.
+- Idle speed ratios 0.900x at 250k x 48 B and 0.895x at 1M x 128 B; full matrix returned at 1.6s in 4/4 base and candidate runs.
+- Full suite 15963 passed, 140 skipped, 64 xfailed; privacy 77 passed. Independent review and exact-head remote CI not established.
+- No T2 publication in this round. Prior run used nice 19; absolute timings are not pooled with this nice-20 run.
+
+### <a id="row-handoff-v1-1749-vector.chunk"></a>row-handoff-v1-1749-vector.chunk
+
+**id:**
+row-handoff-v1-1749-vector.chunk
+
+**benchmark:**
+Recall row handoff (vector.chunk)
+
+**metric:**
+busy_median_s
+
+**value:**
+0.33568108300096355
+
+**display:**
+8.160382 -> 0.335681 s
+
+**tier:**
+P
+
+**date:**
+2026-10-21
+
+**system_commit:**
+8d18e7943152d132f0af292911c88098b66685aa + fix.patch (sha256 fa8411c21ba78856c8f7afc5ce58cfb7eb443e173d859bd68f086437ab170748; exact measured file hashes in CODE.json)
+
+**harness_commit:**
+1b2aa454bad593116279ffc99854c80d79c0c06d
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+Generated 250k-message short corpus; 500 sessions; 250k chunk and 500 summary binary rows; 384-d int8; cold direct load; 8s deadline; Python 3.14.6 / SQLite 3.53.1; inherited nice 20; one busy in-process Python thread
+
+**dataset_exposure:**
+Generated only; no corpus text retained in evidence
+
+**breakdown:**
+base: busy median 8.160382 s (min 8.026514, max 8.281800, n=5, timeouts 5, past deadline 5); idle median 0.259293 s (n=5, timeouts 0); busy/idle 31.47. candidate: busy median 0.335681 s (min 0.316753, max 0.342580, n=5, timeouts 0, past deadline 0); idle median 0.198665 s (n=5, timeouts 0); busy/idle 1.69. Fix-round limits (candidate vs base): 1m-128 deadline 4 vs 4, passed; 1m-128 memory 1127 vs 583, 1.933x, failed; 1m-128 speed 0.9685 vs 1.0825, 0.895x, passed; 1m-384 memory 2947 vs 1107, 2.662x, failed; 250k-48 speed 0.212 vs 0.2355, 0.900x, passed. Full per-run samples: https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/SAMPLES.json
+
+**variance:**
+5 idle/busy pairs per phase/site, interleaved base/candidate; fresh process per idle/busy pair; min/max in linked card
+
+**failclose:**
+Base chunk 5/5 busy deadline misses; candidate 0/5 at every site. RSS acceptance FAIL at both required widths.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/SAMPLES.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/LIMITS.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/CHECKS.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/CODE.json
+
+**caveats:**
+- Advisory on this Mac; no floor, smallest-host, release or runtime claim.
+- PARTIAL: prescribed memory changes miss the <=1.25x RSS target: 1.933x at 1M x 128 B and 2.662x at 1M x 384 B. Whole-stream hex aggregation remains the limiting mechanism.
+- Session busy median improves in this remeasurement; earlier regression is not reproduced. Timing noise is large; no universal session speedup claim.
+- Idle speed ratios 0.900x at 250k x 48 B and 0.895x at 1M x 128 B; full matrix returned at 1.6s in 4/4 base and candidate runs.
+- Full suite 15963 passed, 140 skipped, 64 xfailed; privacy 77 passed. Independent review and exact-head remote CI not established.
+- No T2 publication in this round. Prior run used nice 19; absolute timings are not pooled with this nice-20 run.
+
+### <a id="row-handoff-v1-1749-vector.summary"></a>row-handoff-v1-1749-vector.summary
+
+**id:**
+row-handoff-v1-1749-vector.summary
+
+**benchmark:**
+Recall row handoff (vector.summary)
+
+**metric:**
+busy_median_s
+
+**value:**
+0.11789395799860358
+
+**display:**
+1.656694 -> 0.117894 s
+
+**tier:**
+P
+
+**date:**
+2026-10-21
+
+**system_commit:**
+8d18e7943152d132f0af292911c88098b66685aa + fix.patch (sha256 fa8411c21ba78856c8f7afc5ce58cfb7eb443e173d859bd68f086437ab170748; exact measured file hashes in CODE.json)
+
+**harness_commit:**
+1b2aa454bad593116279ffc99854c80d79c0c06d
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+Generated 250k-message short corpus; 500 sessions; 250k chunk and 500 summary binary rows; 384-d int8; cold direct load; 8s deadline; Python 3.14.6 / SQLite 3.53.1; inherited nice 20; one busy in-process Python thread
+
+**dataset_exposure:**
+Generated only; no corpus text retained in evidence
+
+**breakdown:**
+base: busy median 1.656694 s (min 1.390754, max 1.773543, n=5, timeouts 0, past deadline 0); idle median 0.001621 s (n=5, timeouts 0); busy/idle 1021.86. candidate: busy median 0.117894 s (min 0.088226, max 0.142537, n=5, timeouts 0, past deadline 0); idle median 0.001793 s (n=5, timeouts 0); busy/idle 65.75. Fix-round limits (candidate vs base): 1m-128 deadline 4 vs 4, passed; 1m-128 memory 1127 vs 583, 1.933x, failed; 1m-128 speed 0.9685 vs 1.0825, 0.895x, passed; 1m-384 memory 2947 vs 1107, 2.662x, failed; 250k-48 speed 0.212 vs 0.2355, 0.900x, passed. Full per-run samples: https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/SAMPLES.json
+
+**variance:**
+5 idle/busy pairs per phase/site, interleaved base/candidate; fresh process per idle/busy pair; min/max in linked card
+
+**failclose:**
+Base chunk 5/5 busy deadline misses; candidate 0/5 at every site. RSS acceptance FAIL at both required widths.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/SAMPLES.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/LIMITS.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/CHECKS.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/CODE.json
+
+**caveats:**
+- Advisory on this Mac; no floor, smallest-host, release or runtime claim.
+- PARTIAL: prescribed memory changes miss the <=1.25x RSS target: 1.933x at 1M x 128 B and 2.662x at 1M x 384 B. Whole-stream hex aggregation remains the limiting mechanism.
+- Session busy median improves in this remeasurement; earlier regression is not reproduced. Timing noise is large; no universal session speedup claim.
+- Idle speed ratios 0.900x at 250k x 48 B and 0.895x at 1M x 128 B; full matrix returned at 1.6s in 4/4 base and candidate runs.
+- Full suite 15963 passed, 140 skipped, 64 xfailed; privacy 77 passed. Independent review and exact-head remote CI not established.
+- No T2 publication in this round. Prior run used nice 19; absolute timings are not pooled with this nice-20 run.
 
 ### <a id="scale-curve-fastscan-2026-07-30"></a>scale-curve-fastscan-2026-07-30
 
@@ -611,11 +4007,964 @@ six gate executions, five root causes, mandatory confirmation-run protocol (F42 
 3 integrity fail-closes across the saga, all correct, all documented
 
 **evidence:**
-- bench/FINDING-F44
-- bench/specs/SPEC-171-FAST-SCAN-GATE v2
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F44-GATE171-CLOSED.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/SPEC-171-FAST-SCAN-GATE.md
 
 **caveats:**
 - uncontended latency is reported separately (P1/L4); this is the published cost-curve instrument
+
+### <a id="session-end-attribution-cost-2026-10-23"></a>session-end-attribution-cost-2026-10-23
+
+**id:**
+session-end-attribution-cost-2026-10-23
+
+**benchmark:**
+Session-end attribution ordinary-turn overhead
+
+**metric:**
+maximum_paired_median_delta_ms
+
+**value:**
+0.02470599999999995
+
+**display:**
+4/4 scoped cells pass; INFO preflight +0.004043ms, ingest +0.003702ms
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+ec11b30a3a96ac27fe2f81021a3a6254a2a6ef72
+
+**harness_commit:**
+ec11b30a3a96ac27fe2f81021a3a6254a2a6ef72
+
+**judge:**
+deterministic; no model judge
+
+**reader:**
+synthetic warm 24-row SQLite history
+
+**retrieval_config:**
+Full warm preflight and post_llm_call ingest span at INFO and DEBUG; defaults with embeddings and temporal rollups disabled; no provider calls
+
+**dataset_exposure:**
+Synthetic only; no customer data
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/summary.json
+
+**variance:**
+200 alternating AB/BA pairs per cell; 10 warmups; paired medians and p10/p90 retained
+
+**failclose:**
+Marginal and paired median deltas must each be at most max(10% of baseline,0.05ms); 4/4 pass
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/pairs.jsonl
+- https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/measurement-source.py
+- https://github.com/electricsheephq/lcm-x/blob/be138b8ce5ced48e9ccc3feaadd82a7b3c5223ee/score.py
+
+**caveats:**
+- Scopes exclude hook dispatch, turn-complete notification, leaf preparation and all host/model work.
+- Later shallow-copy correction restores the base contract and does not alter either measured path.
+- No live slow-commit attribution, speedup, release, runtime or customer claim.
+- Public raw pairs and re-score inputs retained. T2 unpublished; no result disposal.
+
+[registry row](results.d/session-end-attribution-cost-2026-10-23.json)
+
+### <a id="slow-route-compactions-v0270-2026-10-16"></a>slow-route-compactions-v0270-2026-10-16
+
+**id:**
+slow-route-compactions-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (slow summary route, #1128)
+
+**metric:**
+compactions_per_100_messages
+
+**value:**
+20.0
+
+**display:**
+20.0
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds, 150 pooled post-crossing messages; live-host turn-end semantics; managed policy: leaf chunk 24,000, summary cap 2,000, timeout 120 s
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+rc8 vs rc5: compactions/100 20.0 vs 20.0; mean wait 8.1 vs 11.0 s; waited 20% vs 20%; late facts .872 vs .872; survival drops 0 vs 0; wall p90 45.8 vs 61.0 s
+
+**variance:**
+3 seeds; pooled rates; no variance estimate in scorecard; shorter waits are summary-route timing on the day, not a code-effect claim
+
+**failclose:**
+0 summary-call failures, 0 timeouts, 0 no-progress holds, 0 zero-leaf events
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Per-message wait replay PASS; slow gpt-6.1-sol summariser route. Bars: compactions/100 <=25, mean wait <=15 s, waited <=25%, facts >=.583, survival drops 0, wall p90 <=120 s. Before #1123: 87 compactions/100, 52 s mean wait.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="slow-route-facts-v0270-2026-10-16"></a>slow-route-facts-v0270-2026-10-16
+
+**id:**
+slow-route-facts-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (slow summary route, #1128)
+
+**metric:**
+facts_kept
+
+**value:**
+0.872
+
+**display:**
+.872
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds, 150 pooled post-crossing messages; live-host turn-end semantics; managed policy: leaf chunk 24,000, summary cap 2,000, timeout 120 s
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+rc8 vs rc5: compactions/100 20.0 vs 20.0; mean wait 8.1 vs 11.0 s; waited 20% vs 20%; late facts .872 vs .872; survival drops 0 vs 0; wall p90 45.8 vs 61.0 s
+
+**variance:**
+3 seeds; pooled rates; no variance estimate in scorecard; shorter waits are summary-route timing on the day, not a code-effect claim
+
+**failclose:**
+0 summary-call failures, 0 timeouts, 0 no-progress holds, 0 zero-leaf events
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Per-message wait replay PASS; slow gpt-6.1-sol summariser route. Bars: compactions/100 <=25, mean wait <=15 s, waited <=25%, facts >=.583, survival drops 0, wall p90 <=120 s. Before #1123: 87 compactions/100, 52 s mean wait.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="slow-route-mean-wait-v0270-2026-10-16"></a>slow-route-mean-wait-v0270-2026-10-16
+
+**id:**
+slow-route-mean-wait-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (slow summary route, #1128)
+
+**metric:**
+mean_wait_s_per_message
+
+**value:**
+8.1
+
+**display:**
+8.1 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds, 150 pooled post-crossing messages; live-host turn-end semantics; managed policy: leaf chunk 24,000, summary cap 2,000, timeout 120 s
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+rc8 vs rc5: compactions/100 20.0 vs 20.0; mean wait 8.1 vs 11.0 s; waited 20% vs 20%; late facts .872 vs .872; survival drops 0 vs 0; wall p90 45.8 vs 61.0 s
+
+**variance:**
+3 seeds; pooled rates; no variance estimate in scorecard; shorter waits are summary-route timing on the day, not a code-effect claim
+
+**failclose:**
+0 summary-call failures, 0 timeouts, 0 no-progress holds, 0 zero-leaf events
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Per-message wait replay PASS; slow gpt-6.1-sol summariser route. Bars: compactions/100 <=25, mean wait <=15 s, waited <=25%, facts >=.583, survival drops 0, wall p90 <=120 s. Before #1123: 87 compactions/100, 52 s mean wait.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="slow-route-survival-drops-v0270-2026-10-16"></a>slow-route-survival-drops-v0270-2026-10-16
+
+**id:**
+slow-route-survival-drops-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (slow summary route, #1128)
+
+**metric:**
+rows_dropped_by_survival_fits
+
+**value:**
+0
+
+**display:**
+0
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds, 150 pooled post-crossing messages; live-host turn-end semantics; managed policy: leaf chunk 24,000, summary cap 2,000, timeout 120 s
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+rc8 vs rc5: compactions/100 20.0 vs 20.0; mean wait 8.1 vs 11.0 s; waited 20% vs 20%; late facts .872 vs .872; survival drops 0 vs 0; wall p90 45.8 vs 61.0 s
+
+**variance:**
+3 seeds; pooled rates; no variance estimate in scorecard; shorter waits are summary-route timing on the day, not a code-effect claim
+
+**failclose:**
+0 summary-call failures, 0 timeouts, 0 no-progress holds, 0 zero-leaf events
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Per-message wait replay PASS; slow gpt-6.1-sol summariser route. Bars: compactions/100 <=25, mean wait <=15 s, waited <=25%, facts >=.583, survival drops 0, wall p90 <=120 s. Before #1123: 87 compactions/100, 52 s mean wait.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="slow-route-wait-share-v0270-2026-10-16"></a>slow-route-wait-share-v0270-2026-10-16
+
+**id:**
+slow-route-wait-share-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (slow summary route, #1128)
+
+**metric:**
+messages_waited_percent
+
+**value:**
+20
+
+**display:**
+20%
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds, 150 pooled post-crossing messages; live-host turn-end semantics; managed policy: leaf chunk 24,000, summary cap 2,000, timeout 120 s
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+rc8 vs rc5: compactions/100 20.0 vs 20.0; mean wait 8.1 vs 11.0 s; waited 20% vs 20%; late facts .872 vs .872; survival drops 0 vs 0; wall p90 45.8 vs 61.0 s
+
+**variance:**
+3 seeds; pooled rates; no variance estimate in scorecard; shorter waits are summary-route timing on the day, not a code-effect claim
+
+**failclose:**
+0 summary-call failures, 0 timeouts, 0 no-progress holds, 0 zero-leaf events
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Per-message wait replay PASS; slow gpt-6.1-sol summariser route. Bars: compactions/100 <=25, mean wait <=15 s, waited <=25%, facts >=.583, survival drops 0, wall p90 <=120 s. Before #1123: 87 compactions/100, 52 s mean wait.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="slow-route-wall-p90-v0270-2026-10-16"></a>slow-route-wall-p90-v0270-2026-10-16
+
+**id:**
+slow-route-wall-p90-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (slow summary route, #1128)
+
+**metric:**
+compaction_wall_p90_s
+
+**value:**
+45.8
+
+**display:**
+45.8 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds, 150 pooled post-crossing messages; live-host turn-end semantics; managed policy: leaf chunk 24,000, summary cap 2,000, timeout 120 s
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+rc8 vs rc5: compactions/100 20.0 vs 20.0; mean wait 8.1 vs 11.0 s; waited 20% vs 20%; late facts .872 vs .872; survival drops 0 vs 0; wall p90 45.8 vs 61.0 s
+
+**variance:**
+3 seeds; pooled rates; no variance estimate in scorecard; shorter waits are summary-route timing on the day, not a code-effect claim
+
+**failclose:**
+0 summary-call failures, 0 timeouts, 0 no-progress holds, 0 zero-leaf events
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Per-message wait replay PASS; slow gpt-6.1-sol summariser route. Bars: compactions/100 <=25, mean wait <=15 s, waited <=25%, facts >=.583, survival drops 0, wall p90 <=120 s. Before #1123: 87 compactions/100, 52 s mean wait.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-admission-losses-v0270-2026-10-16"></a>track-s-admission-losses-v0270-2026-10-16
+
+**id:**
+track-s-admission-losses-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+admission_proven_losses
+
+**value:**
+0
+
+**display:**
+0; D3 PASS; 60/60 admitted at all 24 checkpoints
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-compactions-v0270-2026-10-16"></a>track-s-compactions-v0270-2026-10-16
+
+**id:**
+track-s-compactions-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+compactions_per_100_messages
+
+**value:**
+12.3
+
+**display:**
+12.3; bar <= 25
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304; timing: rc8 first six runs, 300 post-crossing messages
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-facts-cp176-v0270-2026-10-16"></a>track-s-facts-cp176-v0270-2026-10-16
+
+**id:**
+track-s-facts-cp176-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+facts_kept_cp176
+
+**value:**
+0.942
+
+**display:**
+0.942 vs 0.933 (reported only)
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-facts-cp304-v0270-2026-10-16"></a>track-s-facts-cp304-v0270-2026-10-16
+
+**id:**
+track-s-facts-cp304-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+facts_kept_cp304
+
+**value:**
+0.778
+
+**display:**
+0.778 vs 0.608; +16.9 pt; p 0.009
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-mean-wait-v0270-2026-10-16"></a>track-s-mean-wait-v0270-2026-10-16
+
+**id:**
+track-s-mean-wait-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+mean_wait_s_per_message
+
+**value:**
+5.2
+
+**display:**
+5.2 s; bar <= 15 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304; timing: rc8 first six runs, 300 post-crossing messages
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-survival-drops-v0270-2026-10-16"></a>track-s-survival-drops-v0270-2026-10-16
+
+**id:**
+track-s-survival-drops-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+rows_dropped_by_survival_fits
+
+**value:**
+115
+
+**display:**
+115 (FAIL, waived by release manager); bar 0
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304; timing: rc8 first six runs, 300 post-crossing messages
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-wait-share-v0270-2026-10-16"></a>track-s-wait-share-v0270-2026-10-16
+
+**id:**
+track-s-wait-share-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+messages_waited_percent
+
+**value:**
+12
+
+**display:**
+12%; bar <= 25%
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304; timing: rc8 first six runs, 300 post-crossing messages
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-wall-max-v0270-2026-10-16"></a>track-s-wall-max-v0270-2026-10-16
+
+**id:**
+track-s-wall-max-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+compaction_wall_max_s
+
+**value:**
+115.1
+
+**display:**
+115.1 s; bar <= 145 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304; timing: rc8 first six runs, 300 post-crossing messages
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-wall-p90-v0270-2026-10-16"></a>track-s-wall-p90-v0270-2026-10-16
+
+**id:**
+track-s-wall-p90-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+compaction_wall_p90_s
+
+**value:**
+64.5
+
+**display:**
+64.5 s; bar <= 120 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304; timing: rc8 first six runs, 300 post-crossing messages
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
 
 ### <a id="v2-static-451-sota-luna-2026-08-03"></a>v2-static-451-sota-luna-2026-08-03
 
@@ -668,8 +5017,10 @@ A/A' 100q fixed-seed subset (seed 20260802) EXECUTED: 11/100 discordant (11.0%),
 0/451 instrument failures both domains
 
 **evidence:**
-- bench/specs/RUN-SHEET-V2-SOTA-LUNA.md (incl. Amendment 1)
-- session-notes 2026-08-02 v2-sota-luna artifacts (full-web, full-enterprise, per-question)
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/RUN-SHEET-V2-SOTA-LUNA.md
+
+**local_raw:**
+- local run 2026-08-02 v2-sota-luna artifacts (full-web, full-enterprise, per-question)
 
 **caveats:**
 - Cross-config context: official-config (qwen3.5-9b reader) row is 123/451=27.3%; the +4.4pt is READER-dominated by design — this row anchors the SOTA-reader funnel, it is NOT a memory-delta claim

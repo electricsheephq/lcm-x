@@ -740,7 +740,7 @@ class TestProviderPrefixedAuxiliaryCalls:
         assert seen["model"] == "gpt-oss-120b"
 
     def test_expansion_call_passes_provider_and_stripped_model(self, monkeypatch):
-        from hermes_lcm.tools import _synthesize_expansion_answer
+        from hermes_lcm.expand_query_tools import _synthesize_expansion_answer
 
         seen = {}
 
@@ -767,10 +767,10 @@ class TestProviderPrefixedAuxiliaryCalls:
 class TestConfig:
     def test_defaults(self):
         c = LCMConfig()
-        assert c.fresh_tail_count == 32
-        assert c.fresh_tail_max_tokens == 0
-        assert c.leaf_chunk_tokens == 20_000
-        assert c.context_threshold == 0.35
+        assert c.fresh_tail_count == 24
+        assert c.fresh_tail_max_tokens == 24_000
+        assert c.leaf_chunk_tokens == 24_000
+        assert c.context_threshold == 0.75
         assert c.incremental_max_depth == 3
         assert c.condensation_fanin == 4
         assert c.dynamic_leaf_chunk_enabled is False
@@ -785,17 +785,17 @@ class TestConfig:
         assert c.embedding_privacy_enabled is None
         assert c.sensitive_patterns == ["api_key", "bearer_token", "password_assignment", "private_key"]
         assert c.sensitive_patterns_source == "default"
-        assert c.large_output_externalization_enabled is False
+        assert c.large_output_externalization_enabled is True  # #1013 part C: deployed default
         assert c.large_output_externalization_threshold_chars == 12_000
         assert c.large_output_externalization_path == ""
-        assert c.large_output_active_replay_stubbing_enabled is False
+        assert c.large_output_active_replay_stubbing_enabled is True  # #1013 part C: deployed default
         assert c.large_output_active_replay_stub_threshold_tokens == 10_000
         assert c.large_output_active_replay_stub_aged_threshold_tokens == 2_000
         assert c.large_output_transcript_gc_enabled is False
         assert c.deferred_maintenance_enabled is False
         assert c.deferred_maintenance_max_passes == 4
         assert c.critical_budget_pressure_ratio == 0.0
-        assert c.threshold_full_sweep_enabled is False
+        assert c.threshold_full_sweep_enabled is True
         assert c.summary_prefix_target_tokens == 0
         assert c.ignore_session_patterns == []
         assert c.stateless_session_patterns == []
@@ -809,7 +809,7 @@ class TestConfig:
         assert c.summary_circuit_breaker_cooldown_seconds == 300
         assert c.expansion_model == ""
         assert c.expansion_context_tokens == 32_000
-        assert c.summary_timeout_ms == 60_000
+        assert c.summary_timeout_ms == 120_000
         assert c.expansion_timeout_ms == 120_000
 
     def test_from_env(self, monkeypatch):
@@ -904,10 +904,10 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.fresh_tail_count == 32
-        assert c.fresh_tail_max_tokens == 0
-        assert c.leaf_chunk_tokens == 20_000
-        assert c.context_threshold == 0.35
+        assert c.fresh_tail_count == 24
+        assert c.fresh_tail_max_tokens == 24_000
+        assert c.leaf_chunk_tokens == 24_000
+        assert c.context_threshold == 0.75
         assert c.max_assembly_tokens == 0
         assert c.reserve_tokens_floor == 0
         assert c.expansion_context_tokens == 32_000
@@ -916,26 +916,26 @@ class TestConfig:
     def test_from_env_reads_hermes_compression_threshold_when_lcm_env_missing(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
-        (hermes_home / "config.yaml").write_text("compression:\n  threshold: 0.68\n")
+        (hermes_home / "config.yaml").write_text("compression:\n  threshold: 0.88\n")
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.68
+        assert c.context_threshold == 0.88
 
     def test_from_env_reads_hermes_codex_gpt55_autoraise_flag(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "compression:\n  threshold: 0.68\n  codex_gpt55_autoraise: false\n"
+            "compression:\n  threshold: 0.88\n  codex_gpt55_autoraise: false\n"
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.68
+        assert c.context_threshold == 0.88
         assert c.codex_gpt55_autoraise_enabled is False
         assert c.config_sources["codex_gpt55_autoraise_enabled"] == "config_yaml:compression.codex_gpt55_autoraise"
 
@@ -999,7 +999,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.summary_timeout_ms == 60_000
+        assert c.summary_timeout_ms == 120_000
 
     def test_from_env_lcm_threshold_env_overrides_hermes_config(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
@@ -1023,7 +1023,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.35
+        assert c.context_threshold == 0.75
 
     def test_from_env_ignores_numeric_zero_disabled_hermes_threshold(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
@@ -1036,7 +1036,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.35
+        assert c.context_threshold == 0.75
 
     def test_from_env_ignores_numeric_zero_float_disabled_hermes_threshold(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
@@ -1049,20 +1049,20 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.35
+        assert c.context_threshold == 0.75
 
     def test_from_env_numeric_one_keeps_hermes_threshold_fallback(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "compression:\n  enabled: 1\n  threshold: 0.50\n"
+            "compression:\n  enabled: 1\n  threshold: 0.80\n"
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.50
+        assert c.context_threshold == 0.80
 
     def test_from_env_ignores_disabled_hermes_threshold_without_pyyaml(self, monkeypatch, tmp_path):
         import hermes_lcm.config as config_mod
@@ -1078,7 +1078,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.35
+        assert c.context_threshold == 0.75
 
     def test_from_env_ignores_numeric_zero_float_without_pyyaml(self, monkeypatch, tmp_path):
         import hermes_lcm.config as config_mod
@@ -1094,7 +1094,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.35
+        assert c.context_threshold == 0.75
 
     def test_from_env_numeric_one_float_keeps_threshold_without_pyyaml(self, monkeypatch, tmp_path):
         import hermes_lcm.config as config_mod
@@ -1102,7 +1102,7 @@ class TestConfig:
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "compression:\n  enabled: 1.0\n  threshold: '0.50'\n"
+            "compression:\n  enabled: 1.0\n  threshold: '0.80'\n"
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
@@ -1110,21 +1110,21 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.50
+        assert c.context_threshold == 0.80
 
     def test_from_env_reads_hermes_threshold_without_pyyaml(self, monkeypatch, tmp_path):
         import hermes_lcm.config as config_mod
 
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
-        (hermes_home / "config.yaml").write_text("compression:\n  threshold: '0.68'\n")
+        (hermes_home / "config.yaml").write_text("compression:\n  threshold: '0.88'\n")
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
         monkeypatch.setattr(config_mod, "yaml", None)
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.68
+        assert c.context_threshold == 0.88
 
     def test_from_env_lcm_section_overrides_compression_section(self, monkeypatch, tmp_path):
         """lcm.context_threshold in config.yaml takes priority over compression.threshold."""
@@ -1170,7 +1170,7 @@ class TestConfig:
         # context_threshold nested under lcm > subsection — must be ignored
         (hermes_home / "config.yaml").write_text(
             "lcm:\n  subsection:\n    context_threshold: 0.99\n"
-            "compression:\n  enabled: true\n  threshold: 0.60\n"
+            "compression:\n  enabled: true\n  threshold: 0.90\n"
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
@@ -1179,7 +1179,7 @@ class TestConfig:
         c = LCMConfig.from_env()
 
         # Must fall through to compression.threshold, NOT the nested 0.99
-        assert c.context_threshold == 0.60
+        assert c.context_threshold == 0.90
 
     def test_from_env_nested_compression_threshold_ignored(self, monkeypatch, tmp_path):
         """Deeply nested threshold under compression: should NOT be matched."""
@@ -1188,7 +1188,7 @@ class TestConfig:
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "compression:\n  enabled: true\n  subsection:\n    threshold: 0.99\n  threshold: 0.55\n"
+            "compression:\n  enabled: true\n  subsection:\n    threshold: 0.99\n  threshold: 0.85\n"
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
@@ -1196,7 +1196,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.55
+        assert c.context_threshold == 0.85
 
 
 class TestSessionPatterns:
@@ -2437,6 +2437,45 @@ class TestMessageStore:
     def test_store_waits_out_long_write_lock_with_extended_busy_timeout(self, tmp_path):
         db_path = tmp_path / "busy-timeout.db"
         store = MessageStore(db_path)
+        lock_conn = sqlite3.connect(db_path, timeout=1.0, check_same_thread=False)
+        lock_conn.execute("BEGIN IMMEDIATE")
+        attempted = threading.Event()
+        errors = []
+        # append() opens its write with BEGIN IMMEDIATE; that statement is the one that waits on the lock.
+        store._conn.set_trace_callback(
+            lambda sql: attempted.set() if sql.lstrip().upper().startswith("BEGIN") else None)
+
+        def append():
+            try:
+                store.append("sess1", {"role": "user", "content": "writer survives lock"})
+            except BaseException as exc:
+                errors.append(exc)
+
+        writer = threading.Thread(target=append, daemon=True)
+        try:
+            # SQLite's native busy handler has no Python clock seam. Its configured
+            # 30 s budget guards the old 5 s regression without a 6.2 s real sleep.
+            assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] >= 30000
+            writer.start()
+            assert attempted.wait(timeout=10)
+        finally:
+            lock_conn.rollback()
+            lock_conn.close()
+            if writer.ident is not None:  # an assertion before start() must not be masked by join()
+                writer.join(timeout=10)
+            store._conn.set_trace_callback(None)
+        try:
+            assert not writer.is_alive()
+            assert errors == []
+            assert store.get_session_count("sess1") == 1
+        finally:
+            store.close()
+
+
+    @pytest.mark.latency
+    def test_store_waits_out_long_write_lock_with_extended_busy_timeout_latency(self, tmp_path):
+        db_path = tmp_path / "busy-timeout.db"
+        store = MessageStore(db_path)
 
         lock_conn = sqlite3.connect(db_path, timeout=1.0, check_same_thread=False)
         lock_conn.execute("PRAGMA journal_mode=WAL")
@@ -2464,6 +2503,7 @@ class TestMessageStore:
         assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] >= 30000
 
         store.close()
+
 
     def test_search_sort_modes_apply_before_limit(self, store):
         older_strong = store.append(
@@ -2631,8 +2671,12 @@ class TestMessageStore:
             store._conn.set_trace_callback(None)
 
         assert len(results) == 2
+        # #1047: the LIKE fallback fetches its candidate window in one bounded query.
+        from hermes_lcm.search_query import compute_search_candidate_cap
+
+        cap = compute_search_candidate_cap(2)
         assert any(
-            "FROM messages" in statement and "content LIKE" in statement and "LIMIT 20" in statement
+            "FROM messages" in statement and "content LIKE" in statement and f"LIMIT {cap}" in statement
             for statement in traced
         )
 
@@ -4811,8 +4855,8 @@ class TestAssemblyBudgetSelection:
         return engine
 
     def test_assembly_skips_oversized_assistant_turn_to_preserve_user_prompt(self, tmp_path, monkeypatch):
-        # 160 (was 120): room for the #680 sentence in the LCM system note.
-        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=160)
+        # 175 (was 120): room for the #680 sentence and the #998 lcm_recall clause in the LCM system note.
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=175)
         huge_assistant = "oversized assistant tool chatter " * 400
 
         assembled = engine._assemble_context(
@@ -5723,7 +5767,8 @@ class TestAssemblyBudgetSelection:
         assert rows[-1]["content"] == "new followup"
 
     def test_assembly_skips_oversized_summary_and_keeps_later_fit_summary(self, tmp_path, monkeypatch):
-        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=140)
+        # 165 (was 140): room for the #998 lcm_recall clause and the #1016 clause in the LCM system note.
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=165)
         engine._dag.add_node(SummaryNode(
             session_id="assembly-session",
             depth=2,
@@ -7421,12 +7466,10 @@ class TestIngestExternalization:
             {"role": "assistant", "content": marker},
         ])
 
+        # #1016: assistant text under the 100k non-tool floor stays inline (it was a raw_payload stub).
         stored = engine._store.get_session_messages("ingest-session")
-        assert stored[0]["content"].startswith("[Externalized payload:")
-        payload_file = next(output_dir.glob("*.json"))
-        payload = json.loads(payload_file.read_text())
-        assert payload["kind"] == "raw_payload"
-        assert payload["content"] == marker
+        assert stored[0]["content"] == marker
+        assert not output_dir.exists() or not list(output_dir.glob("*.json"))
         assert "assistant recovered text" not in stored[0]["content"]
 
     def test_ingest_preserves_unrecoverable_truncation_marker_inline(self, tmp_path):
@@ -7641,7 +7684,9 @@ class TestIngestExternalization:
 
     def test_ingest_externalizes_generic_oversized_raw_payload_fallback(self, tmp_path):
         engine, output_dir = self._engine(tmp_path)
-        content = "GENERIC_RAW_NEEDLE:" + ("z" * 5000)
+        # #1016: user text is externalized only above the 100k non-tool floor; the needle sits
+        # mid-payload, outside the stub's head/tail preview.
+        content = ("z " * 30_000) + "GENERIC_RAW_NEEDLE " + ("z " * 30_000)
 
         engine._ingest_messages([{"role": "user", "content": content}])
 
@@ -7660,7 +7705,8 @@ class TestIngestExternalization:
         from hermes_lcm.engine import LCMEngine
 
         engine, output_dir = self._engine(tmp_path)
-        content = "ACTIVE_RAW_NEEDLE:" + ("r" * 5000)
+        # #1016: above the 100k non-tool floor; the needle sits outside the stub's preview.
+        content = ("r " * 30_000) + "ACTIVE_RAW_NEEDLE " + ("r " * 30_000)
         messages = [{"role": "user", "content": content}]
 
         active_context = engine.compress(messages)
@@ -7679,7 +7725,7 @@ class TestIngestExternalization:
         payload_path = next(output_dir.glob("*.json"))
         expanded = json.loads(
             lcm_tools.lcm_expand(
-                {"externalized_ref": payload_path.name, "max_tokens": 20_000},
+                {"externalized_ref": payload_path.name, "max_tokens": 200_000},
                 engine=engine,
             )
         )
@@ -7702,7 +7748,8 @@ class TestIngestExternalization:
 
     def test_preflight_requests_cleanup_for_oversized_raw_payload_stub(self, tmp_path):
         engine, _output_dir = self._engine(tmp_path)
-        content = "PREFLIGHT_RAW_NEEDLE:" + ("r" * 5000)
+        # #1016: was 5k chars; user text is stubbed only above the 100k non-tool floor.
+        content = ("r " * 30_000) + "PREFLIGHT_RAW_NEEDLE " + ("r " * 30_000)
         messages = [{"role": "user", "content": content}]
 
         assert engine.should_compress_preflight(messages) is True
@@ -7717,7 +7764,8 @@ class TestIngestExternalization:
         import hermes_lcm.tools as lcm_tools
 
         engine, output_dir = self._engine(tmp_path)
-        content = "INJECTED_ROLE_RAW_NEEDLE:" + ("z" * 5000)
+        # #1016: above the 100k non-tool floor; the needle sits outside the stub's preview.
+        content = ("z " * 30_000) + "INJECTED_ROLE_RAW_NEEDLE " + ("z " * 30_000)
         injected_role = "user; ref=bogus]"
 
         engine._ingest_messages([{"role": injected_role, "content": content}])
@@ -7731,9 +7779,9 @@ class TestIngestExternalization:
         payload_file = next(output_dir.glob("*.json"))
         payload = json.loads(payload_file.read_text())
         assert payload["role"] == injected_role
-        by_store_id = json.loads(lcm_tools.lcm_expand({"store_id": stored[0]["store_id"], "max_tokens": 20_000}, engine=engine))
+        by_store_id = json.loads(lcm_tools.lcm_expand({"store_id": stored[0]["store_id"], "max_tokens": 200_000}, engine=engine))
         assert by_store_id["externalized_ref"] == payload_file.name
-        expanded = json.loads(lcm_tools.lcm_expand({"externalized_ref": by_store_id["externalized_ref"], "max_tokens": 20_000}, engine=engine))
+        expanded = json.loads(lcm_tools.lcm_expand({"externalized_ref": by_store_id["externalized_ref"], "max_tokens": 200_000}, engine=engine))
         assert expanded["content"] == content
 
     def test_engine_bootstrap_does_not_externalize_until_ingest_path_runs(self, tmp_path):
@@ -8031,7 +8079,7 @@ class TestExtraction:
 
         assert "[Externalized tool output" in serialized
         assert "call_big_default" in serialized
-        assert content[:500] not in serialized
+        assert "\n[preview: " + content[:600] + " … " + content[-300:] + "]" in serialized
 
         payload_dir = hermes_home / "lcm-large-outputs"
         payload_files = list(payload_dir.glob("*.json"))
@@ -8066,7 +8114,7 @@ class TestExtraction:
         ])
 
         assert "[Externalized tool output" not in serialized
-        assert "...[truncated]..." in serialized
+        assert serialized == "[TOOL RESULT call_disabled]: " + content
         assert not (hermes_home / "lcm-large-outputs").exists()
 
     def test_serialize_messages_falls_back_to_truncation_when_externalization_path_is_unwritable(self, tmp_path):
@@ -8081,6 +8129,7 @@ class TestExtraction:
                 large_output_externalization_enabled=True,
                 large_output_externalization_threshold_chars=200,
                 large_output_externalization_path=str(blocked_path),
+                leaf_chunk_tokens=1,  # Exercise the floor when the inline fallback exceeds its share.
             )
         )
 
@@ -8200,7 +8249,7 @@ class TestExtraction:
 
         assert "[Externalized tool output" in serialized
         assert "call_big_custom" in serialized
-        assert content[:500] not in serialized
+        assert "\n[preview: " + content[:600] + " … " + content[-300:] + "]" in serialized
 
         payload_files = list(output_dir.glob("*.json"))
         assert len(payload_files) == 1

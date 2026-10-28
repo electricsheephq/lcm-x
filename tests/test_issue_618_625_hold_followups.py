@@ -66,7 +66,10 @@ def summaries(monkeypatch):
 
 
 def _engine(tmp_path, context_length: int = 200_000, **config) -> LCMEngine:
-    settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
+    # #1013 part B: foreground-only providers/clocks exclude automatic rollup calls
+    settings = {"large_output_externalization_enabled": False,
+                "large_output_active_replay_stubbing_enabled": False, "temporal_rollups_enabled": False,
+                "fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
                 "threshold_full_sweep_enabled": True, "max_assembly_tokens": 100_000,
                 "database_path": str(tmp_path / "lcm.db"), **config}
     engine = LCMEngine(config=LCMConfig(**settings))
@@ -205,7 +208,7 @@ def test_item2_lcm_status_shows_a_wall_clock_until(tmp_path, clock):
         engine.shutdown()
 
 
-# -- 3. #618 item 3: during a hold at the survival ceiling an automatic pass only fits -------------------------
+# -- 3. #618 item 3: only the sweep hold makes an automatic ceiling pass fit-only ------------------------------
 
 def _ceiling_state(tmp_path, hold: str):
     """Window 6,000 (ceiling 5,100); a list of about 14,000 tokens; one hold of this conversation."""
@@ -227,10 +230,14 @@ def test_item3_a_held_automatic_pass_at_the_ceiling_makes_no_call_and_fits(tmp_p
     try:
         assert engine.should_compress(request) is True and _host_gate(engine) is False  # the ceiling is exempt
         result = engine.compress(large, current_tokens=request)
-        assert summaries == [] and _nodes(engine) == []
-        assert (engine._last_compression_status, engine._last_compression_noop_reason) == ("noop", "held")
-        assert result is not large and engine._survival_measure(result) <= int(6_000 * 0.85)
-        assert engine._last_survival_fit["reason"] == "noop"
+        if hold == "sweep":
+            assert summaries == [] and _nodes(engine) == []
+            assert (engine._last_compression_status, engine._last_compression_noop_reason) == ("noop", "held")
+            assert result is not large and engine._survival_measure(result) <= int(6_000 * 0.85)
+            assert engine._last_survival_fit["reason"] == "noop"
+        else:  # rc4: the #651 hold remains exempt at the ceiling, as in v0.24.8
+            assert summaries and _nodes(engine, 0)
+            assert (engine._last_compression_status, engine._last_compression_noop_reason) != ("noop", "held")
     finally:
         engine.shutdown()
 
@@ -385,7 +392,12 @@ def _sweep_off_engine(tmp_path, **config) -> LCMEngine:
 
 def test_stop_line_names_the_soft_target_stop_of_a_sweep_off_condensation(tmp_path, monkeypatch, clock, caplog):
     """The state of test_issue_605_sweep_off_forced_f2 (U7, the condensation refused after a slow leaf)."""
-    engine = _sweep_off_engine(tmp_path)
+    engine = _sweep_off_engine(tmp_path,
+        # #1013 part B: foreground hold timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     provider = _Provider(clock, 40.0)
     monkeypatch.setattr(escalation, "_invoke_summary_llm", provider)
     for _ in range(8):

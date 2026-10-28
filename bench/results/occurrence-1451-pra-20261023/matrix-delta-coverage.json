@@ -1,0 +1,8 @@
+{
+  "status": "UNCHANGED_PATH_COVERAGE",
+  "cells": 1296,
+  "snapshot_records": 5184,
+  "legacy_without_length": 0,
+  "measurement_head": "0eb95e50f4bae6ef0bcc305efde49c83f3d41fca",
+  "predicate": "Delta is solely in output_length-absent legacy branch. Every non-null snapshot in preserved candidate matrix has output_length; missing snapshots skip shape helper; malformed metadata returns before legacy branch."
+}

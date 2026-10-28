@@ -1,0 +1,558 @@
+"""I2 isolated serial cells, real host trace and shared I1 safety/CPU machinery."""
+from contextlib import closing, contextmanager
+from dataclasses import asdict, replace
+import hashlib
+import json
+import itertools
+import os
+from pathlib import Path
+import random
+import shutil
+import sqlite3
+import subprocess
+import sys
+import threading
+import time
+
+from .audit import audit, connect, preimage, progress
+from .catchup import stop
+from .common import MODEL, REQUEST, append, config, dump, foreign_files, foreground_request, guards, immutable_cache, isolated, load, parser, product, safe_paths
+from .corpus import build, pilot_rows
+from .messages_snapshot import messages_snapshot_columns
+from .cpu import Supervisor
+
+SMOKE = "functional smoke, shared host, not a bar result"
+
+
+def arguments(description):
+    p = parser(description)
+    for name in ("scratch", "out", "model-cache"):
+        p.add_argument("--"+name, type=Path, required=True)
+    for name, default in (("rows", 250000), ("blocks", 3), ("seed", 1586), ("samples", 600), ("queries", 200)):
+        p.add_argument("--"+name, type=int, default=default)
+    p.add_argument("--shape", choices=("short", "mixed"), default="short")
+    p.add_argument("--baseline", choices=("empty", "upgrade"), default="empty")
+    p.add_argument("--max-seconds", type=float, default=18000)
+    p.add_argument("--smoke", action="store_true")
+    p.add_argument("--label", default="Mac")
+    p.add_argument("--worker", type=Path)
+    p.add_argument("--block", type=int, choices=(0, 1, 2))
+    p.add_argument("--covered-store", type=Path)
+    p.add_argument("--user-home")
+    p.add_argument("--build-covered", action="store_true")
+    p.add_argument("--standalone-calibration-s", type=float)
+    p.add_argument("--resume-covered-store", type=Path)
+    p.add_argument("--build-seconds", type=float)
+    p.add_argument("--allow-partial", action="store_true")
+    return p.parse_args()
+
+
+def prepare(a):
+    safe_paths(a.scratch, a.out, a.model_cache)
+    immutable_cache(a.model_cache)
+    if min(a.blocks, a.samples, a.queries) < 1 or a.rows < 2:
+        raise ValueError("positive counts required")
+    a.out.mkdir(parents=True, exist_ok=False)
+    a.scratch.mkdir(parents=True, exist_ok=False)
+    if shutil.disk_usage(a.scratch).free < (150 if sys.platform == "darwin" else 26)*2**30:
+        raise RuntimeError("disk headroom stop")
+    a.user_home = str(getattr(a, "user_home", None) or Path.home())
+    # Isolate corpus construction too, before any product import.
+    isolated(a.scratch/"builder-home", a.model_cache)
+    os.environ["HOME"] = str(a.scratch/"builder-home")
+    os.environ["ORT_DISABLE_TELEMETRY"] = "1"
+    os.environ["CFFIXED_USER_HOME"] = os.environ["HOME"]
+    if source := getattr(a, "resume_covered_store", None):
+        manifest = load(source/"manifest.json")
+        if any(manifest[k] != getattr(a, k) for k in ("rows", "shape", "baseline", "seed")):
+            raise ValueError("covered store corpus mismatch")
+        from contextlib import closing
+        with closing(connect(source/"store.db")) as src, closing(sqlite3.connect(a.scratch/"baseline.db")) as dst:
+            src.backup(dst)
+        dump(a.out/"manifest.json", manifest)
+        return manifest
+    pilot = build(a.lcmx_repo, a.hermes_source, a.scratch/"pilot.db", pilot_rows(1000, a.rows, a.shape), a.shape, a.baseline)
+    estimate = 5*(pilot["database_bytes"]+len(pilot["expected"]["chunks"])*2048)*a.rows/pilot["rows"]
+    import psutil
+    pilot_files = {a.scratch/"pilot.db", *[a.scratch/("pilot.db"+s) for s in ("-wal", "-shm", "-journal")]}
+    if any(Path(f.path).resolve() in {p.resolve() for p in pilot_files}
+           for f in psutil.Process().open_files()):
+        raise RuntimeError("pilot store handles remain open")
+    for path in pilot_files:
+        path.unlink(missing_ok=True)
+    if estimate > 6*2**30:
+        raise RuntimeError("estimated live stores exceed 6 GB; declare a larger runner budget first")
+    manifest = build(a.lcmx_repo, a.hermes_source, a.scratch/"baseline.db", a.rows, a.shape, a.baseline)
+    dump(a.out/"manifest.json", manifest)
+    return manifest
+
+
+def cell(a, state, block, kind):
+    if shutil.disk_usage(a.scratch).free < (150 if sys.platform == "darwin" else 26)*2**30:
+        raise RuntimeError("disk headroom stop")
+    root = a.out/f"{block}-{state}"
+    root.mkdir()
+    # Only baseline + one serial cell copy live; rescore uses the JSONL receipts.
+    db = a.scratch/"cell.db"
+    source = a.covered_store/"store.db" if state == "ON-covered" and getattr(a, "covered_store", None) else a.scratch/"baseline.db"
+    if state == "ON-covered":
+        try:
+            if not getattr(a, "covered_store", None) or not source.is_file():
+                raise FileNotFoundError("covered store or store.db absent")
+            fresh = load(a.out/"manifest.json")
+            try:
+                persisted = load(a.covered_store/"manifest.json")
+            except (OSError, ValueError):
+                raise ValueError("covered_store_manifest_missing") from None
+            if not isinstance(persisted, dict):
+                raise ValueError("covered_store_manifest_missing")
+            if any(k not in persisted or persisted[k] != fresh[k] for k in (
+                    "preimage", "expected", "identities", "rows", "shape", "baseline", "seed")):
+                raise ValueError("covered_store_changed")
+            pins = {k: persisted.get(k, {}) for k in ("observed_vectors", "observed_metadata")}
+            if not all(isinstance(v, dict) for v in pins.values()):
+                raise ValueError("covered_store_manifest_missing")
+            pinned_keys = {k: set(v) for k, v in pins.items()}
+            fresh.update(pins)
+            checked = audit(source, fresh)
+            if any(set(fresh.get(k, {})) - pinned_keys[k] for k in pins):
+                raise ValueError("covered_store_manifest_missing")
+            if checked["complete"]:
+                dump(root/"manifest.json", fresh)
+            detail = dict(changed_vectors=len(checked["changed_vectors"]), changed_metadata=len(checked["changed_metadata"]),
+                missing_count=sum(v["missing_count"] for v in checked["classes"].values()),
+                reason="covered_store_changed" if not checked["raw_unchanged"] or checked["changed_vectors"] or checked["changed_metadata"]
+                    else "covered_store_unfinished", audit=checked)
+        except (FileNotFoundError, sqlite3.DatabaseError, ValueError) as exc:
+            checked, detail = dict(complete=False), dict(reason=str(exc))
+        if not checked["complete"]:
+            result = dict(state="INVALID", reason="covered_store_incomplete", pre_audit=detail)
+            append(root/"events.jsonl", dict(violation="covered_store_incomplete"))
+            dump(root/"summary.json", result)
+            return result
+    with connect(source) as src, sqlite3.connect(db) as dst:
+        src.backup(dst)
+    spec = dict(vars(a), state=state, block=block, kind=kind, db=db, root=root,
+                home=a.scratch/f"{block}-{state}-home")
+    spec = {k: str(v.resolve()) if isinstance(v, Path) else v for k, v in spec.items()}
+    dump(root/"request.json", spec)
+    cmd = [sys.executable, "-B", "-m", f"bench.instruments.local_catchup.{kind}",
+           "--worker", str(root/"request.json"), "--lcmx-repo", str(a.lcmx_repo),
+           "--hermes-source", str(a.hermes_source), "--scratch", str(a.scratch),
+           "--out", str(root), "--model-cache", str(a.model_cache)]
+    meter = Supervisor(root/"cpu.jsonl")
+    with (root/"worker.log").open("w") as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+            env={**os.environ, "HOME": spec["home"], "CFFIXED_USER_HOME": spec["home"]})
+        meter.watch(proc.pid)
+        meter.start()
+        started, reason = time.monotonic(), None
+        try:
+            while proc.poll() is None:
+                if meter.breach or time.monotonic()-started > a.max_seconds:
+                    reason = meter.breach or "cell_deadline"
+                    break
+                time.sleep(.2)
+        finally:
+            stopped = stop(proc)
+            meter.close()
+    reason = meter.breach or reason
+    try:
+        result = load(root/"raw-summary.json") if (root/"raw-summary.json").exists() else {}
+    except (OSError, ValueError):
+        if not stopped["stop_killed"]:
+            raise
+        result = dict(worker_receipts_truncated=["raw-summary.json"])
+    if reason or proc.returncode:
+        result.update(state="ABORTED", reason=reason or f"worker_exit:{proc.returncode}")
+    result.update(stopped)
+    if stopped["stop_killed"]:
+        result.update(state="INVALID", reason="forced_stop_after_grace")
+        if reason:
+            result["breach_reason"] = reason
+    for path in root.glob("*.jsonl"):
+        lines, tail = path.read_bytes().splitlines(keepends=True), b""
+        try:
+            labelled = [dict(json.loads(line), label=SMOKE if a.smoke else a.label) for line in lines]
+        except ValueError:
+            if not stopped["stop_killed"]:
+                raise
+            tail = lines.pop()
+            labelled = [dict(json.loads(line), label=SMOKE if a.smoke else a.label) for line in lines]
+        if path.name == "progress.jsonl":
+            result.update({k: labelled[-1][k] for k in ("fixed_corpus_frozen_s", "global_live_commits_during_freeze") if labelled and k in labelled[-1]})
+        if stopped["stop_killed"] and (tail or not lines and path.name == "progress.jsonl"):
+            result.setdefault("worker_receipts_truncated", []).append(path.name)
+        path.write_bytes("".join(json.dumps(row, sort_keys=True)+"\n" for row in labelled).encode()+tail)
+    result.update(label=SMOKE if a.smoke else a.label, cpu=meter.summary("NOT_JUDGED" if a.smoke else "INCOMPLETE"), exit=proc.returncode)
+    dump(root/"summary.json", result)
+    if reason or result.get("state") == "ABORTED":
+        raise RuntimeError(f"cell stopped: {root.name}: {reason or result.get('reason')}")
+    return result
+
+
+def guard_reason(events):
+    reasons = {"network_attempt": "offline_network_forbidden", "subprocess_launch": "offline_subprocess_launch",
+               "foreground_join": "foreground_embedding_join_forbidden"}
+    for event in events:
+        key = event.get("violation") or event.get("event")
+        if event.get("foreground") and key == "prepare":
+            return "foreground_preparation_forbidden"
+        if event.get("foreground") and key in ("_chunk_backfill_run", "_embedding_backfill_summary_run"):
+            return "foreground_backfill_forbidden"
+        if key in reasons:
+            return reasons[key]
+    return None
+
+
+def guarded_worker(worker, request):
+    root = Path(load(request)["root"])
+    events_path = root/"events.jsonl"
+    event_offset = events_path.stat().st_size if events_path.exists() else 0
+    try:
+        worker(request)
+    except RuntimeError as exc:
+        reasons = {"foreground preparation/backfill/join or network": "foreground_preparation_backfill_join_or_network",
+                   "offline subprocess launch": "offline_subprocess_launch",
+                   "foreground/download preparation forbidden": "foreground_preparation_forbidden",
+                   "foreground backfill forbidden": "foreground_backfill_forbidden",
+                   "foreground embedding join forbidden": "foreground_embedding_join_forbidden",
+                   "offline instrument denies network": "offline_network_forbidden"}
+        if str(exc) not in reasons:
+            raise
+        events = []
+        if events_path.exists():
+            with events_path.open("rb") as stream:
+                stream.seek(event_offset)
+                events = [json.loads(s) for s in stream.read().splitlines()]
+        reason = guard_reason(events) or reasons.get(str(exc))
+        if reason is None:
+            raise
+        dump(root/"raw-summary.json", dict(state="INVALID", reason=reason))
+
+
+def runtime(request):
+    from types import SimpleNamespace
+    a = SimpleNamespace(**load(request))
+    for key in ("db", "root", "home", "scratch", "out", "lcmx_repo", "hermes_source", "model_cache"):
+        setattr(a, key, Path(getattr(a, key)))
+    isolated(a.home, a.model_cache)
+    os.environ["ORT_DISABLE_TELEMETRY"] = "1"
+    mod = product(a.lcmx_repo, a.hermes_source)
+    if a.state == "ON-covered":
+        mod("embedding_provider").resolve_provider(config(mod, a.db), for_backfill=True)._ensure_local(allow_download=False)
+    guards(mod, a.root/"events.jsonl")
+    original_join = threading.Thread.join
+    def join(thread, *args, **kw):
+        name = thread.name.lower()
+        if REQUEST.get() == threading.get_ident() and name != "lcm-query-embed" and any(
+                part in name for part in ("embed", "backfill")):
+            append(a.root/"events.jsonl", {"violation": "foreground_join", "thread": thread.name})
+            raise RuntimeError("foreground embedding join forbidden")
+        return original_join(thread, *args, **kw)
+    threading.Thread.join = join
+    cfg = config(mod, a.db) if a.state != "OFF" else mod("config").LCMConfig(database_path=str(a.db), embeddings_enabled=False)
+    if cfg.embeddings_enabled != (a.state != "OFF"):
+        raise RuntimeError("OFF arm must explicitly disable embeddings")
+    cfg = replace(cfg, fresh_tail_count=2, leaf_chunk_tokens=2000, context_threshold=.75,
+        threshold_full_sweep_enabled=True, large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False, temporal_rollups_enabled=False,
+        l3_truncate_tokens=2, incremental_max_depth=0, summary_spend_max_calls=0)
+    # Same deterministic summary route as bgprep; embedding route remains real.
+    mod("escalation")._invoke_summary_llm = lambda prompt, *args, **kw: (
+        "Earlier turns " + hashlib.sha256(prompt.encode()).hexdigest()[:16] + ".\nExpand for details about: turns")
+    start = time.perf_counter()
+    engine = mod("engine").LCMEngine(config=cfg, hermes_home=str(a.home))
+    if a.state == "ON-covered":
+        engine._schedule_embedding_maintenance = lambda: None  # Bind resets the retirement flag; freeze scheduling too.
+    engine.on_session_start("i2-trace", platform="eval", conversation_id="i2-trace", context_length=6000)
+    if a.state == "ON-covered":
+        engine._embedding_maintenance_retired = True
+    bind = (time.perf_counter()-start)*1000
+    dump(a.root/"config.json", dict(config={**asdict(cfg), "embedding_model": mod("config").effective_embedding_model(cfg.embedding_provider, cfg.embedding_model)}, bind_ms=bind, ort_threads=mod("embedding_provider")._FASTEMBED_THREADS))
+    a._ready = lambda: mod("embedding_provider").probe_provider_availability(cfg).get("available", False)
+    return a, mod, engine, bind
+
+
+def trace(engine, mod, count, seed, observe, check, done=None):
+    from bench.instruments.compaction_probe.bgprep.replay import workload
+    view, batch, expected = [], [], []
+    for i in itertools.count():
+        if (count is not None and i >= count) or (done is not None and done()):
+            break
+        if i % 64 == 0:
+            batch = workload(seed+i//64)
+        pair = batch[i % 64]
+        # Record generated input, not successful writes: ingest can fail silently.
+        for message in pair:
+            expected.append([engine.current_session_id, engine._conversation_id,
+                message["role"], message["timestamp"],
+                hashlib.sha256(message["content"].encode()).hexdigest()])
+        view.append(pair[0])
+        t0 = time.perf_counter()
+        with foreground_request():
+            engine.ingest(view)
+            due = engine.should_compress_preflight(view)
+            t1 = time.perf_counter()
+            if due:
+                view = engine.compress(view, current_tokens=mod("tokens").count_messages_tokens(view))
+            t2 = time.perf_counter()
+        observe(dict(turn=i, start=t0, end=t2, ingest_preflight_ms=(t1-t0)*1000,
+                     dispatch_ms=(t2-t0)*1000, compression_due=bool(due)))
+        view.append(pair[1])
+        with foreground_request():
+            engine.ingest(view)
+        engine.last_prompt_tokens = mod("tokens").count_messages_tokens(view)
+        engine.note_turn_complete()
+        engine._prepare_leaves_after_turn(view)
+        check()
+    return expected
+
+
+@contextmanager
+def integrity_evidence(a, manifest):
+    """Failure-only evidence for generated instrument stores; never change the error."""
+    path = a.root/"integrity-inputs.json"
+    failure = dict(model=MODEL, identities=manifest["identities"], policy="conversational")
+    inputs = dict(trace_rows=manifest.get("trace_rows", []),
+        vectors=manifest.get("observed_vectors", {}) | manifest["preimage"]["vectors"],
+        metadata=manifest.get("observed_metadata", {}) | manifest["preimage"]["metadata"], **failure)
+    with closing(connect(a.db)) as c:
+        try:
+            dump(path, inputs)  # Freeze pins before audit() can extend the in-memory maps.
+        except Exception as error:
+            failure["inputs_error"] = f"{type(error).__name__}: {error}"
+        try:
+            yield c, failure
+        except Exception as exc:
+            failure["error"] = str(exc)
+            try:
+                failure["policy_revisions"] = dict(c.execute(
+                    "SELECT key,value FROM metadata WHERE key LIKE 'chunk_policy_revision%'").fetchall())
+            except Exception as error:
+                failure["policy_error"] = f"{type(error).__name__}: {error}"
+            target = a.root/"failed-cell.db"
+            try:
+                with closing(sqlite3.connect(target)) as dst:
+                    c.backup(dst)  # Same read transaction as the failing comparison, including WAL.
+                failure["backup"] = "sqlite-backup"
+            except Exception as error:
+                failure["backup_error"] = f"{type(error).__name__}: {error}"
+                try:
+                    # Quiesce writers while retaining the DB and both WAL companions together.
+                    with closing(sqlite3.connect(a.db, timeout=1)) as lock:
+                        lock.execute("BEGIN IMMEDIATE")
+                        for suffix in ("", "-wal", "-shm"):
+                            source = Path(str(a.db)+suffix)
+                            if source.exists():
+                                shutil.copy2(source, Path(str(target)+suffix))
+                    failure["backup"] = "locked-db-wal-shm"
+                except Exception as fallback_error:
+                    failure["fallback_error"] = f"{type(fallback_error).__name__}: {fallback_error}"
+            try:
+                dump(a.root/"integrity-failure.json", failure)
+            except Exception as error:
+                exc.add_note(f"integrity evidence write failed: {type(error).__name__}: {error}")
+            raise
+        else:
+            try:
+                path.unlink(missing_ok=True)  # Healthy cells upload no additional evidence.
+            except OSError:
+                pass
+
+
+def integrity(a, manifest):
+    # New trace rows are expected. Audit the immutable corpus subset and old vectors.
+    with integrity_evidence(a, manifest) as (c, failure):
+        c.execute("BEGIN")
+        original = list(c.execute(f"SELECT {messages_snapshot_columns(c)} FROM messages WHERE store_id<=? ORDER BY store_id", (manifest["rows"],)))
+        from .audit import digest
+        if digest(original) != manifest["preimage"]["raw_digest"]:
+            failure["mismatch"] = dict(kind="corpus", key="messages", status="changed",
+                expected=manifest["preimage"]["raw_digest"], actual=digest(original))
+            raise RuntimeError("corpus row corruption")
+        expected_trace = manifest.get("trace_rows") or []
+        trace_roles = {row[2] for row in expected_trace}
+        actual_trace, other_role_rows = [], {}
+        for session, conversation, role, observed, content in c.execute(
+                "SELECT session_id,conversation_id,role,observed_at,content FROM messages WHERE store_id>? ORDER BY store_id",
+                (manifest["rows"],)):
+            actual = [session, conversation, role, observed,
+                      hashlib.sha256((content or "").encode()).hexdigest()]
+            if role in trace_roles:
+                actual_trace.append(actual)
+            else:
+                other_role_rows[role] = other_role_rows.get(role, 0)+1
+        if "trace_rows" in manifest:
+            for i in range(max(len(expected_trace), len(actual_trace))):
+                if i >= len(expected_trace):
+                    kind = "extra/duplicate"
+                elif i >= len(actual_trace):
+                    kind = "missing"
+                elif actual_trace[i] == expected_trace[i]:
+                    continue
+                elif actual_trace[i] in expected_trace[i+1:]:
+                    kind = "out-of-order" if expected_trace[i] in actual_trace[i+1:] else "missing"
+                elif expected_trace[i] in actual_trace[i+1:]:
+                    kind = "extra/duplicate"
+                else:
+                    kind = "altered"
+                failure["mismatch"] = dict(kind="trace", index=i, status=kind,
+                    expected=expected_trace[i] if i < len(expected_trace) else None,
+                    actual=actual_trace[i] if i < len(actual_trace) else None)
+                raise RuntimeError(f"trace row corruption: {kind} at real-turn index {i}")
+        now = preimage(c, len(manifest["expected"]["leaves"]))
+        if now["provenance"] != manifest["preimage"]["provenance"]:
+            key = next(k for k, v in manifest["preimage"]["provenance"].items() if now["provenance"].get(k) != v)
+            failure["mismatch"] = dict(kind="provenance", key=key, status="changed",
+                expected=manifest["preimage"]["provenance"][key], actual=now["provenance"].get(key))
+            raise RuntimeError("corpus provenance corruption")
+        changed_metadata = [k for k, v in (manifest.get("observed_metadata", {}) | manifest["preimage"]["metadata"]).items() if now["metadata"].get(k) != v]
+        checked = audit(a.db, manifest)
+        dump(a.root/"final-integrity.json", dict(corpus_raw_digest=digest(original),
+            expected_raw_digest=manifest["preimage"]["raw_digest"],
+            unpaired_rows=checked["unpaired_rows"], residue=checked["residue"],
+            changed_metadata=changed_metadata, other_role_rows=other_role_rows,
+            vector_digest=hashlib.sha256(json.dumps(now["vectors"], sort_keys=True).encode()).hexdigest()))
+        if any(now["vectors"].get(k) != v for k, v in (manifest.get("observed_vectors", {}) | manifest["preimage"]["vectors"]).items()):
+            key, expected = next((k, v) for k, v in (manifest.get("observed_vectors", {}) | manifest["preimage"]["vectors"]).items() if now["vectors"].get(k) != v)
+            failure["mismatch"] = dict(kind="vector", key=key, expected=expected,
+                actual=now["vectors"].get(key), status="changed" if key in now["vectors"] else "missing")
+            raise RuntimeError("pre-existing vector corruption")
+        if changed_metadata:
+            key = changed_metadata[0]
+            failure["mismatch"] = dict(kind="metadata", key=key,
+                expected=(manifest.get("observed_metadata", {}) | manifest["preimage"]["metadata"])[key],
+                actual=now["metadata"].get(key), status="changed" if key in now["metadata"] else "missing")
+            raise RuntimeError("pre-existing metadata corruption")
+        if checked["unpaired_rows"] or checked["residue"]:
+            failure["mismatch"] = dict(kind="pairing_or_residue", key=next(iter(checked["unpaired_rows"] or checked["residue"])),
+                status="changed", expected=dict(unpaired_rows=[], residue={}),
+                actual=dict(unpaired_rows=checked["unpaired_rows"], residue=checked["residue"]))
+            raise RuntimeError("vector/metadata pairing or in-flight residue")
+        quick_check = c.execute("PRAGMA quick_check").fetchone()[0]
+        if quick_check != "ok":
+            failure["mismatch"] = dict(kind="database", key="quick_check", status="changed", expected="ok", actual=quick_check)
+            raise RuntimeError("database corruption")
+
+
+def safety(a):
+    events = [json.loads(s) for s in (a.root/"events.jsonl").read_text().splitlines()] if (a.root/"events.jsonl").exists() else []
+    if any(e.get("event") == "subprocess_launch" for e in events):
+        raise RuntimeError("offline subprocess launch")
+    if any(e.get("violation") or e.get("foreground") for e in events):
+        raise RuntimeError("foreground preparation/backfill/join or network")
+    foreign = foreign_files(os.getpid(), a.home, a.db, a.model_cache, user_home=Path(a.user_home),
+                            out=a.root, protected_roots=(a.scratch,))
+    source_reads, unexpected = [], []
+    for value in foreign:
+        path = Path(value)
+        if path.suffix in (".py", ".pyc") and ".hermes" not in path.parts and any(
+                path.is_relative_to(root) for root in (a.lcmx_repo, a.hermes_source)):
+            source_reads.append(path.name)
+        else:
+            unexpected.append(hashlib.sha256(value.encode()).hexdigest())
+    if source_reads or unexpected:
+        append(a.root/"file-access.jsonl", dict(source_reads=source_reads, unexpected_path_hashes=unexpected))
+    if unexpected:
+        raise RuntimeError("cross-profile access")
+    now = time.monotonic()
+    if now >= getattr(a, "_next_progress", 0):
+        a._next_progress = now+30
+        if not hasattr(a, "_manifest"):
+            a._manifest = load(a.out/"manifest.json")
+        value = progress(a.db, a._manifest, False)
+        fingerprint = str((value["classes"], value["scan"]))
+        commits = sum(e.get("embedded", 0) for e in events if "end" in e and
+            e.get("event") in ("_chunk_backfill_run", "_embedding_backfill_summary_run"))
+        if commits != getattr(a, "_commits", None):
+            a._commits, a._live_changed = commits, now
+        if fingerprint != getattr(a, "_fingerprint", None):
+            a._fingerprint, a._changed = fingerprint, now
+            a._freeze_base = commits
+        if now-a._changed >= getattr(a, "_fixed_frozen_s", 0):
+            a._fixed_frozen_s, a._freeze_commits = now-a._changed, commits-a._freeze_base
+        append(a.root/"progress.jsonl", dict(at=now, progress=value,
+            fixed_corpus_frozen_s=a._fixed_frozen_s, global_live_commits_during_freeze=a._freeze_commits))
+        if not value["complete"] and now-max(a._changed, a._live_changed) >= 600 and a._ready():
+            raise RuntimeError("zero progress for ten minutes while work remains")
+    return {"fixed_corpus_frozen_s": getattr(a, "_fixed_frozen_s", 0), "global_live_commits_during_freeze": getattr(a, "_freeze_commits", 0),
+            "events": "events.jsonl", "prepare_and_backfill_wrapped": True,
+            "embedding_thread_join_wrapped": True, "python_socket_calls_denied":
+            "connect, connect_ex, sendto, sendmsg, getaddrinfo, gethostbyname, gethostbyname_ex, gethostbyaddr, getnameinfo",
+            "subprocess_launches_recorded": "subprocess.Popen", "subprocess_launches_denied": "subprocess.Popen",
+            "native_and_subprocess_network_guarded": False, "violations": 0}
+
+
+def catchup_activity(root, start, end, coverage_start, coverage_end, require_prepared=False):
+    events = [json.loads(s) for s in (root/"events.jsonl").read_text().splitlines()] if (root/"events.jsonl").exists() else []
+    prepared = [e for e in events if e.get("event") == "prepared" and e.get("foreground") is False]
+    prior = any(e.get("at", float("inf")) <= start for e in prepared)
+    during = any(start <= e.get("at", -1) <= end for e in prepared)
+    runs = sum(e.get("event") in ("_embedding_backfill_summary_run", "_chunk_backfill_run")
+        and e.get("foreground") is False and e.get("embedded", 0) > 0
+        and start <= e.get("at", -1) <= e.get("end", -1) <= end for e in events)
+    delta = sum(coverage_end.values())-sum(coverage_start.values())
+    active = delta > 0 and (not require_prepared or prior or during)
+    return dict(coverage_start=coverage_start, coverage_end=coverage_end, coverage_delta=delta,
+        model_prepared_at_start=prior, background_prepared=during, active_backfills=runs,
+        catchup_activity=active, activity_window=dict(start=start, end=end))
+
+
+def wait_covered(a, mod, engine, manifest):
+    checked = audit(a.db, manifest)
+    append(a.root/"coverage.jsonl", dict(at=time.monotonic(), phase="covered_initial", audit=checked))
+    if not checked["complete"]:
+        raise RuntimeError("covered_store_incomplete")
+
+
+def fill_covered(a, mod, engine, manifest):
+    """Explicit covered-store setup; never counted as autonomous catch-up evidence."""
+    failures = []
+    def fill():
+        try:
+            from .audit import vector_counts
+            checked = audit(a.db, manifest)
+            append(a.root/"coverage.jsonl", dict(at=time.monotonic(), phase="covered_setup", audit=checked))
+            if checked["complete"]:
+                return
+            start, changed, previous = time.monotonic(), time.monotonic(), None
+            while True:
+                if getattr(a, "build_seconds", None) is not None and time.monotonic()-start >= a.build_seconds:
+                    return  # Persist this audited partial store for the next setup job.
+                counts = vector_counts(a.db, manifest)
+                if all(counts[k] >= len(v) for k, v in manifest["expected"].items()):
+                    checked = audit(a.db, manifest)
+                    append(a.root/"coverage.jsonl", dict(at=time.monotonic(), phase="covered_setup", audit=checked))
+                    if checked["complete"]:
+                        return
+                    transient = (checked["raw_unchanged"] and not checked["changed_vectors"]
+                                 and not checked["changed_metadata"] and not checked["unexpected_rows"]
+                                 and checked["integrity"] == "ok"
+                                 and all(v["missing_count"] == 0 for v in checked["classes"].values()))
+                    if not transient or time.monotonic()-start > a.max_seconds:
+                        raise RuntimeError("covered setup final audit failed")
+                    safety(a)
+                    time.sleep(.1)
+                    continue
+                safety(a)
+                fingerprint = str(counts)
+                if fingerprint != previous:
+                    changed, previous = time.monotonic(), fingerprint
+                if time.monotonic()-changed >= 600 or time.monotonic()-start > a.max_seconds:
+                    raise RuntimeError("covered setup deadline/no-progress stop")
+                for name, extra in (("_embedding_backfill_summary_run", {}), ("_chunk_backfill_run", {"policy": "conversational", "incremental": True})):
+                    getattr(mod("command"), name)(engine._config, a.db, apply=True, limit=4096,
+                        retry_uncertain=False, include_next_hint=False, **extra)
+        except Exception as exc:
+            failures.append(f"{type(exc).__name__}: {exc}")
+    thread = threading.Thread(target=fill, name="i2-covered-setup")
+    thread.start()
+    thread.join(a.max_seconds+1)
+    if thread.is_alive() or failures:
+        raise RuntimeError(f"covered setup failed: {failures}")
+
+
+def bootstrap(values, statistic, seed=1586, resamples=10000):
+    rng = random.Random(seed)
+    return sorted(statistic(rng.choices(values, k=len(values))) for _ in range(resamples))

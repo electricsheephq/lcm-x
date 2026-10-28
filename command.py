@@ -8,43 +8,63 @@ from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 import dataclasses
+import hashlib
 import json
+import logging
 import math
-import os
 import re
 import sqlite3
 import time
 from typing import Any
 import uuid
 
+from . import config as config_choices
+from .ingest_policy import embedding_prefix_suffix, split_prefix_revision
+from .config import effective_embedding_model, embedding_provider_id, lcm_env_get
+from .command_auth import CommandInvocation, Decision, authorize
+from .command_doctor import (
+    _doctor_text as _doctor_text,
+)
+from .command_router import route
+from .command_status import (
+    _status_text as _status_text,
+    _embedding_maintenance_status_lines as _embedding_maintenance_status_lines,
+)
 from .db_bootstrap import (
+    _create_stem_fts,
     check_external_content_fts_integrity,
     external_content_fts_needs_repair,
-    inspect_lcm_schema_health,
+    inspect_lcm_schema_health as inspect_lcm_schema_health,
     join_background_integrity_scans,
-    load_integrity_failed,
+    dispatch_background_stem_backfill,
+    stem_index_status as stem_index_status,
+    load_integrity_failed as load_integrity_failed,
     remediate_interim_schema_stamp,
     repair_external_content_fts,
+    sqlite_wal_reset_affected as sqlite_wal_reset_affected,
 )
 from .diagnostics import (
-    _has_lifecycle_fragmentation,
-    _state_db_path_for_engine,
-    doctor_guidance_for_check,
-    doctor_guidance_for_checks,
+    _has_lifecycle_fragmentation as _has_lifecycle_fragmentation,
+    _state_db_path_for_engine as _state_db_path_for_engine,
+    doctor_guidance_for_check as doctor_guidance_for_check,
+    doctor_guidance_for_checks as doctor_guidance_for_checks,
+    survival_fit_count as survival_fit_count,
+    survival_fit_projection_floor_applies as survival_fit_projection_floor_applies,
 )
 from .ingest_protection import (
     EmbeddingPrivacyPolicyError,
     embedding_privacy_revision,
     embedding_provider_requires_privacy,
-    externalized_payload_stats,
+    externalized_payload_stats as externalized_payload_stats,
     protect_embedding_text,
-    scan_externalized_payload_integrity,
-    scan_sqlite_payload_risks,
-    sensitive_pattern_status,
+    scan_externalized_payload_integrity as scan_externalized_payload_integrity,
+    scan_sqlite_payload_risks as scan_sqlite_payload_risks,
+    sensitive_pattern_status as sensitive_pattern_status,
     validate_embedding_privacy_dispatch,
 )
 from .dag import SummaryDAG, build_nodes_fts_spec
-from .inactive_record import inactive_record_notice
+from .inactive_record import inactive_record_notice as inactive_record_notice
+from .engine_registry import has_resident_lcm_engine
 from .presets import (
     explicit_operator_overrides,
     get_preset,
@@ -56,21 +76,27 @@ from .presets import (
     suggest_preset_for_engine,
     unsupported_runtime_fields_text,
 )
-from .maintenance import backup_database, rotate_backup_database
+from .maintenance import backup_database, externalized_payload_inventory, rotate_backup_database
 from .level3_repair import repair_level3_fragments, scan_level3_fragments
 from .assertion_rebuild import rebuild_assertions
 from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
 from .rollup_store import RollupStore
 from .session_patterns import build_session_match_keys, matches_session_pattern
-from .store import build_message_fts_spec, delete_message_relations
-from .survival_fit import SURVIVAL_FIT_COUNTER_KEY
+from .store import build_message_fts_spec, build_message_stem_fts_spec, delete_chunk_inflight, delete_host_uid_bindings, delete_message_relations
+from .survival_fit import SURVIVAL_FIT_COUNTER_KEY as SURVIVAL_FIT_COUNTER_KEY
+from .host_uid import host_uid_doctor_lines as host_uid_doctor_lines
 from .chunking import (
+    _CONVERSATIONAL_ROLES,
+    CHUNK_POLICY_REVISION,
     VALID_CONTENT_POLICIES,
     chunk_message,
     group_by_store_id,
     normalize_content_policy,
 )
+from .embedding_maintenance import clear_incremental_embedding_failures
+from .embedding_maintenance import incremental_embedding_state as incremental_embedding_state
+from .engine_registry import live_bound_session_ids
 from .embedding_provider import (
     EmbeddedDocumentBatch,
     EmbeddingProviderError,
@@ -98,7 +124,7 @@ _EMBEDDING_BACKFILL_BATCH_SIZE = 32
 
 
 def _env_float(key: str, default: float) -> float:
-    raw = os.environ.get(key)
+    raw = lcm_env_get(key)
     if raw is None:
         return default
     try:
@@ -137,7 +163,7 @@ def _embedding_backfill_batch_size(max_batch_items: int | None = None) -> int:
     cap = _VOYAGE_MAX_BATCH_ITEMS
     if isinstance(max_batch_items, int):
         cap = max(1, min(max_batch_items, _VOYAGE_MAX_BATCH_ITEMS))
-    raw = os.environ.get("LCM_EMBEDDING_BACKFILL_BATCH_SIZE")
+    raw = lcm_env_get("LCM_EMBEDDING_BACKFILL_BATCH_SIZE")
     if raw is None:
         return min(_EMBEDDING_BACKFILL_BATCH_SIZE, cap)
     try:
@@ -494,7 +520,7 @@ def _help_text(error: str | None = None) -> str:
         "- /lcm doctor retention: read-only retention analysis for stored session footprint and age",
         "- /lcm backup: create a timestamped SQLite backup before any future cleanup workflow",
         "- /lcm rotate: preview a tail-preserving in-place compact of the active session (read-only)",
-        "- /lcm rotate apply: backup-first rotate that advances the lifecycle frontier past pre-tail raw messages",
+        "- /lcm rotate apply: refused on Hermes (#1141); use /compress here N",
         "- /lcm rollups: show temporal-rollup status for the current session",
         "- /lcm rollups rebuild <day|week|month|all> [date]: synchronously rebuild a bounded UTC target set",
         "- /lcm assertions rebuild [--apply] [--limit N]: preview or run one bounded exact-row assertion batch",
@@ -505,142 +531,6 @@ def _help_text(error: str | None = None) -> str:
         "- /lcm embed backfill [--apply] [--limit N]: preview or populate missing leaf-summary embeddings",
         "- /lcm help: show this help",
     ])
-    return "\n".join(lines)
-
-
-def _status_text(engine) -> str:
-    status = engine.get_status()
-    db_path = Path(engine._store.db_path)
-    db_exists = db_path.exists()
-    db_size = db_path.stat().st_size if db_exists else 0
-    session_bound = bool(engine.current_session_id)
-    source_stats = status.get("source_lineage") or {}
-    runtime_identity = status.get("runtime_identity") or {}
-    source_stats = {
-        "messages_total": int(source_stats.get("messages_total", 0) or 0),
-        "attributed_messages": int(source_stats.get("attributed_messages", 0) or 0),
-        "normalized_unknown_messages": int(source_stats.get("normalized_unknown_messages", 0) or 0),
-        "legacy_blank_source_messages": int(source_stats.get("legacy_blank_source_messages", 0) or 0),
-        "effective_unknown_messages": int(source_stats.get("effective_unknown_messages", 0) or 0),
-        **({"error": source_stats.get("error")} if source_stats.get("error") else {}),
-    }
-    protection = status.get("ingest_protection") or sensitive_pattern_status(engine._config)
-    config_sources = status.get("config_sources") or {}
-    config_source_warnings = status.get("config_source_warnings") or []
-    ignored_config_yaml_lcm_keys = status.get("ignored_config_yaml_lcm_keys") or []
-
-    uninitialized = "(uninitialized)"
-    unknown = "(unknown)"
-    model = (engine.model or unknown) if session_bound else uninitialized
-    provider = (engine.provider or unknown) if session_bound else uninitialized
-    context_length_source = (
-        (getattr(engine, "_context_length_source", "") or unknown)
-        if session_bound
-        else uninitialized
-    )
-
-    lines = [
-        "LCM status",
-        f"engine: {status.get('engine', engine.name)}",
-        f"plugin_name: {runtime_identity.get('plugin_name', '(unknown)')}",
-        f"plugin_version: {runtime_identity.get('plugin_version', '(unknown)')}",
-        f"plugin_path: {runtime_identity.get('plugin_path', '(unknown)')}",
-        f"module_path: {runtime_identity.get('module_path', '(unknown)')}",
-        f"plugin_git_commit: {runtime_identity.get('plugin_git_commit') or '(unavailable)'}",
-        f"plugin_git_branch: {runtime_identity.get('plugin_git_branch') or '(unavailable)'}",
-        f"plugin_git_dirty: {runtime_identity.get('plugin_git_dirty') if runtime_identity.get('plugin_git_dirty') is not None else '(unavailable)'}",
-        f"hermes_home: {runtime_identity.get('hermes_home', '') or '(unset)'}",
-        f"session_id: {engine.current_session_id or '(unbound)'}",
-        f"session_platform: {engine.current_session_platform or ('(unbound)' if not session_bound else '(unknown)')}",
-        f"model: {model}",
-        f"provider: {provider}",
-        f"database_path: {db_path}",
-        f"database_path_source: {runtime_identity.get('database_path_source', '(unknown)')}",
-        f"database_exists: {_fmt_bool(db_exists)}",
-        f"database_size: {_fmt_size(db_size) if db_exists else 'missing'}",
-        f"compression_count: {engine.compression_count}",
-        f"total_compactions: {status.get('total_compactions', 0)}",
-        f"total_compactions_scope: {status.get('total_compactions_scope', 'current_conversation')}",
-        f"last_compression_status: {status.get('last_compression_status', 'idle')}",
-        f"last_compression_noop_reason: {status.get('last_compression_noop_reason', '') or '(none)'}",
-        f"context_length: {engine.context_length if session_bound else '(uninitialized)'}",
-        f"raw_context_length: {status.get('raw_context_length', 0) if session_bound else '(uninitialized)'}",
-        f"effective_context_length_cap: {status.get('effective_context_length_cap') or '(none)'}",
-        f"effective_context_length_reason: {status.get('effective_context_length_reason') or '(none)'}",
-        f"context_length_source: {context_length_source}",
-        f"configured_context_threshold: {status.get('configured_context_threshold', engine._config.context_threshold)}",
-        f"context_threshold: {status.get('context_threshold', engine._config.context_threshold)}",
-        f"context_threshold_source: {status.get('context_threshold_source', config_sources.get('context_threshold', 'manual_or_default'))}",
-        f"context_threshold_autoraised: {status.get('context_threshold_autoraised') or '(none)'}",
-        f"threshold_tokens: {engine.threshold_tokens if session_bound else '(uninitialized)'}",
-        f"cache_metrics_available: {_fmt_bool(status.get('cache_metrics_available'))}",
-        f"last_input_tokens: {status.get('last_input_tokens', 0)}",
-        f"last_output_tokens: {status.get('last_output_tokens', 0)}",
-        f"last_cache_read_tokens: {status.get('last_cache_read_tokens', 0)}",
-        f"last_cache_write_tokens: {status.get('last_cache_write_tokens', 0)}",
-        f"last_reasoning_tokens: {status.get('last_reasoning_tokens', 0)}",
-        f"cache_read_ratio: {float(status.get('cache_read_ratio', 0.0) or 0.0) * 100:.1f}%",
-        f"sensitive_patterns_enabled: {_fmt_bool(protection.get('enabled'))}",
-        f"sensitive_patterns: {', '.join(protection.get('patterns') or []) or '(none)'}",
-        f"sensitive_patterns_source: {protection.get('source', 'default')}",
-        # Filter classification for current_session_id (the foreground view).
-        # When a side channel is in flight, get_status() reports the bound
-        # session's flags; we read the engine properties instead so this row
-        # stays consistent with the session_id row above.
-        f"session_ignored: {_fmt_bool(engine.current_session_ignored)}",
-        f"session_stateless: {_fmt_bool(engine.current_session_stateless)}",
-        f"side_channel_active: {_fmt_bool(engine.side_channel_active)}",
-        f"conversation_id: {runtime_identity.get('conversation_id', '') or '(unbound)'}",
-        f"lifecycle_current_session_id: {runtime_identity.get('lifecycle_current_session_id', '') or '(none)'}",
-        f"lifecycle_last_finalized_session_id: {runtime_identity.get('lifecycle_last_finalized_session_id', '') or '(none)'}",
-        f"source_messages_total: {source_stats['messages_total']}",
-        f"source_attributed_messages: {source_stats['attributed_messages']}",
-        f"source_unknown_messages: {source_stats['normalized_unknown_messages']}",
-        f"source_legacy_blank_messages: {source_stats['legacy_blank_source_messages']}",
-        f"source_effective_unknown_messages: {source_stats['effective_unknown_messages']}",
-    ]
-
-    last_rotate_at = status.get("last_rotate_at")
-    if last_rotate_at:
-        lines.append(
-            f"last_rotate_at: "
-            f"{datetime.fromtimestamp(float(last_rotate_at), tz=timezone.utc).isoformat(timespec='seconds')}"
-        )
-        rotate_backup_size = int(status.get("rotate_backup_size", 0) or 0)
-        if rotate_backup_size:
-            lines.append(f"rotate_backup_size: {_fmt_size(rotate_backup_size)}")
-    else:
-        lines.append("last_rotate_at: (never)")
-    if status.get("rotate_backup_path"):
-        lines.append(f"rotate_backup_path: {status['rotate_backup_path']}")
-
-    if session_bound:
-        lines.extend([
-            f"store_messages: {status.get('store_messages', 0)}",
-            f"dag_nodes: {status.get('dag_nodes', 0)}",
-        ])
-    else:
-        lines.append(
-            "note: no active Hermes session has initialized LCM in this process yet — after a fresh restart, send one normal message first if you want live per-session runtime details"
-        )
-
-    if "ignore_session_patterns_source" in status:
-        lines.append(
-            f"ignore_session_patterns_source: {status.get('ignore_session_patterns_source')}"
-        )
-    if "stateless_session_patterns_source" in status:
-        lines.append(
-            f"stateless_session_patterns_source: {status.get('stateless_session_patterns_source')}"
-        )
-    if config_source_warnings:
-        lines.append("config_source_warnings: " + "; ".join(config_source_warnings))
-    if ignored_config_yaml_lcm_keys:
-        lines.append(
-            "ignored_config_yaml_lcm_keys: "
-            + ", ".join(f"lcm.{key}" for key in ignored_config_yaml_lcm_keys)
-        )
-    if source_stats.get("error"):
-        lines.append(f"source_lineage_error: {source_stats['error']}")
     return "\n".join(lines)
 
 
@@ -847,13 +737,28 @@ def _rotate_text(engine) -> str:
     if preview.get("noop"):
         lines.append(f"reason: {preview.get('reason', 'no_change')}")
         lines.append("note: read-only preview — rotate apply would be a no-op for this session")
+        lines.append("note: if an earlier LCM-X already rotated this session and Hermes restarted since, compaction can stop on the rows below that frontier and /compress here N will not repair it: start a new session with /new (raw rows stay recoverable via lcm_load_session; in-place fix tracked in #1184)")
     else:
-        lines.append("note: read-only preview — use `/lcm rotate apply` to advance the frontier (backup-first)")
+        lines.append("note: read-only preview — on Hermes, use `/compress here N` to compact (rotate apply is refused, #1141)")
+        lines.append("note: if an earlier LCM-X already rotated this session and Hermes restarted since, compaction can stop on the rows below that frontier and /compress here N will not repair it: start a new session with /new (raw rows stay recoverable via lcm_load_session; in-place fix tracked in #1184)")
         lines.append("note: pre-tail raw messages remain in the store and recoverable via lcm_load_session")
     return "\n".join(lines)
 
 
 def _rotate_apply_text(engine) -> str:
+    return "\n".join([
+        "LCM rotate apply",
+        "status: refused",
+        "reason: host_owns_transcript",
+        "note: Hermes reloads its own transcript after a restart, so advancing the frontier without summaries leaves rows LCM-X cannot map (#1141)",
+        "note: use `/compress here N` to summarise everything except the most recent N messages",
+        "note: if an earlier LCM-X already rotated this session and Hermes restarted since, compaction can stop on the rows below that frontier and /compress here N will not repair it: start a new session with /new (raw rows stay recoverable via lcm_load_session; in-place fix tracked in #1184)",
+        "note: no backup was created and no lifecycle state was changed",
+    ])
+
+
+def _rotate_apply_unchecked(engine) -> str:
+    # Kept for hosts that rebuild the context from the store.
     # Pre-flight refusal AND noop check before touching disk. This avoids
     # both writing a backup for a session that would refuse and overwriting
     # the previous known-good rolling backup when the apply would be a no-op
@@ -890,6 +795,7 @@ def _rotate_apply_text(engine) -> str:
             f"previous_frontier_store_id: {pre['current_frontier_store_id']}",
             f"new_frontier_store_id: {pre['new_frontier_store_id']}",
             f"reason: {pre.get('reason', 'no_change')}",
+            *_externalized_payload_lines(engine),
             "note: rotate is a no-op; rolling backup was not written so the previous rotate-latest snapshot is preserved",
         ]
         return "\n".join(lines)
@@ -912,6 +818,7 @@ def _rotate_apply_text(engine) -> str:
             f"reason: {result.get('reason', 'unknown')}",
             f"rotate_backup_path: {backup['backup_path']}",
             f"rotate_backup_size: {_fmt_size(int(backup['backup_size']))}",
+            *_externalized_payload_lines(engine),
             "note: backup was created before rotate refused; lifecycle state unchanged",
         ])
 
@@ -923,6 +830,7 @@ def _rotate_apply_text(engine) -> str:
         f"conversation_id: {result['conversation_id']}",
         f"rotate_backup_path: {backup['backup_path']}",
         f"rotate_backup_size: {_fmt_size(int(backup['backup_size']))}",
+        *_externalized_payload_lines(engine),
         f"total_message_count: {result['total_message_count']}",
         f"fresh_tail_count: {result['fresh_tail_count']}",
         f"fresh_tail_max_tokens: {result['fresh_tail_max_tokens']}",
@@ -1028,6 +936,12 @@ def _doctor_repair_apply_text(engine) -> str:
     try:
         messages_result = repair_external_content_fts(conn, build_message_fts_spec())
         nodes_result = repair_external_content_fts(conn, build_nodes_fts_spec())
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _create_stem_fts(conn, build_message_stem_fts_spec())
+            conn.executemany("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+                             [("fts_stem_state", "backfilling"), ("fts_stem_reset", "1")])
+        dispatch_background_stem_backfill(conn, build_message_stem_fts_spec())
     except sqlite3.Error as exc:
         return "\n".join([
             "LCM doctor repair apply",
@@ -1383,528 +1297,6 @@ def _doctor_source_apply_text(engine) -> str:
     ])
 
 
-def _doctor_text(engine) -> str:
-    db_path = Path(engine._store.db_path)
-    runtime_identity = engine.get_runtime_identity()
-    store_conn = engine._store.connection
-    dag_conn = engine._dag.connection
-
-    issues: list[str] = []
-    recommended_actions: list[str] = []
-    schema_health = inspect_lcm_schema_health(store_conn, database_path=str(db_path))
-    schema_missing_raw = schema_health.get("missing_tables")
-    schema_missing_tables = [str(name) for name in schema_missing_raw] if isinstance(schema_missing_raw, list) else []
-    schema_existing_raw = schema_health.get("existing_tables")
-    schema_existing_tables = [str(name) for name in schema_existing_raw] if isinstance(schema_existing_raw, list) else []
-    schema_core_status = "error" if schema_health.get("error") else "missing" if schema_missing_tables else "ok"
-    if schema_missing_tables or schema_health.get("error"):
-        issues.append("schema_core_tables")
-
-    def _safe_count(conn, query: str, issue_key: str) -> int | str:
-        try:
-            return int(conn.execute(query).fetchone()[0])
-        except Exception as exc:  # pragma: no cover - defensive
-            issues.append(issue_key)
-            return f"error: {exc}"
-
-    try:
-        integrity_row = store_conn.execute("PRAGMA integrity_check").fetchone()
-        integrity = str(integrity_row[0]) if integrity_row else "unknown"
-    except Exception as exc:  # pragma: no cover - defensive
-        integrity = f"error: {exc}"
-        issues.append("sqlite_integrity")
-
-    def _fts_text_status(result: dict[str, Any]) -> str:
-        status = str(result.get("status") or "fail")
-        return "ok" if status == "pass" else status
-
-    try:
-        store_fts_count = int(store_conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0])
-        store_fts_integrity = check_external_content_fts_integrity(store_conn, build_message_fts_spec())
-        store_fts = _fts_text_status(store_fts_integrity)
-        if store_fts == "fail":
-            issues.append("messages_fts")
-        elif store_fts == "unchecked":
-            recommended_actions.append("rerun `/lcm doctor` with read-write SQLite access if a deep messages FTS check is needed")
-    except Exception as exc:  # pragma: no cover - defensive
-        store_fts_count = f"error: {exc}"
-        store_fts = f"error: {exc}"
-        store_fts_integrity = {"status": "fail", "detail": str(exc)}
-        issues.append("messages_fts")
-
-    try:
-        node_fts_count = int(dag_conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0])
-        node_fts_integrity = check_external_content_fts_integrity(dag_conn, build_nodes_fts_spec())
-        node_fts = _fts_text_status(node_fts_integrity)
-        if node_fts == "fail":
-            issues.append("nodes_fts")
-        elif node_fts == "unchecked":
-            recommended_actions.append("rerun `/lcm doctor` with read-write SQLite access if a deep nodes FTS check is needed")
-    except Exception as exc:  # pragma: no cover - defensive
-        node_fts_count = f"error: {exc}"
-        node_fts = f"error: {exc}"
-        node_fts_integrity = {"status": "fail", "detail": str(exc)}
-        issues.append("nodes_fts")
-
-    # A prior non-blocking background integrity scan (issue #6) records a
-    # persisted ``fts_integrity_failed:<table>`` flag when it finds corruption
-    # without rebuilding. Surface it even when this doctor run's live deep check
-    # could not confirm it (e.g. read-only access), pointing at the explicit
-    # repair path.
-    try:
-        store_fts_failed_flag = load_integrity_failed(store_conn, build_message_fts_spec())
-    except Exception:  # pragma: no cover - defensive
-        store_fts_failed_flag = None
-    try:
-        node_fts_failed_flag = load_integrity_failed(dag_conn, build_nodes_fts_spec())
-    except Exception:  # pragma: no cover - defensive
-        node_fts_failed_flag = None
-    if store_fts_failed_flag and "messages_fts" not in issues:
-        issues.append("messages_fts")
-    if node_fts_failed_flag and "nodes_fts" not in issues:
-        issues.append("nodes_fts")
-
-    total_messages = _safe_count(store_conn, "SELECT COUNT(*) FROM messages", "messages_total")
-    total_message_sessions = _safe_count(
-        store_conn,
-        "SELECT COUNT(DISTINCT session_id) FROM messages",
-        "message_sessions_total",
-    )
-    total_nodes = _safe_count(dag_conn, "SELECT COUNT(*) FROM summary_nodes", "summary_nodes_total")
-    total_node_sessions = _safe_count(
-        dag_conn,
-        "SELECT COUNT(DISTINCT session_id) FROM summary_nodes",
-        "summary_node_sessions_total",
-    )
-
-    db_exists = db_path.exists()
-    db_size = db_path.stat().st_size if db_exists else 0
-    wal_path = Path(str(db_path) + "-wal")
-    wal_size = wal_path.stat().st_size if wal_path.exists() else 0
-    try:
-        journal_row = store_conn.execute("PRAGMA journal_mode").fetchone()
-        journal_mode = str(journal_row[0]) if journal_row else "unknown"
-    except Exception as exc:  # pragma: no cover - defensive
-        journal_mode = f"error: {exc}"
-        issues.append("sqlite_journal_mode")
-    try:
-        quick_row = store_conn.execute("PRAGMA quick_check").fetchone()
-        quick_check = str(quick_row[0]) if quick_row else "unknown"
-    except Exception as exc:  # pragma: no cover - defensive
-        quick_check = f"error: {exc}"
-        issues.append("sqlite_quick_check")
-    payload_storage_error = ""
-    try:
-        payload_risks = scan_sqlite_payload_risks(store_conn)
-        externalized_stats = externalized_payload_stats(engine._config, hermes_home=engine._hermes_home)
-        externalized_integrity = scan_externalized_payload_integrity(
-            store_conn,
-            engine._config,
-            hermes_home=engine._hermes_home,
-        )
-    except Exception as exc:  # pragma: no cover - defensive
-        payload_storage_error = str(exc)
-        payload_risks = {
-            "largest_content_rows": [],
-            "largest_tool_calls_rows": [],
-            "suspicious_data_uri_content_rows": [],
-            "suspicious_data_uri_tool_calls_rows": [],
-            "suspicious_base64_like_rows": [],
-            "quarantined_assistant_rows": [],
-            "suspicious_repetitive_assistant_rows": [],
-            "heartbeat_noise_rows": [],
-        }
-        externalized_stats = {
-            "externalized_payload_count": 0,
-            "externalized_payload_bytes": 0,
-            "externalized_payload_chars": 0,
-            "externalized_payload_dir": "",
-            "latest_externalized_payload_path": "",
-            "latest_externalized_payload_mtime": 0,
-        }
-        externalized_integrity = {
-            "externalized_payload_refs_total": 0,
-            "externalized_payload_refs_existing": 0,
-            "externalized_payload_refs_missing": 0,
-            "externalized_payload_files_unreferenced": 0,
-            "missing_externalized_payload_refs": [],
-            "unreferenced_externalized_payload_files": [],
-        }
-        issues.append("payload_storage")
-    clean_scan = _scan_clean_candidates(engine)
-
-    debt_rows = []
-    lifecycle_conn = getattr(getattr(engine, "_lifecycle", None), "connection", None)
-    if lifecycle_conn is not None:
-        try:
-            debt_rows = lifecycle_conn.execute(
-                """
-                SELECT conversation_id, debt_kind, debt_size_estimate
-                FROM lcm_lifecycle_state
-                WHERE debt_kind IS NOT NULL AND debt_size_estimate > 0
-                ORDER BY updated_at DESC
-                """
-            ).fetchall()
-        except Exception as exc:  # pragma: no cover - defensive
-            issues.append("lifecycle_state")
-            debt_rows = [(f"error: {exc}", "error", 0)]
-
-    observations: list[str] = []
-    missing_externalized_refs = int(externalized_integrity.get("externalized_payload_refs_missing", 0) or 0)
-    suspicious_payload_rows = sum(
-        len(payload_risks.get(key) or [])
-        for key in (
-            "suspicious_data_uri_content_rows",
-            "suspicious_data_uri_tool_calls_rows",
-            "suspicious_base64_like_rows",
-            "suspicious_repetitive_assistant_rows",
-        )
-    )
-
-    if schema_health.get("error"):
-        observations.append(f"schema_core_tables: error: {schema_health['error']}")
-        recommended_actions.append(
-            "verify SQLite can read sqlite_master for the database inspected by Hermes"
-        )
-    elif schema_missing_tables:
-        observations.append(
-            "schema_core_tables: missing " + ", ".join(schema_missing_tables)
-        )
-        recommended_actions.append(
-            "verify HERMES_HOME/LCM_DATABASE_PATH point at the database inspected by Hermes"
-        )
-    else:
-        observations.append("schema_core_tables: ok")
-
-    if debt_rows:
-        first = debt_rows[0]
-        observations.append(
-            f"maintenance_debt: {len(debt_rows)} conversation(s) currently carry deferred maintenance debt; first={first[0]} kind={first[1]} size={first[2]}"
-        )
-        recommended_actions.append(
-            "let normal compaction turns reduce maintenance debt before attempting broader cleanup"
-        )
-
-    if clean_scan["error"]:
-        observations.append(f"cleanup_candidates: scan error: {clean_scan['error']}")
-    elif clean_scan["candidates"]:
-        observations.append(
-            f"cleanup_candidates: {len(clean_scan['candidates'])} pattern-matched junk/noise session candidate(s) detected"
-        )
-        recommended_actions.append("inspect candidate sessions with `/lcm doctor clean`")
-        recommended_actions.append("create a safety snapshot first with `/lcm backup`")
-    else:
-        observations.append("cleanup_candidates: none")
-
-    if missing_externalized_refs:
-        issues.append("payload_storage")
-        observations.append(
-            f"payload_storage: {missing_externalized_refs} externalized payload ref(s) point to missing JSON files"
-        )
-        recommended_actions.append(
-            "inspect missing externalized payload refs and restore from backups if needed"
-        )
-    if suspicious_payload_rows:
-        observations.append(
-            f"payload_storage: {suspicious_payload_rows} suspicious inline/base64 payload row(s) need review"
-        )
-        recommended_actions.append(
-            "inspect suspicious payload rows before cleanup; restore payload files from backup before deleting or rewriting anything"
-        )
-    if payload_storage_error:
-        observations.append(f"payload_storage_error: {payload_storage_error}")
-        recommended_actions.append("inspect payload storage diagnostics before cleanup or deletion")
-
-    try:
-        source_stats = engine._store.get_source_stats()
-    except Exception as exc:  # pragma: no cover - defensive
-        issues.append("source_lineage")
-        source_stats = {
-            "messages_total": 0,
-            "attributed_messages": 0,
-            "normalized_unknown_messages": 0,
-            "legacy_blank_source_messages": 0,
-            "effective_unknown_messages": 0,
-            "error": str(exc),
-        }
-    observations.append(
-        "source_lineage: "
-        f"attributed={source_stats['attributed_messages']} "
-        f"unknown={source_stats['normalized_unknown_messages']} "
-        f"legacy_blank={source_stats['legacy_blank_source_messages']} "
-        f"effective_unknown={source_stats['effective_unknown_messages']}"
-    )
-    if source_stats.get("error"):
-        observations.append(f"source_lineage_error: {source_stats['error']}")
-    if source_stats["legacy_blank_source_messages"]:
-        observations.append(
-            "legacy blank-source rows are normalized as `source=unknown` for back-compat filters"
-        )
-
-    try:
-        lifecycle_stats = engine._lifecycle.get_fragmentation_stats(
-            state_db_path=_state_db_path_for_engine(engine)
-        )
-    except Exception as exc:  # pragma: no cover - defensive
-        issues.append("lifecycle_fragmentation")
-        lifecycle_stats = {"error": str(exc)}
-    else:
-        observations.append(
-            "lifecycle_fragmentation: "
-            f"lifecycle_rows={lifecycle_stats['lifecycle_rows']} "
-            f"empty_lifecycle_rows={lifecycle_stats.get('empty_lifecycle_rows', 0)} "
-            f"message_sessions={lifecycle_stats['distinct_message_sessions']} "
-            f"node_sessions={lifecycle_stats['distinct_node_sessions']} "
-            f"current_missing_in_lcm_any={lifecycle_stats['lifecycle_current_missing_in_lcm_any']} "
-            f"last_finalized_missing_in_lcm_any={lifecycle_stats['lifecycle_last_finalized_missing_in_lcm_any']} "
-            f"current_missing_in_state={lifecycle_stats['lifecycle_current_missing_in_state']} "
-            f"last_finalized_missing_in_state={lifecycle_stats['lifecycle_last_finalized_missing_in_state']} "
-            f"message_sessions_missing_in_state={lifecycle_stats['lcm_message_sessions_missing_in_state']} "
-            f"node_sessions_missing_in_state={lifecycle_stats['lcm_node_sessions_missing_in_state']} "
-            f"message_sessions_without_lifecycle_current={lifecycle_stats['message_sessions_without_lifecycle_current']} "
-            f"message_sessions_without_lifecycle_reference={lifecycle_stats['message_sessions_without_lifecycle_reference']} "
-            f"node_sessions_without_lifecycle_reference={lifecycle_stats['node_sessions_without_lifecycle_reference']} "
-            f"state_sessions_missing_in_lcm_any={lifecycle_stats['state_sessions_missing_in_lcm_any']}"
-        )
-        if lifecycle_stats.get("state_db_error"):
-            observations.append(f"lifecycle_fragmentation_state_db_error: {lifecycle_stats['state_db_error']}")
-        classification = lifecycle_stats.get("classification") or {}
-        categories = classification.get("categories") or []
-        if classification:
-            observations.append(
-                "lifecycle_fragmentation_classification: "
-                f"{classification.get('status', 'unknown')}; {len(categories)} categories need review"
-            )
-            for category in categories:
-                sample = ",".join(category.get("sample_session_ids") or []) or "(none)"
-                observations.append(
-                    "lifecycle_category "
-                    f"{category.get('name')}: count={category.get('count', 0)} sample={sample}"
-                )
-        if _has_lifecycle_fragmentation(lifecycle_stats):
-            recommended_actions.append(
-                "inspect lifecycle fragmentation before any cleanup/repair behavior mutates state"
-            )
-            recommended_actions.append(
-                "treat this as read-only evidence; do not infer every mismatch is harmful"
-            )
-
-    if clean_scan.get("protected_count"):
-        observations.append(
-            f"protected_sessions: skipped {clean_scan['protected_count']} currently bound session(s) from cleanup candidates"
-        )
-
-    protection = sensitive_pattern_status(engine._config)
-    if protection["enabled"] and protection["active_patterns"]:
-        observations.append(
-            "sensitive_pattern_handling: enabled; matching raw secret values are replaced before SQLite, FTS, summaries, active replay, and externalized payloads"
-        )
-    elif protection["enabled"]:
-        observations.append("sensitive_pattern_handling: enabled but no active known patterns are configured")
-        recommended_actions.append("set LCM_SENSITIVE_PATTERNS to one or more known names, or disable sensitive handling")
-    else:
-        observations.append("sensitive_pattern_handling: disabled")
-    if protection["unknown_patterns"]:
-        issues.append("sensitive_pattern_config")
-        recommended_actions.append(
-            "remove unknown LCM_SENSITIVE_PATTERNS entries or replace them with supported names"
-        )
-
-    if store_fts_failed_flag:
-        observations.append(
-            "messages_fts_integrity: a background integrity scan flagged corruption "
-            f"(detail: {store_fts_failed_flag['detail'] or 'unknown'})"
-        )
-        recommended_actions.append(
-            "run `/lcm doctor repair`, then `/lcm backup` and `/lcm doctor repair apply` to rebuild messages_fts"
-        )
-    if node_fts_failed_flag:
-        observations.append(
-            "nodes_fts_integrity: a background integrity scan flagged corruption "
-            f"(detail: {node_fts_failed_flag['detail'] or 'unknown'})"
-        )
-        recommended_actions.append(
-            "run `/lcm doctor repair`, then `/lcm backup` and `/lcm doctor repair apply` to rebuild nodes_fts"
-        )
-
-    triage_checks: list[dict[str, Any]] = []
-    if integrity != "ok":
-        triage_checks.append({"check": "database_integrity", "status": "fail", "detail": integrity})
-    if schema_health.get("error") or schema_missing_tables:
-        triage_checks.append({"check": "schema_core_tables", "status": "fail", "detail": schema_health})
-    if store_fts != "ok":
-        triage_checks.append({
-            "check": "messages_fts_integrity",
-            "status": "warn" if store_fts == "unchecked" else "fail",
-            "detail": store_fts_integrity,
-        })
-    if node_fts != "ok":
-        triage_checks.append({
-            "check": "nodes_fts_integrity",
-            "status": "warn" if node_fts == "unchecked" else "fail",
-            "detail": node_fts_integrity,
-        })
-    if store_fts_failed_flag and store_fts != "fail":
-        triage_checks.append({
-            "check": "messages_fts_integrity",
-            "status": "fail",
-            "detail": {"status": "fail", "background_flag": store_fts_failed_flag},
-        })
-    if node_fts_failed_flag and node_fts != "fail":
-        triage_checks.append({
-            "check": "nodes_fts_integrity",
-            "status": "fail",
-            "detail": {"status": "fail", "background_flag": node_fts_failed_flag},
-        })
-    if clean_scan["candidates"]:
-        triage_checks.append({"check": "cleanup_candidates", "status": "warn", "detail": clean_scan})
-    if payload_storage_error or missing_externalized_refs or any(payload_risks.get(key) for key in (
-        "suspicious_data_uri_content_rows",
-        "suspicious_data_uri_tool_calls_rows",
-        "suspicious_base64_like_rows",
-        "suspicious_repetitive_assistant_rows",
-        "heartbeat_noise_rows",
-    )):
-        detail = {**payload_risks, **externalized_integrity}
-        if payload_storage_error:
-            detail["error"] = payload_storage_error
-        triage_checks.append({
-            "check": "payload_storage",
-            "status": "fail" if payload_storage_error else "warn",
-            "detail": detail,
-        })
-    if (protection["enabled"] and not protection["active_patterns"]) or protection["unknown_patterns"]:
-        triage_checks.append({"check": "sensitive_pattern_handling", "status": "warn", "detail": protection})
-    if source_stats.get("error"):
-        triage_checks.append({"check": "source_lineage_hygiene", "status": "fail", "detail": source_stats})
-    if lifecycle_stats.get("error") or _has_lifecycle_fragmentation(lifecycle_stats):
-        lifecycle_status = "fail" if lifecycle_stats.get("error") else "warn"
-        triage_checks.append({"check": "lifecycle_fragmentation", "status": lifecycle_status, "detail": lifecycle_stats})
-    try:  # #582: the survival fit kept a session alive by dropping stored turns from live context
-        survival_fit = engine._store.read_metadata_json(SURVIVAL_FIT_COUNTER_KEY)
-    except Exception:
-        survival_fit = None
-    survival_fit = survival_fit if isinstance(survival_fit, dict) else {}
-    try:
-        fit_count = int(survival_fit.get("count") or 0)
-    except (TypeError, ValueError, OverflowError):  # a damaged record: a fit with an unknown count
-        fit_count = None
-    if fit_count != 0:
-        projected = survival_fit.get("projected_count")  # absent on a record from before the key: unknown
-        within = ("rollback to a 0.24.x version older than v0.24.5: that plugin cannot compact stored rows that a "
-                  "survival fit removed from the live context; stop Hermes, move the configured database file (by "
-                  "default lcm.db, with its -wal and -shm companions) aside and keep it, then restore the database "
-                  "backup taken before the first v0.24.5 install with the plugin; a rollback of the plugin alone to "
-                  "v0.24.5 or later is fine")
-        applied = ("applied an unknown number of times (the stored count is unreadable)" if fit_count is None
-                   else f"applied {fit_count} time(s)")
-        if survival_fit.get("last_shortened") is False:
-            applied = applied.replace("applied", "attempted", 1) + "; could not shorten the list on the last attempt"
-        rollback = (f"; {within}; a rollback to v0.23.3 keeps the database file and needs native recovery ON "
-                    "(see triage_guidance)" if survival_fit.get("ever_shortened", True) else "")
-        observations.append(f"survival_fit: {applied}; last reason "
-                            f"{survival_fit.get('last_reason') or '(unknown)'}; projected_count "
-                            f"{'unknown' if projected is None else projected}; unreached_budget_count "
-                            f"{survival_fit.get('unreached_budget_count', 0)}; last_reached_budget "
-                            f"{survival_fit.get('last_reached_budget', 'unknown')}{rollback}")
-        triage_checks.append({"check": "survival_fit", "status": "warn", "detail": survival_fit})
-    stub_first_exit = getattr(engine, "_last_stub_first_exit", None)
-    if stub_first_exit:  # #671: a partial stop; the rows no leaf summarised stay stored as backlog
-        observations.append("stub_first_exit: the last threshold compaction stopped on its free cuts without a "
-                            "model call (partial); " + " ".join(f"{k}={v}" for k, v in stub_first_exit.items()))
-    inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))
-    if inactive_process:
-        issues.append("inactive_process")
-        inactive_check = {"check": "inactive_process", "status": "warn", "detail": inactive_process}
-        triage_checks.append(inactive_check)
-        recommended_actions.append(doctor_guidance_for_check(inactive_check)["operator_action"])
-    triage_guidance = doctor_guidance_for_checks(triage_checks)
-
-    doctor_status = "issues-found" if integrity != "ok" or issues else (
-        "action-recommended" if recommended_actions else "ok"
-    )
-    lines = [
-        "LCM doctor",
-        f"status: {doctor_status}",
-        f"plugin_name: {runtime_identity.get('plugin_name', '(unknown)')}",
-        f"plugin_version: {runtime_identity.get('plugin_version', '(unknown)')}",
-        f"plugin_path: {runtime_identity.get('plugin_path', '(unknown)')}",
-        f"module_path: {runtime_identity.get('module_path', '(unknown)')}",
-        f"plugin_git_commit: {runtime_identity.get('plugin_git_commit') or '(unavailable)'}",
-        f"plugin_git_branch: {runtime_identity.get('plugin_git_branch') or '(unavailable)'}",
-        f"plugin_git_dirty: {runtime_identity.get('plugin_git_dirty') if runtime_identity.get('plugin_git_dirty') is not None else '(unavailable)'}",
-        f"database_path: {db_path}",
-        f"database_exists: {_fmt_bool(db_exists)}",
-        f"database_size: {_fmt_size(db_size) if db_exists else 'missing'}",
-        f"wal_size: {_fmt_size(wal_size)}",
-        f"schema_core_tables: {schema_core_status}",
-        f"schema_missing_tables: {', '.join(schema_missing_tables) or '(none)'}",
-        f"schema_existing_tables: {', '.join(schema_existing_tables) or '(none)'}",
-        f"journal_mode: {journal_mode}",
-        f"quick_check: {quick_check}",
-        f"sqlite_integrity: {integrity}",
-        f"messages_total: {total_messages}",
-        f"message_sessions_total: {total_message_sessions}",
-        f"summary_nodes_total: {total_nodes}",
-        f"summary_node_sessions_total: {total_node_sessions}",
-        f"messages_fts: {store_fts}",
-        f"messages_fts_rows: {store_fts_count}",
-        f"nodes_fts: {node_fts}",
-        f"nodes_fts_rows: {node_fts_count}",
-        f"largest_content_rows: {payload_risks['largest_content_rows']}",
-        f"largest_tool_calls_rows: {payload_risks['largest_tool_calls_rows']}",
-        f"suspicious_data_uri_content_rows: {payload_risks['suspicious_data_uri_content_rows']}",
-        f"suspicious_data_uri_tool_calls_rows: {payload_risks['suspicious_data_uri_tool_calls_rows']}",
-        f"suspicious_base64_like_rows: {payload_risks['suspicious_base64_like_rows']}",
-        f"quarantined_assistant_rows: {payload_risks['quarantined_assistant_rows']}",
-        f"suspicious_repetitive_assistant_rows: {payload_risks['suspicious_repetitive_assistant_rows']}",
-        f"heartbeat_noise_rows: {payload_risks['heartbeat_noise_rows']}",
-        f"sensitive_patterns_enabled: {_fmt_bool(protection.get('enabled'))}",
-        f"sensitive_patterns: {', '.join(protection.get('patterns') or []) or '(none)'}",
-        f"sensitive_patterns_source: {protection.get('source', 'default')}",
-        f"sensitive_patterns_unknown: {', '.join(protection.get('unknown_patterns') or []) or '(none)'}",
-        f"externalized_payload_dir: {externalized_stats['externalized_payload_dir']}",
-        f"externalized_payload_count: {externalized_stats['externalized_payload_count']}",
-        f"externalized_payload_bytes: {externalized_stats['externalized_payload_bytes']}",
-        f"externalized_payload_chars: {externalized_stats['externalized_payload_chars']}",
-        f"latest_externalized_payload_path: {externalized_stats['latest_externalized_payload_path'] or '(none)'}",
-        f"externalized_payload_refs_total: {externalized_integrity['externalized_payload_refs_total']}",
-        f"externalized_payload_refs_existing: {externalized_integrity['externalized_payload_refs_existing']}",
-        f"externalized_payload_refs_missing: {externalized_integrity['externalized_payload_refs_missing']}",
-        f"externalized_payload_files_unreferenced: {externalized_integrity['externalized_payload_files_unreferenced']}",
-        f"missing_externalized_payload_refs: {externalized_integrity['missing_externalized_payload_refs']}",
-        f"unreferenced_externalized_payload_files: {externalized_integrity['unreferenced_externalized_payload_files']}",
-        f"survival_fit_count: {'unknown' if fit_count is None else fit_count}",
-    ]
-    if inactive_process:
-        lines.append(f"inactive_process: {inactive_process}")
-    if issues:
-        lines.append(f"issues: {', '.join(issues)}")
-    else:
-        lines.append("issues: none")
-    lines.append("observations:")
-    for item in observations:
-        lines.append(f"- {item}")
-    lines.append("recommended_actions:")
-    if recommended_actions:
-        for item in recommended_actions:
-            lines.append(f"- {item}")
-    else:
-        lines.append("- none")
-    lines.append("triage_guidance:")
-    if triage_guidance:
-        for item in triage_guidance:
-            warning_suffix = " warning-only" if item.get("warning_only") else ""
-            lines.append(
-                "- "
-                f"{item['check']}: {item['action']}{warning_suffix} — "
-                f"{item['operator_action']}"
-            )
-    else:
-        lines.append("- none")
-    return "\n".join(lines)
-
-
 def _doctor_clean_text(engine) -> str:
     scan = _scan_clean_candidates(engine)
     if scan["error"]:
@@ -2033,6 +1425,15 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
         delete_message_relations(conn, (
             f"SELECT store_id FROM messages WHERE EXISTS ("
             f"SELECT 1 FROM {scope_table} AS scope "
+            "WHERE scope.session_id = messages.session_id)"
+        ))
+        delete_host_uid_bindings(conn, (
+            f"SELECT store_id FROM messages WHERE EXISTS ("
+            f"SELECT 1 FROM {scope_table} AS scope "
+            "WHERE scope.session_id = messages.session_id)"
+        ))
+        delete_chunk_inflight(conn, (
+            f"SELECT store_id FROM messages WHERE EXISTS (SELECT 1 FROM {scope_table} AS scope "
             "WHERE scope.session_id = messages.session_id)"
         ))
         msg_cur = conn.execute(
@@ -2196,7 +1597,8 @@ def _doctor_clean_apply_text(engine) -> str:
 
 def _doctor_clean_lifecycle_text(engine) -> str:
     count = engine._lifecycle.row_count()
-    protected = {str(getattr(engine, "_session_id", "") or "")}
+    # #753: rows bound by any live engine in this process are protected, as in apply.
+    protected = {str(getattr(engine, "_session_id", "") or "")} | live_bound_session_ids()
     protected = {s for s in protected if s}
 
     conn = engine._lifecycle.connection
@@ -2271,7 +1673,8 @@ def _doctor_clean_lifecycle_apply_text(engine) -> str:
         ])
 
     before = engine._lifecycle.row_count()
-    protected = {str(getattr(engine, "_session_id", "") or "")}
+    # #753: never delete a row another live engine in this process still has bound.
+    protected = {str(getattr(engine, "_session_id", "") or "")} | live_bound_session_ids()
     protected = {s for s in protected if s}
 
     try:
@@ -2301,6 +1704,31 @@ def _doctor_clean_lifecycle_apply_text(engine) -> str:
     ])
 
 
+def _externalized_payload_lines(engine) -> list[str]:
+    inventory = externalized_payload_inventory(engine)
+    if inventory["path"] is None:
+        return [f"externalized_payload_dir: unavailable ({inventory['error']})"]
+    path = inventory["path"]
+    if not inventory["exists"]:
+        return [f"externalized_payload_dir: absent ({path})"]
+    if inventory.get("scan_error"):
+        return [
+            f"externalized_payload_dir: {path}",
+            f"externalized_payload_scan: unavailable ({inventory['scan_error']})",
+            "note: externalized payloads are not in the SQLite snapshot; copy externalized_payload_dir with the backup when moving it to another host",
+        ]
+    lines = [
+        f"externalized_payload_dir: {path}",
+        f"externalized_payload_files: {inventory['files']}",
+        f"externalized_payload_size: {_fmt_size(inventory['bytes'])}",
+    ]
+    if inventory["unreadable"]:
+        lines.append(f"externalized_payload_unreadable: {inventory['unreadable']} (not counted above)")
+    if inventory["files"] or inventory["unreadable"]:
+        lines.append("note: externalized payloads are not in the SQLite snapshot; copy externalized_payload_dir with the backup when moving it to another host")
+    return lines
+
+
 def _backup_text(engine) -> str:
     backup = backup_database(engine)
     if not backup["ok"]:
@@ -2317,6 +1745,7 @@ def _backup_text(engine) -> str:
         f"database_path: {backup['db_path']}",
         f"backup_path: {backup['backup_path']}",
         f"backup_size: {_fmt_size(int(backup['backup_size']))}",
+        *_externalized_payload_lines(engine),
         "note: backup created before any future cleanup/apply workflow",
     ])
 
@@ -2350,9 +1779,9 @@ def _preset_show_text(tokens: list[str], engine) -> str:
         f"policy_path: {preset.policy_path}",
         f"benchmark_version: {provenance.get('benchmark_version', '(unknown)')}",
         f"fixture_suite: {fixture_suite}",
-        f"score: {metric_summary.get('score', '(unknown)')}",
-        f"baseline_score: {metric_summary.get('baseline_score', '(unknown)')}",
-        f"retrieval_canary_recall: {metric_summary.get('retrieval_canary_recall', '(unknown)')}",
+        f"evidence: {provenance.get('evidence', '(unknown)')}",  # names the comparison arm of baseline_*
+        *(f"{key}: {value}" for key, value in metric_summary.items()),  # #1126: the preset's own recorded metrics
+        *([] if metric_summary else ["metric_summary: (none recorded for this preset)"]),
         f"applies_to: {applies_to}",
         "runtime_env:",
     ]
@@ -2382,7 +1811,7 @@ def _preset_suggest_text(engine) -> str:
     explicit = explicit_operator_overrides()
     invalid = invalid_operator_overrides()
     invalid_text = ", ".join(
-        f"{env_var}={os.environ.get(env_var, '')}" for env_var in sorted(invalid.values())
+        f"{env_var}={lcm_env_get(env_var, '')}" for env_var in sorted(invalid.values())
     ) if invalid else "(none)"
     lines.extend([
         f"suggested_preset: {preset.name}",
@@ -2472,7 +1901,7 @@ def _preset_text(tokens: list[str], engine) -> str:
 def _rollups_status_text(engine) -> str:
     # Import lazily to avoid making the slash-command module part of the tool
     # module's import path while still guaranteeing both surfaces use one shape.
-    from .tools import _temporal_rollups_status
+    from .inspect_tools import _temporal_rollups_status
 
     status = _temporal_rollups_status(engine)
     lines = [
@@ -2833,7 +2262,7 @@ def _resolve_storage_dtype(config, override: str | None = None) -> str:
         if override is not None
         else getattr(config, "embedding_storage_dtype", "float32")
     ).strip().lower()
-    return "int8" if value == "int8" else "float32"
+    return value if value in config_choices.EMBEDDING_STORAGE_DTYPES else "float32"
 
 
 def _resolve_store_dim(config, provider_dim: int, override: int | None = None) -> int:
@@ -2851,16 +2280,16 @@ def _resolve_store_dim(config, provider_dim: int, override: int | None = None) -
     return store_dim
 
 
-def _embedding_warmup_text(engine) -> str:
-    """Warm and dimension-lock both summary and chunk vector profiles."""
+def _embedding_register_profiles(config, db_path, *, allow_download: bool) -> str | dict[str, Any]:
+    """Register both profiles; return probe metadata and the unchanged warmup text."""
     try:
-        if not bool(getattr(engine._config, "embeddings_enabled", False)):
+        if not bool(getattr(config, "embeddings_enabled", False)):
             return (
                 "LCM embedding warmup\n"
                 "status: disabled\n"
                 "error: embeddings are disabled; set LCM_EMBEDDINGS_ENABLED=true"
             )
-        provider = resolve_provider(engine._config)
+        provider = resolve_provider(config)
         if provider is None:
             return (
                 "LCM embedding warmup\n"
@@ -2872,20 +2301,23 @@ def _embedding_warmup_text(engine) -> str:
         privacy_revision = ""
         warmup_text = "warmup"
         if embedding_provider_requires_privacy(provider.provider_id):
-            privacy_revision = embedding_privacy_revision(engine._config)
+            privacy_revision = embedding_privacy_revision(config)
             warmup_text, _revision, _changed = protect_embedding_text(
                 warmup_text,
-                engine._config,
+                config,
                 expected_revision=privacy_revision,
             )
             validate_embedding_privacy_dispatch(
                 [warmup_text],
-                engine._config,
+                config,
                 expected_revision=privacy_revision,
             )
 
         if provider.provider_id == FastembedProvider.provider_id:
-            vector = provider.warmup()
+            if not allow_download:
+                # Load the cached model outside the query deadline, as warmup() does.
+                provider._ensure_local()
+            vector = provider.warmup() if allow_download else provider.embed_query(warmup_text)
             progress = (
                 f"download: ready ({fastembed_download_size_note(provider.model_id)})"
             )
@@ -2902,8 +2334,8 @@ def _embedding_warmup_text(engine) -> str:
         dim = len(vector)
         if dim < 1:
             raise ValueError("provider returned an empty warmup embedding")
-        storage_dtype = _resolve_storage_dtype(engine._config)
-        store_dim = _resolve_store_dim(engine._config, dim)
+        storage_dtype = _resolve_storage_dtype(config)
+        store_dim = _resolve_store_dim(config, dim)
         chunk_model = default_chunk_model(provider.provider_id, provider.model_id)
         chunk_provider = provider
         chunk_dim = dim
@@ -2911,7 +2343,7 @@ def _embedding_warmup_text(engine) -> str:
         chunk_privacy_revision = privacy_revision
         if chunk_model != provider.model_id:
             chunk_config = dataclasses.replace(
-                engine._config,
+                config,
                 embedding_provider=provider.provider_id,
                 embedding_model=chunk_model,
             )
@@ -2922,16 +2354,16 @@ def _embedding_warmup_text(engine) -> str:
             chunk_privacy_revision = ""
             if embedding_provider_requires_privacy(chunk_provider.provider_id):
                 chunk_privacy_revision = embedding_privacy_revision(
-                    engine._config
+                    config
                 )
                 chunk_warmup_text, _revision, _changed = protect_embedding_text(
                     chunk_warmup_text,
-                    engine._config,
+                    config,
                     expected_revision=chunk_privacy_revision,
                 )
                 validate_embedding_privacy_dispatch(
                     [chunk_warmup_text],
-                    engine._config,
+                    config,
                     expected_revision=chunk_privacy_revision,
                 )
             chunk_vector = chunk_provider.embed_query(chunk_warmup_text)
@@ -2939,14 +2371,15 @@ def _embedding_warmup_text(engine) -> str:
             if chunk_dim < 1:
                 raise ValueError("chunk provider returned an empty warmup embedding")
             chunk_progress = "probe: complete"
-        chunk_store_dim = _resolve_store_dim(engine._config, chunk_dim)
-        store = VectorStore(engine._store.db_path, config=engine._config)
+        chunk_store_dim = _resolve_store_dim(config, chunk_dim)
+        store = VectorStore(db_path, config=config)
         try:
             store.register_profile(
                 provider.model_id,
                 provider.provider_id,
                 store_dim,
                 revision=privacy_revision,
+                revision_suffix=getattr(provider, "identity_revision_suffix", ""),
                 dtype=storage_dtype,
             )
             store.register_profile(
@@ -2954,6 +2387,7 @@ def _embedding_warmup_text(engine) -> str:
                 chunk_provider.provider_id,
                 chunk_store_dim,
                 revision=chunk_privacy_revision,
+                revision_suffix=getattr(chunk_provider, "identity_revision_suffix", ""),
                 dtype=storage_dtype,
                 task="chunk",
             )
@@ -2962,16 +2396,16 @@ def _embedding_warmup_text(engine) -> str:
         # Semantic search caches provider instances by configured provider and
         # model. Replace any pre-warmup instance (which may have an open
         # breaker) with the provider that just completed warmup successfully.
-        engine._lcm_embedding_provider_cache = (
+        provider_cache = (
             (
-                str(getattr(engine._config, "embedding_provider", "") or "")
+                str(getattr(config, "embedding_provider", "") or "")
                 .strip()
                 .lower(),
-                str(getattr(engine._config, "embedding_model", "") or "").strip(),
+                effective_embedding_model(getattr(config, "embedding_provider", ""), getattr(config, "embedding_model", "")),
             ),
             provider,
         )
-        return "\n".join([
+        text = "\n".join([
             "LCM embedding warmup",
             "status: ready",
             progress,
@@ -2985,12 +2419,33 @@ def _embedding_warmup_text(engine) -> str:
             f"privacy_revision: {privacy_revision or '(local)'}",
             f"cost_note: {cost_note}",
         ])
+        return {
+            "provider": provider, "chunk_provider": chunk_provider,
+            "dim": store_dim, "chunk_dim": chunk_store_dim, "dtype": storage_dtype,
+            "privacy_revision": privacy_revision, "chunk_privacy_revision": chunk_privacy_revision,
+            "progress": progress, "chunk_progress": chunk_progress, "text": text,
+            "provider_cache": provider_cache,
+        }
     except Exception as exc:
         return "\n".join([
             "LCM embedding warmup",
             "status: error",
             f"error: {exc}",
         ])
+
+
+def _embedding_warmup_text(engine) -> str:
+    """Warm and dimension-lock both summary and chunk vector profiles."""
+    try:
+        result = _embedding_register_profiles(engine._config, engine._store.db_path, allow_download=True)
+        if isinstance(result, dict):
+            from .embedding_maintenance import note_local_model_present
+
+            note_local_model_present(engine._config)
+            engine._lcm_embedding_provider_cache = result["provider_cache"]
+        return result["text"] if isinstance(result, dict) else result
+    except Exception as exc:
+        return "\n".join(["LCM embedding warmup", "status: error", f"error: {exc}"])
 
 
 def _embedding_read_connection(db_path: str | Path) -> sqlite3.Connection:
@@ -3008,7 +2463,7 @@ def _embedding_current_profile(conn: sqlite3.Connection) -> sqlite3.Row | None:
             SELECT identity_hash, model_name, provider, revision, dim, dtype,
                    byteorder, task, registered_at
             FROM lcm_embedding_profile
-            WHERE active = 1 AND archived_at IS NULL AND task = 'summary'
+            WHERE active = 1 AND archived_at IS NULL AND task IN ('summary', 'summary+prefix')
             ORDER BY registered_at DESC, identity_hash DESC
             LIMIT 1
             """
@@ -3089,6 +2544,7 @@ def _embedding_authorized_uncertain_rows(
     conn: sqlite3.Connection,
     identity_hash: str,
     limit: int,
+    retry_before: float | None = None,
 ) -> tuple[int, list[sqlite3.Row]]:
     """Select exact uncertain rows without consuming their durable markers."""
     _register_summary_has_text(conn)
@@ -3105,6 +2561,8 @@ def _embedding_authorized_uncertain_rows(
               AND m.identity_hash = f.identity_hash
         )
     """
+    if retry_before is not None:
+        where += f" AND COALESCE(f.updated_at, 0) <= {float(retry_before)}"
     total = int(
         conn.execute(
             "SELECT COUNT(*) "
@@ -3218,6 +2676,19 @@ def _embedding_lease_heartbeat(raw: str) -> float:
 
 class _BackfillLeaseLost(RuntimeError):
     """The caller no longer owns the exact backfill lease generation."""
+
+
+class _BackfillRefusal(str):
+    """Refusal text that also carries a machine-readable reason (#1014).
+
+    It renders exactly like the plain refusal string, so command output is
+    unchanged; the incremental pass reads ``reason`` to skip a held lease quietly.
+    """
+
+    def __new__(cls, text: str, *, reason: str) -> "_BackfillRefusal":
+        refusal = super().__new__(cls, text)
+        refusal.reason = reason
+        return refusal
 
 
 class _LocalPublishError(RuntimeError):
@@ -3350,6 +2821,33 @@ def _acquire_embedding_backfill_lease(
     except Exception:
         conn.rollback()
         raise
+
+
+def _embedding_inflight_counts(conn, identity_hash, rows=None, *, eligible="") -> tuple[int, int]:
+    """Count unsent claims as in flight; split dispatches by live lease ownership."""
+    try:
+        raw = conn.execute("SELECT value FROM metadata WHERE key=?", (_EMBEDDING_BACKFILL_CLAIM_KEY,)).fetchone()
+        lease = json.loads(raw[0]) if raw else {}
+        live = time.time() - _embedding_lease_heartbeat(raw[0]) < _embedding_backfill_lease_ttl_s() if raw else False
+        owner = (lease.get("owner"), int(lease.get("generation", 0))) if live else (None, None)
+    except (TypeError, ValueError, AttributeError, sqlite3.OperationalError):
+        owner = (None, None)
+    if rows is None:
+        try:
+            rows = conn.execute(
+                "SELECT state, lease_id, generation, COUNT(*) FROM lcm_embedding_backfill_inflight "
+                "WHERE identity_hash=? AND state IN ('claimed','dispatched','uncertain') " + eligible + " GROUP BY state, lease_id, generation",
+                (identity_hash,),
+            )
+        except sqlite3.OperationalError:
+            return (0, 0)
+    counts = [0, 0]
+    for state, lease_id, generation, count in rows:
+        if state == "claimed":
+            counts[0] += count  # Unsent work is safely retryable even without a live owner.
+        if state in {"dispatched", "uncertain"}:
+            counts[0 if state == "dispatched" and owner[0] is not None and (lease_id, generation) == owner else 1] += count
+    return tuple(counts)
 
 
 def _prepare_inflight_for_lease(
@@ -3752,7 +3250,7 @@ def _embedding_backfill_options(
             continue
         if token == "--dtype" and index + 1 < len(tokens) and not seen_dtype:
             expected_dtype = tokens[index + 1].lower()
-            if expected_dtype not in {"float32", "int8"}:
+            if expected_dtype not in config_choices.EMBEDDING_STORAGE_DTYPES:
                 return "`--dtype` must be one of `float32` or `int8`."
             seen_dtype = True
             index += 2
@@ -3832,6 +3330,7 @@ def _embedding_backfill_report(
     privacy_revision: str | None = None,
     privacy_transformed: int = 0,
     privacy_blocked: int = 0,
+    privacy_withheld: int = 0,
 ) -> str:
     header = "LCM embedding backfill" if corpus is None else f"LCM {corpus} backfill"
     lines = [header, f"mode: {mode}"]
@@ -3865,6 +3364,12 @@ def _embedding_backfill_report(
         ])
     if stop_reason:
         lines.append(f"stop_reason: {stop_reason}")
+    if privacy_withheld:
+        lines.append(
+            f"privacy_withheld: {privacy_withheld} document(s) refused by the "
+            "privacy policy; not sent, they stay pending (an uncertain row "
+            "retried with --retry-uncertain keeps its in-flight marker)"
+        )
     if error:
         lines.append(f"error: {error}")
     if uncertain:
@@ -3898,11 +3403,26 @@ def _embedding_backfill_report(
     return "\n".join(lines)
 
 
-def _provider_document_batches(provider, texts: list[str], *, before_dispatch):
+def _embedding_batches_until_stopped(batches, stop_event):
+    """Check before advancing a provider generator, never during publication."""
+    batches = iter(batches)
+    while stop_event is None or not stop_event.is_set():
+        try:
+            batch = next(batches)
+        except StopIteration:
+            return
+        yield batch
+
+
+def _provider_document_batches(provider, texts: list[str], *, before_dispatch, stop_event=None):
     """Yield accepted provider requests, adapting legacy deterministic fakes."""
     method = getattr(provider, "embed_document_batches", None)
     if callable(method):
-        yield from method(texts, before_dispatch=before_dispatch)
+        yield from _embedding_batches_until_stopped(
+            method(texts, before_dispatch=before_dispatch), stop_event,
+        )
+        return
+    if stop_event is not None and stop_event.is_set():
         return
     before_dispatch(tuple(range(len(texts))))
     vectors = provider.embed_documents(texts)
@@ -3973,7 +3493,7 @@ def _prepare_embedding_provider_documents(
 
 
 def _provider_chunk_document_batches(
-    provider, batch, chunk_meta, *, before_dispatch
+    provider, batch, chunk_meta, *, before_dispatch, stop_event=None
 ):
     """Yield accepted provider requests for a chunk backfill batch.
 
@@ -3989,12 +3509,12 @@ def _provider_chunk_document_batches(
             [(index, batch[index][1]) for index in group_indexes]
             for group_indexes in group_by_store_id(store_ids)
         ]
-        yield from provider.embed_chunk_group_batches(
-            groups, before_dispatch=before_dispatch
+        yield from _embedding_batches_until_stopped(
+            provider.embed_chunk_group_batches(groups, before_dispatch=before_dispatch), stop_event,
         )
         return
     yield from _provider_document_batches(
-        provider, [item[1] for item in batch], before_dispatch=before_dispatch
+        provider, [item[1] for item in batch], before_dispatch=before_dispatch, stop_event=stop_event,
     )
 
 
@@ -4040,10 +3560,85 @@ def _embedding_backfill_summary_text(
     engine, *, apply: bool, limit: int, retry_uncertain: bool,
     include_next_hint: bool = True, expected_dtype: str | None = None,
 ) -> str:
+    result = _embedding_backfill_summary_run(
+        engine._config, engine._store.db_path, apply=apply, limit=limit,
+        retry_uncertain=retry_uncertain, include_next_hint=include_next_hint,
+        expected_dtype=expected_dtype,
+    )
+    if isinstance(result, str):
+        return result
+    if apply and not result["error"] and (result["embedded"] or result["status"] == "complete"):
+        # Operator progress supersedes an older automatic-pass failure in /lcm doctor (#1959).
+        clear_incremental_embedding_failures(engine._store.db_path)
+    return _embedding_backfill_report(**result)
+
+
+def _summary_backfill_estimates(
+    *, documents: list[tuple[str, str, int]], provider_name, config,
+) -> tuple[int, int, int]:
+    est_tokens = sum(document[2] for document in documents)
+    est_cost_tokens = sum(
+        document[2]
+        for document in documents
+        if provider_name.lower() != "voyage"
+        or document[2] <= _VOYAGE_MAX_DOCUMENT_TOKENS
+    )
+    est_batches = _embedding_batch_estimate(
+        provider_name,
+        [document[2] for document in documents],
+        getattr(config, "embedding_max_batch_items", None),
+    )
+    return est_tokens, est_cost_tokens, est_batches
+
+
+def _record_embedding_catchup(db_path, task: str, identity: str, remaining: int | bool, *, operator_retry: int = 0,
+                              scan_state=None) -> None:
+    """Best-effort advisory state after publication; never fail embedding work."""
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        try:
+            with conn:
+                if scan_state is None:
+                    conn.execute(
+                        "INSERT INTO metadata(key, value) VALUES(?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (f"embedding_catchup:{task}:{identity}",
+                         json.dumps({"remaining": remaining, "operator_retry": operator_retry, "updated_at": time.time()})),
+                    )
+                    return
+                state = scan_state or {}
+                value = json.dumps({"remaining": remaining, "operator_retry": operator_retry,
+                                    "updated_at": time.time(), "inflight_cursor": state.get("inflight_cursor", ""),
+                                    "inflight_actionable_seen": state.get("inflight_actionable_seen", False),
+                                    "inflight_uncertain_count": state.get("inflight_uncertain_count", 0),
+                                    "inflight_cycle_started_at": state.get("inflight_cycle_started_at", 0)})
+                conn.execute(
+                    "INSERT INTO metadata(key, value) SELECT ?, CASE WHEN ? IS NOT NULL AND "
+                    "EXISTS (SELECT 1 FROM messages WHERE store_id > ?) "
+                    "THEN json_set(?, '$.remaining', json('true')) ELSE ? END "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (f"embedding_catchup:{task}:{identity}", state.get("max_store_id"),
+                     state.get("max_store_id"), value, value),
+                )
+        finally:
+            conn.close()
+    except Exception:
+        logging.getLogger(__name__).debug("Could not record embedding catch-up state", exc_info=True)
+
+
+def _embedding_backfill_summary_run(
+    config, db_path, *, apply: bool, limit: int, retry_uncertain: bool,
+    include_next_hint: bool = True, expected_dtype: str | None = None, stop_event=None,
+    maintenance_slice: float = 0.0,
+) -> str | dict[str, Any]:
+    """Summary backfill core: refusal text, or the report fields (#1014).
+
+    Shared by `/lcm embed backfill` and the incremental maintenance pass.
+    """
     mode = "apply" if apply else "dry-run"
     started = time.monotonic()
 
-    if not bool(getattr(engine._config, "embeddings_enabled", False)):
+    if not bool(getattr(config, "embeddings_enabled", False)):
         return "\n".join([
             "LCM embedding backfill",
             f"mode: {mode}",
@@ -4051,7 +3646,6 @@ def _embedding_backfill_summary_text(
             "error: embeddings are disabled; set LCM_EMBEDDINGS_ENABLED=true, then run `/lcm embed warmup`",
         ])
 
-    db_path = engine._store.db_path
     # Resolve the active profile (read-only) — needed by both modes. The
     # *pending* set for apply is (re-)discovered AFTER the lease is claimed.
     try:
@@ -4075,7 +3669,7 @@ def _embedding_backfill_summary_text(
         identity = str(profile["identity_hash"])
         model = str(profile["model_name"])
         provider_name = str(profile["provider"])
-        profile_revision = str(profile["revision"] or "")
+        profile_revision, profile_suffix = split_prefix_revision(str(profile["revision"] or ""))
         profile_dtype = str(profile["dtype"] or "float32")
         if expected_dtype is not None and expected_dtype != profile_dtype:
             return "\n".join([
@@ -4086,6 +3680,13 @@ def _embedding_backfill_summary_text(
                 f"summary profile dtype ({profile_dtype}); re-run `/lcm embed warmup` "
                 f"with LCM_EMBEDDING_STORAGE_DTYPE={expected_dtype} to register that identity",
             ])
+        if apply and (profile_suffix or config.embedding_query_prefix or config.embedding_document_prefix):
+            try:
+                prefix_provider = resolve_provider(config, for_backfill=True)
+            except Exception as exc:
+                return "\n".join(["LCM embedding backfill", "mode: apply", "status: error", f"error: {exc}"])
+            if profile_suffix != getattr(prefix_provider, "identity_revision_suffix", ""):
+                return "configured provider does not match the current profile: embedding prefix settings changed; run /lcm embed warmup, then backfill"
         if not apply:
             pending, rows = _embedding_pending_rows(read_conn, identity, limit)
     except sqlite3.Error as exc:
@@ -4097,21 +3698,6 @@ def _embedding_backfill_summary_text(
         ])
     finally:
         read_conn.close()
-
-    def _estimates(documents: list[tuple[str, str, int]]) -> tuple[int, int, int]:
-        est_tokens = sum(document[2] for document in documents)
-        est_cost_tokens = sum(
-            document[2]
-            for document in documents
-            if provider_name.lower() != "voyage"
-            or document[2] <= _VOYAGE_MAX_DOCUMENT_TOKENS
-        )
-        est_batches = _embedding_batch_estimate(
-            provider_name,
-            [document[2] for document in documents],
-            getattr(engine._config, "embedding_max_batch_items", None),
-        )
-        return est_tokens, est_cost_tokens, est_batches
 
     if not apply:
         raw_documents = [
@@ -4126,12 +3712,21 @@ def _embedding_backfill_summary_text(
             privacy_error,
         ) = _prepare_embedding_provider_documents(
             raw_documents,
-            config=engine._config,
+            config=config,
             provider_name=provider_name,
             expected_revision=profile_revision,
         )
-        estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
-        return _embedding_backfill_report(
+        privacy_withheld = (
+            privacy_blocked
+            if privacy_revision is not None and privacy_revision == profile_revision
+            else 0
+        )
+        if privacy_withheld:
+            privacy_error = None
+        estimated_tokens, estimated_cost_tokens, estimated_batches = _summary_backfill_estimates(
+            documents=documents, provider_name=provider_name, config=config,
+        )
+        return dict(
             mode=mode,
             status="refused" if privacy_error else "dry-run",
             provider=provider_name,
@@ -4152,11 +3747,12 @@ def _embedding_backfill_summary_text(
             privacy_revision=privacy_revision,
             privacy_transformed=privacy_transformed,
             privacy_blocked=privacy_blocked,
+            privacy_withheld=privacy_withheld,
         )
 
     ttl_s = _embedding_backfill_lease_ttl_s()
     heartbeat_s = _embedding_backfill_heartbeat_s()
-    budget_s = _embedding_backfill_budget_s()
+    budget_s = min(1.0, maintenance_slice) if maintenance_slice else _embedding_backfill_budget_s()
 
     store: VectorStore | None = None
     lease: _BackfillLease | None = None
@@ -4174,8 +3770,9 @@ def _embedding_backfill_summary_text(
     privacy_revision: str | None = None
     privacy_transformed = 0
     privacy_blocked = 0
+    privacy_withheld = 0
     try:
-        store = VectorStore(db_path, config=engine._config)
+        store = VectorStore(db_path, config=config)
         conn = store.connection
         _ensure_inflight_table(conn)
         # Claim BEFORE discovery: acquire the lease, then re-query pending rows
@@ -4185,12 +3782,12 @@ def _embedding_backfill_summary_text(
             conn, ttl_s=ttl_s, heartbeat_s=heartbeat_s
         )
         if lease is None:
-            return "\n".join([
+            return _BackfillRefusal("\n".join([
                 "LCM embedding backfill",
                 "mode: apply",
                 "status: refused",
                 "error: another embedding backfill holds the lease; retry after it exits or after the lease TTL expires",
-            ])
+            ]), reason="lease_held")
         _prepare_inflight_for_lease(conn, identity, lease)
         captured_identity = store.capture_identity(model, provider=provider_name)
         if captured_identity.identity_hash != identity:
@@ -4204,7 +3801,7 @@ def _embedding_backfill_summary_text(
         # can never displace an older authorized row under --limit.
         if retry_uncertain:
             pending, rows = _embedding_authorized_uncertain_rows(
-                conn, identity, limit
+                conn, identity, limit, **({"retry_before": time.time() - 600.0} if maintenance_slice else {}),
             )
             authorized_uncertain_ids = {
                 str(row["node_id"]) for row in rows
@@ -4224,10 +3821,17 @@ def _embedding_backfill_summary_text(
             privacy_error,
         ) = _prepare_embedding_provider_documents(
             raw_documents,
-            config=engine._config,
+            config=config,
             provider_name=provider_name,
             expected_revision=profile_revision,
         )
+        privacy_withheld = (
+            privacy_blocked
+            if privacy_revision is not None and privacy_revision == profile_revision
+            else 0
+        )
+        if privacy_withheld:
+            privacy_error = None
         if privacy_error is not None:
             error = privacy_error
             stop_reason = "privacy_refused"
@@ -4237,23 +3841,27 @@ def _embedding_backfill_summary_text(
         # 60/min guard mid-way and stalls.
         provider = (
             None
-            if privacy_error is not None
-            else resolve_provider(engine._config, for_backfill=True)
+            if privacy_error is not None or (privacy_withheld and not documents)
+            else resolve_provider(config, for_backfill=True)
         )
-        if privacy_error is not None:
+        if privacy_error is not None or (privacy_withheld and not documents):
             pass
         elif provider is None:
             error = "embedding provider is not configured; run `/lcm embed warmup`"
         elif (
             provider.model_id != model
             or str(provider.provider_id).lower() != provider_name.lower()
+            or profile_suffix != getattr(provider, "identity_revision_suffix", "")
         ):
             error = "configured provider does not match the current profile; run `/lcm embed warmup`"
         else:
             batch_size = _embedding_backfill_batch_size(
-                getattr(engine._config, "embedding_max_batch_items", None)
+                getattr(config, "embedding_max_batch_items", None)
             )
             for offset in range(0, len(documents), batch_size):
+                if stop_event is not None and stop_event.is_set():
+                    stop_reason = "process_exit"
+                    break
                 # Renew the heartbeat lease; if it was stolen (TTL lapsed and a
                 # second owner took over), stop rather than write under a lease
                 # we no longer hold.
@@ -4261,7 +3869,8 @@ def _embedding_backfill_summary_text(
                     lease_lost = True
                     stop_reason = "lease_lost"
                     break
-                if budget_s > 0 and (time.monotonic() - started) > budget_s:
+                if (budget_s > 0 and (time.monotonic() - started) > budget_s
+                        and not (maintenance_slice and offset == 0)):
                     budget_exhausted = True
                     stop_reason = "op_budget_exhausted"
                     break
@@ -4289,21 +3898,14 @@ def _embedding_backfill_summary_text(
 
                 def before_dispatch(indexes: tuple[int, ...]) -> None:
                     nonlocal latest_request_id
-                    normalized = tuple(int(index) for index in indexes)
-                    if (
-                        not normalized
-                        or len(set(normalized)) != len(normalized)
-                        or any(index < 0 or index >= len(batch) for index in normalized)
-                        or any(index in request_by_index for index in normalized)
-                    ):
-                        raise EmbeddingProviderError(
-                            "provider dispatched invalid or duplicate document indexes"
-                        )
+                    normalized = _normalize_summary_backfill_indexes(
+                        indexes=indexes, batch=batch, request_by_index=request_by_index,
+                    )
                     if privacy_revision is not None:
                         try:
                             validate_embedding_privacy_dispatch(
                                 [batch[index][1] for index in normalized],
-                                engine._config,
+                                config,
                                 expected_revision=privacy_revision,
                             )
                         except EmbeddingPrivacyPolicyError as exc:
@@ -4332,7 +3934,7 @@ def _embedding_backfill_summary_text(
                     for accepted_batch in _provider_document_batches(
                         provider,
                         [item[1] for item in batch],
-                        before_dispatch=before_dispatch,
+                        before_dispatch=before_dispatch, stop_event=stop_event,
                     ):
                         if len(accepted_batch.indexes) != len(accepted_batch.vectors):
                             raise EmbeddingProviderError(
@@ -4434,6 +4036,19 @@ def _embedding_backfill_summary_text(
                         if lease_lost or identity_superseded:
                             break
                     if lease_lost or identity_superseded:
+                        break
+                    if stop_event is not None and stop_event.is_set():
+                        stop_reason = "process_exit"
+                        # The accepted batch is committed. Only un-dispatched
+                        # claims may be cleared; ordinary discovery resumes them.
+                        for index, item in enumerate(batch):
+                            if index not in request_by_index and not _owned_inflight_transition(
+                                conn, identity, lease, None, embedded_id=item[0],
+                                authorized_uncertain_ids=batch_authorized_ids,
+                            ):
+                                lease_lost = True
+                                stop_reason = "lease_lost"
+                                break
                         break
                     skipped_indexes = {
                         int(index)
@@ -4544,6 +4159,8 @@ def _embedding_backfill_summary_text(
     remaining, in_flight_count, uncertain_count = _embedding_backfill_remaining(
         db_path, identity, pending, embedded
     )
+    operator_retry = uncertain_count if embedding_provider_id(provider_name) != "fastembed" else 0
+    _record_embedding_catchup(db_path, "summary", identity, remaining + in_flight_count + uncertain_count - operator_retry, operator_retry=operator_retry)
     selected_embeddable = len(documents) - len(skipped)
     status = _embedding_backfill_status(
         error=error,
@@ -4554,15 +4171,18 @@ def _embedding_backfill_summary_text(
         failed=failed,
         uncertain=uncertain_count,
         skipped=len(skipped),
+        privacy_withheld=privacy_withheld,
     )
-    estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
-    return _embedding_backfill_report(
+    estimated_tokens, estimated_cost_tokens, estimated_batches = _summary_backfill_estimates(
+        documents=documents, provider_name=provider_name, config=config,
+    )
+    return dict(
         mode=mode,
         status=status,
         provider=provider_name,
         model=model,
         pending=pending,
-        selected=len(documents),
+        selected=len(documents) + privacy_withheld,
         estimated_tokens=estimated_tokens,
         estimated_cost_tokens=estimated_cost_tokens,
         estimated_batches=estimated_batches,
@@ -4579,7 +4199,26 @@ def _embedding_backfill_summary_text(
         privacy_revision=privacy_revision,
         privacy_transformed=privacy_transformed,
         privacy_blocked=privacy_blocked,
+        privacy_withheld=privacy_withheld,
     )
+
+
+def _normalize_summary_backfill_indexes(
+    *, indexes: tuple[int, ...], batch: list[tuple[str, str, int]],
+    request_by_index: dict[int, str],
+) -> tuple[int, ...]:
+    """Normalize and validate one summary backfill request's page indexes."""
+    normalized = tuple(int(index) for index in indexes)
+    if (
+        not normalized
+        or len(set(normalized)) != len(normalized)
+        or any(index < 0 or index >= len(batch) for index in normalized)
+        or any(index in request_by_index for index in normalized)
+    ):
+        raise EmbeddingProviderError(
+            "provider dispatched invalid or duplicate document indexes"
+        )
+    return normalized
 
 
 def _embedding_backfill_remaining(
@@ -4591,15 +4230,8 @@ def _embedding_backfill_remaining(
         try:
             remaining, _ = _embedding_pending_rows(check_conn, identity_hash, 1)
             try:
-                in_flight = int(check_conn.execute(
-                    "SELECT COUNT(*) FROM lcm_embedding_backfill_inflight WHERE identity_hash = ?",
-                    (identity_hash,),
-                ).fetchone()[0])
-                uncertain = int(check_conn.execute(
-                    "SELECT COUNT(*) FROM lcm_embedding_backfill_inflight "
-                    "WHERE identity_hash = ? AND state IN ('dispatched', 'uncertain')",
-                    (identity_hash,),
-                ).fetchone()[0])
+                in_flight, uncertain = _embedding_inflight_counts(check_conn, identity_hash, eligible=
+                    "AND embedded_id IN (SELECT CAST(node_id AS TEXT) FROM summary_nodes WHERE depth=0 AND lcm_summary_has_text(summary)=1)")
             except sqlite3.OperationalError:
                 in_flight = 0
                 uncertain = 0
@@ -4631,7 +4263,7 @@ def _chunk_current_profile(conn: sqlite3.Connection) -> sqlite3.Row | None:
             SELECT identity_hash, model_name, provider, revision, dim, dtype,
                    byteorder, task, registered_at
             FROM lcm_embedding_profile
-            WHERE active = 1 AND archived_at IS NULL AND task = 'chunk'
+            WHERE active = 1 AND archived_at IS NULL AND task IN ('chunk', 'chunk+prefix')
             ORDER BY registered_at DESC, identity_hash DESC
             LIMIT 1
             """
@@ -4678,11 +4310,152 @@ def _chunk_inflight_ids(conn: sqlite3.Connection, identity_hash: str | None) -> 
     }
 
 
+_CHUNK_PARTIAL_WARNED = set()
+
+
+def _chunk_partial_ids(conn, identity_hash, *, backlog=False):
+    saved = conn.execute(
+        "SELECT value FROM metadata WHERE key=?", (f"chunk_partial_messages:{identity_hash}",),
+    ).fetchone()
+    warning_value = saved[0] if saved else None
+    try:
+        ids = json.loads(saved[0]) if saved else []
+        if isinstance(ids, dict):
+            if any(type(ids.get(k)) is not int or ids[k] < 0 for k in ("cursor", "turn")):
+                raise ValueError("invalid partial cursor")
+            if "repair_pending" in ids:
+                marker = ids["repair_pending"]
+                if not isinstance(marker, str) or len(marker) != 16 or any(c not in "0123456789abcdef" for c in marker):
+                    raise ValueError("invalid partial repair marker")
+                if backlog:
+                    warning_value = marker
+                    raise ValueError("pending partial repair")
+            ids = ids.get("ids")
+        if not isinstance(ids, list) or any(type(i) is not int for i in ids):
+            raise ValueError("invalid message ids")
+        return set(ids)
+    except (ValueError, TypeError):
+        warning_key = (identity_hash, warning_value)
+        if warning_key not in _CHUNK_PARTIAL_WARNED:
+            logging.getLogger("hermes_lcm").warning(
+                "Preserving partial-message record with unknown backlog; repair with "
+                "`/lcm embed backfill --corpus chunks --apply` (cloud providers also require --confirm-raw-text)"
+            )
+            _CHUNK_PARTIAL_WARNED.add(warning_key)
+        return None
+
+
+def _repair_chunk_partial_messages(conn, identity_hash, lease):
+    """Only a full operator scan can safely rediscover malformed intent coverage."""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if _chunk_partial_ids(conn, identity_hash) is None:
+            key = f"chunk_partial_messages:{identity_hash}"
+            value = conn.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()[0]
+            digest = hashlib.sha256(value.encode()).hexdigest()[:16]
+            fence = ("EXISTS (SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
+                     "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?)")
+            owner = (_EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation)
+            conn.execute(
+                "INSERT OR IGNORE INTO metadata(key, value) SELECT ?, value FROM metadata WHERE key=? AND " + fence,
+                (f"chunk_partial_messages_malformed:{identity_hash}:{digest}", key, *owner),
+            )
+            conn.execute("UPDATE metadata SET value=? WHERE key=? AND " + fence,
+                         (json.dumps(dict(ids=[], cursor=0, turn=0, repair_pending=digest)), key, *owner))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _prune_chunk_partial_messages(conn, identity_hash, lease, chunk_cache, policy=""):
+    """Drop discoverable unpublished intents and proven completions without re-chunking."""
+    ids = _chunk_partial_ids(conn, identity_hash)
+    if ids is None:
+        return  # Unknown coverage must survive byte-for-byte.
+    published = {}
+    for sid, cid in conn.execute(
+        "SELECT store_id, chunk_id FROM lcm_chunk_meta JOIN messages USING (store_id) WHERE identity_hash=? "
+        "AND store_id IN (SELECT value FROM json_each(?))", (identity_hash, json.dumps(sorted(ids))),
+    ):
+        published.setdefault(sid, set()).add(cid)
+    complete = {sid for sid, chunks in chunk_cache.items()
+                if all(c.chunk_id in published.get(sid, ()) for c in chunks if c.char_end > c.char_start)}
+    retained = {r[0] for r in conn.execute(
+        "SELECT store_id FROM messages WHERE store_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(sorted(ids)),),
+    )} if normalize_content_policy(policy) == "full" else ids & published.keys()
+    value = json.dumps(sorted(retained - complete))
+    conn.execute(
+        "UPDATE metadata SET value=CASE WHEN json_type(value)='object' "
+        "THEN json_set(value, '$.ids', json(?)) ELSE ? END WHERE key=? "
+        "AND CASE WHEN json_type(value)='object' THEN json_extract(value, '$.ids') ELSE value END !=? "
+        "AND EXISTS (SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
+        "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?)",
+        (value, value, f"chunk_partial_messages:{identity_hash}", value,
+         _EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation),
+    )
+
+
+def _record_chunk_partial_messages(conn, identity_hash, lease, store_ids, *, progress=None):
+    """Persist before dispatch, so publication/exit/lease loss cannot strand a message."""
+    if not store_ids and progress is None:
+        return
+    ids = _chunk_partial_ids(conn, identity_hash)
+    if ids is None:
+        raise ValueError("malformed partial-message record requires repair before dispatch")
+    saved = conn.execute("SELECT value FROM metadata WHERE key=?",
+                         (f"chunk_partial_messages:{identity_hash}",)).fetchone()
+    state = json.loads(saved[0]) if saved else []
+    value = sorted(ids | store_ids)
+    if isinstance(state, dict) or progress is not None:
+        value = dict(state if isinstance(state, dict) else {}, ids=value, **(progress or {}))
+    cur = conn.execute(
+        "INSERT INTO metadata(key, value) SELECT ?, ? WHERE EXISTS "
+        "(SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
+        "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE metadata.value!=excluded.value",
+        (f"chunk_partial_messages:{identity_hash}", json.dumps(value),
+         _EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation),
+    )
+    if not cur.rowcount and not conn.execute(
+        "SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
+        "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?",
+        (_EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation),
+    ).fetchone():
+        raise _BackfillLeaseLost("embedding backfill lease lost before recording message intents")
+
+
+def _chunk_partial_window(conn, identity_hash, lease, limit, chunk_cache, policy, *, advance=True):
+    """Rotate bounded source reads; keep progress in the existing intent record."""
+    ids = _chunk_partial_ids(conn, identity_hash)
+    if not ids:
+        return set(), 0
+    state = json.loads(conn.execute("SELECT value FROM metadata WHERE key=?",
+                                   (f"chunk_partial_messages:{identity_hash}",)).fetchone()[0])
+    cursor, turn = (state["cursor"], state["turn"]) if isinstance(state, dict) else (0, 0)
+    ordered = sorted(ids)
+    ordered = [i for i in ordered if i > cursor] + [i for i in ordered if i <= cursor]
+    window = ordered[:4 * max(1, limit // 2) - 2]  # Reserve the two frontier boundary reads.
+    if advance:  # An uncertain retry between ordinary passes must not consume their parity.
+        _record_chunk_partial_messages(conn, identity_hash, lease, set(),
+                                       progress={"cursor": window[-1], "turn": turn + 1})
+    for row in conn.execute("SELECT store_id, role, content FROM messages WHERE store_id IN "
+                            "(SELECT value FROM json_each(?))", (json.dumps(window),)):
+        chunk_cache[row[0]] = chunk_message(*row, policy=policy)
+    return set(window), turn
+
+
 def _chunk_pending_rows(
     conn: sqlite3.Connection,
     identity_hash: str | None,
     policy: str,
     limit: int,
+    *,
+    incremental: bool = False,
+    record_progress: bool = False,
+    include_boundaries: bool = True, include_partials: bool = True, chunk_cache=None,
+    partial_window=None, partial_turn=0, gap_scan_state=None,
 ) -> tuple[int, list[tuple[str, str, int]], dict[str, tuple[int, int, int, int]]]:
     """Discover policy-chunked messages whose chunks are not yet embedded.
 
@@ -4691,16 +4464,63 @@ def _chunk_pending_rows(
     active policy, and excludes chunk ids already embedded under the identity or
     held in-flight. Returns the total pending count, up to ``limit`` documents
     as ``(chunk_id, text, tokens)``, and a metadata map for the selected chunks.
+
+    ``incremental`` (the #1014 automatic pass) reads the frontier of
+    ``_chunk_frontier_rows``: new messages first, then revision gaps and history
+    newest first. ``record_progress`` is only used under the writer's lease.
+    It stops at a message boundary once ``limit`` chunks are found, so its cost
+    tracks new messages rather than the store; the returned total then counts
+    only what it saw.
     """
-    already = _chunk_embedded_ids(conn, identity_hash)
-    inflight = _chunk_inflight_ids(conn, identity_hash)
+    chunk_cache = {} if chunk_cache is None else chunk_cache
+    partial_ids = (_chunk_partial_ids(conn, identity_hash) or set()) if incremental else set()
+    partial_limit, partial_selected = (0 if limit == 1 and partial_turn % 2 else max(1, limit // 2)), 0
+    if incremental:
+        seen_rows = set()
+        already = set()
+        inflight = _chunk_inflight_ids(conn, identity_hash)
+        boundary_ids = set(_chunk_cursor(conn, identity_hash) or ()) if include_boundaries else set()
+        revisit_ids = boundary_ids | partial_ids
+        rows = _chunk_frontier_rows(
+            conn, identity_hash, policy=policy, record_progress=record_progress,
+            include_boundaries=include_boundaries, partial_limit=partial_limit if include_partials else 0,
+            partial_window=partial_window, gap_page_size=32, gap_scan_state=gap_scan_state,
+        )
+    else:
+        already = _chunk_embedded_ids(conn, identity_hash)
+        inflight = _chunk_inflight_ids(conn, identity_hash)
+        rows = conn.execute(
+            "SELECT store_id, role, content FROM messages ORDER BY store_id DESC"
+        )
     total = 0
     documents: list[tuple[str, str, int]] = []
     meta: dict[str, tuple[int, int, int, int]] = {}
-    for row in conn.execute(
-        "SELECT store_id, role, content FROM messages ORDER BY store_id DESC"
-    ):
-        for chunk in chunk_message(row[0], row[1], row[2], policy=policy):
+    for row in rows:
+        if gap_scan_state and gap_scan_state.get("stop", lambda: False)():
+            break
+        if incremental and len(documents) >= limit:
+            break
+        if incremental:
+            # A cursor boundary can also be a revision-gap row.
+            if row[0] in seen_rows:
+                continue
+            seen_rows.add(row[0])
+            if row[0] in partial_ids and (not include_partials or partial_selected >= partial_limit
+                                         or (partial_window is not None and row[0] not in partial_window)):
+                continue
+            already = set()
+            if row[0] in revisit_ids:
+                # Exit may have published only the first batch of this message.
+                # Revisit its remaining chunks without re-embedding committed ones.
+                already = {str(item[0]) for item in conn.execute(
+                    "SELECT chunk_id FROM lcm_chunk_meta WHERE store_id=? AND identity_hash=?",
+                    (row[0], identity_hash),
+                )}
+        chunks = chunk_cache.get(row[0])
+        if chunks is None:
+            chunks = chunk_message(*row, policy=policy)
+        selected_before = len(documents)
+        for chunk in chunks:
             chunk_id = chunk.chunk_id
             if chunk_id in already or chunk_id in inflight:
                 continue
@@ -4708,8 +4528,12 @@ def _chunk_pending_rows(
             # persist an empty snippet + bogus lcm_expand offset (F3).
             if chunk.char_end <= chunk.char_start:
                 continue
+            if incremental and row[0] in partial_ids:
+                if partial_selected >= partial_limit:
+                    break
+                partial_selected += 1
             total += 1
-            if len(documents) < limit:
+            if len(documents) < limit or incremental:
                 documents.append((chunk_id, chunk.text, chunk.token_estimate))
                 meta[chunk_id] = (
                     chunk.store_id,
@@ -4717,11 +4541,563 @@ def _chunk_pending_rows(
                     chunk.char_start,
                     chunk.char_end,
                 )
+        # Manual scans stream the rest; retain only rows needed by the record.
+        if row[0] in partial_ids or len(documents) > selected_before:
+            chunk_cache[row[0]] = chunks
     return total, documents, meta
 
 
+def _chunk_cursor(
+    conn: sqlite3.Connection, identity_hash: str | None
+) -> tuple[int, int] | None:
+    """Oldest and newest message ids with a chunk embedded or in flight under the identity."""
+    low = high = None
+    for sql in (
+        # Separate MIN and MAX so each can walk the store_id index instead of scanning the whole table.
+        "SELECT (SELECT MIN(store_id) FROM lcm_chunk_meta WHERE identity_hash = ?1), "
+        "(SELECT MAX(store_id) FROM lcm_chunk_meta WHERE identity_hash = ?1)",
+        "SELECT MIN(id), MAX(id) FROM (SELECT CAST(substr(embedded_id, 1, "
+        "instr(embedded_id, ':') - 1) AS INTEGER) AS id FROM "
+        "lcm_embedding_backfill_inflight WHERE identity_hash = ?1 "
+        "AND instr(embedded_id, ':') > 1) WHERE id > 0",
+    ):
+        try:
+            first, last = conn.execute(sql, (identity_hash,)).fetchone()
+        except sqlite3.OperationalError:
+            continue  # table not created yet
+        if first is not None:
+            low = int(first) if low is None else min(low, int(first))
+            high = int(last) if high is None else max(high, int(last))
+    return None if low is None else (low, high)
+
+
+_CHUNK_HISTORY_SCAN_MESSAGES = 2_000  # history rows one discovery reads; rows that never chunk are re-read
+
+
+def _chunk_policy_revision(conn: sqlite3.Connection, identity_hash: str | None) -> int:
+    """An unstamped populated identity used revision 1; an empty one needs no fill."""
+    if not identity_hash:
+        return CHUNK_POLICY_REVISION
+    row = conn.execute(
+        "SELECT value FROM metadata WHERE key = ?",
+        (f"chunk_policy_revision:{identity_hash}",),
+    ).fetchone()
+    if row is not None:
+        return int(row[0])
+    try:
+        populated = conn.execute(
+            "SELECT 1 FROM lcm_chunk_meta WHERE identity_hash = ? LIMIT 1", (identity_hash,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        populated = None  # chunk tables not created yet
+    return 1 if populated else CHUNK_POLICY_REVISION
+
+
+def _chunk_coverage(conn, identity_hash, low):
+    """Legacy integers prove today's cursor range under the original default policy."""
+    row = conn.execute("SELECT value FROM metadata WHERE key = ?",
+                       (f"chunk_policy_revision_through:{identity_hash}",)).fetchone()
+    try:
+        value = json.loads(row[0]) if row else None
+        if type(value) is int:
+            return (_chunk_cursor(conn, identity_hash) or (low, value))[0], value, "conversational", "legacy"
+        if (isinstance(value, dict) and type(value.get("from")) is int
+                and type(value.get("through")) is int and isinstance(value.get("policy"), str)):
+            return value["from"], value["through"], value["policy"]
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _chunk_coverage_value(conn, identity_hash, low, through, policy):
+    previous = _chunk_coverage(conn, identity_hash, low)
+    if previous and previous[2] == policy:
+        first, last, _ = previous[:3]
+        if low <= last + 1 and first <= through + 1:
+            low, through = min(low, first), max(through, last)
+        elif low < first:
+            # A pending low band cannot replace the already-certified upper range.
+            low, through = first, last
+    return json.dumps({"from": low, "through": through, "policy": policy}, separators=(",", ":"))
+
+
+def _record_chunk_policy_revision(conn: sqlite3.Connection, identity_hash: str, bounds, policy) -> None:
+    if policy == "full":
+        conn.execute("INSERT INTO metadata(key,value) VALUES(?,?) "
+                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value",
+                     (f"chunk_policy_revision:{identity_hash}", str(CHUNK_POLICY_REVISION)))
+        return  # A complete manual full pass proves revision, not policy coverage.
+    # Keep the revision an integer for older readers; coverage has its own key.
+    conn.executemany(
+        "INSERT INTO metadata(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value != excluded.value",
+        [(f"chunk_policy_revision:{identity_hash}", str(CHUNK_POLICY_REVISION)),
+         (f"chunk_policy_revision_through:{identity_hash}",
+          _chunk_coverage_value(conn, identity_hash, *bounds, policy))],
+    )
+
+
+def _chunk_gapfill_bounds(conn, identity_hash, bounds, revision, policy="conversational", *, coverage=...):
+    """Validate a newly exposed low band before extending matching upper coverage."""
+    if bounds is None:
+        return None
+    low, high = bounds
+    if coverage is ...:
+        coverage = _chunk_coverage(conn, identity_hash, low)
+    if revision >= CHUNK_POLICY_REVISION and coverage and coverage[2] == policy:
+        first, through, _ = coverage[:3]
+        if low < first:
+            return low, min(high, first - 1)
+        low = max(low, through + 1)
+    return (low, high) if low <= high else None
+
+
+def _chunk_gapfill_ranges(conn, identity_hash, bounds, revision, policy, *, coverage=...):
+    """Upper work stays visible while a disjoint low band is awaiting validation."""
+    if bounds is None or policy == "full":
+        return ()
+    if coverage is ...:
+        coverage = _chunk_coverage(conn, identity_hash, bounds[0])
+    band = _chunk_gapfill_bounds(conn, identity_hash, bounds, revision, policy, coverage=coverage)
+    if band is None:
+        return ()
+    if (revision >= CHUNK_POLICY_REVISION and coverage and coverage[2] == policy
+            and bounds[0] < coverage[0] and coverage[1] < bounds[1]):
+        return ((max(bounds[0], coverage[1] + 1), bounds[1]), band)
+    return (band,)
+
+
+def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_progress=False,
+                        gap_page_size=None, gap_scan_state=None):
+    """Scan new territory once; revisit unpublished candidates by id until covered."""
+    low, high = bounds
+    coverage = (gap_scan_state or {}).get("coverage")
+    low_band = coverage and coverage[2] == policy and low < coverage[0]
+    scan_key = f"chunk_gapfill_scan:{identity_hash}"
+    saved = conn.execute("SELECT value FROM metadata WHERE key = ?", (scan_key,)).fetchone()
+    gap_scan_state = gap_scan_state if gap_scan_state is not None else {}
+    if low_band:
+        try:
+            parent = json.loads(saved[0]) if saved else {}
+        except ValueError:
+            parent = {}
+        parent = parent if isinstance(parent, dict) else {}
+        if record_progress and not parent.get("epoch"):
+            initial = {"scan_value": saved[0] if saved else None}
+            _record_chunk_gapfill_progress(conn, identity_hash, initial, parent)
+            saved = conn.execute("SELECT value FROM metadata WHERE key=?", (scan_key,)).fetchone()
+            parent = json.loads(saved[0]) if saved else {}
+        gap_scan_state.update(parent_value=saved[0] if saved else None,
+                              parent_epoch=parent.get("epoch"), turn=parent.get("turn", 0))
+        if record_progress and gap_scan_state["parent_value"] is None:
+            gap_scan_state["unproven"] = True
+            return  # A writable low walk needs a captured parent fence.
+        scan_key += ":low"
+        saved = conn.execute("SELECT value FROM metadata WHERE key=?", (scan_key,)).fetchone()
+    gap_scan_state["scan_key"] = scan_key
+    while record_progress and saved is None:
+        # Give first selection an observable token too: deletion must not turn
+        # absence into absence and let a stale first walk pass its CAS.
+        initial = dict(gap_scan_state, scan_value=None)
+        _record_chunk_gapfill_progress(conn, identity_hash, initial, {"epoch": uuid.uuid4().hex})
+        if low_band and initial["scan_value"] is None:
+            gap_scan_state["unproven"] = True
+            return  # The parent changed; a later call must capture a fresh fence.
+        saved = ((initial["scan_value"],) if initial["scan_value"] is not None else
+                 conn.execute("SELECT value FROM metadata WHERE key = ?", (scan_key,)).fetchone())
+    gap_scan_state["scan_value"] = saved[0] if saved else None
+    try:
+        scan = json.loads(saved[0]) if saved else {}
+        if low_band and (not gap_scan_state["parent_epoch"] or scan.get("epoch") != gap_scan_state["parent_epoch"]):
+            scan = {}
+        valid = (
+            isinstance(scan, dict)
+            and type(scan.get("revision")) is int and type(scan.get("high")) is int
+            and isinstance(scan.get("policy"), str)
+            and ("pending" not in scan or (isinstance(scan["pending"], list)
+                 and all(type(i) is int for i in scan["pending"])))
+            and ("ceiling" not in scan or type(scan["ceiling"]) is int)
+            and ("walk" not in scan or (isinstance(scan["walk"], dict)
+                 and type(scan["walk"].get("below")) is int
+                 and isinstance(scan["walk"].get("pending"), list)
+                 and all(type(i) is int for i in scan["walk"]["pending"])))
+        )
+        if not valid:
+            scan = {}
+    except Exception:
+        scan = {}  # Unusable progress metadata requires the full gap revalidation.
+    if (scan.get("revision") != CHUNK_POLICY_REVISION or scan.get("policy") != policy
+            or (coverage and len(coverage) > 3 and scan.get("high", coverage[1]) > coverage[1])):
+        scan = {}  # An integer rewrite cannot authenticate a wider saved band scan.
+    pending_ids = []
+    ceiling = high + 1
+    if "pending" in scan and scan["high"] <= high and not low_band:
+        pending_ids = sorted({i for i in scan["pending"] if i >= low}, reverse=True)
+        low = max(low, scan["high"] + 1)
+    elif scan.get("high") == high:
+        # Only our own scan can certify a zero-chunk prefix.
+        ceiling = scan.get("ceiling", ceiling)
+    roles = "'assistant', 'user', 'tool'" if policy == "heads" else "'assistant', 'user'"
+    page_size = max(1, min(gap_page_size or limit, limit))
+    if gap_scan_state is not None:
+        gap_scan_state["unproven"] = True
+    candidates = []
+    metadata_only = gap_scan_state.get("metadata_only", False)
+
+    def record(progress, values=()):
+        if not record_progress:
+            return
+        _record_chunk_gapfill_progress(conn, identity_hash, gap_scan_state, progress, values)
+
+    def record_ceiling(*, pending_complete=False):
+        # Keep unread pending ids. A fully replayed, empty list needs no skip
+        # certificate; dropping it reopens the whole range below the ceiling.
+        if ceiling < high + 1 and ("pending" not in scan or not pending_ids or pending_complete):
+            record({"revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high, "ceiling": ceiling})
+
+    reached = 0
+    walk = scan.get("walk", {}) if scan.get("high", high) <= high and "pending" not in scan else {}
+    page_ceiling = walk.get("below", ceiling)
+    replay = sorted({i for i in walk.get("pending", []) if i >= low}, reverse=True)
+    unpublished = []
+    range_complete = low > high
+    if walk and scan["high"] < high:
+        # Check arrivals before resuming the old walk. Until this segment is
+        # exhausted, leave the old proof intact; publication makes retries advance.
+        top_ceiling = high + 1
+        while reached < limit:
+            rows = conn.execute(
+                "SELECT store_id, role, content FROM messages AS m "
+                f"WHERE store_id > ? AND store_id < ? AND lower(trim(role)) IN ({roles}) "
+                "AND trim(COALESCE(content, '')) != '' AND NOT EXISTS "
+                "(SELECT 1 FROM lcm_chunk_meta c WHERE c.store_id=m.store_id AND c.identity_hash=?) "
+                "ORDER BY store_id DESC LIMIT ?",
+                (max(low - 1, scan["high"]), top_ceiling, identity_hash, min(page_size, limit - reached)),
+            ).fetchall()
+            for row in rows:
+                if gap_scan_state.get("stop", lambda: False)():
+                    return
+                reached += 1
+                top_ceiling = row[0]
+                if metadata_only or any(c.char_end > c.char_start for c in chunk_message(*row, policy=policy)):
+                    unpublished.append(row[0])
+                    candidates.append(row[0])
+                    yield row
+            if reached == limit:
+                # The old walk lies below this boundary, so rescan it naturally;
+                # only unpublished top candidates need explicit replay.
+                gap_scan_state["walk_progress"] = {
+                    "revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high,
+                    "ceiling": ceiling,
+                    "walk": {"below": top_ceiling, "pending": unpublished},
+                }
+                return
+            if len(rows) < page_size:
+                break
+    # Fetch each page completely: no SQLite cursor survives a yield to a writer.
+    while (replay or not range_complete) and reached < limit:
+        take = min(page_size, limit - reached)
+        if replay:
+            batch, replay = replay[:take], replay[take:]
+            rows = conn.execute(
+                "SELECT store_id, role, content FROM messages AS m "
+                f"WHERE store_id IN ({','.join('?' for _ in batch)}) "
+                "AND NOT EXISTS (SELECT 1 FROM lcm_chunk_meta AS c "
+                "WHERE c.store_id=m.store_id AND c.identity_hash=?) ORDER BY store_id DESC",
+                (*batch, identity_hash),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT store_id, role, content FROM messages AS m "
+                f"WHERE store_id >= ? AND store_id <= ? AND store_id < ? "
+                f"AND lower(trim(role)) IN ({roles}) AND trim(COALESCE(content, '')) != '' "
+                "AND NOT EXISTS (SELECT 1 FROM lcm_chunk_meta AS c "
+                "WHERE c.store_id = m.store_id AND c.identity_hash = ?) "
+                "ORDER BY store_id DESC LIMIT ?",
+                (low, min(high, page_ceiling - 1), page_ceiling, identity_hash, take),
+            ).fetchall()
+            range_complete = len(rows) < take
+            if rows:
+                page_ceiling = rows[-1][0]
+        unpublished.extend(row[0] for row in rows)
+        if "pending" not in scan:
+            gap_scan_state["walk_progress"] = {
+                "revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high,
+                "ceiling": ceiling, "walk": {"below": page_ceiling, "pending": [*unpublished, *replay]},
+            }
+        for row in rows:
+            if gap_scan_state.get("stop", lambda: False)():
+                return
+            reached += 1
+            if metadata_only or any(c.char_end > c.char_start for c in chunk_message(*row, policy=policy)):
+                if not candidates:
+                    record_ceiling()  # Deterministic, before the first candidate escapes.
+                candidates.append(row[0])
+                yield row
+            else:
+                unpublished.remove(row[0])  # Message edits invalidate the proof if this becomes chunkable.
+                if not candidates:
+                    ceiling = min(ceiling, row[0])
+    # A saved pending range is older than the new range; replay it newest first.
+    for start in range(0, len(pending_ids), min(500, page_size)):
+        batch = pending_ids[start:start + min(500, page_size)]
+        rows = conn.execute(
+            "SELECT store_id, role, content FROM messages AS p "
+            f"WHERE store_id IN ({','.join('?' for _ in batch)}) "
+            "AND NOT EXISTS (SELECT 1 FROM lcm_chunk_meta AS c "
+            "WHERE c.store_id = p.store_id AND c.identity_hash = ?) ORDER BY store_id DESC",
+            (*batch, identity_hash),
+        ).fetchall()
+        for row in rows:
+            if gap_scan_state.get("stop", lambda: False)():
+                return
+            if metadata_only or any(c.char_end > c.char_start for c in chunk_message(*row, policy=policy)):
+                if not candidates:
+                    record_ceiling()
+                candidates.append(row[0])
+                yield row
+            elif not candidates and range_complete:
+                ceiling = min(ceiling, row[0])
+    if range_complete:
+        if gap_scan_state is not None:
+            gap_scan_state["unproven"] = False
+        if len(candidates) < limit:
+            if gap_scan_state is not None:
+                gap_scan_state.pop("walk_progress", None)
+            # Only natural exhaustion certifies every range row and pending id.
+            progress = {"revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high,
+                        "pending": candidates}
+            values = [(f"chunk_policy_revision_through:{identity_hash}",
+                       _chunk_coverage_value(conn, identity_hash, bounds[0],
+                                             min(candidates, default=high + 1) - 1, policy))]
+            if not candidates and not metadata_only:
+                values.append((f"chunk_policy_revision:{identity_hash}", str(CHUNK_POLICY_REVISION)))
+            record(progress, values)
+    if not range_complete:
+        record_ceiling(pending_complete=True)
+        if not candidates and "pending" not in scan:
+            # Exhausting the row budget proves no coverage below the page.
+            # Retain this empty walk so a new high cannot restart the prefix.
+            gap_scan_state["walk_progress"] = {
+                "revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high,
+                "ceiling": ceiling,
+                "walk": {"below": page_ceiling, "pending": [*unpublished, *replay]},
+            }
+
+
+def _record_chunk_gapfill_progress(conn, identity_hash, state, progress, values=()):
+    """CAS the exact selection proof; certificates share the same write transaction."""
+    parent_key = f"chunk_gapfill_scan:{identity_hash}"
+    key = state.get("scan_key", parent_key)
+    try:
+        previous = json.loads(state["scan_value"]) if state["scan_value"] else {}
+    except ValueError:
+        previous = {}
+    previous = previous if isinstance(previous, dict) else {}
+    progress = dict(progress, epoch=state.get("parent_epoch") or previous.get("epoch") or uuid.uuid4().hex,
+                    turn=state.get("turn", previous.get("turn", 0) + 1))
+    if state.get("deferred_low"):
+        progress["deferred_low"] = True
+    value = json.dumps(progress)
+    conn.execute("SAVEPOINT chunk_gapfill_progress")
+    try:
+        written = conn.execute(
+            "INSERT INTO metadata(key,value) SELECT ?,? "
+            "WHERE (SELECT value FROM metadata WHERE key=?) IS ? "
+            "AND (? IS NULL OR (SELECT value FROM metadata WHERE key=?) IS ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value, key, state["scan_value"], state.get("parent_value"), parent_key, state.get("parent_value")),
+        ).rowcount
+        if written:
+            state["scan_value"] = value
+            conn.executemany(
+                "INSERT INTO metadata(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value", values,
+            )
+    except BaseException:
+        conn.execute("ROLLBACK TO chunk_gapfill_progress")
+        raise
+    finally:
+        conn.execute("RELEASE chunk_gapfill_progress")
+
+
+def _record_chunk_gapfill_walk(conn, identity_hash, state):
+    """Writer-only: persist selection's replay proof before any provider work."""
+    if progress := state.get("walk_progress"):
+        _record_chunk_gapfill_progress(conn, identity_hash, state, progress)
+
+
+def _chunk_gapfill_order(conn, identity, ranges, state, record_progress):
+    """Share the writable upper/low turn fence across frontier and cloud scans."""
+    if record_progress and len(ranges) > 1:
+        try:
+            key = f"chunk_gapfill_scan:{identity}"
+            records = dict(conn.execute("SELECT key,value FROM metadata WHERE key IN (?,?)", (key, key + ":low")))
+            upper, lower = (json.loads(records.get(k, "{}")) for k in (key, key + ":low"))
+            if upper.get("deferred_low") and upper.get("epoch") and (lower.get("epoch") != upper["epoch"] or lower.get("turn", -1) < upper.get("turn", 0)):
+                ranges = ranges[::-1]
+        except (ValueError, AttributeError):
+            pass
+    state["deferred_low"] = record_progress and len(ranges) > 1
+    return ranges
+
+
+def _validate_cloud_chunk_metadata(config, db_path):
+    """Writer-only metadata coverage; neither chunk text nor resolve a provider."""
+    store = VectorStore(db_path, config=config)
+    lease = None
+    try:
+        conn = store.connection
+        profile = _chunk_current_profile(conn)
+        if profile is None:
+            return
+        lease = _acquire_embedding_backfill_lease(
+            conn, ttl_s=_embedding_backfill_lease_ttl_s(), heartbeat_s=_embedding_backfill_heartbeat_s())
+        if lease is None:
+            return
+        identity = profile["identity_hash"]
+        policy = normalize_content_policy(getattr(config, "embedding_content_policy", ""))
+        bounds = _chunk_cursor(conn, identity)
+        coverage = _chunk_coverage(conn, identity, bounds[0]) if bounds else None
+        state = {"metadata_only": True, "coverage": coverage}
+        ranges = _chunk_gapfill_ranges(conn, identity, bounds, _chunk_policy_revision(conn, identity),
+                                       policy, coverage=coverage)
+        for band in _chunk_gapfill_order(conn, identity, ranges, state, True):
+            list(_chunk_gapfill_rows(conn, identity, band, policy, _CHUNK_HISTORY_SCAN_MESSAGES,
+                                    record_progress=True, gap_scan_state=state))
+            _record_chunk_gapfill_walk(conn, identity, state)
+            break
+    finally:
+        if lease is not None:
+            lease.release()
+        store.close()
+
+
+def _chunk_frontier_rows(
+    conn: sqlite3.Connection, identity_hash: str | None, history_limit: int | None = None, policy: str = "",
+    *, record_progress: bool = False, include_boundaries: bool = False, partial_limit: int = 0,
+    partial_window=None, gap_page_size=None, gap_scan_state=None,
+):
+    """Messages the automatic chunk pass has not reached. New messages come first, oldest first; then missing
+    eligible rows inside unproven cursor bounds, newest first and bounded; then up to
+    ``_CHUNK_HISTORY_SCAN_MESSAGES`` of the history below the oldest embedded message, newest first. A store with no
+    chunk under the identity reads that many of its newest messages, so turning embeddings on for an existing store
+    covers recent messages before old history; `/lcm embed backfill` reaches the rest in one go. Under the
+    conversational policy only non-empty user and assistant rows can chunk, so the bound counts only those: a long
+    run of tool rows cannot hold the walk in place."""
+    history_limit = _CHUNK_HISTORY_SCAN_MESSAGES if history_limit is None else history_limit
+    policy = normalize_content_policy(policy)
+    if partial_limit:
+        # Uncertain-only rows must not consume slots before selection's quota.
+        yield from conn.execute(
+            "SELECT store_id, role, content FROM messages WHERE store_id IN "
+            "(SELECT value FROM json_each(?)) ORDER BY store_id DESC",
+            (json.dumps(sorted(partial_window) if partial_window is not None else
+                        sorted(_chunk_partial_ids(conn, identity_hash) or ())[:4 * partial_limit]),),
+        )
+    revision = _chunk_policy_revision(conn, identity_hash)
+    eligible = ""
+    if normalize_content_policy(policy) == "conversational":
+        roles = ", ".join(f"'{role}'" for role in sorted(_CONVERSATIONAL_ROLES))
+        eligible = f" AND lower(trim(role)) IN ({roles}) AND COALESCE(content, '') != ''"
+    bounds = _chunk_cursor(conn, identity_hash)
+    if bounds is None:
+        if record_progress and identity_hash and revision >= CHUNK_POLICY_REVISION and policy != "full":
+            _record_chunk_policy_revision(conn, identity_hash, (0, 0), policy)
+        yield from conn.execute(
+            f"SELECT store_id, role, content FROM messages WHERE 1{eligible} ORDER BY store_id DESC LIMIT ?",
+            (history_limit,),
+        )
+        return
+    low, high = bounds
+    # A stop at a provider boundary can leave either frontier message partial.
+    # The caller filters its already-published/in-flight chunks by exact id.
+    if include_boundaries:
+        yield from conn.execute(
+            f"SELECT store_id, role, content FROM messages WHERE store_id = ?{eligible}", (high,)
+        )
+    yield from conn.execute(
+        f"SELECT store_id, role, content FROM messages WHERE store_id > ?{eligible} ORDER BY store_id", (high,)
+    )
+    coverage = _chunk_coverage(conn, identity_hash, low) if policy != "full" else None
+    gap_ranges = _chunk_gapfill_ranges(
+        conn, identity_hash, bounds, revision, policy, coverage=coverage,
+    )
+    if gap_ranges and coverage and len(coverage) > 3 and record_progress and revision >= CHUNK_POLICY_REVISION:
+        # Preserve the trusted integer's range, but discard stale band progress
+        # once before using its new-format certificate on the next call.
+        _record_chunk_policy_revision(conn, identity_hash, coverage[:2], coverage[2])
+    if not gap_ranges and record_progress and revision >= CHUNK_POLICY_REVISION and policy != "full":
+        # Restamp trusted legacy integers without a scan or a status-side write.
+        _record_chunk_policy_revision(conn, identity_hash, bounds, policy)
+    gap_scan_state = gap_scan_state if gap_scan_state is not None else {}
+    unproven = False
+    gap_ranges = _chunk_gapfill_order(conn, identity_hash, gap_ranges, gap_scan_state, record_progress)
+    for band in gap_ranges:
+        gap_scan_state["coverage"] = coverage
+        for row in _chunk_gapfill_rows(
+            conn, identity_hash, band, policy, min(history_limit, _CHUNK_HISTORY_SCAN_MESSAGES),
+            record_progress=record_progress, gap_page_size=gap_page_size, gap_scan_state=gap_scan_state,
+        ):
+            yield row
+        unproven |= gap_scan_state.get("unproven", False)
+        if record_progress and len(gap_ranges) > 1:
+            # Defer writable low work until the next call: publication can grow
+            # high again, leaving both bands for the read-only remaining query.
+            break
+    if unproven:
+        gap_scan_state["unproven"] = True
+    if include_boundaries and low != high:
+        yield from conn.execute(
+            f"SELECT store_id, role, content FROM messages WHERE store_id = ?{eligible}", (low,)
+        )
+    yield from conn.execute(
+        f"SELECT store_id, role, content FROM messages WHERE store_id < ?{eligible} ORDER BY store_id DESC LIMIT ?",
+        (low, history_limit),
+    )
+
+
+_STATUS_CHUNK_SCAN_MESSAGES = 2_000  # /lcm status chunks at most this many messages; a larger backlog ends in "+"
+
+
+def _chunk_backlog_estimate(conn: sqlite3.Connection, identity_hash: str | None, policy: str) -> str:
+    """The automatic pass's pending chunks, read along its frontier and bounded for the status page."""
+    ids = _chunk_partial_ids(conn, identity_hash, backlog=True)
+    total = len(ids) if ids is not None else 1
+    gap_ranges = _chunk_gapfill_ranges(
+        conn, identity_hash, _chunk_cursor(conn, identity_hash), _chunk_policy_revision(conn, identity_hash),
+        normalize_content_policy(policy),
+    )
+    suffix = ""
+    inflight = _chunk_inflight_ids(conn, identity_hash) if gap_ranges else set()
+    rows = _chunk_frontier_rows(
+        conn, identity_hash, history_limit=_STATUS_CHUNK_SCAN_MESSAGES + 1, policy=policy
+    )
+    seen = set()
+    partial_ids = ids or set()
+    for scanned, row in enumerate(rows):
+        if scanned >= _STATUS_CHUNK_SCAN_MESSAGES:
+            return f"{total}+{suffix}"
+        if row[0] in seen:
+            continue
+        seen.add(row[0])
+        already = {str(item[0]) for item in conn.execute(
+            "SELECT chunk_id FROM lcm_chunk_meta WHERE store_id=? AND identity_hash=?",
+            (row[0], identity_hash),
+        )} if row[0] in partial_ids else set()
+        pending = sum(
+            1 for chunk in chunk_message(row[0], row[1], row[2], policy=policy)
+            if chunk.char_end > chunk.char_start and chunk.chunk_id not in inflight
+            and chunk.chunk_id not in already
+        )
+        total += pending
+        if pending and any(first <= row[0] <= last for first, last in gap_ranges):
+            suffix = " (gap-fill)"
+    return f"{total}{'+' if partial_ids or ids is None else ''}{suffix}"
+
+
 def _rebuild_chunk_document(
-    conn: sqlite3.Connection, chunk_id: str, policy: str
+    conn: sqlite3.Connection, chunk_id: str, policy: str, chunk_cache=None
 ) -> tuple[str, int, int, int] | None:
     """Reconstruct one chunk's text/tokens/span by re-chunking its source message.
 
@@ -4742,7 +5118,10 @@ def _rebuild_chunk_document(
     ).fetchone()
     if row is None:
         return None
-    for chunk in chunk_message(store_id, row[0], row[1], policy=policy):
+    chunk_cache = {} if chunk_cache is None else chunk_cache
+    if store_id not in chunk_cache:
+        chunk_cache[store_id] = chunk_message(store_id, *row, policy=policy)
+    for chunk in chunk_cache[store_id]:
         if chunk.chunk_index == chunk_index:
             return chunk.text, chunk.token_estimate, chunk.char_start, chunk.char_end
     return None
@@ -4753,14 +5132,15 @@ def _chunk_authorized_uncertain_rows(
     identity_hash: str,
     policy: str,
     limit: int,
+    retry_before: float | None = None, chunk_cache=None,
 ) -> tuple[int, list[tuple[str, str, int]], dict[str, tuple[int, int, int, int]]]:
-    """Select uncertain chunk rows without consuming their durable markers."""
+    """Keep retry markers unless their source message is gone or empty."""
     rows = conn.execute(
-        """
+        f"""
         SELECT f.embedded_id
         FROM lcm_embedding_backfill_inflight AS f
         WHERE f.identity_hash = ?
-          AND f.state = 'uncertain'
+          AND f.state = 'uncertain'{" AND COALESCE(f.updated_at, 0) <= ?" if retry_before is not None else ""}
           AND NOT EXISTS (
               SELECT 1 FROM lcm_chunk_meta AS m
               WHERE m.chunk_id = f.embedded_id
@@ -4769,14 +5149,20 @@ def _chunk_authorized_uncertain_rows(
         ORDER BY f.updated_at, f.embedded_id
         LIMIT ?
         """,
-        (identity_hash, max(0, int(limit))),
+        (identity_hash, *((retry_before,) if retry_before is not None else ()), max(0, int(limit))),
     ).fetchall()
     documents: list[tuple[str, str, int]] = []
     meta: dict[str, tuple[int, int, int, int]] = {}
     for row in rows:
         chunk_id = str(row[0])
-        rebuilt = _rebuild_chunk_document(conn, chunk_id, policy)
-        if rebuilt is None:
+        rebuilt = _rebuild_chunk_document(conn, chunk_id, policy, chunk_cache)
+        if rebuilt is None or rebuilt[3] <= rebuilt[2]:
+            conn.execute(
+                "DELETE FROM lcm_embedding_backfill_inflight WHERE identity_hash=? AND embedded_id=? AND state='uncertain' "
+                "AND NOT EXISTS (SELECT 1 FROM messages WHERE store_id=CAST(? AS INTEGER) AND COALESCE(content, '') != '')",
+                (identity_hash, chunk_id, chunk_id.split(":", 1)[0]),
+            )
+            conn.commit()
             continue
         text, tokens, char_start, char_end = rebuilt
         # Write-seam guard: never persist a degenerate/zero span — it yields an
@@ -4798,25 +5184,94 @@ def _chunk_authorized_uncertain_rows(
     return len(documents), documents, meta
 
 
+_CHUNK_INFLIGHT_SCAN_ROWS = 256
+
+
 def _chunk_backfill_remaining(
-    db_path, identity_hash: str | None, policy: str, pending: int, embedded: int
+    db_path, identity_hash: str | None, policy: str, pending: int, embedded: int,
+    incremental: bool = False, *, include_boundaries: bool = False, inflight_policy: str | None = None, chunk_cache=None,
+    deadline=None, scan_state=None,
 ) -> tuple[int, int, int]:
     try:
         check_conn = _embedding_read_connection(db_path)
         try:
-            remaining, _, _ = _chunk_pending_rows(check_conn, identity_hash, policy, 1)
+            scan_state = scan_state if scan_state is not None else {}
+            scan_state["max_store_id"] = check_conn.execute("SELECT COALESCE(MAX(store_id),0) FROM messages").fetchone()[0]
+            gap_scan_state = {}
+            remaining, _, _ = _chunk_pending_rows(
+                check_conn, identity_hash, policy, 1, incremental=incremental,
+                # Selection already revisited the boundaries. Only an exit
+                # interrupt can leave part of this pass's message unfinished.
+                include_boundaries=include_boundaries, include_partials=False, chunk_cache=chunk_cache,
+                gap_scan_state=gap_scan_state,
+            )
+            if incremental and gap_scan_state.get("unproven"):
+                remaining = max(remaining, 1)
+            # Even held/uncertain chunks leave their recorded message incomplete.
+            ids = _chunk_partial_ids(check_conn, identity_hash, backlog=True)
+            remaining = max(remaining, len(ids) if ids is not None else 1)
             if identity_hash:
                 try:
-                    in_flight = int(check_conn.execute(
-                        "SELECT COUNT(*) FROM lcm_embedding_backfill_inflight "
-                        "WHERE identity_hash = ?",
-                        (identity_hash,),
-                    ).fetchone()[0])
-                    uncertain = int(check_conn.execute(
-                        "SELECT COUNT(*) FROM lcm_embedding_backfill_inflight "
-                        "WHERE identity_hash = ? AND state IN ('dispatched', 'uncertain')",
-                        (identity_hash,),
-                    ).fetchone()[0])
+                    chunks_by_source = {}
+                    actionable = []
+                    saved = check_conn.execute("SELECT value FROM metadata WHERE key=?",
+                                               (f"embedding_catchup:chunk:{identity_hash}",)).fetchone()
+                    try:
+                        cycle = json.loads(saved[0]) if saved else {}
+                        cursor = str(cycle.get("inflight_cursor", ""))
+                        actionable_seen = bool(cycle.get("inflight_actionable_seen", bool(cursor)))
+                        uncertain_seen = int(cycle.get("inflight_uncertain_count", 0)) if cursor else 0
+                        cycle_started = float(cycle.get("inflight_cycle_started_at", 0)) if cursor else time.time()
+                    except (TypeError, ValueError, AttributeError):
+                        cursor = ""
+                        actionable_seen = False
+                        uncertain_seen, cycle_started = 0, time.time()
+                    scanned = 0
+                    incomplete = False
+                    scan_state["inflight_cursor"] = cursor
+                    for row in check_conn.execute(
+                        "SELECT embedded_id, state, lease_id, generation FROM lcm_embedding_backfill_inflight "
+                        "WHERE +identity_hash = ? AND embedded_id > ? ORDER BY embedded_id LIMIT ?",
+                        (identity_hash, cursor, _CHUNK_INFLIGHT_SCAN_ROWS),
+                    ):
+                        if deadline is not None and time.monotonic() >= deadline:
+                            incomplete = True
+                            break
+                        scanned += 1
+                        scan_state["inflight_cursor"] = row[0]
+                        try:
+                            store_id = int(row[0].split(":", 1)[0])
+                        except ValueError:
+                            continue
+                        if store_id not in chunks_by_source:
+                            source = check_conn.execute("SELECT role, content FROM messages WHERE store_id=?", (store_id,)).fetchone()
+                            chunks_by_source[store_id] = {c.chunk_id for c in chunk_message(store_id, *source, policy=inflight_policy or policy)
+                                                         if c.char_end > c.char_start} if source else set()
+                        if row[0] in chunks_by_source[store_id]:
+                            actionable.append(row)
+                    else:
+                        if scanned < _CHUNK_INFLIGHT_SCAN_ROWS:
+                            if check_conn.execute(
+                                "SELECT 1 FROM lcm_embedding_backfill_inflight WHERE identity_hash=? "
+                                "AND state IN ('claimed','dispatched','uncertain') AND updated_at>=? "
+                                "AND embedded_id<=? LIMIT 1",
+                                (identity_hash, cycle_started, scan_state["inflight_cursor"]),
+                            ).fetchone():
+                                remaining = max(remaining, 1)  # A new row behind the cursor needs a fresh cycle.
+                            scan_state["inflight_cursor"] = ""
+                        else:
+                            incomplete = True
+                    if incomplete:
+                        remaining = True  # Unknown backlog, never a completion certificate.
+                        scan_state["inflight_incomplete"] = True
+                    elif actionable_seen:
+                        remaining = max(remaining, 1)  # Earlier pages still have actionable backlog.
+                    scan_state["inflight_actionable_seen"] = incomplete and (actionable_seen or bool(actionable))
+                    in_flight, uncertain = _embedding_inflight_counts(check_conn, identity_hash,
+                        (tuple(row[1:]) + (1,) for row in actionable))
+                    uncertain += uncertain_seen
+                    scan_state["inflight_uncertain_count"] = uncertain if incomplete else 0
+                    scan_state["inflight_cycle_started_at"] = cycle_started if incomplete else 0
                 except sqlite3.OperationalError:
                     in_flight = 0
                     uncertain = 0
@@ -4846,8 +5301,57 @@ def _chunk_backfill_text(
     confirm_raw_text: bool = False, include_next_hint: bool = True,
     expected_dtype: str | None = None,
 ) -> str:
+    result = _chunk_backfill_run(
+        engine._config, engine._store.db_path, apply=apply, limit=limit,
+        retry_uncertain=retry_uncertain, policy=policy,
+        confirm_raw_text=confirm_raw_text, include_next_hint=include_next_hint,
+        expected_dtype=expected_dtype,
+    )
+    return str(result) if isinstance(result, str) else _embedding_backfill_report(**result)
+
+
+def _chunk_backfill_estimates(
+    *, documents: list[tuple[str, str, int]], provider_name, model, config,
+) -> tuple[int, int, int]:
+    # The contextualized (voyage-context) chunk apply path groups a message's
+    # chunks into one document, skips a chunk only above the 32K per-chunk
+    # context cap, and plans requests by the context budgets. Model that
+    # exactly so the cost/consent preview matches apply (FIX 4). Plain-voyage
+    # and local providers keep the flat per-document estimate.
+    if (
+        embedding_provider_id(provider_name.strip().lower()) == "voyage"
+        and _is_voyage_context_model(model)
+    ):
+        return _chunk_context_estimates(
+            documents, getattr(config, "embedding_max_batch_items", None)
+        )
+    est_tokens = sum(document[2] for document in documents)
+    est_cost_tokens = sum(
+        document[2]
+        for document in documents
+        if provider_name.lower() != "voyage"
+        or document[2] <= _VOYAGE_MAX_DOCUMENT_TOKENS
+    )
+    est_batches = _embedding_batch_estimate(
+        provider_name,
+        [document[2] for document in documents],
+        getattr(config, "embedding_max_batch_items", None),
+    )
+    return est_tokens, est_cost_tokens, est_batches
+
+
+def _chunk_backfill_run(
+    config, db_path, *, apply: bool, limit: int, retry_uncertain: bool, policy: str,
+    confirm_raw_text: bool = False, include_next_hint: bool = True,
+    expected_dtype: str | None = None, incremental: bool = False, stop_event=None,
+    maintenance_slice: float = 0.0,
+) -> str | dict[str, Any]:
+    """Chunk backfill core: refusal text, or the report fields (#1014).
+
+    ``incremental`` selects bounded cursor discovery for the automatic pass.
+    """
     policy = normalize_content_policy(policy or getattr(
-        engine._config, "embedding_content_policy", "conversational"
+        config, "embedding_content_policy", "conversational"
     ))
     mode = "apply" if apply else "dry-run"
     started = time.monotonic()
@@ -4862,17 +5366,16 @@ def _chunk_backfill_text(
             f"error: {message}",
         ])
 
-    if not bool(getattr(engine._config, "embeddings_enabled", False)):
+    if not bool(getattr(config, "embeddings_enabled", False)):
         return _refused(
             "embeddings are disabled; set LCM_EMBEDDINGS_ENABLED=true, then run "
             "`/lcm embed warmup`"
         )
 
-    db_path = engine._store.db_path
     configured_provider = str(
-        getattr(engine._config, "embedding_provider", "") or ""
+        getattr(config, "embedding_provider", "") or ""
     ).strip().lower()
-    configured_model = str(getattr(engine._config, "embedding_model", "") or "").strip()
+    configured_model = effective_embedding_model(getattr(config, "embedding_provider", ""), getattr(config, "embedding_model", ""))
 
     try:
         read_conn = _embedding_read_connection(db_path)
@@ -4884,7 +5387,7 @@ def _chunk_backfill_text(
             identity = str(profile["identity_hash"])
             model = str(profile["model_name"])
             provider_name = str(profile["provider"])
-            profile_revision = str(profile["revision"] or "")
+            profile_revision, profile_suffix = split_prefix_revision(str(profile["revision"] or ""))
             profile_dim = int(profile["dim"])
             profile_dtype = str(profile["dtype"] or "float32")
         else:
@@ -4906,39 +5409,14 @@ def _chunk_backfill_text(
                 f"profile dtype ({profile_dtype}); re-run `/lcm embed warmup` with "
                 f"LCM_EMBEDDING_STORAGE_DTYPE={expected_dtype} to register that identity"
             )
+        if apply and profile is not None and profile_suffix != embedding_prefix_suffix(config, configured_provider):
+            return _refused("configured provider does not match the chunk profile: embedding prefix settings changed; run /lcm embed warmup, then backfill")
         if not apply:
             pending, rows, _ = _chunk_pending_rows(read_conn, identity, policy, limit)
     except sqlite3.Error as exc:
         return _refused(f"could not discover pending chunks ({exc})")
     finally:
         read_conn.close()
-
-    def _estimates(documents: list[tuple[str, str, int]]) -> tuple[int, int, int]:
-        # The contextualized (voyage-context) chunk apply path groups a message's
-        # chunks into one document, skips a chunk only above the 32K per-chunk
-        # context cap, and plans requests by the context budgets. Model that
-        # exactly so the cost/consent preview matches apply (FIX 4). Plain-voyage
-        # and local providers keep the flat per-document estimate.
-        if (
-            provider_name.strip().lower() in {"voyage", "voyageai"}
-            and _is_voyage_context_model(model)
-        ):
-            return _chunk_context_estimates(
-                documents, getattr(engine._config, "embedding_max_batch_items", None)
-            )
-        est_tokens = sum(document[2] for document in documents)
-        est_cost_tokens = sum(
-            document[2]
-            for document in documents
-            if provider_name.lower() != "voyage"
-            or document[2] <= _VOYAGE_MAX_DOCUMENT_TOKENS
-        )
-        est_batches = _embedding_batch_estimate(
-            provider_name,
-            [document[2] for document in documents],
-            getattr(engine._config, "embedding_max_batch_items", None),
-        )
-        return est_tokens, est_cost_tokens, est_batches
 
     if not apply:
         expected_privacy_revision = profile_revision
@@ -4948,7 +5426,7 @@ def _chunk_backfill_text(
         ):
             try:
                 expected_privacy_revision = embedding_privacy_revision(
-                    engine._config
+                    config
                 )
             except EmbeddingPrivacyPolicyError as exc:
                 return _refused(str(exc))
@@ -4960,14 +5438,21 @@ def _chunk_backfill_text(
             privacy_error,
         ) = _prepare_embedding_provider_documents(
             rows,
-            config=engine._config,
+            config=config,
             provider_name=provider_name,
             expected_revision=expected_privacy_revision,
         )
-        estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(
-            documents
+        privacy_withheld = (
+            privacy_blocked
+            if privacy_revision is not None and privacy_revision == expected_privacy_revision
+            else 0
         )
-        return _embedding_backfill_report(
+        if privacy_withheld:
+            privacy_error = None
+        estimated_tokens, estimated_cost_tokens, estimated_batches = _chunk_backfill_estimates(
+            documents=documents, provider_name=provider_name, model=model, config=config,
+        )
+        return dict(
             mode=mode,
             status="refused" if privacy_error else "dry-run",
             provider=provider_name,
@@ -4990,6 +5475,7 @@ def _chunk_backfill_text(
             privacy_revision=privacy_revision,
             privacy_transformed=privacy_transformed,
             privacy_blocked=privacy_blocked,
+            privacy_withheld=privacy_withheld,
         )
 
     # -- apply --
@@ -5018,12 +5504,14 @@ def _chunk_backfill_text(
 
     ttl_s = _embedding_backfill_lease_ttl_s()
     heartbeat_s = _embedding_backfill_heartbeat_s()
-    budget_s = _embedding_backfill_budget_s()
+    budget_s = min(1.0, maintenance_slice) if maintenance_slice else _embedding_backfill_budget_s()
 
     store: VectorStore | None = None
     lease: _BackfillLease | None = None
     documents: list[tuple[str, str, int]] = []
     chunk_meta: dict[str, tuple[int, int, int, int]] = {}
+    partial_messages = False
+    chunk_cache = {}
     pending = 0
     embedded = 0
     skipped: list[tuple[str, str]] = []
@@ -5037,8 +5525,9 @@ def _chunk_backfill_text(
     privacy_revision: str | None = None
     privacy_transformed = 0
     privacy_blocked = 0
+    privacy_withheld = 0
     try:
-        store = VectorStore(db_path, config=engine._config)
+        store = VectorStore(db_path, config=config)
         store.ensure_chunk_schema()
         conn = store.connection
         _ensure_inflight_table(conn)
@@ -5047,11 +5536,16 @@ def _chunk_backfill_text(
         )
         if lease is None:
             store.close()
-            return _refused(
+            return _BackfillRefusal(_refused(
                 "another embedding backfill holds the lease; retry after it exits "
                 "or after the lease TTL expires"
-            )
+            ), reason="lease_held")
         _prepare_inflight_for_lease(conn, identity, lease)
+        if not incremental and not retry_uncertain:
+            _repair_chunk_partial_messages(conn, identity, lease)
+        _prune_chunk_partial_messages(conn, identity, lease, chunk_cache, policy=policy)
+        partial_window, partial_turn = _chunk_partial_window(conn, identity, lease, limit, chunk_cache, policy,
+                                                            advance=not retry_uncertain)
         captured_identity = EmbeddingIdentity.canonical(
             provider_name,
             model,
@@ -5059,7 +5553,7 @@ def _chunk_backfill_text(
             profile_dim,
             profile_dtype,
             str(profile["byteorder"] or "little"),
-            "chunk",
+            str(profile["task"]),
         )
         if captured_identity.identity_hash != identity:
             raise ValueError(
@@ -5067,14 +5561,43 @@ def _chunk_backfill_text(
             )
         if retry_uncertain:
             pending, rows, chunk_meta = _chunk_authorized_uncertain_rows(
-                conn, identity, policy, limit
+                conn, identity, policy, limit, chunk_cache=chunk_cache,
+                **({"retry_before": time.time() - 600.0} if maintenance_slice else {}),
             )
             authorized_uncertain_ids = {row[0] for row in rows}
         else:
+            def discovery_stopped():
+                nonlocal stop_reason, budget_exhausted
+                if stop_event is not None and stop_event.is_set():
+                    stop_reason = "process_exit"
+                elif budget_s > 0 and time.monotonic() - started > budget_s:
+                    budget_exhausted = True
+                    stop_reason = "op_budget_exhausted"
+                return stop_reason is not None
+
+            gap_scan_state = {"stop": discovery_stopped}
             pending, rows, chunk_meta = _chunk_pending_rows(
-                conn, identity, policy, limit
+                conn, identity, policy, limit, incremental=incremental,
+                record_progress=incremental, chunk_cache=chunk_cache,
+                partial_window=partial_window, partial_turn=partial_turn,
+                gap_scan_state=gap_scan_state,
             )
+            if incremental:
+                _record_chunk_gapfill_walk(conn, identity, gap_scan_state)
             authorized_uncertain_ids = set()
+        if maintenance_slice:
+            # Keep the existing whole-message slice selection.
+            cut = min(len(rows), limit, 32)
+            while 0 < cut < len(rows) and chunk_meta[rows[cut - 1][0]][0] == chunk_meta[rows[cut][0]][0]:
+                cut -= 1
+            if cut == 0 and rows:
+                cut = 1
+                while cut < len(rows) and chunk_meta[rows[cut][0]][0] == chunk_meta[rows[0][0]][0]:
+                    cut += 1
+            rows = rows[:cut]
+        _record_chunk_partial_messages(
+            conn, identity, lease, {chunk_meta[row[0]][0] for row in rows},
+        )
         (
             documents,
             privacy_revision,
@@ -5083,45 +5606,70 @@ def _chunk_backfill_text(
             privacy_error,
         ) = _prepare_embedding_provider_documents(
             rows,
-            config=engine._config,
+            config=config,
             provider_name=provider_name,
             expected_revision=profile_revision,
         )
+        privacy_withheld = (
+            privacy_blocked
+            if privacy_revision is not None and privacy_revision == profile_revision
+            else 0
+        )
+        if privacy_withheld:
+            privacy_error = None
         if privacy_error is not None:
             error = privacy_error
             stop_reason = "privacy_refused"
 
         chunk_provider_config = dataclasses.replace(
-            engine._config, embedding_model=model
+            config, embedding_model=model
         )
         provider = (
             None
-            if privacy_error is not None
+            if stop_reason or privacy_error is not None or (privacy_withheld and not documents)
             else resolve_provider(chunk_provider_config, for_backfill=True)
         )
-        if privacy_error is not None:
+        if stop_reason or privacy_error is not None or (privacy_withheld and not documents):
             pass
         elif provider is None:
             error = "embedding provider is not configured; run `/lcm embed warmup`"
         elif (
             provider.model_id != model
             or str(provider.provider_id).lower() != provider_name.lower()
+            or profile_suffix != getattr(provider, "identity_revision_suffix", "")
         ):
             error = "configured provider does not match the chunk profile; run `/lcm embed warmup`"
         else:
             batch_size = _embedding_backfill_batch_size(
-                getattr(engine._config, "embedding_max_batch_items", None)
+                getattr(config, "embedding_max_batch_items", None)
             )
-            for offset in range(0, len(documents), batch_size):
+            batches = []
+            offset = 0
+            while offset < len(documents):
+                end = min(offset + batch_size, len(documents))
+                if maintenance_slice:
+                    while offset < end < len(documents) and chunk_meta[documents[end - 1][0]][0] == chunk_meta[documents[end][0]][0]:
+                        end -= 1
+                    if end == offset:  # A single message needs several bounded batches.
+                        end = min(offset + batch_size, len(documents))
+                batches.append(documents[offset:end])
+                offset = end
+            previous_message = None
+            for batch in batches:
+                if stop_event is not None and stop_event.is_set():
+                    stop_reason = "process_exit"
+                    break
                 if not lease.renew():
                     lease_lost = True
                     stop_reason = "lease_lost"
                     break
-                if budget_s > 0 and (time.monotonic() - started) > budget_s:
+                continuing_message = maintenance_slice and chunk_meta[batch[0][0]][0] == previous_message
+                if (budget_s > 0 and (time.monotonic() - started) > budget_s
+                        and not continuing_message and not (maintenance_slice and previous_message is None)):
                     budget_exhausted = True
                     stop_reason = "op_budget_exhausted"
                     break
-                batch = documents[offset:offset + batch_size]
+                previous_message = chunk_meta[batch[-1][0]][0]
                 batch_authorized_ids = {
                     item[0] for item in batch if item[0] in authorized_uncertain_ids
                 }
@@ -5150,7 +5698,7 @@ def _chunk_backfill_text(
                         try:
                             validate_embedding_privacy_dispatch(
                                 [batch[index][1] for index in normalized],
-                                engine._config,
+                                config,
                                 expected_revision=privacy_revision,
                             )
                         except EmbeddingPrivacyPolicyError as exc:
@@ -5174,7 +5722,7 @@ def _chunk_backfill_text(
                     accepted_indexes: set[int] = set()
                     for accepted_batch in _provider_chunk_document_batches(
                         provider, batch, chunk_meta,
-                        before_dispatch=before_dispatch,
+                        before_dispatch=before_dispatch, stop_event=stop_event,
                     ):
                         if len(accepted_batch.indexes) != len(accepted_batch.vectors):
                             raise EmbeddingProviderError(
@@ -5267,6 +5815,19 @@ def _chunk_backfill_text(
                             break
                     if lease_lost or identity_superseded:
                         break
+                    if stop_event is not None and stop_event.is_set():
+                        stop_reason = "process_exit"
+                        # The accepted batch is committed. Only un-dispatched
+                        # claims may be cleared; ordinary discovery resumes them.
+                        for index, item in enumerate(batch):
+                            if index not in request_by_index and not _owned_inflight_transition(
+                                conn, identity, lease, None, embedded_id=item[0],
+                                authorized_uncertain_ids=batch_authorized_ids,
+                            ):
+                                lease_lost = True
+                                stop_reason = "lease_lost"
+                                break
+                        break
                     skipped_indexes = {
                         int(index)
                         for index in getattr(provider, "last_skipped_documents", [])
@@ -5341,6 +5902,29 @@ def _chunk_backfill_text(
                         error = str(exc)
                         stop_reason = "privacy_refused"
                         break
+        if incremental and not retry_uncertain and pending == embedded and not (error or failed or skipped or stop_reason):
+            bounds = _chunk_cursor(conn, identity)
+            coverage = _chunk_coverage(conn, identity, bounds[0]) if bounds else None
+            if (coverage and coverage[2] == policy and coverage[0] <= bounds[0] and coverage[1] < bounds[1]
+                    and _chunk_policy_revision(conn, identity) >= CHUNK_POLICY_REVISION
+                    and not _chunk_inflight_ids(conn, identity)):
+                state = {"metadata_only": True, "coverage": coverage}
+                list(_chunk_gapfill_rows(conn, identity, (coverage[1] + 1, bounds[1]), policy,
+                                        _CHUNK_HISTORY_SCAN_MESSAGES, record_progress=True, gap_scan_state=state))
+                _record_chunk_gapfill_walk(conn, identity, state)
+        if (
+            not incremental and not retry_uncertain and pending == embedded
+            and not error and not failed and not skipped and not stop_reason
+            and not _chunk_inflight_ids(conn, identity)
+        ):
+            _record_chunk_policy_revision(conn, identity, _chunk_cursor(conn, identity) or (0, 0), policy)
+            conn.execute(
+                "UPDATE metadata SET value=json_remove(value, '$.repair_pending') WHERE key=? "
+                "AND json_type(value)='object' AND json_extract(value, '$.repair_pending') IS NOT NULL "
+                "AND EXISTS (SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
+                "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?)",
+                (f"chunk_partial_messages:{identity}", _EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation),
+            )
     except _BackfillLeaseLost:
         lease_lost = True
         stop_reason = "lease_lost"
@@ -5348,6 +5932,14 @@ def _chunk_backfill_text(
         error = str(exc)
     finally:
         if store is not None:
+            if lease is not None:
+                try:
+                    _prune_chunk_partial_messages(conn, identity, lease, chunk_cache, policy=policy)
+                    partial_messages = _chunk_partial_ids(conn, identity, backlog=True) != set()
+                except Exception as exc:
+                    logging.getLogger("hermes_lcm").warning("Partial-message prune failed: %s", exc)
+                    partial_messages = True
+                    error = f"{error}; partial-message prune failed: {exc}" if error else str(exc)
             if lease is not None and not lease_lost and not identity_superseded:
                 try:
                     lease.release()
@@ -5358,19 +5950,35 @@ def _chunk_backfill_text(
                     )
             store.close()
 
+    scan_state = {}
+    configured_policy = normalize_content_policy(getattr(config, "embedding_content_policy", "conversational"))
     remaining, in_flight_count, uncertain_count = _chunk_backfill_remaining(
-        db_path, identity, policy, pending, embedded
+        db_path, identity, policy if incremental else configured_policy, pending, embedded, incremental,
+        include_boundaries=stop_reason == "process_exit", chunk_cache=chunk_cache if policy == configured_policy else {},
+        inflight_policy=configured_policy,
+        deadline=started + budget_s if budget_s > 0 else None, scan_state=scan_state,
     )
+    operator_retry = uncertain_count if embedding_provider_id(provider_name) != "fastembed" else 0
+    backlog = True if scan_state.get("inflight_incomplete") else remaining + in_flight_count + uncertain_count - operator_retry
+    if incremental and policy != configured_policy:
+        backlog = True  # Override coverage cannot certify configured coverage; avoid a fresh full-history walk.
+    _record_embedding_catchup(db_path, "chunk", identity, bool(backlog) if incremental else backlog,
+                              operator_retry=operator_retry, scan_state=scan_state)
     selected_embeddable = len(documents) - len(skipped)
     status = _embedding_backfill_status(
         error=error, lease_lost=lease_lost, budget_exhausted=budget_exhausted,
         embedded=embedded, selected_embeddable=selected_embeddable,
         failed=failed, uncertain=uncertain_count, skipped=len(skipped),
+        privacy_withheld=privacy_withheld,
     )
-    estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
-    return _embedding_backfill_report(
+    if status == "complete" and partial_messages:
+        status = "partial"
+    estimated_tokens, estimated_cost_tokens, estimated_batches = _chunk_backfill_estimates(
+        documents=documents, provider_name=provider_name, model=model, config=config,
+    )
+    return dict(
         mode=mode, status=status, provider=provider_name, model=model,
-        pending=pending, selected=len(documents),
+        pending=pending, selected=len(documents) + privacy_withheld,
         estimated_tokens=estimated_tokens, estimated_cost_tokens=estimated_cost_tokens,
         estimated_batches=estimated_batches, embedded=embedded, skipped=skipped,
         failed=failed, remaining=remaining, duration=time.monotonic() - started,
@@ -5380,6 +5988,7 @@ def _chunk_backfill_text(
         privacy_revision=privacy_revision,
         privacy_transformed=privacy_transformed,
         privacy_blocked=privacy_blocked,
+        privacy_withheld=privacy_withheld,
     )
 
 
@@ -5393,6 +6002,7 @@ def _embedding_backfill_status(
     failed: list[tuple[str, str]],
     uncertain: int = 0,
     skipped: int = 0,
+    privacy_withheld: int = 0,
 ) -> str:
     """Report the truthful terminal status — never a premature ``complete``."""
     if error:
@@ -5403,89 +6013,49 @@ def _embedding_backfill_status(
         return "partial"
     if failed:
         return "failed" if embedded == 0 else "partial"
+    if privacy_withheld:
+        return "partial"
     if embedded >= selected_embeddable:
         return "complete"
     return "partial"
 
 
-def handle_lcm_command(raw_args: str | None, engine) -> str:
+def handle_lcm_command(
+    raw_args: str | None, engine, *,
+    session_engine_resolved: bool = True, session_context_present: bool = False,
+    session_profile: str = "", engine_profile: str = "", context_session_id: str = "",
+    context_conversation_id: str = "",
+) -> str:
     tokens = [part.strip() for part in (raw_args or "").strip().split() if part.strip()]
+    invocation = CommandInvocation(
+        command=tuple(tokens),
+        session_engine_resolved=session_engine_resolved,
+        session_context_present=session_context_present,
+        session_profile=session_profile, engine_profile=engine_profile,
+        context_session_id=context_session_id,
+        context_conversation_id=context_conversation_id,
+    )
+    decision = authorize(invocation)
+    if decision is Decision.READ_BINDINGS:
+        invocation = dataclasses.replace(
+            invocation,
+            bound_session_id=str(getattr(engine, "_session_id", "") or ""),
+            bound_conversation_id=str(getattr(engine, "_conversation_id", "") or ""),
+        )
+        decision = authorize(invocation)
+    if decision is Decision.CHECK_RESIDENT:
+        invocation = dataclasses.replace(
+            invocation, resident_engine_present=has_resident_lcm_engine(),
+        )
+        decision = authorize(invocation)
+    if decision in (Decision.PROFILE_MISMATCH, Decision.OWNERSHIP_UNPROVEN):
+        return decision.value
+    if not session_engine_resolved:
+        result = handle_lcm_command(raw_args, engine)
+        if decision is Decision.ALLOW_WITH_STORE:
+            return result + f"\nstore: {engine._store.db_path}"
+        return result
     if not tokens:
         return _status_text(engine)
 
-    head = tokens[0].lower()
-    rest = tokens[1:]
-
-    if head == "status":
-        if rest:
-            return _help_text("`/lcm status` does not accept extra arguments.")
-        return _status_text(engine)
-
-    if head == "doctor":
-        if not rest:
-            return _doctor_text(engine)
-        if len(rest) == 1 and rest[0].lower() == "clean":
-            return _doctor_clean_text(engine)
-        if len(rest) == 1 and rest[0].lower() == "repair":
-            return _doctor_repair_text(engine)
-        if len(rest) == 1 and rest[0].lower() == "source":
-            return _doctor_source_text(engine)
-        if len(rest) == 1 and rest[0].lower() == "retention":
-            return _doctor_retention_text(engine)
-        if len(rest) == 2 and rest[0].lower() == "clean" and rest[1].lower() == "apply":
-            return _doctor_clean_apply_text(engine)
-        if len(rest) == 2 and rest[0].lower() == "clean" and rest[1].lower() == "lifecycle":
-            return _doctor_clean_lifecycle_text(engine)
-        if len(rest) == 3 and rest[0].lower() == "clean" and rest[1].lower() == "lifecycle" and rest[2].lower() == "apply":
-            return _doctor_clean_lifecycle_apply_text(engine)
-        if len(rest) == 2 and rest[0].lower() == "repair" and rest[1].lower() == "apply":
-            return _doctor_repair_apply_text(engine)
-        if len(rest) == 2 and rest[0].lower() == "repair" and rest[1].lower() == "level3":
-            return _doctor_repair_level3_text(engine)
-        if len(rest) == 3 and [part.lower() for part in rest] == ["repair", "level3", "apply"]:
-            return _doctor_repair_level3_apply_text(engine)
-        if len(rest) == 2 and rest[0].lower() == "repair" and rest[1].lower() == "schema-stamp":
-            return _doctor_repair_schema_stamp_text(engine)
-        if (
-            len(rest) == 3
-            and rest[0].lower() == "repair"
-            and rest[1].lower() == "schema-stamp"
-            and rest[2].lower() == "apply"
-        ):
-            return _doctor_repair_schema_stamp_apply_text(engine)
-        if len(rest) == 2 and rest[0].lower() == "source" and rest[1].lower() == "apply":
-            return _doctor_source_apply_text(engine)
-        return _help_text("`/lcm doctor` currently supports `clean`, `clean apply`, `clean lifecycle`, `clean lifecycle apply`, `repair`, `repair apply`, `repair schema-stamp`, `repair schema-stamp apply`, `source`, `source apply`, and `retention` as extra subcommands, plus `repair level3` and `repair level3 apply`.")
-
-    if head == "backup":
-        if rest:
-            return _help_text("`/lcm backup` does not accept extra arguments.")
-        return _backup_text(engine)
-
-    if head == "rotate":
-        if not rest:
-            return _rotate_text(engine)
-        if len(rest) == 1 and rest[0].lower() == "apply":
-            return _rotate_apply_text(engine)
-        return _help_text("`/lcm rotate` accepts an optional `apply` subcommand.")
-
-    if head == "rollups":
-        return _rollups_text(rest, engine)
-
-    if head == "assertions":
-        return _assertions_text(rest, engine)
-
-    if head == "preset":
-        return _preset_text(rest, engine)
-
-    if head == "embed":
-        if len(rest) == 1 and rest[0].lower() == "warmup":
-            return _embedding_warmup_text(engine)
-        if rest and rest[0].lower() == "backfill":
-            return _embedding_backfill_text(rest[1:], engine)
-        return _help_text("`/lcm embed` requires the `warmup` or `backfill` subcommand.")
-
-    if head == "help":
-        return _help_text()
-
-    return _help_text(f"Unknown subcommand: {tokens[0]}")
+    return route(tokens[0], tokens[1:], engine, globals())
