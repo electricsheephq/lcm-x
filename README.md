@@ -1172,7 +1172,7 @@ compressor`, check how long that process has been running. A process started
 before the update still holds the old Hermes or LCM-X modules in memory and
 mixes them with the new files on disk. Restart that process (and the Hermes
 gateway). This is separate from the
-config case in the update section, where `Context engine 'lcm' not found` means
+config case in the [migration section](#migrating-from-hermes-lcm), where `Context engine 'lcm' not found` means
 `config.yaml` still names the old engine.
 
 ### Reporting a bug
