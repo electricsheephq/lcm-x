@@ -4357,12 +4357,12 @@ class LCMEngine(
             )
         self._update_model_pending_session_start = False
 
-    def _adopt_foreign_reset_frontier(self, state: Any) -> None:
+    def _adopt_foreign_reset_frontier(self, state: Any, frontier: int | None = None) -> None:
         #752 R3: a still-bound sibling may have rewound this row after our bind.
         if (state is not None and state.current_session_id == self._session_id
                 and state.last_reset_at is not None and state.last_reset_at != self._bound_reset_at):
             previous = int(self._last_compacted_store_id or 0)
-            frontier = int(state.current_frontier_store_id or 0)
+            frontier = int((state.current_frontier_store_id if frontier is None else frontier) or 0)
             self._frontier_holder().bind_frontier(frontier)
             self._bound_reset_at = state.last_reset_at
             logger.info(
@@ -4432,9 +4432,11 @@ class LCMEngine(
         if state.current_session_id is None:
             if state.last_finalized_session_id != session_id:
                 return False
+            finalized_frontier = state.last_finalized_frontier_store_id
             state = self._lifecycle.bind_session(session_id, conversation_id=state.conversation_id)
+            self._adopt_foreign_reset_frontier(state, finalized_frontier)
         else:
-            self._adopt_foreign_reset_frontier(state)  # a still-bound row only; an unbound one is #2048
+            self._adopt_foreign_reset_frontier(state)
         self._bound_reset_at = state.last_reset_at
         resumable_finalized = (
             state.last_finalized_frontier_store_id
@@ -5606,6 +5608,8 @@ class LCMEngine(
         session_id: str,
         messages: List[Dict[str, Any]],
     ) -> None:
+        self._adopt_foreign_reset_frontier(
+            self._lifecycle.get_by_conversation(self._conversation_id))
         with self._attribution_span("classifier"):
             proof = getattr(self, "_compress_commit_proof", None)
             reason = next((reason for reason, gate in (
@@ -5800,8 +5804,10 @@ class LCMEngine(
                 # Rows from first_lost on lost their only summaries: record the frontier the retained nodes
                 # still cover, so a resume, rotation or another engine re-summarises instead of skipping them.
                 retained_frontier = first_lost - 1
-                self._lifecycle.rewind_reset_frontier(
+                state = self._lifecycle.rewind_reset_frontier(
                     self._conversation_id, self._session_id, retained_frontier, observed=observed)
+                if state is not None:
+                    self._bound_reset_at = state.last_reset_at
                 self._pending_reset_frontier_store_id = min(
                     int(self._pending_reset_frontier_store_id or 0), retained_frontier)
 

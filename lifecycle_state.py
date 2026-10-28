@@ -779,11 +779,11 @@ class LifecycleStateStore:
 
     @_synchronized
     def rewind_reset_frontier(self, conversation_id, session_id, frontier_store_id, *, observed):
-        """#752: lower the frontiers whose summaries a reset deleted, in ONE conditional UPDATE.
+        """#752: lower deleted-summary frontiers and refresh the reset marker in ONE conditional UPDATE.
 
         A field moves only downwards, and only if it still holds the value read before deletion
-        (a concurrent publication wins). Nothing is written when nothing moves (the #1306 empty-reset
-        proof compares updated_at with last_reset_at).
+        (a concurrent publication wins). Nothing is written when nothing moves; the #1306 empty-reset
+        proof also requires an empty session.
         """
         if not conversation_id or observed is None:
             return None
@@ -797,7 +797,7 @@ class LifecycleStateStore:
                 SET current_frontier_store_id = CASE WHEN {cur_moves} THEN :f ELSE current_frontier_store_id END,
                     last_finalized_frontier_store_id =
                         CASE WHEN {fin_moves} THEN :f ELSE last_finalized_frontier_store_id END,
-                    updated_at = :now
+                    last_reset_at = :now, updated_at = :now
                 WHERE conversation_id = :cid AND ({cur_moves} OR {fin_moves})""", p)
         self._conn.commit()
         return self.get_by_conversation(conversation_id) if cursor.rowcount else None

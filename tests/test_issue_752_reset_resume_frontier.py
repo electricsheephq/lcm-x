@@ -240,7 +240,7 @@ def test_two_engine_publication_after_reset_then_resume(tmp_path, monkeypatch, c
                 engine.shutdown()
 
 
-@pytest.mark.parametrize("case", ["publication", "in_place", "rotation", "bound_after_reset", "own_reset"])
+@pytest.mark.parametrize("case", ["publication", "race", "end", "in_place", "rotation", "bound_after_reset", "own_reset"])
 def test_bound_engine_adopts_another_engines_reset_frontier(tmp_path, monkeypatch, caplog, case):
     monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
     caplog.set_level("INFO", logger=lcm_engine_module.__name__)
@@ -256,6 +256,14 @@ def test_bound_engine_adopts_another_engines_reset_frontier(tmp_path, monkeypatc
             engine_b = _engine(tmp_path)
             engine_b.on_session_start("S1", platform="cli", context_length=200_000)
             assert engine_b._last_compacted_store_id == 18
+        if case == "race":
+            delete = engine_a._dag.delete_below_depth
+
+            def _delete(*args, **kwargs):
+                engine_b._rebind_after_unadopted_compaction_commit()
+                return delete(*args, **kwargs)
+
+            monkeypatch.setattr(engine_a._dag, "delete_below_depth", _delete)
         engine_a.on_session_reset()  #752 R3: S1 stays bound; only the durable frontier rewinds.
         state = engine_a._lifecycle.get_by_conversation("S1")
         frontier = state.current_frontier_store_id
@@ -267,7 +275,7 @@ def test_bound_engine_adopts_another_engines_reset_frontier(tmp_path, monkeypatc
             assert engine_b._last_compacted_store_id == frontier
         engine = engine_a if case == "own_reset" else engine_b
         caplog.clear()
-        if case == "publication":
+        if case in ("publication", "race"):
             _ingest_turns(engine, host, range(13, 21))
             engine.compress(list(host), force=True)
             assert engine._last_compression_status == "compacted"
@@ -276,6 +284,9 @@ def test_bound_engine_adopts_another_engines_reset_frontier(tmp_path, monkeypatc
             )
             assert all(counts[sid] == 1 for sid in range(frontier + 1, 19))
             assert not any("publication_invariant_conflict" in r.message for r in caplog.records)
+        elif case == "end":
+            engine.on_session_end("S1", host)
+            assert engine._lifecycle.get_by_conversation("S1").last_finalized_frontier_store_id == frontier
         else:
             engine.on_session_start(
                 "S3" if case == "rotation" else "S1", boundary_reason="compression",
@@ -285,16 +296,15 @@ def test_bound_engine_adopts_another_engines_reset_frontier(tmp_path, monkeypatc
             assert state.current_session_id == ("S3" if case == "rotation" else "S1")
             assert state.current_frontier_store_id == engine._last_compacted_store_id == frontier
         adopted = [r for r in caplog.records if "after another engine's reset (in-process" in r.message]
-        assert len(adopted) == (1 if case in ("publication", "in_place") else 0)
+        assert len(adopted) == (1 if case in ("publication", "race", "end", "in_place") else 0)
     finally:
         for engine in (engine_b, engine_a):
             if engine is not None:
                 engine.shutdown()
 
 
-def test_unbound_in_place_boundary_after_another_engines_end_and_reset_does_not_adopt(tmp_path, monkeypatch, caplog):
-    # #2048: an unbound row re-binds at 0 even under retained coverage, so this path keeps its
-    # pre-R3 behaviour (no adoption) until #2048 lands.
+def test_unbound_in_place_boundary_adopts_rewound_finalized_frontier(tmp_path, monkeypatch, caplog):
+    #752 R3: adopt the rewound finalized frontier before stale local progress can re-lift it.
     monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
     caplog.set_level("INFO", logger=lcm_engine_module.__name__)
     engine_a, engine_b = _engine(tmp_path), _engine(tmp_path)
@@ -309,8 +319,10 @@ def test_unbound_in_place_boundary_after_another_engines_end_and_reset_does_not_
         engine_b.on_session_start(
             "S1", boundary_reason="compression", old_session_id="S1", platform="cli", context_length=200_000
         )
-        assert engine_b._lifecycle.get_by_conversation("S1").current_session_id == "S1"
-        assert not any("after another engine's reset (in-process" in r.message for r in caplog.records)
+        state = engine_b._lifecycle.get_by_conversation("S1")
+        assert state.current_session_id == "S1"
+        assert state.current_frontier_store_id == engine_b._last_compacted_store_id == 0
+        assert sum("after another engine's reset (in-process" in r.message for r in caplog.records) == 1
     finally:
         engine_b.shutdown()
         engine_a.shutdown()
