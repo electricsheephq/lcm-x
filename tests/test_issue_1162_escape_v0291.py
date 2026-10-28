@@ -8,6 +8,7 @@ import math
 
 import pytest
 
+import hermes_lcm.engine as lcm_engine
 from hermes_lcm import leaf_prep
 from hermes_lcm.compaction import _CompressionState, _LeafState, _THRESHOLD_FULL_SWEEP_MAX_PASSES
 from hermes_lcm.tokens import count_messages_tokens
@@ -521,7 +522,336 @@ def test_t12_contiguity_budget_lift(tmp_path, summaries, lines):
         out = engine._store_complete_input(chunk, {}, mapping, chunk, chunk, 0, [], 1,
                                             scanned=(stored, False), allow_retained_escape=True)
         assert out and engine._store_complete_blocked is None
-        assert {sid for _, ids in out for sid in ids} | {mapping[id(m)] for m, _ in out if id(m) in mapping} == {1, 2, 3}
+        def ids_of(pairs):
+            return [sid for m, ids in pairs for sid in [*ids, *([mapping[id(m)]] if id(m) in mapping else [])]]
+        # #2007: the list keeps the walk's order; the summarizer reads it in store order, not [row 2, row 0].
+        assert ids_of(out) == _walk_ids(rows, chunk)
+        assert ids_of(_in_store_order(engine, out)) == [1, 2, 3]
+    finally:
+        engine.shutdown()
+
+
+def _leaf_ids(engine, out) -> list:
+    full_map = engine._compress_run.store_ids_by_message_id or {}
+    return [sid for m, ids in out for sid in [*ids, *([full_map[id(m)]] if id(m) in full_map else [])]]
+
+
+def _walk_ids(stored, chunk) -> list:
+    """The walk's (main's) order for these leaves: the chunk rows in host order, each hidden row emitted
+    before the first chunk row stored after it."""
+    host = [next(sid for sid, row in enumerate(stored, start=1) if row is m) for m in chunk]
+    hidden, out = [sid for sid in range(1, len(stored) + 1) if sid not in host], []
+    for sid in host:
+        out += [h for h in hidden if h < sid and h not in out] + [sid]
+    return out
+
+
+def _in_store_order(engine, out) -> list:
+    """#2007: the order the summarizer reads ``out`` in (the rank of a host-reordered leaf)."""
+    rank = engine._store_complete_order
+    return sorted(out, key=lambda pair: rank[id(pair[0])]) if rank else list(out)
+
+
+def test_2007_identity_anchor_input_in_store_order(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    rows = [{"role": "user", "content": f"row {i}" + PAD, "timestamp": 10.0 * (i + 1)} for i in range(3)]
+    try:
+        engine.ingest(rows)
+        view = [rows[2], rows[0]]  # the host moved row 0 after row 2; row 1 is hidden
+        full_map = engine._get_store_id_map_for_messages(view)
+        engine._compress_run.store_ids_by_message_id = full_map
+        out = engine._identity_anchor_summary_input(view, full_map, view, view, budget=4000)
+        assert out and _leaf_ids(engine, out) == _walk_ids(rows, view)
+        assert _leaf_ids(engine, _in_store_order(engine, out)) == [1, 2, 3]
+        assert [m["content"] for m, _ids in _in_store_order(engine, out)] == [r["content"] for r in rows]
+    finally:
+        engine.shutdown()
+
+
+def test_2007_reordered_tool_group_stays_whole_in_store_order(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    user, call, result, reply = _turn("X", 100.0, tool=True)
+    later = {"role": "user", "content": "later" + PAD, "timestamp": 200.0}
+    try:
+        engine.ingest([user, call, result, reply, later])
+        view = [user, later, call, result, reply]  # the host moved the tool group after a later row
+        full_map = engine._get_store_id_map_for_messages(view)
+        engine._compress_run.store_ids_by_message_id = full_map
+        out = engine._identity_anchor_summary_input(view, full_map, view, view, budget=4000)
+        assert out and _leaf_ids(engine, out) == _walk_ids([user, call, result, reply, later], view)
+        out = _in_store_order(engine, out)
+        assert _leaf_ids(engine, out) == [1, 2, 3, 4, 5]
+        roles = [m.get("role") for m, _ids in out]
+        assert roles[1:3] == ["assistant", "tool"] and out[1][0].get("tool_calls")
+        assert out[2][0]["tool_call_id"] == out[1][0]["tool_calls"][0]["id"]
+    finally:
+        engine.shutdown()
+
+
+def _anchored_ids(engine, stored, view) -> list:
+    engine.ingest(stored)
+    full_map = engine._get_store_id_map_for_messages(view)
+    engine._compress_run.store_ids_by_message_id = full_map
+    out = engine._identity_anchor_summary_input(view, full_map, view, view, budget=4000)
+    assert out and _leaf_ids(engine, out) == _walk_ids(stored, view)  # #2007 r5: the list keeps the walk's order
+    return _leaf_ids(engine, _in_store_order(engine, out))  # the order the summarizer reads
+
+
+def test_2007_swapped_sibling_results_in_store_order(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    user = {"role": "user", "content": "user" + PAD, "timestamp": 100.0}
+    call = {"role": "assistant", "content": "", "tool_calls": [
+        {"id": f"call_{k}", "type": "function", "function": {"name": "read_file", "arguments": "{}"}} for k in "AB"]}
+    result_a, result_b = ({"role": "tool", "tool_call_id": f"call_{k}", "content": f"result {k}" + PAD} for k in "AB")
+    reply = {"role": "assistant", "content": "reply" + PAD}
+    try:  # the host swapped the call's two results
+        assert _anchored_ids(engine, [user, call, result_a, result_b, reply],
+                             [user, call, result_b, result_a, reply]) == [1, 2, 3, 4, 5]
+    finally:
+        engine.shutdown()
+
+
+def test_2007_hidden_result_follows_its_reordered_call(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    user, call, result, _reply = _turn("X", 100.0, tool=True)
+    answer = {"role": "assistant", "content": "answer" + PAD}
+    later = {"role": "user", "content": "later" + PAD, "timestamp": 200.0}
+    try:  # stored u1 a2 call3 result4 u5; the host hides the result and moves the call last
+        assert _anchored_ids(engine, [user, answer, call, result, later], [user, answer, later, call]) == [1, 2, 3, 4, 5]
+    finally:
+        engine.shutdown()
+
+
+def test_2007_result_of_a_hidden_call_keeps_store_order(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    user, call, result, _reply = _turn("X", 100.0, tool=True)
+    later = {"role": "user", "content": "later" + PAD, "timestamp": 200.0}
+    try:  # stored u1 call2 result3 u4; the host hides the call and moves the result last
+        assert _anchored_ids(engine, [user, call, result, later], [user, later, result]) == [1, 2, 3, 4]
+    finally:
+        engine.shutdown()
+
+
+def _call(*names, content=""):
+    return {"role": "assistant", "content": content, "tool_calls": [
+        {"id": name, "type": "function", "function": {"name": "read_file", "arguments": "{}"}} for name in names]}
+
+
+def _result(name, text):
+    return {"role": "tool", "tool_call_id": name, "content": text + PAD}
+
+
+def test_2007_unmatched_tool_row_between_siblings(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    user = {"role": "user", "content": "user" + PAD, "timestamp": 100.0}
+    call, result_a, result_b = _call("call_A", "call_B"), _result("call_A", "result A"), _result("call_B", "result B")
+    stray = {"role": "tool", "content": "tool row without a call id" + PAD}
+    try:  # stored u1 call2 A3 stray4 B5; the host puts B first and the stray row between B and A
+        assert _anchored_ids(engine, [user, call, result_a, stray, result_b],
+                             [user, call, result_b, stray, result_a]) == [1, 2, 3, 5, 4]
+    finally:
+        engine.shutdown()
+
+
+def _walk_order(engine, stored, chunk, mapping, claims):
+    engine.ingest(stored)
+    full = {id(m): s for m, s in mapping}
+    out = engine._store_complete_input(chunk, {id(m): c for m, c in claims}, full, chunk, chunk, 0, [],
+                                       100_000, scanned=(_rows(engine), False))
+    assert out and [m for m, _ids in out] == chunk  # #2007 r5: no hidden row, so the walk keeps the chunk order
+    return [m for m, _ids in _in_store_order(engine, out)]
+
+
+@pytest.mark.parametrize("shape", ["G", "H"])
+def test_2007_result_never_precedes_an_id_less_call(tmp_path, summaries, lines, shape):
+    # A regression guard: a call row without a store id (position 0) stays ahead of its results.
+    engine = _engine(tmp_path, False)
+    try:
+        if shape == "G":  # out [U2, C(no id, c), X3, R1->c]
+            result, user, later = _result("c", "result c"), {"role": "user", "content": "U" + PAD}, \
+                {"role": "user", "content": "X" + PAD}
+            call = _call("c", content="unstored call")
+            order = _walk_order(engine, [result, user, later], [user, call, later, result],
+                                [(user, 2), (later, 3)], [(result, [1])])
+            pairs = [(call, result)]
+        else:  # out [C1(a), Ra3, C(no id, b), Rb2->b]
+            call_a, result_b, result_a = _call("a"), _result("b", "result b"), _result("a", "result a")
+            call_b = _call("b", content="unstored call")
+            order = _walk_order(engine, [call_a, result_b, result_a], [call_a, result_a, call_b, result_b],
+                                [(call_a, 1), (result_a, 3)], [(result_b, [2])])
+            pairs = [(call_a, result_a), (call_b, result_b)]
+        position = {id(m): i for i, m in enumerate(order)}
+        assert all(position[id(c)] < position[id(r)] for c, r in pairs), [m["content"][:12] for m in order]
+    finally:
+        engine.shutdown()
+
+
+def test_2007_repeated_call_id_answers_the_latest_call(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    first = {"role": "user", "content": "first" + PAD, "timestamp": 100.0}
+    second = {"role": "user", "content": "second" + PAD, "timestamp": 200.0}
+    call_1, result_1 = _call("call_0", content="first call"), _result("call_0", "first result")
+    call_2, result_2 = _call("call_0", content="second call"), _result("call_0", "second result")
+    try:  # the host moves the first turn's tool group after the second turn's
+        assert _anchored_ids(engine, [first, call_1, result_1, second, call_2, result_2],
+                             [first, second, call_2, result_2, call_1, result_1]) == [1, 2, 3, 4, 5, 6]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("shape", ["hidden_results", "moved_result"])
+def test_2007_repeated_call_id_follows_the_store(tmp_path, summaries, lines, shape):
+    # #2011: a result of a reused call id joins the call stored nearest before it, not the walk's nearest.
+    engine = _engine(tmp_path, False)
+    call_1, result_1 = _call("call_0", content="first call"), _result("call_0", "first result")
+    call_2, result_2 = _call("call_0", content="second call"), _result("call_0", "second result")
+    later = {"role": "user", "content": "later" + PAD, "timestamp": 500.0}
+    try:
+        if shape == "hidden_results":  # stored C1 R1 C2 R2 U5; the host shows C2 C1 U5 (both results hidden)
+            ids = _anchored_ids(engine, [call_1, result_1, call_2, result_2, later], [call_2, call_1, later])
+        else:  # stored C1 R2 C3 R4; the host shows C1 C3 R4 R2
+            ids = _anchored_ids(engine, [call_1, result_1, call_2, result_2], [call_1, call_2, result_2, result_1])
+        assert ids == sorted(ids)
+    finally:
+        engine.shutdown()
+
+
+def test_2007_in_order_tool_shapes_returned_as_built(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    user = {"role": "user", "content": "user" + PAD, "timestamp": 100.0}
+    hidden = {"role": "user", "content": "hidden" + PAD, "timestamp": 150.0}
+    call, result_a, result_b = _call("call_A", "call_B"), _result("call_A", "result A"), _result("call_B", "result B")
+    stray = {"role": "tool", "content": "tool row without a call id" + PAD}
+    again, result_c = _call("call_A", content="again"), _result("call_A", "result again")
+    stored = [user, hidden, call, result_a, result_b, stray, again, result_c]
+    view = [m for m in stored if m is not hidden]
+    try:
+        engine.ingest(stored)
+        full_map = engine._get_store_id_map_for_messages(view)
+        engine._compress_run.store_ids_by_message_id = full_map
+        out = engine._identity_anchor_summary_input(view, full_map, view, view, budget=4000)
+        assert _leaf_ids(engine, out) == list(range(1, len(stored) + 1))
+        assert engine._store_complete_order == {}  # #2007 r5: an in-order leaf gets no rank
+        assert [m for m, _ids in out if any(m is v for v in view)] == view
+        assert [m["content"] for m, _ids in out] == [m["content"] for m in stored]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("shape", ["row_inside_group", "two_calls_then_results"])
+def test_2007_store_ordered_split_group_returned_as_built(tmp_path, summaries, lines, shape):
+    # F4 guard: a leaf already in store order keeps today's input, even when the store holds a row
+    # between a call and its result; regrouping it would move that row out of store order.
+    engine = _engine(tmp_path, False)
+    if shape == "row_inside_group":  # stored C1(a) U2 Ra3
+        rows = [_call("a"), {"role": "user", "content": "between" + PAD}, _result("a", "result a")]
+    else:  # stored C1(a) C2(b) Ra3 Rb4
+        rows = [_call("a"), _call("b", content="second call"), _result("a", "result a"), _result("b", "result b")]
+    try:
+        engine.ingest(rows)
+        full = {id(m): s for s, m in enumerate(rows, start=1)}
+        assert engine._store_complete_input(rows, {}, full, rows, rows, 0, [], 100_000,
+                                            scanned=(_rows(engine), False)) is None
+        assert engine._store_complete_order == {}
+    finally:
+        engine.shutdown()
+
+
+def _leaf_calls(monkeypatch, engine, fail_first: bool):
+    """The leaf summariser texts (a stub whose first call can fail retry-worthy) and each leaf's consumed ids."""
+    texts, consumed = [], []
+
+    def summarize(**kwargs):
+        if kwargs.get("depth", 0) == 0:
+            texts.append(kwargs["text"])
+            if fail_first and len(texts) == 1:
+                raise TimeoutError("request timed out")  # retry-worthy: the rescue retries a smaller prefix
+        return "Earlier turns.\nExpand for details about: turns", 1
+
+    original = engine._leaf_consumption
+
+    def consumption(*args):
+        result = original(*args)
+        consumed.append(result[4])
+        return result
+
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", summarize)
+    monkeypatch.setattr(engine, "_leaf_consumption", consumption)
+    return texts, consumed
+
+
+def _read_ids(text, stored) -> list:
+    """The store ids of the rows a summariser text holds, in the order it holds them."""
+    marks = [(sid, row["content"].split(PAD)[0]) for sid, row in enumerate(stored, start=1)]
+    return [sid for _at, sid in sorted((text.index(mark), sid) for sid, mark in marks if mark in text)]
+
+
+def test_2007_rescue_prefix_consumes_only_rows_it_read(tmp_path, lines, monkeypatch):
+    # B1: the host holds [B(2), A(1)]; the first call fails retry-worthy and the rescue retries one row.
+    engine = _engine(tmp_path, False)
+    a = {"role": "user", "content": "row A" + PAD, "timestamp": 10.0}
+    b = {"role": "user", "content": "row B" + PAD, "timestamp": 20.0}
+    stored = [a, b, *[row for i in (2, 3) for row in _turn(f"T{i}", 100.0 * i)]]
+    view = [b, a, *stored[2:]]
+    texts, consumed = _leaf_calls(monkeypatch, engine, fail_first=True)
+    try:
+        engine.ingest(stored)
+        engine._ingest_cursor = len(view)
+        engine.compress(view, current_tokens=10_000)
+        assert len(texts) >= 2 and sorted(_read_ids(texts[0], stored)) == [1, 2] and consumed, (texts, consumed)
+        read = _read_ids(texts[1], stored)
+        assert len(read) == 1 and consumed[0] == sorted(read)  # no row the summary never read is consumed
+        assert read == sorted(read)  # store order
+    finally:
+        engine.shutdown()
+
+
+def _hidden_row_and_tool_group():
+    user = {"role": "user", "content": "user 1" + PAD, "timestamp": 100.0}
+    hidden = {"role": "user", "content": "hidden 2" + PAD, "timestamp": 150.0}
+    call, result = _call("call_X", content="call 3"), _result("call_X", "result 4")
+    reply = {"role": "assistant", "content": "reply 5" + PAD}
+    later = {"role": "user", "content": "later 6" + PAD, "timestamp": 200.0}
+    return [user, hidden, call, result, reply, later, *[row for i in (3, 4) for row in _turn(f"T{i}", 100.0 * i)]]
+
+
+@pytest.mark.parametrize("rescue", [False, True], ids=["full", "rescue"])
+def test_2007_summariser_reads_a_reordered_leaf_in_store_order(tmp_path, lines, monkeypatch, rescue):
+    engine = _engine(tmp_path, False, leaf_chunk_tokens=4000, dynamic_leaf_chunk_max=4000)
+    stored = _hidden_row_and_tool_group()
+    view = [stored[0], stored[5], *stored[2:5], *stored[6:]]  # row 2 hidden; row 6 moved before the tool group
+    texts, _consumed = _leaf_calls(monkeypatch, engine, fail_first=rescue)
+    try:
+        engine.ingest(stored)
+        engine._ingest_cursor = len(view)
+        engine.compress(view, current_tokens=10_000)
+        read = [_read_ids(text, stored) for text in texts]
+        assert read and {1, 2, 3, 4, 5, 6} <= set(read[0]) and read[0] == sorted(read[0]), read
+        if rescue:  # the rescue prefix of the walk, still read in store order (the call before its result)
+            assert len(read) >= 2 and {3, 4, 6} <= set(read[1]) < set(read[0]), read
+            assert read[1] == sorted(read[1]), read
+    finally:
+        engine.shutdown()
+
+
+def test_2007_in_order_leaf_serialized_as_given(tmp_path, lines, monkeypatch):
+    engine = _engine(tmp_path, False, leaf_chunk_tokens=4000, dynamic_leaf_chunk_max=4000)
+    stored = _hidden_row_and_tool_group()
+    view = [row for i, row in enumerate(stored) if i != 1]  # row 2 hidden, the rest in store order
+    texts, _consumed = _leaf_calls(monkeypatch, engine, fail_first=False)
+    given, original = [], engine._summarize_leaf_chunk_with_rescue
+
+    def summarise(chunk, **kwargs):
+        given.append(engine._serialize_messages_with_clip(list(chunk))[0])
+        return original(chunk, **kwargs)
+
+    monkeypatch.setattr(engine, "_summarize_leaf_chunk_with_rescue", summarise)
+    try:
+        engine.ingest(stored)
+        engine._ingest_cursor = len(view)
+        engine.compress(view, current_tokens=10_000)
+        assert texts and given and texts[0] == given[0]  # main's serialization: the input as given, byte for byte
+        assert {1, 2, 3, 4, 5, 6} <= set(_read_ids(texts[0], stored))
     finally:
         engine.shutdown()
 

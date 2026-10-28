@@ -224,7 +224,8 @@ class StoreCompleteMixin:
                               accounted_ids=(), scale: int = 1, scanned=None, copy_lookup=None,
                               escape_retained: bool = False, allow_retained_escape: bool = False,
                               lift_allowed: bool = True) -> Optional[list]:
-        """``[(input_row, [store_id, ...]), ...]`` in store order; ``[]`` when the leaf cannot start
+        """``[(input_row, [store_id, ...]), ...]`` in walk order (when the host reordered the leaf,
+        ``_store_complete_order`` holds each input row's store-order rank); ``[]`` when the leaf cannot start
         (a retained occurrence, no source rows, or a contiguity cut); None: today's input."""
         from .identity_anchor import _match_occurrences
 
@@ -233,6 +234,7 @@ class StoreCompleteMixin:
         self._store_complete_blocked = None  # #1162: (store_id, role, kind, chunk head position) of a [] return
         self._store_complete_empty_reason = ""
         self._store_complete_escaped = []
+        self._store_complete_order = {}  # #2007: id(input row) -> store-order rank, set only for a host-reordered leaf
         given_claims = claims
         in_chunk = {id(message) for message in chunk}
         claims = {key: list(ids) for key, ids in claims.items()}
@@ -277,8 +279,8 @@ class StoreCompleteMixin:
         def ids_of(message, ids) -> list:
             return list(ids) + ([full_map[id(message)]] if id(message) in full_map else [])
 
-        def position(message) -> int:
-            return max(ids_of(message, claims.get(id(message), ())), default=0)
+        def position(message, ids=None) -> int:
+            return max(ids_of(message, claims.get(id(message), ()) if ids is None else ids), default=0)
 
         def calls(messages):
             return {_tool_call_id(call) for m in messages for call in m.get("tool_calls") or ()} - {""}
@@ -448,6 +450,61 @@ class StoreCompleteMixin:
         emitted = sum(1 for message, _ids in out if id(message) in in_chunk)
         self._store_complete_escaped = [(sid, m.get("role"), escaped[sid])
                                         for m, ids in out for sid in ids if sid in escaped]
+        # #2007: the walk above decides WHICH rows the leaf takes and their order (a host prefix of the chunk,
+        # which _leaf_consumption and a rescue prefix rely on); the summarizer reads them in store order, each
+        # tool group whole, through the rank published in _store_complete_order.
+        # A call group is an assistant row with tool calls plus every tool row that answers it: the call with
+        # that id stored nearest before the result, else the nearest preceding one in the walk (a repeated id
+        # follows the store, #2011). Every other row with a store id is its own unit; a row
+        # without one (position 0) stays behind the row before it, a leading one first. A group sorts at
+        # its call's store position or, when the call has none, at its earliest stored result; inside it
+        # the call stays first and its results follow in store order. A leaf whose stored rows are already
+        # in store order gets no rank, even when the store holds a row inside a group; in a regrouped
+        # leaf such a row follows the group. The sorts are stable.
+        def call_ids(message) -> set:
+            return calls([message]) if message.get("role") == "assistant" else set()
+
+        def tool_id(message) -> str:
+            return str(message.get("tool_call_id") or "").strip() if message.get("role") == "tool" else ""
+
+        answered = {call_id for message, _ids in out for call_id in call_ids(message)}
+        parts, part = [], None  # part = [row, *id-less rows behind it], in walk order
+        for message, ids in out:
+            if tool_id(message) in answered or call_ids(message) or position(message, ids) or part is None:
+                part = [(message, ids)]
+                parts.append(part)
+            else:
+                part.append((message, ids))
+        heads, owners = {}, {}  # walk index of a unit's head -> unit; call id -> [(store position, walk index)]
+        for index, part in enumerate(parts):
+            if call_ids(part[0][0]):
+                heads[index] = [part]  # unit = [[head, *id-less], [result, *id-less], ...]
+                for call_id in call_ids(part[0][0]):
+                    owners.setdefault(call_id, []).append((position(*part[0]), index))
+        for index, part in enumerate(parts):
+            if index in heads:
+                continue
+            at, mine = position(*part[0]), owners.get(tool_id(part[0][0]), [])
+            owner = max([o for o in mine if at and 0 < o[0] < at], default=None) or max(
+                [o for o in mine if o[1] < index], key=lambda o: o[1], default=None)
+            if owner is None:
+                heads[index] = [part]
+            else:
+                heads[owner[1]].append(part)
+        units = [heads[index] for index in sorted(heads)]
+
+        def by_position(parts) -> list:  # stable; a part without a store id keeps its predecessor's key
+            keys, key = [], 0
+            for unit_parts in parts:
+                key = position(*unit_parts[0][0]) or min((p for p in (position(*r[0]) for r in unit_parts[1:]) if p),
+                                                        default=0) or key
+                keys.append(key)
+            return [item for _key, item in sorted(zip(keys, parts), key=lambda pair: pair[0])]
+        stored = [p for p in (position(m, ids) for m, ids in out) if p]
+        if any(a > b for a, b in zip(stored, stored[1:])):
+            ordered = [pair for unit in by_position(units)
+                       for part in [unit[0], *(p[0] for p in by_position([[r] for r in unit[1:]]))] for pair in part]
+            self._store_complete_order = {id(m): i for i, (m, _ids) in enumerate(ordered)}
         if emitted == len(out) == len(chunk) and not excluded and not any(ids for _m, ids in out):
             return None  # nothing hidden, claimed or excluded: today's input and mapping
         last = max(s for m, ids in out for s in ids_of(m, ids)) if any(ids_of(m, ids) for m, ids in out) else frontier

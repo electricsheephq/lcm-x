@@ -1397,6 +1397,7 @@ class LCMEngine(
         self._hidden_backlog_unknown_warned: set[str] = set()
         self._unattributed_leaf_warned: set[tuple[str, int]] = set()
         self._leaf_rescue_admit: Callable[[list], bool] | None = None  # #1147 r1: per-call rescue lineage check
+        self._leaf_summary_order: dict[int, int] | None = None  # #2007: per-call store-order rank of the leaf rows
         self._compaction_request = CompactionRequest()
         self._no_progress_candidate = False  # set by _compress_impl for compress()
         self._objective_only_noop = False
@@ -3167,13 +3168,20 @@ class LCMEngine(
         deadline: Optional[float] = None,
     ) -> tuple[List[Dict[str, Any]], int, str, int, int]:
         """The foreground leaf summariser: the live values in, the provenance written back (#441, #652)."""
+        order = getattr(self, "_leaf_summary_order", None)
+
+        def serialize(batch, **budget):  # #2007: a host-reordered leaf, or its rescue prefix, is read in store order
+            if order and all(id(m) in order for m in batch):
+                batch = sorted(batch, key=lambda m: order[id(m)])
+            return self._serialize_messages_with_clip(batch, **budget)
+
         result = summarize_leaf_chunk_with_rescue(
             initial_chunk,
             config=self._config,
             focus_topic=focus_topic,
             circuit_breaker=self._summary_circuit_breaker,
             spend_guard=self._summary_spend_guard,
-            serialize=self._serialize_messages_with_clip,
+            serialize=serialize,
             leaf_target_tokens=self._leaf_target_tokens,
             next_rescue_chunk=self._next_leaf_rescue_chunk,
             primary_route=self._primary_summary_route,

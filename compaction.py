@@ -149,6 +149,7 @@ class _LeafState:
     premapped_store_ids: Optional[Dict[int, int]] = None
 
     summary_input_chunk: List[Dict[str, Any]] = field(default_factory=list)
+    summary_order: Optional[Dict[int, int]] = None  # #2007: id(summary input row) -> store-order rank
     selected_raw_chunk: List[Dict[str, Any]] = field(default_factory=list)
     prepared: Any = None
     pending_escapes: list = field(default_factory=list)
@@ -1365,7 +1366,8 @@ class CompactionMixin:
         claims; None when no leaf can start there. The loop's store-complete state is restored afterwards."""
         saved = getattr(self, "_store_complete_excluded", []), getattr(self, "_store_complete_cut", False)
         saved_diagnostics = (getattr(self, "_store_complete_blocked", None),
-                             getattr(self, "_store_complete_empty_reason", ""), getattr(self, "_store_complete_escaped", []))
+                             getattr(self, "_store_complete_empty_reason", ""), getattr(self, "_store_complete_escaped", []),
+                             getattr(self, "_store_complete_order", {}))
         selected_input = [message for message in chunk if id(message) not in dependent_reply_message_ids]
         self._store_complete_excluded, self._store_complete_cut = [], False
         try:
@@ -1395,7 +1397,8 @@ class CompactionMixin:
             return consumption
         finally:
             self._store_complete_excluded, self._store_complete_cut = saved
-            self._store_complete_blocked, self._store_complete_empty_reason, self._store_complete_escaped = saved_diagnostics
+            (self._store_complete_blocked, self._store_complete_empty_reason, self._store_complete_escaped,
+             self._store_complete_order) = saved_diagnostics
 
     def _reject_prepared_chain(self, leaf, reason: str) -> None:
         """#787: the first rejection ends the chain from ``leaf`` on, each leaf counted under ``reason``."""
@@ -2735,6 +2738,7 @@ class CompactionMixin:
                 full_map = self._compress_run.store_ids_by_message_id  # #1147 r1: use the full pass lineage.
                 self._leaf_rescue_admit = lambda chunk: any(anchor_claims.get(id(m)) for m in chunk) or bool(
                     self._get_store_ids_for_messages([sources.get(id(m), m) for m in chunk], full_map))
+                self._leaf_summary_order = leaf.summary_order  # #2007: the serializer reads this leaf in store order
                 summary_kwargs: dict[str, Any] = {"focus_topic": state.focus_topic}
                 if state.threshold_full_sweep_active:
                     summary_kwargs["deadline"] = state.sweep_deadline
@@ -2767,7 +2771,7 @@ class CompactionMixin:
                     return "break", None
                 raise
             finally:
-                self._leaf_rescue_admit = None  # #1147 r1: the rescue hook lives for this call only
+                self._leaf_rescue_admit = self._leaf_summary_order = None  # #1147 r1 / #2007: hooks for this call only
                 if state.threshold_full_sweep_active:
                     sweep_step_done("summariser", step_started)
             # #652: no truncated level 3 leaf while the fit can rescue; the backlog stays. A level 3 that
@@ -3146,6 +3150,7 @@ class CompactionMixin:
         self._store_complete_copy_exclusion_proofs = {}
         self._store_complete_empty_reason = ""
         self._store_complete_escaped = []
+        self._store_complete_order = {}  # #2007: also when identity anchoring is off (a stale id() could recur)
         step_started = time.monotonic() if state.threshold_full_sweep_active else 0.0
         leaf.anchored_input = self._identity_anchor_summary_input(
             selected_input, self._compress_run.store_ids_by_message_id, state.working_messages, leaf.selected_raw_chunk,
@@ -3170,6 +3175,9 @@ class CompactionMixin:
             state.noop_reason, state.unattributed_leaf_refused = "selected leaf chunk lacks raw store lineage", True
             return "break", None
         leaf.summary_input_chunk, leaf.sources, leaf.anchor_claims = self._leaf_summary_input(leaf.anchored_input, selected_input)
+        rank = self._store_complete_order  # #2007: carrier rows are new dicts; rank their source rows
+        order = {id(m): rank.get(id(leaf.sources.get(id(m), m))) for m in leaf.summary_input_chunk}
+        leaf.summary_order = order if rank and None not in order.values() else None
         if leaf.prepared is not None and (not leaf.summary_input_chunk or tuple(self._leaf_consumption(
                 leaf.selected_raw_chunk, leaf.summary_input_chunk, leaf.sources, leaf.anchored_input, leaf.anchor_claims,
                 dependent_reply_message_ids)[3:]) != (list(leaf.prepared.covered_store_ids),) * 2):
