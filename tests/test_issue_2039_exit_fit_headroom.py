@@ -1,6 +1,8 @@
 """#2039: over-window threshold exits retain headroom without changing the no-cut fallback."""
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 import hermes_lcm.survival_fit as survival_fit
@@ -50,7 +52,7 @@ def test_over_window_exit_fit_leaves_host_threshold_headroom(engine):
     assert engine._store.get_session_messages("S", limit=100_000) == stored
 
 
-def test_exit_cap_without_whole_turn_cut_keeps_plain_window_fallback(engine):
+def test_exit_cap_without_whole_turn_cut_keeps_plain_window_fallback(engine, caplog):
     view = _stored_turns(engine, 300, 395, newest_words=100_000)
     measure = engine._survival_measure(view)
     observed = measure + 48_602
@@ -59,8 +61,11 @@ def test_exit_cap_without_whole_turn_cut_keeps_plain_window_fallback(engine):
     exit_budget = engine._survival_fit_budget(view, observed, request_cap=cap)
     assert engine._survival_measure(view[-2:]) > exit_budget
 
-    result = engine._survival_fit(view, view, observed, "exit_fit:noop", request_cap=cap)
+    with caplog.at_level(logging.INFO, logger="hermes_lcm"):
+        result = engine._survival_fit(view, view, observed, "exit_fit:noop", request_cap=cap)
 
+    # The fallback applies a fit, so no "the list stays as it is" skip line is logged.
+    assert "LCM exit fit skipped" not in caplog.text
     # Base 32d3c3e2: 40 ordinary turns (605 each) + newest (150,013) fit the plain budget.
     # One more ordinary turn does not fit, so today's uncapped recursion keeps rows 518 onward.
     assert result == view[518:]
