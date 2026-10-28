@@ -2,5 +2,9 @@
   "_frontier": {
     "lifetime": "process",
     "why": "Owned by one engine for its lifetime; session transitions update the held values without replacing the holder."
+  },
+  "_survival_counter_write_lost": {
+    "lifetime": "process",
+    "why": "Set by a failed survival-fit counter write and cleared by the next successful write; not reset on profile rebinding."
   }
 }
