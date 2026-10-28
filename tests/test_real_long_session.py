@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from tests.real_long_session_probe import assert_ordered_tail, assert_restored_history, canonical
+from tests.real_long_session_probe import assert_ordered_tail, assert_restored_history, assert_resumed_input, canonical
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -115,3 +115,21 @@ def test_restored_history_rejects_missing_or_reordered_rows() -> None:
         assert_restored_history(history[:-1], terminal)
     with pytest.raises(AssertionError, match="restored history changed"):
         assert_restored_history(list(reversed(history)), terminal)
+
+
+def test_resumed_input_accepts_a_compaction_input_and_rejects_changed_rows() -> None:
+    # The first resumed turn may compact before any provider request; the
+    # compaction input must then carry the whole restored history (#1999).
+    history = [{"role": "user", "content": "inventory"}, {"role": "assistant", "content": "noted"}]
+    terminal = {"history": [canonical(m) for m in history], "tail": [canonical(m) for m in history]}
+    newest = {"role": "user", "content": "next"}
+    assert_resumed_input([*history, newest], terminal, "next")
+    assert_resumed_input([{"role": "system", "content": "host"}, *history, newest], terminal, "next")
+    with pytest.raises(AssertionError, match="newest user changed"):
+        assert_resumed_input([*history, {"role": "user", "content": "other"}], terminal, "next")
+    with pytest.raises(AssertionError, match="restored history changed"):
+        assert_resumed_input([history[1], newest], terminal, "next")
+    with pytest.raises(AssertionError, match="restored history changed"):
+        assert_resumed_input([*reversed(history), newest], terminal, "next")
+    with pytest.raises(AssertionError, match="restored history changed"):
+        assert_resumed_input([history[0], {**history[1], "content": "noted\n"}, newest], terminal, "next")
