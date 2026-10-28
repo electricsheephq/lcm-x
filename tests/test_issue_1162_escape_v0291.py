@@ -416,6 +416,9 @@ def test_t6r_rotation_child(tmp_path, summaries, lines):
         engine.on_session_start("S2", platform="cli", context_length=200_000,
                                 conversation_id="conv", boundary_reason="compression", old_session_id="S")
         assert engine._identity_anchor_covered_view(retained, {})
+        # The wedge symptom: the child must still step over the escaped host copy.
+        engine._compress_run.store_ids_by_message_id = engine._get_store_id_map_for_messages(view)
+        assert len(engine._identity_anchor_extend_chunk([retained], [retained, *_turn("C20", 2000.0)])) > 1
         _, trace = _passes(engine, view, 1, lines)
         assert not any(t["reason"] == "selected leaf chunk lacks raw store lineage" for t in trace), trace
     finally:
