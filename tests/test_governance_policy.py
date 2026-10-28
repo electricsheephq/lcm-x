@@ -246,7 +246,10 @@ def test_release_manager_delegation_is_recorded_and_bounded():
             " or release, repository settings, private vulnerability handling, or public security disclosure;"
             " those stay with the code owner.") in policy
     assert "widening this bullet stays with the code owner" in policy
-    assert "on a PR it authored it uses the fallback reviewer instead of skipping" in policy
+    assert "It covers: issue and feature acceptance, priority and compatibility decisions; triage metadata and milestones; public data-integrity disclosure; issue lifecycle (close as fixed once the issue's own acceptance is met, as duplicate, or as not planned with the reason; reopen); merges through the `land-pr` barrier; rc tags; and GA cuts after the release gate passes." in policy
+    assert "a lane from a model other than the author's that meets the `land-pr` review obligation" in policy
+    assert ("on a PR it authored it uses the fallback reviewer (a lane from a model other than the author's that"
+            " meets the `land-pr` review obligation) instead of skipping") in policy
     assert "For close and reopen, the release manager's decision under the code owner's recorded delegation" in skill
     assert "release-manager delegation that stands for it" in skill
     assert "public security disclosure still needs the code owner" in skill

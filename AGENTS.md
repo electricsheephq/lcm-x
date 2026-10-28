@@ -199,9 +199,10 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   acceptance is met, as duplicate, or as not planned with the reason; reopen); merges through the
   `land-pr` barrier; rc tags; and GA cuts after the release gate passes. For these actions its
   decision is the maintainer authorization and the human code-owner approval that this file,
-  CONTRIBUTING.md and `triage-backlog` require. Each action still re-fetches live state first,
+  CONTRIBUTING.md, `land-pr` and `triage-backlog` require. Each action still re-fetches live state first,
   leaves an evidence comment, and reads back the result. It decides `REVIEW_SKIPPED` lanes; on a PR
-  it authored it uses the fallback reviewer instead of skipping. It does not cover bypassing checks or
+  it authored it uses the fallback reviewer (a lane from a model other than the author's that meets
+  the `land-pr` review obligation) instead of skipping. It does not cover bypassing checks or
   the ruleset, force-pushes, deleting `main` or a published tag or release, repository settings,
   private vulnerability handling, or public security disclosure; those stay with the code owner.
   Other bots and contributor agents stay proposal-only.
