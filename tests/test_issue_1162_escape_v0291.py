@@ -565,6 +565,50 @@ def test_2007_reordered_tool_group_stays_whole_in_store_order(tmp_path, summarie
         engine.shutdown()
 
 
+def _anchored_ids(engine, stored, view) -> list:
+    engine.ingest(stored)
+    full_map = engine._get_store_id_map_for_messages(view)
+    engine._compress_run.store_ids_by_message_id = full_map
+    out = engine._identity_anchor_summary_input(view, full_map, view, view, budget=4000)
+    assert out
+    return _leaf_ids(engine, out)
+
+
+def test_2007_swapped_sibling_results_in_store_order(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    user = {"role": "user", "content": "user" + PAD, "timestamp": 100.0}
+    call = {"role": "assistant", "content": "", "tool_calls": [
+        {"id": f"call_{k}", "type": "function", "function": {"name": "read_file", "arguments": "{}"}} for k in "AB"]}
+    result_a, result_b = ({"role": "tool", "tool_call_id": f"call_{k}", "content": f"result {k}" + PAD} for k in "AB")
+    reply = {"role": "assistant", "content": "reply" + PAD}
+    try:  # the host swapped the call's two results
+        assert _anchored_ids(engine, [user, call, result_a, result_b, reply],
+                             [user, call, result_b, result_a, reply]) == [1, 2, 3, 4, 5]
+    finally:
+        engine.shutdown()
+
+
+def test_2007_hidden_result_follows_its_reordered_call(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    user, call, result, _reply = _turn("X", 100.0, tool=True)
+    answer = {"role": "assistant", "content": "answer" + PAD}
+    later = {"role": "user", "content": "later" + PAD, "timestamp": 200.0}
+    try:  # stored u1 a2 call3 result4 u5; the host hides the result and moves the call last
+        assert _anchored_ids(engine, [user, answer, call, result, later], [user, answer, later, call]) == [1, 2, 3, 4, 5]
+    finally:
+        engine.shutdown()
+
+
+def test_2007_result_of_a_hidden_call_keeps_store_order(tmp_path, summaries, lines):
+    engine = _engine(tmp_path, False)
+    user, call, result, _reply = _turn("X", 100.0, tool=True)
+    later = {"role": "user", "content": "later" + PAD, "timestamp": 200.0}
+    try:  # stored u1 call2 result3 u4; the host hides the call and moves the result last
+        assert _anchored_ids(engine, [user, call, result, later], [user, later, result]) == [1, 2, 3, 4]
+    finally:
+        engine.shutdown()
+
+
 def test_t11_prepared_escape_promotes(tmp_path, summaries, lines, monkeypatch):
     engine = _engine(tmp_path, False, fresh_tail_count=1, leaf_chunk_tokens=1000,
                      context_threshold=0.75, background_leaf_prep_enabled=True)

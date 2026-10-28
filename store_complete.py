@@ -224,7 +224,7 @@ class StoreCompleteMixin:
                               accounted_ids=(), scale: int = 1, scanned=None, copy_lookup=None,
                               escape_retained: bool = False, allow_retained_escape: bool = False,
                               lift_allowed: bool = True) -> Optional[list]:
-        """``[(input_row, [store_id, ...]), ...]`` in store order; ``[]`` when the leaf cannot start
+        """``[(input_row, [store_id, ...]), ...]`` in store order (a tool group kept whole); ``[]`` when the leaf cannot start
         (a retained occurrence, no source rows, or a contiguity cut); None: today's input."""
         from .identity_anchor import _match_occurrences
 
@@ -450,16 +450,22 @@ class StoreCompleteMixin:
                                         for m, ids in out for sid in ids if sid in escaped]
         # #2007: the walk above decides WHICH rows the leaf takes (a host prefix of the chunk, which
         # _leaf_consumption consumes); the summarizer reads them in store order. A unit is a row with a
-        # store id plus the tool results and id-less rows (position 0) after it: a tool group stays whole,
-        # an id-less row stays behind its neighbour, leading ones stay first; the stable sort keeps an
-        # in-order leaf as built.
-        units: list = []
+        # store id plus, when it is a tool call, the results that answer it; each id-less row (position 0)
+        # stays behind its predecessor (leading ones stay first). A result whose call is not in the open
+        # unit starts its own unit. Units sort by store position and a call's results by theirs after it;
+        # the stable sorts keep an in-order leaf as built. A tool group is never split: if the store
+        # interleaves another row between its results, that row follows the whole group.
+        units: list = []  # unit = [[head, *id-less], [result, *id-less], ...]
         for message, ids in out:
-            if not units or (message.get("role") != "tool" and position(message, ids)):
-                units.append([])
-            units[-1].append((message, ids))
-        out = [pair for unit in sorted(units, key=lambda u: next((p for p in (position(*pair) for pair in u) if p), 0))
-               for pair in unit]
+            group = units and message.get("role") == "tool" and str(message.get("tool_call_id") or "").strip() \
+                in calls([m for part in units[-1] for m, _ids in part])
+            if group and position(message, ids):
+                units[-1].append([])
+            elif not (group or units and not position(message, ids)):
+                units.append([[]])
+            units[-1][-1].append((message, ids))
+        out = [pair for unit in sorted(units, key=lambda u: next((p for part in u for p in (position(*q) for q in part) if p), 0))
+               for part in [unit[0], *sorted(unit[1:], key=lambda part: position(*part[0]))] for pair in part]
         if (emitted == len(out) == len(chunk) and not excluded and not any(ids for _m, ids in out)
                 and all(m is c for (m, _ids), c in zip(out, chunk))):
             return None  # nothing hidden, claimed or excluded: today's input and mapping
