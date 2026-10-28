@@ -136,7 +136,7 @@ def test_1998_prefix_retry_keeps_retained_composite_claims_pending(tmp_path, sum
         assert out == [] and engine._store_complete_empty_reason == CONTIGUITY
         holes = [msg for _lvl, msg in lines if msg.startswith("LCM contiguity hole:")]
         assert len(holes) == 1 and f"hole_store_id={ids[0]} " in holes[0], holes
-        assert "blocking_chunk_index=1/3 " in holes[0], holes
+        assert "blocking_chunk_index=1/3 " in holes[0] and "prefix_retry=True" in holes[0], holes  # the retry ran
         assert engine._store_complete_escaped == []
         assert chunk == [m, u, composite]
         assert len(_rows(engine)) == 6  # the witness does not store a duplicate composite row
