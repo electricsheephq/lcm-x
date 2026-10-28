@@ -5,6 +5,6 @@
   },
   "_survival_counter_write_lost": {
     "lifetime": "process",
-    "why": "Per-store map keyed by database path, set by a failed survival-fit counter write and cleared by that store's next successful write; a profile rebind neither leaks the marker into another store nor loses it."
+    "why": "Per-store map keyed by the resolved database file, set by a failed survival-fit counter write and cleared by that store's next successful write; a profile rebind neither leaks the marker into another store nor loses it."
   }
 }

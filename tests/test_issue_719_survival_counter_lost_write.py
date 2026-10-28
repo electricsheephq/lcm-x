@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -216,6 +217,39 @@ def test_lost_projection_stays_with_store_across_home_rebind(tmp_path, monkeypat
         assert floor is True
         assert "applied an unknown number of times (a counter write failed)" in observation
         assert "projected_count unknown" in observation
+        _assert_rollback(observation, guidance, floor)
+    finally:
+        obj.shutdown()
+
+
+@pytest.mark.parametrize("alias", ["relative", "symlink"])
+def test_lost_projection_survives_another_spelling_of_the_store_path(tmp_path, monkeypatch, alias):
+    home_a = tmp_path / "home-a"
+    home_a.mkdir()
+    if alias == "relative":
+        monkeypatch.chdir(tmp_path)
+        first = "home-a"
+    else:
+        (tmp_path / "link-a").symlink_to(home_a, target_is_directory=True)
+        first = str(tmp_path / "link-a")
+    obj = LCMEngine(config=LCMConfig(embeddings_enabled=False), hermes_home=first)
+    try:
+        obj.on_session_start("A", platform="telegram", conversation_id="conv-a", context_length=6000)
+        _fail_once(obj, monkeypatch)
+        _record(obj, projected=True)
+        assert _counter(obj) is None
+
+        obj.on_session_start("B", platform="telegram", conversation_id="conv-b", context_length=6000,
+                             hermes_home=str(tmp_path / "home-b"))
+        obj.on_session_start("A", platform="telegram", conversation_id="conv-a", context_length=6000,
+                             hermes_home=str(home_a))
+        assert obj._store.db_path == home_a / "lcm.db"
+        assert obj._store.db_path != Path(first) / "lcm.db"
+        _record(obj, shortened=False)
+        record = _counter(obj)
+        assert record["ever_shortened"] is True and "projected_count" not in record
+        observation, guidance, floor = _doctor(obj, monkeypatch)
+        assert floor is True
         _assert_rollback(observation, guidance, floor)
     finally:
         obj.shutdown()

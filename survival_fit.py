@@ -29,6 +29,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .host_uid import _valid_uid
@@ -61,6 +62,17 @@ _WARNING_FITTED = ("To keep this conversation within the model's context window,
 _NOTICE_RE = re.compile(r"(?:\n\n)?\[LCM survival fit: \d+ earlier messages \(store ids [^()\]]*\) are stored verbatim "
                         r"but not in live context; lcm_grep / lcm_load_session reach them\.\]")
 _RECOVERY_THRESHOLD_SHARE = 0.95  # #608: a recovery attempt's request fits under this share of the threshold
+
+
+def survival_counter_store_key(store: Any) -> str:
+    """#719: one lost-write marker per database file, however its path is spelled."""
+    raw = str(store.db_path)
+    if raw == ":memory:":
+        return f":memory:{id(store)}"
+    try:
+        return str(Path(raw).resolve())
+    except (OSError, RuntimeError):  # a symlink loop keeps the spelled path
+        return raw
 
 
 def _carries_survival_notice(raw: Any, text: str) -> bool:
@@ -584,7 +596,7 @@ class SurvivalFitMixin:
         # Per store: absent means no lost shortened write; False: lost drop-only fit; True: lost projection.
         lost_by_store = getattr(self, "_survival_counter_write_lost", {})
         self._survival_counter_write_lost = lost_by_store
-        store_key = str(self._store.db_path)
+        store_key = survival_counter_store_key(self._store)
         lost = lost_by_store.get(store_key)
 
         def counted(record):  # runs inside the store's write transaction: concurrent engines add, never overwrite

@@ -310,7 +310,7 @@ def collect_doctor(engine: Any) -> DoctorFacts:
         probe_errors["survival_fit"] = True
         survival_fit = None
     survival_fit = survival_fit if isinstance(survival_fit, dict) else {}
-    lost = getattr(engine, "_survival_counter_write_lost", {}).get(str(engine._store.db_path))
+    lost = getattr(engine, "_survival_counter_write_lost", {}).get(command.survival_counter_store_key(engine._store))
     if lost is not None:
         survival_fit = {**survival_fit, "ever_shortened": True}
         if lost:
