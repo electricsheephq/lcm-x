@@ -318,6 +318,21 @@ the caveat â€” the same disclosure mechanism as `lcm_grep`'s `degraded_reason` â
 so a caller never mistakes a truncated or approximate arm's contribution to the
 fused ranking for an exhaustive exact one.
 
+With a usable vector corpus, the first full-text arm gets at most a quarter of
+the request budget, so a slow full-text search cannot starve the semantic arms.
+If that capped search expires, the response reports
+`full-text arm capped to preserve semantic recall budget`. When no semantic arm
+then returns a hit, `lcm_recall` runs the full-text arm once more under the
+remaining request deadline (#265). The usual causes are an embedding provider
+that cannot be resolved, and reference-strict summaries that have no surviving
+source messages and yield only drill-down leads. Any other run whose semantic
+arms return nothing qualifies too. The re-run replaces the capped reason. On
+success it reports full-text coverage `ok`. On failure it reports
+`full-text arm unavailable`, plus `timeout` when the failure was timeout-shaped
+(the request deadline expired, or the worker pool was saturated).
+`provenance.fts_rerun: true` marks a response where the re-run happened; the
+key is absent otherwise.
+
 A backlog recorded by the last embedding backfill pass also sets `degraded: true`
 with a `summary semantic index catching up` or `chunk semantic index catching up`
 reason (and remaining rows when known). The record is per corpus and embedding
