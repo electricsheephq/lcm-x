@@ -601,11 +601,11 @@ def observe(case: Scenario, root: Path) -> Trace:
                 real_recover = reconcile.recover_hermes_persisted_output_with_file_stat
                 recovery_calls = 0
 
-                def recover(text: str | None) -> Any:
+                def recover(text: str | None, **kwargs: Any) -> Any:
                     nonlocal recovery_calls
                     recovery_calls += 1
                     events.append("file recover " + compact(canonical.value(text)))
-                    recovered = real_recover(text)
+                    recovered = real_recover(text, **kwargs)
                     events.append("file result " + compact(canonical.value(recovered)))
                     if recovery_calls == 1 and case.variant in {"vanish", "appear"}:
                         payload = root / "hermes-results" / "payload.txt"
