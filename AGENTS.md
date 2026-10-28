@@ -203,7 +203,7 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   minor releases v0.29.0 and v0.30.0 run all phases.
 - The GA commit may differ from the passing rc tree by EXACTLY the release-notes addition
   (mechanically verified: `git diff rcN..GA --name-only` ⊆ `.github/release-notes/`); GA notes
-  link the four phase receipts (A-D). A P0/P1 gauntlet finding means fix → new rc → re-run; the only
+  link the four phase receipts (A-D; under the tiers, those of the selected rows). A P0/P1 gauntlet finding means fix → new rc → re-run; the only
   exceptions are a Phase B shape or a Phase C publication conflict that the previous GA also
   shows, with the candidate no worse than the base; and a Phase B duplicate-only shape reachable
   only under an injected crash or kill, meeting all five conditions in the spec's differential
