@@ -1540,8 +1540,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         result.pop("_sort_ts", None)
         result.pop("_sort_rank", None)
         result.pop("_sort_directness", None)
-    _annotate_subagent_lineage(engine, results)
         result.pop("_hybrid_summary_override", None)
+    _annotate_subagent_lineage(engine, results)
 
     response: Dict[str, Any] = {
         "query": query,
