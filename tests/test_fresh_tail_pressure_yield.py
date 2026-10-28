@@ -42,7 +42,8 @@ def _stub_summarizer(chunk, focus_topic=None, **_kwargs):
 
 
 def _make_engine(tmp_path, monkeypatch, **config_overrides):
-    config = LCMConfig()
+    # #1013: these cells test the count-protected tail, so pin the pre-#1013 uncapped tail.
+    config = LCMConfig(fresh_tail_max_tokens=0)
     config.database_path = str(tmp_path / "lcm_pressure_yield.db")
     for key, value in config_overrides.items():
         setattr(config, key, value)

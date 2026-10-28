@@ -31,7 +31,7 @@ REJECTED_LINE = "LCM summary result rejected"
 COMPACTION_LINE = re.compile(
     r"^LCM compaction #\d+: \d+ messages → \d+ \(\d+ leaf pass(?:es)?, \d+→\d+ tokens(?:, host_tokens=\d+)?, "
     r"\d+ DAG nodes"
-    r"(?P<rest>.*)\)$")
+    r"(?P<rest>.*)\)(?:, hidden_rows=(?P<hidden_rows>\d+\+?|unknown))?$")
 
 
 @pytest.fixture(autouse=True)
@@ -78,7 +78,10 @@ def _provider(monkeypatch, *script) -> _Provider:
 
 
 def _engine(tmp_path, context_length: int = 200_000, **config) -> LCMEngine:
-    settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
+    # #1013 part B: foreground-only providers/clocks exclude automatic rollup calls
+    settings = {"large_output_externalization_enabled": False,
+                "large_output_active_replay_stubbing_enabled": False, "temporal_rollups_enabled": False,
+                "fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
                 "threshold_full_sweep_enabled": True, "max_assembly_tokens": 100_000,
                 "database_path": str(tmp_path / "lcm.db"), **config}
     engine = LCMEngine(config=LCMConfig(**settings))
@@ -296,6 +299,7 @@ def test_t7_compaction_line_without_level_3_leaves_is_unchanged(tmp_path, monkey
         _compress(engine, _view(), caplog)
         assert levels and 3 not in levels
         assert _compaction_line(caplog).group("rest") == ""
+        assert _compaction_line(caplog).group("hidden_rows") == "0"  # #597: evaluated, drained
     finally:
         engine.shutdown()
 
@@ -307,6 +311,7 @@ def test_t7_compaction_line_counts_two_level_3_leaves(tmp_path, monkeypatch, lev
         _compress(engine, _view(), caplog)
         assert levels.count(3) == 2
         assert _compaction_line(caplog).group("rest") == ", 2 level 3 leaves"
+        assert _compaction_line(caplog).group("hidden_rows") == "0"  # #597: evaluated, drained
     finally:
         engine.shutdown()
 
@@ -356,6 +361,7 @@ def test_t9_circuit_opening_on_leaf_3_keeps_leaves_1_to_3_and_stops_before_leaf_
         assert _count(caplog, STOP_LINE) == 1 and _count(caplog, "3 leaves written, backlog kept") == 1
         assert engine._sweep_budget_hold_until == 0.0  # a stored leaf: no hold
         assert _compaction_line(caplog).group("rest") == ""
+        assert _compaction_line(caplog).group("hidden_rows") is None  # #597: no backlog check on this stop
     finally:
         engine.shutdown()
 
@@ -469,7 +475,12 @@ def test_condensation_rechecks_route_before_every_depth(tmp_path, monkeypatch, l
     """#605 F2: each group is within the level 3 bound, so it is written verbatim with no call (it was: two
     rejected calls whose counts 5 and 6 opened the route); the route now opens after the depth 0 pass. A group
     stored whole needs no route, so the depth 1 group is written forced or not (#628 follow-up)."""
-    engine = _engine(tmp_path, condensation_fanin=2, threshold_full_sweep_enabled=False)
+    engine = _engine(tmp_path, condensation_fanin=2, threshold_full_sweep_enabled=False,
+        # #1013 part B: foreground circuit counts exclude background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     provider = _provider(monkeypatch, "reject")  # never shorter than its source
     _condensation_state(engine)
     real = engine._condense_summary_nodes

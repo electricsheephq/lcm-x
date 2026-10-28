@@ -1,0 +1,13 @@
+{
+  "publication_attempts": 607,
+  "valid_publications": 606,
+  "valid_rejected": 0,
+  "intentional_invalid": [
+    {
+      "test": "tests/test_issue_1451_atomic_snapshot.py::test_invalid_writer_snapshot_never_gets_a_matching_digest",
+      "full": false,
+      "legacy": null
+    }
+  ],
+  "scope": "8 affected test files, all six original census counterexamples; observe-only plugin"
+}

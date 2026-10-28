@@ -235,6 +235,8 @@ def test_host_that_keeps_the_raw_form_gets_no_override(tmp_path, monkeypatch):
 
 
 def test_externalized_large_user_row_keeps_its_identity(tmp_path, monkeypatch):
+    # #1055: force externalization for this fixture independently of the bound window.
+    monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
     host = _AcpHost(
         tmp_path,
         monkeypatch,

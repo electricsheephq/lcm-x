@@ -1969,7 +1969,7 @@ def test_child_proof_write_failure_then_restart_before_first_ingest_loses_nothin
 
 def test_metadata_write_exception_is_contained(tmp_path, monkeypatch):
     """#484 round 1 item 5: a raising write_metadata_json does not fail compress()
-    and keeps the process-local proof, so the in-process commit still classifies."""
+    and keeps the positional proof without claiming durability (#1451)."""
     monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
     engine = LCMEngine(
         config=LCMConfig(
@@ -1999,12 +1999,16 @@ def test_metadata_write_exception_is_contained(tmp_path, monkeypatch):
         monkeypatch.setattr(engine._store, "write_metadata_json", failing_write)
         compressed = engine.compress(list(host), force=True)
         assert engine._last_compression_status == "compacted"
-        assert engine._compress_commit_proof is not None
-        rows = _row_count(engine)
+        assert engine._compress_commit_proof["durable"] is False
+        before = engine._store.get_session_messages("S0")
         engine.on_session_end("S0", pre)
         engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
         engine.ingest(list(compressed) + [_turn(13)[1]])
-        assert _row_count(engine) == rows + 1
+        stored = engine._store.get_session_messages("S0")
+        assert [(r["store_id"], r["role"], r["content"]) for r in stored[:len(before)]] == [
+            (r["store_id"], r["role"], r["content"]) for r in before]
+        assert sum(r["content"] == _turn(13)[1]["content"] for r in stored) == 1
+        assert len(stored) == len(before) + 1
     finally:
         engine.shutdown()
 
@@ -2343,3 +2347,13 @@ def test_durable_proof_does_not_cross_hermes_homes_on_a_shared_database(tmp_path
         assert engine._cursor_from_durable_commit_proof(host) is None
     finally:
         engine.shutdown()
+
+
+@pytest.fixture(autouse=True)
+def _historical_native_proof_writer(request, monkeypatch):
+    if request.node.originalname == "test_native_adoption_with_summary_carrier_survives_restart_without_loss":
+        from hermes_lcm.compaction import CompactionMixin
+        from tests.legacy_native_state import legacy_commit_proof
+        monkeypatch.setattr(LCMEngine, "_record_compress_commit_proof", legacy_commit_proof)
+        monkeypatch.setattr(LCMEngine, "_write_compress_commit_proof_payload",
+                            CompactionMixin._write_compress_commit_proof_payload)

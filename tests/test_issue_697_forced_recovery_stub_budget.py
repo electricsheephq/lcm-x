@@ -20,6 +20,7 @@ def engine(tmp_path):
     instance = LCMEngine(
         config=LCMConfig(
             database_path=str(tmp_path / "lcm.db"),
+            embeddings_enabled=False,
             fresh_tail_count=10,
             large_output_externalization_enabled=True,
             large_output_externalization_threshold_chars=100,
