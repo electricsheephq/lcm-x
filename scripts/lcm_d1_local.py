@@ -247,14 +247,18 @@ def _main(argv, interrupt):
         return status
 
     effective = [value["effective_intra_op_threads"] for value in role_threads.values()]
-    # One-thread build reports still decide the verdict: a capped product stays within threads at the shard
+    built = [row["effective_intra_op_threads"] for rows in build_threads.values() for row in rows]
+    # One-thread build reports still decide the shard verdict: a capped product stays within threads at the shard
     # setting, and an uncapped one reports the same count there. They do not make the budget fully known.
-    checked = effective + [row["effective_intra_op_threads"] for rows in build_threads.values() for row in rows]
-    budget_ok = args.jobs * max((n for n in checked if n is not None), default=threads) <= args.thread_budget
+    shard_ok = args.jobs * max((n for n in effective + built if n is not None), default=threads) <= args.thread_budget
+    # The build runs 2 * P workers at once, so its own verdict uses that concurrency.
+    build_ok = not built or 2 * args.build_workers * max((n for n in built if n is not None), default=1) <= args.thread_budget
+    budget_ok = shard_ok and build_ok
     arms = run_pool([task for task in tasks if task[0] in manifests], args.jobs, launch) if budget_ok and not interrupt[0] else []
     receipt = {"instrument_sha": instrument, "products": pins, "jobs": args.jobs,
                "cache_manifests": manifests, "role_threads": role_threads,
-               "thread_budget_ok": budget_ok, "thread_budget_fully_known": len(effective) == 2 and None not in effective,
+               "thread_budget_ok": budget_ok, "build_thread_budget_ok": build_ok, "shard_thread_budget_ok": shard_ok,
+               "thread_budget_fully_known": len(effective) == 2 and None not in effective,
                "worker_timeout": args.worker_timeout, "preembed": preembed, "interrupted": bool(interrupt[0]),
                "fresh_output_guard_already_existed": True,
                "ort_threads_per_shard_cap": threads, "thread_budget": args.thread_budget,

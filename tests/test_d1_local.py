@@ -587,7 +587,7 @@ def driver_args(root):
             "--aprime-dir", str(root / "aa"), "--output", str(root / "out"), "--scratch", str(root / "scratch")]
 
 
-@pytest.mark.parametrize("workers,failed_role,reported", [(None, None, 2), (1, None, 2), (3, None, 1), (3, "candidate", 1), (3, None, 6)])
+@pytest.mark.parametrize("workers,failed_role,reported", [(None, None, 2), (1, None, 2), (3, None, 1), (3, "candidate", 1), (3, None, 2), (3, None, 6)])
 def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, workers, failed_role, reported):
     cli = driver()
     argv = driver_args(tmp_path)
@@ -640,7 +640,9 @@ def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, w
         return {"exit_code": 0, "timed_out": False}
 
     monkeypatch.setattr(cli, "run_child", fake_run)
-    refused = 3 * reported > 8  # an uncapped product's build report exceeds the shard budget: no arm runs
+    # An uncapped product's build report exceeds the shard budget, or the 2 * P concurrent builders exceed it: no arm runs.
+    build_refused = parallel and 2 * workers * reported > 8
+    refused = 3 * reported > 8 or build_refused
     assert cli.main(argv) == int(failed_role is not None or refused)
     receipt = json.loads((tmp_path / "out/d1-receipt.json").read_text())
     assert len(builds) == (2 * workers if parallel else 2)
@@ -648,6 +650,8 @@ def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, w
     assert set(receipt["cache_manifests"]) == ({"base"} if failed_role else {"base", "candidate"})
     assert len(reads) == (0 if refused else 8 if failed_role else 16)
     assert receipt["thread_budget_ok"] is not refused
+    assert receipt["build_thread_budget_ok"] is not build_refused
+    assert receipt["shard_thread_budget_ok"] is not (3 * reported > 8)
     if parallel:
         assert receipt["build_workers"] == workers
         assert receipt["merged_entries"] == {role: 30 for role in receipt["cache_manifests"]}
