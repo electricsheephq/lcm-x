@@ -329,8 +329,9 @@ The rollback target for v0.29.0 is `v0.28.1`. Take a SQLite-safe backup first, a
 compare ordered raw messages and summary provenance through upgrade, rollback and
 re-upgrade. After a rollback to v0.28.1, the three chunk embedding triggers stay in
 the database and SQLite keeps running them; prefixed vectors use their own task names
-(`summary+prefix`, `chunk+prefix`), which v0.28.1 ignores (#1942); and the
-`sender_id` and `sender_source` columns stay empty and v0.28.1 ignores them.
+(`summary+prefix`, `chunk+prefix`), which v0.28.1 ignores (#1942); and v0.28.1
+ignores the `sender_id` and `sender_source` columns: values v0.29.0 stored stay in place, and rows
+v0.28.1 writes leave them empty.
 
 For the previous release,
 [v0.28.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.28.1)
