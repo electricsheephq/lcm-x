@@ -5755,7 +5755,7 @@ class LCMEngine(
         #    N  → keep nodes at depth >= N (e.g. 2 keeps d2+)
         retain = self._config.new_session_retain_depth
         if self._session_id and retain != -1:
-            min_depth = retain if retain > 0 else None
+            min_depth = None if retain == 0 else retain  # below -1 deletes nothing, as before
             # #752: read before deleting, while the retained nodes' lineage still resolves.
             first_lost = self._dag.first_unretained_row(self._session_id, min_depth)
             observed = self._lifecycle.get_by_conversation(self._conversation_id)

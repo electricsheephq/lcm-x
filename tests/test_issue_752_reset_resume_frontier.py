@@ -314,13 +314,13 @@ def test_reset_without_end_then_same_id_start_binds_at_retained_frontier(tmp_pat
         engine.shutdown()
 
 
-@pytest.mark.parametrize("retain", [-1, 2], ids=["retain-all", "empty-d2-only"])
+@pytest.mark.parametrize("retain", [-1, -2, 2], ids=["retain-all", "retain-minus-2", "empty-d2-only"])
 def test_reset_that_loses_nothing_writes_no_rewind(tmp_path, monkeypatch, retain):
     monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
     engine = _engine(tmp_path, new_session_retain_depth=retain)
     try:
         engine.on_session_start("S1", platform="cli", context_length=200_000)
-        if retain == -1:
+        if retain < 0:
             host = []
             _ingest_turns(engine, host, range(1, 13))
             engine.compress(list(host), force=True)
@@ -329,8 +329,10 @@ def test_reset_that_loses_nothing_writes_no_rewind(tmp_path, monkeypatch, retain
         else:
             engine._dag.add_node(SummaryNode(session_id="S1", depth=2, source_type="nodes", source_ids=[]))
         monkeypatch.setattr(engine._lifecycle, "rewind_reset_frontier", lambda *a, **kw: pytest.fail("unexpected rewind"))
+        nodes = len(engine._dag.get_session_nodes("S1"))
         engine.on_session_reset()
-        if retain == -1:
+        if retain < 0:
+            assert len(engine._dag.get_session_nodes("S1")) == nodes
             engine.on_session_start("S2", platform="cli", context_length=200_000)
             engine.on_session_start("S1", platform="cli", context_length=200_000)
             assert engine._last_compacted_store_id == 18
