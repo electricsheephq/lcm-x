@@ -600,8 +600,7 @@ class Canonical:
             return self.value(vars(value), path)
         if isinstance(value, dict):
             # These keys are Python object identities, not durable store IDs.
-            identity_keys = path.endswith(("store_ids_by_message_id", "_compress_occurrences", "_no_progress_public_rows",
-                                           "_store_complete_order", "_leaf_summary_order"))
+            identity_keys = path.endswith(("store_ids_by_message_id", "_compress_occurrences", "_no_progress_public_rows"))
             return {(f"<message-{i}>" if identity_keys else str(k)): self.value(v, f"{path}.{k}")
                     for i, (k, v) in enumerate(value.items(), 1)}
         if isinstance(value, (list, tuple)):
