@@ -366,7 +366,7 @@ checkout root. Credential entries list only variable names, never values.
 
 | Environment key | Reader file(s) | Purpose | Read when |
 | --- | --- | --- | --- |
-| `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `engine.py` | Absolute compaction threshold override | each call — `_set_context_length()` with a positive context length, through model updates, session-start metadata, or cloning |
+| `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `config.py`, `engine.py` | Absolute compaction threshold override; also settable as `lcm.context_threshold_tokens` in config.yaml; an integer env value wins, including `0` to turn the YAML pin off; empty or non-integer env values fall back to YAML | registration for YAML, provenance, and routed-profile env pins; each `_set_context_length()` call with a positive context length for live env on non-routed hosts, through model updates, session-start metadata, or cloning |
 | `LCM_ENABLE_SLASH_COMMAND` | `__init__.py` | Optional slash-command registration | plugin registration |
 | `LCM_SENDER_CAPTURE` | `sender_capture.py` | Profile-aware pending sender capture; default `true`, `0` disables capture without removing columns or backfilling history | each call — pending association creation through the profile-aware boolean resolver |
 | `LCM_HERMES_BASE_DIR` | `config.py` (called by `engine.py`, `externalize.py`, `diagnostics.py`) | Storage containment boundary; process-wide, never read from a routed profile | each call — storage-directory resolution or state-database containment validation; `_get_allowed_hermes_base()` also reads it when called (tests only; no production caller) |

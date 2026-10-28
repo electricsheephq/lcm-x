@@ -186,6 +186,19 @@ def test_yaml_and_unscoped_misses(host, load_profile, tmp_path, monkeypatch):
     assert engine.threshold_tokens == 134000
 
 
+def test_yaml_absolute_threshold_on_a_routed_miss(host, load_profile, tmp_path, monkeypatch):
+    """#48: a routed profile without the env key uses its own lcm.context_threshold_tokens, not the launch env."""
+    monkeypatch.setenv("LCM_ABSOLUTE_THRESHOLD_TOKENS", "120000")
+    home = tmp_path / "yaml-absolute-home"
+    home.mkdir()
+    (home / "config.yaml").write_text("lcm:\n  context_threshold: 0.67\n  context_threshold_tokens: 20000\n")
+    with host.bind(home):
+        _, engine = load_profile()
+    assert engine._config.config_sources["absolute_threshold_tokens"] == "config_yaml:lcm.context_threshold_tokens"
+    engine._set_context_length(200000, source="issue48", model="fixture", provider="custom")
+    assert engine.threshold_tokens == 20000
+
+
 def test_home_only_discovery_rejects_foreign_bound_mapping(host, load_profile, tmp_path):
     home = tmp_path / "wanted"
     home.mkdir()

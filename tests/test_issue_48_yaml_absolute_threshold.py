@@ -50,13 +50,15 @@ def _update_model(engine, window=100_000, *, codex=False):
 
 
 def _select_parser(monkeypatch, parser):
-    if parser == "fallback":
-        monkeypatch.setattr(config_module, "yaml", None)
-    else:
-        monkeypatch.setattr(config_module, "yaml", pytest.importorskip("yaml"))
+    monkeypatch.setattr(config_module, "yaml", pytest.importorskip("yaml") if parser == "pyyaml" else None)
+    monkeypatch.setattr(
+        config_module, "ruamel_yaml",
+        pytest.importorskip("ruamel.yaml") if parser == "ruamel" else None,
+        raising=False,
+    )
 
 
-@pytest.mark.parametrize("parser", ("pyyaml", "fallback"))
+@pytest.mark.parametrize("parser", ("pyyaml", "ruamel", "line"))
 def test_yaml_absolute_threshold_pins_across_model_windows(make_engine, monkeypatch, parser):
     _select_parser(monkeypatch, parser)
     config, engine = make_engine("lcm:\n  context_threshold: 0.4\n  context_threshold_tokens: 20000\n")
@@ -95,7 +97,7 @@ def test_invalid_env_falls_back_to_yaml_with_warning(make_engine):
     assert any("LCM_ABSOLUTE_THRESHOLD_TOKENS" in w for w in config.config_source_warnings)
 
 
-@pytest.mark.parametrize("parser", ("pyyaml", "fallback"))
+@pytest.mark.parametrize("parser", ("pyyaml", "ruamel", "line"))
 @pytest.mark.parametrize("value", ("lots", "true", "-5", "20000.0", '"lots"', '"20000.0"'))
 def test_invalid_yaml_absolute_is_ignored_with_warning(make_engine, monkeypatch, parser, value):
     _select_parser(monkeypatch, parser)
@@ -175,7 +177,7 @@ def test_runtime_env_change_remains_authoritative(make_engine, monkeypatch, yaml
         clone.shutdown()
 
 
-@pytest.mark.parametrize("parser", ("pyyaml", "fallback"))
+@pytest.mark.parametrize("parser", ("pyyaml", "ruamel", "line"))
 @pytest.mark.parametrize("value", ("", "null", "~", '{}', '""'))
 def test_empty_yaml_absolute_is_absent_without_warning(make_engine, monkeypatch, parser, value):
     _select_parser(monkeypatch, parser)

@@ -461,6 +461,7 @@ def _load_hermes_config_yaml(cfg_path: Path | None = None) -> dict[str, Any]:
 
 _SUPPORTED_LCM_CONFIG_YAML_KEYS = {
     "context_threshold",
+    "context_threshold_tokens",
     "model_thresholds",
     "summary_reasoning_effort",
     "expansion_reasoning_effort",
@@ -586,6 +587,42 @@ def _hermes_compression_threshold_with_source_and_warning(default: float) -> tup
     except Exception:
         return default, "default", None
     return default, "default", None
+
+
+def _lcm_absolute_threshold_tokens_with_source(
+    default: int, raw_env: str | None,
+) -> tuple[int, str, str | None]:
+    """Resolve the absolute compaction trigger (#48).
+
+    ``LCM_ABSOLUTE_THRESHOLD_TOKENS`` wins whenever it holds an integer, including
+    ``0`` (which turns a config.yaml value off), mirroring LCM_CONTEXT_THRESHOLD over
+    lcm.context_threshold. An empty env value counts as unset, as the engine has
+    always treated it. Otherwise ``lcm.context_threshold_tokens`` applies; 0 or an
+    absent key means no absolute trigger.
+    """
+    value, source, warning = default, "default", None
+    cfg = _load_hermes_config_yaml()
+    lcm_section = cfg.get("lcm") if isinstance(cfg, dict) else None
+    raw_yaml = lcm_section.get("context_threshold_tokens") if isinstance(lcm_section, dict) else None
+    if raw_yaml not in (None, {}, "{}", "null", "~", ""):
+        parsed = None
+        if not isinstance(raw_yaml, bool):
+            try:
+                parsed = int(str(raw_yaml).strip())
+            except ValueError:
+                parsed = None
+        if parsed is None or parsed < 0:
+            warning = (f"invalid config.yaml lcm.context_threshold_tokens={raw_yaml!r} ignored "
+                       "(must be a non-negative integer)")
+        elif parsed > 0:
+            value, source = parsed, "config_yaml:lcm.context_threshold_tokens"
+    if raw_env is not None and raw_env.strip():
+        try:
+            int(raw_env)  # Validate provenance without caching the live env override.
+            return value, "env:LCM_ABSOLUTE_THRESHOLD_TOKENS", None
+        except ValueError:
+            return value, source, f"invalid env LCM_ABSOLUTE_THRESHOLD_TOKENS={raw_env!r} ignored"
+    return value, source, warning
 
 
 def _hermes_auxiliary_compression_timeout_ms(default: int) -> int:
@@ -1410,6 +1447,9 @@ class LCMConfig:
     # #671 stub-first exit: a share of the threshold that lowers the exit's target to
     # min(threshold - leaf chunk, 0.95 x threshold, int(ratio x threshold)); 0 = the built-in target.
     stub_first_exit_target_ratio: float = 0.0
+    # #48: absolute compaction trigger in tokens (0 = ratio-based). from_env() reads
+    # LCM_ABSOLUTE_THRESHOLD_TOKENS, then config.yaml lcm.context_threshold_tokens.
+    absolute_threshold_tokens: int = 0
 
     # Loader provenance only, not a user setting. Manual configs are explicit.
     embeddings_enabled_explicit: bool = True
@@ -1446,7 +1486,7 @@ class LCMConfig:
         c.embeddings_enabled_explicit = env.get("LCM_EMBEDDINGS_ENABLED", "").strip().lower() in (
             "1", "true", "yes", "on", "0", "false", "no", "off")
         c._embeddings_enabled_supplied = c.embeddings_enabled_explicit
-        c._absolute_threshold_tokens = env.get("LCM_ABSOLUTE_THRESHOLD_TOKENS", "0") if pinned else None
+        c._absolute_threshold_tokens = env.get("LCM_ABSOLUTE_THRESHOLD_TOKENS", "") if pinned else None
         config_sources: dict[str, str] = {}
         config_source_warnings: list[str] = []
 
@@ -1525,6 +1565,10 @@ class LCMConfig:
         _record("context_threshold", source, warning)
         if source == _FLOORED_COMPRESSION_THRESHOLD_SOURCE and floor_warning:
             config_source_warnings.append(floor_warning)
+        c.absolute_threshold_tokens, source, warning = _lcm_absolute_threshold_tokens_with_source(
+            c.absolute_threshold_tokens, env.get("LCM_ABSOLUTE_THRESHOLD_TOKENS")
+        )
+        _record("absolute_threshold_tokens", source, warning)
         # Per-model threshold overrides: load from lcm.model_thresholds in
         # config.yaml, then LCM_MODEL_THRESHOLDS env var (comma-separated
         # key:value pairs). Env overrides config.yaml.
