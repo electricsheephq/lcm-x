@@ -453,26 +453,45 @@ class StoreCompleteMixin:
         # #2007: the walk above decides WHICH rows the leaf takes and their order (a host prefix of the chunk,
         # which _leaf_consumption and a rescue prefix rely on); the summarizer reads them in store order, each
         # tool group whole, through the rank published in _store_complete_order.
-        # A call group is an assistant row with tool calls plus every later tool row that answers it (the
-        # nearest preceding call with that id). Every other row with a store id is its own unit; a row
+        # A call group is an assistant row with tool calls plus every tool row that answers it: the call with
+        # that id stored nearest before the result, else the nearest preceding one in the walk (a repeated id
+        # follows the store, #2011). Every other row with a store id is its own unit; a row
         # without one (position 0) stays behind the row before it, a leading one first. A group sorts at
         # its call's store position or, when the call has none, at its earliest stored result; inside it
         # the call stays first and its results follow in store order. A leaf whose stored rows are already
         # in store order gets no rank, even when the store holds a row inside a group; in a regrouped
         # leaf such a row follows the group. The sorts are stable.
-        units, answers, part = [], {}, None  # unit = [[head, *id-less], [result, *id-less], ...]
+        def call_ids(message) -> set:
+            return calls([message]) if message.get("role") == "assistant" else set()
+
+        def tool_id(message) -> str:
+            return str(message.get("tool_call_id") or "").strip() if message.get("role") == "tool" else ""
+
+        answered = {call_id for message, _ids in out for call_id in call_ids(message)}
+        parts, part = [], None  # part = [row, *id-less rows behind it], in walk order
         for message, ids in out:
-            tool_id = str(message.get("tool_call_id") or "").strip() if message.get("role") == "tool" else ""
-            call_ids = calls([message]) if message.get("role") == "assistant" else set()
-            if tool_id in answers or call_ids or position(message, ids) or part is None:
+            if tool_id(message) in answered or call_ids(message) or position(message, ids) or part is None:
                 part = [(message, ids)]
-                if tool_id in answers:
-                    answers[tool_id].append(part)
-                else:
-                    units.append([part])
-                    answers.update(dict.fromkeys(call_ids, units[-1]))
+                parts.append(part)
             else:
                 part.append((message, ids))
+        heads, owners = {}, {}  # walk index of a unit's head -> unit; call id -> [(store position, walk index)]
+        for index, part in enumerate(parts):
+            if call_ids(part[0][0]):
+                heads[index] = [part]  # unit = [[head, *id-less], [result, *id-less], ...]
+                for call_id in call_ids(part[0][0]):
+                    owners.setdefault(call_id, []).append((position(*part[0]), index))
+        for index, part in enumerate(parts):
+            if index in heads:
+                continue
+            at, mine = position(*part[0]), owners.get(tool_id(part[0][0]), [])
+            owner = max([o for o in mine if at and 0 < o[0] < at], default=None) or max(
+                [o for o in mine if o[1] < index], key=lambda o: o[1], default=None)
+            if owner is None:
+                heads[index] = [part]
+            else:
+                heads[owner[1]].append(part)
+        units = [heads[index] for index in sorted(heads)]
 
         def by_position(parts) -> list:  # stable; a part without a store id keeps its predecessor's key
             keys, key = [], 0

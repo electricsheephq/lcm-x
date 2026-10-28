@@ -699,6 +699,23 @@ def test_2007_repeated_call_id_answers_the_latest_call(tmp_path, summaries, line
         engine.shutdown()
 
 
+@pytest.mark.parametrize("shape", ["hidden_results", "moved_result"])
+def test_2007_repeated_call_id_follows_the_store(tmp_path, summaries, lines, shape):
+    # #2011: a result of a reused call id joins the call stored nearest before it, not the walk's nearest.
+    engine = _engine(tmp_path, False)
+    call_1, result_1 = _call("call_0", content="first call"), _result("call_0", "first result")
+    call_2, result_2 = _call("call_0", content="second call"), _result("call_0", "second result")
+    later = {"role": "user", "content": "later" + PAD, "timestamp": 500.0}
+    try:
+        if shape == "hidden_results":  # stored C1 R1 C2 R2 U5; the host shows C2 C1 U5 (both results hidden)
+            ids = _anchored_ids(engine, [call_1, result_1, call_2, result_2, later], [call_2, call_1, later])
+        else:  # stored C1 R2 C3 R4; the host shows C1 C3 R4 R2
+            ids = _anchored_ids(engine, [call_1, result_1, call_2, result_2], [call_1, call_2, result_2, result_1])
+        assert ids == sorted(ids)
+    finally:
+        engine.shutdown()
+
+
 def test_2007_in_order_tool_shapes_returned_as_built(tmp_path, summaries, lines):
     engine = _engine(tmp_path, False)
     user = {"role": "user", "content": "user" + PAD, "timestamp": 100.0}
