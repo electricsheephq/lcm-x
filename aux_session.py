@@ -20,7 +20,8 @@ import sqlite3
 import threading
 import weakref
 from pathlib import Path
-from typing import Any, Dict
+from collections import Counter
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -789,3 +790,189 @@ class AuxiliarySessionMixin:
             logger.debug("LCM auxiliary ancestor probe failed: %s", exc)
             return False
         return False
+
+
+# --- Delegated subagent sessions (#1931) ------------------------------------
+#
+# A session the host's delegate tool started (a DELEGATE child) stays bypassed for context management, but
+# its rows are stored under the child's own session id and conversation id, with a ``session_lineage`` link
+# to its parent. AUXILIARY sessions (background review, memory/skills-only toolsets, auxiliary model calls)
+# are never stored; when both classes match, AUXILIARY wins. Rows reach the store only through the
+# non-current-session route (a stored-prefix match, or a unique tail anchor, plus
+# ``_append_off_current_session_end_suffix``), so an engine bound to another session keeps its binding,
+# cursor, frontier, lifecycle state and DAG. State stays on the engine (accessed via ``self``).
+
+_DELEGATE_SOURCE = "subagent"  # the host's platform (and state.db ``sessions.source``) for a delegate child
+_ANCHOR_ROWS = 3
+_FRAME_DEPTH = 48
+_COUNTS_LOCK = threading.Lock()
+_COUNTS: Counter = Counter()
+
+
+def delegate_child_store_counts() -> Dict[str, int]:
+    """Process-lifetime counts: ``rows_stored`` and ``fallbacks`` (rows a delegated child could not store)."""
+    with _COUNTS_LOCK:
+        return dict(_COUNTS)
+
+
+def _count(key: str, amount: int = 1) -> None:
+    with _COUNTS_LOCK:
+        _COUNTS[key] += amount
+
+
+def _is_auxiliary_agent(agent: Any) -> bool:
+    origin = str(getattr(agent, "_memory_write_origin", "") or "")
+    context = str(getattr(agent, "_memory_write_context", "") or "")
+    if "background_review" in (origin, context):
+        return True
+    toolsets = getattr(agent, "enabled_toolsets", None)
+    try:
+        names = {str(toolset) for toolset in toolsets} if toolsets is not None else set()
+    except TypeError:
+        names = set()
+    return bool(names) and names <= {"memory", "skills"}
+
+
+def _is_delegate_agent(agent: Any) -> bool:
+    if getattr(agent, "_subagent_id", None) or getattr(agent, "_parent_subagent_id", None):
+        return True
+    try:
+        if int(getattr(agent, "_delegate_depth", 0) or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(getattr(agent, "log_prefix", "") or "").strip().startswith("[subagent-")
+
+
+class DelegateChildMixin:
+    def _delegate_child_agent(self, session_id: str) -> Any:
+        """The running agent object for ``session_id`` on this call stack, or None."""
+        frame = inspect.currentframe()
+        try:
+            frame = frame.f_back if frame is not None else None
+            for _ in range(_FRAME_DEPTH):
+                if frame is None:
+                    return None
+                caller = frame.f_locals.get("self")
+                if caller is not None and caller is not self and \
+                        str(getattr(caller, "session_id", "") or "") == session_id:
+                    return caller
+                frame = frame.f_back
+        finally:
+            del frame
+        return None
+
+    def _host_session_parent(self, session_id: str) -> tuple[str, str]:
+        """``(parent_session_id, source)`` of the host state.db row, read-only; ``("", "")`` when unknown."""
+        try:
+            path = self._state_db_path({})
+            if not path.exists():
+                return "", ""
+            conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+            try:
+                row = conn.execute("SELECT parent_session_id, source FROM sessions WHERE id = ? LIMIT 1",
+                                   (session_id,)).fetchone()
+            finally:
+                conn.close()
+        except Exception as exc:  # pragma: no cover - defensive against host DB drift
+            logger.debug("LCM delegated-child state.db probe failed: %s", exc)
+            return "", ""
+        return (str(row[0] or ""), str(row[1] or "")) if row else ("", "")
+
+    def _delegate_child_link(self, session_id: str, *, require_agent: bool = False) -> Optional[Dict[str, str]]:
+        """The parent link of a DELEGATE child, or None for an AUXILIARY or unproven session."""
+        agent = self._delegate_child_agent(session_id)
+        if agent is not None and _is_auxiliary_agent(agent):
+            return None  # AUXILIARY wins over every delegate signal
+        if (agent is None and require_agent) or self._session_id_matches_lcm_bypass_filters(session_id):
+            return None
+        record = explicit_subagent_lineage(session_id)
+        delegate = bool(record) or (agent is not None and _is_delegate_agent(agent))
+        with self._auxiliary_session_lock:
+            bind_parent = self._delegate_child_bind_parent_ids.get(session_id, "")
+        candidates = [("subagent_start", record.get("parent_session_id", "")), ("bind_kwargs", bind_parent),
+                      ("parent_frame", str(getattr(agent, "_parent_session_id", "") or ""))]
+        if not delegate or not any(parent for _, parent in candidates):
+            host_parent, host_source = self._host_session_parent(session_id)
+            delegate = delegate or (bool(host_parent) and host_source == _DELEGATE_SOURCE)
+            candidates.append(("state_db", host_parent))
+        source, parent = next(((name, value) for name, value in candidates if value), ("", ""))
+        if not delegate or not parent or parent == session_id or self._session_id_matches_lcm_bypass_filters(parent):
+            return None
+        return {
+            "parent_session_id": parent, "source": source,
+            "child_subagent_id": record.get("child_subagent_id") or str(getattr(agent, "_subagent_id", "") or ""),
+            "parent_subagent_id": record.get("parent_subagent_id")
+            or str(getattr(agent, "_parent_subagent_id", "") or ""),
+            "child_role": record.get("role") or str(getattr(agent, "_delegate_role", "") or ""),
+        }
+
+    def _store_delegate_child_turn(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+        *,
+        after_ingest: bool = False,
+        require_agent: bool = False,
+    ) -> int:
+        """Store a delegated child's new rows under its own id; return how many were stored. Never raises."""
+        try:
+            session_id = str(session_id or "")
+            if not session_id or not messages:
+                return 0
+            if self._session_id and not self._bypasses_lcm_context_management() and (
+                after_ingest or session_id == self._session_id
+            ):
+                return 0  # this engine's own ingest owns the view
+            link = self._delegate_child_link(session_id, require_agent=require_agent)
+            if link is None:
+                return 0
+            with self._attribution_span("delegate_child_store", len(messages)):
+                return self._append_delegate_child_rows(session_id, messages, link)
+        except Exception as exc:
+            self._note_delegate_child_fallback(session_id, f"rows not stored: {type(exc).__name__}: {exc}")
+            return 0
+
+    def _append_delegate_child_rows(self, session_id: str, messages: List[Dict[str, Any]], link: Dict[str, str]) -> int:
+        view = [msg for msg in messages if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
+        if not view:
+            return 0
+        start = self._session_end_store_prefix_count(session_id, view)
+        if start is None:
+            start = self._delegate_child_anchor_end(session_id, view)
+        if start is None:
+            self._note_delegate_child_fallback(session_id, "rows not stored: the stored rows no longer match the child's view")
+            return 0
+        suffix = view[start:]
+        if not suffix:
+            return 0
+        try:
+            self._store.record_session_lineage(session_id, link["parent_session_id"], source=link["source"],
+                                               child_subagent_id=link["child_subagent_id"],
+                                               parent_subagent_id=link["parent_subagent_id"],
+                                               child_role=link["child_role"])
+        except Exception as exc:  # the rows still go in; they stay reachable by session id
+            self._note_delegate_child_fallback(session_id, f"parent link not recorded: {type(exc).__name__}: {exc}")
+        stored = self._append_off_current_session_end_suffix(
+            session_id, suffix, source=_DELEGATE_SOURCE, conversation_id=session_id)
+        _count("rows_stored", len(stored))
+        logger.debug("LCM stored %d delegated-child rows: session=%s parent=%s",
+                     len(stored), session_id, link["parent_session_id"])
+        return len(stored)
+
+    def _delegate_child_anchor_end(self, session_id: str, view: List[Dict[str, Any]]) -> Optional[int]:
+        """After the host rewrote the child's head (native compaction), resume after the stored tail when
+        it occurs exactly once in the view."""
+        tail = self._store.get_session_tail(session_id, limit=_ANCHOR_ROWS)
+        if not tail:
+            return None
+        anchor = [self._session_end_prefix_compare_identity(row, session_id=session_id) for row in tail]
+        identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
+        width = len(anchor)
+        ends = [index + width for index in range(len(identities) - width + 1)
+                if identities[index:index + width] == anchor]
+        return ends[0] if len(ends) == 1 else None
+
+    def _note_delegate_child_fallback(self, session_id: str, reason: str) -> None:
+        _count("fallbacks")
+        logger.warning("LCM delegated child %s: %s", session_id or "(unknown)", reason)

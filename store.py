@@ -411,6 +411,13 @@ def delete_chunk_inflight(conn: sqlite3.Connection, rows_sql: str, args: tuple =
         )
 
 
+def delete_session_lineage(conn: sqlite3.Connection, sessions_sql: str, args: tuple = ()) -> None:
+    """#1931: a deleted session's own parent link goes with its messages (``sessions_sql`` selects the session
+    ids), on the caller's transaction. The links of its children stay, so a child id still works on its own."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_lineage'").fetchone():
+        conn.execute(f"DELETE FROM session_lineage WHERE child_session_id IN ({sessions_sql})", args)
+
+
 def _database_identity(path: Path, store: object) -> str:
     """#719: the file a store opens, however its path was spelled; ``:memory:`` is one per store."""
     if str(path) == ":memory:":
@@ -841,6 +848,7 @@ class MessageStore:
             delete_message_relations(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_host_uid_bindings(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_chunk_inflight(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
+            delete_session_lineage(self._conn, "SELECT ?", (session_id,))
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),
@@ -1449,6 +1457,67 @@ class MessageStore:
         return int(self._conn.execute(f"SELECT COUNT(*) FROM host_uid_bindings WHERE kind IN "
                                       f"({','.join('?' * len(kinds))})", kinds).fetchone()[0]) \
             if self._host_uid_table_exists() else None
+
+    # -- #1931 delegated-child lineage: additive, created on the first link --
+
+    def _session_lineage_table_exists(self) -> bool:
+        with self._write_lock:
+            if getattr(self, "_session_lineage_schema_ready", False):
+                return True
+            exists = bool(self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_lineage'").fetchone())
+            # A re-entrant read can see DDL that a failed commit will roll back.
+            if not self._conn.in_transaction:
+                self._session_lineage_schema_ready = exists
+            return exists
+
+    def record_session_lineage(self, child_session_id: str, parent_session_id: str, *, source: str,
+                               child_subagent_id: str = "", parent_subagent_id: str = "",
+                               child_role: str = "") -> None:
+        """INSERT OR IGNORE in its own transaction, so the first link wins. The table is the NAMED step
+        ``session_lineage_v1``: no SCHEMA_VERSION bump, no existing table touched."""
+        conn = self._conn
+        with self._write_lock:
+            if conn.in_transaction:
+                raise sqlite3.OperationalError("session lineage write skipped: the connection is in a transaction")
+            with self.atomic(immediate=True):
+                if not getattr(self, "_session_lineage_schema_ready", False):
+                    conn.execute(
+                        "CREATE TABLE IF NOT EXISTS session_lineage (child_session_id TEXT PRIMARY KEY, "
+                        "parent_session_id TEXT NOT NULL, child_subagent_id TEXT, parent_subagent_id TEXT, "
+                        "child_role TEXT, source TEXT NOT NULL, created_at REAL)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_session_lineage_parent "
+                                 "ON session_lineage(parent_session_id)")
+                    mark_migration_step_complete(conn, "session_lineage_v1")
+                conn.execute(
+                    "INSERT OR IGNORE INTO session_lineage(child_session_id, parent_session_id, child_subagent_id, "
+                    "parent_subagent_id, child_role, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (child_session_id, parent_session_id, child_subagent_id or None, parent_subagent_id or None,
+                     child_role or None, source, time.time()))
+            self._session_lineage_schema_ready = True
+
+    def session_lineage_parents(self, session_ids: Iterable[str]) -> dict[str, str]:
+        """``{child_session_id: parent_session_id}`` for the ids that are recorded children."""
+        ids, out = sorted({str(sid) for sid in session_ids if sid}), {}
+        for start in range(0, len(ids) if ids and self._session_lineage_table_exists() else 0, 500):
+            chunk = ids[start:start + 500]
+            out.update((str(child), str(parent)) for child, parent in self._conn.execute(
+                f"SELECT child_session_id, parent_session_id FROM session_lineage WHERE child_session_id IN "
+                f"({','.join('?' * len(chunk))})", chunk))
+        return out
+
+    def session_lineage_descendants(self, session_id: str, limit: int = 64) -> list[str]:
+        """Children of ``session_id`` and their children (at most 8 levels and ``limit`` ids), newest link first."""
+        if not session_id or not self._session_lineage_table_exists():
+            return []
+        rows = self._conn.execute(
+            "WITH RECURSIVE tree(id, depth, created_at) AS ("
+            "SELECT child_session_id, 1, created_at FROM session_lineage WHERE parent_session_id = ? "
+            "UNION SELECT link.child_session_id, tree.depth + 1, link.created_at FROM session_lineage AS link "
+            "JOIN tree ON link.parent_session_id = tree.id WHERE tree.depth < 8) "
+            "SELECT id FROM tree WHERE id != ? GROUP BY id ORDER BY MAX(created_at) DESC LIMIT ?",
+            (session_id, session_id, int(limit))).fetchall()
+        return [str(row[0]) for row in rows]
 
     def find_rows_by_observed_at(
         self, conversation_id: str, session_ids: List[str], observed_ats: List[float],

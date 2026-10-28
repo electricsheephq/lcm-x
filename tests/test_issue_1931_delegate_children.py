@@ -1,0 +1,258 @@
+"""#1931: delegated subagent sessions are stored under their own id with a parent link, never managed.
+
+The synthetic repro from the issue: a delegated child's tool result carries a marker that exists nowhere
+else. The child's rows must land under the child's session id (own conversation id), the parent must find
+the marker through ``lcm_grep`` scope ``current`` and ``lcm_recall`` with the lineage shown, and nothing
+of the parent may change. AUXILIARY sessions keep storing nothing.
+"""
+
+import importlib
+import json
+import sqlite3
+
+import pytest
+
+from tests.test_issue_622_slow_load import _Ctx, _Manager, _install_host, _load_plugin
+
+MARKER = "quokkaledger"
+DELEGATE = {"_subagent_id": "sa-1", "_delegate_depth": 1, "log_prefix": "[subagent-0]",
+            "enabled_toolsets": ["terminal", "file"]}
+
+
+class Agent:
+    """The host agent frame: hooks and engine calls run inside its methods, as in Hermes."""
+
+    def __init__(self, session_id, parent="parent", **markers):
+        self.session_id = session_id
+        self._parent_session_id = parent
+        for name, value in markers.items():
+            setattr(self, name, value)
+
+    def start(self, engine):
+        engine.on_session_start(self.session_id, platform="subagent", context_length=200_000)
+
+    def turn(self, ctx, history, engine=None):
+        extra = {} if engine is None else {"context_compressor": engine}
+        ctx.hooks["post_llm_call"][0](session_id=self.session_id, platform="subagent",
+                                      conversation_history=list(history), **extra)
+
+    def end(self, engine, history):
+        engine.on_session_end(self.session_id, list(history))
+
+
+def child_view(n_final=0):
+    rows = [{"role": "user", "content": "Inspect the ledger and report."},
+            {"role": "assistant", "content": "Checking the ledger.", "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": f"ledger line: {MARKER} balance 42"}]
+    return rows + [{"role": "assistant", "content": f"final answer {i}"} for i in range(n_final)]
+
+
+PARENT_VIEW = [{"role": "user", "content": "Delegate the ledger check."},
+               {"role": "assistant", "content": "The subagent reported a balance of 42."}]
+
+
+@pytest.fixture
+def host(tmp_path, monkeypatch):
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
+    _install_host(monkeypatch, tmp_path)
+    opened, names = [], iter(f"hermes_lcm_1931_{id(tmp_path)}_{i}" for i in range(10))
+
+    def load():
+        name = next(names)
+        module = _load_plugin(name)
+        ctx = _Ctx(_Manager())
+        module.register(ctx)
+        opened.append(ctx.offered)
+        return ctx, (lambda sub: importlib.import_module(f"{name}.{sub}"))
+
+    def clone(ctx):
+        engine = ctx.offered.clone_for_agent()
+        opened.append(engine)
+        return engine
+
+    yield load, clone
+    for engine in reversed(opened):
+        engine.shutdown()
+
+
+def parent_state(engine):
+    conv = engine._conversation_id
+    conn = engine._store.connection
+    relations = conn.execute("SELECT COUNT(*) FROM message_relations").fetchone()[0] if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else 0
+    state = engine._lifecycle.get_by_conversation(conv)
+    return (engine._session_id, conv, engine._ingest_cursor, engine.current_session_id,
+            [(m["store_id"], m["role"], m["content"]) for m in engine._store.get_session_messages("parent")],
+            len(engine._dag.get_session_nodes("parent")), relations,
+            (state.current_session_id, state.current_frontier_store_id, state.last_finalized_session_id))
+
+
+def child_rows(engine, session_id="child"):
+    return engine._store.get_session_messages(session_id)
+
+
+def lineage_rows(engine):
+    conn = engine._store.connection
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='session_lineage'").fetchone():
+        return []
+    return conn.execute("SELECT child_session_id, parent_session_id, source FROM session_lineage").fetchall()
+
+
+@pytest.mark.parametrize("route", ["shared", "clone", "resident_no_engine", "no_resident"])
+def test_synthetic_repro_flips_child_rows_stored_and_recallable(host, route):
+    load, clone = host
+    ctx, module = load()
+    child = Agent("child", **DELEGATE)
+    parent = None
+    if route != "no_resident":
+        parent = clone(ctx)
+        parent.on_session_start("parent", platform="cli", context_length=200_000)
+        ctx.hooks["post_llm_call"][0](session_id="parent", platform="cli",
+                                      conversation_history=PARENT_VIEW, context_compressor=parent)
+        before = parent_state(parent)
+    engine = {"shared": parent, "resident_no_engine": None, "no_resident": None}.get(route)
+    if route == "clone":
+        engine = clone(ctx)
+        child.start(engine)
+    for n in (0, 1, 2):
+        child.turn(ctx, child_view(n), engine)
+    if parent is None:
+        parent = clone(ctx)
+        parent.on_session_start("parent", platform="cli", context_length=200_000)
+    else:
+        assert parent_state(parent) == before  # isolation: nothing of the parent moved
+    rows = child_rows(parent)
+    assert [m["content"] for m in rows] == [m["content"] for m in child_view(2)]
+    assert {m["conversation_id"] for m in rows} == {"child"}
+    assert lineage_rows(parent) == [("child", "parent", "parent_frame")]
+    assert not any(MARKER in str(m["content"]) for m in parent._store.get_session_messages("parent"))
+
+    grep = json.loads(module("tools").lcm_grep({"query": MARKER}, engine=parent))
+    hits = [hit for hit in grep["results"] if hit.get("session_id") == "child"]
+    assert hits and hits[0]["lineage"] == "subagent of parent" and hits[0]["parent_session_id"] == "parent"
+    recall = json.loads(module("tools").lcm_recall({"query": MARKER}, engine=parent))
+    hits = [hit for hit in recall["hits"] if hit.get("session_id") == "child"]
+    assert hits and hits[0]["lineage"] == "subagent of parent"
+
+
+def test_exactly_once_resend_retry_resume_and_host_rewrite(host):
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    child.turn(ctx, child_view(0), parent)
+    child.turn(ctx, child_view(0), parent)  # identical view re-sent / hook retried
+    assert len(child_rows(parent)) == 3
+    child.turn(ctx, child_view(1), parent)  # one more row stores only that row
+    assert len(child_rows(parent)) == 4
+    child.end(parent, child_view(1))  # session end replays the same view
+    assert len(child_rows(parent)) == 4
+    # Resumed in a new process: the replayed history plus one new row.
+    ctx2, _ = load()
+    parent2 = clone(ctx2)
+    parent2.on_session_start("parent", platform="cli", context_length=200_000)
+    child.turn(ctx2, child_view(2), parent2)
+    assert [m["content"] for m in child_rows(parent2)] == [m["content"] for m in child_view(2)]
+    # The host's native compaction rewrote the head: resume after the unique stored tail.
+    rewritten = [{"role": "user", "content": "[CONTEXT COMPACTION] earlier turns summarised"},
+                 *child_view(2)[-3:], {"role": "assistant", "content": "after compaction"}]
+    child.turn(ctx2, rewritten, parent2)
+    child.turn(ctx2, rewritten, parent2)
+    contents = [m["content"] for m in child_rows(parent2)]
+    assert contents == [m["content"] for m in child_view(2)] + ["after compaction"]
+
+
+def test_unmatched_child_view_is_a_visible_fallback(host, caplog):
+    load, clone = host
+    ctx, module = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    child.turn(ctx, child_view(0), parent)
+    before = module("aux_session").delegate_child_store_counts().get("fallbacks", 0)
+    with caplog.at_level("WARNING"):
+        child.turn(ctx, [{"role": "user", "content": "an unrelated history"}], parent)
+    assert len(child_rows(parent)) == 3
+    assert module("aux_session").delegate_child_store_counts()["fallbacks"] == before + 1
+    assert any("delegated child child" in r.getMessage() and "rows not stored" in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.parametrize("markers", [
+    {**DELEGATE, "_memory_write_origin": "background_review"},
+    {**DELEGATE, "_memory_write_context": "background_review"},
+    {**DELEGATE, "enabled_toolsets": ["memory", "skills"]},
+], ids=["review-origin", "review-context", "memory-skills-only"])
+@pytest.mark.parametrize("route", ["shared", "resident_no_engine"])
+def test_auxiliary_sessions_store_nothing(host, markers, route):
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    before = parent_state(parent)
+    aux = Agent("aux", **markers)
+    for n in (0, 1):
+        aux.turn(ctx, child_view(n), parent if route == "shared" else None)
+    if route == "shared":
+        aux.end(parent, child_view(1))
+    assert child_rows(parent, "aux") == []
+    assert lineage_rows(parent) == []
+    assert parent_state(parent) == before
+
+
+def test_auxiliary_call_without_delegate_signal_stores_nothing(host):
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    Agent("title-call", parent="parent").turn(ctx, child_view(0))  # no delegate marker, record or state.db row
+    assert child_rows(parent, "title-call") == []
+    assert lineage_rows(parent) == []
+
+
+def test_explicit_hook_and_state_db_signals_name_their_source(host, tmp_path):
+    load, clone = host
+    ctx, module = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    ctx.hooks["subagent_start"][0](child_session_id="hooked", parent_session_id="parent",
+                                   child_subagent_id="sa-9", child_role="leaf")
+    Agent("hooked", parent="").turn(ctx, child_view(0))
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, parent_session_id TEXT)")
+        conn.execute("INSERT INTO sessions VALUES ('hosted', 'subagent', 'parent'), ('plain', 'cli', 'parent')")
+    Agent("hosted", parent="").turn(ctx, child_view(0))
+    Agent("plain", parent="").turn(ctx, child_view(0))
+    assert sorted(lineage_rows(parent)) == [("hooked", "parent", "subagent_start"), ("hosted", "parent", "state_db")]
+    assert len(child_rows(parent, "hooked")) == len(child_rows(parent, "hosted")) == 3
+    assert child_rows(parent, "plain") == []
+    row = parent._store.connection.execute(
+        "SELECT child_subagent_id, child_role FROM session_lineage WHERE child_session_id='hooked'").fetchone()
+    assert tuple(row) == ("sa-9", "leaf")
+
+
+def test_recall_scopes_for_child_rows(host):
+    load, clone = host
+    ctx, module = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    Agent("child", **DELEGATE).turn(ctx, child_view(0), parent)
+    Agent("grandchild", parent="child", **DELEGATE).turn(ctx, child_view(0))
+    Agent("sibling-child", parent="sibling", **DELEGATE).turn(ctx, child_view(0))  # another parent's child
+    grep = module("tools").lcm_grep
+
+    def sessions(**args):
+        payload = json.loads(grep({"query": MARKER, **args}, engine=parent))
+        return {hit["session_id"]: hit.get("lineage") for hit in payload["results"]}
+
+    assert sessions() == {"child": "subagent of parent", "grandchild": "subagent of child"}
+    assert sessions(session_scope="all") == {"child": "subagent of parent", "grandchild": "subagent of child",
+                                             "sibling-child": "subagent of sibling"}
+    assert sessions(session_scope="session", session_id="sibling-child") == {"sibling-child": "subagent of sibling"}
+    # Deleting a parent's messages keeps its children's links; deleting a child's removes the child's own link.
+    parent._store.delete_session_messages("parent")
+    parent._store.delete_session_messages("grandchild")
+    assert sorted(r[0] for r in lineage_rows(parent)) == ["child", "sibling-child"]
+    assert sessions(session_scope="session", session_id="child") == {"child": "subagent of parent"}

@@ -145,7 +145,7 @@ from .message_analysis import (
 )
 from .fresh_tail import FreshTailBoundary, resolve_fresh_tail_boundary, tool_group_safe_end
 from .message_patterns import compile_message_patterns, matches_message_pattern
-from .aux_session import AuxiliarySessionMixin
+from .aux_session import AuxiliarySessionMixin, DelegateChildMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity
@@ -1092,6 +1092,7 @@ class LCMEngine(
     PlaceholderLedgerMixin,
     BypassMixin,
     PrefixMatchingMixin,
+    DelegateChildMixin,
     ContextEngine,
 ):
     """Lossless Context Management engine.
@@ -1430,6 +1431,7 @@ class LCMEngine(
         self._auxiliary_next_generation_token = 0
         self._auxiliary_direct_end_guard_session_ids: set[str] = set()
         self._auxiliary_handoff_parent_session_ids: dict[str, str] = {}
+        self._delegate_child_bind_parent_ids: dict[str, str] = {}  # #1931: bind kwargs parent_session_id
         self._auxiliary_retired_session_generations: dict[str, set[int]] = {}
         self._auxiliary_foreground_reused_session_ids: set[str] = set()
         self._lcm_bypass_lineage_session_ids: set[str] = set()
@@ -1755,6 +1757,7 @@ class LCMEngine(
             self._auxiliary_next_generation_token = 0
             self._auxiliary_direct_end_guard_session_ids.clear()
             self._auxiliary_handoff_parent_session_ids.clear()
+            self._delegate_child_bind_parent_ids.clear()
             self._auxiliary_retired_session_generations.clear()
             self._auxiliary_foreground_reused_session_ids.clear()
             self._lcm_bypass_lineage_session_ids.clear()
@@ -5175,6 +5178,9 @@ class LCMEngine(
 
         if self._is_live_auxiliary_child_session(session_id, previous_session_id, kwargs):
             explicit_parent_id = str(kwargs.get("parent_session_id") or "")
+            if explicit_parent_id:  # #1931: a lineage source if this child turns out to be a delegate
+                with self._auxiliary_session_lock:
+                    self._delegate_child_bind_parent_ids[session_id] = explicit_parent_id
             preserve_foreground_reuse_marker = bool(
                 (
                     explicit_parent_id
@@ -5312,6 +5318,7 @@ class LCMEngine(
                 )
             )
         ):
+            self._store_delegate_child_turn(session_id, messages)  # #1931: stored, never managed
             current_thread_session_id = self._thread_context_session_id()
             deactivated = self._deactivate_auxiliary_session(
                 session_id,
@@ -5353,6 +5360,7 @@ class LCMEngine(
             and direct_bypass_normal_prefix_count > 0
         )
         if ended_session_directly_bypasses and not direct_bypass_is_suppressed_reused_normal:
+            self._store_delegate_child_turn(session_id, messages)
             self._remember_lcm_bypass_message_prefix(session_id, messages)
             self._end_host_fallback_compressor_for_session(
                 session_id,
