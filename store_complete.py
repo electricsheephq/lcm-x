@@ -474,6 +474,13 @@ class StoreCompleteMixin:
                     allow_retained_escape=True, lift_allowed=False, prefix_retry=False)
                 if result is None:  # the prefix is today's input; the caller would read None as the whole chunk
                     result = [(message, []) for message in prefix]
+                # A claim of a cut row (a composite or carrier the retry cannot re-identify) may reach this leaf
+                # only through the #1162 escape. Read as hidden input it would be summarised while its holder
+                # stays in view with no pending escape, and a later leaf would summarise that text again.
+                cut_claims = {sid for message in chunk[len(prefix):] for sid in given_claims.get(id(message), ())}
+                escaped_ids = {sid for sid, *_ in self._store_complete_escaped}
+                if cut_claims & {sid for _message, ids in result for sid in ids} - escaped_ids:
+                    result = []
                 if result:
                     self._store_complete_cut = True
                     return result

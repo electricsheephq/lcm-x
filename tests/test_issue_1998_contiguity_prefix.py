@@ -100,3 +100,45 @@ def test_1998_prefix_retry_consumes_only_the_host_prefix(tmp_path, summaries, li
         assert source_ids == ids[:3] and consumed_ids == ids[:3]
     finally:
         engine.shutdown()
+
+
+def test_1998_prefix_retry_keeps_retained_composite_claims_pending(tmp_path, summaries, lines, monkeypatch):
+    # Stored x1 y2 m3 h4 t5 u6; the host shows m u C12. The truncated walk stops at u,
+    # leaving C12's claims as a hole. Retrying on [m] must not summarise x1/y2 as hidden
+    # rows while their composite stays in view without an escape or summary lineage.
+    monkeypatch.setattr(store_complete, "_SCAN_LIMIT", 5)
+    engine = _engine(tmp_path, False)
+    engine.context_length = 1_048_576
+    x = {"role": "user", "content": "first constituent", "timestamp": 1.0}
+    y = {"role": "user", "content": "second constituent", "timestamp": 2.0}
+    m = {"role": "user", "content": "earlier question", "timestamp": 3.0}
+    h = _call("call_2", 4.0)
+    t = _res("call_2", "[Externalized tool output: tool=read_file; chars=90000; ref=x]" + PAD * 3, 5.0)
+    u = {"role": "user", "content": "next", "timestamp": 6.0}
+    composite = {"role": "user", "content": x["content"] + "\n\n" + y["content"], "timestamp": 1.0}
+    try:
+        engine.ingest([x, y, m, h, t, u])
+        ids = [int(row["store_id"]) for row in _rows(engine)]
+        assert len(ids) == 6
+        chunk = [m, u, composite]
+        mapping = {id(m): ids[2], id(u): ids[5]}
+        # R2 observes the exact concatenation at x's stamp, records its witness, and
+        # supplies C12's constituent claims to the real store-complete walk.
+        out = engine._identity_anchor_summary_input(chunk, mapping, chunk, chunk,
+                                                    budget=count_messages_tokens(chunk))
+        witness = engine._store.get_message_relations([ids[0]], "composite")
+        assert [row["related_store_id"] for row in sorted(witness, key=lambda row: row["ordinal"])] == ids[:2]
+        covered = [sid for msg, claims in out or ()
+                   for sid in [*claims, *([mapping[id(msg)]] if id(msg) in mapping else [])]]
+        assert not set(ids[:2]) & set(covered), (
+            "retained composite constituents became hidden summary input without lineage",
+            covered, engine._store_complete_escaped)
+        assert out == [] and engine._store_complete_empty_reason == CONTIGUITY
+        holes = [msg for _lvl, msg in lines if msg.startswith("LCM contiguity hole:")]
+        assert len(holes) == 1 and f"hole_store_id={ids[0]} " in holes[0], holes
+        assert "blocking_chunk_index=1/3 " in holes[0], holes
+        assert engine._store_complete_escaped == []
+        assert chunk == [m, u, composite]
+        assert len(_rows(engine)) == 6  # the witness does not store a duplicate composite row
+    finally:
+        engine.shutdown()
