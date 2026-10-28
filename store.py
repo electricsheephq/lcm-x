@@ -381,12 +381,23 @@ def delete_chunk_inflight(conn: sqlite3.Connection, rows_sql: str, args: tuple =
         )
 
 
+def _database_identity(path: Path, store: object) -> str:
+    """#719: the file a store opens, however its path was spelled; ``:memory:`` is one per store."""
+    if str(path) == ":memory:":
+        return f":memory:{id(store)}"
+    try:
+        return str(path.resolve())
+    except (OSError, RuntimeError, ValueError):  # unresolvable: keep the spelled path
+        return str(path)
+
+
 class MessageStore:
     """SQLite-backed immutable message store."""
 
     def __init__(self, db_path: str | Path, *, ingest_protection_config=None, hermes_home: str = ""):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.db_identity = _database_identity(self.db_path, self)  # fixed at open: a later cwd or symlink change cannot move it
         self._ingest_protection_config = ingest_protection_config or LCMConfig(database_path=str(self.db_path))
         self._hermes_home = hermes_home or str(self.db_path.parent)
         self._context_window_tokens: dict[str, int] = {}  # transient, session-keyed; never LCMConfig/SQLite
