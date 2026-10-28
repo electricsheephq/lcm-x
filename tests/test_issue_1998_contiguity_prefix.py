@@ -59,3 +59,44 @@ def test_1998_tool_call_only_rows_form_a_contiguous_leaf(tmp_path, summaries, li
             assert engine._store_complete_cut
     finally:
         engine.shutdown()
+
+
+def test_1998_prefix_retry_consumes_only_the_host_prefix(tmp_path, summaries, lines, monkeypatch):
+    # Stored a1 t1_2 m3 h4 t2_5 u6; the host shows m u a t1 (a, t1 by claims). The walk emits m, stops at u
+    # (stored 6) and the truncated scan never emits a or t1: their claims are a hole and the leaf empties at
+    # chunk index 1. The retry runs on [m]; a and t1 stay host rows, escaped from the store.
+    monkeypatch.setattr(store_complete, "_SCAN_LIMIT", 5)
+    engine = _engine(tmp_path, False)
+    engine.context_length = 1_048_576
+    a, t1, h = _call("call_1", 1.0), _res("call_1", "ok", 2.0), _call("call_2", 4.0)
+    m = {"role": "user", "content": "earlier question", "timestamp": 3.0}
+    t2 = _res("call_2", "[Externalized tool output: tool=read_file; chars=90000; ref=x]" + PAD * 3, 5.0)
+    u = {"role": "user", "content": "next", "timestamp": 6.0}
+    try:
+        engine.ingest([a, t1, m, h, t2, u])
+        ids = [int(r["store_id"]) for r in _rows(engine)]
+        assert len(ids) == 6
+        chunk = [m, u, a, t1]
+        mapping = {id(m): ids[2], id(u): ids[5]}
+        out = engine._store_complete_input(chunk, {id(a): [ids[0]], id(t1): [ids[1]]}, mapping, chunk, chunk, 0,
+                                           [], count_messages_tokens(chunk), allow_retained_escape=True)
+        assert engine._store_complete_empty_reason != CONTIGUITY, engine._store_complete_empty_reason
+        holes = [msg for _lvl, msg in lines if msg.startswith("LCM contiguity hole:")]
+        assert len(holes) == 1 and f"hole_store_id={ids[0]} " in holes[0], holes
+        assert "blocking_chunk_index=1/4 " in holes[0] and "prefix_retry=True" in holes[0], holes
+        # The leaf covers exactly the stored prefix below u, each row once; of the host rows only m is input.
+        covered = [s for msg, c in out for s in [*c, *([mapping[id(msg)]] if id(msg) in mapping else [])]]
+        assert sorted(covered) == ids[:3], covered
+        assert [msg for msg, _c in out if any(msg is row for row in chunk)] == [m]
+        assert engine._store_complete_cut
+        # The cut rows' stored rows are escaped (the host still shows a and t1), not silently covered.
+        assert engine._store_complete_escaped == [(ids[0], "assistant", "shown"), (ids[1], "tool", "shown")]
+        # The caller's consumption (the leaf loop's derivation) takes only the host prefix [m].
+        engine._compress_run.store_ids_by_message_id = mapping
+        summary_input, sources, anchor_claims = engine._leaf_summary_input(out, chunk)
+        _rows_read, positions, consumed_rows, source_ids, consumed_ids = engine._leaf_consumption(
+            chunk, summary_input, sources, out, anchor_claims, set())
+        assert positions == [0] and consumed_rows == [m]
+        assert source_ids == ids[:3] and consumed_ids == ids[:3]
+    finally:
+        engine.shutdown()
