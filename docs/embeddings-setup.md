@@ -1,15 +1,37 @@
 # Embeddings setup — free and local options
 
-Semantic and hybrid retrieval are **opt-in** and need an embedding provider. You have three good
-options, two of which cost nothing. If you configure nothing, nothing changes — retrieval stays
-FTS-only exactly as before.
+Local semantic recall is **on by default**, using in-process `fastembed` and its
+effective default model `BAAI/bge-small-en-v1.5` (384 dimensions). The configured
+model stays empty: only FastEmbed supplies this built-in default. An explicit
+`LCM_EMBEDDING_MODEL` wins with an explicit provider; a runtime model alone keeps
+the historical missing-provider rejection and stays inert when enable is unset.
+Non-local providers (including Ollama) require `LCM_EMBEDDINGS_ENABLED=true` and
+their own explicit model, retaining their privacy and consent requirements.
+This consent rule also applies to a non-local proactive recall override and to
+programmatic constructors; an omitted enable boolean never consents to cloud use.
+Unrecognized enable values resolve OFF with a warning. A set-but-blank value also
+resolves OFF, without a warning; leave the variable unset to keep the local default. The ignored config.yaml
+key `lcm.embeddings_enabled` does not opt out; use `LCM_EMBEDDINGS_ENABLED=false`.
+Set `LCM_EMBEDDINGS_ENABLED=false` to opt out: no provider load or model download,
+and existing rows and vectors remain intact. Other providers are explicit options.
+
+When local embeddings are enabled by the product default, hosts with at most
+2 effective CPUs use full-text recall immediately, including summaries-only
+requests. Recall reports `degraded=true`, reason `cpu_limited`, and the arms'
+actual coverage; doctor explains the limit. Effective capacity respects affinity
+and cgroup quotas (including ancestor limits and fractional CPUs), cached per
+process. Background catch-up continues. An explicit `LCM_EMBEDDINGS_ENABLED`
+value or programmatic config keeps control; explicit semantic `lcm_grep` is
+unchanged. Proactive recall stays inert on these hosts unless a nonblank provider
+override is set. Doctor still checks provider availability and readiness; a
+healthy CPU-limited host needs only an explicit opt-in if semantic recall is wanted.
 
 ## TL;DR
 
 | Option | Cost | Signup | Install | Best for |
 |---|---|---|---|---|
-| Voyage AI | free tier (200M tokens for the voyage-4 group), then ~$0.02–0.12 per million tokens | yes (no credit card) | none | best quality, zero local footprint |
-| fastembed | $0 | no | `pip install fastembed` (ONNX, no torch) | local default — no accounts, no daemon |
+| Voyage AI | 200M free tokens per model for voyage-4-lite / voyage-4 / voyage-4-large / voyage-context-4, then paid usage | yes; check the dashboard for your current limits | none | best quality, zero local footprint |
+| fastembed | $0 | no | Host-managed dependency companion (ONNX, no torch) | local default — no accounts, no daemon |
 | Ollama | $0 | no | Ollama app/daemon | you already run Ollama |
 | OpenAI-compatible | provider pricing | yes (per provider) | none | reuse an existing `/v1/embeddings` service (SiliconFlow, llama.cpp, vLLM) |
 
@@ -20,25 +42,36 @@ removing providers*).
 
 ## Option 1 — Voyage AI (free tier)
 
-The Voyage-4 generation (`voyage-4`, `voyage-4-large`, `voyage-4-lite`) carries **200 million free
-tokens for that model group**, and signup does not require a credit card. For a personal LCM corpus
-(thousands of summaries), that free allotment covers initial backfill and years of queries; past it,
-embedding costs $0.02/M (`voyage-4-lite`), $0.06/M (`voyage-4`), or $0.12/M (`voyage-4-large`). A
-query embeds exactly one short vector, so a semantic or hybrid query costs a fraction of a cent.
-Voyage documents its allotments and rate tiers on its
-[pricing](https://docs.voyageai.com/docs/pricing) and
-[rate-limits](https://docs.voyageai.com/docs/rate-limits) pages — treat those as the source of
-truth; the numbers above were verified 2026-07.
+Every account gets **200M free tokens per model** for `voyage-4-lite` (recommended),
+`voyage-4`, `voyage-4-large`, and `voyage-context-4` (used by the chunk corpus).
+`voyage-3.5`, `voyage-3-large`, and `voyage-context-3` no longer include free tokens.
+Allowances for other models (for example the code and domain models) are listed on
+[pricing](https://docs.voyageai.com/docs/pricing) (checked 2026-10-27). Adding a payment method raises
+[usage-tier rate limits](https://docs.voyageai.com/docs/rate-limits); the free tokens
+still apply. Check the dashboard for your current limits.
+
+At the [API keys dashboard](https://dashboard.voyageai.com/organization/api-keys),
+choose "Create new secret key" and set `VOYAGE_API_KEY` in Hermes' environment
+([key setup](https://docs.voyageai.com/docs/api-key-and-installation)). Set the
+following environment variables and restart Hermes. The model line is required;
+LCM-X has no default Voyage model.
 
 ```bash
-export VOYAGE_API_KEY=...           # from dash.voyageai.com
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=voyage
 export LCM_EMBEDDING_MODEL=voyage-4-lite   # or voyage-4 / voyage-4-large
+export VOYAGE_API_KEY=...
+export LCM_ENABLE_SLASH_COMMAND=1   # registers /lcm for the commands below
+```
+
+Then verify in Hermes:
+
+```text
 # Cloud provider-bound copies are protected automatically. Durable storage stays raw.
 /lcm embed warmup                   # probes API; registers model, dimensions, privacy revision
 /lcm embed backfill                 # dry run: shows counts + estimated tokens, writes nothing
 /lcm embed backfill --apply         # embeds your history in bounded batches
+/lcm status                        # checks the active provider and coverage
 ```
 
 Known cloud providers protect every provider-bound copy — embedding documents
@@ -65,48 +98,106 @@ worker slots).
 ## Option 2 — fastembed (local, no signup, recommended local default)
 
 [fastembed](https://github.com/qdrant/fastembed) runs ONNX models on CPU with no PyTorch and no
-external service — just a pip package.
+external service. The host installs its Python package through the stable companion plugin.
 
 ```bash
-pip install fastembed          # or: pip install -r requirements-semantic.txt
-export LCM_EMBEDDINGS_ENABLED=true
-export LCM_EMBEDDING_PROVIDER=fastembed
-export LCM_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5   # 384-dim, compact and quick on CPU
-/lcm embed warmup     # downloads the model ONCE, explicitly (a few hundred MB incl. onnxruntime)
-/lcm embed backfill --apply
+# Use the full source commit SHA of your installed LCM-X core.
+LCM_X_REF=<LCM-X-40-character-SHA>
+hermes plugins install electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings --ref "$LCM_X_REF"
+# Accept the host's dependency consent, enable the companion if needed, then restart Hermes.
+# No LCM_* settings or manual warmup are required for the local default.
+/lcm doctor
 ```
 
-The model download happens **only** during `warmup` — never lazily during a query or an agent turn.
-If you skip warmup, semantic search simply stays off and the tools tell you why. Queries use the
-model's query-specific encoding (distinct from document encoding) so query/passage asymmetry is
+Model preparation runs the warmup path automatically in the background; it may
+download an uncached model there, never during a query or on the turn path.
+Catch-up then embeds existing history in bounded background batches. An offline
+cold start uses full text, with bounded preparation retries; preparation can
+complete after connectivity returns. A missing/disabled companion, an uncached
+or loading model, and an incomplete index all keep `lcm_recall` on full text,
+including summaries-only requests, with `degraded=true`, a precise reason and
+actual coverage. Full-text coverage of `none` is not a successful fallback.
+`/lcm doctor` reports preparing, unavailable (with the remedy), or model ready
+with separate summary coverage and chunk coverage/backlog. Model ready does not
+mean index ready. Manual `/lcm embed warmup` and `/lcm embed backfill --apply`
+remain operator tools, rather than prerequisites for the default local path.
+An existing cloud profile stays held when returning to the local default. Doctor
+names its provider: restore that provider's settings with `LCM_EMBEDDINGS_ENABLED=true`,
+or switch to the local model with `/lcm embed warmup`. Existing vectors stay intact.
+Queries use the model's query-specific encoding (distinct from document encoding) so query/passage asymmetry is
 preserved. When `LCM_EMBEDDINGS_ENABLED=false`, `warmup` is inert: it does not resolve a provider,
 download a model, create embedding tables, or create the configured database.
 
-### A host update can remove fastembed
+FastEmbed uses one ONNX Runtime intra-op thread for `BAAI/bge-small-en-v1.5`
+and two for other models; this is not a process CPU quota.
+To load it from another cache, for example one shared, read-only
+cache for several profiles, set fastembed's own `FASTEMBED_CACHE_PATH` (default: the user cache directory).
+Pre-seed a read-only cache: `warmup` cannot download into it.
 
-`fastembed` lives in the virtualenv that runs Hermes, not in LCM-X (which is installed by symlink
-and pulls in no Python packages of its own). `hermes update` can build a **new** environment under
-`installs/<id>/environments/<hash>/venv`. It carries over the dependencies Hermes itself records
-(its extras and the dependencies plugins declare), but a package installed by hand with
-`pip install fastembed` is not recorded, so **a hand-installed embedding dependency can be dropped
-by a host update**.
+### Install consent, updates and recovery
 
-Nothing about your LCM data changes when this happens — the store stays lossless and existing
-vectors are untouched — but new content stops being embedded and semantic retrieval quietly falls
-back to full-text (`lcm_recall` returns `degraded: true`, `lcm_grep mode=semantic` degrades to FTS).
+`scripts/install.sh` links LCM-X core and its skill as before, enables the core
+through the host's enable verb, then runs the companion install command above.
+It passes the selected profile through `-p` to every host command with `HERMES_HOME`
+set to the install root: a named profile targets `root/profiles/<name>`, and
+with a root-shaped home, unset or `default` targets the root even with a sticky active profile. The installer
+requires canonical lowercase, unpadded ASCII profile names and
+refuses other spellings before links or host calls (use `default` for `Default`
+and `work` for padded `Work`). Printed
+retry/enable commands retain that root and profile. A separate older copy prevents
+automatic core enablement until the printed migration is completed. Optional
+companion failure preserves successful core installation and full-text recall;
+for a non-Git archive, replace the retry's SHA placeholder with the core's published
+full commit SHA. Context-engine selection remains manual.
+A profile-shaped `HERMES_HOME=<root>/profiles/<name>` selects that profile; a conflicting `HERMES_PROFILE` is refused before links.
+The installer never links the companion or runs pip. Both qualified host
+pins require a repository subdirectory identifier rather than a local directory;
+`--ref` pins it to the installer's checkout commit. Native-route core users run
+the same companion command with their core's full source SHA. For a catalog payload,
+the installed revision is a dist commit: find the source SHA in that commit's
+`payload: <tag> <source-sha>` message or `payload-manifest.json` (`source_sha`), also
+attached to the source release. See [catalog provenance](operations/catalog-payload.md#verify-provenance).
 
-To recover, reinstall into the active environment and confirm:
+On hosts with the shared plugin manager, the native install owns the questions.
+Noninteractive installation or a decline leaves the companion installed but
+**disabled**. LCM-X stays enabled and full-text recall stays available. To consent
+later, run the host's printed command:
 
 ```bash
-pip install -r requirements-semantic.txt
-/lcm doctor                 # embedding_provider_health must report pass
-/lcm embed backfill --apply # embed anything written while the provider was missing
+HERMES_HOME=<root> hermes -p <profile> plugins enable hermes-lcm-x-local-embeddings
 ```
 
-No restart and no re-warmup are needed: the provider import is lazy and the downloaded model cache
-survives in `~/.cache/fastembed`. The plugin also logs a `WARNING` at startup when embeddings are
-enabled but the configured provider is unavailable, and `/lcm doctor` reports it through the
-`embedding_provider_health` check — so this no longer fails silently.
+The reference Hermes 0.21.5 pin uses its legacy dependency installer, without a
+separate dependency-consent question on enable. Its first session may need a
+restart before fastembed becomes available. Restart Hermes after enable on either
+host, then run `/lcm doctor` to check provider health. Use the root and profile
+printed by the installer (`default` for the root profile); a profile-shaped home
+is normalized to its root and profile. Doctor names the same enable command when
+the companion is disabled. No model download is part of companion installation;
+local model preparation and catch-up start automatically in the running plugin.
+
+The companion is a normal host-managed plugin: use host verbs to enable, disable
+or uninstall it. A pinned install does not move with `hermes plugins update`.
+To deliberately replace an existing host-managed companion, use:
+
+```bash
+hermes plugins install electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings --force --ref "$LCM_X_REF"
+```
+
+The installer prints this command instead of forcing replacement. These host
+pins reject external symlinks before processing `--force`. If an earlier install
+linked the companion, move only that link aside by hand, preserve its target,
+then run the original install command without `--force`. The installer preserves
+the link and prints this prerequisite and the pinned host command. Keep the
+companion selected across host updates: the host records its dependency, while
+ordinary LCM-X version updates leave the stable carrier manifest unchanged.
+Disabling or uninstalling the carrier may remove fastembed on the next sync.
+
+If fastembed is missing after an update, install or enable the companion, restart
+Hermes and run `/lcm doctor`; background preparation and catch-up fill the gap. The
+store and existing vectors are preserved while recall degrades to full text.
+As a last resort on an unmanaged host, `pip install -r requirements-semantic.txt`
+installs into its active environment; manual installs can be dropped on update.
 
 ## Option 3 — Ollama (trusted local daemon)
 
@@ -117,9 +208,20 @@ ollama pull nomic-embed-text        # 768-dim; mxbai-embed-large and bge-m3 also
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=ollama
 export LCM_EMBEDDING_MODEL=nomic-embed-text
+export LCM_EMBEDDING_QUERY_PREFIX="search_query: "
+export LCM_EMBEDDING_DOCUMENT_PREFIX="search_document: "
 # LCM_OLLAMA_BASE_URL defaults to http://localhost:11434
 /lcm embed warmup && /lcm embed backfill --apply
 ```
+
+Prefixes are raw strings; quote them to preserve the trailing space. Empty defaults leave
+requests and vector identities unchanged. Only Ollama and OpenAI-compatible providers use them.
+[Contributor dhaern's measurements](https://github.com/electricsheephq/lcm-x/issues/1118#issuecomment-6358033279) on two public BEIR sets
+found model-card prefixes raised EmbeddingGemma 2 nDCG@10 by about 6% and pixie-rune-8k by under 3%; these are not LCM-X history numbers.
+
+The contributor reported that `embeddinggemma-2:270m` with Ollama's default batch size rejected inputs over about 2,000 tokens
+with HTTP 413 even with `num_ctx` 8192; raising `num_batch` to 8192 as well worked. LCM-X does not send Ollama `options`.
+Try setting both on the model with Modelfile `PARAMETER` entries; that method was not verified by the contributor.
 
 Ollama requests set `truncate: false`, so an input that exceeds the model's context fails loudly
 rather than being silently truncated to a misleading embedding. As with Voyage, an Ollama
@@ -160,7 +262,11 @@ export LCM_EMBEDDING_API_KEY=sk-...        # falls back to SILICONFLOW_API_KEY
 `/embeddings` is appended. The request body is the standard OpenAI shape —
 `{"model": ..., "input": [...]}` with a `Bearer` authorization header — so any
 compatible server works, including local llama.cpp/vLLM instances that cost
-nothing per call.
+nothing per call. For an asymmetric model such as `nomic-embed-text`, set `LCM_EMBEDDING_QUERY_PREFIX="search_query: "`
+and `LCM_EMBEDDING_DOCUMENT_PREFIX="search_document: "` to its model-card values.
+Both HTTP providers send the complete prefixed input after any cloud privacy transform;
+server size errors follow the existing error path, without silent truncation or a vector write
+for the rejected item. There is no new client-side input limit.
 
 The same deadline, spend-guard, and identity rules apply as for the other
 remote providers: `LCM_EMBEDDING_QUERY_TIMEOUT_S` bounds interactive queries,
@@ -193,10 +299,56 @@ walk is itself capped; a missing legacy `source` column or an over-budget lineag
 with `unverifiable_provenance`, so it never becomes an allow-all. A source-filtered semantic result
 therefore reports bounded coverage rather than claiming universal pre-bound source coverage.
 
+## New content is embedded automatically
+
+With embeddings enabled (the default) and a registered profile (automatic local
+preparation, or explicit `/lcm embed warmup` for other providers), LCM-X
+embeds new content in the background: after each leaf summary is published (condensed summaries
+are not embedding targets, as with `/lcm embed backfill`), and
+once when a session binds. Each pass handles at most one backfill batch per corpus, runs off the
+turn path, and uses the same lease, privacy policy, operation budget and provider timeout as
+`/lcm embed backfill`. If a manual backfill or another process holds the lease, the pass skips;
+the next pass picks up whatever is still unembedded. A manual backfill started while a pass runs
+is refused until the pass ends, as with two manual runs. There is no new setting.
+
+- **Summaries** are embedded with any provider. With a cloud provider this means new summaries
+  are sent to it automatically, one bounded batch per pass, without a manual backfill.
+- **Message chunks** are embedded automatically only with fastembed, or with Ollama whose
+  `LCM_OLLAMA_BASE_URL` host is loopback (`localhost`, `127.0.0.0/8`, `::1`). Each pass takes new
+  messages first, then older history newest first, one bounded batch at a time, so its cost follows
+  new messages, not the store, and an existing store's recent messages are covered before its old
+  history; `/lcm embed backfill` embeds the whole backlog in one go. On a cloud provider or a
+  remote Ollama the chunk corpus stays operator-initiated: `--confirm-raw-text` authorizes one invocation and is never
+  stored, so run `/lcm embed backfill --corpus chunks --apply --confirm-raw-text` yourself when you
+  want chunk recall.
+- If the provider is unavailable (for example fastembed is not installed), the pass is skipped and
+  counted; the first skip in a process logs a `WARNING`, later ones log at `DEBUG`.
+
+`/lcm status` shows `embedding_backlog_summaries`, `embedding_backlog_chunks` (what the automatic passes
+still have ahead of them, counted over at most 2,000 messages and shown as `N+` beyond that; a chunk the
+passes skipped inside the embedded range is not counted, and a dry run of
+`/lcm embed backfill --corpus chunks` gives the exact total; with any rows left
+`uncertain` by a failure after dispatch, which only `--retry-uncertain` resends), the time and outcome
+of the last incremental pass (`embedding_incremental_last_pass`) and the process's skipped-pass
+count (`embedding_incremental_failures`). `/lcm embed backfill --apply` is still the way to embed
+an existing history in one go instead of waiting for bounded background catch-up.
+
 ## Performance & footprint
 
-- Vector math is dependency-free by default; installing **numpy** (optional) accelerates large
-  corpora — the top-k scan is milliseconds warm once numpy is loaded.
+- NumPy remains optional. When available, it enables vectorized search and the
+  float32 chunk-loader fast path; the import guard and pure-Python fallback remain.
+  Install it in the Python environment that actually runs Hermes: for a user-managed
+  environment, `python -m pip install numpy`; for a managed build, use that host's
+  supported dependency-installation mechanism rather than modifying a generated venv.
+  Restart long-lived hosts after changing their dependency environment.
+- Float32 chunk matrices are loaded directly from their little-endian BLOBs,
+  avoiding a round trip through Python float objects. Joining the BLOBs still
+  copies bytes; this is not an end-to-end zero-copy pipeline. Int8 decoding,
+  stored vector identities, and search coverage are unchanged.
+- Reproduce the loader comparison without a profile or provider call with
+  `python benchmarks/benchmark_float32_chunk_loader.py --count 2000 --dim 384`.
+  The synthetic benchmark checks exact IDs, matrix values and dot-product scores;
+  timings are host-dependent and are not asserted by tests.
 - Metadata/id resolution uses a temp-table join rather than a giant `IN (...)` list, so it scales
   past the SQLite host-parameter limit that previously failed near ~32k ids (validated to 40k).
 - Without numpy, search scans the most recent `LCM_EMBEDDING_BOUNDED_SCAN_ROWS` vectors (default
@@ -206,6 +358,21 @@ therefore reports bounded coverage rather than claiming universal pre-bound sour
   identity, transactional `data_version`, and candidate ids; it is not a corpus-sized matrix.
 
 ## Switching or removing providers
+
+A prefix change (including removal) registers a new identity: restart Hermes, then run `/lcm embed warmup` and `/lcm embed backfill --apply` (add corpus/consent options for chunks). Provider caches keep their existing provider/model keys.
+
+Prefixed profiles use distinct `summary+prefix` / `chunk+prefix` tasks as well as the
+revision digest. v0.28.1 cannot select these profiles or write into them on rollback;
+it uses an existing unprefixed corpus or falls back to full text. Empty prefixes keep
+the original requests, tasks and identity hashes.
+
+If you tested prefixes on v0.29.0-rc1, restart on the updated build and run
+`/lcm embed warmup`, then `/lcm embed backfill --apply`. Warmup retires rc1's
+revision-only profiles, even if you have since removed the prefixes. Their derived
+vectors are retained but never reused: an earlier rollback may have mixed them with
+unprefixed vectors. Backfill rebuilds the selected corpus from the unchanged source
+rows. For chunks, also run `/lcm embed backfill --apply --corpus chunks --confirm-raw-text`
+with your existing chunk policy. No raw messages or summary DAG nodes are migrated.
 
 Change provider/model → run `/lcm embed warmup` (registers the new profile as the current identity)
 → `/lcm embed backfill --apply` (embeds under the new identity; the previous model's vectors are
@@ -244,6 +411,8 @@ FTS-only instantly.
 - `summary` (default) — embeds the generated **summaries** of your history.
 - `chunks` — embeds provider input derived from **raw, verbatim message text**, chunked by `--policy`
   (`conversational` | `heads` | `full`), for verbatim/chunk-KNN recall.
+  `conversational` (the default) embeds every non-empty user and assistant turn, however short; `heads` adds the
+  head and error chunks of tool results; `full` embeds every role.
 - `both` — runs the summary backfill, then the chunk backfill, in one command.
 
 The distinction matters for privacy. The summary corpus starts from model-generated summaries; the

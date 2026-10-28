@@ -1,0 +1,54 @@
+[
+  [
+    "__init__.py",
+    "Path(__file__).resolve().parent / 'skills' / 'hermes-lcm'"
+  ],
+  [
+    "__init__.py",
+    "importlib.util.spec_from_file_location(f'{__name__}._standalone_config', Path(__file__).resolve().with_name('config.py'))"
+  ],
+  [
+    "__init__.py",
+    "importlib.util.spec_from_file_location(f'{__name__}._standalone_config', Path(__file__).resolve().with_name('config.py'))"
+  ],
+  [
+    "bypass.py",
+    "getattr(importlib.import_module('agent.context_compressor'), 'ContextCompressor')"
+  ],
+  [
+    "engine.py",
+    "_git_runtime_identity(_PLUGIN_ROOT)"
+  ],
+  [
+    "engine.py",
+    "str(Path(__file__).resolve())"
+  ],
+  [
+    "engine.py",
+    "str(_PLUGIN_ROOT)"
+  ],
+  [
+    "guidance.py",
+    "Path(__file__).resolve().parent / 'skills' / 'hermes-lcm' / 'references' / 'recall-policy.md'"
+  ],
+  [
+    "guidance.py",
+    "RECALL_POLICY_PATH.read_text(encoding='utf-8').strip()"
+  ],
+  [
+    "guidance.py",
+    "RuntimeError(f'Hermes-LCM recall policy is empty: {RECALL_POLICY_PATH}')"
+  ],
+  [
+    "host_uid_emit.py",
+    "import_module('agent.message_metadata').PERSISTENCE_ONLY_MESSAGE_FIELDS"
+  ],
+  [
+    "runtime_identity.py",
+    "Path(__file__).resolve().parent"
+  ],
+  [
+    "runtime_identity.py",
+    "_PLUGIN_ROOT / 'plugin.yaml'"
+  ]
+]

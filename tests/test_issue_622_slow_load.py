@@ -22,16 +22,22 @@ import sys
 import textwrap
 import threading
 import time
+import traceback
 import types
 from pathlib import Path
 
 import pytest
 
+from tests.timing_helpers import returns_while_blocked
+
 from hermes_lcm import db_bootstrap
 from hermes_lcm.config import LCMConfig
+from hermes_lcm.dag import SummaryDAG
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.inactive_record import RECORD_NAME
+from hermes_lcm.store import MessageStore
 
+RECORD_DIR = ("plugin-data", "hermes-lcm-x")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BACKFILL_STEP = "messages_ingested_at_backfill_v1"
 ACTIVE_LINE = "LCM plugin loaded — lossless context management active"
@@ -173,15 +179,36 @@ def _shutdown(ctx):
 def test_t1_abandoned_load_logs_one_error_and_writes_record(tmp_path, monkeypatch, caplog):
     home = tmp_path / "hermes-home"
     home.mkdir()
-    _install_host(monkeypatch, home, delay=0.8)
+    _install_host(monkeypatch, home)
     module = _load_plugin("hermes_lcm_622_t1")
+    ctx = _Ctx(_Manager())
+    ctx._abandon_load()
+    monkeypatch.setattr(module, "_MODULE_IMPORTED_AT", time.monotonic() - 1.0)
+    caplog.set_level(logging.INFO)
+    try:
+        module.register(ctx)
+    finally:
+        _shutdown(ctx)
+    _assert_abandoned_load(ctx, caplog, home)
+
+
+@pytest.mark.latency
+def test_t1_abandoned_load_logs_one_error_and_writes_record_latency(tmp_path, monkeypatch, caplog):
+    """The real path: a host load slower than the deadline is abandoned by ``run_with_load_deadline``."""
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    _install_host(monkeypatch, home, delay=0.8)
+    module = _load_plugin("hermes_lcm_622_t1_latency")
     ctx = _Ctx(_Manager())
     caplog.set_level(logging.INFO)
     try:
         _register_under_deadline(module, ctx, deadline=0.3)
     finally:
         _shutdown(ctx)
+    _assert_abandoned_load(ctx, caplog, home)
 
+
+def _assert_abandoned_load(ctx, caplog, home: Path) -> None:
     assert ctx._manager._context_engine is None
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1, [r.getMessage() for r in errors]
@@ -194,7 +221,7 @@ def test_t1_abandoned_load_logs_one_error_and_writes_record(tmp_path, monkeypatc
     assert "LCM plugin loaded" not in caplog.text
     assert "Path B" not in caplog.text
 
-    record = json.loads((home / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
+    record = json.loads((home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
     assert set(record) == {"pid", "process_start", "elapsed_s", "reason", "written_at"}
     assert record["pid"] == os.getpid()
     assert record["elapsed_s"] >= 0.8
@@ -216,7 +243,7 @@ def test_t2_fast_load_logs_active_line_with_load_time(tmp_path, monkeypatch, cap
     assert ctx._manager._context_engine is ctx.offered
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert "NOT active" not in caplog.text
-    assert not (home / RECORD_NAME.format(pid=os.getpid())).exists()
+    assert not (home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=os.getpid())).exists()
     active = [r.getMessage() for r in caplog.records if ACTIVE_LINE in r.getMessage()]
     assert len(active) == 1
     assert re.search(r"\(load \d+\.\d\d s\)$", active[0]), active[0]
@@ -243,7 +270,7 @@ def test_t3_other_engine_in_slot_logs_warning_not_error(tmp_path, monkeypatch, c
     assert "_OtherEngine" in warnings[0]
     assert "load_timeout_seconds" not in warnings[0]
     assert "LCM plugin loaded" not in caplog.text
-    record = json.loads((home / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
+    record = json.loads((home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
     assert "_OtherEngine" in record["reason"]
 
 
@@ -289,7 +316,7 @@ def test_t4_record_reported_while_pid_alive_and_dropped_after(tmp_path):
         status = json.loads(lcm_tools.lcm_status({}, engine=engine))
         assert "inactive_process" not in status
         assert "was not active in process" not in handle_lcm_command("doctor", engine)
-        assert not (home / RECORD_NAME.format(pid=child.pid)).exists()
+        assert not (home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=child.pid)).exists()
     finally:
         engine.shutdown()
 
@@ -308,7 +335,7 @@ def test_t5_unknown_host_shape_is_treated_as_active(tmp_path, monkeypatch, caplo
 
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING and "LCM-X is NOT" in r.getMessage()]
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert not (home / RECORD_NAME.format(pid=os.getpid())).exists()
+    assert not (home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=os.getpid())).exists()
     active = [r.getMessage() for r in caplog.records if ACTIVE_LINE in r.getMessage()]
     assert len(active) == 1
     assert re.search(r"\(load \d+\.\d\d s\)$", active[0]), active[0]
@@ -322,16 +349,20 @@ def _engine(db: Path, **overrides) -> LCMEngine:
     return LCMEngine(config=config, hermes_home=str(db.parent / "home"))
 
 
-def _seed(db: Path, **overrides) -> None:
+def _seed(db: Path, **overrides) -> LCMEngine:
     engine = _engine(db, **overrides)
     try:
         engine.on_session_start("s-622", platform="cli", conversation_id="c-622")
         engine.ingest([
             {"role": "user", "content": f"alpha bravo charlie message {i}"} for i in range(20)
         ])
+        assert engine.drain_rollup_maintenance(timeout=10), "seed rollup maintenance did not drain"
+        assert engine.drain_embedding_maintenance(timeout=10), "seed embedding maintenance did not drain"
+        db_bootstrap.join_background_integrity_scans(timeout=10)
     finally:
         engine.shutdown()
-    db_bootstrap.join_background_integrity_scans(timeout=10)
+    # Keep the closed engine only as an owner-scoped drain handle for assertions.
+    return engine
 
 
 def _markers(db: Path) -> dict[str, float]:
@@ -362,17 +393,19 @@ def _age_markers(db: Path, hours: float) -> float:
     return aged
 
 
-def _hold_write_lock(db: Path, seconds: float) -> threading.Timer:
+def _hold_write_lock(db: Path):
     holder = sqlite3.connect(str(db), timeout=10, check_same_thread=False)
     holder.execute("BEGIN IMMEDIATE")
+    release = threading.Event()
 
-    def _release():
+    def unlock():
+        release.wait()
         holder.rollback()
         holder.close()
 
-    timer = threading.Timer(seconds, _release)
-    timer.start()
-    return timer
+    worker = threading.Thread(target=unlock, daemon=True)
+    worker.start()
+    return release, worker
 
 
 def _timed_open(db: Path, **overrides) -> float:
@@ -383,12 +416,148 @@ def _timed_open(db: Path, **overrides) -> float:
     return elapsed
 
 
-def test_t6_due_deep_check_behind_a_writer_does_not_stall_the_open(tmp_path):
+def test_t6_due_deep_check_behind_a_writer_does_not_stall_the_open(tmp_path, monkeypatch):
+    db = tmp_path / "lcm.db"
+    seeded_engine = _seed(db)
+    assert seeded_engine.drain_rollup_maintenance(timeout=0), "seed rollup worker is not idle"
+    assert seeded_engine.drain_embedding_maintenance(timeout=0), "seed embedding worker is not idle"
+    db_bootstrap.join_background_integrity_scans(timeout=10)
+    # The join helpers return no status; no public registry-idle helper exists. The registries are
+    # process-wide and keep a finished thread when another test replaced its scan body, so a
+    # worker counts only while it is alive (as in the dispatchers themselves).
+    with db_bootstrap._integrity_scan_lock:
+        live = [t for t in db_bootstrap._integrity_scan_threads.values() if t.is_alive()]
+        assert not live, f"integrity workers are not idle: {live}"
+    with db_bootstrap._stem_lock:
+        live = [t for t in db_bootstrap._stem_threads.values() if t.is_alive()]
+        assert not live, f"stem backfill workers are not idle: {live}"
+    aged = _age_markers(db, hours=25)
+
+    release, holder = _hold_write_lock(db)
+    statements = _record_busy_timeouts(monkeypatch)
+    deep_checks_while_locked = []
+    dispatches = []
+    scans_run = []
+    openers = []
+    thread_starts = {}
+    dispatch_context = threading.local()
+    real_check = db_bootstrap.check_external_content_fts_integrity
+    real_dispatch = db_bootstrap._dispatch_background_integrity_scan
+    real_scan = db_bootstrap._run_background_integrity_scan
+    real_start = threading.Thread.start
+    real_dag_init = SummaryDAG.__init__
+    real_store_init = MessageStore.__init__
+
+    def record_opener(kind):
+        openers.append({
+            "kind": kind,
+            "thread": threading.current_thread().name,
+            "stack": traceback.format_stack(),
+        })
+
+    def record_dag_init(self, *args, **kwargs):
+        record_opener("SummaryDAG")
+        return real_dag_init(self, *args, **kwargs)
+
+    def record_store_init(self, *args, **kwargs):
+        record_opener("MessageStore")
+        return real_store_init(self, *args, **kwargs)
+
+    def record_thread_start(thread):
+        origin = {"thread": thread.name, "stack": traceback.format_stack()}
+        thread_starts[thread] = origin
+        dispatch = getattr(dispatch_context, "current", None)
+        if dispatch is not None:
+            dispatch["started_threads"].append(origin)
+        return real_start(thread)
+
+    def record_dispatch(conn, spec, *, now=None):
+        dispatch = {
+            "table": spec.table_name,
+            "thread": threading.current_thread().name,
+            "stack": traceback.format_stack(),
+            "started_threads": [],
+            "outcome": "raised",
+        }
+        dispatches.append(dispatch)
+        previous = getattr(dispatch_context, "current", None)
+        dispatch_context.current = dispatch
+        try:
+            result = real_dispatch(conn, spec, now=now)
+            dispatch["returned"] = result
+            if not result:
+                dispatch["outcome"] = "synchronous fallback"
+            elif dispatch["started_threads"]:
+                dispatch["outcome"] = "claimed and thread started"
+            else:
+                dispatch["outcome"] = "skipped"
+            return result
+        finally:
+            dispatch_context.current = previous
+
+    def record_scan(db_path, spec, started_at):
+        thread = threading.current_thread()
+        scans_run.append({
+            "table": spec.table_name,
+            "thread": thread.name,
+            "starter": thread_starts.get(thread),
+            "stack": traceback.format_stack(),
+        })
+        return real_scan(db_path, spec, started_at)
+
+    def record_deep_check(conn, spec):
+        if not release.is_set():
+            deep_checks_while_locked.append(spec.table_name)
+        return real_check(conn, spec)
+
+    def open_and_snapshot():
+        _timed_open(db)
+        # returns_while_blocked releases the writer in its finally block.
+        # Keep the in-lock snapshot as well as the skipped-scan check after join.
+        return _markers(db)
+
+    # Limit diagnostics to this open, including work that runs after unlock.
+    with monkeypatch.context() as diagnostics:
+        diagnostics.setattr(threading.Thread, "start", record_thread_start)
+        diagnostics.setattr(SummaryDAG, "__init__", record_dag_init)
+        diagnostics.setattr(MessageStore, "__init__", record_store_init)
+        diagnostics.setattr(db_bootstrap, "_dispatch_background_integrity_scan", record_dispatch)
+        diagnostics.setattr(db_bootstrap, "_run_background_integrity_scan", record_scan)
+        diagnostics.setattr(db_bootstrap, "check_external_content_fts_integrity", record_deep_check)
+        try:
+            markers_before_release = returns_while_blocked(open_and_snapshot, release)
+            assert "PRAGMA busy_timeout=50" in statements, "store open did not use its 50 ms claim budget"
+        except AssertionError as exc:
+            details = json.dumps({"dispatches": dispatches, "scans_run": scans_run, "openers": openers}, indent=2)
+            raise AssertionError(f"{exc}\n{details}") from exc
+        finally:
+            release.set()
+            holder.join(timeout=10)
+            db_bootstrap.join_background_integrity_scans(timeout=30)
+        details = json.dumps({"dispatches": dispatches, "scans_run": scans_run, "openers": openers}, indent=2)
+        assert deep_checks_while_locked == [], details
+        assert markers_before_release == {"messages_fts": aged, "nodes_fts": aged}, details
+        assert scans_run == [], details
+        assert dispatches and all(call["outcome"] == "skipped" for call in dispatches), details
+        # Failed claims skip this open; only a later open may refresh the markers.
+        assert _markers(db) == {"messages_fts": aged, "nodes_fts": aged}, details
+
+    for _ in range(3):
+        _timed_open(db)
+        db_bootstrap.join_background_integrity_scans(timeout=30)
+        if all(value > aged for value in _markers(db).values()):
+            break
+    stamped = _markers(db)
+    assert stamped["messages_fts"] > aged and stamped["nodes_fts"] > aged, stamped
+
+
+@pytest.mark.latency
+def test_t6_due_deep_check_behind_a_writer_does_not_stall_the_open_latency(tmp_path):
     db = tmp_path / "lcm.db"
     _seed(db)
     aged = _age_markers(db, hours=25)
 
-    timer = _hold_write_lock(db, seconds=5)
+    timer = _hold_write_lock_for_latency(db, seconds=5)
     try:
         elapsed = _timed_open(db)
     finally:
@@ -487,12 +656,26 @@ def test_t8_rollups_on_open_does_not_wait_for_another_writer(tmp_path):
     db = tmp_path / "lcm.db"
     _seed(db, temporal_rollups_enabled=True)
 
-    timer = _hold_write_lock(db, seconds=5)
+    release, holder = _hold_write_lock(db)
+    try:
+        returns_while_blocked(lambda: _timed_open(db, temporal_rollups_enabled=True), release)
+    finally:
+        release.set()
+        holder.join(timeout=10)
+
+
+@pytest.mark.latency
+def test_t8_rollups_on_open_does_not_wait_for_another_writer_latency(tmp_path):
+    db = tmp_path / "lcm.db"
+    _seed(db, temporal_rollups_enabled=True)
+
+    timer = _hold_write_lock_for_latency(db, seconds=5)
     try:
         elapsed = _timed_open(db, temporal_rollups_enabled=True)
     finally:
         timer.join()
     assert elapsed < 1.0, f"rollups-on store open took {elapsed:.2f} s behind a held write lock"
+
 
 
 # --- review round 2 (#691) -----------------------------------------------------
@@ -530,7 +713,7 @@ def test_b1_abandonment_during_the_active_line_is_still_reported(tmp_path, monke
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1, errors
     assert "LCM-X is NOT active in this process" in errors[0]
-    record = json.loads((home / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
+    record = json.loads((home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
     assert "plugins.load_timeout_seconds" in record["reason"]
 
 
@@ -592,3 +775,29 @@ def test_n3_non_null_ingested_at_zero_is_kept_in_reasoning(tmp_path):
     # ingested_at 0.0 is a stored value, not NULL: it is the observation time, so the row is before as_of.
     assert error is None
     assert grounded is not None and grounded.store_id == store_id
+
+
+def _hold_write_lock_for_latency(db: Path, seconds: float) -> threading.Timer:
+    holder = sqlite3.connect(str(db), timeout=10, check_same_thread=False)
+    holder.execute("BEGIN IMMEDIATE")
+
+    def _release():
+        holder.rollback()
+        holder.close()
+
+    timer = threading.Timer(seconds, _release)
+    timer.start()
+    return timer
+
+
+def _record_busy_timeouts(monkeypatch):
+    statements = []
+    connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
+    return statements

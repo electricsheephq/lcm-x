@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -75,6 +76,101 @@ def _runner_module():
     return module
 
 
+def _doctor_scenario(phase_a, monkeypatch, checks, overall="warnings"):
+    monkeypatch.setattr(phase_a.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(phase_a, "_payload", lambda *_args: {
+        "checks": checks, "overall": overall,
+    })
+    context = {
+        "finance": {"content": "taxi costs $60; train costs $20", "store_id": "fixture"},
+        "atlas": {},
+    }
+    return phase_a._run_matrix(
+        object(), ["lcm_doctor"], context, patterns=False, posture="local", missing=[],
+    )[0]
+
+
+def test_local_doctor_accepts_only_preparing_warning(monkeypatch):
+    checks = [
+        {"check": "inactive_process", "status": "pass"},
+        {"check": "embedding_provider_health", "status": "warn", "detail": {
+            "readiness": "model: preparing; background initialization",
+            "impact": "lcm_recall keeps answering from full text",
+        }},
+    ]
+    assert _doctor_scenario(_runner_module(), monkeypatch, checks)[2] == "PASS"
+
+
+@pytest.mark.parametrize("fault", [False, True])
+def test_local_doctor_real_informational_payload_and_fault(tmp_path, monkeypatch, fault):
+    import json
+    from hermes_lcm import embedding_maintenance, tools
+    from tests.harness import engine_context
+
+    monkeypatch.setattr(tools, "effective_cpus", lambda: 8)
+    monkeypatch.setattr(embedding_maintenance, "local_model_state", lambda config: ("preparing", ""))
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda config: {
+        "available": True, "provider": "fastembed", "model": "BAAI/bge-small-en-v1.5",
+        "detail": "importable",
+    })
+    with engine_context(tmp_path, window=40_000, temporal_rollups_enabled=False) as engine:
+        engine._config.embeddings_enabled = True
+        engine._config.embedding_provider = "fastembed"
+        engine._store.append(engine.current_session_id, {"role": "user", "content": "Phase A fixture"})
+        payload = json.loads(tools.lcm_doctor({}, engine=engine))
+    assert payload["overall"] == "healthy", json.dumps([c for c in payload["checks"] if c["status"] != "pass"])
+    check = next(c for c in payload["checks"] if c["check"] == "embedding_provider_health")
+    assert check["status"] == "warn" and check["detail"]["informational"] is True
+    if fault:
+        # Mutate a second real check: an unrelated fault must still fail even
+        # while the local model's preparation remains informational.
+        other = next(c for c in payload["checks"] if c["check"] == "config_validation")
+        other["status"] = "warn"
+        other["detail"] = ["synthetic configuration fault"]
+        payload["overall"] = "warnings"
+    row = _doctor_scenario(_runner_module(), monkeypatch, payload["checks"], payload["overall"])
+    assert row[2] == ("FAIL" if fault else "PASS")
+
+
+@pytest.mark.parametrize("name,readiness,impact", [
+    ("embedding_provider_health", "model: failed; initialization", "full text"),
+    ("embedding_provider_health", "model: preparing; initialization", "unavailable"),
+    ("embedding_provider_health", "", "full text"),
+    ("another_check", "model: preparing; initialization", "full text"),
+])
+def test_local_doctor_rejects_other_warnings(monkeypatch, name, readiness, impact):
+    checks = [
+        {"check": "inactive_process", "status": "pass"},
+        {"check": name, "status": "warn", "detail": {
+            "readiness": readiness, "impact": impact,
+        }},
+    ]
+    assert _doctor_scenario(_runner_module(), monkeypatch, checks)[2] == "FAIL"
+
+
+@pytest.mark.parametrize("status", ["warn", "pass"])
+def test_prepared_doctor_requires_pass_after_warmup_and_backfill(monkeypatch, status):
+    phase_a = _runner_module()
+    engine, calls = object(), []
+    monkeypatch.setattr(phase_a.importlib.util, "find_spec", lambda _name: object())
+
+    def command(text, target):
+        assert target is engine
+        calls.append(text)
+        return "status: ready" if text == "embed warmup" else "status: complete"
+
+    def doctor(target, tool, args):
+        assert target is engine and tool == "lcm_doctor" and args == {}
+        assert calls == ["embed warmup", "embed backfill --apply --limit 50"]
+        return {"checks": [{"check": "embedding_provider_health", "status": status}],
+                "overall": "healthy" if status == "pass" else "warnings"}
+
+    monkeypatch.setattr(phase_a, "_payload", doctor)
+    row = phase_a._prepared_doctor({"command": SimpleNamespace(handle_lcm_command=command)}, engine)
+    assert row[:3] == ("local", "lcm_doctor (prepared)", "PASS" if status == "pass" else "FAIL")
+    assert calls == ["embed warmup", "embed backfill --apply --limit 50"]
+
+
 def _fake_hermes_repo(root: Path, *, expected_surface: bool = True) -> Path:
     repo = root / "hermes-agent"
     agent = repo / "agent"
@@ -133,13 +229,29 @@ def test_dev_posture_covers_every_tool_despite_disabled_tools_env(tmp_path):
     assert completed.returncode == 0, completed.stdout + completed.stderr + receipt
     assert "DEV RUN — identity unbound" in receipt
     assert "Hermes checkout provenance: `Hermes checkout not configured`" in receipt
-    assert "engine=stubbed-context-base (NOT the hermes surface)" in receipt
+    # Probe in the runner's import environment, without pytest's in-process host modules.
+    host_probe = subprocess.run(
+        [sys.executable, "-c",
+         f"import sys; sys.path[0] = {str(runner.parent)!r}\n"
+         "try:\n"
+         "    from agent.context_engine import ContextEngine\n"
+         "except ModuleNotFoundError as exc:\n"
+         "    if exc.name not in {'agent', 'agent.context_engine'}: raise\n"
+         "    print('engine=stubbed-context-base (NOT the hermes surface)')\n"
+         "else:\n"
+         "    print('engine=hermes-context-engine (')\n"],
+        cwd=worktree, env=env, text=True, capture_output=True, timeout=10,
+    )
+    assert host_probe.returncode == 0, host_probe.stderr
+    assert host_probe.stdout.strip() in receipt
     assert "LCM_DISABLED_TOOLS" in receipt
     assert "Registry coverage: `COMPLETE`" in receipt
     assert "Missing matrix rows: `none`" in receipt
     assert "Unexpected scenario rows: `none`" in receipt
-    assert receipt.count("| local | `lcm_") == 15
+    assert receipt.count("| local | `lcm_") == 17
     assert "| local | `lcm_doctor` | PASS |" in receipt
+    prepared_result = "PASS" if importlib.util.find_spec("fastembed") else "SKIP"
+    assert f"| local | `lcm_doctor (prepared)` | {prepared_result} |" in receipt
     assert "| cloud-default | `lcm_recall` | SKIP | SKIP: VOYAGE_API_KEY is absent |" in receipt
     for battery in (
         "planted-secret",
@@ -182,6 +294,95 @@ def test_release_mode_blocks_the_same_cloud_skip(tmp_path):
     assert "Exit verdict: `BLOCKED`" in receipt
 
 
+@pytest.mark.parametrize("ambient", [None, "outside-hermes"])
+@pytest.mark.parametrize("abort", [False, True])
+def test_scrub_pins_fresh_synthetic_hermes_home_and_restores_environment(
+    tmp_path, monkeypatch, ambient, abort
+):
+    phase_a = _runner_module()
+    out = tmp_path / "out"
+    if ambient is None:
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+    else:
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ambient))
+    original = dict(os.environ)
+    homes = []
+    for _ in range(2):
+        try:
+            with phase_a._scrubbed_environment(tmp_path, out):
+                home = Path(os.environ["HERMES_HOME"])
+                assert home.is_dir() and home.is_relative_to(out)
+                assert not list(home.iterdir())
+                assert str(home) != original.get("HERMES_HOME")
+                homes.append(home)
+                if abort:
+                    raise RuntimeError("synthetic interruption")
+        except RuntimeError as exc:
+            assert abort and str(exc) == "synthetic interruption"
+        assert dict(os.environ) == original
+    assert homes[0] != homes[1]
+
+
+def test_home_resolver_outside_out_blocks_before_engine_construction(tmp_path):
+    outside = tmp_path / "outside-hermes"
+    sabotage = (
+        "from types import ModuleType\n"
+        "host = ModuleType('hermes_constants')\n"
+        f"host.get_hermes_home = lambda: Path({str(outside)!r})\n"
+        "sys.modules['hermes_constants'] = host\n"
+        "def forbidden_engine(*args, **kwargs):\n"
+        "    raise AssertionError('engine must not be constructed')\n"
+        "mod._engine = forbidden_engine\n"
+    )
+    code, receipt, stderr = _run_in_subprocess(
+        tmp_path, sabotage=sabotage, run_kwargs={}
+    )
+    assert code == 1, stderr + receipt
+    assert "Exit verdict: `BLOCKED`" in receipt
+    assert "HERMES_HOME" in receipt and str(outside) in receipt
+    assert "| local |" not in receipt and "| cloud-default |" not in receipt
+    assert "engine must not be constructed" not in receipt
+
+
+@pytest.mark.parametrize("drained", [True, False])
+def test_run_quiesces_maintenance_inside_synthetic_home_before_cleanup(
+    tmp_path, monkeypatch, drained
+):
+    phase_a = _runner_module()
+    worktree = Path(__file__).resolve().parents[1]
+    out = tmp_path / "out"
+    calls = []
+    original = dict(os.environ)
+
+    def quiesce(name, timeout):
+        assert timeout > 0
+        assert Path(os.environ["HERMES_HOME"]).is_relative_to(out)
+        calls.append(name)
+        return drained
+
+    engine = SimpleNamespace(**{
+        name: SimpleNamespace(quiesce=lambda timeout, name=name: quiesce(name, timeout))
+        for name in ("_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER")
+    })
+
+    def load(*args, **kwargs):
+        def cleanup():
+            assert Path(os.environ["HERMES_HOME"]).is_relative_to(out)
+            calls.append("cleanup")
+        return {"engine": engine}, "fake-host", None, cleanup
+
+    monkeypatch.setattr(phase_a, "_load", load)
+    monkeypatch.setattr(phase_a.importlib, "import_module", lambda _name: SimpleNamespace(
+        get_hermes_home=lambda: tmp_path / "outside-hermes"
+    ))
+    code, receipt = phase_a.run(worktree, out)
+    text = receipt.read_text()
+    assert code == 1 and "Exit verdict: `BLOCKED`" in text
+    assert calls == ["_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER", "cleanup"]
+    assert ("HERMES_HOME maintenance did not quiesce" in text) is (not drained)
+    assert dict(os.environ) == original
+
+
 def test_scrub_preserves_cloud_environment_allowlist(tmp_path, monkeypatch):
     phase_a = _runner_module()
     allowed = {
@@ -196,7 +397,7 @@ def test_scrub_preserves_cloud_environment_allowlist(tmp_path, monkeypatch):
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("LCM_DISABLED_TOOLS", "lcm_recall")
 
-    with phase_a._scrubbed_environment(tmp_path) as scrubbed:
+    with phase_a._scrubbed_environment(tmp_path, tmp_path / "out") as scrubbed:
         assert {key: os.environ.get(key) for key in allowed} == allowed
         assert "LCM_DISABLED_TOOLS" not in os.environ
         assert "LCM_DISABLED_TOOLS" in scrubbed
@@ -451,6 +652,12 @@ def test_engine_threads_embedding_privacy_setting(tmp_path, privacy_setting, exp
 
     assert captured["sensitive_patterns_enabled"] is False
     assert captured["embedding_privacy_enabled"] is expected
+    # The all-tools matrix must expose all default-dormant tools.
+    assert captured["assertions_enabled"] is True
+    assert captured["adaptive_retrieval_enabled"] is True
+    assert captured["entities_enabled"] is True
+    assert len(phase_a.SCENARIOS - {"lcm_doctor (prepared)"}) == 16
+    assert "lcm_doctor (prepared)" in phase_a.SCENARIOS
 
 
 def test_noop_scenario_is_a_runner_failure(tmp_path):

@@ -205,7 +205,7 @@ run_low_fd_pytest() {
   elif [[ "$current_limit" =~ ^[0-9]+$ ]] && (( current_limit > 1024 )); then
     ulimit -n 1024 2>/dev/null || echo "warning: could not lower file descriptor limit from $current_limit to 1024" >&2
   fi
-  run_pytest -q
+  run_pytest tests/ bench/ -q
 }
 
 if [[ -n "$DIFF_CHECK_RANGE" ]]; then
@@ -225,7 +225,7 @@ run_gate "benchmark smoke" "$PYTHON_BIN" scripts/lcm_benchmark.py --synthetic-fi
 run_gate "stress smoke" "$PYTHON_BIN" scripts/lcm_stress_check.py --output "$OUTPUT_DIR/stress-smoke" --tier smoke --json
 
 if [[ "$MODE" == "full" ]]; then
-  run_gate "pytest full" run_pytest -q
+  run_gate "pytest full" run_pytest tests/ bench/ -q
   run_gate "pytest low fd" run_low_fd_pytest
   run_gate "stress release" "$PYTHON_BIN" scripts/lcm_stress_check.py --output "$OUTPUT_DIR/stress-release" --tier release --json
 fi

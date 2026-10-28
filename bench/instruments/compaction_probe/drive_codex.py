@@ -222,6 +222,8 @@ def drive(args: argparse.Namespace) -> int:
     turns = _read_jsonl(args.material)
     probes = _read_jsonl(args.probes)
     for index, row in enumerate(turns, 1):
+        if row.get("role", "user") != "user":
+            raise ValueError(f"material turn {index}: non-user row requires role-faithful replay; this driver sends user prompts only")
         if not isinstance(row.get("text"), str):
             raise ValueError(f"material turn {index} has no text")
     for index, row in enumerate(probes, 1):

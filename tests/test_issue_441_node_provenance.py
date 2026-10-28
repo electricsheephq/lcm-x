@@ -108,6 +108,7 @@ def test_t4_leaf_records_level_and_model(tmp_path, monkeypatch, caplog, _pin_lcm
     monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summarizer(3, "stub-model"))
     engine = LCMEngine(config=LCMConfig(
         fresh_tail_count=2, leaf_chunk_tokens=400, context_threshold=0.001, max_assembly_tokens=100_000,
+        threshold_full_sweep_enabled=False,  # #1013: this cell counts one leaf per compaction
         database_path=str(tmp_path / "lcm.db")))
     engine.on_session_start("S", platform="telegram", context_length=200_000, conversation_id="conv")
     try:

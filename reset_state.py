@@ -16,8 +16,10 @@ class ResetStateMixin:
 
         Safe to call on boundary skip because it does not affect compaction progress.
         """
+        self._hung_summary_strike = None  # #1096: conversation changes also reset counters only
         self.compression_count = 0
         self.last_prompt_tokens = 0
+        self._last_gate_tokens = 0  # #954: a rebind never inherits the previous binding's gate observation
         self.last_completion_tokens = 0
         self.last_total_tokens = 0
         self.last_input_tokens = 0
@@ -34,15 +36,14 @@ class ResetStateMixin:
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
         self._last_stub_first_exit = None  # #671: the record describes the latest compaction of this binding
+        self._last_survival_fit = None  # #1162: status must not expose the previous binding's fit
         self._last_boundary_skip_time = 0
         self._compaction_telemetry_counter_rebaseline_pending = True
         self._compaction_telemetry_turn_reset_pending = False
 
     def _reset_compaction_progress(self) -> None:
         """Reset process-local compaction markers for a fresh/unproven session."""
-        self._last_compacted_store_id = 0
-        self._ingest_cursor = 0
-        self._ingest_cursor_needs_reconcile = False
+        self._frontier_holder().reset_progress()
         self._last_ingest_reconciliation = {"action": "none", "reason": "not run"}
 
     def _reset_session_scoped_runtime_state(self) -> None:
@@ -56,8 +57,9 @@ class ResetStateMixin:
         self._reset_compaction_progress()
         # A commit proof is valid only through the compression handoff of the
         # session that produced it (#483); any other reset drops it.
-        self._compress_commit_proof = None
-        self._last_emission_descriptors = None
+        self._frontier_holder().reset_proofs()
+        self._compress_commit_reason, self._compress_commit_publication = "no_proof", "local"
+        self._retired_durable_proof = None  # #671: a stale durable proof retired by reconcile, by created_at
         self._clear_fresh_tail_pressure_yield_state()
         self._generated_ignored_active_replay_placeholder_hashes = set()
         self._generated_ignored_active_replay_placeholder_message_ids = set()
@@ -68,6 +70,13 @@ class ResetStateMixin:
         self._compression_boundary_stored_placeholder_digest_counts = {}
         # #651: a hold armed by the previous binding never holds the next one. #618: nor does the #608 hold.
         self._no_progress_hold, self._no_progress_candidate = None, False
+        self._no_progress_replay = None  # Reload the scoped durable hold only after current ingest proof.
+        self._no_progress_observed_tokens = self._no_progress_ingest_generation = None
+        self._no_progress_hold_persisted = False
+        self._zero_leaf_streaks = {}  # #1162: nor does its zero-leaf streak (a kept conversation id included)
+        self._retained_escape_memos = {}
+        self._objective_only_noop = False
         self._sweep_budget_hold_until, self._sweep_budget_hold_conversation = 0.0, ""
+        self._hung_summary_strike, self._sweep_budget_hold_turn_paced = None, False
         # #677: a preflight request of the previous binding never shapes the next one's compress().
-        self._preflight_below_threshold_cleanup_only = self._preflight_automatic_request = False
+        self._compaction_request.below_threshold_cleanup_only = self._compaction_request.automatic_request = False

@@ -2,11 +2,11 @@ name: codex_gpt_long_context
 context_length: 272000
 context_threshold: 0.75
 fresh_tail_count: 24
-leaf_chunk_tokens: 8000
+leaf_chunk_tokens: 24000
 condensation_fanin: 4
 incremental_max_depth: 1
 dynamic_leaf_chunk_enabled: false
-target_after_compaction: 0.55
+target_after_compaction: null
 min_turns_between_compactions: 0
-policy_version: "1"
-notes: "Initial benchmark candidate for GPT/Codex long-context routes."
+policy_version: "2"
+notes: "Measured benchmark candidate: 24k chunks with a 2,000-token summary cap, per-message-wait replay cell (issues 1123 and 1128); no low-water mark."
