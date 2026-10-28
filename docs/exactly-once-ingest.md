@@ -131,8 +131,10 @@ Two definitions:
 
 ### 3.2 One transaction per ingest
 In order:
-1. **Outside the lock:** compute every row's digests and the prefix chain, take a ledger snapshot (the lineage's vectors, marks and view_seq), and classify against it (§3.4). The view factories must be pure and cheap, because a retry re-runs them.
-2. **`BEGIN IMMEDIATE`,** opened explicitly before the first read of this phase. Today it starts at the first INSERT, so the reads run outside the lock (L5-7). Then re-read view_seq, the marks and the store's write generation (`PRAGMA data_version`, store.py:1196-1200). The write generation also moves when an older reader on another connection commits an `alt_stamp` relation or an observed_at backfill. If any of them changed, classify again inside the lock under the same rules and budget.
+1. **Outside the lock:** compute every row's digests and the prefix chain. This step reads no store state. The view factories must be pure and cheap, because a retry re-runs them.
+2. **`BEGIN IMMEDIATE`,** opened explicitly before the ingest's first store read. Today it starts at the first INSERT, so the reads run outside the lock (L5-7). Classification (today's decisions at P1, §3.4 at P2), the evidence it records, the rows and the complete write list then run inside this one transaction. Every read sees this ingest's own writes, and no other writer can interleave, so there is no snapshot to re-check.
+   - The per-ingest counters measure the lock-hold time against the §5 lock bars.
+   - **Fallback, only if those bars fail:** classification moves out of the lock. It runs against a snapshot (the lineage's vectors, marks and view_seq) with its evidence staged in memory. Inside the lock the ingest re-reads view_seq, the marks and the store's write generation (`PRAGMA data_version`, store.py:1196-1200), which also moves when an older reader on another connection commits an `alt_stamp` relation or an observed_at backfill. If any of them changed, it classifies again inside the lock under the same rules and budget.
 3. **Insert the rows.**
    - `messages.observed_at` is written ONCE at INSERT from the row's own stamp, and never updated.
    - At P2 the observed_at backfill UPDATEs are retired, so an old row never takes a new stamp (#1512). At P1 today's NULL-only backfill stays, inside the ingest transaction, because today's anchor finds its candidates through observed_at (identity_anchor.py:291).
@@ -153,7 +155,7 @@ In order:
 Rules:
 - A rank-1 disagreement blocks any rebind.
 - Concurrent writers serialize on the lock. The UNIQUE indexes are a backstop that sends the loser back to classify again (M5).
-- Today's decision evidence (the C1 data) is staged in memory and read back by the classifier; it gets no commit of its own.
+- Today's decision evidence (the C1 data) is written inside the same transaction and gets no commit of its own. The classifier reads it back on the same connection. Under the fallback in step 2 it is staged in memory instead.
 - Faulted ingests close here (#1815: three shapes that duplicate or skip the retry). A failed transaction leaves no partial evidence, and the retry classifies again.
 - Each ingest counts its lock-hold time, rows classified, rank-5 DP cells, bytes written, cost fallbacks and re-spacings. These are the §5 instruments.
 
@@ -391,7 +393,7 @@ These ship with the P2 flip:
 - **P1, ledger and atomic ingest (M15).**
   - Contents:
     - the ledger schema (docs/process/schema-changes.md);
-    - one transaction per ingest, with the explicit BEGIN IMMEDIATE, the complete write list and the snapshot re-check (§3.2);
+    - one transaction per ingest: the explicit BEGIN IMMEDIATE before the first store read, classification and the complete write list inside it, and the lock-hold counters (§3.2);
     - the compress() single exit, its emission records and its visible failure path (§3.3);
     - the lineage marks with all their writers;
     - the durable cursor;
@@ -454,7 +456,7 @@ Sources: the r3.2 findings of the Codex reviewer (A) and of the Claude reviewer 
 - **M2 Identical unkeyed re-send:** REPLAY, disclosed. It extends to re-growth after a shrink and to an identical overlap in migration or a full-history replay, and is measured on the ACP-driven cells.
 - **M3 Duplicate budget:** a tie stores its rows and never skips them. Visible-doubt rows are at most 1% of stored rows (numerator and denominator in §5), and the doctor shows every one.
 - **M4 Digest:** salted and pre-redaction, no catalog versioning. The salt lives in the same file.
-- **M5 Locking:** commit under `BEGIN IMMEDIATE`, re-classifying when the snapshot changed; the UNIQUE indexes are the backstop.
+- **M5 Locking:** classify and commit under one `BEGIN IMMEDIATE`. Classifying against a snapshot, and classifying again when it changed, is the fallback if the §5 lock bars fail. The UNIQUE indexes are the backstop.
 - **M6 Retention:**
   - Binding, uid, revision and emission rows are kept forever.
   - Stamp observations are capped at 4 per occurrence and kind.
