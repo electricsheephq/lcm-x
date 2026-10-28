@@ -5,7 +5,8 @@
 # commits. Each of those is CI's own step script, read from .github/ at run time, so this
 # script follows CI when CI changes. A green run here is advisory; GitHub CI gates.
 # The script owns the checkout's .venv: it creates or recreates it and removes the YAML
-# libraries from it, so run it in a sandbox checkout, not one whose .venv you manage.
+# libraries from it, so run it in a sandbox checkout, not one whose .venv you manage. Its
+# environment file and SQLite build live inside that .venv, so checkouts never share them.
 #
 # Usage, from anywhere in the checkout (needs network, python3 >= 3.11 with venv, curl,
 # unzip, gcc, sha256sum):
@@ -15,23 +16,25 @@
 set -euo pipefail
 repo="$(git rev-parse --show-toplevel)"
 cd "$repo"
-cache="${XDG_CACHE_HOME:-$HOME/.cache}/lcmx-ci"
-mkdir -p "$cache"
 
 "${PYTHON:-python3}" -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
   || { echo "cloud_setup: Python >= 3.11 is required" >&2; exit 1; }
-# Reuse .venv only when it was made here, on Python >= 3.11, without the system site packages
-# (a system PyYAML would stay importable). Otherwise recreate it; a venv copied or moved from
-# another path keeps shebangs that point there.
+want="$("${PYTHON:-python3}" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+# Reuse .venv only when it was made here, on the selected interpreter's Python version, without
+# the system site packages (a system PyYAML would stay importable). Otherwise recreate it; a
+# venv copied or moved from another path keeps shebangs that point there.
 reuse=0
 case "$(head -1 .venv/bin/pip 2>/dev/null)" in
   "#!$repo/.venv/bin/python"*) reuse=1 ;;
 esac
 if [ "$reuse" = 1 ]; then
-  .venv/bin/python -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null || reuse=0
+  have="$(.venv/bin/python -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
+  [ "$have" = "$want" ] || reuse=0
   if grep -qsiE '^include-system-site-packages *= *true' .venv/pyvenv.cfg; then reuse=0; fi
 fi
 [ "$reuse" = 1 ] || "${PYTHON:-python3}" -m venv --clear .venv
+cache="$repo/.venv/lcmx-ci"
+mkdir -p "$cache"
 export PATH="$repo/.venv/bin:$PATH"
 # PyYAML only to read the workflow files; it is removed again below, because CI's main
 # pytest run has no PyYAML (config.py falls back to its own parser without it).
@@ -110,7 +113,7 @@ if [ "$(id -u)" = 0 ]; then
   # 14 tests in test_issue_1186_dependency_companion, test_stemmed_recall_index and
   # test_track_s_integrity fail as root and pass as any other user (PR #2038).
   echo "cloud_setup: warning: running as root. Some tests fail as root, and another user may not be able" \
-    "to read this checkout's .venv or $cache. Run this setup and pytest as the same non-root user." >&2
+    "to read this checkout's .venv. Run this setup and pytest as the same non-root user." >&2
 fi
 cat <<EOF
 Run the suite as CI does (each shell first loads the environment):
