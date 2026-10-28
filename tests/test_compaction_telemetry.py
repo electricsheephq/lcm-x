@@ -8,6 +8,8 @@ import time
 
 import pytest
 
+from tests.timing_helpers import returns_while_blocked
+
 from hermes_lcm import tools as lcm_tools
 from hermes_lcm import store as lcm_store
 from hermes_lcm.command import handle_lcm_command
@@ -431,7 +433,67 @@ def test_zero_delta_snapshot_preserves_concurrent_compaction_metadata(tmp_path):
         compaction_engine.shutdown()
 
 
-def test_compaction_telemetry_lock_contention_is_nonblocking(tmp_path):
+def test_compaction_telemetry_lock_contention_is_nonblocking(tmp_path, monkeypatch):
+    db_path = tmp_path / "lcm_test.db"
+    lock_owner = MessageStore(db_path)
+    telemetry_store = MessageStore(db_path)
+    lock_ready = threading.Event()
+    release_lock = threading.Event()
+    write_done = threading.Event()
+    write_errors = []
+
+    def hold_write_lock():
+        lock_owner._conn.execute("BEGIN IMMEDIATE")
+        lock_ready.set()
+        release_lock.wait()
+        lock_owner._conn.rollback()
+
+    def write_telemetry():
+        try:
+            telemetry_store.increment_compaction_telemetry(
+                "conv-1",
+                1,
+                {"compression_count_at_record": 1},
+            )
+        except Exception as exc:
+            write_errors.append(exc)
+        finally:
+            write_done.set()
+
+    timeouts = []
+    original_timeout = lcm_store._temporary_sqlite_busy_timeout
+
+    @contextmanager
+    def bounded_timeout(connections, timeout_ms):
+        timeouts.append(timeout_ms)
+        assert timeout_ms == 100, "telemetry must use the 100 ms busy timeout"
+        with original_timeout(connections, timeout_ms):
+            yield
+
+    monkeypatch.setattr(lcm_store, "_temporary_sqlite_busy_timeout", bounded_timeout)
+    holder = threading.Thread(target=hold_write_lock)
+    try:
+        holder.start()
+        assert lock_ready.wait(timeout=5)
+        assert telemetry_store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+
+        returns_while_blocked(write_telemetry, release_lock)
+        assert timeouts == [100]
+        assert write_done.is_set()
+        assert len(write_errors) == 1
+        assert isinstance(write_errors[0], sqlite3.OperationalError)
+        assert "locked" in str(write_errors[0]).lower()
+        assert telemetry_store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+        assert telemetry_store.read_compaction_telemetry("conv-1") is None
+    finally:
+        release_lock.set()
+        holder.join(timeout=5)
+        lock_owner.close()
+        telemetry_store.close()
+
+
+@pytest.mark.latency
+def test_compaction_telemetry_lock_contention_is_nonblocking_latency(tmp_path):
     db_path = tmp_path / "lcm_test.db"
     lock_owner = MessageStore(db_path)
     telemetry_store = MessageStore(db_path)

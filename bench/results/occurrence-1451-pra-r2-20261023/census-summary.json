@@ -1,0 +1,7 @@
+{
+  "publication_attempts": 384,
+  "valid_publications": 372,
+  "valid_rejected": 0,
+  "intentional_invalid_count": 12,
+  "scope": "8 selected affected files, including all6 original counterexample files; observe-only; null retry bypass excluded from publication census"
+}

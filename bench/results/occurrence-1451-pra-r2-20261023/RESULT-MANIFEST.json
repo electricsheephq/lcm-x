@@ -1,0 +1,109 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "occurrence-1451-pra-r2-20261023-public-summary",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "pr1882-r2-public-summary",
+  "claim_class": "advisory",
+  "created": "2026-10-23T05:57:32Z",
+  "settled": "2026-10-23T05:58:05Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "a2f5158972d9cd736a77c03fd23bf22fa399e683",
+    "dirty": true,
+    "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "env": {
+    "command": "matrix per-checkpoint comparisons;192 fired faults; census/compatibility;200 paired cost",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "occurrence-matrix-r2",
+      "metric": "new_or_increased_loss_cells",
+      "value": 0.0,
+      "n": 1296,
+      "baseline_run": "supplied-base-5df5a3c",
+      "source": "SUMMARY.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "census-summary.json",
+      "role": "receipt",
+      "sha256": "62d84f430f4ede7f2b6f76cc0e6794d0d883a93584899ba0897439ee65d5be13",
+      "bytes": 273
+    },
+    {
+      "path": "SUMMARY.json",
+      "role": "receipt",
+      "sha256": "8af4380912015ece4c63862d19babc7126e8ee35d4d549c94e153984f9d2ec4c",
+      "bytes": 3334
+    },
+    {
+      "path": "CHANGED-CELLS-base.md",
+      "role": "receipt",
+      "sha256": "875f4987408b6ba2ef89ce620af91d131e7df1c447c76e96a96db0b38d8885e5",
+      "bytes": 15190
+    },
+    {
+      "path": "CHANGED-CELLS-r1.md",
+      "role": "receipt",
+      "sha256": "6e099e5232e41174df05ab701e47b377d4cd3c0a13223586135f222e414b3f25",
+      "bytes": 160
+    },
+    {
+      "path": "RESULT.md",
+      "role": "receipt",
+      "sha256": "9f51642ebb2a9b3e6daaaa74018eb486bb6bcf64d5a815b11a07f72a80837ddf",
+      "bytes": 2455
+    },
+    {
+      "path": "cost.json",
+      "role": "receipt",
+      "sha256": "5a7f5ad0ca4c80e84ee51f99fd6351729e6e56ae7427c674d0125ef6a8a758ca",
+      "bytes": 482
+    },
+    {
+      "path": "cost-samples.json",
+      "role": "receipt",
+      "sha256": "a4464f61d001de4ecca532072c2f7598e90f7a3f72cbd26b2098680680796ee7",
+      "bytes": 21717
+    },
+    {
+      "path": "CONSUMERS.md",
+      "role": "receipt",
+      "sha256": "1389380e715eba8ba8eac1a0926062d58fedea34d42f1d72af611ad23af52d30",
+      "bytes": 6367
+    },
+    {
+      "path": "fault-summary.json",
+      "role": "receipt",
+      "sha256": "1fbe7425e4736b04e1be5b9b190780835612b14de252f27d624079f98880d2b6",
+      "bytes": 258
+    }
+  ],
+  "rescore": {
+    "command": null,
+    "inputs": [],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "CHANGED-CELLS-base.md",
+    "CHANGED-CELLS-r1.md",
+    "CONSUMERS.md",
+    "RESULT.md",
+    "SUMMARY.json",
+    "census-summary.json",
+    "cost-samples.json",
+    "cost.json",
+    "fault-summary.json"
+  ],
+  "publication_boundary": "Public summary only; full raw and re-score inputs preserved; T2 unpublished; no result disposal."
+}

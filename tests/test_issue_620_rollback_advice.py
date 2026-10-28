@@ -24,6 +24,14 @@ PAD = " alpha beta gamma delta" * 30
 WINDOW = 6000
 RESTORE = "restore the database backup"
 COUNTER_FAILED = "LCM survival-fit counter write failed"
+PROJECTION_FLOOR = (
+    "; a survival fit projected rows (or the projection count is unknown): from v0.27.0 on, "
+    "a plugin-only rollback must target v0.27.0 or later; v0.26.x or earlier cannot recognise "
+    "a short projected row (head + mark) and stores it again on a cold resume (#601 duplicates); "
+    # #919 F2: the projection rollback procedure is self-contained.
+    "to roll back further, stop Hermes and move the configured database file (by default lcm.db, "
+    "with its -wal and -shm companions) aside and keep it"
+)
 
 
 def _rough(messages) -> int:
@@ -112,8 +120,8 @@ def test_no_survival_fit_prints_no_observation_and_no_check(tmp_path, record):
         engine.shutdown()
 
 
-def test_the_advice_is_the_same_with_or_without_a_projection(tmp_path):
-    """A projected_count above 0, 0, and absent (a record from before the key) give the same advice."""
+def test_a_projection_adds_only_the_floor_clause_to_the_advice(tmp_path):
+    """Positive or unknown projections add the floor clause; all other advice stays identical."""
     advice = {}
     for label, projected in (("projected", 3), ("none", 0), ("absent", None)):
         engine = _engine(tmp_path / label)
@@ -128,10 +136,25 @@ def test_the_advice_is_the_same_with_or_without_a_projection(tmp_path):
             advice[label] = (observation.replace(f"projected_count {shown}; ", ""), guidance)
         finally:
             engine.shutdown()
-    assert advice["projected"] == advice["none"] == advice["absent"]
-    observation, guidance = advice["none"]
-    for text in (observation, guidance):
-        assert "plugin-only" not in text and RESTORE in text
+    for label in ("projected", "absent"):
+        observation, guidance = advice[label]
+        # #919: positive or unknown projections append exactly one complete floor clause.
+        assert observation.count(PROJECTION_FLOOR) == 1 and observation.endswith(PROJECTION_FLOOR)
+        # #919 review: the plugin-alone target moves to v0.27.0 in the observation and the guidance alike.
+        assert advice["none"][0] == observation.removesuffix(PROJECTION_FLOOR).replace(
+            "the plugin alone to v0.27.0 or later is fine", "the plugin alone to v0.24.5 or later is fine")
+        for text in (observation, guidance):
+            assert "the plugin alone to v0.27.0 or later is fine" in text and "v0.24.5 or later is fine" not in text
+    for observation, guidance in advice.values():
+        for text in (observation, guidance):
+            # #919: the older-version backup restore and the v0.23.3 recovery advice remain present.
+            assert RESTORE in text and "v0.23.3" in text
+        # #919: triage guidance still contains no plugin-only rollback clause.
+        assert "plugin-only" not in guidance
+    # #919: zero projections keep the v0.24.5 plugin-alone advice in both.
+    assert all("the plugin alone to v0.24.5 or later is fine" in text for text in advice["none"])
+    # #919: zero projections retain the original observation without the floor clause.
+    assert "plugin-only" not in advice["none"][0]
 
 
 def test_a_failed_counter_write_logs_one_warning_and_returns_the_fitted_list(tmp_path, monkeypatch, caplog):
@@ -172,7 +195,13 @@ def test_an_unreadable_stored_count_is_a_fit_with_an_unknown_count(tmp_path, cou
     """A damaged record whose count is not a number: the doctor does not raise and gives the backup restore."""
     observation, guidance = _survival_lines(_doctor_with_record(tmp_path, {"count": count, "last_reason": "noop"}))
     assert "unknown number of times" in observation and RESTORE in observation
-    assert "plugin-only" not in observation and "plugin-only" not in guidance
+    # #919 review: an unknown projection count moves the plugin-alone target to v0.27.0 in both texts.
+    assert "the plugin alone to v0.27.0 or later is fine" in observation and "v0.23.3" in observation
+    assert not any("v0.24.5 or later is fine" in text for text in (observation, guidance))
+    # #919: unknown projections require the complete v0.27.0 plugin-only rollback floor.
+    assert PROJECTION_FLOOR in observation
+    # #919: the unchanged triage guidance still names the older restore and recovery paths.
+    assert "plugin-only" not in guidance and RESTORE in guidance and "v0.23.3" in guidance
 
 
 def test_a_stored_count_too_large_for_a_number_is_a_fit_with_an_unknown_count(tmp_path):
@@ -185,7 +214,13 @@ def test_a_stored_count_too_large_for_a_number_is_a_fit_with_an_unknown_count(tm
         engine.shutdown()
     observation, guidance = _survival_lines(text)
     assert "unknown number of times" in observation and RESTORE in observation
-    assert "plugin-only" not in observation and "plugin-only" not in guidance
+    # #919 review: an unknown projection count moves the plugin-alone target to v0.27.0 in both texts.
+    assert "the plugin alone to v0.27.0 or later is fine" in observation and "v0.23.3" in observation
+    assert not any("v0.24.5 or later is fine" in text for text in (observation, guidance))
+    # #919: unknown projections require the complete v0.27.0 plugin-only rollback floor.
+    assert PROJECTION_FLOOR in observation
+    # #919: the unchanged triage guidance still names the older restore and recovery paths.
+    assert "plugin-only" not in guidance and RESTORE in guidance and "v0.23.3" in guidance
     assert "survival_fit_count: unknown" in text
 
 

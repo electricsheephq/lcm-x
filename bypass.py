@@ -8,8 +8,10 @@ deterministic tail-compaction fallback. State stays on the engine (accessed via
 unchanged.
 """
 
+from contextlib import contextmanager
 import importlib
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from .message_analysis import _assistant_tool_call_ids
@@ -21,6 +23,131 @@ logger = logging.getLogger(__name__)
 
 
 class BypassMixin:
+    @contextmanager
+    def _bypass_compression_binding(self):
+        """Capture admission once; an ended child must not become MAIN mid-call."""
+        context = self._thread_context
+        outer = getattr(context, "bypass_compression_binding", None)
+        if outer is not None:
+            bypassed = True
+        else:
+            with self._auxiliary_session_lock:
+                bypassed = self._bypasses_lcm_context_management()
+                if bypassed:
+                    child_id = self._thread_context_session_id()
+                    state = vars(context) if child_id else self.__dict__
+                    context.bypass_compression_binding = (
+                        state, child_id or self._session_id or "(unknown)",
+                        self._auxiliary_session_generations.get(child_id),
+                    )
+        try:
+            yield bypassed
+        finally:
+            if bypassed:
+                if outer is None:
+                    vars(context).pop("bypass_compression_binding", None)
+                else:
+                    context.bypass_compression_binding = outer
+
+    def _bypass_compress_state(self) -> dict:
+        """Only a marked child has thread-local diagnostics and native state."""
+        context = getattr(self, "_thread_context", None)
+        binding = getattr(context, "bypass_compression_binding", None)
+        if binding is not None:
+            return binding[0]
+        if context is not None and self._thread_context_stateless():
+            return vars(context)
+        return self.__dict__
+
+    def _host_fallback_state_for_session(self, session_id: str) -> dict:
+        # Lifecycle guards only need a representative state; cleanup walks all states.
+        with self._auxiliary_session_lock:
+            states = self._child_host_fallback_states.get(session_id)
+            if states:
+                return next(iter(states.values()))
+        return self.__dict__
+
+    def _host_fallback_states(self, session_id: str | None = None) -> list[dict]:
+        with self._auxiliary_session_lock:
+            if session_id is not None:
+                states = self._child_host_fallback_states.get(session_id)
+                return [self.__dict__, *states.values()] if states else [self.__dict__]
+            return [self.__dict__, *(state for states in self._child_host_fallback_states.values()
+                                     for state in states.values())]
+
+    def _clear_host_fallback_state(self, state: dict) -> None:
+        with self._auxiliary_session_lock:
+            session_id = state.get("_host_fallback_session_id", "")
+            states = self._child_host_fallback_states.get(session_id)
+            if states is not None:
+                states.pop(id(state), None)
+                if not states:
+                    self._child_host_fallback_states.pop(session_id)
+            state["_host_fallback_compressor"] = None
+            state["_host_fallback_session_id"] = ""
+
+    @property
+    def _host_fallback_compressor(self):
+        return self._bypass_compress_state().get("_host_fallback_compressor")
+
+    @_host_fallback_compressor.setter
+    def _host_fallback_compressor(self, value):
+        self._bypass_compress_state()["_host_fallback_compressor"] = value
+
+    @property
+    def _host_fallback_session_id(self):
+        return self._bypass_compress_state().get("_host_fallback_session_id", "")
+
+    @_host_fallback_session_id.setter
+    def _host_fallback_session_id(self, value):
+        state = self._bypass_compress_state()
+        self._publish_host_fallback_compressor(state, value, state.get("_host_fallback_compressor"))
+
+    def _publish_host_fallback_compressor(self, state: dict, session_id: str, compressor: Any) -> bool:
+        # Publication and child deactivation share the same existing lock/registry.
+        with self._auxiliary_session_lock:
+            binding = getattr(self._thread_context, "bypass_compression_binding", None)
+            live = state is self.__dict__ or not session_id or (
+                session_id in self._auxiliary_session_ids
+                and (binding is None or self._auxiliary_session_generations.get(session_id) == binding[2])
+            )
+            self._clear_host_fallback_state(state)
+            if live:
+                state["_host_fallback_compressor"] = compressor
+                state["_host_fallback_session_id"] = session_id
+                if session_id and state is not self.__dict__:
+                    self._child_host_fallback_states.setdefault(session_id, {})[id(state)] = state
+        if not live and compressor is not None:
+            # Host callbacks may re-enter the engine; never run them under our lock.
+            self._dispose_host_fallback_compressor(compressor, session_id)
+        return live
+
+    @staticmethod
+    def _dispose_host_fallback_compressor(compressor: Any, session_id: str) -> None:
+        on_session_end = getattr(compressor, "on_session_end", None)
+        if callable(on_session_end) and session_id:
+            try:
+                on_session_end(session_id, [])
+            except Exception:
+                logger.debug("LCM host fallback compressor session-end reset failed", exc_info=True)
+        on_session_reset = getattr(compressor, "on_session_reset", None)
+        if callable(on_session_reset):
+            try:
+                on_session_reset()
+            except Exception:
+                logger.debug("LCM host fallback compressor reset failed", exc_info=True)
+
+    @property
+    def _last_compress_aborted(self):
+        state = self._bypass_compress_state()
+        if "_last_compress_aborted" not in state:
+            raise AttributeError("_last_compress_aborted")
+        return state["_last_compress_aborted"]
+
+    @_last_compress_aborted.setter
+    def _last_compress_aborted(self, value):
+        self._bypass_compress_state()["_last_compress_aborted"] = value
+
     def _bypasses_lcm_context_management(self) -> bool:
         """Return True when this binding must not write/manage LCM state.
 
@@ -45,7 +172,8 @@ class BypassMixin:
         return "active session"
 
     def _bypass_lcm_session_id(self) -> str:
-        return self._thread_context_session_id() or self._session_id or "(unknown)"
+        binding = getattr(self._thread_context, "bypass_compression_binding", None)
+        return binding[1] if binding is not None else self._thread_context_session_id() or self._session_id or "(unknown)"
 
     def _session_id_matches_lcm_bypass_filters(
         self,
@@ -59,6 +187,19 @@ class BypassMixin:
         if matches_session_pattern(match_keys, self._compiled_ignore_session_patterns):
             return True
         return matches_session_pattern(match_keys, self._compiled_stateless_session_patterns)
+
+    def _session_id_bypasses_lcm(self, session_id: str, *, platform: str = "") -> bool:
+        """Classify the requested id without borrowing the foreground's state."""
+        last_bypassed = self._lcm_session_last_bypassed.get(session_id)
+        return bool(
+            self._session_id_matches_lcm_bypass_filters(session_id, platform=platform)
+            or last_bypassed
+            # Lineage decides only until the id has its own binding; a normal rebind records False.
+            or (last_bypassed is None and self._has_lcm_bypass_lineage_session(session_id, platform=platform or None))
+            or session_id in self._active_auxiliary_session_ids()
+            or self._thread_context_has_auxiliary_session(session_id)
+            or (session_id == self._session_id and (self._session_ignored or self._session_stateless))
+        )
 
     def _ended_session_directly_bypasses_lcm(self, session_id: str) -> bool:
         """Classify a session-end callback by the ended id, not the active binding."""
@@ -74,50 +215,54 @@ class BypassMixin:
         messages: List[Dict[str, Any]],
         *,
         current_session_bypasses: bool,
+        require_session_match: bool = False,
     ) -> None:
-        if self._host_fallback_compressor is not None and (
-            current_session_bypasses
-            or not self._host_fallback_session_id
-            or self._host_fallback_session_id == session_id
-        ):
-            compressor = self._host_fallback_compressor
-            fallback_session_id = self._host_fallback_session_id or session_id
-            on_session_end = getattr(compressor, "on_session_end", None)
-            if callable(on_session_end) and fallback_session_id:
-                try:
-                    on_session_end(fallback_session_id, messages)
-                except Exception:
-                    logger.debug("LCM host fallback compressor session-end reset failed", exc_info=True)
-            on_session_reset = getattr(compressor, "on_session_reset", None)
-            if callable(on_session_reset):
-                try:
-                    on_session_reset()
-                except Exception:
-                    logger.debug("LCM host fallback compressor reset failed", exc_info=True)
-            self._host_fallback_compressor = None
-            self._host_fallback_session_id = ""
+        for state in self._host_fallback_states(session_id):
+            compressor = state.get("_host_fallback_compressor")
+            fallback_session_id = state.get("_host_fallback_session_id", "")
+            # Generation handoffs previously guarded the one shared slot by exact ID.
+            # Apply that guard to each state, including MAIN and an empty binding.
+            if require_session_match and fallback_session_id != session_id:
+                continue
+            if compressor is not None and (
+                current_session_bypasses
+                or not fallback_session_id
+                or fallback_session_id == session_id
+            ):
+                fallback_session_id = fallback_session_id or session_id
+                on_session_end = getattr(compressor, "on_session_end", None)
+                if callable(on_session_end) and fallback_session_id:
+                    try:
+                        on_session_end(fallback_session_id, messages)
+                    except Exception:
+                        logger.debug("LCM host fallback compressor session-end reset failed", exc_info=True)
+                on_session_reset = getattr(compressor, "on_session_reset", None)
+                if callable(on_session_reset):
+                    try:
+                        on_session_reset()
+                    except Exception:
+                        logger.debug("LCM host fallback compressor reset failed", exc_info=True)
+                self._clear_host_fallback_state(state)
 
     def _get_host_fallback_compressor(self) -> Any:
         """Return Hermes' native compressor for LCM-bypassed sessions if available."""
-        session_id = self._bypass_lcm_session_id()
-        if self._host_fallback_compressor is not None:
-            if session_id == self._host_fallback_session_id:
-                return self._host_fallback_compressor
-            previous = self._host_fallback_compressor
-            on_session_end = getattr(previous, "on_session_end", None)
-            if callable(on_session_end) and self._host_fallback_session_id:
-                try:
-                    on_session_end(self._host_fallback_session_id, [])
-                except Exception:
-                    logger.debug("LCM host fallback compressor session-end reset failed", exc_info=True)
-            on_session_reset = getattr(previous, "on_session_reset", None)
-            if callable(on_session_reset):
-                try:
-                    on_session_reset()
-                except Exception:
-                    logger.debug("LCM host fallback compressor reset failed", exc_info=True)
-            self._host_fallback_compressor = None
-            self._host_fallback_session_id = ""
+        route_model = self.model or self._config.summary_model
+        if not route_model:
+            if not getattr(self, "_host_fallback_unresolved_model_logged", False):
+                logger.info("LCM host fallback skipped: reason=host_fallback_unresolved_model")
+                self._host_fallback_unresolved_model_logged = True
+            return None
+        with self._auxiliary_session_lock:
+            state = self._bypass_compress_state()
+            session_id = self._bypass_lcm_session_id()
+            previous = state.get("_host_fallback_compressor")
+            previous_id = state.get("_host_fallback_session_id", "")
+            if previous is not None:
+                if session_id == previous_id:
+                    return previous
+                self._clear_host_fallback_state(state)
+        if previous is not None:
+            self._dispose_host_fallback_compressor(previous, previous_id)
         try:
             ContextCompressor = getattr(
                 importlib.import_module("agent.context_compressor"),
@@ -133,7 +278,7 @@ class BypassMixin:
             return None
 
         kwargs = {
-            "model": self.model or "unknown",
+            "model": route_model,
             "threshold_percent": self.context_threshold or self.threshold_percent or 0.50,
             "protect_first_n": self.protect_first_n,
             "protect_last_n": self.protect_last_n,
@@ -153,7 +298,7 @@ class BypassMixin:
             # unbounded ignored/stateless transcript.
             try:
                 compressor = ContextCompressor(
-                    self.model or "unknown",
+                    route_model,
                     threshold_percent=self.context_threshold or self.threshold_percent or 0.50,
                     protect_first_n=self.protect_first_n,
                     protect_last_n=self.protect_last_n,
@@ -171,19 +316,20 @@ class BypassMixin:
                 exc,
             )
             return None
-        self._host_fallback_compressor = compressor
-        self._host_fallback_session_id = session_id
-        self._sync_host_fallback_compressor(compressor)
+        self._sync_host_fallback_compressor(compressor, session_id=session_id)
+        if not self._publish_host_fallback_compressor(state, session_id, compressor):
+            return None
         return compressor
 
-    def _sync_host_fallback_compressor(self, compressor: Any) -> None:
+    def _sync_host_fallback_compressor(self, compressor: Any, *, session_id: str | None = None) -> None:
         """Keep the delegated native compressor aligned with LCM runtime metadata."""
+        route_model = self.model or self._config.summary_model
         update_model = getattr(compressor, "update_model", None)
         context_length = self.context_length or self.raw_context_length
-        if callable(update_model) and context_length > 0:
+        if route_model and callable(update_model) and context_length > 0:
             try:
                 update_model(
-                    model=self.model or "unknown",
+                    model=route_model,
                     context_length=context_length,
                     base_url=self.base_url,
                     api_key=self.api_key,
@@ -192,7 +338,7 @@ class BypassMixin:
                 )
             except TypeError:
                 try:
-                    update_model(self.model or "unknown", context_length, self.base_url, self.api_key)
+                    update_model(route_model, context_length, self.base_url, self.api_key)
                 except TypeError:
                     pass
                 except Exception:
@@ -209,7 +355,8 @@ class BypassMixin:
             except Exception:
                 pass
         on_session_start = getattr(compressor, "on_session_start", None)
-        session_id = self._bypass_lcm_session_id()
+        if session_id is None:
+            session_id = self._bypass_lcm_session_id()
         if callable(on_session_start) and session_id:
             try:
                 on_session_start(
@@ -402,6 +549,7 @@ class BypassMixin:
             return self._trim_bypass_compacted_to_cap(messages, target_tokens)
         head_count = max(1, min(self.protect_first_n, len(messages)))
         tail_count = max(1, min(self.protect_last_n, len(messages) - head_count))
+        head, tail = list(messages[:head_count]), list(messages[-tail_count:])
         marker = {
             "role": "user",
             "content": (
@@ -410,8 +558,20 @@ class BypassMixin:
                 "were dropped to keep the request within the model context window.]"
             ),
         }
-        compacted = list(messages[:head_count]) + [marker] + list(messages[-tail_count:])
+        self._mint_engine_uids([(marker, "omitted_marker", None, "omitted_marker")],
+                               taken=(row.get("message_uid") for row in head + tail))
+        minted = getattr(getattr(self, "_thread_context", None), "bypass_minted_engine_uids", None)
+        if minted is not None and marker.get("message_uid"):
+            minted.append(marker["message_uid"])
+        compacted = head + [marker] + tail
         return self._trim_bypass_compacted_to_cap(compacted, target_tokens)
+
+    def _book_host_compressor_seconds(self, started: float) -> None:
+        """D5: book the host compressor's wait on this thread's foreground budget, shown as ``host=`` on the stop
+        line; the engine is shared with live children, so the budget is per thread, never ``_foreground_budget``."""
+        budget = getattr(getattr(self, "_thread_context", None), "foreground_budget", None)
+        if budget is not None:
+            budget.host += max(0.0, time.monotonic() - started)
 
     def _compress_lcm_bypassed_session(
         self,
@@ -422,6 +582,7 @@ class BypassMixin:
         force: bool = False,
     ) -> List[Dict[str, Any]]:
         """Delegate ignored/stateless context bounding without writing to LCM."""
+        state = self._bypass_compress_state()
         reason = self._bypass_lcm_reason()
         session_id = self._bypass_lcm_session_id()
         self._remember_lcm_bypass_message_prefix(session_id, messages)
@@ -438,13 +599,13 @@ class BypassMixin:
                 observed_tokens,
                 self.threshold_tokens,
             )
-            self._last_compression_status = "noop"
-            self._last_compression_noop_reason = f"LCM bypassed below threshold: {reason}"
+            state["_last_compression_status"] = "noop"
+            state["_last_compression_noop_reason"] = f"LCM bypassed below threshold: {reason}"
             return self._redact_active_replay_messages(messages)
 
         logger.debug("LCM delegating compaction for bypassed %s %s", reason, session_id)
-        self._last_compression_status = "host_fallback"
-        self._last_compression_noop_reason = f"LCM bypassed: {reason}"
+        state["_last_compression_status"] = "host_fallback"
+        state["_last_compression_noop_reason"] = f"LCM bypassed: {reason}"
         safe_messages = self._redact_active_replay_messages(messages)
         target_tokens = self._bypass_compaction_target_tokens(
             observed_tokens=observed_tokens,
@@ -460,6 +621,7 @@ class BypassMixin:
 
         self._sync_host_fallback_compressor(compressor)
         before_count = int(getattr(compressor, "compression_count", 0) or 0)
+        host_started = time.monotonic()
         try:
             try:
                 compacted = compressor.compress(
@@ -475,6 +637,7 @@ class BypassMixin:
                     focus_topic=focus_topic,
                 )
         except Exception as exc:
+            self._book_host_compressor_seconds(host_started)
             self._mirror_host_fallback_state(compressor)
             logger.warning(
                 "LCM Hermes native ContextCompressor failed for bypassed %s %s; using deterministic trim: %s",
@@ -482,13 +645,13 @@ class BypassMixin:
                 session_id,
                 exc,
             )
-            self._host_fallback_compressor = None
-            self._host_fallback_session_id = ""
+            self._clear_host_fallback_state(state)
             compacted = self._fallback_tail_compaction(safe_messages, target_tokens=target_tokens)
             if compacted != safe_messages:
                 self.compression_count += 1
                 self._last_compress_aborted = False
             return compacted
+        self._book_host_compressor_seconds(host_started)
         self._mirror_host_fallback_state(compressor)
         after_count = int(getattr(compressor, "compression_count", before_count) or before_count)
         self.compression_count += max(1, after_count - before_count)

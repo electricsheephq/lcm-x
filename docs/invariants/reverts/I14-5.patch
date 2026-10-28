@@ -1,0 +1,14 @@
+--- a/lifecycle_state.py
++++ b/lifecycle_state.py
+@@ -1157,11 +1157,6 @@
+                 "Lifecycle session binding changed during summary publication"
+             )
+         actual_frontier = int(row[1] or 0)
+-        if actual_frontier != expected_frontier:
+-            raise LifecyclePublicationConflictError(
+-                "Compaction publication frontier generation changed "
+-                f"(expected={expected_frontier}, actual={actual_frontier})"
+-            )
+         self.stage_frontier_advance(
+             conn,
+             conversation_id,

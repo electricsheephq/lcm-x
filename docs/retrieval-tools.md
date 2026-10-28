@@ -28,10 +28,16 @@ remains `session_search`/`lcm_recall`/`lcm_grep`; once an LCM session id and nod
 id are known, they can be retrieved directly through the explicit cross-session
 arguments documented below.
 
+Runtime discovery exposes 13 schemas by default. `lcm_query_state` appears
+only with `LCM_ASSERTIONS_ENABLED=true`; `lcm_retrieve` appears only with
+`LCM_ADAPTIVE_RETRIEVAL_ENABLED=true`. `LCM_DISABLED_TOOLS` hides any named
+tool, even when its flag is enabled. The manifest retains all 16 declarations.
+`LCM_ENTITIES_ENABLED=1` exposes `lcm_memory`; it adds no default recall or context content.
+
 | Tool | Use |
 |------|-----|
 | `lcm_grep` | Search current-session raw messages and summaries. `mode='full_text'` is the byte-compatible default; `mode='semantic'` searches embedded summaries; `mode='hybrid'` combines full-text and semantic ranks with RRF. Set `exclude_current_session=true` or pass `exclude_session_ids` to remove sessions before candidate caps, fusion, and final ranking. Opt into `content_scope='externalized'` or `'both'` for bounded literal search over recoverable payload prefixes owned by the active session. Opt into `session_scope='all'` or `session_scope='session'` (with `session_id`) for bounded archive recovery over rows already present in `lcm.db`, including externally backfilled rows that may carry source strings such as `openclaw-lcm:*`; broader scopes return raw-message hits only in full-text mode and cannot search externalized payloads. Raw-message filters `role`, `time_from`, `time_to`, `source`, and `conversation_id` are pushed into the full-text query; when any is supplied, externalized payload results are omitted, and summary hits are omitted for the role/time filters so the filter contract stays exact. Use `session_search` for earlier separate sessions or broad cross-session recall. |
-| `lcm_recall` | Search the agent's entire memory across ALL conversations and all time by meaning. Runs three arms over the whole local database — full-text raw messages, embedded summary KNN, and verbatim chunk KNN — removes sessions selected by `exclude_current_session` or `exclude_session_ids`, then fuses the remaining candidates with RRF, dedupes chunk hits against FTS by `store_id`, and applies a soft prior `final_score = rank_score × (1 + scope_bias × is_current_conversation) × recency_boost(half_life=30d, floor 0.5)`. `scope_bias` (0..1, default 0.5) and recency are ranking BOOSTS, never filters. `include` selects `all`/`summaries`/`verbatim`. An optional voyage `rerank-2.5-lite` stage (`LCM_RERANK_ENABLED`, default off) reorders the top window of candidates AFTER the scope/recency prior, as a pure rank-reorder (voyage relevance is never spliced onto the RRF scale); transient failures (no provider, network, deadline) skip silently to RRF order, while an embedding-privacy policy error propagates as an error instead. When embeddings are disabled or the vector corpora are empty the tool degrades to the full-text arm — including for `include='summaries'`, whose only vector arm is dead in that state, so a summaries request still returns full-text hits rather than nothing; an embedding-privacy policy error is never absorbed this way — it raises (#370). Each hit carries an `expand_hint`: verbatim excerpts get `lcm_expand(store_id=..., content_offset=...)`, current-session summary hits get `lcm_expand(node_id=...)`, and cross-session summary hits get `lcm_expand(node_id=..., session_id=...)`. Use `lcm_grep(mode='full_text')` for exact text in a known range and `lcm_load_session` for full transcripts. |
+| `lcm_recall` | Search the agent's entire memory across ALL conversations and all time by meaning. Runs three arms over the whole local database — full-text raw messages, embedded summary KNN, and verbatim chunk KNN — removes sessions selected by `exclude_current_session` or `exclude_session_ids`, then fuses the remaining candidates with RRF, dedupes chunk hits against FTS by `store_id`, and applies a soft prior `final_score = rank_score × (1 + scope_bias × is_current_conversation) × recency_boost(half_life=30d, floor 0.5)`. `scope_bias` (0..1, default 0.5) and recency are ranking BOOSTS, never filters. `include` selects `all`/`summaries`/`verbatim`. An optional voyage `rerank-2.5-lite` stage (`LCM_RERANK_ENABLED`, default off) reorders the top window of candidates AFTER the scope/recency prior, as a pure rank-reorder (voyage relevance is never spliced onto the RRF scale); transient failures (no provider, network, deadline) skip silently to RRF order, while an embedding-privacy policy error propagates as an error instead. When embeddings are disabled or the vector corpora are empty the tool degrades to the full-text arm — including for `include='summaries'`, whose only vector arm is dead in that state, so a summaries request still returns full-text hits rather than nothing; a stale cloud identity preserves the full-text arm and reports `embedding_identity_stale:`, while invalid-policy, residual-blocked, and dispatch-drift errors still raise (#370). Each hit carries an `expand_hint`: verbatim excerpts get `lcm_expand(store_id=..., content_offset=...)`, current-session summary hits get `lcm_expand(node_id=...)`, and cross-session summary hits get `lcm_expand(node_id=..., session_id=...)`. Every verbatim message hit, in both `detail='snippets'` and `detail='answer_ready'`, also carries `event_time` (ISO 8601 UTC to the second, e.g. `2024-03-20T13:45:30Z`) when the row has a host observation time (`messages.observed_at`), plus `event_time_source` (e.g. `host_message_timestamp`) when that is recorded; rows without one, such as imported history, carry neither key, and the hit `timestamp` stays LCM's write time. Summary hits do not carry the fields, and they change neither ranking nor `content`. A missing `event_time` means no recorded time only when the response has no `event_time_unavailable` marker: when the event-time read was skipped because the request deadline was spent, or failed, the response carries `event_time_unavailable: true` and `event_time_unavailable_reason` (`deadline` or `read_error`), and the hits it covered carry no event-time fields. The fields never cost a hit under the response cap: the cap sizes hits without them, and a response over the cap with them loses the fields, lowest-ranked hit first, before any hit, with reason `response_cap` (left out only when the marker itself would be what evicts a hit). The read is bounded by `recall_query_timeout_s` and never extends the call. Use `lcm_grep(mode='full_text')` for exact text in a known range and `lcm_load_session` for full transcripts. |
 | `lcm_query_state` | Query the feature-flagged same-DB V4 assertion sidecar by canonical subject, optional predicate/kind/scope/speaker, and optional as-of boundary. Returns typed lifecycle state with exact message store IDs, character spans, hashes, and quotes. It preserves unresolved conflicts and never treats recency alone as supersession. |
 | `lcm_compute` | Execute a question-derived, provider-neutral date/count/sum/difference/order/latest-state operation over exact raw spans or assertion IDs. Values, units, labels, keys, dates, operand order, completeness, and final wording are validated; unsupported or ambiguous inputs return an evidence-only fallback. |
 | `lcm_compile_evidence` | Turn one bounded semantic proposal into an exact-source-grounded evidence brief. The proposal may name facets and operands, but product code validates refs, quotes, spans, entities, dates, values, units, distinct keys, roles, and sources; finite coverage is never accepted from the proposal alone. |
@@ -45,6 +51,7 @@ arguments documented below.
 | `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. |
 | `lcm_inspect` | Read-only operator inventory for current-session lineage, message/frontier metadata, fresh tail, externalized refs/readability, compaction skip/no-op reasons, and matched ignore/stateless patterns. It returns metadata only; use `lcm_load_session`/`lcm_expand` when you need content. |
 | `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. |
+| `lcm_memory` | Default-off read-only `lookup`/`list` over this profile. Lookup accepts a name and up to 8 aliases; returns mention counts, event/write-labelled first/last times (carried times marked `time_uncertain: carried`) and sessions over all matching rows, plus capped cited snippets and compatible assertion facts. Optional question ranks up to 5 mentions across all entity matches, independently of the card limit. List groups assertion subjects by namespace; without assertions there is no registry until E2. No writes or model calls. |
 
 ### Retrieval contract
 
@@ -183,6 +190,31 @@ usable result before the deadline, the semantic arm is not started and an
 explicit timeout is returned. Fusion expiry also returns an explicit timeout.
 No external reranker is called.
 
+### Exact duplicate message delivery (`lcm_recall` / `lcm_grep`)
+
+Exact stored copies of a message count once against delivery limits, per-session
+quotas, expansion quotas and response budgets. The key is the session and
+conversation identity, source, role, tool-call id (empty when absent), assistant
+tool calls, and SHA-256 of the
+**full stored content**. Summaries are never grouped; chunks of the same message
+still fuse by `store_id` first.
+Only stamped rows with the same recorded occurrence time can collapse. Unstamped
+rows remain separate, including a stamped original's unstamped replay copies:
+content equality alone cannot distinguish a copy from a real repeated turn.
+Groups with multiple recorded occurrence times remain separate in full.
+
+The representative is the best-ranked member. The group keeps its best-ranked position. Recall keeps the
+maximum fused score and union of retrieval arms. Only grouped hits carry
+`duplicate_store_ids`: sorted other store ids, excluding the representative.
+For example, `{"store_id": 12, "duplicate_store_ids": [19, 27]}` identifies
+three stored copies through one delivered hit. This is on by default with no
+config key. Duplicate-free responses retain their existing bytes.
+
+Grouping affects delivery only: raw reads and `lcm_expand(store_id=...)` still
+return each row independently. It neither changes the store nor repairs the
+writers that produced duplicates. A failed or expired identity read leaves
+recall candidates ungrouped rather than hiding potentially distinct evidence.
+
 ### Weighted RRF fusion (lcm_recall)
 
 `lcm_recall` fuses three arms — full-text raw messages, summary-vector KNN, and
@@ -213,6 +245,53 @@ erroring the tool. `lcm_grep`'s hybrid RRF is unaffected: it keeps implicit
 actually applied to the arms that ran are echoed back under
 `provenance.arm_weights`.
 
+#### Opt-in session packs (`LCM_RECALL_DELIVERY_UNIT`)
+
+The default `hits` preserves the ranked-hit response. Set
+`LCM_RECALL_DELIVERY_UNIT=session` to deliver full source messages around the
+best-ranked seeds, with unchanged ranking. Invalid environment values warn and
+fall back to `hits`. `limit` bounds ranked seeds (maximum 25), so `total_results`
+can exceed it. `include` selects seed arms; summary seeds can return raw messages.
+Both `detail` values use session delivery; `seen_refs` and occurrence-time
+options retain their `answer_ready` validation and exact-span semantics.
+
+The whole JSON response fits 16,000 estimated tokens and 64,000 characters,
+including metadata and escaping. It can contain partial sessions; inspect
+`provenance.delivery` for seed IDs, source-order ranges, completion, omissions,
+estimator and measured size. Tool-call/result groups are atomic. Oversized or
+unreadable groups carry bounded expansion hints; stored content is never changed.
+Event time comes from host observation, never the storage timestamp. Externalized
+markers remain markers. Proactive injection keeps its independent hits budget.
+This setting makes no answer-quality or host-context-fit guarantee.
+
+#### FTS anchor slot (`LCM_RECALL_FTS_ANCHOR`)
+
+`LCM_RECALL_FTS_ANCHOR` (default `true`) keeps the full-text arm's best match in
+the ranked window. When two or more arms ran and fusion pushed the full-text
+arm's position-1 message past `limit`, that one message moves into the window at
+the start of the 10th distinct session (the window's last slot when it holds
+fewer distinct sessions than that), so at most one session leaves the window. The move is
+order-only: the hit keeps its own `score`, so a relevance floor on `score`
+still applies to it. It is inert with a single
+arm, so embeddings-off (full-text only) output is unchanged, and inert when
+`LCM_RECALL_ARM_WEIGHTS` sets `fts` to `0`. It is also inert when `limit` is
+below `4`: displacing one of three or fewer hits costs more than it gains (a
+tradeoff frozen in #950). Proactive recall (`LCM_PROACTIVE_RECALL_ENABLED`) does
+not use the anchor, because it filters its hits by
+`LCM_PROACTIVE_RECALL_MIN_SCORE` without refilling them. Set
+`LCM_RECALL_FTS_ANCHOR=false` to restore the previous order. Managed (evaOS
+fleet) profiles can set it only after a provisioning release adds it to the
+environment allowlist.
+
+With two or more arms, the response reports
+`provenance.fts_anchor = {fired, position, delivered}`: `fired` says whether the
+message moved, `position` is its 1-based slot in the ranked window (or `null`),
+and `delivered` says whether the anchored hit is among the hits finally returned
+(`null` when the anchor did not fire, since there is no anchored hit).
+`detail='answer_ready'` still applies its citation and per-session rules and the
+response size cap after the anchor, so a fired anchor can report
+`delivered: false`.
+
 `LCM_RERANK_ENABLED=true` optionally lets Voyage reorder the bounded top fused
 window after the scope/recency prior. `LCM_RERANK_MODEL` selects the Voyage
 model (`rerank-2.5-lite` by default; `rerank-2.5` for the quality-oriented
@@ -235,9 +314,32 @@ the caveat — the same disclosure mechanism as `lcm_grep`'s `degraded_reason` �
 so a caller never mistakes a truncated or approximate arm's contribution to the
 fused ranking for an exhaustive exact one.
 
+A backlog recorded by the last embedding backfill pass also sets `degraded: true`
+with a `summary semantic index catching up` or `chunk semantic index catching up`
+reason (and remaining rows when known). The record is per corpus and embedding
+identity; completing catch-up clears it. Non-FastEmbed uncertain rows instead report
+`<corpus> semantic index has N rows awaiting /lcm embed backfill --apply --retry-uncertain --corpus <summary|chunks>`.
+Ingest marks an existing chunk record when automatic chunk passes cannot run;
+a manual backfill clears it. Ordinary automatic ingest lag and no recorded pass
+add no reason. Recall uses a keyed metadata
+lookup, without counting corpus rows; coverage enums still describe the kNN scan.
+
 ### Privacy-policy errors are not a degrade
 
-An embedding-privacy policy error (empty/unknown catalog, post-warmup policy drift, residual
+A missing active cloud profile or an older registered privacy revision degrades
+`lcm_recall` to its full-text arm, with vector coverage `none` and one
+`embedding_identity_stale:` reason. No query is sent to the stale arm's provider and
+its stored vectors are not read. `lcm_grep` semantic mode uses the same reason, and
+`lcm_doctor` warns with the remedy: `/lcm embed warmup`, then
+`/lcm embed backfill --apply`, with `--corpus chunks` (or `--corpus both`) when the stale
+corpus includes chunk vectors. Cloud providers also require `--confirm-raw-text` on
+every chunk or combined apply. Inspect the doctor's complete `remedy` and consent warning.
+Repeat the backfill apply only while `remaining` is above 0 and each run lowers it.
+Stop on `status: partial`, `status: error`, or `status: failed`, or if `remaining`
+stops falling, and inspect the warnings, errors, and detail output.
+Proactive recall can use these full-text hits without counting a privacy-policy error.
+
+An embedding-privacy policy error (empty/unknown catalog, dispatch-time policy drift, residual
 detector match) is a deterministic configuration fault. `lcm_recall` raises it from every
 arm — query embedding, chunk query embedding, summary arm, chunk arm, and rerank — rather
 than reporting `degraded_to_fts`. Proactive recall keeps the assembly contract (injects
@@ -407,8 +509,9 @@ Version 1 is deliberately narrow:
   per file, and caps externalized result material at 64,000 response characters
 - a result includes the ref, tool-call id, bounded snippet, line and byte
   position, original content byte/character sizes, and `scan_truncated`
-- `externalized_refs` is optional; explicit invalid, missing, symlinked, or
-  foreign-session refs are rejected rather than silently widened
+- `externalized_refs` is optional, and an empty list is the same as omitting it;
+  explicit invalid, missing, symlinked, or foreign-session refs are rejected
+  rather than silently widened
 
 Cross-session externalized search remains unsupported. Search the historical
 row first, load the intended session, or recover a known current-session ref

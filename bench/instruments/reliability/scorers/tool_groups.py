@@ -36,4 +36,5 @@ def split_groups(db_path) -> dict:
         for g in groups:
             if 0 < len(g & covered) < len(g):
                 split.append({"node_id": node_id, "group": sorted(g), "covered": sorted(g & covered)})
-    return {"groups": len(groups), "summaries": len(nodes), "split_groups": len(split), "splits": split[:20]}
+    return {"groups": len(groups), "summaries": len(nodes), "split_groups": len(split),
+            "splits": sorted(split, key=lambda r: (r["node_id"], r["group"]))[:20]}

@@ -49,8 +49,11 @@ from benchmarking.longmemeval import (  # noqa: E402
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    # Subparsers do not inherit allow_abbrev from their parent.
+    from functools import partial
+    sub = parser.add_subparsers(dest="command", required=True,
+                               parser_class=partial(argparse.ArgumentParser, allow_abbrev=False))
 
     fetch = sub.add_parser("fetch", help="Download a pinned LongMemEval dataset file.")
     fetch.add_argument("--output", required=True, help="Directory to write the dataset file into.")
@@ -92,6 +95,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Embedding provider. 'stub' is deterministic/offline (scores meaningless).",
     )
     run.add_argument("--model", default="", help="Embedding model id (required for non-stub).")
+    run.add_argument("--shipped-default", action="store_true", help="Measure this tree's shipped embedding defaults; excludes explicit embedding settings.")
+    run.add_argument(
+        "--embeddings", choices=("on", "off"), default="on",
+        help="Enable embedding arms (default: on); off requires --provider stub.",
+    )
     run.add_argument("--limit", type=int, default=None, help="Score only the first N questions.")
     run.add_argument(
         "--rerank",
@@ -192,6 +200,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     probe.add_argument("--seed", type=int, default=0)
     probe.add_argument("--timeout", type=float, default=300.0)
     args = parser.parse_args(argv)
+    if args.command == "run" and args.shipped_default and any(token.partition("=")[0] in {"--provider", "--model", "--embeddings"} for token in argv):
+        parser.error("--shipped-default cannot override explicit embedding settings")
+    if args.command == "run" and args.embeddings == "off" and args.provider != "stub":
+        parser.error("--embeddings off requires --provider stub")
     args._recall_rerank_window_given = any(
         token == "--recall-rerank-window"
         or token.startswith("--recall-rerank-window=")
@@ -416,6 +428,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 questions,
                 provider_name=args.provider,
                 model=args.model,
+                embeddings_enabled=False if args.embeddings == "off" else None,
+                shipped_default=getattr(args, "shipped_default", False),
                 tmp_dir=tmp_dir,
                 use_rerank=args.rerank,
                 recall_rerank=args.recall_rerank,

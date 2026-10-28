@@ -26,9 +26,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        host: [eva-0.21.5, customer-0.21.2, upstream-main]
+        # Keep r34.4 alongside r34.10 for one release to retain comparison coverage. r34.15 is the fleet runtime candidate (Python 3.12).
+        host: [ref-0.21.5, floor-0.21.3, r34.4-0.21.5, r34.10-0.21.5, r34.15-0.21.5, upstream-main, upstream-uid]
     env:
       OUT: ${{ github.workspace }}/reliability-out
+      DEFAULT_WINDOW_REPORT_ONLY: "true"  # One switch for command failures; verdict promotion needs qualification.
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -47,29 +49,10 @@ jobs:
         run: python -m bench.instruments.reliability.ci prep --host "${{ matrix.host }}" --root "$RUNNER_TEMP/hosts" --out "$RUNNER_TEMP/hosts.json"
 
       - name: R1 in-process, all cells
-        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r1"
+        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r1" --keep-dbs fail
 
       - name: R2 acp-process, all cells
-        run: python bench/instruments/reliability/run_matrix.py --transport acp-process --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r2"
-
-      - name: Job summary
-        if: always()
-        run: |
-          for t in r1 r2; do
-            if [ -f "$OUT/$t/MATRIX.md" ]; then cat "$OUT/$t/MATRIX.md" >> "$GITHUB_STEP_SUMMARY"; fi
-          done
-
-      - name: Upload results
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: reliability-${{ matrix.host }}
-          path: |
-            reliability-out/*/results.jsonl
-            reliability-out/*/run.json
-            reliability-out/*/*.md
-            reliability-out/*/cells/**/verdict.json
-          if-no-files-found: warn
+        run: python bench/instruments/reliability/run_matrix.py --transport acp-process --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r2" --keep-dbs fail
 
       - name: Gate (ERROR, or a G-REL-1 FAIL without an open targeted issue)
         env:
@@ -77,3 +60,157 @@ jobs:
         run: |
           gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 1000 --json number --jq '.[].number' > "$RUNNER_TEMP/open-issues.txt"
           python -m bench.instruments.reliability.ci gate "$OUT/r1/results.jsonl" "$OUT/r2/results.jsonl" --open-issues "$RUNNER_TEMP/open-issues.txt"
+
+      # Explicit opt-in cells, after the gate step so they cannot hold up its verdict; R1 only (process_cell.unsupported() rejects
+      # default-window/* under R2). Skipped on cancellation; after a failed gate they add one short report-only step (cells take ~15 s).
+      - name: Default-window R1 in-process (report-only)
+        if: ${{ !cancelled() }}
+        continue-on-error: ${{ env.DEFAULT_WINDOW_REPORT_ONLY == 'true' }}
+        timeout-minutes: 30
+        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells 'default-window/*' --jobs 4 --out "$OUT/default-window-r1" --keep-dbs fail
+
+      - name: Job summary
+        if: always()
+        run: |
+          for t in r1 r2 default-window-r1; do
+            printf '\n## %s\n\n' "$t" >> "$GITHUB_STEP_SUMMARY"
+            if [ -f "$OUT/$t/MATRIX.md" ]; then
+              cat "$OUT/$t/MATRIX.md" >> "$GITHUB_STEP_SUMMARY"
+            else
+              printf 'No matrix report produced; see step logs.\n' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          if [ -d "$OUT" ]; then
+            du -sh --exclude=pycache --exclude=files "$OUT" | awk '{printf "\nArtifact inputs: %s\n", $1}' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reliability-${{ matrix.host }}
+          include-hidden-files: true
+          path: |
+            reliability-out/*/results.jsonl
+            reliability-out/*/run.json
+            reliability-out/*/*.md
+            reliability-out/*/cells/**
+            reliability-out/default-window-*/**
+            !reliability-out/**/pycache/**
+            !reliability-out/*/cells/*/*/*/files/**
+          if-no-files-found: warn
+
+
+  latency:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: pip install pytest==9.1.1 numpy
+
+      - name: Use the runtime SQLite library
+        uses: ./.github/actions/sqlite-runtime
+
+      - name: Stub hermes-agent ABC
+        run: |
+          mkdir -p agent
+          cat > agent/__init__.py <<'STUB'
+          STUB
+          cat > agent/context_engine.py <<'STUB'
+          """Dependency-free ContextEngine contract shared by the pinned hosts."""
+          import copy
+          import json
+          from abc import ABC, abstractmethod
+
+          class ContextEngine(ABC):
+              last_prompt_tokens = 0
+              last_completion_tokens = 0
+              last_total_tokens = 0
+              threshold_tokens = 0
+              context_length = 0
+              compression_count = 0
+              threshold_percent = 0.75
+              protect_first_n = 3
+              protect_last_n = 6
+              emit_automatic_compaction_status = True
+
+              def __init__(self, **kwargs):
+                  self.compression_count = 0
+                  self.last_prompt_tokens = 0
+
+              @property
+              @abstractmethod
+              def name(self):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def update_from_response(self, usage):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def should_compress(self, prompt_tokens=None):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def compress(self, messages, current_tokens=None, focus_topic=None, force=False, memory_context=""):
+                  raise NotImplementedError
+
+              def should_compress_info(self, prompt_tokens=None):
+                  return self.should_compress(prompt_tokens), None
+
+              def should_compress_preflight(self, messages):
+                  return False
+
+              def get_automatic_compaction_status_message(self, *, phase, default_message, **context):
+                  return default_message if self.emit_automatic_compaction_status else None
+
+              def on_session_start(self, session_id, **kwargs):
+                  pass
+
+              def on_session_end(self, session_id, messages):
+                  pass
+
+              def on_session_reset(self):
+                  self.compression_count = 0
+                  self.last_prompt_tokens = 0
+                  self.last_completion_tokens = 0
+                  self.last_total_tokens = 0
+
+              def get_tool_schemas(self):
+                  return []
+
+              def handle_tool_call(self, name, args, **kwargs):
+                  return json.dumps({"error": f"Unknown context engine tool: {name}"})
+
+              def get_status(self):
+                  last_prompt = max(self.last_prompt_tokens, 0)
+                  return {
+                      "last_prompt_tokens": last_prompt,
+                      "threshold_tokens": self.threshold_tokens,
+                      "context_length": self.context_length,
+                      "usage_percent": min(100, last_prompt / self.context_length * 100) if self.context_length else 0,
+                      "compression_count": self.compression_count,
+                  }
+
+              def clone_for_agent(self):
+                  return copy.deepcopy(self)
+
+              def update_model(self, model, context_length, base_url="", api_key="", provider="", api_mode=""):
+                  # Host threshold resolution imports its compressor; keep this
+                  # unit-test fallback dependency-free. LCMEngine overrides it.
+                  self.context_length = context_length
+          STUB
+
+      - name: Run latency budgets under low file descriptor limit
+        run: |
+          ulimit -n 1024
+          python -m pytest tests/ -q -m latency

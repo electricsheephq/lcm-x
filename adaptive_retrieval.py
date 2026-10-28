@@ -243,6 +243,7 @@ class ExactEvidence:
     assertion_id: str = ""
     context_tokens: int = 0
     context_chars: int = 0
+    duplicate_store_ids: tuple[int, ...] = ()
 
     def public_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -260,6 +261,8 @@ class ExactEvidence:
         }
         if self.assertion_id:
             payload["assertion_id"] = self.assertion_id
+        if self.duplicate_store_ids:
+            payload["duplicate_store_ids"] = list(self.duplicate_store_ids)
         return payload
 
 
@@ -498,6 +501,8 @@ def _candidate_from_item(
         "role": row.get("role") or "unknown",
         "timestamp": row.get("timestamp") or 0,
     }
+    if item.get("duplicate_store_ids"):
+        public_stub["duplicate_store_ids"] = item["duplicate_store_ids"]
     encoded_stub = _canonical_json(
         public_stub, field_name="evidence", max_chars=8_192
     )
@@ -514,6 +519,7 @@ def _candidate_from_item(
         role=str(row.get("role") or "unknown"),
         timestamp=float(row.get("timestamp") or 0),
         assertion_id=assertion_id,
+        duplicate_store_ids=tuple(item.get("duplicate_store_ids") or ()),
         context_tokens=count_tokens(encoded_stub),
         context_chars=len(encoded_stub),
     )

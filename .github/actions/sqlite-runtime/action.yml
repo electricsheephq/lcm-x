@@ -1,0 +1,56 @@
+name: SQLite runtime library
+description: >-
+  Build the SQLite release that the supported Hermes runtimes bundle and load it in place of
+  the runner's system library, so the suites run against the same SQLite as production.
+  Ubuntu's system SQLite (3.45.1) predates the WAL-reset fix in 3.51.3 (#1084).
+inputs:
+  version:
+    description: SQLite version Python must report after loading the library.
+    default: "3.53.1"
+  url:
+    description: Official amalgamation archive for that version.
+    default: "https://sqlite.org/2026/sqlite-amalgamation-3530100.zip"
+  sha256:
+    description: sha256 of the amalgamation archive.
+    default: "36ad6e7f38540a3b21a2ac36340833f0a9e426bc1c752751c3ba669466827eae"
+runs:
+  using: composite
+  steps:
+    - name: Build and load SQLite ${{ inputs.version }}
+      shell: bash
+      env:
+        SQLITE_URL: ${{ inputs.url }}
+        SQLITE_SHA256: ${{ inputs.sha256 }}
+        SQLITE_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/sqlite-runtime"
+        mkdir -p "$dir"
+        cd "$dir"
+        curl -fsSL --retry 3 -o amalgamation.zip "$SQLITE_URL"
+        echo "$SQLITE_SHA256  amalgamation.zip" | sha256sum -c -
+        unzip -q -o amalgamation.zip
+        src="$(find . -maxdepth 2 -name sqlite3.c -print -quit)"
+        # Same feature options as the runtime's bundled SQLite (python-build-standalone):
+        # compare `pragma compile_options` on a runtime interpreter before changing them.
+        gcc -O2 -fPIC -shared \
+          -DSQLITE_ENABLE_FTS3 -DSQLITE_ENABLE_FTS3_PARENTHESIS -DSQLITE_ENABLE_FTS4 \
+          -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_GEOPOLY \
+          -DSQLITE_ENABLE_DBSTAT_VTAB -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_PERCENTILE \
+          -DSQLITE_DEFAULT_RECURSIVE_TRIGGERS=1 -DSQLITE_THREADSAFE=1 \
+          -Wl,-soname,libsqlite3.so.0 \
+          -o "$dir/libsqlite3.so.0" "$src" -lpthread -ldl -lm
+        export LD_LIBRARY_PATH="$dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+        python - <<'PY'
+        import os
+        import sqlite3
+        import sys
+
+        want = os.environ["SQLITE_VERSION"]
+        print("python", sys.version.split()[0], "sqlite", sqlite3.sqlite_version)
+        options = sqlite3.connect(":memory:").execute("pragma compile_options").fetchall()
+        print("compile_options", " ".join(row[0] for row in options))
+        if sqlite3.sqlite_version != want:
+            sys.exit(f"loaded SQLite {sqlite3.sqlite_version}, expected {want}")
+        PY

@@ -1,0 +1,271 @@
+"""Coverage certificates bind both cursor ends and the content policy (#1543/#1550/#1624)."""
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from tests.test_issue_1536_chunk_revision import (
+    LONG, SHORT, Store, add_rows, chunking, command, counts, metadata,
+    store as store,  # shared offline fake Ollama fixture
+)
+
+ROWS = [(1, "user", LONG), (2, "user", SHORT), (3, "assistant", LONG),
+        (4, "user", "I work Fridays."), (5, "assistant", LONG),
+        (6, "user", LONG), (7, "assistant", LONG)]
+
+
+def raw(store):
+    return list(store[1].connection.execute("SELECT * FROM messages ORDER BY store_id"))
+
+
+def run(store, *, policy="conversational", limit=32, incremental=True):
+    config = store[0]
+    before = raw(store)
+    result = command._chunk_backfill_run(
+        config, config.database_path, apply=True, limit=limit,
+        retry_uncertain=False, policy=policy, incremental=incremental,
+    )
+    assert isinstance(result, dict) and result["error"] is None and not result["failed"], result
+    assert raw(store) == before
+
+
+def marker(store):
+    return json.loads(metadata(store, "chunk_policy_revision_through"))
+
+
+def certify(store, bounds, policy="conversational"):
+    _, vectors, identity, _ = store
+    assert list(command._chunk_gapfill_rows(
+        vectors.connection, identity.identity_hash, bounds, policy, 32, record_progress=True,
+    )) == []
+
+
+def older_walk(store, ids):
+    """Only insert below the low: rewriting covered rows would wipe the proof."""
+    _, vectors, identity, _ = store
+    before = raw(store)
+    proof = metadata(store, "chunk_policy_revision_through")
+    low = command._chunk_cursor(vectors.connection, identity.identity_hash)[0]
+    for row in vectors.connection.execute("SELECT store_id, role, content FROM messages ORDER BY store_id").fetchall():
+        if row[0] in ids:
+            assert row[0] < low and row[0] not in counts(store)
+            for chunk in chunking.chunk_message(*row, policy="full"):
+                vectors.record_chunk_embedding(
+                    chunk.chunk_id, "model-a", [1.0, 0.0], store_id=chunk.store_id,
+                    chunk_index=chunk.chunk_index, char_start=chunk.char_start,
+                    char_end=chunk.char_end, token_estimate=chunk.token_estimate, identity=identity,
+                )
+    assert metadata(store, "chunk_policy_revision_through") == proof
+    assert raw(store) == before
+
+
+def assert_status(store, policy, expected):
+    config, vectors, _, _ = store
+    config.embedding_content_policy = policy
+    before = list(vectors.connection.execute("SELECT * FROM metadata ORDER BY key"))
+    messages = raw(store)
+    engine = SimpleNamespace(_config=config, _store=SimpleNamespace(db_path=config.database_path))
+    assert f"embedding_backlog_chunks: {expected}" in command._embedding_maintenance_status_lines(engine)
+    assert list(vectors.connection.execute("SELECT * FROM metadata ORDER BY key")) == before
+    assert raw(store) == messages
+
+
+@pytest.mark.parametrize("staged", [False, True], ids=["natural", "staged"])
+def test_1543_low_side_round_trip(store: Store, staged):
+    add_rows(store, ROWS, {6, 7} if staged else set())
+    if staged:
+        metadata(store, "chunk_policy_revision", 2)
+        certify(store, (6, 7))
+    else:
+        run(store, limit=2)
+        run(store, limit=1)
+    older_walk(store, {1, 3} if not staged else {1, 3, 5})
+    for _ in range(3):
+        run(store)
+    assert counts(store) == dict.fromkeys(range(1, 8), 1)
+    assert marker(store) == {"from": 1, "through": 7, "policy": "conversational"}
+
+
+def test_1624_backward_cursor_older_writer(store: Store):
+    add_rows(store, [(i, "user", LONG) for i in range(1, 7)], {4, 5, 6})
+    metadata(store, "chunk_policy_revision", 2)
+    certify(store, (4, 6))
+    older_walk(store, {2})
+    for _ in range(3):
+        run(store)
+    assert counts(store) == dict.fromkeys(range(1, 7), 1)
+
+
+@pytest.mark.parametrize("manual", [False, True], ids=["incremental", "manual"])
+def test_1550_policy_switch_repairs_older_tools(store: Store, manual):
+    add_rows(store, [(i, "tool" if i in (2, 4, 6) else "user", LONG) for i in range(1, 9)], set())
+    for _ in range(3):
+        run(store, incremental=not manual)
+    assert set(counts(store)) == {1, 3, 5, 7, 8}
+    for _ in range(3):
+        run(store, policy="heads")
+    assert counts(store) == dict.fromkeys(range(1, 9), 1)
+    assert marker(store) == {"from": 1, "through": 8, "policy": "heads"}
+
+
+@pytest.mark.parametrize("kind", ["band", "policy"])
+def test_status_reports_unproven_candidates_without_writes(store: Store, kind):
+    if kind == "band":
+        add_rows(store, ROWS, {6, 7})
+        metadata(store, "chunk_policy_revision", 2)
+        certify(store, (6, 7))
+        older_walk(store, {1, 3, 5})
+        policy, pending = "conversational", 2
+    else:
+        add_rows(store, [(i, "tool" if i in (2, 4, 6) else "user", LONG) for i in range(1, 9)], set())
+        run(store)
+        run(store)
+        policy, pending = "heads", 3
+    assert_status(store, policy, f"{pending} (gap-fill)")
+
+
+def test_repaired_steady_state_does_not_scan(store: Store, monkeypatch):
+    add_rows(store, ROWS, {6, 7})
+    metadata(store, "chunk_policy_revision", 2)
+    certify(store, (6, 7))
+    older_walk(store, {1, 3, 5})
+    for _ in range(3):
+        run(store)
+    assert counts(store) == dict.fromkeys(range(1, 8), 1)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("steady coverage must not repeat gap-fill")
+
+    monkeypatch.setattr(command, "_chunk_gapfill_rows", unexpected)
+    run(store)
+    assert_status(store, "conversational", "0")
+
+
+def test_own_history_walk_scans_at_most_two_bounded_bands(store: Store, monkeypatch):
+    add_rows(store, [(i, "user", LONG) for i in range(1, 18)], {16, 17})
+    metadata(store, "chunk_policy_revision", 2)
+    certify(store, (16, 17))
+    gapfill = command._chunk_gapfill_rows
+    bands = []
+
+    class CountedConnection:
+        def __init__(self, conn, visited):
+            self.conn = conn
+            conn.create_function("coverage_band_visit", 1, lambda i: visited.append(i) or 1)
+
+        def execute(self, sql, parameters=()):
+            if "SELECT store_id, role, content FROM messages AS m " in sql:
+                sql = sql.replace("AND NOT EXISTS", "AND coverage_band_visit(m.store_id) AND NOT EXISTS")
+            return self.conn.execute(sql, parameters)
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+    def counted(*args, **kwargs):
+        visited = []
+        bands.append((kwargs.get("record_progress", False), args[2], visited))
+        yield from gapfill(CountedConnection(args[0], visited), *args[1:], **kwargs)
+
+    monkeypatch.setattr(command, "_chunk_gapfill_rows", counted)
+    monkeypatch.setattr(command, "_CHUNK_HISTORY_SCAN_MESSAGES", 4)
+    previous_low = 16
+    previous_walk = 0
+    saw_two = False
+    for _ in range(6):
+        bands.clear()
+        run(store, limit=4)
+        assert len(bands) <= 2
+        low = command._chunk_cursor(store[1].connection, store[2].identity_hash)[0]
+        assert len({writable for writable, _, _ in bands}) == len(bands)
+        saw_two |= len(bands) == 2
+        for writable, band, visited in bands:
+            expected = ((previous_low, previous_low + previous_walk - 1) if writable
+                        else (low, previous_low - 1))
+            assert band == expected
+            assert band[1] - band[0] + 1 <= 4
+            assert len(visited) <= band[1] - band[0] + 1
+            assert all(band[0] <= i <= band[1] for i in visited)
+        print("COVERAGE_BANDS " + json.dumps(bands))
+        previous_walk, previous_low = previous_low - low, low
+    assert saw_two
+    assert counts(store) == dict.fromkeys(range(1, 18), 1)
+    assert marker(store) == {"from": 1, "through": 17, "policy": "conversational"}
+
+
+@pytest.mark.parametrize("policy", ["conversational", "heads"])
+def test_legacy_integer_trusted_for_default_and_revalidated_once_for_heads(store: Store, monkeypatch, policy):
+    add_rows(store, [(1, "user", LONG), (2, "tool", LONG), (3, "user", LONG)], {1, 3})
+    metadata(store, "chunk_policy_revision", 2)
+    metadata(store, "chunk_policy_revision_through", 3)
+    gapfill = command._chunk_gapfill_rows
+    scans = []
+
+    def counted(*args, **kwargs):
+        if kwargs.get("record_progress"):
+            scans.append(args[2])
+        yield from gapfill(*args, **kwargs)
+
+    monkeypatch.setattr(command, "_chunk_gapfill_rows", counted)
+    for _ in range(3):
+        run(store, policy=policy)
+    assert scans == ([(1, 3), (2, 3)] if policy == "heads" else [])
+    assert set(counts(store)) == ({1, 2, 3} if policy == "heads" else {1, 3})
+    assert marker(store) == {"from": 1, "through": 3, "policy": policy}
+    scans.clear()
+    run(store, policy=policy)
+    assert scans == []
+
+
+def test_v0281_reader_bounds_do_not_trust_json(store: Store):
+    add_rows(store, ROWS, {6, 7})
+    metadata(store, "chunk_policy_revision", 2)
+    certify(store, (6, 7))
+    assert isinstance(marker(store), dict)
+    namespace = {"CHUNK_POLICY_REVISION": command.CHUNK_POLICY_REVISION}
+    source = Path(__file__).with_name("fixtures") / "issue_1543_v0281_gapfill_bounds.py.txt"
+    exec(compile(source.read_text(), str(source), "exec"), namespace)
+    assert namespace["_chunk_gapfill_bounds"](store[1].connection, store[2].identity_hash, (6, 7), 2) == (6, 7)
+
+
+def test_v0281_reader_gapfill_uses_saved_scan_on_json(store: Store):
+    """JSON falls through bounds parsing; the older scan record still narrows reads."""
+    add_rows(store, ROWS, {1, 3, 5, 6, 7})
+    metadata(store, "chunk_policy_revision", 2)
+    certify(store, (6, 7))
+    conn, identity = store[1].connection, store[2].identity_hash
+    conn.execute("INSERT OR REPLACE INTO metadata VALUES(?, ?)",
+                 (f"chunk_gapfill_scan:{identity}", json.dumps({
+                     "revision": 2, "policy": "conversational", "high": 7, "pending": [2, 4],
+                 })))
+    namespace = dict(vars(command))
+    for filename in ("issue_1543_v0281_gapfill_bounds.py.txt", "issue_1543_v0281_gapfill_rows.py.txt"):
+        source = Path(__file__).with_name("fixtures") / filename
+        exec(compile(source.read_text(), str(source), "exec"), namespace)
+    bounds = namespace["_chunk_gapfill_bounds"](conn, identity, (1, 7), 2)
+    assert bounds == (1, 7)
+    before = list(conn.execute("SELECT * FROM metadata ORDER BY key"))
+    sql = []
+    conn.set_trace_callback(sql.append)
+    try:
+        rows = list(namespace["_chunk_gapfill_rows"](conn, identity, bounds, "conversational", 32))
+    finally:
+        conn.set_trace_callback(None)
+    assert [r[0] for r in rows] == [4, 2]
+    assert any("store_id IN (2,4)" in statement for statement in sql)
+    assert not any("WHERE store_id >= 1 AND store_id <= 7" in statement for statement in sql)
+    assert list(conn.execute("SELECT * FROM metadata ORDER BY key")) == before
+
+
+@pytest.mark.parametrize("policy", ["conversational", "heads"])
+def test_legacy_rewrite_does_not_reuse_wider_band_scan(store: Store, policy):
+    rows = [(i, "tool" if policy == "heads" and i == 3 else "user", LONG) for i in range(1, 8)]
+    add_rows(store, rows, {5, 6, 7})
+    metadata(store, "chunk_policy_revision", 2)
+    certify(store, (5, 7), policy=policy)  # Saved high=7 scan proves only the old top band.
+    older_walk(store, {1, 2, 4})
+    metadata(store, "chunk_policy_revision_through", 2)  # Older reader's truthful integer.
+    assert_status(store, policy, "1 (gap-fill)")
+    for _ in range(3):
+        run(store, policy=policy)
+    assert counts(store) == dict.fromkeys(range(1, 8), 1)

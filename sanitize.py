@@ -80,19 +80,6 @@ def _structured_part_has_visible_assistant_content(part: Any) -> bool:
     return True
 
 
-def _assistant_message_has_visible_content(msg: Dict[str, Any]) -> bool:
-    content = msg.get("content")
-    if content is None:
-        return False
-    if isinstance(content, str):
-        return bool(_strip_reasoning_blocks(content).strip())
-    if isinstance(content, list):
-        return any(_structured_part_has_visible_assistant_content(part) for part in content)
-    if isinstance(content, dict):
-        return _structured_part_has_visible_assistant_content(content)
-    return bool(str(content).strip())
-
-
 def _strip_structured_text_part(part: Dict[str, Any]) -> Dict[str, Any] | None:
     cleaned = dict(part)
     for key in ("text", "content", "value"):

@@ -1,9 +1,10 @@
 """Nightly CI helpers for .github/workflows/reliability-nightly.yml: host prep from hosts.ci.json, and the gate.
 
-    python -m bench.instruments.reliability.ci prep --host eva-0.21.5 --root "$RUNNER_TEMP/hosts" --out hosts.json
+    python -m bench.instruments.reliability.ci prep --host ref-0.21.5 --root "$RUNNER_TEMP/hosts" --out hosts.json
     python -m bench.instruments.reliability.ci gate r1/results.jsonl r2/results.jsonl --open-issues open-issues.txt
 
-The gate fails on any ERROR, and on a FAIL in the G-REL-1 cell set unless the cell targets an open issue. It also
+The gate fails on any ERROR, and on a FAIL in the G-REL-1 cell set unless every failed bar is declared by an
+open target in cells.ISSUES on that host (cells.ISSUE_HOSTS; empty or missing failed_bars always gates). It also
 fails on an empty results file, a host missing from any file, an empty set and, per (host, transport, plugin sha) present, on any missing, duplicate or unexpected cell
 row against the ``--cells all`` list run_matrix.py uses for that transport (UNSUPPORTED rows count as present).
 """
@@ -13,6 +14,7 @@ import argparse
 import json
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 CI_HOSTS = Path(__file__).with_name("hosts.ci.json")
@@ -21,12 +23,28 @@ G_REL_1 = ("baseline", "acp-trailing", "preflight-continue", "repeat-identical-r
            "pressure-disagreement", "lcm-tool-mid-turn", "parallel-tool-group", "crash-", "gateway-second-restart",
            "cancel-retry", "publication-failure")
 # Data cells inside a gate family that never gate (still expected rows for completeness).
-NON_GATE = ("publication-failure/rotation-child-persistent",)
+NON_GATE = ("drain/hidden-backlog/in-place", "drain/hidden-backlog/rotation",
+            "stop-after-tool/no-retry/in-place",
+            "drain/hidden-backlog-large/in-place", "drain/hidden-backlog-large/rotation",
+            *(f"continuity/{shape}/{mode}" for shape in
+              ("sole-user-tool-loop", "survival-fit", "survival-fit-older-turns")
+              for mode in ("in-place", "rotation")))
+# #1588: exact cells, transport and bars proven by nightly 39539195029; never whole families.
+CELL_GATE = {
+    # #1900 / #1588: permanent loss gate; accepted surplus and B1 multiplicity never gate.
+    "publication-failure/rotation-child-persistent": ("in-process", ("B2D",)),
+    **{f"continuity/forced-compaction-then-turn/{m}": ("acp-process", ("B1", "B2", "B3", "B4", "B8", "F4"))
+       for m in ("in-place", "rotation")},
+    **{f"native-on-off/{v}/in-place": ("in-process", ("B3", "B4", "B8")) for v in ("v0.23.3", "v0.24.3")},
+    **{c: ("in-process", ("B1", "B2")) for c in ("overflow-recovery-restart/in-place",
+       "overflow-recovery-restart/rotation", "upgrade-crash-after-rotation/rotation")},
+}
 
 
 def in_gate_set(cell_id: str) -> bool:
     family = cell_id.split("/")[0]
-    return cell_id not in NON_GATE and any(family == g or (g.endswith("-") and family.startswith(g)) for g in G_REL_1)
+    return cell_id in CELL_GATE or (cell_id not in NON_GATE and
+           any(family == g or (g.endswith("-") and family.startswith(g)) for g in G_REL_1))
 
 
 def expected_cells(transport: str | None) -> list[str]:
@@ -70,13 +88,57 @@ def file_coverage(per_file: dict[str, list[dict]]) -> list[str]:
 
 
 def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[dict]] | None = None) -> list[str]:
+    from bench.instruments.reliability import cells as C
+    from bench.instruments.reliability import controls as CT
+
     problems = (file_coverage(per_file) if per_file is not None else []) + completeness(results)
+    groups = {}
+    for r in results:
+        groups.setdefault((r["host"], r.get("transport")), []).append(r)
+    for (host, transport), rows in groups.items():
+        required = host in CT.P8_MUST_SUPPORT.get(transport, ())
+        for cell, want in CT.P8_CONTROLS.items():
+            got = [r for r in rows if r["cell"] == cell]
+            where = f"{host} {cell} ({transport or 'in-process'}): P8 control"
+            if not got and required:
+                problems.append(f"{where}: missing row")
+            for r in got:
+                if r["verdict"] == "UNSUPPORTED" and not required:
+                    continue
+                if r["verdict"] != want:
+                    problems.append(f"{where}: {r['verdict']}, expected {want}")
+                elif want == "FAIL" and "B9" not in (r.get("failed_bars") or {}):
+                    problems.append(f"{where}: FAIL without B9")
     for r in results:
         where = f"{r['verdict']} {r['host']} {r['cell']} ({r.get('transport', 'in-process')})"
         if r["verdict"] == "ERROR":
             problems.append(f"{where}: {str(r.get('reason', ''))[:200]}")
-        elif r["verdict"] == "FAIL" and in_gate_set(r["cell"]) and not set(r.get("targets") or []) & open_issues:
-            problems.append(f"{where}: G-REL-1 cell fails and targets no open issue (targets {r.get('targets')})")
+        elif r["verdict"] == "FAIL" and in_gate_set(r["cell"]):
+            targets = set(r.get("targets") or [])
+            open_targets = targets & open_issues
+            transport = r.get("transport", "in-process")
+            declared = {bar for target in open_targets if target in C.ISSUES
+                        and r["host"].startswith(C.ISSUE_HOSTS.get(target, ("",)))
+                        and transport in C.ISSUE_TRANSPORTS.get(target, (transport,)) for bar in C.ISSUES[target][0]}
+            failed = set(r.get("failed_bars") or {})
+            if r["cell"] in CELL_GATE:
+                lane, bars = CELL_GATE[r["cell"]]
+                if transport != lane:
+                    continue
+                if "B2D" in bars and "B2" in failed:
+                    b2 = (r.get("numbers") or {}).get("B2") or {}
+                    deficit = b2.get("deficit_rows")
+                    if deficit is None or deficit > 0:
+                        failed.add("B2D")
+                if failed:
+                    failed &= set(bars) | ({"B9"} if lane == "acp-process" and r["host"] == "upstream-uid" else set())
+                    if not failed:
+                        continue
+            uncovered = sorted(failed - declared)
+            if not failed or uncovered:
+                detail = f"uncovered bars {uncovered}" if failed else "empty or missing failed_bars; nothing attributable"
+                problems.append(f"{where}: G-REL-1 cell fails: {detail} "
+                                f"(targets {sorted(targets)}, open targets {sorted(open_targets)})")
     return problems
 
 
@@ -87,9 +149,19 @@ def prep(name: str, root: Path, out: Path) -> dict:
     for cmd in (["git", "init", "-q", str(src)],
                 ["git", "-C", str(src), "fetch", "-q", "--depth", "1", f"https://github.com/{spec['repo']}.git", spec["sha"]],
                 ["git", "-C", str(src), "checkout", "-q", "--detach", "FETCH_HEAD"],
-                ["uv", "venv", "-q", "--python", spec["python_version"], str(venv)],
-                ["uv", "pip", "install", "-q", "-p", str(venv / "bin" / "python"), "-e", f"{src}[{spec['extras']}]", *spec["pins"]]):
+                ["uv", "venv", "-q", "--python", spec["python_version"], str(venv)]):
         subprocess.run(cmd, check=True)
+    # uv pip does not inherit project-level overrides from an editable dependency.
+    # Use the pinned host's own policy (e.g. its Pillow/browser-harness override).
+    project = tomllib.loads((src / "pyproject.toml").read_text())
+    overrides = project.get("tool", {}).get("uv", {}).get("override-dependencies", [])
+    override_args = []
+    if overrides:
+        override_file = root / name / "overrides.txt"
+        override_file.write_text("\n".join(overrides) + "\n")
+        override_args = ["--overrides", str(override_file)]
+    subprocess.run(["uv", "pip", "install", "-q", "-p", str(venv / "bin" / "python"),
+                    "-e", f"{src}[{spec['extras']}]", *spec["pins"], *override_args], check=True)
     hosts = {"hosts": {name: {"python": str(venv / "bin" / "python"), "src": str(src), "sha": spec["sha"],
                               "hermes_version": spec["hermes_version"]}}}
     out.write_text(json.dumps(hosts, indent=1) + "\n")

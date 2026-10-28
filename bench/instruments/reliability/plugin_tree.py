@@ -69,9 +69,17 @@ def parse_bool(tree: Path, key: str, value: str) -> tuple[bool, str]:
     an unparseable value keeps the field default False (config.py ``native_recovery: bool = False``)."""
     src = (Path(tree) / "config.py").read_text()
     fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "_parse_bool_env")
-    ns = {"os": SimpleNamespace(environ={key: value})}
+    ns = {"os": SimpleNamespace(environ={key: value}), "lcm_env_get": {key: value}.get}
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "config.py", "exec"), ns)  # noqa: S102 - the plugin's parser
     return bool(ns["_parse_bool_env"](key, False)), f"config.py:{fn.lineno}"
+
+
+def recovery_prefixes(tree: Path) -> tuple[str, ...]:
+    """Literal prefixes before formatting fields, from the scored tree's recovery constants."""
+    return tuple(ast.literal_eval(n.value).split("{", 1)[0]
+                 for n in ast.walk(ast.parse((Path(tree) / "engine.py").read_text()))
+                 if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                 and n.targets[0].id in {"_OVERFLOW_RECOVERY_PLACEHOLDER", "_OVERFLOW_RECOVERY_OVERCAP_NOTE"})
 
 
 def carrier_markers(tree: Path) -> tuple[re.Pattern, tuple[str, ...]]:
@@ -89,4 +97,4 @@ def carrier_markers(tree: Path) -> tuple[re.Pattern, tuple[str, ...]]:
                     prefixes.append(value.value)
     if not header or not prefixes:
         raise ValueError(f"no generated-carrier markers in {tree}")
-    return re.compile(header), tuple(prefixes)
+    return re.compile(header), tuple(prefixes) + recovery_prefixes(tree)
