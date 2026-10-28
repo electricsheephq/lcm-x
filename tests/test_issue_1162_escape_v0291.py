@@ -697,6 +697,24 @@ def test_2007_in_order_tool_shapes_returned_as_built(tmp_path, summaries, lines)
         engine.shutdown()
 
 
+@pytest.mark.parametrize("shape", ["row_inside_group", "two_calls_then_results"])
+def test_2007_store_ordered_split_group_returned_as_built(tmp_path, summaries, lines, shape):
+    # F4 guard: a leaf already in store order keeps today's input, even when the store holds a row
+    # between a call and its result; regrouping it would move that row out of store order.
+    engine = _engine(tmp_path, False)
+    if shape == "row_inside_group":  # stored C1(a) U2 Ra3
+        rows = [_call("a"), {"role": "user", "content": "between" + PAD}, _result("a", "result a")]
+    else:  # stored C1(a) C2(b) Ra3 Rb4
+        rows = [_call("a"), _call("b", content="second call"), _result("a", "result a"), _result("b", "result b")]
+    try:
+        engine.ingest(rows)
+        full = {id(m): s for s, m in enumerate(rows, start=1)}
+        assert engine._store_complete_input(rows, {}, full, rows, rows, 0, [], 100_000,
+                                            scanned=(_rows(engine), False)) is None
+    finally:
+        engine.shutdown()
+
+
 def test_t11_prepared_escape_promotes(tmp_path, summaries, lines, monkeypatch):
     engine = _engine(tmp_path, False, fresh_tail_count=1, leaf_chunk_tokens=1000,
                      context_threshold=0.75, background_leaf_prep_enabled=True)

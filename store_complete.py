@@ -224,7 +224,8 @@ class StoreCompleteMixin:
                               accounted_ids=(), scale: int = 1, scanned=None, copy_lookup=None,
                               escape_retained: bool = False, allow_retained_escape: bool = False,
                               lift_allowed: bool = True) -> Optional[list]:
-        """``[(input_row, [store_id, ...]), ...]`` in store order, each tool group whole; ``[]`` when the leaf cannot start
+        """``[(input_row, [store_id, ...]), ...]`` in store order (regrouped with each tool group whole only when the host
+        reordered it); ``[]`` when the leaf cannot start
         (a retained occurrence, no source rows, or a contiguity cut); None: today's input."""
         from .identity_anchor import _match_occurrences
 
@@ -454,8 +455,9 @@ class StoreCompleteMixin:
         # nearest preceding call with that id). Every other row with a store id is its own unit; a row
         # without one (position 0) stays behind the row before it, a leading one first. A group sorts at
         # its call's store position or, when the call has none, at its earliest stored result; inside it
-        # the call stays first and its results follow in store order. The sorts are stable: an in-order
-        # leaf with contiguous groups is returned as built; a row stored inside a group follows the group.
+        # the call stays first and its results follow in store order. A leaf whose stored rows are already
+        # in store order is returned as built, even when the store holds a row inside a group; in a regrouped
+        # leaf such a row follows the group. The sorts are stable.
         units, answers, part = [], {}, None  # unit = [[head, *id-less], [result, *id-less], ...]
         for message, ids in out:
             tool_id = str(message.get("tool_call_id") or "").strip() if message.get("role") == "tool" else ""
@@ -477,8 +479,10 @@ class StoreCompleteMixin:
                                                         default=0) or key
                 keys.append(key)
             return [item for _key, item in sorted(zip(keys, parts), key=lambda pair: pair[0])]
-        out = [pair for unit in by_position(units) for part in [unit[0], *(p[0] for p in by_position([[r] for r in unit[1:]]))]
-               for pair in part]
+        stored = [p for p in (position(m, ids) for m, ids in out) if p]
+        if any(a > b for a, b in zip(stored, stored[1:])):
+            out = [pair for unit in by_position(units)
+                   for part in [unit[0], *(p[0] for p in by_position([[r] for r in unit[1:]]))] for pair in part]
         if (emitted == len(out) == len(chunk) and not excluded and not any(ids for _m, ids in out)
                 and all(m is c for (m, _ids), c in zip(out, chunk))):
             return None  # nothing hidden, claimed or excluded: today's input and mapping
