@@ -1481,6 +1481,42 @@ class VectorStore:
         except struct.error:
             return None
 
+    def _fetch_exact_rows(self, sql, args, *, vectors=True):
+        """Transfer one ordered scan, retaining the row loader on resource failure."""
+        raw_transfer = self._conn.execute("PRAGMA encoding").fetchone()[0] == "UTF-8"
+        width = "length(CAST(vec AS BLOB))" if raw_transfer else "length(hex(vec))/2"
+        payload = "CAST(group_concat(vec, '') AS BLOB)" if raw_transfer else "group_concat(hex(vec), '')"
+        fields = (
+            f"rowid, vector_id, vector_kind, {width}, "
+            "typeof(vec), CASE WHEN typeof(vec) != 'blob' THEN vec END"
+            if vectors else "chunk_id"
+        )
+        packed = (f"SELECT json_group_array(json_array({fields})), "
+                  f"{payload} FROM ({sql})")
+        try:
+            metadata, transferred = self._conn.execute(packed, args).fetchone()
+        except (sqlite3.Error, MemoryError) as exc:
+            code = getattr(exc, "sqlite_errorcode", 0) & 0xff
+            if not isinstance(exc, MemoryError) and code not in (
+                sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM,
+                sqlite3.SQLITE_FULL, sqlite3.SQLITE_IOERR,
+            ):
+                raise
+            return self._conn.execute(sql, args).fetchall()
+        rows = json.loads(metadata)
+        if not vectors:
+            return rows
+        raw = (transferred or b"") if raw_transfer else bytes.fromhex(transferred or "")
+        del transferred
+        offset = 0
+        decoded = []
+        for rowid, ident, kind, width, storage, value in rows:
+            end = offset + (width or 0)
+            blob = raw[offset:end] if storage == "blob" else value
+            decoded.append((rowid, ident, kind, blob))
+            offset = end
+        return decoded
+
     def _load_vectors_for_ids(
         self,
         identity_hash: str,
@@ -1500,9 +1536,10 @@ class VectorStore:
         if not embedded_ids:
             return rowids, out_ids, kinds, vectors
         with self._temp_id_table(embedded_ids) as table:
-            rows = self._conn.execute(
+            rows = self._fetch_exact_rows(
                 f"""
-                SELECT v.rowid, v.embedded_id, m.embedded_kind, v.vec
+                SELECT v.rowid AS rowid, v.embedded_id AS vector_id,
+                       m.embedded_kind AS vector_kind, v.vec
                 FROM {table} t
                 JOIN lcm_embedding_vectors v
                   ON v.embedded_id = t.id AND v.identity_hash = ?
@@ -1512,17 +1549,17 @@ class VectorStore:
                 WHERE m.archived = 0
                 """,
                 (identity_hash,),
-            ).fetchall()
+            )
         for row in rows:
             try:
-                vector = self._decode_stored_vec(bytes(row["vec"]), dim, dtype)
+                vector = self._decode_stored_vec(bytes(row[3]), dim, dtype)
             except (TypeError, ValueError):
                 continue
             if vector is None:
                 continue
-            rowids.append(int(row["rowid"]))
-            out_ids.append(str(row["embedded_id"]))
-            kinds.append(str(row["embedded_kind"]))
+            rowids.append(int(row[0]))
+            out_ids.append(str(row[1]))
+            kinds.append(str(row[2]))
             vectors.append(list(vector))
         return rowids, out_ids, kinds, vectors
 
@@ -1546,8 +1583,8 @@ class VectorStore:
             for _, embedded_id, score, kind in ranked[:limit]
         ]
 
-    def _release_matrix_caches(self) -> None:
-        """Drop every cached matrix before a streamed scan allocates its batches.
+    def _release_matrix_caches(self, *, chunk: bool = False) -> None:
+        """Drop the active corpus caches before a streamed scan allocates its batches.
 
         ``cache=False`` alone keeps NEW batches out of the LRU but does nothing
         about what is already in it, and the retrieval-core pool keeps a store
@@ -1555,8 +1592,8 @@ class VectorStore:
         cache_before=4 / cache_after=4: four warm matrices (~192MB of summary
         float32 at a 25k batch, before the separate chunk cache) coexisting with
         the streamed batch, which is not the one-batch bound this batching
-        promises. Both float32 caches and both binary-prescreen caches are
-        released, since all four are retained scan state.
+        promises. The active corpus float32 and binary-prescreen caches are
+        released; the other corpus retains its warm matrices.
 
         Safe against a concurrent reader on a shared pooled store: clearing only
         drops the dict entries. A caller mid-scan holds its own reference to the
@@ -1564,10 +1601,10 @@ class VectorStore:
         freed normally afterwards.
         """
         with self._cache_lock:
-            self._matrix_cache.clear()
-            self._chunk_matrix_cache.clear()
-            self._binary_matrix_cache.clear()
-            self._chunk_binary_matrix_cache.clear()
+            caches = ((self._chunk_matrix_cache, self._chunk_binary_matrix_cache)
+                      if chunk else (self._matrix_cache, self._binary_matrix_cache))
+            for cache in caches:
+                cache.clear()
 
     def _scan_ranked(
         self,
@@ -1578,6 +1615,7 @@ class VectorStore:
         deadline: float | None,
         limit: int,
         score_batch: Any,
+        chunk: bool = False,
     ) -> tuple[list[tuple[str, float, str]], int, bool]:
         """Score every candidate in ``batch_rows`` chunks, keeping a running top-k.
 
@@ -1611,7 +1649,7 @@ class VectorStore:
             # matrices warmed by EARLIER calls stay resident for the pooled
             # store's whole lifetime. Release them before the first batch is
             # allocated, so peak really is one batch.
-            self._release_matrix_caches()
+            self._release_matrix_caches(chunk=chunk)
         started = _monotonic()
         for start in range(0, len(candidate_ids), batch_rows):
             if deadline is not None and _monotonic() >= deadline:
@@ -1767,13 +1805,15 @@ class VectorStore:
                 f"SELECT COUNT(*) FROM {binary_table} WHERE identity_hash = ?",
                 (str(identity_hash),),
             ).fetchone()
+            binary = int(binary_count[0]) if binary_count else 0
+            if binary == 0:
+                return False
             vector_count = self._conn.execute(
                 f"SELECT COUNT(*) FROM {vector_table} WHERE identity_hash = ?",
                 (str(identity_hash),),
             ).fetchone()
         except sqlite3.OperationalError:
             return False
-        binary = int(binary_count[0]) if binary_count else 0
         vectors = int(vector_count[0]) if vector_count else 0
         return binary > 0 and binary == vectors
 
@@ -2658,9 +2698,9 @@ class VectorStore:
                 if conversation_table is not None
                 else ""
             )
-            rows = self._conn.execute(
+            rows = self._fetch_exact_rows(
                 f"""
-                SELECT cm.chunk_id
+                SELECT cm.chunk_id, X'' AS vec
                 FROM lcm_chunk_meta cm
                 JOIN messages m ON m.store_id = cm.store_id
                 {conversation_join}
@@ -2668,8 +2708,8 @@ class VectorStore:
                 ORDER BY m.timestamp DESC, cm.chunk_id DESC
                 LIMIT ?
                 """,
-                args,
-            ).fetchall()
+                args, vectors=False,
+            )
         return [str(row[0]) for row in rows]
 
     def _load_chunk_vectors_for_ids(
@@ -2779,9 +2819,10 @@ class VectorStore:
         blobs: list[bytes] = []
         expected_bytes = dim * 4
         with self._temp_id_table(chunk_ids) as table:
-            rows = self._conn.execute(
+            rows = self._fetch_exact_rows(
                 f"""
-                SELECT v.rowid, v.chunk_id, v.vec
+                SELECT v.rowid AS rowid, v.chunk_id AS vector_id,
+                       'chunk' AS vector_kind, v.vec
                 FROM {table} t
                 CROSS JOIN lcm_chunk_vectors v
                   ON v.chunk_id = t.id AND v.identity_hash = ?
@@ -2790,9 +2831,9 @@ class VectorStore:
                 WHERE m.archived = 0
                 """,
                 (identity_hash,),
-            ).fetchall()
+            )
         for row in rows:
-            blob = row["vec"]
+            blob = row[3]
             # SQLite permits non-BLOB storage; bytes(integer) allocates zeros.
             # Reject it before conversion, consistently with the Python loader.
             if not isinstance(blob, (bytes, bytearray, memoryview)):
@@ -2803,8 +2844,8 @@ class VectorStore:
                 continue
             if len(blob) != expected_bytes:
                 continue
-            rowids.append(int(row["rowid"]))
-            loaded_ids.append(str(row["chunk_id"]))
+            rowids.append(int(row[0]))
+            loaded_ids.append(str(row[1]))
             blobs.append(blob)
         matrix = (
             numpy.frombuffer(b"".join(blobs), dtype=numpy.dtype("<f4")).reshape(len(blobs), dim)
@@ -2991,11 +3032,12 @@ class VectorStore:
 
         candidates, scanned_rows, stopped_early = self._scan_ranked(
             candidate_ids=scan_ids,
-            batch_rows=max(1, self.bounded_scan_rows),
+            batch_rows=max(1, min(1000, self.bounded_scan_rows)),
             budget_s=scan_budget_s,
             deadline=scan_deadline,
             limit=k,
             score_batch=score_batch,
+            chunk=True,
         )
         coverage = "bounded" if stopped_early else candidate_coverage
         scanned = total = None

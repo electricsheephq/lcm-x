@@ -1,0 +1,20 @@
+{
+  "base": "849da257b52fc9833955928816dd1585184988b1",
+  "option1": "de43f47f335bf75d6883ce3053a6548267b411c0",
+  "candidate": "6ef9b824c6b49fef5f52c08e3881c6eef88d94ee",
+  "product_lines": 117,
+  "variant": "raw coalesced UTF8 aggregate; corrected hex aggregate for UTF16;1000-row chunk batch cap",
+  "variant_diagnostic": "Measured on dirty de43f47f with identical product file bytes to committed6ef9b824",
+  "vector_store_sha256": "65155943d84c335ac25b09191ad299c160648e6a24de48718d83c6b10637e0a9",
+  "store_files": {
+    "audit.json": "595deeb1de3a90a953c7a7eaac9ff450dc6c14c0c084bc2c1c6a098864792061",
+    "coverage.jsonl": "a830ff53b0a2ad2e498b14a2e7282d77d50b01bf132a892508e72ebe7c32abed",
+    "store.db-wal": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "store.db-shm": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+    "store.db": "9bd0db7a9226cab46219d6601f3a118ee5b932149162a8d4be0c0e01907e120d",
+    "manifest.json": "e95ddb6f79d441938f03f23ae7d4f4ee36cd325ce842cea76c43130401da625e"
+  },
+  "setup": "BLAS/VECLIB/OMP1; product ORT2; nice19; <=8 observed native threads; serial processes; synthetic250000chunks/500leaves; no compaction or CPU affinity",
+  "window": "Clock starts at width fixture PASS; C1/C2 must be quiet-admitted before cutoff; no reset",
+  "publication": "Archival publication incomplete; tags/releases forbidden to this lane"
+}

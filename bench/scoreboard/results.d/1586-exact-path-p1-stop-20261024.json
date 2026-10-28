@@ -1,0 +1,33 @@
+{
+  "id": "1586-exact-path-p1-stop-20261024",
+  "run_id": "20261024-1586-exact-path-p1",
+  "t2_tag": "lcm-x/20261024-1586-exact-path-p1",
+  "benchmark": "Synthetic exact recall under host load (#1586 P1 stopped preflight)",
+  "metric": "observed_topk_differences",
+  "value": 4,
+  "display": "STOP: 4 top-k differences in 36 observed pairs; C1/C2/C3 not run",
+  "tier": "F",
+  "date": "2026-10-24",
+  "system_commit": "base849da257b52fc9833955928816dd1585184988b1; candidate76abda9fcce73706c2656a038098532be4a8e0e7; later changes contain reporting/documentation only",
+  "harness_commit": "76abda9fcce73706c2656a038098532be4a8e0e7 bench/instruments/local_catchup/contention.py; prepared ABAB scheduler amended for P1 load sampling and exactness/RSS preflight",
+  "judge": "none; deterministic ordered top-k IDs and score tolerance4float32ULP; rescore-partial.py retained beside receipt",
+  "reader": "BAAI/bge-small-en-v1.5 query embedding; no answering model",
+  "retrieval_config": "Default exact float32/384 recall; no binary mirror; 250000chunks/500leaves; unchanged8sdeadline;25kchunkbatch;BLAS/VECLIB/OMP1;productORT2;nice19;seed1586;classesa/b;no busythread in preflight;no compaction/affinity/cgroup",
+  "dataset_exposure": "Synthetic instrument-built fixture only; no customer data or provider traffic",
+  "breakdown": "https://github.com/electricsheephq/lcm-x/blob/3588c3f36022c84caa3b5b93813b95793e8fa9f0/bench/scoreboard/evidence/1586-exact-path-p1-20261024/SUMMARY.json",
+  "variance": "One interrupted preflight: base 200 completed calls, candidate 36 completed calls, paired prefix 36. This is neither a failure-rate estimate nor a complete ABAB latency measurement. Load1 before/after: base 15.3501/19.2124; candidate 19.2124/22.4761.",
+  "failclose": "First difference: index 3/class a, base full chunks and candidate timeout/chunk none. All four differences coincide with candidate deadline censoring. The remaining 32 pairs match IDs and scores within tolerance. No completed call excluded. Candidate interrupted at the SPEC exactness stop; peak RSS missing. Both store audits PASS.",
+  "evidence": [
+    "https://github.com/electricsheephq/lcm-x/blob/3588c3f36022c84caa3b5b93813b95793e8fa9f0/bench/scoreboard/evidence/1586-exact-path-p1-20261024/RESULT-MANIFEST.json",
+    "https://github.com/electricsheephq/lcm-x/blob/3588c3f36022c84caa3b5b93813b95793e8fa9f0/bench/scoreboard/evidence/1586-exact-path-p1-20261024/RESULT.md",
+    "https://github.com/electricsheephq/lcm-x/blob/3588c3f36022c84caa3b5b93813b95793e8fa9f0/bench/scoreboard/evidence/1586-exact-path-p1-20261024/SUMMARY.json",
+    "https://github.com/electricsheephq/lcm-x/blob/3588c3f36022c84caa3b5b93813b95793e8fa9f0/bench/scoreboard/evidence/1586-exact-path-p1-20261024/partial-recalls.jsonl"
+  ],
+  "caveats": [
+    "EXACTNESS_STOP, not PENDING-QUIET: P1 high-load exception applies only to C2.",
+    "Partial preflight: no C1/C2/C3 performance bar, memory bar, completed exactness cell or confidence interval.",
+    "Does not establish a ranking error between two completed full scans.",
+    "Not 2-vCPU floor, saturation compaction, fresh GA, merge, release, runtime or customer proof.",
+    "T2 incomplete: intended tag only. Release manager owns publication because lane SPEC forbids tags/releases. All raw results retained."
+  ]
+}

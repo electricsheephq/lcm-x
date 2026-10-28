@@ -1,0 +1,162 @@
+{
+  "status": "EXACTNESS_STOP",
+  "utc": "2026-10-24T11:30:46.235037+00:00",
+  "pair": "E-A1/E-B1",
+  "paired_row": 6,
+  "query_i": 3,
+  "query_class": "a",
+  "base": {
+    "seconds": 1.5846617079805583,
+    "timeout": false,
+    "error": null,
+    "coverage": {
+      "fts": "ok",
+      "summary": "full",
+      "chunk": "full"
+    }
+  },
+  "candidate": {
+    "seconds": 8.003818333032541,
+    "timeout": true,
+    "error": null,
+    "coverage": {
+      "fts": "ok",
+      "summary": "full",
+      "chunk": "none"
+    }
+  },
+  "base_ids": [
+    [
+      "message_excerpt",
+      "s1586_shard000452",
+      null,
+      226011,
+      {
+        "chunk_index": 0,
+        "char_start": 0,
+        "char_end": 583
+      }
+    ],
+    [
+      "summary",
+      "s1586_shard000255",
+      256,
+      127501,
+      null
+    ],
+    [
+      "message_excerpt",
+      "s1586_shard000261",
+      null,
+      130511,
+      {
+        "chunk_index": 0,
+        "char_start": 0,
+        "char_end": 583
+      }
+    ],
+    [
+      "summary",
+      "s1586_shard000265",
+      266,
+      132501,
+      null
+    ],
+    [
+      "message_excerpt",
+      "s1586_shard000451",
+      null,
+      225511,
+      {
+        "chunk_index": 0,
+        "char_start": 0,
+        "char_end": 583
+      }
+    ],
+    [
+      "summary",
+      "s1586_shard000251",
+      252,
+      125501,
+      null
+    ],
+    [
+      "message_excerpt",
+      "s1586_shard000312",
+      null,
+      156011,
+      {
+        "chunk_index": 0,
+        "char_start": 0,
+        "char_end": 583
+      }
+    ],
+    [
+      "message_excerpt",
+      "s1586_shard000255",
+      null,
+      127501,
+      null
+    ]
+  ],
+  "candidate_ids": [
+    [
+      "summary",
+      "s1586_shard000255",
+      256,
+      127501,
+      null
+    ],
+    [
+      "summary",
+      "s1586_shard000265",
+      266,
+      132501,
+      null
+    ],
+    [
+      "summary",
+      "s1586_shard000251",
+      252,
+      125501,
+      null
+    ],
+    [
+      "summary",
+      "s1586_shard000250",
+      251,
+      125001,
+      null
+    ],
+    [
+      "summary",
+      "s1586_shard000025",
+      26,
+      12501,
+      null
+    ],
+    [
+      "summary",
+      "s1586_shard000259",
+      260,
+      129501,
+      null
+    ],
+    [
+      "summary",
+      "s1586_shard000125",
+      126,
+      62501,
+      null
+    ],
+    [
+      "message_excerpt",
+      "s1586_shard000255",
+      null,
+      127501,
+      null
+    ]
+  ],
+  "completed_candidate_queries": 24,
+  "checked_prefix": 7
+}

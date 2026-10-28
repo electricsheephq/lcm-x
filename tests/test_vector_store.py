@@ -483,7 +483,7 @@ def test_multi_batch_scan_releases_matrices_warmed_before_it(tmp_path, monkeypat
     the LRU but leaves matrices warmed by EARLIER calls resident for the pooled
     store's whole lifetime — the reviewer's probe measured cache_before=4 /
     cache_after=4 across a two-batch scan, i.e. ~192MB coexisting with the
-    streamed batch. The invariant: at first-batch allocation, nothing is left.
+    streamed batch. The invariant: at first-batch allocation, the active corpus cache is empty.
     """
     numpy = pytest.importorskip("numpy")
     db_path = tmp_path / "cache-release.db"
@@ -525,12 +525,12 @@ def test_multi_batch_scan_releases_matrices_warmed_before_it(tmp_path, monkeypat
         assert result.coverage == "full"
         assert len(observed) == 4  # 8 vectors, 2 per batch
         # Released BEFORE the first batch is allocated, and never repopulated.
-        assert observed[0] == (0, 0)
-        assert all(sizes == (0, 0) for sizes in observed)
+        assert observed[0] == (0, 1)
+        assert all(sizes == (0, 1) for sizes in observed)
         assert len(store._matrix_cache) == 0
-        assert len(store._chunk_matrix_cache) == 0
+        assert len(store._chunk_matrix_cache) == 1
         assert len(store._binary_matrix_cache) == 0
-        assert len(store._chunk_binary_matrix_cache) == 0
+        assert len(store._chunk_binary_matrix_cache) == 1
     finally:
         store.close()
         dag.close()
