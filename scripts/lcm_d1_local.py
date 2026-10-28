@@ -154,6 +154,7 @@ def _main(argv, interrupt):
     threads = args.thread_budget // args.jobs
     env = dict(os.environ, LCM_D1_ORT_THREADS=str(threads), OMP_NUM_THREADS=str(threads),
                HF_HUB_OFFLINE="1", PYTHONDONTWRITEBYTECODE="1")
+    env.pop("LCM_D1_BUILD_PARTITION", None)  # Only parallel build workers get a partition.
     common = ["--dataset-label", "m", "--provider", "fastembed", "--model", "BAAI/bge-small-en-v1.5"]
     started = time.monotonic()
 
@@ -210,13 +211,13 @@ def _main(argv, interrupt):
 
         builds = run_pool([(role, part) for role in products for part in range(args.build_workers)], 2 * args.build_workers, build)
         preembed = [row for rows in builds for row in rows]
-        merged_entries, duplicate_keys = {}, {}
+        merged_entries, duplicate_keys, build_threads = {}, {}, {}
         for role in products:
             rows = [row for row in preembed if row["role"] == role]
             if interrupt[0] or any(row["exit_code"] for row in rows):
                 continue
-            for row in rows:
-                role_threads[role] = json.loads((args.output / f"{role}-{row['arm']}-part-{row['part']}-threads.json").read_text())
+            # Build workers run one ORT thread, so their reports stay out of role_threads (the shard setting).
+            build_threads[role] = [json.loads((args.output / f"{role}-{row['arm']}-part-{row['part']}-threads.json").read_text()) for row in rows]
             parts = [caches[role].parent / "parts" / f"part-{part}.sqlite" for part in range(args.build_workers)]
             merged_entries[role], duplicate_keys[role] = merge(parts, caches[role])
             manifests[role] = seal(caches[role])
@@ -257,7 +258,7 @@ def _main(argv, interrupt):
                "wall_seconds": time.monotonic() - started, "arms": arms,
                "not_proven": "Eight-hour acceptance requires the complete quiet-window run; recall equivalence is a separate gate."}
     if args.build_workers > 1:
-        receipt.update(build_workers=args.build_workers, merged_entries=merged_entries, duplicate_keys=duplicate_keys)
+        receipt.update(build_workers=args.build_workers, merged_entries=merged_entries, duplicate_keys=duplicate_keys, build_threads=build_threads)
     (args.output / "d1-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     return 128 + interrupt[0] if interrupt[0] else int(not budget_ok or any(row["exit_code"] for row in preembed) or any(arm["exit_code"] or arm["parse_error"] for arm in arms))
 

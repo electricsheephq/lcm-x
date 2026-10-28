@@ -593,7 +593,7 @@ def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, w
     argv = driver_args(tmp_path)
     if workers is not None:
         argv += ["--build-workers", str(workers)]
-    monkeypatch.delenv("LCM_D1_BUILD_PARTITION", raising=False)
+    monkeypatch.setenv("LCM_D1_BUILD_PARTITION", "1/2")  # A stray parent value must reach no serial or read child.
     monkeypatch.setattr(cli, "pin", lambda _: "a" * 40)
     parallel = workers is not None and workers > 1
     joined = threading.Barrier(2 * workers) if parallel else None
@@ -631,6 +631,7 @@ def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, w
             return {"exit_code": 7 if role == failed_role and part == 0 and arm == "preembed-aa" else 0, "timed_out": False}
         reads.append(role)
         assert env["LCM_D1_ORT_THREADS"] == env["OMP_NUM_THREADS"] == "2"
+        assert "LCM_D1_BUILD_PARTITION" not in env
         assert cache == tmp_path / "out" / role / "embeddings.sqlite"
         out = Path(command[command.index("--output") + 1])
         out.mkdir(parents=True)
@@ -649,6 +650,8 @@ def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, w
         assert receipt["build_workers"] == workers
         assert receipt["merged_entries"] == {role: 30 for role in receipt["cache_manifests"]}
         assert receipt["duplicate_keys"] == {role: 0 for role in receipt["cache_manifests"]}
+        assert receipt["build_threads"] == {role: [{"effective_intra_op_threads": 1}] * (2 * workers) for role in receipt["cache_manifests"]}
+        assert receipt["role_threads"] == {} and receipt["thread_budget_fully_known"] is False
         assert all({"role", "part", "arm", "exit_code", "timed_out", "elapsed_s"} == set(row) and row["elapsed_s"] >= 0 for row in receipt["preembed"])
         if failed_role:
             assert not (tmp_path / "out" / failed_role / "embeddings.manifest.json").exists()
@@ -656,7 +659,8 @@ def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, w
         assert list(builds) == [("base", None), ("candidate", None)]
         assert receipt["preembed"] == [{"role": role, "arm": arm, "exit_code": 0, "timed_out": False}
                                        for role in ("base", "candidate") for arm in ("preembed", "preembed-aa")]
-        assert not {"build_workers", "merged_entries", "duplicate_keys"} & receipt.keys()
+        assert receipt["role_threads"] == {role: {"effective_intra_op_threads": 2} for role in ("base", "candidate")}
+        assert not {"build_workers", "merged_entries", "duplicate_keys", "build_threads"} & receipt.keys()
 
 
 def test_build_workers_above_thread_budget_is_parser_error(tmp_path, monkeypatch, capsys):
