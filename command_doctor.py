@@ -61,6 +61,7 @@ class DoctorFacts:
     sqlite_version: str
     stem_index: str
     host_uid_lines: tuple[str, ...]
+    token_counter: dict[str, str]
     # Exception text remains in the corresponding result; flags preserve branch identity.
     probe_errors: dict[str, bool]
 
@@ -337,6 +338,8 @@ def collect_doctor(engine: Any) -> DoctorFacts:
     sqlite_version = command.sqlite3.sqlite_version
     stem_index = command.stem_index_status(store_conn)
     host_uid_lines = tuple(command.host_uid_doctor_lines(engine))
+    from .tokens import token_counter_status
+    token_counter = token_counter_status()
     return DoctorFacts(
         runtime_identity=runtime_identity,
         db_path=db_path,
@@ -385,6 +388,7 @@ def collect_doctor(engine: Any) -> DoctorFacts:
         sqlite_version=sqlite_version,
         stem_index=stem_index,
         host_uid_lines=host_uid_lines,
+        token_counter=token_counter,
         probe_errors=probe_errors,
     )
 
@@ -691,6 +695,9 @@ def render_doctor(facts: DoctorFacts) -> str:
         f"missing_externalized_payload_refs: {facts.externalized_integrity['missing_externalized_payload_refs']}",
         f"unreferenced_externalized_payload_files: {facts.externalized_integrity['unreferenced_externalized_payload_files']}",
         f"survival_fit_count: {'unknown' if facts.fit_count is None else facts.fit_count}",
+        f"token_counter: {facts.token_counter['counter']}",
+        f"token_counter_encoding: {facts.token_counter['encoding'] or '(none)'}",
+        f"token_counter_state: {facts.token_counter['state']}",
         *facts.host_uid_lines,
     ]
     if facts.inactive_process:

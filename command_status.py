@@ -33,11 +33,13 @@ class StatusFacts:
     protection: dict[str, Any]
     stem_index: str
     embedding_lines: tuple[str, ...]
+    token_counter: dict[str, str]
 
 
 def collect_status(engine: Any) -> StatusFacts:
     """Read live facts through command's existing, patchable helper locations."""
     from . import command
+    from .tokens import token_counter_status
 
     status = engine.get_status()
     db_path = Path(engine._store.db_path)
@@ -57,6 +59,7 @@ def collect_status(engine: Any) -> StatusFacts:
         protection=protection, stem_index=stem_index,
         embedding_lines=tuple(command._embedding_maintenance_status_lines(engine))
         if bool(getattr(engine._config, "embeddings_enabled", False)) else (),
+        token_counter=token_counter_status(),
     )
 
 
@@ -136,6 +139,9 @@ def render_status(facts: StatusFacts) -> str:
         f"last_cache_write_tokens: {status.get('last_cache_write_tokens', 0)}",
         f"last_reasoning_tokens: {status.get('last_reasoning_tokens', 0)}",
         f"cache_read_ratio: {float(status.get('cache_read_ratio', 0.0) or 0.0) * 100:.1f}%",
+        f"token_counter: {facts.token_counter['counter']}",
+        f"token_counter_encoding: {facts.token_counter['encoding'] or '(none)'}",
+        f"token_counter_state: {facts.token_counter['state']}",
         f"sensitive_patterns_enabled: {_fmt_bool(protection.get('enabled'))}",
         f"sensitive_patterns: {', '.join(protection.get('patterns') or []) or '(none)'}",
         f"sensitive_patterns_source: {protection.get('source', 'default')}",

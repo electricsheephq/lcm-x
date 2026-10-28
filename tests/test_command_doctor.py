@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from hermes_lcm import command, tools  # type: ignore[import-not-found]
+from hermes_lcm import command, tokens, tools  # type: ignore[import-not-found]
 from tests.harness import make_engine
 
 CASES = (
@@ -144,6 +144,9 @@ def doctor_engine(
     tmp_path: Path, case: str, patch: pytest.MonkeyPatch, *, trace: bool = False
 ) -> Iterator[Any]:
     # No session bind: no background work, host calls, or provider loads.
+    patch.setattr(tokens, "token_counter_status", lambda: {
+        "counter": "char_estimate", "encoding": "", "state": "unavailable",
+    })
     patch.setenv("HERMES_HOME", str(tmp_path / "home"))
     patch.setenv("HERMES_PROFILE", "default")
     engine: Any = make_engine(

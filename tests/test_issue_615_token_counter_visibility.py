@@ -28,7 +28,7 @@ def make_engine(tmp_path):
     engines = []
 
     def make(name="lcm_615"):
-        config = LCMConfig(database_path=str(tmp_path / f"{name}.db"))
+        config = LCMConfig(database_path=str(tmp_path / f"{name}.db"), embeddings_enabled=False)
         engine = LCMEngine(config=config, hermes_home=str(tmp_path / name))
         engines.append(engine)
         return engine
