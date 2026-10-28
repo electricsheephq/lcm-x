@@ -868,6 +868,11 @@ class DelegateChildMixin:
             "FROM session_lineage WHERE child_session_id = ?", (session_id,)).fetchone()
         return dict(zip(columns, (str(value or "") for value in row))) if row else {}
 
+    def _is_known_delegate_child(self, session_id: str) -> bool:
+        key = self._delegate_child_key(session_id)
+        return bool(self._stored_delegate_child_link(session_id)
+                    or key in _DELEGATE_RESUME_BOUNDARIES or key in _DELEGATE_COMPRESSION_PARENTS)
+
     def _delegate_child_store_sessions(self, session_id: str) -> list[str]:
         sessions = []
         while session_id and session_id not in sessions:
@@ -901,7 +906,16 @@ class DelegateChildMixin:
             self._store_delegate_child_turn(session_id, messages, platform=_DELEGATE_SOURCE, require_agent=True)
             try:
                 if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
-                    stored_tail = self._store.get_session_tail(session_id, limit=1)
+                    tail = self._store.get_session_tail(session_id, limit=1)
+                    view = [msg for msg in messages
+                            if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
+                    if tail and view and self._session_end_prefix_compare_identity(
+                        tail[-1], session_id=session_id,
+                    ) == self._session_end_prefix_compare_identity(view[-1], session_id=session_id):
+                        stored_tail = tail
+                    else:
+                        self._note_delegate_child_fallback(
+                            session_id, "compression boundary not recorded: input not stored")
             except Exception as exc:
                 self._note_delegate_child_fallback(session_id, f"compression boundary not recorded: {exc}")
         result = self._compress_bypassed(messages, current_tokens, focus_topic, force)
@@ -924,9 +938,19 @@ class DelegateChildMixin:
                 if old_key in _DELEGATE_AUXILIARY_IDS:
                     _DELEGATE_AUXILIARY_IDS.add(new_key)
                     return
-                link = self._stored_delegate_child_link(old_session_id)
-                if not link:
+                if not self._is_known_delegate_child(old_session_id):
                     return
+                if not self._stored_delegate_child_link(old_session_id):
+                    try:
+                        link = self._delegate_child_link(old_session_id, platform=_DELEGATE_SOURCE)
+                        if link:
+                            self._store.record_session_lineage(old_session_id, **link)
+                        else:
+                            self._note_delegate_child_fallback(
+                                old_session_id, "parent link not recorded during compression handoff: no parent identity resolves")
+                    except Exception as exc:
+                        self._note_delegate_child_fallback(
+                            old_session_id, f"parent link not recorded during compression handoff: {exc}")
                 _DELEGATE_COMPRESSION_PARENTS[new_key] = old_session_id
                 if old_key in _DELEGATE_RESUME_BOUNDARIES:
                     _DELEGATE_RESUME_BOUNDARIES[new_key] = _DELEGATE_RESUME_BOUNDARIES[old_key]
@@ -1003,7 +1027,7 @@ class DelegateChildMixin:
             return None
         if parent == self._session_id:
             parent_platform = self._session_platform
-            if self._session_ignored:
+            if self._session_ignored or (self._session_stateless and not self._is_known_delegate_child(parent)):
                 return None
         else:
             parent_platform = self._lcm_session_last_platform.get(parent, "") or self._host_session_parent(parent)[1]
@@ -1061,6 +1085,7 @@ class DelegateChildMixin:
         boundary = _DELEGATE_RESUME_BOUNDARIES.get(key)
         identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
         start = self._delegate_child_unique_end(identities, boundary) if boundary else None
+        anchored = start is not None
         if start is not None:
             self._note_delegate_child_fallback(session_id, "resuming after compression boundary")
         else:
@@ -1068,14 +1093,20 @@ class DelegateChildMixin:
             if start == 0 and len(self._delegate_child_store_sessions(session_id)) > 1:
                 start = None  # an empty continuation is not an empty logical child history
         if start is None:
-            stored_rows = [row for sid in reversed(self._delegate_child_store_sessions(session_id))
-                           for row in self._store.get_session_messages(sid)]
-            start = self._delegate_child_anchor_end(session_id, view, stored_rows)
+            sessions = self._delegate_child_store_sessions(session_id)
+            stored_tail = []
+            for sid in sessions:
+                stored_tail = [(sid, row) for row in self._store.get_session_tail(
+                    sid, limit=_ANCHOR_ROWS - len(stored_tail))] + stored_tail
+                if len(stored_tail) == _ANCHOR_ROWS:
+                    break
+            start = self._delegate_child_anchor_end(session_id, view, stored_tail)
+            anchored = start is not None
             if start is None:
                 self._note_delegate_child_fallback(
                     session_id, "stored rows no longer match the child's view; resuming with counted identities")
-                remaining = Counter(self._session_end_prefix_compare_identity(row, session_id=session_id)
-                                    for row in stored_rows)
+                remaining = Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
+                                    for sid in sessions for row in self._store.get_session_messages(sid, limit=-1))
                 suffix = []
                 for msg, identity in zip(view, identities):
                     if remaining[identity] > 0:
@@ -1091,7 +1122,7 @@ class DelegateChildMixin:
             return 0
         stored = self._append_off_current_session_end_suffix(
             session_id, suffix, source=_DELEGATE_SOURCE, conversation_id=session_id)
-        if boundary:
+        if boundary and anchored:
             self._remember_delegate_child_boundary(session_id, view)
         _count("rows_stored", len(stored))
         logger.debug("LCM stored %d delegated-child rows: session=%s parent=%s",
@@ -1099,11 +1130,11 @@ class DelegateChildMixin:
         return len(stored)
 
     def _delegate_child_anchor_end(self, session_id: str, view: List[Dict[str, Any]],
-                                  stored_rows: List[Dict[str, Any]]) -> Optional[int]:
+                                  stored_rows: list[tuple[str, Dict[str, Any]]]) -> Optional[int]:
         """After the host rewrote the child's head (native compaction), resume after the stored tail when
         it occurs exactly once in the view."""
-        anchor = [self._session_end_prefix_compare_identity(row, session_id=session_id)
-                  for row in stored_rows[-_ANCHOR_ROWS:]]
+        anchor = [self._session_end_prefix_compare_identity(row, session_id=sid)
+                  for sid, row in stored_rows]
         identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
         for width in range(len(anchor), 0, -1):
             end = self._delegate_child_unique_end(identities, anchor[-width:])

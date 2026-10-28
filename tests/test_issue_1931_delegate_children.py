@@ -562,3 +562,192 @@ def test_store_during_compression_does_not_publish_stale_boundary(host, monkeypa
     child.turn(ctx, [*result, concurrent, later], parent)
     assert [row["content"] for row in child_rows(parent)] == [
         row["content"] for row in [*original, concurrent, later]]
+
+
+def test_failed_compress_pre_store_does_not_publish_boundary(host, monkeypatch, caplog):
+    load, clone = host
+    ctx, module = load()
+    engine = clone(ctx)
+    engine.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    original = [{"role": "user", "content": f"row {i}"} for i in range(1, 11)]
+    child.turn(ctx, original[:5], engine)
+    append = engine._append_off_current_session_end_suffix
+    attempts = []
+
+    def fail_once(*args, **kwargs):
+        attempts.append(args)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("synthetic append failure")
+        return append(*args, **kwargs)
+
+    compacted = [{"role": "user", "content": "compressed head"}, *original[-2:]]
+    monkeypatch.setattr(engine, "_append_off_current_session_end_suffix", fail_once)
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: compacted)
+    with caplog.at_level("WARNING"):
+        result = child.compress(engine, original)
+    aux = module("aux_session")
+    assert engine._delegate_child_key("child") not in aux._DELEGATE_RESUME_BOUNDARIES
+    assert any("compression boundary not recorded: input not stored" in record.message for record in caplog.records)
+    later = {"role": "user", "content": "row 11"}
+    for _ in range(2):
+        child.turn(ctx, [*result, later], engine)
+    contents = [row["content"] for row in child_rows(engine)]
+    assert all(contents.count(f"row {i}") == 1 for i in (9, 10, 11))
+
+
+@pytest.mark.parametrize("shape", ["short", "tool-group"])
+def test_stale_replay_does_not_rewind_compression_boundary(host, monkeypatch, shape):
+    load, clone = host
+    ctx, _ = load()
+    engine = clone(ctx)
+    engine.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    original = child_view(2)
+    compacted = [{"role": "user", "content": "compressed head"}, original[-1]]
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: compacted)
+    compacted = child.compress(engine, original)
+    if shape == "short":
+        additions = [{"role": "assistant", "content": "new answer"}]
+        stale = compacted
+    else:
+        additions = [
+            {"role": "user", "content": "next request"},
+            {"role": "assistant", "content": "checking", "tool_calls": [
+                {"id": "c6", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c6", "content": "new tool result"},
+            {"role": "assistant", "content": "new final answer"},
+        ]
+        stale = [*compacted, *additions[:2]]
+    newest = {"role": "user", "content": "newest request"}
+    child.turn(ctx, [*compacted, *additions], engine)
+    child.turn(ctx, stale, engine)
+    child.turn(ctx, [*compacted, *additions, newest], engine)
+    child.turn(ctx, [*compacted, *additions, newest], engine)
+    contents = [row["content"] for row in child_rows(engine)]
+    assert all(contents.count(row["content"]) == 1 for row in [*additions, newest])
+
+
+def test_compression_handoff_retries_missing_predecessor_link(host, monkeypatch):
+    load, clone = host
+    ctx, _ = load()
+    engine = clone(ctx)
+    engine.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    child.start(engine)
+    ctx.hooks["subagent_start"][0](child_session_id="child", parent_session_id="parent")
+    record = engine._store.record_session_lineage
+    attempts = []
+
+    def fail_once(session_id, *args, **kwargs):
+        attempts.append(session_id)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("synthetic lineage contention")
+        return record(session_id, *args, **kwargs)
+
+    original = child_view(2)
+    compacted = [{"role": "user", "content": "compressed head"}, *original[-2:]]
+    monkeypatch.setattr(engine._store, "record_session_lineage", fail_once)
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: compacted)
+    result = child.compress(engine, original)
+    assert lineage_rows(engine) == []
+    child.rotate(engine, "continued")
+    later = {"role": "assistant", "content": "continued answer"}
+    for _ in range(2):
+        child.turn(ctx, [*result, later], engine)
+    assert [row["content"] for row in child_rows(engine)] == [row["content"] for row in original]
+    assert [row["content"] for row in child_rows(engine, "continued")] == [later["content"]]
+    assert sorted(lineage_rows(engine)) == [
+        ("child", "parent", "subagent_start"), ("continued", "child", "compression")]
+    assert attempts == ["child", "child", "continued"]
+
+
+@pytest.mark.parametrize("counted", [False, True], ids=["anchor", "counter"])
+def test_restart_matches_externalized_predecessor_rows(host, monkeypatch, counted):
+    monkeypatch.setenv("LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED", "true")
+    monkeypatch.setenv("LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS", "256")
+    load, clone = host
+    ctx, _ = load()
+    engine = clone(ctx)
+    engine.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    original = child_view()
+    original[-1] = {**original[-1], "content": "large tool result line\n" * 1000}
+    child.turn(ctx, original, engine)
+    stored_before = child_rows(engine)
+    assert stored_before[-1]["content"] != original[-1]["content"]  # the predecessor owns the payload ref
+    child.rotate(engine, "continued")
+    ctx2, _ = load()
+    resumed = clone(ctx2)
+    resumed.on_session_start("parent", platform="cli", context_length=200_000)
+    if counted:
+        monkeypatch.setattr(resumed, "_delegate_child_anchor_end", lambda *args: None)
+    later = {"role": "assistant", "content": "after externalized tail"}
+    for _ in range(2):
+        child.turn(ctx2, [*original, later], resumed)
+    assert child_rows(resumed) == stored_before
+    assert [row["content"] for row in child_rows(resumed, "continued")] == [later["content"]]
+
+
+def test_delegate_fallback_reads_real_tail_and_uncapped_rows(host, monkeypatch):
+    load, clone = host
+    ctx, _ = load()
+    engine = clone(ctx)
+    engine.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    original = [{"role": "user", "content": f"stored row {i}"} for i in range(8)]
+    child.turn(ctx, original, engine)
+    read = engine._store.get_session_messages
+    tail = engine._store.get_session_tail
+    limits, tail_reads = [], []
+
+    def capped_read(session_id, limit=2):
+        limits.append(limit)
+        return read(session_id, limit=limit)
+
+    def track_tail(session_id, limit=1000):
+        tail_reads.append((session_id, limit))
+        return tail(session_id, limit=limit)
+
+    monkeypatch.setattr(engine._store, "get_session_messages", capped_read)
+    monkeypatch.setattr(engine._store, "get_session_tail", track_tail)
+    first = {"role": "user", "content": "after true tail"}
+    child.turn(ctx, [*original[-2:], first], engine)
+    assert ("child", 3) in tail_reads
+    assert len(read("child", limit=-1)) == len(original) + 1
+    monkeypatch.setattr(engine, "_delegate_child_anchor_end", lambda *args: None)
+    second = {"role": "user", "content": "after counted fallback"}
+    for _ in range(2):
+        child.turn(ctx, [original[4], first, second], engine)
+    assert -1 in limits
+    assert [row["content"] for row in read("child", limit=-1)] == [
+        row["content"] for row in [*original, first, second]]
+
+
+@pytest.mark.parametrize("parent_kind", ["ignored", "delegate"])
+def test_stateless_rotated_parent_requires_delegate_identity(host, monkeypatch, parent_kind):
+    monkeypatch.setenv("LCM_IGNORE_SESSION_PATTERNS", "old-parent")
+    load, clone = host
+    ctx, _ = load()
+    engine = clone(ctx)
+    if parent_kind == "ignored":
+        engine.on_session_start("old-parent", platform="cli", context_length=200_000)
+        old_id = "old-parent"
+    else:
+        engine.on_session_start("root", platform="cli", context_length=200_000)
+        Agent("old-child", parent="root", **DELEGATE).turn(ctx, child_view(), engine)
+        # Rehydrate the child's bypass lineage on a separate engine before rotation.
+        engine = clone(ctx)
+        engine.on_session_start("old-child", platform="subagent", context_length=200_000)
+        engine._mark_lcm_bypass_lineage_session("old-child", platform="subagent")
+        old_id = "old-child"
+    engine.on_session_start("parent", platform="subagent", boundary_reason="compression", old_session_id=old_id)
+    assert engine._session_id == "parent" and engine._session_stateless and not engine._session_ignored
+    links_before = lineage_rows(engine)
+    child = Agent("child", **DELEGATE)
+    child.turn(ctx, child_view(), engine)
+    if parent_kind == "ignored":
+        assert child_rows(engine) == [] and lineage_rows(engine) == []
+    else:
+        assert [row["content"] for row in child_rows(engine)] == [row["content"] for row in child_view()]
+        assert lineage_rows(engine) == [*links_before, ("child", "parent", "parent_frame")]
