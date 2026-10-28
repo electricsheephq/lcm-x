@@ -405,6 +405,41 @@ def test_t6_cold_resume(tmp_path, summaries, lines):
         engine.shutdown()
 
 
+def test_t6r_rotation_child(tmp_path, summaries, lines):
+    from tests.test_host_uid_shadow import _state_db
+    engine, view = _reorder(tmp_path, False)
+    try:
+        view, _ = _passes(engine, view, 2, lines)
+        retained = view[-1]
+        assert engine._identity_anchor_covered_view(retained, {})
+        _state_db(tmp_path, [("S", None, "compression"), ("S2", "S", None)])
+        engine.on_session_start("S2", platform="cli", context_length=200_000,
+                                conversation_id="conv", boundary_reason="compression", old_session_id="S")
+        assert engine._identity_anchor_covered_view(retained, {})
+        # The wedge symptom: the child must still step over the escaped host copy.
+        engine._compress_run.store_ids_by_message_id = engine._get_store_id_map_for_messages(view)
+        assert len(engine._identity_anchor_extend_chunk([retained], [retained, *_turn("C20", 2000.0)])) > 1
+        _, trace = _passes(engine, view, 1, lines)
+        assert not any(t["reason"] == "selected leaf chunk lacks raw store lineage" for t in trace), trace
+    finally:
+        engine.shutdown()
+
+
+def test_t6r_unrelated_rebind_does_not_see_memo(tmp_path, summaries, lines):
+    from tests.test_host_uid_shadow import _state_db
+    engine, view = _reorder(tmp_path, False)
+    try:
+        view, _ = _passes(engine, view, 2, lines)
+        retained = view[-1]
+        assert engine._identity_anchor_covered_view(retained, {})
+        _state_db(tmp_path, [("S", None, "compression"), ("unrelated", None, None)])
+        engine.on_session_start("unrelated", platform="cli", context_length=200_000, conversation_id="conv")
+        assert not engine._retained_escape_memo()
+        assert not engine._identity_anchor_covered_view(retained, {})
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.parametrize("reverse", [False, True], ids=["retained_result", "retained_call"])
 def test_t7_cross_host_tool_group(tmp_path, summaries, lines, reverse):
     engine = _engine(tmp_path, False)

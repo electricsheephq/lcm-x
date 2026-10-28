@@ -1267,10 +1267,15 @@ class IdentityAnchorMixin:
                                           copy_lookup=copy_lookup, allow_retained_escape=self._retained_escape_enabled)
 
     def _retained_escape_memo(self) -> dict:
-        """Session-scoped identities of escape-covered rows; never a source claim."""
-        key = self._replay_snapshot_metadata_key("retained_escape")
+        """Escape-covered identities for the session and its compression ancestors; never a source claim."""
         cache = self.__dict__.setdefault("_retained_escape_memos", {})
-        if key not in cache:
+        merged = {}
+        for session_id in [self._session_id, *self._identity_anchor_chain()]:
+            key = self._replay_snapshot_metadata_key("retained_escape", session_id)
+            if key in cache:
+                for digest, sid in cache[key].items():
+                    merged.setdefault(digest, sid)
+                continue
             memo = {}
             try:
                 payload = self._store.read_metadata_json(key)
@@ -1288,9 +1293,11 @@ class IdentityAnchorMixin:
                 memo = {}
             except Exception:
                 logger.debug("LCM retained escape metadata load failed", exc_info=True)
-                return {}  # retry later; an unread memo must never be replaced by a partial write
+                continue  # retry later; leave this key uncached to prevent a partial write
             cache[key] = memo
-        return cache[key]
+            for digest, sid in memo.items():
+                merged.setdefault(digest, sid)
+        return merged
 
     @staticmethod
     def _retained_escape_digest(identity) -> str:
