@@ -194,18 +194,19 @@ def test_t3_the_hold_expires_by_time(tmp_path, summaries, monkeypatch):
         engine.shutdown()
 
 
-def test_t3_new_rows_invalidate_the_fingerprinted_hold(tmp_path, summaries):
+def test_t3_the_hold_survives_a_following_turn_that_stores_new_rows(tmp_path, summaries):
+    # v0.29.1 #1880: restores the v0.28.1 local hold floor
     engine, view, rough = _stuck_engine(tmp_path)
     try:
         engine.compress(view, current_tokens=rough)
         rows = _stored(engine)
         next_turn = [*view, *_turn("T9", 900.0)]
         next_rough = count_messages_tokens(next_turn)
-        assert engine.should_compress_preflight(next_turn) is True  # new eligibility is retried in this turn
+        assert engine.should_compress_preflight(next_turn) is False  # preflight ingests the new turn
         assert _stored(engine) > rows
-        assert engine.should_compress(next_rough) is True
-        assert _host_gate(engine) is False
-        assert engine.get_status()["no_progress_hold"] is None
+        assert engine.should_compress(next_rough) is False
+        assert _host_gate(engine) is True
+        assert engine.get_status()["no_progress_hold"]["reason"] == "no_progress"
     finally:
         engine.shutdown()
 
@@ -272,6 +273,7 @@ def test_t3_manual_forced_overflow_and_recovery_are_never_blocked_while_it_holds
 # -- T4. the survival ceiling --------------------------------------------------------------------------------
 
 def test_t4_the_hold_does_not_apply_at_the_survival_ceiling(tmp_path, summaries):
+    # v0.29.1 #1880: restores the v0.28.1 local hold floor
     engine, view, rough = _stuck_engine(tmp_path)
     try:
         engine.compress(view, current_tokens=rough)
@@ -280,8 +282,7 @@ def test_t4_the_hold_does_not_apply_at_the_survival_ceiling(tmp_path, summaries)
         assert engine.should_compress(ceiling) is True  # the host calls compress(), whose survival fit runs
         assert _host_gate(engine) is False  # the gate saw the ceiling observation
         engine.last_prompt_tokens = ceiling - 1
-        assert engine.should_compress(ceiling - 1) is True  # changed pressure bucket is not the old proof
-        assert _host_gate(engine) is False
+        assert engine.should_compress(ceiling - 1) is False and _host_gate(engine) is True
         engine.last_prompt_tokens = rough
         assert engine.should_compress(rough) is False and _host_gate(engine) is True
     finally:

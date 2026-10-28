@@ -180,7 +180,7 @@ def test_c_leaf_ends_before_a_retained_occurrence(tmp_path, summaries):
             view = engine.compress(view)
             statuses.append(engine._last_compression_status)
         assert "error" not in statuses, engine._last_compression_noop_reason
-        assert r_id not in _covered(engine) and _frontier(engine) < r_id
+        assert r_id in _covered(engine) and _frontier(engine) >= r_id  # #1162: escape covers retained R from stored bytes.
         assert _frontier(engine) > 0
         _assert_contiguous(engine)
     finally:

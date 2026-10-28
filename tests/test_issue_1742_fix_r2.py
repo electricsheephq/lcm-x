@@ -120,8 +120,8 @@ def test_shown_retained_backlog(tmp_path, monkeypatch, order):
         assert tuple(backlog) == (order[0], False)
         engine.compress(copy.deepcopy(view), current_tokens=count_messages_tokens(view), force=True)
         reason = engine._last_compression_noop_reason or ""
-        assert ("unresolved retained occurrence" in reason) == blocked
-        assert engine._last_compacted_store_id == 0
+        assert "unresolved retained occurrence" not in reason  # #1162: product escapes; inspector still reports the stop.
+        assert (engine._last_compacted_store_id > 0) == blocked
     finally:
         engine.shutdown()
     assert result["empty_input_kind"] == ("retained" if blocked else "none")
@@ -151,12 +151,9 @@ def test_shown_retained_nonforced(tmp_path, monkeypatch, order, min_observations
         # snapshot describes the initial stop, before that separate host state.
         for attempt in range(5 if min_observations == 1000 else 2):
             engine.compress(copy.deepcopy(view), current_tokens=observed, force=False)
-            if attempt == 0 or min_observations == 1000:
-                assert "unresolved retained occurrence" in engine._last_compression_noop_reason
-            assert engine._last_compacted_store_id == 0
-        if min_observations == 1000:
-            assert engine._zero_leaf_streaks[engine._hold_conversation_key()]["passes"] == 5
-        assert not calls.calls
+            assert "unresolved retained occurrence" not in engine._last_compression_noop_reason  # #1162: escape progresses.
+            assert engine._last_compacted_store_id >= 1
+        assert calls.calls  # #1162: the stored retained row is summarized instead of repeating the zero-leaf stop.
     finally:
         engine.shutdown()
     assert result["empty_input_kind"] == "retained"

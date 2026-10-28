@@ -82,6 +82,25 @@ information. For an explicit opt-in on a small host:
 export LCM_EMBEDDINGS_ENABLED=true
 ```
 
+### Free cloud embeddings (Voyage AI)
+
+Local FastEmbed stays the default and needs no account. Voyage AI offers every
+account 200M free tokens per model for `voyage-4-lite`, `voyage-4`,
+`voyage-4-large`, and `voyage-context-4`. Set these in Hermes' environment:
+
+```bash
+export LCM_EMBEDDINGS_ENABLED=true
+export LCM_EMBEDDING_PROVIDER=voyage
+export LCM_EMBEDDING_MODEL=voyage-4-lite
+export VOYAGE_API_KEY=...
+export LCM_ENABLE_SLASH_COMMAND=1   # registers /lcm for the setup commands
+```
+
+Restart Hermes, then run `/lcm embed warmup`, `/lcm embed backfill` (dry run),
+`/lcm embed backfill --apply`, then `/lcm status`. Cloud privacy filtering is on
+by default for provider-bound copies; durable storage stays raw. See
+[Voyage setup, key creation and current limits](https://github.com/electricsheephq/lcm-x/blob/main/docs/embeddings-setup.md#option-1--voyage-ai-free-tier).
+
 Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/operator-guide.md) as the complete current source. Start with:
 
 - `LCM_CONTEXT_THRESHOLD` (default `0.75`): when normal context pressure triggers compaction;
@@ -165,6 +184,9 @@ A 400 or 404 saying the route cannot serve its model (unknown model, model not f
 - `LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS` (default `300`): seconds an open route is refused before a retry is allowed;
 - `LCM_SUMMARY_TIMEOUT_MS` (default `120000`, the host's own compression default; when unset, Hermes `auxiliary.compression.timeout` applies if configured): how long one summary call may run before it counts as a failure. The foreground time budget can cut a call shorter.
 - `LCM_FOREGROUND_SOFT_SECONDS` (default `60`; `0` = none) and `LCM_FOREGROUND_HARD_SECONDS` (default `120`; `0` or invalid = `120`) (#605): one time budget for a threshold sweep, counted from `compress()` entry. The progress call (a condensation when the summary frontier is over its target, else the first leaf) is tried while 15 s of usable time is left before the hard bound less a finalize reserve; after a stored leaf or condensed node a call starts only if its route's recent duration says it ends, with the reserve, by the hard bound and by the soft target (stop reason `soft_target_reached`). Each call's timeout is at most the usable time left. A step already running is not interrupted, so a compaction can end past the hard bound: read the INFO line `LCM compaction stop:` for the seconds. On `reason=error`, a trailing `failure=` field names the known cause as one token, such as `publication_invariant_conflict` or `exception:RuntimeError` (#1180). A call cut by the budget does not count against the route's circuit, and a compaction takes one spend-guard slot; rollups use their own guard. The budget covers the sweep-off, manual `/compress`, forced overflow and recovery paths too (manual and forced use the hard bound only), and a leaf or condensation source within `LCM_L3_TRUNCATE_TOKENS` is written whole as level 3 with no call.
+
+A published retained-occurrence escape logs one WARNING per pass naming the stored rows and the host/store order mismatch (#1162). The stop line adds `escaped=store_id:<id>,role:<role>,kind:<shown|mapped>,n:<count>` for published escapes only. The host copies stay live and the source rows stay stored; a failed summary emits neither this WARNING nor the token.
+
 - `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` (default `true` from v0.27.0): a large tool result or inline media payload is stored as a payload file under the Hermes home and its row holds an `[Externalized payload: ...]` reference; `lcm_expand(externalized_ref=...)` returns the original bytes; `false` opts out;
 - `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` (default `true` from v0.27.0): ingest durably externalizes a large tool result, per the two thresholds below; below-threshold size-only host adoption waits for a real compression boundary; needs externalization on; `false` opts out;
 - `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` (default `10000`) and `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` (default `2000`; `0` = the first-sight value, never above it) (#671): with `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` and `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` both on (the default from v0.27.0), a new tool result over the first value is replaced by its externalized-ref stub at ingest, and at a compaction a tool result outside the fresh tail is stubbed from the aged value. The stub keeps the call row; `lcm_expand(externalized_ref=...)` returns the original. An automatic compaction at or over the threshold first tries these free cuts without a model call and returns them when the host-measured list is at or under min(threshold - leaf chunk, 0.95 x threshold): stop reason `stub_first_exit` (partial; `lcm_status` `last_stub_first_exit`, the doctor, the `LCM compaction stop:` line); the rows no leaf summarised stay stored as backlog.

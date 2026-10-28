@@ -151,6 +151,7 @@ class _LeafState:
     summary_input_chunk: List[Dict[str, Any]] = field(default_factory=list)
     selected_raw_chunk: List[Dict[str, Any]] = field(default_factory=list)
     prepared: Any = None
+    pending_escapes: list = field(default_factory=list)
     sources: Dict[int, Dict[str, Any]] = field(default_factory=dict)
     anchor_claims: Dict[int, List[int]] = field(default_factory=dict)
     compacted_chunk: List[Dict[str, Any]] = field(default_factory=list)
@@ -712,6 +713,7 @@ class CompactionMixin:
                 return self._compress_bypassed(messages, current_tokens, focus_topic, force)
         self._last_compress_leaves = None
         self._last_hidden_backlog = None
+        self._compress_escaped = []
         self._compress_forced_overflow = False
         self._last_compression_noop_reason = ""  # #1162: a fit's cause belongs to this pass
         _summary_call.error = None  # the thread-local summary failure must not outlive its pass
@@ -951,17 +953,19 @@ class CompactionMixin:
             blocked = (getattr(self, "_store_complete_blocked", None)
                        if budget.selected and retained and not bypassed else None)
             exited = getattr(self, "_stub_first_exit_now", None) if reason != "error" and not bypassed else None
+            escaped = getattr(self, "_compress_escaped", []) if not bypassed else []
             if exited:  # #671: the free cuts reached the target before any model call
                 reason = "stub_first_exit"
             logger.info("LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs "
-                        "finalize=%.1fs backlog_tokens=%d%s%s%s%s", reason, budget.leaves, budget.progress or "none", elapsed,
+                        "finalize=%.1fs backlog_tokens=%d%s%s%s%s%s", reason, budget.leaves, budget.progress or "none", elapsed,
                         pre, calls, finalize,
                         self._raw_backlog_tokens(result) if isinstance(result, list) and not bypassed else 0,
                         f" host={budget.host:.1f}s" if budget.host > 0 else "",
                         " tokens_before={tokens_before} tokens_after={tokens_after} target={target_tokens} "
                         "backlog_rows={backlog_rows}".format(**exited) if exited else "",
                         " blocked=store_id:%d,role:%s,kind:%s" % blocked[:3] if blocked else empty_input,  # #1162
-                        f" failure={self._survival_fit_reason}" if reason == "error" and self._survival_fit_reason else "")
+                        f" failure={self._survival_fit_reason}" if reason == "error" and self._survival_fit_reason else "",
+                        " escaped=store_id:%d,role:%s,kind:%s,n:%d" % (*escaped[0], len(escaped)) if escaped else "")
         except Exception:
             logger.debug("LCM compaction stop line failed", exc_info=True)
         if self._bypasses_lcm_context_management():
@@ -1361,7 +1365,7 @@ class CompactionMixin:
         claims; None when no leaf can start there. The loop's store-complete state is restored afterwards."""
         saved = getattr(self, "_store_complete_excluded", []), getattr(self, "_store_complete_cut", False)
         saved_diagnostics = (getattr(self, "_store_complete_blocked", None),
-                             getattr(self, "_store_complete_empty_reason", ""))
+                             getattr(self, "_store_complete_empty_reason", ""), getattr(self, "_store_complete_escaped", []))
         selected_input = [message for message in chunk if id(message) not in dependent_reply_message_ids]
         self._store_complete_excluded, self._store_complete_cut = [], False
         try:
@@ -1391,7 +1395,7 @@ class CompactionMixin:
             return consumption
         finally:
             self._store_complete_excluded, self._store_complete_cut = saved
-            self._store_complete_blocked, self._store_complete_empty_reason = saved_diagnostics
+            self._store_complete_blocked, self._store_complete_empty_reason, self._store_complete_escaped = saved_diagnostics
 
     def _reject_prepared_chain(self, leaf, reason: str) -> None:
         """#787: the first rejection ends the chain from ``leaf`` on, each leaf counted under ``reason``."""
@@ -1727,6 +1731,7 @@ class CompactionMixin:
         self._objective_only_noop = False
         self._compress_dropped_ignored_rows = False
         self._compress_host_rows_consumed = self._compress_hidden_rows_consumed = 0
+        self._compress_escaped = []
         # Preflight handoffs are one-shot instructions for this invocation.
         # Consume them before every early return so a later unrelated turn can
         # never inherit stale cleanup-only state.
@@ -2883,6 +2888,18 @@ class CompactionMixin:
     ) -> tuple[Literal["next", "break", "continue", "return"], Optional[List[Dict[str, Any]]]]:
         """Advance the committed leaf and choose the next loop transfer."""
         self._last_compacted_store_id = leaf.published_frontier
+        published_ids = set(leaf.source_store_ids)
+        escaped = [row for row in leaf.pending_escapes if row[0] in published_ids]
+        self._record_retained_escape(escaped)
+        if escaped and not self._compress_escaped:
+            sid, role, kind = escaped[0]
+            more = ", +%d more: %s" % (len(escaped) - 1, ",".join(str(s[0]) for s in escaped[1:])) if len(escaped) > 1 else ""
+            logger.warning("LCM retained-occurrence fallback: leaf includes %d retained row(s) whole "
+                           "(store_id=%d role=%s kind=%s%s) frontier=%d; the host view still holds them, "
+                           "so their content is also summarised; source rows stay stored; cause: "
+                           "host order disagrees with store order (#1162)",
+                           len(escaped), sid, role, kind, more, self._store_complete_frontier())
+        self._compress_escaped.extend(row for row in escaped if row not in self._compress_escaped)
         self._compress_host_rows_consumed += leaf.selected_raw_len
         self._compress_hidden_rows_consumed += len(leaf.compacted_chunk) - len(leaf.compacted_positions)
         self._invalidate_rollups_for_published_node(leaf.node)
@@ -3128,6 +3145,7 @@ class CompactionMixin:
         self._store_complete_excluded, self._store_complete_cut, self._store_complete_blocked = [], False, None
         self._store_complete_copy_exclusion_proofs = {}
         self._store_complete_empty_reason = ""
+        self._store_complete_escaped = []
         step_started = time.monotonic() if state.threshold_full_sweep_active else 0.0
         leaf.anchored_input = self._identity_anchor_summary_input(
             selected_input, self._compress_run.store_ids_by_message_id, state.working_messages, leaf.selected_raw_chunk,
@@ -3142,6 +3160,7 @@ class CompactionMixin:
             state.noop_reason = (_RETAINED_NOOP_REASON + " (store_id=%d role=%s kind=%s)" % blocked[:3]
                                  if blocked else self._store_complete_empty_reason or "leaf input is empty")
             return "break", None
+        leaf.pending_escapes = list(self._store_complete_escaped)
         leaf.publication_excluded_store_ids.extend(self._store_complete_excluded)
         leaf_map = self._compress_run.store_ids_by_message_id or {}
         if not any(claims for _message, claims in leaf.anchored_input or ()) and not any(

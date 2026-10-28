@@ -1168,6 +1168,8 @@ and a trailing `failure=` field names the known cause (#1180). Recovery attempts
 below the threshold never take this exit; when the cuts miss the target the
 compaction runs as before.
 
+A published retained-occurrence escape logs one WARNING per pass naming the stored rows and the host/store order mismatch (#1162). The stop line adds `escaped=store_id:<id>,role:<role>,kind:<shown|mapped>,n:<count>` for published escapes only. The host copies stay live and the source rows stay stored; a failed summary emits neither this WARNING nor the token.
+
 `LCM_STUB_FIRST_EXIT_TARGET_RATIO` (default `0`, env only) lowers that target to a
 share of the threshold: the exit is taken only when the list is at or under
 min(threshold - `LCM_LEAF_CHUNK_TOKENS`, 0.95 x threshold, int(ratio x threshold)),

@@ -70,6 +70,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -87,7 +88,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=d994764b6956b804aeb66980a0e22438a9d1318e66ad6c280f3f66aa9e84e902"
+"attrs count=144 sha256=033f60be0fbf281943b9e3d1d3d1313ec2d45413848581830542399ab4e99454"
 ],
 "below-threshold-cleanup-only": [
 "compress attempt=1",
@@ -159,6 +160,7 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compaction_request=sha12/len=400844009612/142",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -172,7 +174,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=dee0ec6c585ac069901fae8183de69f9eb532ce07b2dc4104f3c3bfa7a34adee"
+"attrs count=144 sha256=3ac00b27f28c16cf77c427b84e17a6f7b53bee49ed4b1cc4b51401f835612af7"
 ],
 "boundary-cleanup-only": [
 "compress attempt=1",
@@ -244,6 +246,7 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compaction_request=sha12/len=400844009612/142",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -257,7 +260,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=f948e0e1a51d26ec3aee4f6e804234b884b17e9987ba8fb61b3afbfec6733172"
+"attrs count=144 sha256=67ee29ae4083d4bd33b73c611748c832ad886c4d73cd652dfbc397056c774600"
 ],
 "budget-exhausted-before-leaf": [
 "compress attempt=1",
@@ -335,6 +338,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -359,11 +363,12 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_turn_paced=true",
 "attr _sweep_budget_hold_until=1715.0",
-"attrs count=141 sha256=9d6fe9e71de33fd241e58d60726f59a06a1f775d048c29d6613767f241f9424c"
+"attrs count=144 sha256=6234f2711bddd4ce5e3127737ed428b9728361c053443296951f917c144ee4c5"
 ],
 "budget-partial-pass": [
 "compress attempt=1",
@@ -462,6 +467,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -487,10 +493,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=2ad9fb5de3dc401b98eb3319eb7cd39b8fdb582dc08a8b8f4149b16001035fec"
+"attrs count=144 sha256=e9474469b740720cdd217219dc45b340e32ccbc9bee0c84fb139a0ae686cdb25"
 ],
 "child-session-bypass": [
 "compress attempt=1",
@@ -506,13 +513,14 @@
 "assemble",
 "message system 5ebbb9a2c7c7/25",
 "message assistant c5d0bd23824d/401",
+"attr _compress_escaped=[]",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _foreground_budget=sha12/len=a4ce1981038b/351",
 "attr _last_compression_status=\"running\"",
 "attr _pending_emission_candidates=[]",
 "attr compression_count=1",
-"attrs count=141 sha256=0989d267dc3a82b25bb017b7603d4c16cc5608fef37ce47f9769d6897e892d3e"
+"attrs count=144 sha256=a002522f668140d91057a15be677f7be85012f6331fb6caec79926b9cbe483b7"
 ],
 "child-session-forced": [
 "compress attempt=1",
@@ -528,13 +536,14 @@
 "assemble",
 "message system 5ebbb9a2c7c7/25",
 "message assistant c5d0bd23824d/401",
+"attr _compress_escaped=[]",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _foreground_budget=sha12/len=a4ce1981038b/351",
 "attr _last_compression_status=\"running\"",
 "attr _pending_emission_candidates=[]",
 "attr compression_count=1",
-"attrs count=141 sha256=0989d267dc3a82b25bb017b7603d4c16cc5608fef37ce47f9769d6897e892d3e"
+"attrs count=144 sha256=a002522f668140d91057a15be677f7be85012f6331fb6caec79926b9cbe483b7"
 ],
 "child-with-cached-usage": [
 "compress attempt=1",
@@ -550,13 +559,14 @@
 "assemble",
 "message system 5ebbb9a2c7c7/25",
 "message assistant c5d0bd23824d/401",
+"attr _compress_escaped=[]",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _foreground_budget=sha12/len=a4ce1981038b/351",
 "attr _last_compression_status=\"running\"",
 "attr _pending_emission_candidates=[]",
 "attr compression_count=1",
-"attrs count=141 sha256=0989d267dc3a82b25bb017b7603d4c16cc5608fef37ce47f9769d6897e892d3e"
+"attrs count=144 sha256=a002522f668140d91057a15be677f7be85012f6331fb6caec79926b9cbe483b7"
 ],
 "child-without-usage": [
 "compress attempt=1",
@@ -572,13 +582,14 @@
 "assemble",
 "message system 5ebbb9a2c7c7/25",
 "message assistant c5d0bd23824d/401",
+"attr _compress_escaped=[]",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _foreground_budget=sha12/len=a4ce1981038b/351",
 "attr _last_compression_status=\"running\"",
 "attr _pending_emission_candidates=[]",
 "attr compression_count=1",
-"attrs count=141 sha256=0989d267dc3a82b25bb017b7603d4c16cc5608fef37ce47f9769d6897e892d3e"
+"attrs count=144 sha256=a002522f668140d91057a15be677f7be85012f6331fb6caec79926b9cbe483b7"
 ],
 "condensation-levels": [
 "compress attempt=1",
@@ -686,6 +697,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -709,10 +721,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=e60199e7db7648ca06d17c01a727ba30de98ddda53ee06b5f551ed67bf4e98f1"
+"attrs count=144 sha256=4b569b90bb8fb0039ce71018d501dabd7f5a678ed116110e3ad96afb3d5a7780"
 ],
 "condensation-publication-locked": [
 "compress attempt=1",
@@ -807,6 +820,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -831,10 +845,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"sqlite_publication_locked\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=69513a8c7457a3cde30f5ab8781840c3ba36468f2fb6183a6c37c18545fd166f"
+"attrs count=144 sha256=910e10b7ff0d82776f37dcdd10ffe8ca439b19f397843d9d2a59fc40d772ef3b"
 ],
 "condensation-spends-soft-budget": [
 "compress attempt=1",
@@ -919,6 +934,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -937,7 +953,7 @@
 "attr _pending_emission_candidates=sha12/len=fc146730afef/464",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=bd9f9d8ab4d42fbd7f4d45f022ec1e308d1548e4ba6c5417adb50e94917516b3"
+"attrs count=144 sha256=77220777556937d5f8da70bba17894bf195988cc147cb27d6bba957f48086138"
 ],
 "context-length-rescue": [
 "compress attempt=1",
@@ -1036,6 +1052,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=3",
@@ -1059,10 +1076,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=8630eb0b33b963376a36e52100a3a0b2fe016263eae87a1d7816a2b04f1448f2"
+"attrs count=144 sha256=cafe7b84f20794bffd1631c69092438b5d070d98eea3b6ae1d2f3bfbf500cadf"
 ],
 "deadline-checkpoint-10": [
 "compress attempt=1",
@@ -1135,6 +1153,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -1157,10 +1176,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=141 sha256=60ee22415ccd659ffd4e71a5fd0363d2b90b806ec66e2de960f2d62ea43922b5"
+"attrs count=144 sha256=9abefa3c531a1d0b37f8f2c696f3cf914527c3b4f09b1941172e8a7a30b3b970"
 ],
 "deadline-checkpoint-4": [
 "compress attempt=1",
@@ -1233,6 +1253,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -1252,7 +1273,7 @@
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=141 sha256=e12d3d2baee5c1a0e46fefb260182219c6f6dc8476479311338a9956046aed4c"
+"attrs count=144 sha256=74eb2296bbcbd39b8471140118a2a02dbbcb28dc0bdf5b66e87490ce532ffdfb"
 ],
 "deadline-checkpoint-6": [
 "compress attempt=1",
@@ -1325,6 +1346,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -1344,7 +1366,7 @@
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=141 sha256=e12d3d2baee5c1a0e46fefb260182219c6f6dc8476479311338a9956046aed4c"
+"attrs count=144 sha256=74eb2296bbcbd39b8471140118a2a02dbbcb28dc0bdf5b66e87490ce532ffdfb"
 ],
 "deadline-checkpoint-8": [
 "compress attempt=1",
@@ -1417,6 +1439,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -1437,7 +1460,7 @@
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=141 sha256=b616670ae8c1013b916ffbd41b0c822573957e0e76f70efb125c032517914867"
+"attrs count=144 sha256=6745e84dea5bb73093b2c5b56a883d0dbe12df9881651d3058f853b7bf78d9ef"
 ],
 "deadline-hidden-backlog-read": [
 "compress attempt=1",
@@ -1458,6 +1481,7 @@
 "assemble",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -1476,7 +1500,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=141 sha256=1e7d08bbe67754aa7d67a88ffbce56534e8c821693a0dbbf2331c024849e83ab"
+"attrs count=144 sha256=b62d817eb8b84cdeee771625e0947ea164db20e46329b7bdd7464743227775ed"
 ],
 "default-sweep-target": [
 "compress attempt=1",
@@ -1620,6 +1644,7 @@
 "message user c7f31850e580/241",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -1645,10 +1670,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=af10b2d3cc666e6e14edec5e2be4ca41890895fa9574b0575a65f3825ab1dd4e"
+"attrs count=144 sha256=fff5c663a0b600cfedbac678859c57c26cbd3dd9a5889277c7b362a0f3eb5369"
 ],
 "deferred-critical-small-backlog": [
 "compress attempt=1",
@@ -1727,6 +1753,7 @@
 "assemble",
 "message system 6a97437a05d4/508",
 "message user 67e4e8b1c7a0/112",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=true",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -1752,10 +1779,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=87ddcbece522244250b5c5205092506246fa316855e32424576c89e59ac81d4b"
+"attrs count=144 sha256=2448b108f88961beb7eb9f92dc0f037595e4a5d4a36fdbf077854d38b129dd19"
 ],
 "deferred-maintenance": [
 "compress attempt=1",
@@ -1850,6 +1878,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -1873,10 +1902,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=0fbaeba3da421f3cdec8d53787f27f1fb8bae2046e49916bf2516a243c8f40fe"
+"attrs count=144 sha256=199f9f8ecb168b645bcd443feba4c59a3df5760eabc103a30097ce61b0763f8f"
 ],
 "dependent-nonreply-barrier": [
 "non-reply role: both fingerprints absent despite persisted ledger; generated=False",
@@ -1930,6 +1960,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -1950,10 +1981,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=4b218baf469f152b4d6e3583ac83fde7c59106fdffeb4f5b83b513d4c5022bb1"
+"attrs count=144 sha256=8a8cc951a7d9ae44fcfd7003893f1d5f732e52e282567cf0c06f3610b6496c4a"
 ],
 "dependent-only-leaf": [
 "compress attempt=1",
@@ -2002,6 +2034,7 @@
 "message user 67e4e8b1c7a0/112",
 "message user b3e9e4ecee67/14",
 "message assistant 6a500e118d1f/14",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=3",
@@ -2022,10 +2055,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=0e2a668fd7c7084ea6631c9e4fd6814f1ff9b4e1b86e01091d6f3c74ada01846"
+"attrs count=144 sha256=b4d4cc1b0d5dcfdbc6326b09c5bc4c46e112d19d62f53ad5ac1e60e8cb372cd6"
 ],
 "dynamic-below-minimum": [
 "compress attempt=1",
@@ -2098,6 +2132,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -2115,7 +2150,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=fee2616acfb95315765e3a0eb471a493247fa03cf8e2f83cdb93aee3b02e6bf5"
+"attrs count=144 sha256=3502feefca9c603ab76f3c88ee5c3bc7882f6b0169c0d7e12ed7c180bb88198a"
 ],
 "dynamic-below-minimum-no-fit": [
 "compress attempt=1",
@@ -2188,6 +2223,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -2206,7 +2242,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=28f1f0e6c7477cd28987ccb98c463229f2427d4475e8bcc50792263a3499f8f0"
+"attrs count=144 sha256=68e785a6f8137a2630777576d96cc8966189d0fdf9d44db63ebfbde4002c9b4a"
 ],
 "dynamic-forced-overflow": [
 "compress attempt=1",
@@ -2283,6 +2319,7 @@
 "assemble",
 "message system 6a97437a05d4/508",
 "message user 67e4e8b1c7a0/112",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=true",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -2308,10 +2345,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=2efd3d69db0886d9aeb7b2b19e7816b89f5f6af657ebb5937679423d83069739"
+"attrs count=144 sha256=2a51f5f8ec0c0e0c8713da41a6461ede98cee73fea5ae0783cd463aa6e6d505d"
 ],
 "dynamic-fresh-tail-yield": [
 "compress attempt=1",
@@ -2413,6 +2451,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=10",
@@ -2436,10 +2475,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=6d5e02bc3fef55e63b6cd2e93c809dde572ba7c2eff39fa4882c8188f5df8a45"
+"attrs count=144 sha256=f0fde756433801a3668aa7cc13c2496f2f7a27eb66899208292a5fcd396dac77"
 ],
 "dynamic-leaf-passes": [
 "compress attempt=1",
@@ -2560,6 +2600,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=8",
@@ -2583,10 +2624,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=d2a875426db1fd24960462617a4a7de1650e3ddd23536a7269bcfcef7a221de9"
+"attrs count=144 sha256=5c0fcd693314badce6d3bd2f7bb44c94f16e29036fd3ebf06293159b7919f69a"
 ],
 "dynamic-raw-drained": [
 "compress attempt=1",
@@ -2659,6 +2701,7 @@
 "message assistant 1d3aa33ccd2c/1266",
 "message user d932be6f1500/1267",
 "message assistant 5112d3181a5e/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=2",
@@ -2682,10 +2725,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=88893f0bbfd13a58420140decfc78ed850fcae6acd14dda972e43813a8761744"
+"attrs count=144 sha256=dd9cf0d71bcc36e5573a1c3bd02d59b08a91187c4c5dce0da2920a9c06a53f47"
 ],
 "dynamic-small-backlog-yields": [
 "compress attempt=1",
@@ -2766,6 +2810,7 @@
 "message user 67e4e8b1c7a0/112",
 "message user 69e6fa69ef3f/1444",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=15",
@@ -2789,10 +2834,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=b20d3ade2c1bbf7342c964e08806a0192b52b4bfd9ef5ed60941c811a49ff107"
+"attrs count=144 sha256=d3740f12a9deb70457f1952f7993d82cd772a917fd4a793196b0f6cb29ebea85"
 ],
 "dynamic-threshold-reached": [
 "compress attempt=1",
@@ -2883,6 +2929,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -2906,10 +2953,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=162610208f4b416400601df02511a33e2f48344f3a4f7fe024e64493d179a19c"
+"attrs count=144 sha256=8c1a938342336cf93a277f153719f3e18d0148f44b14f7e8b38188bb02a1922b"
 ],
 "empty": [
 "compress attempt=1",
@@ -2921,13 +2969,14 @@
 "sql #1 sha12/len=4702b2b116a4/157",
 "sql COMMIT",
 "assemble",
+"attr _compress_escaped=[]",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _foreground_budget=sha12/len=a4ce1981038b/351",
 "attr _last_compression_noop_reason=\"empty message list\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=5f9b8bb755b19f0d9f365a21d76efd1818768b104bd6b49456c1b79b76afb5da"
+"attrs count=144 sha256=c742fad1784c2e6d7a7df121ef30fa1864fa9959452221996ab87681f76b1a7c"
 ],
 "escalation-level-three": [
 "compress attempt=1",
@@ -3020,6 +3069,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -3043,10 +3093,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=114fa76971b3185f5d6b6c37689424c9859ff3f7550f78224ad2f61413499fa9"
+"attrs count=144 sha256=272366dd3bc413836866e4ee38f84790434a19e32f9603ebcc997781dc409ccd"
 ],
 "escalation-level-two": [
 "compress attempt=1",
@@ -3139,6 +3190,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -3162,10 +3214,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=66f315944018ab322241ed0ac961642ae53b41bea2ad6e9878b5a245b8ddc72e"
+"attrs count=144 sha256=66c00c8cd094e5a67810803343591095ba6a32a84cd994ccf0b8470ffb5ce0d8"
 ],
 "escalation-rejected-keeps-backlog": [
 "compress attempt=1",
@@ -3243,6 +3296,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -3266,9 +3320,10 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=754668ef838647aaa1eb97c6afef34b2abc9fe3c76b6e63c915b79904eaccba8"
+"attrs count=144 sha256=176f584216dd8af582cdbb4d97073043604b66eb6d7a2b983fef7193eaa0d56b"
 ],
 "explicit-focus": [
 "compress attempt=1",
@@ -3359,6 +3414,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -3382,10 +3438,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=4b218baf469f152b4d6e3583ac83fde7c59106fdffeb4f5b83b513d4c5022bb1"
+"attrs count=144 sha256=8a8cc951a7d9ae44fcfd7003893f1d5f732e52e282567cf0c06f3610b6496c4a"
 ],
 "externalized-payloads": [
 "compress attempt=1",
@@ -3493,6 +3550,7 @@
 "message tool 42152c96b8ab/237",
 "message assistant b61a04d6dd7e/1600",
 "message tool 5b2c2c72fea5/237",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -3516,10 +3574,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=4dbea9e6c187b222cd33ce4de207d6763d7430b13c07532ac670b4f5cdb779ee"
+"attrs count=144 sha256=8f944afd0fdc2c1fddc6859e84170b1a875d4da7fb5e3a1d808760ae79fe30e5"
 ],
 "externalized-transcript-gc": [
 "compress attempt=1",
@@ -3620,6 +3679,7 @@
 "message user 69e6fa69ef3f/1444",
 "message assistant b61a04d6dd7e/1600",
 "message tool b3f7e026a84f/1600",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=22",
@@ -3643,10 +3703,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=84a3730c2d952f06f20e7dd37a918807f652c6ae6030463fcf25dbafc3d00d1a"
+"attrs count=144 sha256=4ca798004b7b057cba110e9c1364601b5685181218b0343e78de34b67febc7e4"
 ],
 "finish-callable-telemetry": [
 "compress attempt=1",
@@ -3778,6 +3839,7 @@
 "message user c9c175d956bb/826",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -3803,10 +3865,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=f340af59d0583444b80b2ffac136fa1f2ffcea0dbaa5b755d705ae537fe4c7c8"
+"attrs count=144 sha256=400d9d283fc962fc8350a1a497463b2eb6fdad5a0872d44abac996588e48819b"
 ],
 "finish-condensation-lock": [
 "compress attempt=1",
@@ -3903,6 +3966,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -3927,10 +3991,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"sqlite_publication_locked\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=69513a8c7457a3cde30f5ab8781840c3ba36468f2fb6183a6c37c18545fd166f"
+"attrs count=144 sha256=910e10b7ff0d82776f37dcdd10ffe8ca439b19f397843d9d2a59fc40d772ef3b"
 ],
 "finish-condensation-nonlock-error": [
 "compress attempt=1",
@@ -4028,6 +4093,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -4051,9 +4117,10 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=db69a7d977aab3592bbc06f3bc046dd38c65968469666ebb3f9ab882e9f873db"
+"attrs count=144 sha256=4200f0abd6a4e46184859ce6765056c608f07439b15c9c7dd68b8364f985a50d"
 ],
 "finish-gc-lock": [
 "compress attempt=1",
@@ -4148,6 +4215,7 @@
 "message user 69e6fa69ef3f/1444",
 "message assistant b61a04d6dd7e/1600",
 "message tool b3f7e026a84f/1600",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=22",
@@ -4172,10 +4240,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"sqlite_publication_locked\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=2488f13eec0cac087e8345f4d11a17ef1c3bc494b7fdcb2384007938a03d8c39"
+"attrs count=144 sha256=a41eed138796ce2fceeb4f760425e50a1bb6e223978ac74a4ba2b894864bacc8"
 ],
 "finish-post-drain-read-error": [
 "compress attempt=1",
@@ -4321,6 +4390,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -4346,9 +4416,10 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=3343d0d508b233a25fb990d3d7544540c9a471d636a35cc3537376eb3a5f2213"
+"attrs count=144 sha256=456acc3d138f8a1ff637665f3f9dc2e55955122f6ece90aafdf2986b93cf7500"
 ],
 "finish-promoted-keys": [
 "compress attempt=1",
@@ -4425,6 +4496,7 @@
 "message user b53243ce9e6d/826",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -4447,10 +4519,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=3626e621eeb0262d2975d9cc725b5b08e39cdf0b6cf79270c6719c6f71d6746c"
+"attrs count=144 sha256=6300c31283529fc362d36ba49ee0d5200aa5e379b8e45f97b58609d6ff5a815d"
 ],
 "finish-repeat-condensation-skipped": [
 "compress attempt=1",
@@ -4587,6 +4660,7 @@
 "message user 066515930aa9/4751",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -4612,10 +4686,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=8e5e57cac929b235cafae86bd59675014954e4b48f0c01c089684b045c23a3e3"
+"attrs count=144 sha256=b305af957e2f62e10dec572ac011075ca439225593b9fd53d09c3037848d9587"
 ],
 "forced-overflow": [
 "compress attempt=1",
@@ -4691,6 +4766,7 @@
 "assemble",
 "message system 6a97437a05d4/508",
 "message user 67e4e8b1c7a0/112",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=true",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -4715,10 +4791,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=c8bfe903573c0a595fe3b18d5e9dcd04fca68c4aa700eca96ad8b224bcd81fec"
+"attrs count=144 sha256=ae8762f2b0b096257a180eeadbd7b683419972b2961a5490d988deb1a719e0cd"
 ],
 "fresh-tail-protected": [
 "compress attempt=1",
@@ -4763,6 +4840,7 @@
 "message system 6a97437a05d4/508",
 "message user 3966be03c944/1267",
 "message assistant 7a468e7d082c/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -4781,7 +4859,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=ea1402633a11/3476",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=91b2cba5a32dccd1528e8280df66966bd7761944da44e070f5dca3362aa17921"
+"attrs count=144 sha256=0f766abb63a0f7f44eea2efd043c991360007e82ef06ce85c5e8de4fe2ec6f92"
 ],
 "fresh-tail-yield": [
 "compress attempt=1",
@@ -4875,6 +4953,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=2",
@@ -4898,10 +4977,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=8b2b1d0bc9fd607eb922dd8fba8712f2ae52be89a660f9d44c7fd3f8c7052bae"
+"attrs count=144 sha256=8c10b52ac2ef681fbe0e3238a8af1d9505bb59655a3f699006b426afb4413569"
 ],
 "generated-dependent-replies": [
 "compress attempt=1",
@@ -4975,6 +5055,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -4995,10 +5076,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=1860b47da34a76e4274b34d1b247ccb724fa89430bf51c8a22c3d9984ce5e5bf"
+"attrs count=144 sha256=56295b7f1ad64094d59024c3bfd7592e73921fb40e33d3507a7b76d59575e686"
 ],
 "hidden-owned-backlog": [
 "compress attempt=1",
@@ -5035,6 +5117,7 @@
 "message user e2d650caf507/226",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=2",
 "attr _compress_host_rows_consumed=0",
@@ -5057,10 +5140,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=true",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[1]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=02b057803c7b26315ecfa7e13e83f59dac63a7b7404066cb8e08054920fd9bf0"
+"attrs count=144 sha256=6beff852fe9b1ebf4ef7b0aca18fcbb8939b34a2eb8978382f740e47140285a9"
 ],
 "hold-fit-only": [
 "compress attempt=1",
@@ -5133,6 +5217,7 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compaction_request=sha12/len=400844009612/142",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -5147,7 +5232,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=4879a6583c0bf0f5b2e33248ac0a1a39234dc038e565cc4c93bd7cb7c4ad8a37"
+"attrs count=144 sha256=11b42b00aeebcc47dd41171c3255f03851dd69268053cfbafc514da734d7aa94"
 ],
 "hung-primary-leaves-fallback": [
 "compress attempt=1",
@@ -5225,6 +5310,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -5249,9 +5335,10 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=2de5fd8c6c99da2658de25a8bb74daa098e34923d91a534c466aa9c2e5faaa6b"
+"attrs count=144 sha256=c5f885a901bdeb1d8647e5babe0bcf7562d341a9de2570c3388d053e5715a861"
 ],
 "identity-anchor": [
 "compress attempt=1",
@@ -5342,6 +5429,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -5365,10 +5453,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=d74bc731190c8f4d08f478e2fff3ad295ff98d0eda5f3c75d645abbbcc922eeb"
+"attrs count=144 sha256=217092e7f6444e62570cffeaf40f4913176eaa6957536c33315ef91cbfe2586d"
 ],
 "identity-anchor-disabled": [
 "compress attempt=1",
@@ -5449,6 +5538,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -5472,10 +5562,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=4b218baf469f152b4d6e3583ac83fde7c59106fdffeb4f5b83b513d4c5022bb1"
+"attrs count=144 sha256=8a8cc951a7d9ae44fcfd7003893f1d5f732e52e282567cf0c06f3610b6496c4a"
 ],
 "ignored-bypass-missing": [
 "compress attempt=1",
@@ -5531,13 +5622,14 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compaction_request=sha12/len=400844009612/142",
+"attr _compress_escaped=[]",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _foreground_budget=sha12/len=a4ce1981038b/351",
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: ignored session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=196ba78d990fbe967a829f2e1946fab3e37f82e23ca9b7a5fff5f5d04414c4d5"
+"attrs count=144 sha256=e1af9ffb63a407fc2aa3a595c26dec0454ba5c9efb4da6cc47214c85f8f9bae8"
 ],
 "ignored-bypass-negative": [
 "compress attempt=1",
@@ -5593,13 +5685,14 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compaction_request=sha12/len=400844009612/142",
+"attr _compress_escaped=[]",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _foreground_budget=sha12/len=a4ce1981038b/351",
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: ignored session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=196ba78d990fbe967a829f2e1946fab3e37f82e23ca9b7a5fff5f5d04414c4d5"
+"attrs count=144 sha256=e1af9ffb63a407fc2aa3a595c26dec0454ba5c9efb4da6cc47214c85f8f9bae8"
 ],
 "ignored-bypass-zero": [
 "compress attempt=1",
@@ -5655,13 +5748,14 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compaction_request=sha12/len=400844009612/142",
+"attr _compress_escaped=[]",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _foreground_budget=sha12/len=a4ce1981038b/351",
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: ignored session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=196ba78d990fbe967a829f2e1946fab3e37f82e23ca9b7a5fff5f5d04414c4d5"
+"attrs count=144 sha256=e1af9ffb63a407fc2aa3a595c26dec0454ba5c9efb4da6cc47214c85f8f9bae8"
 ],
 "ignored-dependent-tail-eof": [
 "compress attempt=1",
@@ -5692,6 +5786,7 @@
 "message system 6a97437a05d4/508",
 "message assistant ca513cb8653a/2522",
 "attr _compress_dropped_ignored_rows=true",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -5707,7 +5802,7 @@
 "attr _no_progress_public_rows=sha12/len=a1311241116e/3987",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=9e0b30f5b69bf748ecb12e877404251f4ff0599d6b00ca298502647c23155c3e"
+"attrs count=144 sha256=6efea248e38a25692a632fabbcb138f90bd6a54f2981e5d086e3d7b8d32baafd"
 ],
 "ignored-message-dependents": [
 "compress attempt=1",
@@ -5810,6 +5905,7 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compress_dropped_ignored_rows=true",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -5833,10 +5929,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=1ecd81ddeaadd5ad69bc5f7e187b54a01f84b30179a2e21ce77d875e38f2f705"
+"attrs count=144 sha256=b27a4462f05df6eabb7ffaa8653b4e6402adffafd4e20f0d4020b44afee8c080"
 ],
 "ignored-tail-nondict-barrier": [
 "compress attempt=1",
@@ -5845,12 +5942,13 @@
 "non-dict tail: token counting rejects input before ingestion and leaf phases",
 "leaf_prep after {\"chain\":[],\"counters\":{}}",
 "assemble raise AttributeError",
+"attr _compress_escaped=[]",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _foreground_budget=sha12/len=a4ce1981038b/351",
 "attr _last_compression_status=\"running\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=1146925374b3af84294bb422e2ea64e47406c2586d2eb345d4a190ded7d5874f"
+"attrs count=144 sha256=6fa1d17713538065ad696cf3aa0726202870f99a36907a537064576e8d5be5a9"
 ],
 "ignored-tail-unanchored-eof": [
 "compress attempt=1",
@@ -5879,6 +5977,7 @@
 "leaf_prep after {\"chain\":[],\"counters\":{}}",
 "assemble",
 "attr _compress_dropped_ignored_rows=true",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -5894,7 +5993,7 @@
 "attr _no_progress_public_rows=sha12/len=919971a2eae2/3917",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=8dbe6f7b029c7972d329caa8d2fd724407e4f2b5f080b14bee7833a80b527d5c"
+"attrs count=144 sha256=967b0bc8c37ebdb7e88f824d132280a85c3d4bbcfa72737f00c2af86292c65fd"
 ],
 "ignored-tail-unknown-role": [
 "compress attempt=1",
@@ -5958,6 +6057,7 @@
 "message unknown c992ea3b143b/22",
 "message assistant 5af94fa49bf3/1266",
 "attr _compress_dropped_ignored_rows=true",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -5980,10 +6080,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=42dab11aca2d615d920b70bf52ff43f15da18ec7efdf996af8d8c62b9d43694f"
+"attrs count=144 sha256=85dcda00c7f5b5f64518aa1349e8ee8f3a29edaee70124957219959735d64dc0"
 ],
 "ignored-unknown-role": [
 "compress attempt=1",
@@ -6042,6 +6143,7 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compress_dropped_ignored_rows=true",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -6064,10 +6166,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=f77ffc7248678ada7bf14bf0958bddfb5213ffcadc5691b8953d40b25bf1f0f8"
+"attrs count=144 sha256=591cdc165d2b7676e74cac5f0d89790e3653ac9bba3026fb13296935b79b142e"
 ],
 "leaf-automatic-no-sweep": [
 "compress attempt=1",
@@ -6158,6 +6261,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -6181,10 +6285,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=72ac7164e4453300f534acae64666d63f3cc1e556d72752e9973b9a804d77fe2"
+"attrs count=144 sha256=8338b7c4a4fee4739c31c1315d5ecb30cd15d7a37460e7f2a9d8c2e96a6c3409"
 ],
 "leaf-no-host-token-count": [
 "compress attempt=1",
@@ -6275,6 +6380,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -6298,9 +6404,10 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr compression_count=1",
-"attrs count=141 sha256=936108ae40ad36862c3ab572df1df235fbd4e9301621c4b52ecde65c0001c6bd"
+"attrs count=144 sha256=86cc7bdf8d904e8f82e853ae99917fac047ebac4b43e5664d6eba82c91b8d88f"
 ],
 "leaf-pass": [
 "compress attempt=1",
@@ -6391,6 +6498,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -6414,10 +6522,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=4b218baf469f152b4d6e3583ac83fde7c59106fdffeb4f5b83b513d4c5022bb1"
+"attrs count=144 sha256=8a8cc951a7d9ae44fcfd7003893f1d5f732e52e282567cf0c06f3610b6496c4a"
 ],
 "leaf-phase-budget-after-leaf": [
 "compress attempt=1",
@@ -6516,6 +6625,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=2",
@@ -6542,12 +6652,13 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_turn_paced=true",
 "attr _sweep_budget_hold_until=1715.0",
 "attr compression_count=1",
-"attrs count=141 sha256=0d943e5788674ed0055617afd0df6fa7ce3e68bcdc3c50b5be0bbb6f1f41559c"
+"attrs count=144 sha256=9057a35d8ec6f781c714223ac40b9fba397871f1e6545162d66eb135fda54e10"
 ],
 "leaf-phase-data-error-after": [
 "compress attempt=1",
@@ -6648,6 +6759,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=2",
@@ -6672,10 +6784,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=4522f67eb26f0d2ce06d6e8e19277b46f5f0c0b8d1125a71d356efc0bbad89f3"
+"attrs count=144 sha256=deae78ee195015ee58f6e7f8e841f435c17c9965986c5670b737acf9afd3199f"
 ],
 "leaf-phase-data-error-before": [
 "compress attempt=1",
@@ -6753,6 +6866,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -6772,9 +6886,10 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=0aea8c352bfb866bd470956a51d74a62a993d455bebc7f0d6811ab6daee46698"
+"attrs count=144 sha256=925dea2f87a0c6462891efde0894d92acff594707303675fd3a7e15e6ed7a861"
 ],
 "leaf-phase-dependent": [
 "compress attempt=1",
@@ -6819,6 +6934,7 @@
 "message user c29960ce771a/146",
 "message user b3e9e4ecee67/14",
 "message assistant 6a500e118d1f/14",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=2",
@@ -6838,10 +6954,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=be2f8d263385cdce3fb641f9013b7d50fc5f09fef35e597167b7f507a71f72e6"
+"attrs count=144 sha256=7b1fb3849a0ee33f1bdc0ece005b506eb348dd1ceebfc27924dfd9d75974da06"
 ],
 "leaf-phase-lineage-moved": [
 "compress attempt=1",
@@ -6923,6 +7040,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -6945,10 +7063,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",0]]",
-"attrs count=141 sha256=ba7b74f630979ade4bfe0c3c33ae30f12526edbd783bd9f7766d2a3c344c68cc"
+"attrs count=144 sha256=a8daf6fdb747fc9bf693a95bf8311442ca14192abf7793a3c49b59333e177a0a"
 ],
 "leaf-phase-no-call-stop": [
 "compress attempt=1",
@@ -7022,6 +7141,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -7042,10 +7162,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=141 sha256=3021bc06f5eafd15413a78c754cfe69149c23b995962791518a117ddbc9b9bbe"
+"attrs count=144 sha256=662803c6406e45e7e796ad0b304407f42033a00e7cac3612eae500ec9e4f9e09"
 ],
 "leaf-phase-raise-cleanup": [
 "compress attempt=1",
@@ -7119,6 +7240,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -7138,9 +7260,10 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=d55193dccdaaba9664f1bb355e5dd10b91f8ee23ea6f129445ee1350c9f09e52"
+"attrs count=144 sha256=33d7a3ba38bf1882eb8820045adf853a48924ee065eb4eee8e23fb67b0a7f7ac"
 ],
 "leaf-phase-rescue-keeps": [
 "compress attempt=1",
@@ -7215,6 +7338,7 @@
 "message assistant 5c7d7e8030b9/1267",
 "message user 1be0acff385d/1268",
 "message assistant 56ea567a39db/1267",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=8",
 "attr _compress_host_rows_consumed=38",
@@ -7235,10 +7359,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=true",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=1a2e83e3995a03a60729b6cfae4f3cadf545fcb575a8abebf7db9f308b4136b4"
+"attrs count=144 sha256=824b7da324fdb6b6c11f1f41d627f1ff8d5d6583319e0681c2aa70d7f0633c78"
 ],
 "leaf-phase-rescue-loses": [
 "compress attempt=1",
@@ -7335,6 +7460,7 @@
 "message assistant 8f9e1cce13da/1257",
 "message user 1c3f83b39131/1252",
 "message assistant 7ff4e93a2069/1257",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -7353,10 +7479,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",52]]",
-"attrs count=141 sha256=a2f1cd8e8d78ca5f759abb6bffa7d89504eb7e2fb692fced44fad0b6edbd5453"
+"attrs count=144 sha256=497e8e23aa3ec7301596b04bbd9470bd783c46c62721072e1d2a53e85bf34786"
 ],
 "leaf-phase-soft-extraction": [
 "compress attempt=1",
@@ -7507,6 +7634,7 @@
 "message user c9c175d956bb/826",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -7532,10 +7660,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=70140d02d59b364a70691cc7800e36227273d2aacbd92d4018fd3a94af77bfd8"
+"attrs count=144 sha256=aef8ea093ee5927b87800ce9b070501d1583d91dccfdb5bf5c2a7f17d14de50b"
 ],
 "legacy-filtered-backlog": [
 "compress attempt=1",
@@ -7597,6 +7726,7 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compress_dropped_ignored_rows=true",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -7619,10 +7749,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=38e655206a17463bd3c3218e15ecea5ee8cfa67bc3a604006a8966d2e6b9f4ac"
+"attrs count=144 sha256=4d1facdfe1ed649801ed89ce31891998e46927de1395a2fbd3fb69664270b34c"
 ],
 "legacy-filtered-eof-dependents": [
 "compress attempt=1",
@@ -7681,6 +7812,7 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compress_dropped_ignored_rows=true",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -7703,10 +7835,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=291c90e98573e70cd228097471dbbc94b02ba80936d431f480ecff563ba7b0d8"
+"attrs count=144 sha256=511fb8687fc8a01361d91d3a2bbb8c6f3f1a5d28a301703bb106c393547784f5"
 ],
 "legacy-filtered-tail-dependents": [
 "compress attempt=1",
@@ -7765,6 +7898,7 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compress_dropped_ignored_rows=true",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -7787,10 +7921,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=c607bf0709cbc7eac950f480b93117b2d6d398fc4ba6a4e04cce4165291716a0"
+"attrs count=144 sha256=ec9518767ff2787c95d288810c162f0d7efb5259ca3ae5ec0ef00ec4bd54bf7d"
 ],
 "lifecycle-publication-conflict": [
 "compress attempt=1",
@@ -7875,6 +8010,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -7896,10 +8032,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"publication_invariant_conflict\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=35d229d409f9623f742f5437f46bf800bdd29705bfc5073610fa39334f829eaa"
+"attrs count=144 sha256=6742540a840ab6cd2f3ec53d715d2fd62a949656a8f4367dd16b3d3b6ac976b2"
 ],
 "no-system-prompt": [
 "compress attempt=1",
@@ -7980,6 +8117,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -8003,10 +8141,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=07b8ecedca6dd6e93f95e67b630c548c2fe2ca34b42abf3e4b25813488dd956f"
+"attrs count=144 sha256=59f09e0d733d6d4b214c11f4eb35ad8f98ac6491b21195cbe92e254bc3f24673"
 ],
 "objective-anchor": [
 "compress attempt=1",
@@ -8053,6 +8192,7 @@
 "message tool b418dd6b02ab/1600",
 "message assistant b61a04d6dd7e/1600",
 "message tool b3f7e026a84f/1600",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -8071,7 +8211,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=25ee3a20c4e0/15841",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=15cfb2fc6b30bd5f690003b4069267d4f35c36353e439b745cb384fd15c4f464"
+"attrs count=144 sha256=5f90d0e10224f12dc03d42f5667cf71f128c8fa4a0e8eb74e8cd251669b1de39"
 ],
 "objective-cap-too-small": [
 "compress attempt=1",
@@ -8124,6 +8264,7 @@
 "return []",
 "leaf_prep after {\"chain\":[],\"counters\":{}}",
 "assemble",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=true",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=1",
@@ -8146,10 +8287,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=070fc54c207a663a39ce0044fa1e6998a4ade79e0a4bfe85cce5d2a1e82701bf"
+"attrs count=144 sha256=e52b539f94c8498e26d8ac8f2c0d347b7bfb693af1885a406b99e099941f7c8a"
 ],
 "objective-without-cap": [
 "compress attempt=1",
@@ -8196,6 +8338,7 @@
 "message tool b418dd6b02ab/1600",
 "message assistant b61a04d6dd7e/1600",
 "message tool b3f7e026a84f/1600",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -8214,7 +8357,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=25ee3a20c4e0/15841",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=7f127c3b5d905c4544f8227174a16fc62adf2b840c97edf6e46341ca08884c84"
+"attrs count=144 sha256=2d90bb5222d25bf28904d16b10eac4687007117c56f25b4ea3d093800f1542e5"
 ],
 "optional-extraction-host-unavailable": [
 "compress attempt=1",
@@ -8319,6 +8462,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=12",
@@ -8342,10 +8486,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=01f5d8412f2864ad1f952a4c908c083782ad0244d8123c9ea5bd9f090c12a6c6"
+"attrs count=144 sha256=4afbb046c00cabee169a7c2791d38c820d556ea3f3dc21f494bfaa78e58d97db"
 ],
 "persisted-volatile-no-pattern": [
 "compress attempt=1",
@@ -8404,6 +8549,7 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compress_dropped_ignored_rows=true",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -8426,10 +8572,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=0a031bf652c4e5afc1fbdf6ba78284e49a42d5262114a525709b7bc360a4b5e4"
+"attrs count=144 sha256=9596d74b90504b6d00230bf700cf79c2636fa7e62ea3dca1c95ab0cac24cbf19"
 ],
 "post-leaf-condensation-rejected": [
 "compress attempt=1",
@@ -8563,6 +8710,7 @@
 "message user c9c175d956bb/826",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -8588,10 +8736,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=f3bb344225513e1aa48af5a2ed22596dc94f742dc6063ddb8dc1f6a06d454b96"
+"attrs count=144 sha256=2c14a9076b8328c38af033eea901752bb72fb958c6f0a3872f1dcea19d8668f8"
 ],
 "post-leaf-publication-conflict": [
 "compress attempt=1",
@@ -8697,6 +8846,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -8722,10 +8872,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"publication_invariant_conflict\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=1c8a713971c38586acb58f2264d80f8b8cdc404c88290f1fe22eaae569736c58"
+"attrs count=144 sha256=2479f9a21dddb4f673cd3642c9a3bb5031e65d2ca3473ea7adcb1aeb47929ef9"
 ],
 "pre-leaf-condensation-rejected": [
 "compress attempt=1",
@@ -8807,6 +8958,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -8828,10 +8980,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=141 sha256=dd4e8e62cf1b5e7d921d15d1284714ff40ff618909fef0a2ee9664886bdd571b"
+"attrs count=144 sha256=99e07eb195e1f25f81e053c662f42cabf710bff1987b1c73e3e909ff7d5937d1"
 ],
 "pre-leaf-frontier-read-error": [
 "compress attempt=1",
@@ -8916,6 +9069,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -8931,7 +9085,7 @@
 "attr _pending_emission_candidates=sha12/len=fc146730afef/464",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=cdc198188ddb5d46ce16d1aaebf096d6c06bb002e425998cc61a94393ad6b824"
+"attrs count=144 sha256=ca611874b7a0b8730a12ddf30f211357fd5eeb92ac53eba07d92eb696754fd14"
 ],
 "pre-leaf-publication-locked": [
 "compress attempt=1",
@@ -9016,6 +9170,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -9032,7 +9187,7 @@
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_fit_reason=\"sqlite_publication_locked\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=e06ce5cf3e8729c4637884e5e66f3bec19a2c64166200e2fa40baa5dc43bd9b5"
+"attrs count=144 sha256=23c7469ab8d16a3b6262d853ab25048cc9f08aac2a65fa163f241c66c2cf92d6"
 ],
 "prepared-leaf-promotion": [
 "compress attempt=1",
@@ -9106,6 +9261,7 @@
 "message user b53243ce9e6d/826",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -9128,10 +9284,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=3626e621eeb0262d2975d9cc725b5b08e39cdf0b6cf79270c6719c6f71d6746c"
+"attrs count=144 sha256=6300c31283529fc362d36ba49ee0d5200aa5e379b8e45f97b58609d6ff5a815d"
 ],
 "prepared-leaf-route-rejected": [
 "compress attempt=1",
@@ -9185,6 +9342,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -9205,10 +9363,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=284a6c2b1ede75b68988496df58e30b5aa92163d666c267bb28feb213f787f5d"
+"attrs count=144 sha256=ec614a64b8850231b9ebdc8a7cf9c58e255ee1d2b13a6ee21ca9fd09f55f40cb"
 ],
 "provider-aborted": [
 "compress attempt=1",
@@ -9281,6 +9440,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -9300,9 +9460,10 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=d55193dccdaaba9664f1bb355e5dd10b91f8ee23ea6f129445ee1350c9f09e52"
+"attrs count=144 sha256=33d7a3ba38bf1882eb8820045adf853a48924ee065eb4eee8e23fb67b0a7f7ac"
 ],
 "publish-advance-deferred-short": [
 "compress attempt=1",
@@ -9359,6 +9520,7 @@
 "message user 2954dc3014b3/231",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -9379,10 +9541,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=0d5f2aa5c71addf639bfef2ce4554a65e71e086647b260aaac87aa91c40d8028"
+"attrs count=144 sha256=6fe63771eb59ad6e757707bb2798fcafc8541e6e401f76ff62cbc80cace75902"
 ],
 "publish-advance-dynamic-empty": [
 "compress attempt=1",
@@ -9461,6 +9624,7 @@
 "message user 2954dc3014b3/231",
 "message user f6149929fcde/1267",
 "message assistant 1d3aa33ccd2c/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=2",
@@ -9484,10 +9648,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=96b32a897cdb4fd9bd2bf073b4336a109c5d671c02bdb7f147ad61471aaa178e"
+"attrs count=144 sha256=9899e8ac74780b59729d0af07a25540f6c455016a05eee0b0c73d66954bfae07"
 ],
 "publish-advance-gc-nonlock": [
 "compress attempt=1",
@@ -9599,6 +9764,7 @@
 "message tool b418dd6b02ab/1600",
 "message assistant b61a04d6dd7e/1600",
 "message tool b3f7e026a84f/1600",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=22",
@@ -9622,9 +9788,10 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=24c4a0b469dbd9a3a376242634099461d2d835a81611ed76e499a3405f2f478d"
+"attrs count=144 sha256=c67e9e690187f2bd8f0f1f32c72e80df1fdbeb7466aa33f69cdf810eaab38c00"
 ],
 "publish-advance-hidden-drain": [
 "compress attempt=1",
@@ -9723,6 +9890,7 @@
 "message user 7f8e5c382671/1654",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=14",
 "attr _compress_host_rows_consumed=0",
@@ -9746,10 +9914,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=d956e60f3c57a2da5733ae82c12d6ee942557d54eb4ffa0f27bb6c4cd02ba84b"
+"attrs count=144 sha256=322e5e1fe1b61309b610e3ca8be181651eb6875629ae4caa9aedd851bba4df17"
 ],
 "publish-advance-nonlock": [
 "compress attempt=1",
@@ -9831,6 +10000,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -9851,9 +10021,10 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=f65fa71eabe22b871e1fedddf1f46bdf15ed09da51cce58743ffdc963a4ee1a9"
+"attrs count=144 sha256=4dab2a4f19ecef4f131346437fce179fde3b7717a09965a90fed836708beaff0"
 ],
 "publish-advance-promote-continue": [
 "compress attempt=1",
@@ -9939,6 +10110,7 @@
 "message user 739159cc1021/474",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -9959,10 +10131,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=97ae28f8bb561e952353a8edc9d15d00dbf7b35be7e799aed554efdbd2643003"
+"attrs count=144 sha256=03681b348859b572bb6b549010dc9e5bea07178c41be34a4ab7b73a8f9ac0167"
 ],
 "publish-advance-promote-low": [
 "compress attempt=1",
@@ -10017,6 +10190,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=2",
@@ -10037,10 +10211,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=b7ca768e6ab3cc83b878744f4e35e19d3a775860c25c65658d9ae282f8dcc09a"
+"attrs count=144 sha256=3905b482dde2704137b81da16156a90941833179ab7cf13767cc83cccd1c69bb"
 ],
 "publish-advance-publish-binding": [
 "compress attempt=1",
@@ -10083,6 +10258,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -10101,10 +10277,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"lifecycle_binding_changed\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=145b09cbe4234a82a1e7a2638ed9a82938d5d82018a8ab7d01d3b69bb1aae5bd"
+"attrs count=144 sha256=673a683fe9fd1a02b3b5a599588bebfc481c4c183a677e0b567b5344b796b421"
 ],
 "publish-advance-publish-coverage": [
 "compress attempt=1",
@@ -10164,6 +10341,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -10184,10 +10362,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=05921c11f1e0f1546805b539b26d3ed0e7de752f43cd9aefaa4284412626b9e3"
+"attrs count=144 sha256=fc4292de2ad802dd885ce6a7f6359324e9487126065fb2af5d855f59c3d665a1"
 ],
 "publish-advance-publish-fence": [
 "compress attempt=1",
@@ -10230,6 +10409,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -10248,10 +10428,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"publication_invariant_conflict\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=a8a1535b6d21cf03429f4176ad13df45bd7983bd6ee8e649c8c4e671b144b5cd"
+"attrs count=144 sha256=6fa7d5d18d370d822084a56b3776331190acdcf590506c25813cedf74edfad2e"
 ],
 "publish-advance-publish-frontier": [
 "compress attempt=1",
@@ -10294,6 +10475,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -10312,10 +10494,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"publication_invariant_conflict\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=a8a1535b6d21cf03429f4176ad13df45bd7983bd6ee8e649c8c4e671b144b5cd"
+"attrs count=144 sha256=6fa7d5d18d370d822084a56b3776331190acdcf590506c25813cedf74edfad2e"
 ],
 "publish-advance-publish-retry": [
 "compress attempt=1",
@@ -10408,6 +10591,7 @@
 "message user 739159cc1021/474",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -10428,10 +10612,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=97ae28f8bb561e952353a8edc9d15d00dbf7b35be7e799aed554efdbd2643003"
+"attrs count=144 sha256=03681b348859b572bb6b549010dc9e5bea07178c41be34a4ab7b73a8f9ac0167"
 ],
 "publish-advance-publish-route": [
 "compress attempt=1",
@@ -10491,6 +10676,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -10512,10 +10698,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=284a6c2b1ede75b68988496df58e30b5aa92163d666c267bb28feb213f787f5d"
+"attrs count=144 sha256=ec614a64b8850231b9ebdc8a7cf9c58e255ee1d2b13a6ee21ca9fd09f55f40cb"
 ],
 "replayed-summary-scaffold": [
 "compress attempt=1",
@@ -10642,6 +10829,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -10665,10 +10853,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=2",
-"attrs count=141 sha256=917e66d99ccb87ce013241e4a849a1e3b2c6e86ab4cb5104e3b6dfd54d5d0e20"
+"attrs count=144 sha256=d30246ba3dfca47b5085aae176724b3d1af4fdb8bc5fad340bf9556c7b0d0d0f"
 ],
 "resume-after-interruption": [
 "compress attempt=1",
@@ -10826,6 +11015,7 @@
 "message user 8bcbc615232b/826",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=12",
@@ -10851,10 +11041,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=844aa14360a40149601482467eb73d074122bb3f09ed6e8f1870a724bb3ec541"
+"attrs count=144 sha256=28fae84f6abcb3cb24f2178252ae760d79e4be48edcdadd3ebf61246029a5719"
 ],
 "resume-commit-wide-tail": [
 "compress attempt=1",
@@ -10883,6 +11074,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -10895,7 +11087,7 @@
 "attr _no_progress_proof_fingerprint=null",
 "attr _pending_emission_candidates=sha12/len=80ce4269865e/3211",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=2e8a0a0b713e6a1aaf9d509659670783b858524007611d8fdc73419027309389"
+"attrs count=144 sha256=4fad8aa0e678ce5e37c571c4d3a4231e6962fc0cf9cbc8128f68bd6d546a55ec"
 ],
 "resume-unadopted-commit": [
 "compress attempt=1",
@@ -11022,6 +11214,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -11045,10 +11238,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=2",
-"attrs count=141 sha256=f5a0aa02f27b57b691dabcb5b13706254c6ca53ede6aea7d50a9b1dc4b705366"
+"attrs count=144 sha256=b382fda6303ac9f9bfbf85a7fba2d11c76f202350f16282a933914d80474c961"
 ],
 "retained-tail-occurrence": [
 "compress attempt=1",
@@ -11104,6 +11298,7 @@
 "message assistant 5af94fa49bf3/1266",
 "message user 3966be03c944/1267",
 "message assistant 7a468e7d082c/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -11121,9 +11316,123 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=a156356425463ea683e5204d4817714b87dae2672ccd56ac12b06c1a95a31d83"
+"attrs count=144 sha256=2654fff3b1f4058ade31a5a8e0731be55c0f703935d879c9492737a1985022b5"
+],
+"retained-tail-occurrence-escape": [
+"compress attempt=1",
+"leaf_prep before {\"chain\":[],\"counters\":{}}",
+"log hermes_lcm.engine DEBUG \"Ingest: session=%s cursor=%d incoming=%d\"",
+"sql BEGIN IMMEDIATE",
+"sql shape=1 conn=_host_rewrite_store INSERT INTO metadata(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+"sql #1 sha12/len=52614d71143e/151",
+"sql COMMIT",
+"log hermes_lcm.store_complete INFO \"LCM store-complete leaf: frontier=%d last=%d rows=%d host_rows=%d/%d hidden=%d excluded=%d copies=%d cut=%s\"",
+"log hermes_lcm.engine INFO \"LCM leaf summary input: input_tokens=%d source_tokens=%d messages=%d\"",
+"call 1 model=trace-model level=1 budget=4000 timeout=115.0 in=71e04201f1ea/6566",
+"log hermes_lcm.escalation DEBUG \"L1 summarization succeeded (%d tokens)\"",
+"sql BEGIN IMMEDIATE",
+"sql shape=2 conn=_dag INSERT INTO summary_nodes (session_id, depth, summary, token_count, source_token_count, source_ids, source_type, created_at, earliest_at, latest_at, expand_hint) VALUES (?, ?,?, ?, ?,?,?, ?, ?, ?,?)",
+"sql #2 sha12/len=5fdee48ee0e1/319 x3",
+"sql shape=3 conn=_dag INSERT OR REPLACE INTO summary_node_provenance (node_id, escalation_level, model, created_at) VALUES (?, ?,?, ?)",
+"sql #3 sha12/len=bd12465197ec/135",
+"sql shape=4 conn=_dag UPDATE lcm_lifecycle_state SET current_frontier_store_id = MAX(current_frontier_store_id, ?), updated_at = ? WHERE conversation_id =?AND current_session_id =?",
+"sql #4 sha12/len=db40c02d9788/190",
+"sql COMMIT",
+"sql BEGIN IMMEDIATE",
+"sql #1 sha12/len=04dc23c75f8d/325",
+"sql COMMIT",
+"log hermes_lcm.compaction WARNING \"LCM retained-occurrence fallback: leaf includes %d retained row(s) whole (store_id=%d role=%s kind=%s%s) frontier=%d; the host view still holds them, so their content is also summarised; source rows stay stored; cause: host order disagrees with store order (#1162)\"",
+"sql BEGIN IMMEDIATE",
+"sql #1 sha12/len=4702b2b116a4/157",
+"sql COMMIT",
+"log hermes_lcm.compaction INFO \"LCM leaf compaction finished in %.1fms\"",
+"log hermes_lcm.compaction INFO \"LCM compaction #%d: %d messages \u2192 %d (%d leaf pass%s, %d\u2192%d tokens%s, %d DAG nodes%s%s)%s\"",
+"sql BEGIN IMMEDIATE",
+"sql #1 sha12/len=1ddc1221da37/482",
+"sql COMMIT",
+"return sha12/len=42982ac2ba3d/18394",
+"leaf_prep after {\"chain\":[],\"counters\":{}}",
+"assemble",
+"message user 4009495f6e2d/1495",
+"message assistant 5112d3181a5e/1266",
+"message user 4915f154ddd8/1267",
+"message assistant 55698fcd55cb/1266",
+"message user 6c12f191db5f/1267",
+"message assistant 63393eb669ff/1266",
+"message user d403af208259/1267",
+"message assistant 23e7a56837ee/1266",
+"message user 848f65aa4811/1267",
+"message assistant 7c6b372997fd/1266",
+"message user a036540eca3b/1267",
+"message assistant 5af94fa49bf3/1266",
+"message user 3966be03c944/1267",
+"message assistant 7a468e7d082c/1266",
+"compress attempt=2",
+"leaf_prep before {\"chain\":[],\"counters\":{}}",
+"log hermes_lcm.engine INFO \"LCM identity-anchor recognised %d replayed rows: session=%s cursor=%d incoming=%d\"",
+"log hermes_lcm.engine DEBUG \"Ingest: session=%s cursor=%d incoming=%d\"",
+"sql BEGIN IMMEDIATE",
+"sql shape=5 conn=_host_rewrite_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, NULL)",
+"sql #5 sha12/len=5928522868b9/1578 x5",
+"sql COMMIT",
+"log hermes_lcm.engine DEBUG \"Ingested %d messages into LCM store\"",
+"log hermes_lcm.engine INFO \"LCM leaf summary input: input_tokens=%d source_tokens=%d messages=%d\"",
+"call 2 model=trace-model level=1 budget=4000 timeout=115.0 in=2782b2c2d7cf/6566",
+"log hermes_lcm.escalation DEBUG \"L1 summarization succeeded (%d tokens)\"",
+"sql BEGIN IMMEDIATE",
+"sql #2 sha12/len=6231c5a1aa49/320 x3",
+"sql #3 sha12/len=aecd9e0c6b0b/135",
+"sql #4 sha12/len=5aa2bc41273a/190",
+"sql COMMIT",
+"log hermes_lcm.compaction INFO \"LCM leaf compaction finished in %.1fms\"",
+"log hermes_lcm.compaction INFO \"LCM compaction #%d: %d messages \u2192 %d (%d leaf pass%s, %d\u2192%d tokens%s, %d DAG nodes%s%s)%s\"",
+"sql BEGIN IMMEDIATE",
+"sql #1 sha12/len=4097279ac758/482",
+"sql COMMIT",
+"return sha12/len=0d0116001133/13294",
+"leaf_prep after {\"chain\":[],\"counters\":{}}",
+"assemble",
+"message user 7403e148889c/1733",
+"message assistant 63393eb669ff/1266",
+"message user d403af208259/1267",
+"message assistant 23e7a56837ee/1266",
+"message user 848f65aa4811/1267",
+"message assistant 7c6b372997fd/1266",
+"message user a036540eca3b/1267",
+"message assistant 5af94fa49bf3/1266",
+"message user 3966be03c944/1267",
+"message assistant 7a468e7d082c/1266",
+"attr _compress_escaped=[]",
+"attr _compress_forced_overflow=false",
+"attr _compress_hidden_rows_consumed=0",
+"attr _compress_host_rows_consumed=4",
+"attr _compress_occurrences=null",
+"attr _compress_run=sha12/len=903114f374d3/249",
+"attr _dag=sha12/len=61d36a34d1eb/686",
+"attr _foreground_budget=sha12/len=362eb82ba6e6/379",
+"attr _ingest_cursor=10",
+"attr _last_compacted_store_id=8",
+"attr _last_compression_status=\"compacted\"",
+"attr _last_leaf_content_filter_error=false",
+"attr _last_leaf_level_3_verbatim=false",
+"attr _last_leaf_summary_model=\"\"",
+"attr _lifecycle=sha12/len=ad7a839340c4/391",
+"attr _no_progress_observed_tokens=3000",
+"attr _no_progress_public_rows=sha12/len=43639987ef45/21000",
+"attr _pending_emission_candidates=sha12/len=960a2e34e8da/3896",
+"attr _store=sha12/len=847b0f21ed3a/26793",
+"attr _store_complete_blocked=null",
+"attr _store_complete_copy_exclusion_proofs={}",
+"attr _store_complete_cut=false",
+"attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
+"attr _store_complete_excluded=[]",
+"attr _survival_pass_observed=true",
+"attr compression_count=2",
+"attrs count=144 sha256=641aa9a7b72678a47e5bf896abe5f85e3ef4e374d76ad6d4394e27e295693145"
 ],
 "route-unavailable": [
 "compress attempt=1",
@@ -11196,6 +11505,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -11216,10 +11526,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=141 sha256=3021bc06f5eafd15413a78c754cfe69149c23b995962791518a117ddbc9b9bbe"
+"attrs count=144 sha256=662803c6406e45e7e796ad0b304407f42033a00e7cac3612eae500ec9e4f9e09"
 ],
 "route-unavailable-adopt-commit": [
 "compress attempt=1",
@@ -11340,6 +11651,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -11365,11 +11677,12 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
 "attr compression_count=1",
-"attrs count=141 sha256=0030b7b12ef650dbb5add2a1e57f9053d00e0c82f06c009a1fe55629c87ee921"
+"attrs count=144 sha256=647b8d4432201aa8477ad9be10bb2dd583388ae353a3d524e5611f9b5f243294"
 ],
 "route-unavailable-full-tail": [
 "compress attempt=1",
@@ -11414,6 +11727,7 @@
 "message system 6a97437a05d4/508",
 "message user 3966be03c944/1267",
 "message assistant 7a468e7d082c/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -11431,7 +11745,7 @@
 "attr _store=sha12/len=ea1402633a11/3476",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=141 sha256=09870167dc6afa849bd35dd758cf5b133db9a230ab8b65e64a0c6a6af4ee44cd"
+"attrs count=144 sha256=2db30886782691b5079356169f96bc84ddf04766cbec096a85dc67165ebf4b2e"
 ],
 "selection-deferred-critical-False": [
 "compress attempt=1",
@@ -11517,6 +11831,7 @@
 "message user 67e4e8b1c7a0/112",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -11540,10 +11855,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=05670af77bdb9868b24cfad0b9ef7d6beeceabfe13a99d0548e264b4bb319c0a"
+"attrs count=144 sha256=4ace8969724051a7e029d458b92b7a74f69a25be91bdb6bd6a0db24dcff13843"
 ],
 "selection-deferred-critical-True": [
 "compress attempt=1",
@@ -11629,6 +11945,7 @@
 "message user 67e4e8b1c7a0/112",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -11652,10 +11969,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=c10bdda7611e8dfe42fd89c2ea3d30296afbcc143806bc2919bf5d71555d551c"
+"attrs count=144 sha256=cebe8dca3a8d8cdffff8d56c95204a5ab0bac75037a6773f89e5c424d8146265"
 ],
 "selection-empty-filtered": [
 "compress attempt=1",
@@ -11682,6 +12000,7 @@
 "message user f694d5a8b2f8/14",
 "message assistant b78fea766ebe/13",
 "attr _compress_dropped_ignored_rows=true",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -11698,7 +12017,7 @@
 "attr _no_progress_public_rows=sha12/len=d6453683c669/1491",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=e42409d6e74b1a0de4066123b7ad1b9a41eccd75317bd0bb5ceca964eaeb5262"
+"attrs count=144 sha256=580437413b85994c3ad153a9c406e0ec402d34ffc2277df32f5883e152369955"
 ],
 "selection-objective-sweep": [
 "compress attempt=1",
@@ -11746,6 +12065,7 @@
 "message tool b418dd6b02ab/1600",
 "message assistant b61a04d6dd7e/1600",
 "message tool b3f7e026a84f/1600",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -11766,7 +12086,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=25ee3a20c4e0/15841",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=ba22cdc185350706cddb66922aa0ca3dcfb7ef8b1cdabfbafbea13e824c06af8"
+"attrs count=144 sha256=9665488f9e9e179a49014a5524fd33da6beaa3fc15c4a6e665e9b2277bd9c997"
 ],
 "selection-prepared-hidden": [
 "compress attempt=1",
@@ -11804,6 +12124,7 @@
 "message user e2d650caf507/226",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=2",
 "attr _compress_host_rows_consumed=0",
@@ -11826,10 +12147,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=true",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[1]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=13a4e724af1cc0f4df27839899e08cdb70bb6ac0e537675009fe42f131f8d94b"
+"attrs count=144 sha256=1fd4226e9470a48d857ad37e1d93c5f9cb1131d66e92957ae9083c0e607793f0"
 ],
 "selection-prepared-input-price-change": [
 "compress attempt=1",
@@ -11888,6 +12210,7 @@
 "message assistant 60637118f99f/1371",
 "message user 1efc21f611f4/1372",
 "message assistant 9c032d7351f3/1371",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=2",
@@ -11908,10 +12231,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=8a6542f6b80634d7dbca6db03bf5a951653a187a169bf46c6741682b29caf1e9"
+"attrs count=144 sha256=9a29da2ee875b329de19f04dfcf5083bfc9c53a5b756885469d3016c68fc4f3c"
 ],
 "selection-prepared-match": [
 "compress attempt=1",
@@ -11996,6 +12320,7 @@
 "message user 739159cc1021/474",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -12016,10 +12341,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=97ae28f8bb561e952353a8edc9d15d00dbf7b35be7e799aed554efdbd2643003"
+"attrs count=144 sha256=03681b348859b572bb6b549010dc9e5bea07178c41be34a4ab7b73a8f9ac0167"
 ],
 "selection-prepared-no-call": [
 "compress attempt=1",
@@ -12055,6 +12381,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -12072,10 +12399,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=141 sha256=b6218a4f4c70ad954309a88eae7d540dff0624be99f1d4655e5911e6340ddc0c"
+"attrs count=144 sha256=783186373a2c314d9d6a695ea1e4fa1ecb5f02081bccd03fb416f91dbbe9562c"
 ],
 "selection-prepared-overflow": [
 "compress attempt=1",
@@ -12114,6 +12442,7 @@
 "assemble",
 "message system 6a97437a05d4/508",
 "message user 67e4e8b1c7a0/112",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=true",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -12135,10 +12464,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=9154756c3ae3e778893cbfc71b1dd013af3a816b655de7b734b0eb49a3fb1014"
+"attrs count=144 sha256=5bd9b98dd88226f550a656837d84928508c3e46efc3a395b29750b6faba32145"
 ],
 "selection-prepared-split": [
 "compress attempt=1",
@@ -12196,6 +12526,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -12216,10 +12547,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=162d00fcddae179ed1552d74560248a76a2a7e11ad976e784c587343d3f7b152"
+"attrs count=144 sha256=605ca76b88c5d323bbdb09eed81366430649a4604e7d95d6e998c57dede18e43"
 ],
 "selection-pressure-sweep": [
 "compress attempt=1",
@@ -12344,6 +12676,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=12",
@@ -12369,10 +12702,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=bb4b0a496dbc718f2d2710d36ab806f5142d9923e0601b29823c94d3939fc7ba"
+"attrs count=144 sha256=059aa6cd5f7540917dd45bb362fe8c17b2ff85acc51f8130c443d774b8bff610"
 ],
 "selection-unattributed": [
 "compress attempt=1",
@@ -12462,6 +12796,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -12484,11 +12819,12 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",15]]",
 "attr compression_count=1",
-"attrs count=141 sha256=c19787e922c3689eb043c016a95fe010d7618d3ce710d7d569773c5bc9f73e3a"
+"attrs count=144 sha256=5ad7974e52236ac2d8b30fe58e61c3b20b5ea7fedd22746aae3f14d78f4116ad"
 ],
 "single-below-minimum-no-fit": [
 "compress attempt=1",
@@ -12561,6 +12897,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -12579,7 +12916,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=dacc73876efa705912b43681db084e63e37c88c92084d69c5382c8f8caaa234d"
+"attrs count=144 sha256=58c3bf4fa37474e0316a6f30d2a6ffb5200156dc17e2cfb832d2de97f8e7108f"
 ],
 "single-small-backlog-yields": [
 "compress attempt=1",
@@ -12660,6 +12997,7 @@
 "message user 67e4e8b1c7a0/112",
 "message user 69e6fa69ef3f/1444",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=15",
@@ -12683,10 +13021,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=5bfc59cbfce46135838612c5f283b034b056a0d04e3e9dc7dde5cc6937d34981"
+"attrs count=144 sha256=ea845c2b5d8889bf46fda91c3e5e951225080c810617f4d048c6ca5b9b3e9bc2"
 ],
 "stateless-bypass-missing": [
 "compress attempt=1",
@@ -12742,13 +13081,14 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compaction_request=sha12/len=400844009612/142",
+"attr _compress_escaped=[]",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _foreground_budget=sha12/len=a4ce1981038b/351",
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: stateless session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=11997e4746eb77567add50ba3a35bb85816c76d099c709e0d72718e9cd8c34bd"
+"attrs count=144 sha256=61294e07479b62077734f8c35474468ecd484a1370454cee22b9f4671ee73e9b"
 ],
 "stateless-bypass-negative": [
 "compress attempt=1",
@@ -12804,13 +13144,14 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compaction_request=sha12/len=400844009612/142",
+"attr _compress_escaped=[]",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _foreground_budget=sha12/len=a4ce1981038b/351",
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: stateless session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=11997e4746eb77567add50ba3a35bb85816c76d099c709e0d72718e9cd8c34bd"
+"attrs count=144 sha256=61294e07479b62077734f8c35474468ecd484a1370454cee22b9f4671ee73e9b"
 ],
 "stateless-bypass-zero": [
 "compress attempt=1",
@@ -12866,13 +13207,14 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compaction_request=sha12/len=400844009612/142",
+"attr _compress_escaped=[]",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _foreground_budget=sha12/len=a4ce1981038b/351",
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: stateless session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=11997e4746eb77567add50ba3a35bb85816c76d099c709e0d72718e9cd8c34bd"
+"attrs count=144 sha256=61294e07479b62077734f8c35474468ecd484a1370454cee22b9f4671ee73e9b"
 ],
 "stop-hang-False-False-False": [
 "compress attempt=1",
@@ -12951,6 +13293,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -12975,11 +13318,12 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_turn_paced=true",
 "attr _sweep_budget_hold_until=1715.0",
-"attrs count=141 sha256=9d6fe9e71de33fd241e58d60726f59a06a1f775d048c29d6613767f241f9424c"
+"attrs count=144 sha256=6234f2711bddd4ce5e3127737ed428b9728361c053443296951f917c144ee4c5"
 ],
 "stop-hang-False-False-True": [
 "compress attempt=1",
@@ -13058,6 +13402,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -13082,9 +13427,10 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=2de5fd8c6c99da2658de25a8bb74daa098e34923d91a534c466aa9c2e5faaa6b"
+"attrs count=144 sha256=c5f885a901bdeb1d8647e5babe0bcf7562d341a9de2570c3388d053e5715a861"
 ],
 "stop-hang-False-True-False": [
 "compress attempt=1",
@@ -13148,6 +13494,7 @@
 "assemble",
 "message system 6a97437a05d4/508",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=true",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -13168,9 +13515,10 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=997ea6742424b52134391a6d5ee51ae0b6a9fa289012ee5087a0fdc3128255ed"
+"attrs count=144 sha256=f434702e4d4a62ba86fb80e206a748a6658b321056176bb077c24f57aa16cad5"
 ],
 "stop-hang-False-True-True": [
 "compress attempt=1",
@@ -13234,6 +13582,7 @@
 "assemble",
 "message system 6a97437a05d4/508",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=true",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -13254,9 +13603,10 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=f19664f06314c482d85b1226a5dc203b0ef2ae59364d57aa17792666bc8ac41e"
+"attrs count=144 sha256=d234a896efa2cdc9959addf1c4e233fed28ca3a1bcc47d75039b8bfb753b5d9d"
 ],
 "stop-hang-True-False-False": [
 "compress attempt=1",
@@ -13298,7 +13648,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _sweep_budget_hold_turn_paced=false",
 "attr _sweep_budget_hold_until=2131.0",
-"attrs count=141 sha256=9bcb7c0db3fc03e7eebffebe509dda4b3227422c5926187e367f5e5f2ca1cdb5"
+"attrs count=144 sha256=e4608b7a5dd8dfed3ca3658f59c485718cbab6ce60ad4a7953536003c47a128e"
 ],
 "stop-hang-True-False-True": [
 "compress attempt=1",
@@ -13338,7 +13688,7 @@
 "message assistant 5af94fa49bf3/1266",
 "attr _foreground_budget=sha12/len=958f78f7b178/442",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=9565e2423dc51619d91088e01cb60fc7fb534b180fe689a36f820a6fc524de11"
+"attrs count=144 sha256=3f4bac65cb73e3ec693b7877aa3ce963fc8b8eb2fc454c15fd0d845e9595d642"
 ],
 "stop-hang-True-True-False": [
 "compress attempt=1",
@@ -13370,7 +13720,7 @@
 "attr _no_progress_observed_tokens=250000",
 "attr _pending_emission_candidates=[]",
 "attr _sweep_budget_hold_turn_paced=false",
-"attrs count=141 sha256=f03170b6be4887e6b21b3e2fa8042c60beda0711db379f275d8f594bb62f8f78"
+"attrs count=144 sha256=33652aa8647a4f8967fb03cb82bfea7b9648b582068b61b63fdfd29ae3e4c005"
 ],
 "stop-hang-True-True-True": [
 "compress attempt=1",
@@ -13401,7 +13751,7 @@
 "attr _last_overflow_recovery_failed=true",
 "attr _no_progress_observed_tokens=250000",
 "attr _pending_emission_candidates=[]",
-"attrs count=141 sha256=6e53830225c3bbe342aec7f547d04b3395894811ef79c4e42474dc78fa4f56b7"
+"attrs count=144 sha256=d71397d431d96c40cd540dfad999eb545ca259c4cade4aec7121ecdac8739c78"
 ],
 "stop-overflow-no-leaf": [
 "compress attempt=1",
@@ -13445,6 +13795,7 @@
 "assemble",
 "message system 6a97437a05d4/508",
 "message user 3966be03c944/1267",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=true",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -13460,7 +13811,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=ea1402633a11/3476",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=3a21e7c3aabfdb5a637c6dc418c08334d2339e4375596146a00e96d8a1038913"
+"attrs count=144 sha256=12dcfc62530df69b2377e5101b72bb5798d464bef002d12a2ca49aac6c764b4e"
 ],
 "stop-reason-cleared": [
 "compress attempt=1",
@@ -13484,7 +13835,7 @@
 "sql #1 sha12/len=4702b2b116a4/157",
 "sql COMMIT",
 "log hermes_lcm.compaction DEBUG \"LCM compaction emission descriptor count=%d\"",
-"log hermes_lcm.compaction INFO \"LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs finalize=%.1fs backlog_tokens=%d%s%s%s%s\"",
+"log hermes_lcm.compaction INFO \"LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs finalize=%.1fs backlog_tokens=%d%s%s%s%s%s\"",
 "return sha12/len=473ac6071c64/20107",
 "wrapper fit_cause [\"\"]",
 "leaf_prep after {\"chain\":[],\"counters\":{}}",
@@ -13505,6 +13856,7 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compress_dropped_ignored_rows=true",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -13519,7 +13871,7 @@
 "attr _no_progress_public_rows=sha12/len=3dace5636f07/21060",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=68355b2fae020be43f27514e8bb62c2ad042ca7300f14f2cd5e082b2a1247168"
+"attrs count=144 sha256=f5990e595f9d02fd55b772d56eac3b5f1a5f31518e6e80fa976f0222fa319ab5"
 ],
 "stop-reason-retained": [
 "compress attempt=1",
@@ -13533,7 +13885,7 @@
 "log hermes_lcm.compaction INFO \"LCM compression no-op: %s\"",
 "log hermes_lcm.host_uid INFO \"LCM host-uid shadow: events agree=%d disagree=%d counts=%s\"",
 "log hermes_lcm.compaction DEBUG \"LCM compaction emission descriptor count=%d\"",
-"log hermes_lcm.compaction INFO \"LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs finalize=%.1fs backlog_tokens=%d%s%s%s%s\"",
+"log hermes_lcm.compaction INFO \"LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs finalize=%.1fs backlog_tokens=%d%s%s%s%s%s\"",
 "return sha12/len=4910bac0b1c4/21375",
 "wrapper fit_cause sha12/len=87f4d4e2c9ba/93",
 "leaf_prep after {\"chain\":[],\"counters\":{}}",
@@ -13581,7 +13933,7 @@
 "log hermes_lcm.compaction INFO \"LCM compression no-op: %s\"",
 "log hermes_lcm.host_uid INFO \"LCM host-uid shadow: events agree=%d disagree=%d counts=%s\"",
 "log hermes_lcm.compaction DEBUG \"LCM compaction emission descriptor count=%d\"",
-"log hermes_lcm.compaction INFO \"LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs finalize=%.1fs backlog_tokens=%d%s%s%s%s\"",
+"log hermes_lcm.compaction INFO \"LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs finalize=%.1fs backlog_tokens=%d%s%s%s%s%s\"",
 "return sha12/len=4910bac0b1c4/21375",
 "wrapper fit_cause sha12/len=87f4d4e2c9ba/93",
 "leaf_prep after {\"chain\":[],\"counters\":{}}",
@@ -13602,6 +13954,7 @@
 "message assistant 5af94fa49bf3/1266",
 "message user 3966be03c944/1267",
 "message assistant 7a468e7d082c/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -13620,9 +13973,148 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=9448cc8bfa6b8a931a228cb516249b6c8d07ea15939fd4aacd2166826c2ed7c2"
+"attrs count=144 sha256=fb541f5f333cb575a66335d9b9bd0f8c036f582c6a673e27514e5e3ab1e3d842"
+],
+"stop-reason-retained-escape": [
+"compress attempt=1",
+"leaf_prep before {\"chain\":[],\"counters\":{}}",
+"log hermes_lcm.engine DEBUG \"Ingest: session=%s cursor=%d incoming=%d\"",
+"sql BEGIN IMMEDIATE",
+"sql shape=1 conn=_host_rewrite_store INSERT INTO metadata(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+"sql #1 sha12/len=52614d71143e/151",
+"sql COMMIT",
+"log hermes_lcm.store_complete INFO \"LCM store-complete leaf: frontier=%d last=%d rows=%d host_rows=%d/%d hidden=%d excluded=%d copies=%d cut=%s\"",
+"log hermes_lcm.engine INFO \"LCM leaf summary input: input_tokens=%d source_tokens=%d messages=%d\"",
+"call 1 model=trace-model level=1 budget=4000 timeout=115.0 in=71e04201f1ea/6566",
+"log hermes_lcm.escalation DEBUG \"L1 summarization succeeded (%d tokens)\"",
+"sql BEGIN IMMEDIATE",
+"sql shape=2 conn=_dag INSERT INTO summary_nodes (session_id, depth, summary, token_count, source_token_count, source_ids, source_type, created_at, earliest_at, latest_at, expand_hint) VALUES (?, ?,?, ?, ?,?,?, ?, ?, ?,?)",
+"sql #2 sha12/len=9865418aee5a/319 x3",
+"sql shape=3 conn=_dag INSERT OR REPLACE INTO summary_node_provenance (node_id, escalation_level, model, created_at) VALUES (?, ?,?, ?)",
+"sql #3 sha12/len=bd12465197ec/135",
+"sql shape=4 conn=_dag UPDATE lcm_lifecycle_state SET current_frontier_store_id = MAX(current_frontier_store_id, ?), updated_at = ? WHERE conversation_id =?AND current_session_id =?",
+"sql #4 sha12/len=db40c02d9788/190",
+"sql COMMIT",
+"sql BEGIN IMMEDIATE",
+"sql #1 sha12/len=04dc23c75f8d/325",
+"sql COMMIT",
+"log hermes_lcm.compaction WARNING \"LCM retained-occurrence fallback: leaf includes %d retained row(s) whole (store_id=%d role=%s kind=%s%s) frontier=%d; the host view still holds them, so their content is also summarised; source rows stay stored; cause: host order disagrees with store order (#1162)\"",
+"sql BEGIN IMMEDIATE",
+"sql #1 sha12/len=4702b2b116a4/157",
+"sql COMMIT",
+"log hermes_lcm.compaction INFO \"LCM leaf compaction finished in %.1fms\"",
+"log hermes_lcm.compaction INFO \"LCM compaction #%d: %d messages \u2192 %d (%d leaf pass%s, %d\u2192%d tokens%s, %d DAG nodes%s%s)%s\"",
+"sql BEGIN IMMEDIATE",
+"sql #1 sha12/len=1ddc1221da37/482",
+"sql COMMIT",
+"sql BEGIN IMMEDIATE",
+"sql #1 sha12/len=809ec308f545/2962",
+"sql #1 sha12/len=5ea2f6627130/2148",
+"sql COMMIT",
+"log hermes_lcm.host_uid INFO \"LCM host-uid shadow: events agree=%d disagree=%d counts=%s\"",
+"log hermes_lcm.compaction DEBUG \"LCM compaction emission descriptor count=%d\"",
+"log hermes_lcm.compaction INFO \"LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs finalize=%.1fs backlog_tokens=%d%s%s%s%s%s\"",
+"return sha12/len=b02e91e6c4b9/18777",
+"wrapper fit_cause [\"\"]",
+"leaf_prep after {\"chain\":[],\"counters\":{}}",
+"assemble",
+"message user 4009495f6e2d/1495",
+"message assistant 5112d3181a5e/1266",
+"message user 4915f154ddd8/1267",
+"message assistant 55698fcd55cb/1266",
+"message user 6c12f191db5f/1267",
+"message assistant 63393eb669ff/1266",
+"message user d403af208259/1267",
+"message assistant 23e7a56837ee/1266",
+"message user 848f65aa4811/1267",
+"message assistant 7c6b372997fd/1266",
+"message user a036540eca3b/1267",
+"message assistant 5af94fa49bf3/1266",
+"message user 3966be03c944/1267",
+"message assistant 7a468e7d082c/1266",
+"compress attempt=2",
+"leaf_prep before {\"chain\":[],\"counters\":{}}",
+"log hermes_lcm.engine INFO \"LCM identity-anchor recognised %d replayed rows: session=%s cursor=%d incoming=%d\"",
+"log hermes_lcm.engine DEBUG \"Ingest: session=%s cursor=%d incoming=%d\"",
+"sql BEGIN IMMEDIATE",
+"sql shape=5 conn=_host_rewrite_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, NULL)",
+"sql #5 sha12/len=2eff5a55ac17/1578 x5",
+"sql #5 sha12/len=4ffb9b84ad94/310 x5",
+"sql #5 sha12/len=7a04e6343cca/1578 x5",
+"sql #5 sha12/len=f5e2163a2704/1578 x5",
+"sql #5 sha12/len=e7eca4415696/1578 x5",
+"sql #5 sha12/len=e55e8e0b11b8/1578 x5",
+"sql #5 sha12/len=aa51efc18eb8/1578 x5",
+"sql #5 sha12/len=7201fd996872/1578 x5",
+"sql #5 sha12/len=5928522868b9/1578 x5",
+"sql COMMIT",
+"sql BEGIN IMMEDIATE",
+"sql #1 sha12/len=8f4593e2ff18/159",
+"sql COMMIT",
+"log hermes_lcm.engine DEBUG \"Ingested %d messages into LCM store\"",
+"log hermes_lcm.store_complete INFO \"LCM store-complete leaf: frontier=%d last=%d rows=%d host_rows=%d/%d hidden=%d excluded=%d copies=%d cut=%s\"",
+"log hermes_lcm.engine INFO \"LCM leaf summary input: input_tokens=%d source_tokens=%d messages=%d\"",
+"call 2 model=trace-model level=1 budget=4000 timeout=115.0 in=d16211f50723/2727",
+"log hermes_lcm.escalation DEBUG \"L1 summarization succeeded (%d tokens)\"",
+"log hermes_lcm.compaction WARNING \"LCM leaf chunk has no durable source above the frontier: frontier=%d rows=%d first_mapped_store_id=%s\"",
+"log hermes_lcm.engine INFO \"LCM active-context cleanup: dropped %d assistant message(s) with no visible content\"",
+"log hermes_lcm.host_uid INFO \"LCM host-uid shadow: events agree=%d disagree=%d counts=%s\"",
+"log hermes_lcm.compaction DEBUG \"LCM compaction emission descriptor count=%d\"",
+"log hermes_lcm.compaction INFO \"LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs finalize=%.1fs backlog_tokens=%d%s%s%s%s%s\"",
+"return sha12/len=4910bac0b1c4/21375",
+"wrapper fit_cause [\"selected leaf chunk lacks raw store lineage\"]",
+"leaf_prep after {\"chain\":[],\"counters\":{}}",
+"assemble",
+"message user b46ee3d0307f/1381",
+"message assistant 1d3aa33ccd2c/1266",
+"message user d932be6f1500/1267",
+"message assistant 5112d3181a5e/1266",
+"message user 4915f154ddd8/1267",
+"message assistant 55698fcd55cb/1266",
+"message user 6c12f191db5f/1267",
+"message assistant 63393eb669ff/1266",
+"message user d403af208259/1267",
+"message assistant 23e7a56837ee/1266",
+"message user 848f65aa4811/1267",
+"message assistant 7c6b372997fd/1266",
+"message user a036540eca3b/1267",
+"message assistant 5af94fa49bf3/1266",
+"message user 3966be03c944/1267",
+"message assistant 7a468e7d082c/1266",
+"attr _compress_escaped=[]",
+"attr _compress_forced_overflow=false",
+"attr _compress_hidden_rows_consumed=0",
+"attr _compress_host_rows_consumed=0",
+"attr _compress_occurrences=null",
+"attr _compress_run=sha12/len=9495f58715a8/182",
+"attr _dag=sha12/len=d158891b634f/343",
+"attr _ingest_cursor=16",
+"attr _last_compacted_store_id=4",
+"attr _last_compression_noop_reason=\"selected leaf chunk lacks raw store lineage\"",
+"attr _last_compression_status=\"sanitized\"",
+"attr _last_leaf_content_filter_error=false",
+"attr _last_leaf_level_3_verbatim=false",
+"attr _last_leaf_summary_model=\"trace-model\"",
+"attr _lifecycle=sha12/len=8f9dd2b30f6f/391",
+"attr _no_progress_observed_tokens=3000",
+"attr _no_progress_proof_complete=false",
+"attr _no_progress_proof_fingerprint=null",
+"attr _no_progress_public_rows=sha12/len=1ceddb0c481c/21519",
+"attr _pending_emission_candidates=sha12/len=a41bd420cb7c/3018",
+"attr _store=sha12/len=8408194ced13/38077",
+"attr _store_complete_blocked=[9,\"user\",\"shown\",0]",
+"attr _store_complete_copy_exclusion_proofs={}",
+"attr _store_complete_cut=true",
+"attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
+"attr _store_complete_excluded=[]",
+"attr _survival_pass_observed=true",
+"attr _unattributed_leaf_warned=[[\"trace-conversation\",4]]",
+"attr compression_count=1",
+"attrs count=144 sha256=7daf23398390214eb4765076843212a1627377fff01a323df48d927a02e3393d"
 ],
 "stop-reason-unattributed": [
 "compress attempt=1",
@@ -13689,7 +14181,7 @@
 "log hermes_lcm.compaction WARNING \"LCM leaf chunk has no durable source above the frontier: frontier=%d rows=%d first_mapped_store_id=%s\"",
 "log hermes_lcm.engine INFO \"LCM active-context cleanup: dropped %d assistant message(s) with no visible content\"",
 "log hermes_lcm.compaction DEBUG \"LCM compaction emission descriptor count=%d\"",
-"log hermes_lcm.compaction INFO \"LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs finalize=%.1fs backlog_tokens=%d%s%s%s%s\"",
+"log hermes_lcm.compaction INFO \"LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs finalize=%.1fs backlog_tokens=%d%s%s%s%s%s\"",
 "return sha12/len=dd9925fdd7f3/20961",
 "wrapper fit_cause [\"selected leaf chunk lacks raw store lineage\"]",
 "leaf_prep after {\"chain\":[],\"counters\":{}}",
@@ -13712,6 +14204,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -13734,11 +14227,12 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",15]]",
 "attr compression_count=1",
-"attrs count=141 sha256=73a406022b0a624ee1895ce202db04b80deccdaff57ad11f0c9e045827212913"
+"attrs count=144 sha256=4688df66202be92102d982f622c658869e38fa9b1560535521b5d1672288fc50"
 ],
 "stop-refused-restore": [
 "compress attempt=1",
@@ -13784,6 +14278,7 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compress_dropped_ignored_rows=true",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -13802,10 +14297,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=141 sha256=8fdf61c48baf687f3b39999fa0626bbc0fe7c63679347ba838a37a67721e49b0"
+"attrs count=144 sha256=578afe20f47f2e773873d37294de1dcb2dbc0eec3c8ffb52addf68bc40a16780"
 ],
 "stop-rejection-after-leaf": [
 "compress attempt=1",
@@ -13906,6 +14402,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=2",
@@ -13930,10 +14427,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=08077862bd7a6da4c04f81d2d8e75f86793c5dd957c91d03a90f6558238af9d2"
+"attrs count=144 sha256=061ec738c8059b849c3c05af544afb488457cea0255c56c759adf2eec606dc72"
 ],
 "stop-resumed-anchor": [
 "compress attempt=1",
@@ -13972,6 +14470,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -13984,7 +14483,7 @@
 "attr _no_progress_proof_fingerprint=null",
 "attr _pending_emission_candidates=sha12/len=7d75449c34c6/416",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=0360ff15970c768f7189ea8d7549eeb1d600a5b7d8cee19ea48f028caff1d55f"
+"attrs count=144 sha256=eb261b898deec73cab6bfd5e5360358be9e253d0888320e51f868086d3d15544"
 ],
 "stop-route-after-leaf": [
 "compress attempt=1",
@@ -14081,6 +14580,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=2",
@@ -14105,10 +14605,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=71b71137cc72a1c0d0f754666d6e0ce192c5002b14eac826a9771026a5950301"
+"attrs count=144 sha256=4e7db678e7023cd3c7486a9992e91b00a19eeb3d750281a8d078657b52c4502a"
 ],
 "stop-scaffold-equal": [
 "compress attempt=1",
@@ -14148,6 +14649,7 @@
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
 "attr _compress_dropped_ignored_rows=true",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -14164,7 +14666,7 @@
 "attr _no_progress_public_rows=sha12/len=cfd1777acbed/20979",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=bfb4b0798f52ec7f163cc996837d5bb0a3bb3efbb24caa06606ae9e2f02a67cb"
+"attrs count=144 sha256=bc24cf2f5128427d08ae53d6cbd08ed830860e644d7a7669e1034bbc5539dcd2"
 ],
 "stub-first-exit": [
 "compress attempt=1",
@@ -14252,6 +14754,7 @@
 "message tool 42152c96b8ab/237",
 "message assistant b61a04d6dd7e/1600",
 "message tool 5b2c2c72fea5/237",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -14268,7 +14771,7 @@
 "attr _store=sha12/len=acd66f87830b/35604",
 "attr _stub_first_exit_now=sha12/len=fd265c889784/84",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=eabb6c89d1ea6db42b42722814abc528c8be657b2ab62fcc60ea00b3783f733a"
+"attrs count=144 sha256=059d8b308d02595270a2618d72ab4711d425b4c40dbe73d3f201f9dbe0516e39"
 ],
 "sweep-budget-entry": [
 "compress attempt=1",
@@ -14341,6 +14844,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -14360,7 +14864,7 @@
 "attr _store=sha12/len=78abcdec3f42/25548",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=141 sha256=bcb6ce0d52abd849261d0ac7bb875c0eaa469982877b5e38fb45542fe533b8d5"
+"attrs count=144 sha256=2df013e17912379c3712812938ecdbc70a15e0fa99861a4dc36788a94fb38a85"
 ],
 "sweep-drain-condense": [
 "compress attempt=1",
@@ -14489,6 +14993,7 @@
 "message user c9c175d956bb/826",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -14514,10 +15019,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=320bc0f935272fe58fee3b1a78a87f3a640bb46bcbd564e1a186bf84e1e455c4"
+"attrs count=144 sha256=69671bd632ba15a22034e459bc7c3563d1c9996db9191ec98a1061c3511f46e1"
 ],
 "sweep-fresh-tail-yield": [
 "compress attempt=1",
@@ -14641,6 +15147,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=12",
@@ -14666,10 +15173,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=bb4b0a496dbc718f2d2710d36ab806f5142d9923e0601b29823c94d3939fc7ba"
+"attrs count=144 sha256=059aa6cd5f7540917dd45bb362fe8c17b2ff85acc51f8130c443d774b8bff610"
 ],
 "sweep-pass-budget": [
 "compress attempt=1",
@@ -14968,6 +15476,7 @@
 "message assistant 7c79282995bb/1267",
 "message user a219ecf2ec9e/1268",
 "message assistant 4102ec4c78d1/1267",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=12",
@@ -14992,10 +15501,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=b4e4c2b96965178ba5f4c92c538eb12d61d9429a291ecfa6af6b9ceaa28ee15e"
+"attrs count=144 sha256=8ca16e4d2729068680ab11551e02dc1afda100bd4ca4543f052c2a24d76acb5d"
 ],
 "sweep-pre-leaf-condensation": [
 "compress attempt=1",
@@ -15139,6 +15649,7 @@
 "message user bd1deaea975c/601",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=14",
@@ -15164,10 +15675,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=4efc4f9d60538971ac1de8d31899fd984199e27d3f3c3a5d20ba96b990d152b9"
+"attrs count=144 sha256=3efb9128a1aeb76e9806e7e6dc52d5be1bd748eaf6f0908ca9fd4483171d61b8"
 ],
 "sweep-stub-first-exit": [
 "compress attempt=1",
@@ -15255,6 +15767,7 @@
 "message tool 42152c96b8ab/237",
 "message assistant b61a04d6dd7e/1600",
 "message tool 5b2c2c72fea5/237",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -15272,7 +15785,7 @@
 "attr _store=sha12/len=acd66f87830b/35604",
 "attr _stub_first_exit_now=sha12/len=fd265c889784/84",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=be0fa35a39364f697a84d1b1a087b0e698b3d80370d0b877e85092e7be5feb3a"
+"attrs count=144 sha256=c6dd0765b13275cc63f53f1be01a6f5c03f1f1f1285e298be6f9cb3e4b3c2870"
 ],
 "sweep-tail-drained": [
 "compress attempt=1",
@@ -15317,6 +15830,7 @@
 "message system 6a97437a05d4/508",
 "message user 3966be03c944/1267",
 "message assistant 7a468e7d082c/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -15336,7 +15850,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=ea1402633a11/3476",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=c248b456d3486ffb39d0479023e6280b097f5814d2ef56cd8f64a72cb0693eff"
+"attrs count=144 sha256=1126fd8aefaf6452e03eea34ee12678ddc1c21cc0b560b1d8f18f0ca4a0a659e"
 ],
 "tool-pair-groups": [
 "compress attempt=1",
@@ -15444,6 +15958,7 @@
 "message tool b418dd6b02ab/1600",
 "message assistant b61a04d6dd7e/1600",
 "message tool b3f7e026a84f/1600",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -15467,10 +15982,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=1088a40cf30411d90f5fcc28065eca29174a2ab8cb24335824b2dfb31e7dd3d4"
+"attrs count=144 sha256=677486db6594f87624a8dd64614ecdc835b12c717f20d37de6f29a8180ad2030"
 ],
 "transcript-gc-locked": [
 "compress attempt=1",
@@ -15563,6 +16079,7 @@
 "message user 69e6fa69ef3f/1444",
 "message assistant b61a04d6dd7e/1600",
 "message tool b3f7e026a84f/1600",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=22",
@@ -15587,10 +16104,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_fit_reason=\"sqlite_publication_locked\"",
 "attr _survival_pass_observed=true",
-"attrs count=141 sha256=2488f13eec0cac087e8345f4d11a17ef1c3bc494b7fdcb2384007938a03d8c39"
+"attrs count=144 sha256=a41eed138796ce2fceeb4f760425e50a1bb6e223978ac74a4ba2b894864bacc8"
 ],
 "unattributed-rotated-history": [
 "compress attempt=1",
@@ -15676,6 +16194,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
@@ -15698,11 +16217,12 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",15]]",
 "attr compression_count=1",
-"attrs count=141 sha256=88634f88eaf16005e83b51f291a10d13f61624b79623846bb1dce69eed32d95a"
+"attrs count=144 sha256=c3cc51314d5e531754664848ce6487e9110f62003c13a6d0f5c76cee514cfd72"
 ],
 "unknown-window-default-target": [
 "compress attempt=1",
@@ -15794,6 +16314,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -15817,10 +16338,11 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=b653533520ff21780b9aecc718f1df60a99a90545718b1b3128a39be701aa206"
+"attrs count=144 sha256=a1e0935bd100c08932c24ee4b4b8e7bfbe1e3713451bd80df29525fd08666234"
 ],
 "unthresholded-default-target": [
 "compress attempt=1",
@@ -15911,6 +16433,7 @@
 "message assistant 7c6b372997fd/1266",
 "message user a036540eca3b/1267",
 "message assistant 5af94fa49bf3/1266",
+"attr _compress_escaped=[]",
 "attr _compress_forced_overflow=false",
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=4",
@@ -15934,9 +16457,10 @@
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=false",
 "attr _store_complete_empty_reason=\"\"",
+"attr _store_complete_escaped=[]",
 "attr _store_complete_excluded=[]",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=141 sha256=888224b6c88f9ae65b5b608e3bc2b05319170cf078b04676bc2e861b7ff0dc93"
+"attrs count=144 sha256=207afbc4ea0c712bf78ce45d42f1f22c7d188c96de169b73c53a8073cacdbef4"
 ]
 }

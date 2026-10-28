@@ -23,6 +23,12 @@ summaries = retained.summaries
 host_estimator = fit.host_estimator
 
 
+@pytest.fixture(autouse=True)
+def retained_stop_control(monkeypatch):
+    # B2: retain the no-call stop fixture while the product escapes by default.
+    monkeypatch.setattr(retained.LCMEngine, "_retained_escape_enabled", False)
+
+
 @pytest.fixture
 def no_call(tmp_path, monkeypatch, summaries):
     engine, view = retained._reorder(tmp_path, False)

@@ -22,6 +22,12 @@ PAD = " alpha beta gamma delta" * 30
 RETAINED = "leaf would end before an unresolved retained occurrence"
 
 
+@pytest.fixture(autouse=True)
+def _legacy_retained_stop(monkeypatch):
+    # #1162: keep this observability suite on the pre-escape stop contract.
+    monkeypatch.setattr(LCMEngine, "_retained_escape_enabled", False, raising=False)
+
+
 @pytest.fixture
 def summaries(monkeypatch):
     captured: list[str] = []
