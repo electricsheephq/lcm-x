@@ -1,0 +1,24 @@
+Host source: NousResearch/hermes-agent@d923a5eb487a17c0a68801bba9ef0f56c81040a8; fetched through GitHub API. No installed/profile source read.
+agent/conversation_compression.py:1538: blocked = getattr(type(compressor), "_automatic_compression_blocked", None)
+agent/conversation_compression.py:1544: reason, reason_fn = None, getattr(compressor, "_compression_block_reason", None)
+agent/conversation_compression.py:1575: ``reason`` comes from ``_compression_block_reason``: ``cooldown:*`` and ``structural_backoff:*`` are
+agent/conversation_compression.py:3223: agent.context_compressor.record_rejected_compaction()
+agent/turn_context_compaction.py:71: engine lacks ``should_compress_info`` / raises).
+agent/turn_context_compaction.py:77: _info = getattr(compressor, "should_compress_info", None)
+agent/turn_context_compaction.py:279: _should_compress_now = False
+agent/turn_context_compaction.py:306: _should_compress_now = _compressor.should_compress(_preflight_tokens)
+agent/turn_context_compaction.py:307: if not _should_compress_now:
+agent/turn_context_compaction.py:309: if _should_compress_now:
+agent/turn_context_compaction.py:320: _should_compress_now = _compressor.should_compress(_preflight_tokens)
+agent/turn_context_compaction.py:321: if _should_compress_now:
+agent/turn_context_compaction.py:415: if not _compressor.should_compress(_preflight_tokens):
+agent/turn_context_compaction.py:436: ``should_compress_preflight()`` get exactly ONE ``compress()`` pass; a no-op never
+agent/turn_context_compaction.py:438: _engine_preflight = getattr(_compressor, "should_compress_preflight", None)
+agent/turn_context_compaction.py:446: "should_compress_preflight raised %s; skipping "
+agent/turn_preflight.py:63: cooldown → ``should_compress``), rebinding the loop locals on ``v`` and setting
+agent/turn_preflight.py:102: and compressor.should_compress(request_pressure_tokens)
+agent/turn_preflight.py:205: # threshold (should_compress_info reason is None below it).
+agent/turn_preflight.py:305: and _compressor.should_compress(_real_tokens)
+agent/agent_init.py:1922: # update_model() can't mutate the parent's (#42449). clone_for_agent() defaults to
+agent/agent_init.py:1926: _selected_engine = _candidate.clone_for_agent()
+agent/agent_init.py:1933: "should override clone_for_agent() (or __deepcopy__) to copy "

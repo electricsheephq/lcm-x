@@ -4,7 +4,32 @@
 > validator were removed. It produced 0 v2 passes; #466, which introduced v2, and the 3 merges
 > after it (#462, #469, #470) landed through ruleset transitions; and no publisher ever emitted
 > the `lcm-x-ai-review:v2` marker. AI review is now recorded evidence under the `land-pr` review obligation, not
-> enforcement. The text below is kept as history and describes no current rule.
+> enforcement. The retired-check history below describes no current rule.
+
+## Current advisory hint
+
+`scripts/maintainer_gate.py` returns `review_lanes_hint` for `land-pr` and `review-pr`.
+Its `named_risks` vocabulary is `review-provenance-policy`, `lcm-memory-preservation`,
+and `turn-path`. Existing review lanes are unchanged: a known risk or unknown changed
+files names acceptance and adversarial; known paths with no risk name acceptance only.
+The evaluator's hint never changes readiness decisions or blocker codes.
+
+`TURN_PATH_FILES` lists the modules that shape the request sent to the model or the
+per-turn stored record: assembly, compaction, survival fit, ingest/re-ingest identity,
+the summary route and the host `compress` contract. Being reachable from a turn is not
+enough: storage, commands, config, tools and opt-in pre-answer modules keep only
+`lcm-memory-preservation`. Turn-path files also retain `lcm-memory-preservation`. Renames count both paths.
+Only a supplied changed path in that set adds `turn_path_probe_packet`, a fixed list:
+
+1. Consumer enumeration: `rg` call sites for every changed helper and effects on each consumer.
+2. Previous-GA differential row: `tests/differential` (opt-in).
+3. Sibling shapes: neighbouring windows, row roles, and recovery paths.
+
+When the hint names `turn-path`, the PR body carries this packet as review context.
+The packet is advisory: no extra reviewers, no PR-size cap, and never a readiness or
+landing blocker. Unknown changed files have no packet key; both review lanes still apply.
+
+## Retired exact-head check (historical)
 
 The `AI review exact-head` check treats a repository dispatch as a request to
 inspect existing GitHub pull-request reviews. A dispatch names review objects by

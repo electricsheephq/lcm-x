@@ -1,0 +1,85 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "1880-preflight-cost-r2-20261023",
+  "project": "lcm-x",
+  "kind": "benchmark",
+  "status": "settled",
+  "owner_lane": "issue-1880-part-a-r2",
+  "claim_class": null,
+  "created": "2026-10-23T03:52:17Z",
+  "settled": "2026-10-23T03:53:39Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "2cbb01e37e461ab439620514ecb05f92020620ae",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python measure.py CHECKOUT",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "preflight-size-cleanup-10k",
+      "metric": "candidate_median_ms",
+      "value": 0.166417,
+      "n": 200,
+      "baseline_run": "10407e12",
+      "source": "summary.json"
+    },
+    {
+      "benchmark": "preflight-size-cleanup-100k",
+      "metric": "candidate_median_ms",
+      "value": 0.1691875,
+      "n": 200,
+      "baseline_run": "10407e12",
+      "source": "summary.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "pairs.jsonl",
+      "role": "per-item",
+      "sha256": "827a03aa38c4f3221998b24ce2305fcc1744705a35651f236b61223aeb3d9cab",
+      "bytes": 46167
+    },
+    {
+      "path": "summary.json",
+      "role": "per-item",
+      "sha256": "47760044c1b2d888ade662bf81950102b75b01488982d472239fafed9bf35a14",
+      "bytes": 938
+    },
+    {
+      "path": "measurement-source.txt",
+      "role": "per-item",
+      "sha256": "654b9b31d02c2198bfea87318ce01446808151f01cfbf4cc21562779b50d423f",
+      "bytes": 4859
+    },
+    {
+      "path": "score.py",
+      "role": "per-item",
+      "sha256": "5b5a76ac370252315086efb806ad25eb22782a34d1a069852c2a1b24b09469d7",
+      "bytes": 599
+    }
+  ],
+  "rescore": {
+    "command": "python score.py",
+    "inputs": [
+      "pairs.jsonl"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "measurement-source.txt",
+    "pairs.jsonl",
+    "score.py",
+    "summary.json"
+  ],
+  "t2_tag": "lcm-x/1880-preflight-cost-r2-20261023"
+}

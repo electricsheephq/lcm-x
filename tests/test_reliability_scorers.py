@@ -105,6 +105,104 @@ def test_clean_cell_passes_every_bar(tmp_path):
     assert out["applicable_bars"] == ["B1", "B2", "B3", "B4", "B5", "B8"]
 
 
+@pytest.mark.parametrize("composite", [False, True])
+@pytest.mark.parametrize("kind", ["placeholder", "note"])
+def test_recovery_host_echo_never_licenses_stored_surplus(tmp_path, composite, kind):
+    tree = Path(__file__).resolve().parents[1]
+    prefixes = plugin_tree.recovery_prefixes(tree)
+    assert len(prefixes) == 2 and set(prefixes) <= set(plugin_tree.carrier_markers(tree)[1])
+    text = next(p for p in prefixes if ("latest message" in p) == (kind == "note"))
+    text += "123 tokens) is stored." if kind == "note" else ""
+    if composite:
+        text = U.format(1, 1) + "\n\n" + text
+    out = make(tmp_path, rows=clean_rows() + [("user", text)], events=clean_events(),
+               host=[("S0", "user", text, 1)], plugin={"tree": str(tree)})
+    assert out["verdict"] == "FAIL" and "B2" in out["failed_bars"]
+    assert out["numbers"]["B2"]["stored_rows_not_expected"] == 1
+    assert out["numbers"]["B2"]["host_parity_licensed"]["rows"] == 0
+    if composite:
+        assert "B1" in out["failed_bars"]
+
+
+def test_recovery_exclusion_preserves_embedded_objective_licence(tmp_path):
+    tree = Path(__file__).resolve().parents[1]
+    text = "ordinary user text\n\n[Current user objective preserved from compacted history] quoted"
+    out = make(tmp_path, rows=clean_rows() + [("user", text)], events=clean_events(),
+               host=[("S0", "user", text, 1)], plugin={"tree": str(tree)})
+    assert out["verdict"] == "PASS" and out["numbers"]["B2"]["host_parity_licensed"]["rows"] == 1
+
+
+@pytest.mark.parametrize("marked,prior,verdict", [(False, True, "UNSUPPORTED"), (True, False, "UNSUPPORTED"),
+                                                 (True, True, "PASS")])
+def test_forced_recovery_requires_marker_and_prior_compaction(tmp_path, marked, prior, verdict):
+    recovery = {"event": "compaction", "turn": 2, "compression_status": "overflow_recovery",
+                "recovery_marker": marked, "prior_compaction": prior}
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), bars=["B1", "B2"],
+               faults=[{"kind": "forced_recovery", "turn": 2}], extra_events=[recovery])
+    assert out["verdict"] == verdict
+    if verdict == "UNSUPPORTED":
+        assert "recovery" in out["reason"]
+
+
+def test_overflow_cell_restart_and_bars_contract():
+    for c in cells.select("overflow-recovery-restart/*"):
+        assert c["bars"] == ["B1", "B2"] and c["targets"] == [534, 1508]
+        assert c["faults"][1] == {"kind": "crash_after_compaction_before_reply", "after_status": "overflow_recovery", "offset": 1}
+        assert c["faults"][2] == {"kind": "clean_exit_before_turn", "after_restart": 1}
+        assert set(c["lcm_env"]) == set(cells.tight(c["window"]))
+    assert cells.ISSUES[534] == (("B1", "B2"), "")
+    assert cells.ISSUES[1505][0] == ("B1", "B2")
+    assert cells.ISSUES[1508][0] == ("B1", "B2")
+    assert cells.ISSUE_HOSTS[1508] == ("ref-", "floor-", "upstream-main")
+
+
+@pytest.mark.parametrize("stored_result,verdict", [("real host result", "PASS"), ("wrong result", "FAIL")])
+def test_forced_recovery_scores_durable_result_against_dispatch(tmp_path, stored_result, verdict):
+    ev, rows = tool_turn(1, calls=PLAN[:1], results=[stored_result],
+                         recovery_result_sha256=hashlib.sha256(b"real host result").hexdigest())
+    ev = [e for e in ev if e["event"] != "tool_seen"]
+    events = clean_events()
+    events[1:1] = ev
+    recovery = {"event": "compaction", "turn": 1, "compression_status": "overflow_recovery",
+                "recovery_marker": True, "prior_compaction": True}
+    out = make(tmp_path, rows=clean_rows(1) + rows + clean_rows(3)[2:], events=events,
+               faults=[{"kind": "forced_recovery", "turn": 1}], extra_events=[recovery], bars=["B1", "B2"],
+               tool_plan=[{"turns": [1], "calls": [{"name": n, "args": a} for n, a in PLAN[:1]]}])
+    assert out["verdict"] == verdict
+    assert out["numbers"]["B6"]["tool_execution_failures"] == 1  # result never reached the provider
+
+
+@pytest.mark.parametrize("dispatch_ok,ending,reply,gap", [
+    (False, "complete", True, "recovery tool dispatch failed"),
+    (True, "failed", True, "forced recovery turn did not complete"),
+    (True, "missing", True, "forced recovery turn did not complete"),
+    (True, "cancel", True, "forced recovery turn did not complete"),
+    (True, "complete", False, "scripted reply"),
+    (True, "complete", True, None),
+])
+def test_forced_recovery_requires_successful_dispatch_and_completed_reply(dispatch_ok, ending, reply, gap):
+    events = turn_events(32)
+    ev, _ = tool_turn(32, calls=[("write_file", {"path": "p", "content": "result"})], results=["result"],
+                      ok=dispatch_ok, recovery_result_sha256=hashlib.sha256(b"result").hexdigest())
+    events[1:1] = [e for e in ev if e["event"] != "tool_seen"]
+    if ending == "failed":
+        events[-1]["failed"] = True
+    elif ending == "cancel":
+        events[-1]["kind"] = "cancel"
+    elif ending == "missing":
+        events.pop()
+    if not reply:
+        events = [e for e in events if e["event"] != "emit"]
+    events.append({"event": "compaction", "turn": 32, "compression_status": "overflow_recovery",
+                   "recovery_marker": True, "prior_compaction": True})
+    atts = bars.attempts(events)
+    bound = bars.tool_calls.bind(atts)
+    cell = {"bars": ["B1", "B2"], "faults": [{"kind": "forced_recovery", "turn": 32}],
+            "tool_plan": [{"turns": [32], "calls": [{"name": "write_file"}]}]}
+    gaps = bars.scenario_gaps(cell, events, atts, {"groups": 0}, bound)
+    assert any(gap in g for g in gaps) if gap else not gaps
+
+
 def test_b1_b2_duplicate_user_row_fails(tmp_path):
     out = make(tmp_path, rows=clean_rows() + [("user", U.format(2, 2) + " ")], events=clean_events())
     assert out["failed_bars"]["B1"] == {"T02": {"expected": 1, "stored": 2}}
@@ -250,6 +348,50 @@ def test_b6_split_group_and_orphans(tmp_path):
     assert split["failed_bars"]["B6"]["split_groups"] == 1
     orphan = make(tmp_path / "o", rows=rows, events=events, phase={"counters": {"failed": [], "orphan_drops": 1}}, **kw)
     assert orphan["failed_bars"]["B6"]["host_orphan_drops"] == 1
+
+
+def sha(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+# floor-0.21.3 (345cd2b0): after a post-tool compaction the request copy carries the host's dangling-tail notice in
+# place of this turn's live results; the host persists the dispatched result (tool_calls.bind wire_notices).
+FLOOR_SHA, REF_SHA = "345cd2b057a452236de401d3534b8502a7465e8d", "f97608f178d1ffeca59860195ab7da295f7c8e5f"
+
+
+@pytest.mark.parametrize("flagged,dispatch_sha,stored,verdict,licensed,dispatch_ok,lost", [
+    (True, True, ("r0", "r1"), "PASS", 2, True, False),  # LCM stored what the host dispatched and persisted
+    (True, True, ("n0", "n1"), "FAIL", 2, True, False),  # the notice is never an acceptable stored body
+    (True, False, ("r0", "r1"), "FAIL", 0, True, False),  # no dispatch sha (an older transcript): nothing is licensed
+    (False, True, ("r0", "r1"), "FAIL", 0, True, False),  # the probe did not see the host's own notice: nothing is licensed
+    (True, True, ("r0", "r1"), "FAIL", 0, False, False),  # a failed dispatch is never licensed
+    (True, True, ("r0", "r1"), "FAIL", 2, True, True),  # a licensed call whose stored row is lost still fails
+])
+def test_b2_scores_the_dispatched_result_behind_a_host_wire_notice(tmp_path, flagged, dispatch_sha, stored, verdict, licensed,
+                                                                  dispatch_ok, lost, host_sha=FLOOR_SHA):
+    events, rows, kw = tool_cell()
+    for e in events:
+        k = e.get("id", "")[-1:]
+        if e["event"] == "tool_seen":
+            e.update(sha=sha("n" + k), **({"host_wire_notice": True} if flagged else {}))
+        elif e["event"] == "tool_dispatch":
+            e.update(**({"result_sha256": sha("r" + k)} if dispatch_sha else {}), **({} if dispatch_ok else {"ok": False}))
+    rows = [(r[0], stored[int(r[3][-1])], *r[2:]) if r[0] == "tool" else r for r in rows]
+    if lost:
+        rows = [r for r in rows if not (r[0] == "tool" and r[3].endswith("_1"))]
+    out = make(tmp_path, rows=rows, events=events, **kw, **({"host_sha": host_sha} if host_sha else {}))
+    assert out["verdict"] == verdict, out["failed_bars"]
+    lic = out["numbers"]["B2"]["host_wire_notice_licensed"]
+    assert lic["rows"] == licensed and [r["id"] for r in lic["records"]] == ["call_T01_0_0", "call_T01_0_1"][:licensed]
+    if licensed:
+        assert lic["records"][0] == {"id": "call_T01_0_0", "notice_sha256": sha("n0"), "result_sha256": sha("r0")}
+
+
+@pytest.mark.parametrize("host_sha", [REF_SHA, None])
+def test_b2_wire_notice_licence_is_scoped_to_the_hosts_without_the_reanchor(tmp_path, host_sha):
+    """The PASS case on 0.21.5 (which re-anchors) or on a cell with no host sha: a notice there is a regression."""
+    test_b2_scores_the_dispatched_result_behind_a_host_wire_notice(tmp_path, True, True, ("r0", "r1"), "FAIL", 0, True,
+                                                                  False, host_sha=host_sha)
 
 
 def native_events(n=3):
@@ -472,6 +614,10 @@ def test_r13_import_provenance_fails_closed_outside_the_host_tree(tmp_path, monk
     for d in (src, tree, elsewhere):
         d.mkdir()
     cell = {"host_src": str(src), "host_python": sys.executable, "plugin": {"tree": str(tree), "module": "hermes_plugins.x"}}
+    # Host modules an earlier real-host test left loaded would be violations too, and the 20-entry cap would hide
+    # the ones asserted below (#1041): start from no loaded host modules.
+    for name in [n for n in sys.modules if n.split(".")[0] in probe.HOST_PREFIXES or n.startswith("hermes_plugins.")]:
+        monkeypatch.delitem(sys.modules, name)
     monkeypatch.setitem(sys.modules, "run_agent", types.SimpleNamespace(__file__=str(elsewhere / "run_agent.py")))
     monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(__file__=str(src / "hermes_state.py")))
     monkeypatch.setitem(sys.modules, "hermes_plugins.x", types.SimpleNamespace(__file__=str(src / "x.py")))
@@ -534,12 +680,12 @@ def test_r14_a1_final_check_needs_a_fresh_compressed_pass(monkeypatch, host_stat
 
 def test_r14_a2_controls_never_hold_without_runs():
     assert controls.check("PC-2", []) and controls.check("PC-3", [])
-    assert controls.check("PC-3", [], ["eva-0.21.5"])  # a requested host with no row is a problem
+    assert controls.check("PC-3", [], ["ref-0.21.5"])  # a requested host with no row is a problem
     assert controls.CONTROLS["PC-3"]["refs"] == ["508f893517f52a400c2bfe0b37f914e864ff806c"]
-    row = {"plugin_ref": "v0.24.2", "host": "eva-0.21.5", "verdict": "FAIL", "failed_bars": {"B6": {}}}
+    row = {"plugin_ref": "v0.24.2", "host": "ref-0.21.5", "verdict": "FAIL", "failed_bars": {"B6": {}}}
     rows = [dict(row, cell=c) for c in controls.CONTROLS["PC-2"]["cells"]]
-    assert controls.check("PC-2", rows, ["eva-0.21.5"]) == []
-    assert controls.check("PC-2", rows, ["eva-0.21.5", "upstream-main"])  # "all" = requested hosts, not row hosts
+    assert controls.check("PC-2", rows, ["ref-0.21.5"]) == []
+    assert controls.check("PC-2", rows, ["ref-0.21.5", "upstream-main"])  # "all" = requested hosts, not row hosts
 
 
 def git_host(tmp_path):
@@ -582,6 +728,24 @@ def test_r14_a4_a_failed_db_copy_is_error_and_not_scored(tmp_path, monkeypatch, 
     assert out["verdict"] == "ERROR" and missing in out["reason"]
 
 
+def test_985_a_failed_probe_keeps_its_own_reason_when_the_db_copy_fails(tmp_path, monkeypatch):
+    """Regression (#985): a host that died before creating its databases reported only "database copy failed",
+    which hid the probe's own error and stderr tail. The verdict stays ERROR and the reason now leads with the
+    probe's failure; a finished probe with a failed copy keeps today's reason."""
+    def never(*_a, **_k):
+        raise AssertionError("scored despite a failed DB copy")
+    monkeypatch.setattr(run_matrix.bars, "score", never)
+    errors = ["lcm.db: FileNotFoundError('lcm.db does not exist')"]
+    died = {"exit": "error", "reason": "host process ended: EOF; stderr: Traceback ... ImportError: x"}
+    out = run_matrix.verdict_fields({"faults": []}, tmp_path, died, set(), {}, errors)
+    assert out["verdict"] == "ERROR"
+    assert out["reason"].startswith("probe failed before the databases were complete: host process ended: EOF")
+    assert "ImportError: x" in out["reason"] and "database copy failed, not scored: lcm.db" in out["reason"]
+    for last in ({"exit": "done"}, {"exit": "unsupported", "reason": "r"}):
+        rec = run_matrix.verdict_fields({"faults": []}, tmp_path, last, set(), {}, errors)
+        assert rec == {"verdict": "ERROR", "reason": "database copy failed, not scored: " + errors[0]}
+
+
 def test_r14_t17_an_unapplied_bar_is_not_covered():
     row = {"cell": "native-long-prefix/rotation", "verdict": "PASS", "applicable_bars": ["B1", "B2", "B4", "B5", "B7"]}
     assert report.issue_status([row], "", ("B6",))[0].startswith("NOT COVERED on B6")
@@ -607,6 +771,11 @@ def test_r14_safety_refusals(tmp_path):
     for key in ("LCM_DATABASE_PATH", "LCM_EXPORT_DIR", "LCM_EMBEDDING_API_KEY", "LCM_AUTH_TOKEN", "HOME"):
         assert run_matrix.env_refusal({key: "x"}), key
     assert run_matrix.env_refusal({"LCM_CONTEXT_THRESHOLD": "0.5"}) is None
+    # Token COUNT keys are tuning, not credentials (the fleet sets these two).
+    for key in ("LCM_LEAF_CHUNK_TOKENS", "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS", "LCM_RESERVE_TOKENS_FLOOR"):
+        assert run_matrix.env_refusal({key: "8000"}) is None, key
+    for key in ("LCM_API_KEY_TOKENS", "LCM_AUTH_TOKENS_SECRET", "LCM_ACCESS_TOKEN"):
+        assert run_matrix.env_refusal({key: "x"}), key
     src = tmp_path / "src"
     src.mkdir()
     path = tmp_path / "hosts.json"
@@ -765,6 +934,108 @@ def test_r2a4_c_a_deficit_is_never_licensed(tmp_path):
     assert out["numbers"]["B2"]["deficit_rows"] == 1 and {"B1", "B2"} <= set(out["failed_bars"])
 
 
+def _held_composite(tmp_path, *, parts_sid="S0", host_parts=(14, 15), inner=""):
+    """#804 shape: the host held T14 + "\n\n" + T15 as one live composite but stored the parts apart; LCM stored the
+    parts as two rows."""
+    t14, t15 = U.format(14, 14) + inner, U.format(15, 15)
+    host = [(parts_sid, "user", U.format(t, t) + (inner if t == 14 else ""), 1) for t in host_parts]
+    parents = {"S0": None, **({parts_sid: None} if parts_sid != "S0" else {})}
+    return make(tmp_path, rows=[("user", t14), ("user", t15), ("assistant", R.format(15, 15))],
+                sids=[parts_sid, parts_sid, "S0"], events=turn_events(15, held=t14 + "\n\n" + t15),
+                parents=parents, host=host, plugin=TREE, bars=["B2"])
+
+
+def test_b2_held_composite_stored_as_host_parts_is_not_a_deficit(tmp_path):
+    for i, inner in enumerate(("", "\n\nsecond paragraph\n\nthird")):  # a part may hold its own "\n\n"
+        out = _held_composite(tmp_path / str(i), inner=inner)
+        b2 = out["numbers"]["B2"]
+        assert "B2" not in out["failed_bars"], out["failed_bars"]
+        assert b2["missing_keys"] == b2["deficit_rows"] == b2["surplus_rows"] == 0
+        assert b2["host_parity_licensed"]["rows"] == 0  # the licences were spent on the composite
+        [composite] = b2["held_composites_as_parts"]
+        assert composite["preview"].startswith("[T14]") and [p["store_ids"] for p in composite["parts"]] == [[1], [2]]
+
+
+def test_b2_held_composite_needs_host_evidence_for_every_part(tmp_path):
+    out = _held_composite(tmp_path, host_parts=(14,))
+    b2 = out["numbers"]["B2"]
+    assert "B2" in out["failed_bars"] and b2["missing_keys"] == 1 and not b2["held_composites_as_parts"]
+
+
+def test_b2_held_composite_the_host_stored_durably_stays_a_deficit(tmp_path):
+    """The host holds the composite itself as a durable row (and the parts): LCM should have stored it."""
+    composite = U.format(14, 14) + "\n\n" + U.format(15, 15)
+    out = make(tmp_path, rows=[("user", U.format(14, 14)), ("user", U.format(15, 15)), ("assistant", R.format(15, 15))],
+               events=turn_events(15, held=composite), parents={"S0": None}, plugin=TREE, bars=["B2"],
+               host=[("S0", "user", composite, 1), ("S0", "user", U.format(14, 14), 1), ("S0", "user", U.format(15, 15), 1)])
+    b2 = out["numbers"]["B2"]
+    assert "B2" in out["failed_bars"] and b2["missing_keys"] == 1 and not b2["held_composites_as_parts"]
+
+
+def test_b2_composite_cover_respects_licence_capacity_while_searching():
+    from bench.instruments.reliability.scorers import multiset
+    a, b = "alpha part", "beta part"
+    lic = {("user", multiset.h(x)): {"licensed": 1} for x in (a, a + "\n\n" + a, b)}
+    assert multiset.licensed_parts(a + "\n\n" + a + "\n\n" + b, lic, 1) == {
+        ("user", multiset.h(a + "\n\n" + a)): 1, ("user", multiset.h(b)): 1}
+    assert multiset.licensed_parts(a + "\n\n" + b, {("user", multiset.h(a)): {"licensed": 1}}, 1) is None
+
+
+def test_b2_composite_cover_is_fail_closed_on_a_pathological_input(latency_check):
+    """70 paragraphs, every single and adjacent pair licensed, and an unlicensed tail: the budget ends the search
+    quickly and the composite stays a deficit."""
+    import time
+    from bench.instruments.reliability.scorers import multiset
+    paras = [f"paragraph {i}" for i in range(70)]
+    lic = {("user", multiset.h(p)): {"licensed": 1} for p in paras}
+    lic.update({("user", multiset.h(a + "\n\n" + b)): {"licensed": 1} for a, b in zip(paras, paras[1:])})
+    started = time.monotonic() if latency_check else None
+    assert multiset.licensed_parts("\n\n".join(paras + ["unlicensed tail"]), lic, 1) is None
+    if latency_check:
+        assert time.monotonic() - started < 10
+
+
+def test_b2_composite_cover_cuts_inside_a_longer_newline_run():
+    """A raw part may end or start with whitespace (the probe's trailing_ws turns): R + "\n" + "\n\n" + U + "\n" still
+    splits into the two edge-stripped keys."""
+    from bench.instruments.reliability.scorers import multiset
+    a, b = "alpha part", "beta part"
+    lic = {("user", multiset.h(x)): {"licensed": 1} for x in (a, b)}
+    assert multiset.licensed_parts(a + "\n" + "\n\n" + b + "\n", lic, 1) == {
+        ("user", multiset.h(a)): 1, ("user", multiset.h(b)): 1}
+
+
+def test_b2_composite_cover_is_fail_closed_past_its_part_cap():
+    from bench.instruments.reliability.scorers import multiset
+    paras = [f"paragraph {i}" for i in range(multiset.COVER_PARTS + 1)]
+    lic = {("user", multiset.h(p)): {"licensed": 1} for p in paras}
+    assert multiset.licensed_parts("\n\n".join(paras[:-1]), lic, 1)  # exactly COVER_PARTS parts
+    assert multiset.licensed_parts("\n\n".join(paras), lic, 1) is None
+
+
+def test_b2_held_composite_pairs_only_the_occurrences_the_host_did_not_store_whole():
+    """Expected twice, stored whole once: the other occurrence pairs with host-licensed parts unless the host stored
+    both occurrences whole."""
+    from bench.instruments.reliability.scorers import multiset
+    a, b = "alpha part", "beta part"
+    c = a + "\n\n" + b
+    rows = [(1, "S0", "user", c), (2, "S0", "user", a), (3, "S0", "user", b)]
+    def host(n):
+        return {("user", multiset.h(x)): {"n": k, "ids": [x]} for x, k in ((a, 1), (b, 1), (c, n))}
+    for held, verdict in ((0, "PASS"), (1, "PASS"), (2, "FAIL")):
+        out = multiset.score([("user", c), ("user", c)], rows, host(held))
+        assert out["verdict"] == verdict, (held, out)
+        assert len(out["held_composites_as_parts"]) == (verdict == "PASS")
+    [composite] = multiset.score([("user", c), ("user", c)], rows, host(1))["held_composites_as_parts"]
+    assert composite["expected"] == 2 and composite["as_parts"] == 1
+
+
+def test_b2_held_composite_parts_in_another_lineage_do_not_cover_it(tmp_path):
+    out = _held_composite(tmp_path, parts_sid="cron_job_01")
+    b2 = out["numbers"]["B2"]
+    assert "B2" in out["failed_bars"] and b2["missing_keys"] == 1 and not b2["held_composites_as_parts"]
+
+
 def test_r2a4_d_a_licence_is_per_lineage(tmp_path):
     other = ("cron_job_01", "user", U.format(2, 2), 1)  # the second copy is held in another lineage
     out = make(tmp_path, rows=clean_rows() + [("user", U.format(2, 2))], events=clean_events(),
@@ -792,11 +1063,12 @@ def test_r2a4_reports_licences_visibly(tmp_path):
     assert "lcm [3, 7] host rows [3, 7]" in im and "tags T02" in im
 
 
-def test_r2a4_541_gate_cell_injects_once_and_the_persistent_cell_is_data():
+def test_r2a4_541_gate_cell_injects_once_and_the_persistent_cell_gates_deficits():
     by = {c["id"]: c for c in cells.select("publication-failure/*")}
     once, always = by["publication-failure/rotation-child"], by["publication-failure/rotation-child-persistent"]
-    assert not once["faults"][0].get("persistent") and always["faults"][0]["persistent"] and not always["targets"]
-    assert ci.in_gate_set(once["id"]) and not ci.in_gate_set(always["id"])
+    assert not once["faults"][0].get("persistent") and always["faults"][0]["persistent"] and always["targets"] == [1797]
+    assert ci.in_gate_set(once["id"]) and ci.in_gate_set(always["id"])
+    assert ci.CELL_GATE[always["id"]] == ("in-process", ("B2D",))
     for transport in (None, "acp-process"):
         assert always["id"] in ci.expected_cells(transport)
     src = Path(probe.__file__).read_text()
@@ -813,3 +1085,350 @@ def test_r2a4_an_echoed_lcm_carrier_is_never_licensed(tmp_path):
     out = make(tmp_path / "t", rows=clean_rows() + [("user", todo)], events=clean_events(),
                host=held() + [("S0", "user", todo, 1)], plugin=TREE)
     assert out["numbers"]["B2"]["host_parity_licensed"]["rows"] == 0 and "B2" in out["failed_bars"]
+
+
+def test_b9_only_cell_without_the_audit_is_unsupported_never_pass(tmp_path):
+    """A P8 control proves nothing when B9 is UNSUPPORTED (audit off, or a host without the seams)."""
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), bars=["B9"])
+    assert out["verdict"] == "UNSUPPORTED" and out["applicable_bars"] == [], out
+    assert out["reason"].startswith("B9: ")
+
+
+@pytest.mark.parametrize("committed,expected", [(2, "PASS"), (3, "FAIL")])
+def test_default_window_cadence_half_boundary(tmp_path, committed, expected):
+    events = clean_events(4)
+    for i in range(4):
+        if i < committed:
+            events.append({"event": "compaction", "compression_status": "compacted", "turn": i + 1})
+        events.append({"event": "provider_request", "turn": i + 1})
+    out = make(tmp_path, rows=clean_rows(4), events=events, passes=0, bars=["C1"])
+    assert out["verdict"] == expected
+    assert out["numbers"]["C1"] == {"model_calls": 4, "preceded_by_compaction": committed}
+
+
+@pytest.mark.parametrize("committed,expected", [(1, "INCONCLUSIVE"), (2, "INCONCLUSIVE"), (3, "FAIL")])
+def test_default_window_cadence_trailing_commit_is_inconclusive(tmp_path, committed, expected):
+    # A commit with no observed model call after it never scores PASS. The missing call can only add a call that a
+    # commit preceded, so a FAIL stands: 2 of 4 would PASS, but 3 of 5 fails.
+    events = clean_events(4)
+    for i in range(4):
+        if i < committed:
+            events.append({"event": "compaction", "compression_status": "compacted", "turn": i + 1})
+        events.append({"event": "provider_request", "turn": i + 1})
+    events.append({"event": "compaction", "compression_status": "compacted", "turn": 5})
+    out = make(tmp_path, rows=clean_rows(4), events=events, passes=0, bars=["C1"])
+    assert out["verdict"] == expected
+
+
+@pytest.mark.parametrize("present,expected", [(True, "PASS"), (False, "FAIL"), (None, "INCONCLUSIVE")])
+def test_default_window_objective_requires_request_bytes(tmp_path, present, expected):
+    events = clean_events()
+    events += [{"event": "compaction", "compression_status": "compacted"},
+               {"event": "provider_request", "continuity": {"F4": True, "current_request_present": present}}]
+    out = make(tmp_path, rows=clean_rows(), events=events, passes=0, bars=["F4"])
+    assert out["verdict"] == expected
+    assert out["numbers"]["F4"] == {"observed": 1, "present": int(present is True),
+                                      "absent": int(present is False), "unknown": int(present is None)}
+
+
+@pytest.mark.parametrize("bar", ["C1", "F4"])
+def test_default_window_missing_scenario_never_passes(tmp_path, bar):
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), passes=0, bars=[bar])
+    assert out["verdict"] == "INCONCLUSIVE"
+
+
+def test_default_window_counts_requests_once_and_ignores_noops_final_and_cron(tmp_path):
+    events = clean_events()
+    events += [{"event": "compaction", "compression_status": "noop"},
+               {"event": "provider_request"},
+               {"event": "compaction", "compression_status": "compacted"},
+               {"event": "compaction", "compression_status": "compacted"},
+               {"event": "provider_request", "continuity": {"current_request_present": True}},
+               {"event": "compaction", "compression_status": "noop"},
+               {"event": "provider_request"},
+               {"event": "compaction", "compression_status": "compacted", "final": True},
+               {"event": "compaction", "compression_status": "compacted", "session_prefix": "K"}]
+    out = make(tmp_path, rows=clean_rows(), events=events, passes=0, bars=["C1", "F4"])
+    assert out["verdict"] == "PASS"
+    assert out["numbers"]["C1"] == {"model_calls": 2, "preceded_by_compaction": 1}
+    assert out["numbers"]["F4"]["observed"] == 2
+
+
+def test_default_window_cell_contract():
+    selected = cells.select("default-window/*")
+    assert len(selected) == 2
+    with pytest.raises(ValueError, match="no cell matches"):
+        cells.select("default-window/32k-cadence")
+    assert not any(c["id"].startswith("default-window/") for c in cells.select("all"))
+    from bench.instruments.reliability import process_cell
+    for c in selected:
+        assert "R1" in process_cell.unsupported(c, "acp-process")
+        assert c["lcm_env"] == {} and c["in_place"] is True
+        assert ("C1" in c["bars"]) is c["id"].endswith("cadence")
+        assert ("F4" in c["bars"]) is c["id"].endswith("objective-1221")
+    with pytest.raises(ValueError, match="no cell matches"):
+        cells.select("default-window/64k-large-objective")
+    c = cells.select("default-window/objective-1221")[0]
+    assert c["bars"] == ["B1", "B2", "B6", "F4"]
+    assert c["window"] == 32768 and c["turns"] == 2
+    assert 12000 <= len(probe.user_text(c, "T", 2)) // 4 < 12100
+    assert len(probe.user_text(c, "T", 1)) < 100
+    assert not c["final_compaction_check"]
+    assert len(c["tool_plan"]) == 11
+    assert [g["calls"][0]["args"]["path"] for g in c["tool_plan"]] == [
+        f"~/objective-1221/big-{n:02d}.txt" for n in range(1, 12)]
+    assert "threshold:" not in run_matrix.config_yaml(c, {"engine": "fixture", "enabled": "fixture"})
+
+
+def test_default_window_objective_fixtures_stay_in_private_home(tmp_path, monkeypatch):
+    private_home = tmp_path / "home"
+    private_home.mkdir()
+    monkeypatch.setenv("HOME", str(private_home))
+    c = cells.select("default-window/objective-1221")[0]
+    # The output path is independent of the paths sent to the real host's file tool.
+    for name in ("short", "a-much-longer-output-directory"):
+        files = tmp_path / name
+        probe.write_tool_files(files, c)
+        for n, size in enumerate([24000, 16000] + [7400] * 9, 1):
+            text = (private_home / "objective-1221" / f"big-{n:02d}.txt").read_text()
+            expected = "".join(f"Record {i:04d}: datum for task step {n:02d}.\n"
+                               for i in range(size // 30 + 1))[:size]
+            assert text == expected
+            assert not (files / f"big-{n:02d}.txt").exists()
+
+
+def test_check_result_expands_home_in_read_file_paths(tmp_path, monkeypatch):
+    private_home = tmp_path / "home"
+    private_home.mkdir()
+    monkeypatch.setenv("HOME", str(private_home))
+    probe.write_tool_files(tmp_path / "files", cells.select("default-window/objective-1221")[0])
+    path = "~/objective-1221/big-01.txt"
+    lines = len((private_home / "objective-1221" / "big-01.txt").read_text().splitlines())
+    ok, detail, _ = probe.check_result("read_file", {"path": path}, json.dumps({"total_lines": lines}))
+    assert ok, detail
+    ok, detail, _ = probe.check_result("read_file", {"path": path}, json.dumps({"total_lines": lines - 1}))
+    assert not ok and f"of {lines}" in detail
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_default_window_objective_carrier_expects_persisted_original(tmp_path, duplicate):
+    original = U.format(2, 2)
+    carrier = "[Current user objective preserved from compacted history]\n" + original
+    carrier += "\n\n[Recent Summary (d0, node 1)]\nStub summary."
+    events = turn_events(1) + turn_events(2, held=carrier) + turn_events(3)
+    rows = clean_rows() + ([("user", original)] if duplicate else [])
+    out = make(tmp_path, rows=rows, events=events, bars=["B1", "B2"])
+    assert out["verdict"] == ("FAIL" if duplicate else "PASS")
+    assert out["numbers"]["B2"]["deficit_rows"] == 0
+    assert out["numbers"]["B2"]["surplus_rows"] == int(duplicate)
+
+
+@pytest.mark.parametrize("held", [
+    "quoted [Current user objective preserved from compacted history]\ntext",
+    "[Current user objective preserved from compacted history] not a carrier line",
+    "[Your active task list was preserved across context compression]\ntext",
+])
+def test_default_window_carrier_mapping_requires_exact_objective_marker(held):
+    atts = bars.attempts(turn_events(1, held=held))
+    assert bars.expected_items(atts)[0] == ("user", held)
+
+
+@pytest.mark.parametrize("contains", [True, False])
+def test_default_window_request_contains_complete_text(contains):
+    current = "[T02] user turn 2: complete objective"
+    messages = [{"role": "system", "content": None},
+                {"role": "user", "content": "prefix\n" + (current if contains else "[T02] shortened") + "\nsuffix"}]
+    assert probe.request_contains(messages, current) is contains
+
+
+def test_default_window_f4_absent_request_positive_control(tmp_path):
+    current = U.format(2, 2)
+    present = probe.request_contains([{"role": "user", "content": "[T02] shortened"}], current)
+    events = clean_events() + [{"event": "compaction", "compression_status": "compacted"},
+                              {"event": "provider_request", "continuity": {"current_request_present": present}}]
+    out = make(tmp_path, rows=clean_rows(), events=events, passes=0, bars=["F4"])
+    assert present is False
+    assert out["verdict"] == "FAIL" and out["numbers"]["F4"]["absent"] == 1
+
+
+def test_default_window_noop_preserves_pending_commit(tmp_path):
+    events = clean_events() + [{"event": "compaction", "compression_status": "compacted"},
+                              {"event": "compaction", "compression_status": "noop"},
+                              {"event": "provider_request", "continuity": {"current_request_present": True}}]
+    out = make(tmp_path, rows=clean_rows(), events=events, passes=0, bars=["C1", "F4"])
+    assert out["numbers"]["C1"] == {"model_calls": 1, "preceded_by_compaction": 1}
+    assert out["numbers"]["F4"] == {"observed": 1, "present": 1, "absent": 0, "unknown": 0}
+
+
+def test_default_window_trailing_commit_without_request_is_inconclusive(tmp_path):
+    events = clean_events() + [{"event": "compaction", "compression_status": "compacted"},
+                              {"event": "provider_request", "continuity": {"current_request_present": True}},
+                              {"event": "compaction", "compression_status": "compacted"}]
+    out = make(tmp_path, rows=clean_rows(), events=events, passes=0, bars=["F4"])
+    assert out["verdict"] == "INCONCLUSIVE"
+    assert out["numbers"]["F4"] == {"observed": 1, "present": 1, "absent": 0, "unknown": 1}
+
+
+# B4 drained-store proof: a noop needs actual final-call tail observations and DB coverage.
+def drained_final():
+    rows = clean_rows()
+    observed = [{"role": role, "sha256": hashlib.sha256(text.encode()).hexdigest()}
+                for role, text in rows]
+    boundary = {"session": "S0", "boundary": {"start": 4, "count": 2}, "rows": observed}
+    return {"outcome": "inconclusive", "engine_status": "noop", "engine_calls": 1,
+            "noop_reason": "no eligible raw backlog outside fresh tail", "conflicts": 0,
+            "rejection": None, "session": "S0", "tail_observations": [boundary, boundary],
+            "attempts": [], "backlog_checks": [{"turns_since_pass": 0}] * 3}
+
+
+def test_b4_witnessed_drained_store_passes(tmp_path):
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), nodes=[[1, 2, 3, 4]],
+               phase={"final_check": drained_final()}, bars=["B4"])
+    assert out["verdict"] == "PASS"
+    proof = out["numbers"]["B4"]["coverage"]
+    assert proof["covered_ids"] == [1, 2, 3, 4]
+    assert proof["protected_ids"] == [5, 6] and proof["uncovered_ids"] == []
+    assert proof["stored_ids"] == [1, 2, 3, 4, 5, 6]
+
+
+@pytest.mark.parametrize("duplicate", ["prefix", "tail"])
+def test_b4_drained_input_duplicate_is_invalid(tmp_path, duplicate):
+    final = drained_final()
+    observed = final["tail_observations"][0]
+    # Prefix case: id 4 is uncovered at index 3; its unstored copy cannot protect it.
+    # Tail case: two observed copies cannot both identify the single stored id 5.
+    observed["rows"].append(dict(observed["rows"][3 if duplicate == "prefix" else 4]))
+    observed["boundary"]["count"] = 3
+    final["tail_observations"] = [observed]
+    nodes = [[1, 2, 3]] if duplicate == "prefix" else [[1, 2, 3, 4]]
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), nodes=nodes,
+               phase={"final_check": final}, bars=["B4"])
+    assert out["verdict"] == "INCONCLUSIVE"
+    assert out["numbers"]["B4"]["coverage"]["valid"] is False
+
+
+@pytest.mark.parametrize("duplicate_prefix", [False, True])
+def test_b4_drained_unmatched_tail_duplicate_preserves_pass(tmp_path, duplicate_prefix):
+    final = drained_final()
+    observed = final["tail_observations"][0]
+    unmatched = {"role": "assistant", "sha256": hashlib.sha256(b"unstored input").hexdigest()}
+    observed["rows"].append(unmatched)
+    if duplicate_prefix:
+        observed["rows"].insert(0, dict(unmatched))
+        observed["boundary"]["start"] += 1
+    observed["boundary"]["count"] = 3
+    final["tail_observations"] = [observed]
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), nodes=[[1, 2, 3, 4]],
+               phase={"final_check": final}, bars=["B4"])
+    assert out["verdict"] == "PASS"
+    proof = out["numbers"]["B4"]["coverage"]
+    assert proof["valid"] is True
+    assert proof["covered_ids"] == [1, 2, 3, 4]
+    assert proof["protected_ids"] == [5, 6] and proof["uncovered_ids"] == []
+
+
+@pytest.mark.parametrize("broken", ["uncovered", "absent", "unobserved", "different", "lineage",
+                                  "wrong_session", "ambiguous", "count", "calls", "reason", "rejection"])
+def test_b4_drained_proof_fails_closed(tmp_path, broken):
+    final, nodes, rows = drained_final(), [[1, 2, 3, 4]], clean_rows()
+    if broken == "uncovered":
+        nodes = [[1, 2, 3]]
+    elif broken == "absent":
+        final.pop("tail_observations")
+    elif broken == "unobserved":
+        final["tail_observations"] = []
+    elif broken == "different":
+        final["tail_observations"][1] = {**final["tail_observations"][1], "session": "other"}
+    elif broken == "lineage":
+        final["session"] = "other"
+    elif broken == "wrong_session":
+        final["session"] = "other"
+        final["tail_observations"] = [{**final["tail_observations"][0], "session": "other"}]
+    elif broken == "ambiguous":
+        rows += [rows[-1]]
+    elif broken == "count":
+        final["tail_observations"] = [{**final["tail_observations"][0], "boundary": {"start": 4, "count": 1}}]
+    elif broken == "calls":
+        final["engine_calls"] = 0
+    elif broken == "reason":
+        final["noop_reason"] = "retained occurrence unproven"
+    elif broken == "rejection":
+        final["rejection"] = "unresolved retained occurrence"
+    out = make(tmp_path, rows=rows, events=clean_events(), nodes=nodes,
+               phase={"final_check": final}, bars=["B4"])
+    assert out["verdict"] == "INCONCLUSIVE"
+
+
+@pytest.mark.parametrize("failure", ["error", "conflict", "exception", "turn"])
+def test_b4_drained_proof_never_overrides_failure(tmp_path, failure):
+    final = drained_final()
+    phase = {"final_check": final}
+    if failure == "turn":
+        phase["counters"] = {"failed": ["T03"]}
+    else:
+        final["outcome"] = "failed"
+        final.update({"engine_status": "error"} if failure == "error" else
+                     {"conflicts": 1} if failure == "conflict" else {"exception": "injected"})
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), nodes=[[1, 2, 3, 4]],
+               phase=phase, bars=["B4"])
+    assert out["verdict"] == "FAIL"
+
+
+def test_b4_persistent_fault_applicability_keeps_diagnostic(tmp_path):
+    cell = cells.select("publication-failure/rotation-child-persistent")[0]
+    assert cell["bars"] == ["B1", "B2"]
+    assert "B4 is an expected-negative publication diagnostic; final_check and numbers.B4 remain recorded, " \
+           "but B4 is not applicable to this persistent-fault cell." in cell["doc"]
+    assert "B4" in cells.select("publication-failure/rotation-child")[0]["bars"]
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(),
+               phase={"final_check": {"outcome": "failed", "engine_status": "error"}}, bars=cell["bars"])
+    assert out["verdict"] == "PASS" and "B4" not in out["applicable_bars"]
+    assert out["numbers"]["B4"]["final_check"]["engine_status"] == "error"
+
+
+def test_b4_observer_records_actual_boundary_without_changing_result():
+    class Engine:
+        _session_id = "S0"
+        def _fresh_tail_boundary(self, messages):
+            return types.SimpleNamespace(start=1, count=len(messages) - 1)
+    engine = Engine()
+    rows = [{"role": "system", "content": "anchor"}, {"role": "user", "content": "tail"}]
+    probe.trace_final_tail(Engine, lambda: True)
+    boundary = engine._fresh_tail_boundary(rows)
+    assert boundary.start == 1 and boundary.count == 1
+    observed = engine._probe_tail_observations[0]
+    assert observed["session"] == "S0" and observed["boundary"] == {"start": 1, "count": 1}
+    assert observed["rows"][1] == {"role": "user", "sha256": hashlib.sha256(b"tail").hexdigest()}
+
+
+@pytest.mark.parametrize("crossing", [True, False])
+def test_b4_summary_lineage_mismatch_is_not_coverage(tmp_path, crossing):
+    make(tmp_path, rows=clean_rows(), events=clean_events(), nodes=[[1, 2, 3, 4]],
+         phase={"final_check": drained_final()}, bars=["B4"])
+    db = tmp_path / "cell/db/lcm.db"
+    with sqlite3.connect(db) as con:
+        if crossing:
+            con.execute("update summary_nodes set session_id='other'")
+        else:
+            con.execute("update messages set session_id='other' where store_id=1")
+    assert bars.score({"bars": ["B4"]}, tmp_path / "cell")["verdict"] == "INCONCLUSIVE"
+
+
+def test_b4_tail_observer_is_passive_and_fails_closed():
+    active = False
+    class Engine:
+        _session_id = "S0"
+        def _fresh_tail_boundary(self, messages):
+            if messages is None:
+                raise RuntimeError("product error")
+            return types.SimpleNamespace(start=0, count=len(messages))
+    engine = Engine()
+    probe.trace_final_tail(Engine, lambda: active)
+    engine._fresh_tail_boundary([])
+    assert not hasattr(engine, "_probe_tail_observations")
+    active = True
+    with pytest.raises(RuntimeError, match="product error"):
+        engine._fresh_tail_boundary(None)
+    del Engine._session_id  # observer failure must not change the real return
+    assert engine._fresh_tail_boundary([]).start == 0
+    assert engine._probe_tail_observations == [{"error": "unobserved"}]

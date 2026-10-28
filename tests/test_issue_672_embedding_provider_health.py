@@ -22,6 +22,8 @@ import hermes_lcm.embedding_provider as embedding_provider
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.diagnostics import doctor_guidance_for_check
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.ingest_protection import embedding_privacy_revision
+from hermes_lcm.vector_store import VectorStore
 
 
 def probe_provider_availability(config):
@@ -35,7 +37,7 @@ def probe_provider_availability(config):
 
 
 def _make_engine(tmp_path, db_name="lcm_672.db", **config_kwargs):
-    config = LCMConfig(database_path=str(tmp_path / db_name), **config_kwargs)
+    config = LCMConfig(**{"database_path": str(tmp_path / db_name), "embeddings_enabled": False, **config_kwargs})
     engine = LCMEngine(config=config)
     engine._session_id = "test-session"
     engine.context_length = 200000
@@ -148,7 +150,7 @@ def test_disabled_embeddings_pass_without_noise(tmp_path):
         engine.shutdown()
 
 
-def test_enabled_and_available_provider_passes(tmp_path, monkeypatch):
+def test_available_local_provider_preparing_is_informational(tmp_path, monkeypatch):
     monkeypatch.setattr(
         embedding_provider.importlib.util, "find_spec", lambda name, *a, **kw: object()
     )
@@ -160,7 +162,9 @@ def test_enabled_and_available_provider_passes(tmp_path, monkeypatch):
     )
     try:
         _, check = _doctor_check(engine)
-        assert check["status"] == "pass"
+        assert check["status"] == "warn"
+        assert check["detail"]["informational"] is True
+        assert check["detail"]["readiness"].startswith("model: preparing;")
         assert check["detail"]["available"] is True
     finally:
         engine.shutdown()
@@ -190,6 +194,14 @@ def test_probe_performs_no_network_or_model_load(tmp_path, monkeypatch):
         embedding_model="voyage-3",
     )
     try:
+        vectors = VectorStore(engine._store.db_path, config=engine._config)
+        try:
+            vectors.register_profile(
+                "voyage-3", "voyage", 2,
+                revision=embedding_privacy_revision(engine._config),
+            )
+        finally:
+            vectors.close()
         _, check = _doctor_check(engine)
         assert check["status"] == "pass"
         # Credential presence is not reachability, and the check must say so.
@@ -206,8 +218,8 @@ def test_probe_performs_no_network_or_model_load(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "kwargs, expect_available, needle",
     [
-        ({"embedding_provider": "", "embedding_model": ""}, False, "unset"),
-        ({"embedding_provider": "fastembed", "embedding_model": ""}, False, "LCM_EMBEDDING_MODEL"),
+        ({"embedding_provider": "", "embedding_model": ""}, False, "fastembed"),
+        ({"embedding_provider": "voyage", "embedding_model": ""}, False, "LCM_EMBEDDING_MODEL"),
         ({"embedding_provider": "", "embedding_model": "x"}, False, "LCM_EMBEDDING_PROVIDER"),
         ({"embedding_provider": "nope", "embedding_model": "x"}, False, "unsupported"),
         ({"embedding_provider": "ollama", "embedding_model": "x"}, True, "not probed"),

@@ -14,6 +14,7 @@ import functools
 import sqlite3
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -24,9 +25,11 @@ from .db_bootstrap import (
     refuse_schema_version_too_new,
     run_versioned_migrations,
 )
+from .sqlite_session import ConnectionPolicy, open_connection
 
 
 _OWNERSHIP_QUERY_MAX_RANGES = 200
+_BIND_CAS_ATTEMPTS = 8
 
 
 class LifecycleBindingChangedError(RuntimeError):
@@ -35,6 +38,30 @@ class LifecycleBindingChangedError(RuntimeError):
 
 class LifecyclePublicationConflictError(RuntimeError):
     """Raised when compaction publication cannot prove its source frontier."""
+
+
+def _compaction_coverage_conflict_message(
+    expected_frontier: int,
+    authoritative_ids: list[int],
+    covered_ids: list[int],
+    excluded_ids: list[int],
+) -> str:
+    proven_ids = covered_ids + excluded_ids
+    missing = sorted(set(authoritative_ids) - set(proven_ids))
+    extra = sorted(set(proven_ids) - set(authoritative_ids))
+    double = sorted(
+        (set(covered_ids) & set(excluded_ids))
+        | {store_id for store_id, count in Counter(covered_ids).items() if count > 1}
+        | {store_id for store_id, count in Counter(excluded_ids).items() if count > 1}
+    )
+    return (
+        "Compaction publication source coverage is not contiguous "
+        f"(expected_frontier={expected_frontier}, owned={len(authoritative_ids)} "
+        f"covered={len(covered_ids)} excluded={len(excluded_ids)}; "
+        f"missing={len(missing)} {missing[:8]}; extra={len(extra)} {extra[:8]}; "
+        f"double={len(double)} {double[:8]}; authoritative={authoritative_ids}, "
+        f"covered={covered_ids}, excluded={excluded_ids})"
+    )
 
 
 def _synchronized(method):
@@ -82,15 +109,16 @@ class LifecycleStateStore:
         self._init_db()
 
     def _init_db(self) -> None:
-        self._conn = sqlite3.connect(
-            str(self.db_path),
-            timeout=30.0,
-            check_same_thread=False,
-            isolation_level=None,
-        )
-        refuse_schema_version_too_new(self._conn)
-        configure_connection(self._conn)
-        self._conn.row_factory = sqlite3.Row
+        open_connection(ConnectionPolicy(
+            database=str(self.db_path),
+            connect_kwargs=(
+                ("timeout", 30.0), ("check_same_thread", False), ("isolation_level", None),
+            ),
+            before_row_factory=(refuse_schema_version_too_new, configure_connection),
+            row_factory=sqlite3.Row,
+            on_open=lambda conn: setattr(self, "_conn", conn),
+            on_setup_error=None,
+        ))
         run_versioned_migrations(self._conn)
         self._conn.commit()
 
@@ -176,9 +204,26 @@ class LifecycleStateStore:
         *,
         conversation_id: str | None = None,
     ) -> LifecycleState:
-        existing = self.get_by_conversation(conversation_id) if conversation_id else self.get_by_session(session_id)
-        conversation_id = conversation_id or (existing.conversation_id if existing else session_id)
-        now = time.time()
+        """#634 compare-and-swap; a stale read never overwrites a newer write."""
+        resolved = conversation_id
+        for _ in range(_BIND_CAS_ATTEMPTS):
+            existing = self.get_by_conversation(resolved) if resolved else self.get_by_session(session_id)
+            resolved = resolved or (existing.conversation_id if existing else session_id)
+            if existing is not None and existing.current_session_id == session_id:
+                return existing
+            cursor = self._conn.execute(*self._bind_plan(existing, session_id, resolved, time.time()))
+            self._conn.commit()
+            if cursor.rowcount == 1:
+                state = self.get_by_conversation(resolved)
+                assert state is not None
+                return state
+        return self._bind_session_in_write_transaction(session_id, resolved)
+
+    @staticmethod
+    def _bind_plan(
+        existing: LifecycleState | None, session_id: str, conversation_id: str, now: float,
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Build the same bind decision for CAS and the write-transaction fallback."""
         current_frontier = 0
         current_bound_at = now
         last_finalized_session_id = None
@@ -192,8 +237,6 @@ class LifecycleStateStore:
         last_reset_at = None
 
         if existing is not None:
-            if existing.current_session_id == session_id:
-                return existing
             # A session rebinding after its OWN finalize (same id; Hermes in-place
             # compaction, restart/resume) resumes its published frontier: its DAG
             # still claims every source row up to it (#483, #247 class).
@@ -207,16 +250,6 @@ class LifecycleStateStore:
                 )
                 else 0
             )
-            current_bound_at = (
-                existing.current_bound_at if existing.current_session_id == session_id else now
-            )
-            last_finalized_session_id = existing.last_finalized_session_id
-            last_finalized_frontier = existing.last_finalized_frontier_store_id
-            debt_kind = existing.debt_kind
-            debt_size_estimate = existing.debt_size_estimate
-            last_finalized_at = existing.last_finalized_at
-            debt_updated_at = existing.debt_updated_at
-            last_maintenance_attempt_at = existing.last_maintenance_attempt_at
             last_rollover_at = (
                 now
                 if (
@@ -229,9 +262,26 @@ class LifecycleStateStore:
                 )
                 else existing.last_rollover_at
             )
-            last_reset_at = existing.last_reset_at
 
-        self._conn.execute(
+            return (
+                """
+                UPDATE lcm_lifecycle_state
+                SET current_session_id = ?, current_frontier_store_id = ?, current_bound_at = ?,
+                    last_rollover_at = ?, updated_at = ?
+                WHERE conversation_id = ?
+                  AND current_session_id IS ?
+                  AND last_finalized_session_id IS ?
+                  AND last_finalized_frontier_store_id = ?
+                  AND last_finalized_at IS ?
+                  AND last_reset_at IS ?
+                """,
+                (session_id, current_frontier, now, last_rollover_at, now, conversation_id,
+                 existing.current_session_id, existing.last_finalized_session_id,
+                 existing.last_finalized_frontier_store_id, existing.last_finalized_at,
+                 existing.last_reset_at),
+            )
+
+        return (
             """
             INSERT INTO lcm_lifecycle_state(
                 conversation_id,
@@ -249,20 +299,7 @@ class LifecycleStateStore:
                 last_reset_at,
                 updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(conversation_id) DO UPDATE SET
-                current_session_id = excluded.current_session_id,
-                last_finalized_session_id = excluded.last_finalized_session_id,
-                current_frontier_store_id = excluded.current_frontier_store_id,
-                last_finalized_frontier_store_id = excluded.last_finalized_frontier_store_id,
-                debt_kind = excluded.debt_kind,
-                debt_size_estimate = excluded.debt_size_estimate,
-                current_bound_at = excluded.current_bound_at,
-                last_finalized_at = excluded.last_finalized_at,
-                debt_updated_at = excluded.debt_updated_at,
-                last_maintenance_attempt_at = excluded.last_maintenance_attempt_at,
-                last_rollover_at = excluded.last_rollover_at,
-                last_reset_at = excluded.last_reset_at,
-                updated_at = excluded.updated_at
+            ON CONFLICT(conversation_id) DO NOTHING
             """,
             (
                 conversation_id,
@@ -281,10 +318,20 @@ class LifecycleStateStore:
                 now,
             ),
         )
-        self._conn.commit()
-        state = self.get_by_conversation(conversation_id)
-        assert state is not None
-        return state
+
+    def _bind_session_in_write_transaction(self, session_id: str, conversation_id: str) -> LifecycleState:
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.get_by_conversation(conversation_id)
+            if existing is None or existing.current_session_id != session_id:
+                self._conn.execute(*self._bind_plan(existing, session_id, conversation_id, time.time()))
+            state = self.get_by_conversation(conversation_id)
+            assert state is not None
+            self._conn.commit()
+            return state
+        except BaseException:
+            self._conn.rollback()
+            raise
 
     @_synchronized
     def rebind_own_finalized(self, session_id: str, conversation_id: str) -> LifecycleState | None:
@@ -318,48 +365,32 @@ class LifecycleStateStore:
         session_id: str,
         frontier_store_id: int = 0,
     ) -> LifecycleState | None:
-        state = self.get_by_conversation(conversation_id)
-        if state is None:
+        if not conversation_id:
             return None
         now = time.time()
-        current_session_id = state.current_session_id
-        current_frontier = state.current_frontier_store_id
-        if current_session_id == session_id:
-            current_session_id = None
-            current_frontier = 0
-        # Record only the finalizing session's own frontier: another session's
-        # finalized frontier must never become this session's resumable one
-        # (bind_session restores it by owner, #484 round 2).
-        finalized_frontier = int(frontier_store_id or 0)
-        if state.last_finalized_session_id == session_id and (
-            state.last_reset_at is None or (state.last_finalized_at or 0) >= state.last_reset_at
-        ):
-            finalized_frontier = max(finalized_frontier, state.last_finalized_frontier_store_id)
-        self._conn.execute(
+        frontier = int(frontier_store_id or 0)
+        cursor = self._conn.execute(
             """
             UPDATE lcm_lifecycle_state
-            SET current_session_id = ?,
-                last_finalized_session_id = ?,
-                current_frontier_store_id = ?,
-                last_finalized_frontier_store_id = ?,
-                debt_kind = debt_kind,
-                debt_size_estimate = debt_size_estimate,
-                last_finalized_at = ?,
-                updated_at = ?
-            WHERE conversation_id = ?
+            SET current_session_id = CASE WHEN current_session_id = :sid THEN NULL ELSE current_session_id END,
+                current_frontier_store_id = CASE WHEN current_session_id = :sid THEN 0
+                                                 ELSE current_frontier_store_id END,
+                last_finalized_frontier_store_id = CASE
+                    WHEN last_finalized_session_id = :sid
+                     AND (last_reset_at IS NULL OR COALESCE(last_finalized_at, 0) >= last_reset_at)
+                    THEN MAX(:frontier, COALESCE(last_finalized_frontier_store_id, 0))
+                    ELSE :frontier END,
+                last_finalized_session_id = :sid,
+                last_finalized_at = :now,
+                updated_at = :now
+            WHERE conversation_id = :cid
             """,
-            (
-                current_session_id,
-                session_id,
-                current_frontier,
-                finalized_frontier,
-                now,
-                now,
-                state.conversation_id,
-            ),
+            {"sid": session_id, "frontier": frontier, "now": now, "cid": conversation_id},
         )
         self._conn.commit()
-        return self.get_by_conversation(state.conversation_id)
+        if cursor.rowcount == 0:
+            return None
+        return self.get_by_conversation(conversation_id)
 
     @_synchronized
     def record_rollover(
@@ -988,6 +1019,7 @@ class LifecycleStateStore:
         excluded_store_ids: list[int] | None = None,
         filter_exclusion_proofs: dict[int, Any] | None = None,
         carried_ranges: list[tuple[str, int, int]] | None = None,
+        copy_exclusion_proofs: dict[int, int] | None = None,
     ) -> int:
         """Validate and stage one contiguous compaction-frontier advance.
 
@@ -1020,6 +1052,10 @@ class LifecycleStateStore:
                 "Compaction publication coverage overlaps an explicit exclusion"
             )
         exclusion_proofs = filter_exclusion_proofs or {}
+        copy_proofs = {int(c): int(t) for c, t in (copy_exclusion_proofs or {}).items()
+                       if expected_frontier < int(c) <= covered_end}
+        if not set(copy_proofs) <= set(excluded_ids):
+            raise LifecyclePublicationConflictError("Compaction publication copy proof is not excluded")
         allowed_carry_ranges = [
             (str(source_session_id), int(start), int(end))
             for source_session_id, start, end in (carried_ranges or [])
@@ -1035,11 +1071,12 @@ class LifecycleStateStore:
             )
 
         snapshot_ids = sorted(
-            set(all_covered_ids + excluded_ids + list(exclusion_proofs))
+            set(all_covered_ids + excluded_ids + list(exclusion_proofs) + list(copy_proofs.values()))
         )
         snapshot_rows = conn.execute(
             """
-            SELECT m.store_id, m.session_id, m.conversation_id, m.content
+            SELECT m.store_id, m.session_id, m.conversation_id, m.content, m.role,
+                   m.tool_call_id, m.tool_calls, m.tool_name
             FROM json_each(?) AS source
             CROSS JOIN messages AS m
             WHERE m.store_id = source.value
@@ -1066,6 +1103,18 @@ class LifecycleStateStore:
             raise LifecyclePublicationConflictError(
                 "Compaction publication filter exclusion changed"
             )
+        if copy_proofs:
+            twin_ids = sorted(set(copy_proofs.values()))
+            node_covered = {int(row[0]) for row in conn.execute(
+                "SELECT source.value FROM summary_nodes AS node, json_each(node.source_ids) AS source "
+                "WHERE node.source_type='messages' "
+                "AND source.value IN (SELECT value FROM json_each(?))",
+                (str(twin_ids),),
+            ).fetchall()}
+            for copy, twin in copy_proofs.items():
+                if (twin >= copy or tuple(snapshot_by_id[copy][3:]) != tuple(snapshot_by_id[twin][3:])
+                        or twin not in node_covered):
+                    raise LifecyclePublicationConflictError("Compaction publication copy exclusion changed")
         owned_ranges = [(session_id, expected_frontier, covered_end)]
         owned_ranges.extend(
             (source, max(expected_frontier, start), min(covered_end, end))
@@ -1099,10 +1148,9 @@ class LifecycleStateStore:
         proven_ids = sorted(covered_ids + excluded_ids)
         if authoritative_ids != proven_ids:
             raise LifecyclePublicationConflictError(
-                "Compaction publication source coverage is not contiguous "
-                f"(expected_frontier={expected_frontier}, "
-                f"authoritative={authoritative_ids}, covered={covered_ids}, "
-                f"excluded={excluded_ids})"
+                _compaction_coverage_conflict_message(
+                    expected_frontier, authoritative_ids, covered_ids, excluded_ids
+                )
             )
         if conn.execute(
             """

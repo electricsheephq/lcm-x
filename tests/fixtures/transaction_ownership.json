@@ -1,0 +1,783 @@
+{
+  "append_failure": {
+    "error": "after first write",
+    "in_transaction": true,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        3,
+        "session",
+        "user",
+        "new",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE"
+    ]
+  },
+  "append_success": {
+    "error": null,
+    "in_transaction": false,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        3,
+        "session",
+        "user",
+        "new",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "COMMIT"
+    ]
+  },
+  "backfill_failure": {
+    "error": "after first write",
+    "in_transaction": true,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        10.0
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE"
+    ]
+  },
+  "backfill_success": {
+    "error": null,
+    "in_transaction": false,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        10.0
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "COMMIT"
+    ]
+  },
+  "commit_failure": {
+    "error": "before commit",
+    "in_transaction": true,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [
+      [
+        "trace",
+        "{}"
+      ]
+    ],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE"
+    ]
+  },
+  "commit_success": {
+    "error": null,
+    "in_transaction": false,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [
+      [
+        "trace",
+        "{}"
+      ]
+    ],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "COMMIT"
+    ]
+  },
+  "delete_failure": {
+    "error": "after first write",
+    "in_transaction": true,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE"
+    ]
+  },
+  "delete_success": {
+    "error": null,
+    "in_transaction": false,
+    "messages": [],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "COMMIT"
+    ]
+  },
+  "gc_failure": {
+    "error": "after first write",
+    "in_transaction": true,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "archived",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE"
+    ]
+  },
+  "gc_success": {
+    "error": null,
+    "in_transaction": false,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "archived",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "COMMIT"
+    ]
+  },
+  "host_uid_commit_failure": {
+    "error": "InjectedFailure",
+    "in_transaction": false,
+    "metadata": [],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "ROLLBACK"
+    ]
+  },
+  "host_uid_failure": {
+    "error": "after first write",
+    "in_transaction": false,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "ROLLBACK"
+    ]
+  },
+  "host_uid_success": {
+    "error": null,
+    "in_transaction": false,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [
+      [
+        "trace",
+        "{}"
+      ]
+    ],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "COMMIT"
+    ]
+  },
+  "metadata_failure": {
+    "error": "after first write",
+    "in_transaction": true,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [
+      [
+        "trace",
+        "{}"
+      ]
+    ],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE"
+    ]
+  },
+  "metadata_success": {
+    "error": null,
+    "in_transaction": false,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [
+      [
+        "trace",
+        "{}"
+      ]
+    ],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "COMMIT"
+    ]
+  },
+  "normalize_commit_failure": {
+    "error": "IntegrityError",
+    "in_transaction": false,
+    "metadata": [],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "COMMIT",
+      "ROLLBACK"
+    ]
+  },
+  "normalize_failure": {
+    "error": "after first write",
+    "in_transaction": false,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "ROLLBACK"
+    ]
+  },
+  "normalize_success": {
+    "error": null,
+    "in_transaction": false,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "COMMIT"
+    ]
+  },
+  "pin_failure": {
+    "error": "after first write",
+    "in_transaction": true,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        1,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE"
+    ]
+  },
+  "pin_success": {
+    "error": null,
+    "in_transaction": false,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        1,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "COMMIT"
+    ]
+  },
+  "reassign_failure": {
+    "error": "after first write",
+    "in_transaction": true,
+    "messages": [
+      [
+        1,
+        "next",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "next",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE"
+    ]
+  },
+  "reassign_success": {
+    "error": null,
+    "in_transaction": false,
+    "messages": [
+      [
+        1,
+        "next",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "next",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "COMMIT"
+    ]
+  },
+  "relations_failure": {
+    "error": "after first write",
+    "in_transaction": true,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [
+      [
+        1,
+        "alt_stamp",
+        2,
+        0,
+        10.0
+      ]
+    ],
+    "trace": [
+      "BEGIN IMMEDIATE"
+    ]
+  },
+  "relations_success": {
+    "error": null,
+    "in_transaction": false,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [
+      [
+        1,
+        "alt_stamp",
+        2,
+        0,
+        10.0
+      ]
+    ],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "COMMIT"
+    ]
+  },
+  "schema_1": {
+    "attempts": 2,
+    "in_transaction": false,
+    "rebuild": false,
+    "trace": []
+  },
+  "schema_2": {
+    "attempts": 2,
+    "in_transaction": false,
+    "rebuild": true,
+    "trace": []
+  },
+  "unpin_failure": {
+    "error": "after first write",
+    "in_transaction": true,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE"
+    ]
+  },
+  "unpin_success": {
+    "error": null,
+    "in_transaction": false,
+    "messages": [
+      [
+        1,
+        "session",
+        "user",
+        "source",
+        0,
+        "unknown",
+        null
+      ],
+      [
+        2,
+        "session",
+        "tool",
+        "result",
+        0,
+        "unknown",
+        null
+      ]
+    ],
+    "metadata": [],
+    "relations": [],
+    "trace": [
+      "BEGIN IMMEDIATE",
+      "COMMIT"
+    ]
+  }
+}
