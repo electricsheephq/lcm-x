@@ -7,6 +7,7 @@ from sqlite3 import connect
 from pathlib import Path
 from typing import Any
 
+from .runtime_identity import _plugin_metadata, plugin_docs_url
 from .config import companion_enable_command, containment_base_dir
 
 
@@ -224,6 +225,12 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             command = "inspect background model preparation; run `/lcm embed warmup` if preparation fails, then re-run `/lcm doctor`"
             warning_only = True
             rationale = "local model preparation is in progress or needs retry; full-text recall is active"
+        elif (status == "warn" and isinstance(detail, dict)
+              and str(detail.get("reason", "")).startswith(("summary catch-up stalled", "summary catch-up failing"))):
+            action = DOCTOR_ACTION_INSPECT
+            command = f"{detail['reason']}; run `/lcm embed backfill --apply`, then check `/lcm doctor` again"
+            warning_only = True
+            rationale = "summary catch-up needs attention; full-text recall is active"
         elif (status == "warn" and isinstance(detail, dict) and detail.get("cpu_limited")
               and detail.get("available")
               and not str(detail.get("readiness", "")).startswith("model: unavailable(")):
@@ -282,7 +289,7 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
         command = ("inspect lcm_status zero_leaf_streak and the 'LCM compaction stop' lines: reason= names what stops "
                    "the leaf, and for a retained occurrence blocked= gives its store_id, role and kind; stored rows stay intact and "
                    "reachable (lcm_grep / lcm_expand); a new session clears a stop that persists; "
-                   "offline diagnosis: docs/operations/store-wedge-inspect.md")
+                   f"offline diagnosis: {plugin_docs_url('docs/operations/store-wedge-inspect.md', _plugin_metadata()['version'])}")
         warning_only = True
         rationale = ("over-threshold passes that store no leaf leave the session over its threshold, so every turn pays "
                      "for the whole prompt; this is an operating state, not persisted-state corruption")

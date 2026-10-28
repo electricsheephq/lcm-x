@@ -1397,6 +1397,7 @@ class LCMEngine(
         self._hidden_backlog_unknown_warned: set[str] = set()
         self._unattributed_leaf_warned: set[tuple[str, int]] = set()
         self._leaf_rescue_admit: Callable[[list], bool] | None = None  # #1147 r1: per-call rescue lineage check
+        self._leaf_summary_order: dict[int, int] | None = None  # #2007: per-call store-order rank of the leaf rows
         self._compaction_request = CompactionRequest()
         self._no_progress_candidate = False  # set by _compress_impl for compress()
         self._objective_only_noop = False
@@ -2478,6 +2479,10 @@ class LCMEngine(
         self._no_progress_hold_persisted = bool(reason == "no_progress" and persist)
         if self._no_progress_hold_persisted:
             self._persist_no_progress_hold()
+        # Only a hold armed here owns a local floor; restart readers must
+        # continue checking the current persisted proof on every admission.
+        self._no_progress_local_hold = self._no_progress_hold
+        self._no_progress_local_hold_conversation = self._hold_conversation_key()
         if reason in _TURN_END_HOLD_REASONS:
             logger.info("LCM automatic compaction held until turn end (cap %.0fs): %s",
                         _SWEEP_BUDGET_HOLD_SECONDS, reason)
@@ -2488,12 +2493,22 @@ class LCMEngine(
         """#651: never latches; it ends at its time (a stored leaf clears it in compress())."""
         if not managed_scope and self._bypasses_lcm_context_management():
             return False
+        if (self._no_progress_hold is not None and self._no_progress_hold[1] == "no_progress"
+                and getattr(self, "_no_progress_local_hold", None) is not None
+                and self._hold_conversation_key() != getattr(self, "_no_progress_local_hold_conversation", None)):
+            self._no_progress_hold = None
+            self._no_progress_local_hold = None
+            self._no_progress_local_hold_conversation = None
         if self._no_progress_hold is None or (
-                self._no_progress_hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)):
+                self._no_progress_hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)
+                and self._no_progress_hold is not getattr(self, "_no_progress_local_hold", None)):
             return self._persisted_no_progress_hold_active(managed_scope=True)
         if time.monotonic() < self._no_progress_hold[0]:
             return True
+        persisted = self._no_progress_hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)
         self._no_progress_hold = None
+        if persisted:
+            return self._persisted_no_progress_hold_active(managed_scope=True)
         return False
 
     def _no_progress_metadata_warning(self) -> None:
@@ -2566,8 +2581,8 @@ class LCMEngine(
                         else "survival" if ceiling is not None and tokens >= ceiling
                         else "threshold" if self.threshold_tokens > 0 and tokens >= self.threshold_tokens
                         else "below")
-            # MAX(primary key) and lifecycle's indexed conversation lookup are
-            # bounded. Global maxima conservatively invalidate on other sessions.
+            # Scoped maxima and lifecycle's conversation lookup use indexes;
+            # activity in another conversation/session cannot invalidate proof.
             # The open store's resolved path is invariant for this binding. Cache
             # only that identity, never metadata or the current fingerprint.
             store_path = self._store.db_path
@@ -2575,9 +2590,15 @@ class LCMEngine(
             if bound_store is None or bound_store[0] is not self._store or bound_store[1] != store_path:
                 bound_store = (self._store, store_path, str(Path(store_path).resolve()))
                 self._no_progress_bound_store = bound_store
-            state = [replay, bound_store[2], self._store.max_store_id(),
+            message_max = self._store._conn.execute(
+                "SELECT COALESCE(MAX(store_id), 0) FROM messages WHERE conversation_id = ? AND session_id = ?",
+                (self._conversation_id, self._session_id)).fetchone()[0]
+            node_max = self._dag._conn.execute(
+                "SELECT COALESCE(MAX(node_id), 0) FROM summary_nodes WHERE session_id = ?",
+                (self._session_id,)).fetchone()[0]
+            state = [replay, bound_store[2], message_max,
                      self._store_complete_frontier(),
-                     self._dag._conn.execute("SELECT COALESCE(MAX(node_id), 0) FROM summary_nodes").fetchone()[0],
+                     node_max,
                      pressure, tokens // 1024, tokens, int(self.context_length or 0), self.threshold_tokens,
                      yield_ready,
                      route,
@@ -3147,13 +3168,20 @@ class LCMEngine(
         deadline: Optional[float] = None,
     ) -> tuple[List[Dict[str, Any]], int, str, int, int]:
         """The foreground leaf summariser: the live values in, the provenance written back (#441, #652)."""
+        order = getattr(self, "_leaf_summary_order", None)
+
+        def serialize(batch, **budget):  # #2007: a host-reordered leaf, or its rescue prefix, is read in store order
+            if order and all(id(m) in order for m in batch):
+                batch = sorted(batch, key=lambda m: order[id(m)])
+            return self._serialize_messages_with_clip(batch, **budget)
+
         result = summarize_leaf_chunk_with_rescue(
             initial_chunk,
             config=self._config,
             focus_topic=focus_topic,
             circuit_breaker=self._summary_circuit_breaker,
             spend_guard=self._summary_spend_guard,
-            serialize=self._serialize_messages_with_clip,
+            serialize=serialize,
             leaf_target_tokens=self._leaf_target_tokens,
             next_rescue_chunk=self._next_leaf_rescue_chunk,
             primary_route=self._primary_summary_route,
@@ -8943,6 +8971,10 @@ class LCMEngine(
             passes += 1
             self._no_progress_candidate = False  # #909/#651: a stored condensation is progress
             self._clear_persisted_no_progress_hold()
+            if self._no_progress_hold is not None and self._no_progress_hold[1] == "no_progress":
+                self._no_progress_hold = None
+                self._no_progress_local_hold = None
+                self._no_progress_local_hold_conversation = None
             if (budget := self._foreground_call_budget()) is not None:
                 budget.progress = budget.progress or "condensation"
             try:

@@ -3369,6 +3369,13 @@ class ReconcileMixin:
                     and self._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False) == user_identity):
                 continue
             stored_call, stored_result = stored_rows[j + 1], stored_rows[j + 2]
+            if any(
+                stamp is not None and stored_stamp is not None and stamp != stored_stamp
+                for host, stored in ((messages[call_index], stored_call), (messages[result_index], stored_result))
+                for stamp, stored_stamp in ((self._host_occurrence_metadata(host)["timestamp"],
+                                             _normalize_observed_at(stored.get("observed_at"))),)
+            ):
+                continue
             if self._message_replay_identity(stored_call, stored_row=True, allow_pruned_tool_alias=False) != call_identity:
                 continue
             stored_literal = self._message_replay_identity(stored_result, stored_row=True, allow_pruned_tool_alias=False)

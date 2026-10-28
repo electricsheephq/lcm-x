@@ -20,6 +20,7 @@ Start here:
 Reference map:
 
 - Configuration and activation: `references/configuration.md`
+- Free Voyage AI setup: [Free cloud embeddings](references/configuration.md#free-cloud-embeddings-voyage-ai)
 - Architecture and data ownership: `references/architecture.md`
 - Diagnostics and safe operator workflow: `references/diagnostics.md`
 - Recall tools and routing: `references/recall-tools.md`

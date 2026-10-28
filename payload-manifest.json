@@ -1,15 +1,22 @@
 {
-  "source_sha": "c13dea3783bdbd1aab52d83dff5d009bfade0bd2",
-  "tooling_sha": "c13dea3783bdbd1aab52d83dff5d009bfade0bd2",
+  "source_sha": "9aaf609e073c0998a770da515a06605b2dfcab1f",
+  "tooling_sha": "9aaf609e073c0998a770da515a06605b2dfcab1f",
   "allowlist_sha256": "83b8bf2418d229639abd5bd72bae468b6263549fa601bb763943864add830f07",
-  "builder_version": 1,
-  "file_count": 117,
-  "total_bytes": 4319100,
+  "builder_version": 2,
+  "tooling_dirty": false,
+  "readme_omitted_links": [],
+  "file_count": 118,
+  "total_bytes": 4344321,
   "files": [
     {
       "path": "LICENSE",
       "bytes": 1075,
       "sha256": "2e6197fc446cea62efa627742a43a6f336cee9e73d9dd338a7f1c26696aeb264"
+    },
+    {
+      "path": "README.md",
+      "bytes": 1094,
+      "sha256": "daaf347d65e6d0636ed23b434d1cdef3a47db2c83a219d2a1cb699d4ae2a2420"
     },
     {
       "path": "__init__.py",
@@ -73,8 +80,8 @@
     },
     {
       "path": "command.py",
-      "bytes": 269117,
-      "sha256": "4dd6616a9610fa0212438a6be505db2d7918c0da157897cfc2fa3d86c6666923"
+      "bytes": 269459,
+      "sha256": "c4524f55b35865107aeaa02d40d87e5ceb8183dc9aeb2cead2bb8ba9fa98c2f7"
     },
     {
       "path": "command_auth.py",
@@ -83,8 +90,8 @@
     },
     {
       "path": "command_doctor.py",
-      "bytes": 38484,
-      "sha256": "b41bbcbb82989de7645e1c2b724d8e96c0280d8372e5a08b025edd6b77024165"
+      "bytes": 39771,
+      "sha256": "12302c91500eb6cea8cd2bc11a1740b092c4d0f733bf47fc679ec367a35c032e"
     },
     {
       "path": "command_router.py",
@@ -98,8 +105,8 @@
     },
     {
       "path": "compaction.py",
-      "bytes": 199877,
-      "sha256": "15cc45bff421dd05b55d31f199d660cf7659f8ec26bccf8a9f4091129e8aa972"
+      "bytes": 202130,
+      "sha256": "7a5739ab456d99155fd43ba2156704cd76100316fe59cf6094866ecaf8be49ed"
     },
     {
       "path": "compaction_policy.py",
@@ -118,8 +125,8 @@
     },
     {
       "path": "config.py",
-      "bytes": 81220,
-      "sha256": "70c2fa3a75db2f5d5831abb46e4053eab570e6a1e97f0268256ae68ddeec41c7"
+      "bytes": 81224,
+      "sha256": "29f9e933871efe11d4761a9dbbe9494fb264d51a3af9579a88d9e74221721224"
     },
     {
       "path": "cpu_capacity.py",
@@ -138,18 +145,18 @@
     },
     {
       "path": "diagnostics.py",
-      "bytes": 21388,
-      "sha256": "6bcfde4f1f135d191a3c6d9bee2eeef3d5e49b1eb58993c124e4f8c2c3a601e0"
+      "bytes": 21957,
+      "sha256": "6796a5799476ca5372d1632f6fd5b87221bd9f2c8b920d67156227eea319bd75"
     },
     {
       "path": "embedding_maintenance.py",
-      "bytes": 18843,
-      "sha256": "ef226d2029be2d46b88d35b1e79e3d13712dfa326ffc2c82bbc32585b91b4b75"
+      "bytes": 19518,
+      "sha256": "f184b45c2ade75824f0bf6f833ea91ffe9c9252a3637d79530f327ad2eef6aa3"
     },
     {
       "path": "embedding_provider.py",
-      "bytes": 88626,
-      "sha256": "b277deae3523673a6b3bad4c9cf7bfc9b838b1b8cbc7bc0264637f485096644a"
+      "bytes": 88743,
+      "sha256": "b0f26e18db61c8e953adb83c3539d506d4b169340f86076b42a999f1dbbfe195"
     },
     {
       "path": "emission_projection.py",
@@ -158,8 +165,8 @@
     },
     {
       "path": "engine.py",
-      "bytes": 539478,
-      "sha256": "6f799c32d07c1064184626fc1ff152bc84e1f45bdf84968f242fd374bb6ca41f"
+      "bytes": 541583,
+      "sha256": "943c7eee2c7af0f28a61acc915e6461984c9048c0183f241bd6b639dfced3c1a"
     },
     {
       "path": "engine_registry.py",
@@ -243,8 +250,8 @@
     },
     {
       "path": "identity_anchor.py",
-      "bytes": 94462,
-      "sha256": "def7cc4bcf6f1449822900afa1dace7cf26488dc7fc78a6795b223fe5a2e0928"
+      "bytes": 98116,
+      "sha256": "fa219aabe905cd93921738543e501cbd08409986d69c89c54b38d664e9848941"
     },
     {
       "path": "inactive_record.py",
@@ -348,8 +355,8 @@
     },
     {
       "path": "plugin.yaml",
-      "bytes": 727,
-      "sha256": "ef00229649238c97c53f2e14a81933dc28361197e246dfc912c779212a5363cb"
+      "bytes": 724,
+      "sha256": "ca5b9e415c8bf1908b4f0237334be80ff381c7114e1e888fc86880b2ae68f20d"
     },
     {
       "path": "plugin_identity.py",
@@ -398,8 +405,8 @@
     },
     {
       "path": "reconcile.py",
-      "bytes": 210021,
-      "sha256": "f62d324aa555924a05c637c25afe1a512909d3516960a822315071daab128294"
+      "bytes": 210479,
+      "sha256": "c80e90bc5894e4ef1339465cb913d4509cff5c53a9e0ce884c55eaee17e8b08b"
     },
     {
       "path": "requirements_compiler.py",
@@ -408,8 +415,8 @@
     },
     {
       "path": "reset_state.py",
-      "bytes": 4561,
-      "sha256": "11a5f887b5f07f8fa1b6bfeb892e959f624265ddbb5f1b9f038bbae64dfb1285"
+      "bytes": 4602,
+      "sha256": "ed2ac5a8bca5e63a558b25ba8fcf418f1f4accedfcd1827686ed158410d64885"
     },
     {
       "path": "retrieval_context.py",
@@ -438,8 +445,8 @@
     },
     {
       "path": "runtime_identity.py",
-      "bytes": 3224,
-      "sha256": "d76a6ee4e244ef862b8186530b265462bc9a7419b76ada49aa27ab6922ef4a25"
+      "bytes": 3672,
+      "sha256": "1e9b75f576155f027e6046e7460da1575667e179af00f3e4551a872ee317501e"
     },
     {
       "path": "sanitize.py",
@@ -483,23 +490,23 @@
     },
     {
       "path": "skills/hermes-lcm/SKILL.md",
-      "bytes": 2369,
-      "sha256": "f5c2e3bcbfd7f0968d875ad16a6aa7dbe2ff7243ee45b958c8f33cb269c8f57d"
+      "bytes": 2478,
+      "sha256": "d33af04528a102ab31ef709558eb22a956ac5af45867d966a5cb13ddb8025bbc"
     },
     {
       "path": "skills/hermes-lcm/references/architecture.md",
-      "bytes": 8869,
-      "sha256": "a2eacb2531dc6758d1bbf1be2284bee4f3d4e9100681827334c1e3642ec6b142"
+      "bytes": 9108,
+      "sha256": "85e7975973372fdc05c0f5bbe551f30e81f67f7b9da70f0d77fe07ce912fb1da"
     },
     {
       "path": "skills/hermes-lcm/references/configuration.md",
-      "bytes": 37216,
-      "sha256": "27bf260346f03a62e0902bc6ffa71cce746d9148e81498babf218e914f007fc5"
+      "bytes": 38488,
+      "sha256": "e5e426ff58bb13e5de018e849ed7de36ed041e3d9e21871708d6b012ec2e2dd0"
     },
     {
       "path": "skills/hermes-lcm/references/diagnostics.md",
-      "bytes": 8122,
-      "sha256": "7285c13d77b9f12047afac4c3a00ef3b9b4fed20dc80b6925704999837e455d0"
+      "bytes": 8144,
+      "sha256": "f818d5fa8dbc0a369c53ec992641550c3eed2dda9fbc513cdf4cd928feb0df37"
     },
     {
       "path": "skills/hermes-lcm/references/recall-policy.md",
@@ -533,8 +540,8 @@
     },
     {
       "path": "store_complete.py",
-      "bytes": 27177,
-      "sha256": "4e2feba49a43fe83e9e25ec280a78ed726811ddee5deabdfc74c9261c3ab670c"
+      "bytes": 34455,
+      "sha256": "2072a1cb397cede81da0f6e68e4e0a514c60947642e5a3a9062bd847d63e4d25"
     },
     {
       "path": "summary_attempt.py",
@@ -578,8 +585,8 @@
     },
     {
       "path": "tools.py",
-      "bytes": 248504,
-      "sha256": "de7a5f846fcca86238016faad46ae7057705bf5925274c37e46ca5fa3e893c12"
+      "bytes": 251761,
+      "sha256": "ad742f7e4d3f4f8857adc47679a4733bfe5035e1cb14b80cfcdf284fffa64add"
     },
     {
       "path": "trajectory_store.py",

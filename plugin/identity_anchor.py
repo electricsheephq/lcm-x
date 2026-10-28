@@ -23,6 +23,7 @@ R6 (supersede on positive evidence) hooks the host-rewrite capture.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -1263,7 +1264,69 @@ class IdentityAnchorMixin:
             budget = count_messages_tokens(chunk)
         return self._store_complete_input(chunk, claims, full_map, view, raw_chunk, frontier, carry,
                                           max(budget, count_messages_tokens(chunk)), accounted_ids,
-                                          copy_lookup=copy_lookup)
+                                          copy_lookup=copy_lookup, allow_retained_escape=self._retained_escape_enabled)
+
+    def _retained_escape_memo(self) -> dict:
+        """Session-scoped identities of escape-covered rows; never a source claim."""
+        key = self._replay_snapshot_metadata_key("retained_escape")
+        cache = self.__dict__.setdefault("_retained_escape_memos", {})
+        if key not in cache:
+            memo = {}
+            try:
+                payload = self._store.read_metadata_json(key)
+                for item in payload if isinstance(payload, list) else ():
+                    if not isinstance(item, dict) or not isinstance(item.get("identity_sha256"), str):
+                        continue
+                    try:
+                        sid = int(item.get("store_id"))
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if sid > 0:
+                        memo[item["identity_sha256"]] = sid
+            except (ValueError, TypeError):  # includes JSONDecodeError from the store's decoder
+                logger.debug("LCM retained escape metadata corrupt; caching empty memo", exc_info=True)
+                memo = {}
+            except Exception:
+                logger.debug("LCM retained escape metadata load failed", exc_info=True)
+                return {}  # retry later; an unread memo must never be replaced by a partial write
+            cache[key] = memo
+        return cache[key]
+
+    @staticmethod
+    def _retained_escape_digest(identity) -> str:
+        return hashlib.sha256(json.dumps(list(identity), ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    def _record_retained_escape(self, escaped) -> None:
+        if not escaped:
+            return
+        try:
+            memo = dict(self._retained_escape_memo())
+            key = self._replay_snapshot_metadata_key("retained_escape")
+            if key not in self._retained_escape_memos:
+                return  # this call's metadata load failed
+            for sid, row in self._store.get_batch([sid for sid, _role, _kind in escaped]).items():
+                for form in self._stored_row_forms(row):
+                    memo[self._retained_escape_digest(form)] = sid
+            recent = set(sorted(set(memo.values()))[-256:])  # cap rows, not their alternate forms
+            memo = {digest: sid for digest, sid in memo.items() if sid in recent}
+            rows = [{"store_id": sid, "identity_sha256": digest} for digest, sid in sorted(memo.items())]
+            self._store.write_metadata_json([key], json.dumps(rows, sort_keys=True), skip_unchanged=True)
+            self._retained_escape_memos[key] = memo
+        except Exception:
+            logger.debug("LCM retained escape metadata write failed", exc_info=True)
+
+    def _retained_escape_covered_view(self, message, frontier=None) -> bool:
+        if not self._retained_escape_enabled:
+            return False
+        memo = self._retained_escape_memo()
+        if not memo:
+            return False
+        frontier = self._store_complete_frontier() if frontier is None else frontier
+        for strip_carrier in (False, True):
+            identity = self._message_replay_identity(message, strip_carrier=strip_carrier)
+            if 0 < memo.get(self._retained_escape_digest(identity), 0) <= frontier:
+                return True
+        return False
 
     def _identity_anchor_view_key(self, message) -> Optional[tuple]:
         """A view row's occurrence key ``(stamp, form)`` as the ingest site keys it; None for LCM's own scaffold
@@ -1294,9 +1357,11 @@ class IdentityAnchorMixin:
                 return store_id
         return None
 
-    def _identity_anchor_covered_view(self, message, full_map) -> bool:
+    def _identity_anchor_covered_view(self, message, full_map, frontier=None) -> bool:
         """#563: a live user row that no store row maps and whose text is exactly a recorded composite
         (R2 witness) or its survivor, every constituent already covered (at or below the frontier)."""
+        if id(message) not in full_map and self._retained_escape_covered_view(message, frontier):
+            return True  # #1162: any role, including an unmapped host copy after a cold resume
         stamp = _normalize_observed_at(message.get("timestamp"))
         if message.get("role") != "user" or id(message) in full_map:
             return False
@@ -1327,9 +1392,10 @@ class IdentityAnchorMixin:
         if not chunk or len(chunk) >= len(candidates) or not identity_anchor_enabled():
             return chunk
         full_map, self._identity_anchor_text_memo = self._compress_run.store_ids_by_message_id or {}, {}
+        frontier = self._store_complete_frontier()
         end = len(chunk)
-        if all(self._identity_anchor_covered_view(message, full_map) for message in chunk):
-            while end < len(candidates) and self._identity_anchor_covered_view(candidates[end], full_map):
+        if all(self._identity_anchor_covered_view(message, full_map, frontier) for message in chunk):
+            while end < len(candidates) and self._identity_anchor_covered_view(candidates[end], full_map, frontier):
                 end += 1
             if end >= len(candidates):
                 return chunk
