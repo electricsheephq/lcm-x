@@ -173,6 +173,7 @@ jobs:
       - name: Collect deterministic test shards
         env:
           PYTEST_SHARD_DIR: ${{ runner.temp }}/pytest-shards
+          PYTEST_SHARD_FINGERPRINT: reports/test-${{ matrix.python-version }}/shard-${{ matrix.shard }}/collection.txt
         run: |
           ulimit -n 1024
           python -m pytest tests/ --collect-only -q -m "not latency" --ignore=tests/test_embedding_privacy.py -p no:randomly -p scripts.ci.collect_test_shards
@@ -349,6 +350,15 @@ jobs:
           pattern: junit-*
           path: reports/
           merge-multiple: true
+      - name: Require one identical test collection across each version's shards
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          for ver in ("3.11", "3.12", "3.13", "3.14"):
+              prints = {Path(f"reports/test-{ver}/shard-{n}/collection.txt").read_text() for n in range(1, 5)}
+              assert len(prints) == 1, f"{ver}: shard jobs collected different test lists: {sorted(prints)}"
+              print(ver, "collected", prints.pop().strip())
+          PY
       - name: Require executed tests and complete JUnit evidence
         run: >-
           python scripts/ci/check_tests_ran.py

@@ -1,5 +1,6 @@
 """Emit four deterministic pytest argument files from the selected collection."""
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -25,3 +26,11 @@ def pytest_collection_finish(session):
     output.mkdir(parents=True, exist_ok=True)
     for index, shard in enumerate(shards, 1):
         (output / f"shard-{index}.txt").write_text("\n".join(shard) + "\n")
+
+    # Each shard job collects on its own; tests-ran compares these fingerprints so a job that
+    # collected a different list (and so split it differently) cannot pass unnoticed.
+    fingerprint = os.environ.get("PYTEST_SHARD_FINGERPRINT")
+    if fingerprint:
+        digest = hashlib.sha256("\n".join(nodeids).encode()).hexdigest()
+        Path(fingerprint).parent.mkdir(parents=True, exist_ok=True)
+        Path(fingerprint).write_text(f"{len(nodeids)} {digest}\n")
