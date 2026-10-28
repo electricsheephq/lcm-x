@@ -125,7 +125,8 @@ def _fault(case: str) -> Callable[[str, Any], bool]:
             q == "SELECT COUNT(*) FROM messages WHERE session_id = ?"
         ),
         "orphan_error": lambda q, p: q.startswith(
-            "SELECT * FROM summary_nodes WHERE session_id = ?"
+            "SELECT node_id, session_id, depth, summary, token_count, source_token_count, source_ids, source_type, created_at, earliest_at, latest_at, expand_hint FROM summary_nodes "
+            "WHERE session_id = ?"
         ),
         "quality_error": lambda q, p: q.startswith(
             "SELECT node_id, session_id, depth, token_count, source_token_count"

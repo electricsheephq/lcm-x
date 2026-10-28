@@ -2,5 +2,9 @@
   "_frontier": {
     "lifetime": "process",
     "why": "Owned by one engine for its lifetime; session transitions update the held values without replacing the holder."
+  },
+  "_survival_counter_write_lost": {
+    "lifetime": "process",
+    "why": "Per-store map keyed by the database file identity the store fixed when it opened, set by a failed survival-fit counter write and cleared by that store's next successful write; a profile rebind neither leaks the marker into another store nor loses it."
   }
 }
