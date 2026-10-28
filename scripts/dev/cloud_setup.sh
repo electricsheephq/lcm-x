@@ -72,7 +72,9 @@ bash -c "$stub"
 if ! bash -c "$rollback"; then
   echo "cloud_setup: warning: could not fetch the rollback-reader commits; the old-reader tests will fail" >&2
 fi
-python -m pip uninstall -q -y PyYAML
+# CI's main pytest run has neither YAML library (config.py then uses its own parser); CI's ruamel
+# step below installs both, so a re-run removes both again.
+python -m pip uninstall -q -y PyYAML ruamel.yaml ruamel.yaml.clib 2>/dev/null || true
 
 # Keep the venv and the SQLite library for every later shell.
 cat > "$cache/env.sh" <<EOF
@@ -105,6 +107,8 @@ Run the suite as CI does (each shell first loads the environment):
   ulimit -n 1024
   python -m pytest tests/ -q -m "not latency" -n 4 --ignore=tests/test_embedding_privacy.py
   python -m pytest tests/test_embedding_privacy.py -q -m "not latency"
-Then CI's ruamel loader step (it installs ruamel.yaml and PyYAML):
+Then CI's ruamel loader step (it installs ruamel.yaml and PyYAML), and remove them again so the
+main suite keeps CI's no-YAML environment:
 $ruamel
+python -m pip uninstall -q -y PyYAML ruamel.yaml ruamel.yaml.clib
 EOF
