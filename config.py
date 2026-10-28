@@ -601,7 +601,8 @@ def _lcm_absolute_threshold_tokens_with_source(
     absent key means no absolute trigger.
     """
     value, source, warning = default, "default", None
-    cfg = _load_hermes_config_yaml()
+    home = lcm_env_get("HERMES_HOME")
+    cfg = _load_hermes_config_yaml(Path(home) / "config.yaml") if home else _load_hermes_config_yaml()
     lcm_section = cfg.get("lcm") if isinstance(cfg, dict) else None
     raw_yaml = lcm_section.get("context_threshold_tokens") if isinstance(lcm_section, dict) else None
     if raw_yaml not in (None, {}, "{}", "null", "~", ""):

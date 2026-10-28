@@ -544,6 +544,38 @@ def test_stamped_scope_without_home_override(host, scheduled_profiles, monkeypat
     assert seen == [(str(home), "fixture-B", 23)]
 
 
+def test_stamped_scope_yaml_absolute_threshold_missing(host, scheduled_profiles):
+    """A stamped B scope must not inherit the launch YAML's absolute pin."""
+    module, _, home, mapping = scheduled_profiles
+    config = importlib.import_module(module.__name__ + ".config")
+    (home.parent / "launch" / "config.yaml").write_text("lcm:\n  context_threshold_tokens: 20000\n")
+    (home / "config.yaml").write_text("lcm:\n  context_threshold: 0.67\n")
+
+    with host.bind(None, mapping, bound_home=home):
+        from hermes_constants import get_hermes_home_override
+        assert get_hermes_home_override() is None
+        assert config.lcm_env_get("HERMES_HOME") == str(home)
+        resolved = config.LCMConfig.from_env()
+        assert resolved.absolute_threshold_tokens == 0
+        assert not resolved.config_sources["absolute_threshold_tokens"].startswith("config_yaml:")
+
+
+def test_stamped_scope_yaml_absolute_threshold_uses_bound_home(host, scheduled_profiles):
+    """A stamped B scope reads B's absolute pin even with launch home A."""
+    module, _, home, mapping = scheduled_profiles
+    config = importlib.import_module(module.__name__ + ".config")
+    (home.parent / "launch" / "config.yaml").write_text("lcm:\n  context_threshold_tokens: 20000\n")
+    (home / "config.yaml").write_text("lcm:\n  context_threshold_tokens: 30000\n")
+
+    with host.bind(None, mapping, bound_home=home):
+        from hermes_constants import get_hermes_home_override
+        assert get_hermes_home_override() is None
+        assert config.lcm_env_get("HERMES_HOME") == str(home)
+        resolved = config.LCMConfig.from_env()
+        assert resolved.absolute_threshold_tokens == 30000
+        assert resolved.config_sources["absolute_threshold_tokens"] == "config_yaml:lcm.context_threshold_tokens"
+
+
 @pytest.mark.parametrize("accessor", ["missing", "raises"])
 def test_stamped_scope_override_accessor_unavailable(host, scheduled_profiles, monkeypatch, accessor):
     module, _, home, mapping = scheduled_profiles
