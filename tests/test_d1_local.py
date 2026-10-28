@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 import benchmarking.longmemeval as lme
-from benchmarking.d1_cache import D1Cache, seal
+from benchmarking.d1_cache import D1Cache, merge, seal
 
 OPTIONS = {"dimension": 64, "normalization": "fake-unit", "mode": "document"}
 
@@ -29,6 +29,80 @@ class Fake(lme.StubEmbedder):
     def embed_documents(self, texts):
         self.documents.extend(texts)
         return super().embed_documents(texts)
+
+
+def test_build_partitions_cover_each_key_once(tmp_path, monkeypatch):
+    texts = [f"unit {i}" for i in range(30)]
+    embedded = []
+    for part in range(3):
+        monkeypatch.setenv("LCM_D1_BUILD_PARTITION", f"{part}/3")
+        raw = Fake()
+        builder = D1Cache(raw, tmp_path / f"part-{part}.sqlite", options=OPTIONS, readonly=False)
+        monkeypatch.setenv("LCM_D1_BUILD_PARTITION", "not read again")
+        owned = [text for text in texts if int(builder.content_sha256(text)[:16], 16) % 3 == part]
+        expected = [raw._embed(text) if text in owned else [0.0] * raw.dim for text in texts]
+        assert builder.embed_documents(texts) == expected
+        assert builder.embed_documents(texts) == expected
+        assert raw.documents == owned
+        with sqlite3.connect(builder.cache_path) as db:
+            assert {row[0] for row in db.execute("SELECT key FROM entries")} == {builder.content_sha256(text) for text in owned}
+        embedded.extend(raw.documents)
+    assert sorted(embedded) == sorted(texts)
+
+
+def test_partitioned_merge_matches_serial_manifest(tmp_path, monkeypatch):
+    monkeypatch.delenv("LCM_D1_BUILD_PARTITION", raising=False)
+    texts = [f"unit {i}" for i in range(30)]
+    serial = tmp_path / "serial.sqlite"
+    D1Cache(Fake(), serial, options=OPTIONS, readonly=False).embed_documents(texts)
+    expected = seal(serial)
+    parts = []
+    for part in range(3):
+        monkeypatch.setenv("LCM_D1_BUILD_PARTITION", f"{part}/3")
+        path = tmp_path / f"part-{part}.sqlite"
+        builder = D1Cache(Fake(), path, options=OPTIONS, readonly=False)
+        builder.embed_documents(texts[:20])
+        builder.embed_documents(texts[10:] + texts[:2])
+        parts.append(path)
+    merged = tmp_path / "merged.sqlite"
+    assert merge(parts, merged) == (len(texts), 0)
+    assert all(path.exists() for path in parts)
+    assert seal(merged) == expected
+    monkeypatch.setenv("LCM_D1_BUILD_PARTITION", "invalid but ignored by readers")
+    raw = Fake()
+    assert D1Cache(raw, merged, options=OPTIONS).embed_documents(texts) == Fake().embed_documents(texts)
+    assert not raw.documents
+
+
+@pytest.mark.parametrize("fault", ["identity", "duplicate"])
+def test_merge_rejects_identity_mismatch_and_conflicting_duplicate(tmp_path, monkeypatch, fault):
+    monkeypatch.delenv("LCM_D1_BUILD_PARTITION", raising=False)
+    parts = [tmp_path / f"part-{i}.sqlite" for i in range(2)]
+    for i, path in enumerate(parts):
+        options = {**OPTIONS, "mode": "different"} if i and fault == "identity" else OPTIONS
+        D1Cache(Fake(), path, options=options, readonly=False).embed_documents(["shared"])
+    if fault == "duplicate":
+        with sqlite3.connect(parts[1]) as db:
+            db.execute("UPDATE entries SET checksum='different'")
+    with pytest.raises(ValueError, match="model/options mismatch" if fault == "identity" else "conflicting duplicate"):
+        merge(parts, tmp_path / "merged.sqlite")
+
+
+def test_merge_counts_identical_duplicates_and_preserves_parts(tmp_path, monkeypatch):
+    monkeypatch.delenv("LCM_D1_BUILD_PARTITION", raising=False)
+    parts = [tmp_path / f"part-{i}.sqlite" for i in range(2)]
+    for path in parts:
+        D1Cache(Fake(), path, options=OPTIONS, readonly=False).embed_documents(["shared"])
+    before = [path.read_bytes() for path in parts]
+    assert merge(parts, tmp_path / "merged.sqlite") == (1, 1)
+    assert [path.read_bytes() for path in parts] == before
+
+
+@pytest.mark.parametrize("partition", ["", "0", "a/3", "0/0", "-1/3", "3/3", "0/2/3", "1.0/3"])
+def test_malformed_build_partition_raises(tmp_path, monkeypatch, partition):
+    monkeypatch.setenv("LCM_D1_BUILD_PARTITION", partition)
+    with pytest.raises(ValueError, match="build partition"):
+        D1Cache(Fake(), tmp_path / "part.sqlite", options=OPTIONS, readonly=False)
 
 
 def questions():
@@ -511,6 +585,87 @@ def driver_args(root):
     return ["--product", "base=base", "--product", "candidate=candidate",
             "--prepared-dir", str(root / "prepared"), "--shards-dir", str(root / "shards"),
             "--aprime-dir", str(root / "aa"), "--output", str(root / "out"), "--scratch", str(root / "scratch")]
+
+
+@pytest.mark.parametrize("workers,failed_role", [(None, None), (1, None), (3, None), (3, "candidate")])
+def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, workers, failed_role):
+    cli = driver()
+    argv = driver_args(tmp_path)
+    if workers is not None:
+        argv += ["--build-workers", str(workers)]
+    monkeypatch.delenv("LCM_D1_BUILD_PARTITION", raising=False)
+    monkeypatch.setattr(cli, "pin", lambda _: "a" * 40)
+    parallel = workers is not None and workers > 1
+    joined = threading.Barrier(2 * workers) if parallel else None
+    builds, reads = {}, []
+    common = ["--dataset-label", "m", "--provider", "fastembed", "--model", "BAAI/bge-small-en-v1.5"]
+
+    def fake_run(command, *, env, stdout, **kwargs):
+        role = env["LCM_D1_ROLE"]
+        cache = Path(env[lme.EMBED_CACHE_ENV])
+        prefix = [sys.executable, str(Path(cli.__file__).resolve()), "--worker", str(Path(role).resolve()), "a" * 40, "a" * 40]
+        if env["LCM_D1_CACHE_MODE"] == "build":
+            part = int(env["LCM_D1_BUILD_PARTITION"].split("/")[0]) if parallel else None
+            calls = builds.setdefault((role, part), [])
+            arm = "preembed" if not calls else "preembed-aa"
+            name = f"{arm}-part-{part}" if parallel else arm
+            prepared = tmp_path / ("prepared" if arm == "preembed" else "aa")
+            assert command == [*prefix, "prewarm-cache", "--prepared-dir", str(prepared), "--shards-manifest", str(prepared), *common]
+            assert env["LCM_D1_ORT_THREADS"] == env["OMP_NUM_THREADS"] == ("1" if parallel else "2")
+            assert cache == tmp_path / "out" / role / (f"parts/part-{part}.sqlite" if parallel else "embeddings.sqlite")
+            if parallel:
+                assert env["LCM_D1_BUILD_PARTITION"] == f"{part}/{workers}"
+            else:
+                assert "LCM_D1_BUILD_PARTITION" not in env
+            assert Path(stdout.name).name == f"{role}-{name}.log"
+            assert Path(env["LCM_D1_THREAD_REPORT"]).name == f"{role}-{name}-threads.json"
+            assert Path(env["TMPDIR"]) == tmp_path / "scratch" / role / name
+            assert Path(env["HERMES_HOME"]) == Path(env["TMPDIR"]) / "home"
+            calls.append(arm)
+            if parallel and arm == "preembed":
+                joined.wait(timeout=10)
+            builder = D1Cache(Fake(), cache, options={**OPTIONS, "role": role}, readonly=False)
+            builder.partition = (part, workers) if parallel else None
+            builder.embed_documents([f"unit {i}" for i in range(30)])
+            Path(env["LCM_D1_THREAD_REPORT"]).write_text(json.dumps({"effective_intra_op_threads": 1 if parallel else 2}))
+            return {"exit_code": 7 if role == failed_role and part == 0 and arm == "preembed-aa" else 0, "timed_out": False}
+        reads.append(role)
+        assert env["LCM_D1_ORT_THREADS"] == env["OMP_NUM_THREADS"] == "2"
+        assert cache == tmp_path / "out" / role / "embeddings.sqlite"
+        out = Path(command[command.index("--output") + 1])
+        out.mkdir(parents=True)
+        (out / "per_question_checkpoint.jsonl").write_text('{"question_id":"q0"}\n')
+        (out / "embedding-metrics.jsonl").write_text(json.dumps({"wall_ms": 1, "hits": 1, "misses": 0, "corruptions": 0}) + "\n")
+        return {"exit_code": 0, "timed_out": False}
+
+    monkeypatch.setattr(cli, "run_child", fake_run)
+    assert cli.main(argv) == int(failed_role is not None)
+    receipt = json.loads((tmp_path / "out/d1-receipt.json").read_text())
+    assert len(builds) == (2 * workers if parallel else 2)
+    assert all(calls == ["preembed", "preembed-aa"] for calls in builds.values())
+    assert set(receipt["cache_manifests"]) == ({"base"} if failed_role else {"base", "candidate"})
+    assert len(reads) == (8 if failed_role else 16)
+    if parallel:
+        assert receipt["build_workers"] == workers
+        assert receipt["merged_entries"] == {role: 30 for role in receipt["cache_manifests"]}
+        assert receipt["duplicate_keys"] == {role: 0 for role in receipt["cache_manifests"]}
+        assert all({"role", "part", "arm", "exit_code", "timed_out", "elapsed_s"} == set(row) and row["elapsed_s"] >= 0 for row in receipt["preembed"])
+        if failed_role:
+            assert not (tmp_path / "out" / failed_role / "embeddings.manifest.json").exists()
+    else:
+        assert list(builds) == [("base", None), ("candidate", None)]
+        assert receipt["preembed"] == [{"role": role, "arm": arm, "exit_code": 0, "timed_out": False}
+                                       for role in ("base", "candidate") for arm in ("preembed", "preembed-aa")]
+        assert not {"build_workers", "merged_entries", "duplicate_keys"} & receipt.keys()
+
+
+def test_build_workers_above_thread_budget_is_parser_error(tmp_path, monkeypatch, capsys):
+    cli = driver()
+    monkeypatch.setattr(cli, "pin", lambda _: pytest.fail("pin called before budget validation"))
+    with pytest.raises(SystemExit, match="2"):
+        cli.main([*driver_args(tmp_path), "--build-workers", "3", "--thread-budget", "5"])
+    assert "2 * build-workers <= thread-budget" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
 
 
 @pytest.mark.parametrize("phase", ["build", "read"])

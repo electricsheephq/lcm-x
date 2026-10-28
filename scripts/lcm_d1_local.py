@@ -118,6 +118,7 @@ def _main(argv, interrupt):
     for name in ("prepared-dir", "shards-dir", "aprime-dir", "output", "scratch"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--jobs", type=int, default=3)
+    parser.add_argument("--build-workers", type=int, default=1)
     parser.add_argument("--thread-budget", type=int, default=8)
     parser.add_argument("--worker-timeout", type=float, default=14400)
     args = parser.parse_args(argv)
@@ -125,6 +126,8 @@ def _main(argv, interrupt):
         parser.error("worker-timeout must be positive and finite")
     if not 1 <= args.jobs <= args.thread_budget <= 8 or len(args.product) != 2:
         parser.error("require two roles and 1 <= jobs <= thread-budget <= 8")
+    if args.build_workers < 1 or (args.build_workers > 1 and 2 * args.build_workers > args.thread_budget):
+        parser.error("require build-workers >= 1 and 2 * build-workers <= thread-budget for parallel builds")
     products = dict(item.split("=", 1) for item in args.product)
     if len(products) != 2 or any(not role.isidentifier() for role in products):
         parser.error("require two distinct identifier role names")
@@ -154,7 +157,7 @@ def _main(argv, interrupt):
     common = ["--dataset-label", "m", "--provider", "fastembed", "--model", "BAAI/bge-small-en-v1.5"]
     started = time.monotonic()
 
-    def invoke(role, name, command, mode):
+    def invoke(role, name, command, mode, part=None):
         if interrupt[0]:
             return {"exit_code": 128 + interrupt[0], "timed_out": False}
         scratch = args.scratch.resolve() / role / name
@@ -163,27 +166,60 @@ def _main(argv, interrupt):
                          LCM_D1_PRODUCT_SHA=pins[role], LCM_D1_ROLE=role,
                          LCM_D1_THREAD_REPORT=str(args.output.resolve() / f"{role}-{name}-threads.json"),
                          LCM_D1_CACHE_MODE=mode, HERMES_HOME=str(scratch / "home"), TMPDIR=str(scratch))
+        if part is not None:
+            child_env.update(LCM_LONGMEMEVAL_EMBED_CACHE=str(caches[role].parent / "parts" / f"part-{part}.sqlite"),
+                             LCM_D1_BUILD_PARTITION=f"{part}/{args.build_workers}",
+                             LCM_D1_ORT_THREADS="1", OMP_NUM_THREADS="1")
         with (args.output / f"{role}-{name}.log").open("w") as log:
             return run_child([sys.executable, str(Path(__file__).resolve()), "--worker", products[role], pins[role], instrument, *command], cwd=products[role], env=child_env, stdout=log, stderr=subprocess.STDOUT, timeout=args.worker_timeout, interrupt=interrupt)
 
     # Enumerate the product's actual chunk/summary units in each tree, including
-    # the placebo corpus. Only this serial phase is allowed to write the cache.
-    from benchmarking.d1_cache import seal
+    # the placebo corpus. Only this pre-embed phase is allowed to write the cache.
+    from benchmarking.d1_cache import merge, seal
     manifests, role_threads, preembed = {}, {}, []
-    for role in products:
-        if interrupt[0]:
-            break
-        caches[role].parent.mkdir()
-        for name, prepared in (("preembed", args.prepared_dir), ("preembed-aa", args.aprime_dir)):
-            command = ["prewarm-cache", "--prepared-dir", str(prepared.resolve()), "--shards-manifest", str(prepared.resolve()), *common]
-            result = invoke(role, name, command, "build")
-            preembed.append({"role": role, "arm": name, **result})
-            if result["exit_code"]:
+    if args.build_workers == 1:
+        for role in products:
+            if interrupt[0]:
                 break
-            role_threads[role] = json.loads((args.output / f"{role}-{name}-threads.json").read_text())
-        if preembed[-1]["exit_code"]:
-            continue
-        manifests[role] = seal(caches[role])
+            caches[role].parent.mkdir()
+            for name, prepared in (("preembed", args.prepared_dir), ("preembed-aa", args.aprime_dir)):
+                command = ["prewarm-cache", "--prepared-dir", str(prepared.resolve()), "--shards-manifest", str(prepared.resolve()), *common]
+                result = invoke(role, name, command, "build")
+                preembed.append({"role": role, "arm": name, **result})
+                if result["exit_code"]:
+                    break
+                role_threads[role] = json.loads((args.output / f"{role}-{name}-threads.json").read_text())
+            if preembed[-1]["exit_code"]:
+                continue
+            manifests[role] = seal(caches[role])
+    else:
+        for role in products:
+            (caches[role].parent / "parts").mkdir(parents=True)
+
+        def build(task):
+            role, part = task
+            rows = []
+            for name, prepared in (("preembed", args.prepared_dir), ("preembed-aa", args.aprime_dir)):
+                command = ["prewarm-cache", "--prepared-dir", str(prepared.resolve()), "--shards-manifest", str(prepared.resolve()), *common]
+                began = time.monotonic()
+                result = invoke(role, f"{name}-part-{part}", command, "build", part=part)
+                rows.append({"role": role, "part": part, "arm": name, **result, "elapsed_s": time.monotonic() - began})
+                if result["exit_code"] or interrupt[0]:
+                    break
+            return rows
+
+        builds = run_pool([(role, part) for role in products for part in range(args.build_workers)], 2 * args.build_workers, build)
+        preembed = [row for rows in builds for row in rows]
+        merged_entries, duplicate_keys = {}, {}
+        for role in products:
+            rows = [row for row in preembed if row["role"] == role]
+            if interrupt[0] or any(row["exit_code"] for row in rows):
+                continue
+            for row in rows:
+                role_threads[role] = json.loads((args.output / f"{role}-{row['arm']}-part-{row['part']}-threads.json").read_text())
+            parts = [caches[role].parent / "parts" / f"part-{part}.sqlite" for part in range(args.build_workers)]
+            merged_entries[role], duplicate_keys[role] = merge(parts, caches[role])
+            manifests[role] = seal(caches[role])
     tasks = [(role, path.parent.name, path.parent) for role in products for path in shards]
     tasks += [(role, name, args.aprime_dir) for role in products for name in ("aa-A", "aa-Aprime")]
 
@@ -220,6 +256,8 @@ def _main(argv, interrupt):
                "ort_threads_per_shard_cap": threads, "thread_budget": args.thread_budget,
                "wall_seconds": time.monotonic() - started, "arms": arms,
                "not_proven": "Eight-hour acceptance requires the complete quiet-window run; recall equivalence is a separate gate."}
+    if args.build_workers > 1:
+        receipt.update(build_workers=args.build_workers, merged_entries=merged_entries, duplicate_keys=duplicate_keys)
     (args.output / "d1-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     return 128 + interrupt[0] if interrupt[0] else int(not budget_ok or any(row["exit_code"] for row in preembed) or any(arm["exit_code"] or arm["parse_error"] for arm in arms))
 
