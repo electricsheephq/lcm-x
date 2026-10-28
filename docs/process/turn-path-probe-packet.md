@@ -43,7 +43,10 @@ a fixture. Inventory failures name the observed-attribute or scenario set to upd
 Regenerate once, attribute every changed event in the PR, never regenerate to hide a behaviour change. Name the commit or
 behaviour change that explains each changed event in the PR description.
 
-CI compares each changed golden's outcome events with the PR's base (the merge commit's first parent): returns, raises, final state, caller input, and the stored rows, DAG, lifecycle and cursor snapshots. It ignores SQL, other attribute snapshots, logs and helper order.
+For the ingest, compress, reconcile and assembly goldens, CI compares each changed golden's outcome events with the PR's
+base (the merge commit's first parent). Outcome events are returns, raises, final state, caller input, and the stored
+rows, DAG, lifecycle and cursor snapshots. The gate ignores SQL, other attribute snapshots, logs and helper order. The
+summary-chain and backfill goldens are not gated yet (#2068).
 For intended changes, add the scenario under its family in `tests/fixtures/golden_outcome_changes.json` with
 the gate's `outcome_sha` and a one-line `reason` naming the commit or behaviour change; commit it with the golden.
 Added/removed scenarios also require entries (removal hashes an empty outcome list); stale entries are advisory.
