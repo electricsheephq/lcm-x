@@ -6,6 +6,17 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+## v0.29.1 (compaction fixes)
+
+- **Compaction gets past an unresolved retained row.** When the stored history before a row the host still holds could not be cut, compaction now summarises the blocked rows from the stored copy and moves on; the host's copy stays in context (duplicated, never lost). It also works in the protected recent turns and behind a backlog larger than one leaf. The escape records hashes for up to 256 rows per session in the existing session metadata, and each escape pass logs one WARNING (row IDs, role and kind only) plus an `escaped=` field on the compaction stop line (#1162, #1880, PR #2003).
+- **The 10-minute pause after a no-progress pass holds again.** The running engine waits the full 600 s, as v0.28.1 did; a restarted engine still reads the saved record, whose fingerprint now tracks only this session (#1880, PR #2002).
+- **Summaries read a leaf's rows in store order after a host reorder**, with each tool call before its results; leaf coverage and stored rows are unchanged (#2007, #2011, PR #2012).
+- **A re-stamped tool turn after a cold restart is stored:** a pair whose known timestamps differ from the stored pair is no longer matched as a retry (#1967, PR #1969).
+- **Doctor:** local recall reads ready, preparing or unavailable; model faults and coverage read errors are separate; a stalled catch-up is reported as a problem; an exhausted model preparation retries from existing background triggers with bounded backoff (#1959, PR #1976).
+- **Install payload:** documentation links fall back to `main` for an unknown version; the payload README omits links to pages missing from its source commit; link checks resolve from the linking page (#1960, PR #1977, PR #1985).
+- **Testing:** pinned-host fixtures load each host's real profile helpers and the catalog-scanner test expects each host's verdict (#1968, #1975, PR #1972, PR #1979); reliability re-score inputs are kept and undecidable cells refused (#1987, PR #1988, PR #1991); benchmark producers and the D1 local-recall arm are fixed (#1959, #1971, PR #1965, PR #1973, PR #1974, PR #1980, PR #1981); patch releases run the gauntlet rows their diff selects (#1995, PR #2008, PR #2009).
+- **Store:** the schema version stays 5; no new settings. Rollback target: v0.29.0.
+
 ## v0.29.0 (agentic memory)
 
 - **Local semantic recall is on by default.** On-device embeddings (fastembed with `BAAI/bge-small-en-v1.5`) are used out of the box; nothing leaves the machine. The dependency comes from the companion plugin `hermes-lcm-x-local-embeddings`, which `scripts/install.sh` offers. Until the companion, the model and the index are ready, recall answers from full-text search and reports `degraded=true` with the reason. The model fetch and the one-time catch-up run in the background; a recall can start preparation that may download the model, but queries never wait for it. `lcm_doctor` shows model readiness separately from index coverage. Opt out with `LCM_EMBEDDINGS_ENABLED=false` (#1186, PR #1956).
