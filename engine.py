@@ -1910,11 +1910,14 @@ class LCMEngine(
         # LCM_CONTEXT_THRESHOLD alone drifts with context_length.
         try:
             absolute = getattr(self, "_absolute_threshold_tokens", None)
-            absolute_threshold_tokens = int(
-                (lcm_env_get("LCM_ABSOLUTE_THRESHOLD_TOKENS", "0") if absolute is None else absolute) or 0
-            )
+            raw_absolute = lcm_env_get("LCM_ABSOLUTE_THRESHOLD_TOKENS", "") if absolute is None else absolute
+            absolute_threshold_tokens = int(raw_absolute) if str(raw_absolute or "").strip() else None
         except (TypeError, ValueError):
-            absolute_threshold_tokens = 0
+            absolute_threshold_tokens = None
+        if absolute_threshold_tokens is None:
+            # config.yaml lcm.context_threshold_tokens, resolved by LCMConfig.from_env()
+            # with LCM_ABSOLUTE_THRESHOLD_TOKENS taking precedence (#48).
+            absolute_threshold_tokens = int(getattr(self._config, "absolute_threshold_tokens", 0) or 0)
         if absolute_threshold_tokens > 0:
             self.threshold_tokens = absolute_threshold_tokens
             # Keep route-specific ratio auto-raise from re-climbing the
