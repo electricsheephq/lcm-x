@@ -2,6 +2,7 @@
 
 import hashlib
 import sqlite3
+from contextlib import nullcontext
 
 import pytest
 
@@ -90,6 +91,10 @@ def test_digest_encoding():
     assert ledger_digest(salt, "ab", "c") != ledger_digest(salt, "a", "bc")
     assert ledger_digest(salt, None) != ledger_digest(salt, "")
     assert ledger_digest(salt, b"1") != ledger_digest(salt, "1") != ledger_digest(salt, 1)
+    with pytest.raises(TypeError):
+        ledger_digest(salt, True)
+    with pytest.raises(OverflowError):
+        ledger_digest(salt, 2**63)
 
 
 def test_interim_stamp_classification_unchanged(store):
@@ -101,6 +106,9 @@ def test_interim_stamp_classification_unchanged(store):
     assert before == db_bootstrap.VERSION_MISMATCH_INTERIM_STAMP
     store.ensure_ingest_ledger()
     assert db_bootstrap.classify_version_mismatch(store.connection) == before
+    with store.atomic():
+        store.connection.execute("CREATE TABLE ingest_views_v2 (id INTEGER)")
+    assert db_bootstrap.classify_version_mismatch(store.connection) == db_bootstrap.VERSION_MISMATCH_GENUINELY_NEWER
 
 
 def test_failed_creation_does_not_cache_uncommitted_schema(store, monkeypatch):
@@ -120,5 +128,21 @@ def test_failed_creation_does_not_cache_uncommitted_schema(store, monkeypatch):
         "SELECT 1 FROM lcm_migration_state WHERE step_name='ingest_ledger_v1'"
     ).fetchone()
     monkeypatch.setattr(store_module, "mark_migration_step_complete", mark)
+    store.ensure_ingest_ledger()
+    assert store.ingest_ledger_state() == "ready"
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+def test_enclosing_owner_cannot_create_ledger(store, rollback):
+    outer_result = pytest.raises(RuntimeError, match="outer rollback") if rollback else nullcontext()
+    with outer_result, store.atomic():
+        assert not store.connection.in_transaction
+        with pytest.raises(sqlite3.OperationalError, match="own transaction"):
+            store.ensure_ingest_ledger()
+        if rollback:
+            raise RuntimeError("outer rollback")
+    tables = {row[0] for row in store.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert tables.isdisjoint(store_module._INGEST_LEDGER_TABLES)
+    assert store.ingest_ledger_state() == "absent"
     store.ensure_ingest_ledger()
     assert store.ingest_ledger_state() == "ready"

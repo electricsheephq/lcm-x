@@ -76,6 +76,7 @@ def ledger_digest(salt: bytes, *parts) -> bytes:
     """Digest the P1b-defined identity tuple before redaction (design M4).
 
     Each part has a one-byte type tag and an eight-byte big-endian payload length.
+    An int outside the signed 64-bit range raises OverflowError.
     """
     digest = hashlib.blake2b(key=salt, digest_size=16)
     for part in parts:
@@ -85,6 +86,8 @@ def ledger_digest(salt: bytes, *parts) -> bytes:
             tag, payload = b"b", part
         elif isinstance(part, str):
             tag, payload = b"s", part.encode("utf-8")
+        elif isinstance(part, bool):
+            raise TypeError("unsupported ledger digest part: bool")
         elif isinstance(part, int):
             tag, payload = b"i", part.to_bytes(8, "big", signed=True)
         else:
@@ -1314,7 +1317,7 @@ class MessageStore:
     def ensure_ingest_ledger(self) -> None:
         """Idempotently create the ledger and its per-store metadata in one transaction."""
         with self._write_lock:
-            if self._conn.in_transaction:
+            if self._conn.in_transaction or self._transaction_owner.owns(self._conn):
                 raise sqlite3.OperationalError("ingest ledger setup requires its own transaction")
             with self.atomic(immediate=True):
                 self._ensure_ingest_ledger_schema()

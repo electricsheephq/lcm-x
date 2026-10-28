@@ -61,6 +61,10 @@ class TransactionOwner:
         self._lock = lock
         self._active_connection: sqlite3.Connection | None = None
 
+    def owns(self, conn: sqlite3.Connection) -> bool:
+        """Whether an enclosing atomic scope owns this connection, even before a write."""
+        return self._active_connection is conn
+
     def commit(self, conn: sqlite3.Connection) -> None:
         """Flush standalone helper writes; an enclosing atomic block flushes itself."""
         if self._active_connection is None or self._active_connection is not conn:
