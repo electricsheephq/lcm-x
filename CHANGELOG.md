@@ -8,7 +8,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## v0.29.1 (compaction fixes)
 
-- **Compaction gets past an unresolved retained row.** When the stored history before a row the host still holds could not be cut, compaction now summarises the blocked rows from the stored copy and moves on; the host's copy stays in context (duplicated, never lost). It also works in the protected recent turns and behind a backlog larger than one leaf. The escape records up to 256 row hashes per session in the existing session metadata (#1162, #1880, PR #2003).
+- **Compaction gets past an unresolved retained row.** When the stored history before a row the host still holds could not be cut, compaction now summarises the blocked rows from the stored copy and moves on; the host's copy stays in context (duplicated, never lost). It also works in the protected recent turns and behind a backlog larger than one leaf. The escape records hashes for up to 256 rows per session in the existing session metadata, and each escape pass logs one WARNING (row IDs, role and kind only) plus an `escaped=` field on the compaction stop line (#1162, #1880, PR #2003).
 - **The 10-minute pause after a no-progress pass holds again.** The running engine waits the full 600 s, as v0.28.1 did; a restarted engine still reads the saved record, whose fingerprint now tracks only this session (#1880, PR #2002).
 - **Summaries read a leaf's rows in store order after a host reorder**, with each tool call before its results; leaf coverage and stored rows are unchanged (#2007, #2011, PR #2012).
 - **A re-stamped tool turn after a cold restart is stored:** a pair whose known timestamps differ from the stored pair is no longer matched as a retry (#1967, PR #1969).
