@@ -26,7 +26,7 @@ Release dates are ceilings, not schedules: a release ships as soon as its gate p
    .github/release-notes/ — AND nothing under bench/instruments/release_gauntlet/ (a changed
    gauntlet invalidates its own receipts) — the carried receipt is referenced WITH the diff-scope proof
    (`git diff rcN..rcN+1 --name-only`) recorded beside it. Any product-code delta re-runs all
-   affected phases (ingest/recall/privacy deltas re-run everything).
+   affected phases (ingest/recall/privacy deltas re-run everything; under the Tiers section, every selected row).
 5. **GA tag `vX.Y.Z`** only when A+B+C+D receipts are green for the passing rc tree (under the Tiers section,
    the receipts for the selected rows). Because
    release.yml reads curated notes from the tagged tree, the GA commit may differ from the rc
@@ -45,8 +45,8 @@ rows and identify rows assigned to M; an unrun selected gating row is never gree
   and the reference-agent window (D5), and the upgrade/rollback roundtrip.
 - **T, per release:** the rows behind that release's own gate, named in its milestone
   and `ROADMAP.md`. For a patch release, T is the rows the promotion map selects for its
-  diff, plus any row its milestone names. For v0.29.1, D1 (in the shipped LOCAL default) and D8
-  are also T rows, because the v0.29.0-only decisions below commit them to v0.29.1. D2 runs in
+  diff, plus any row its milestone names. For v0.29.1, D1 (in the shipped LOCAL default) and D4/D8
+  are also T rows (D8 reads D4's runs), because the v0.29.0-only decisions below commit them to v0.29.1. D2 runs in
   v0.29.1 only when this selection selects it, and the D2 validity addition those decisions name
   applies to that run.
 - **M, weekly on main:** every other row, run on the main tip once a week, with receipts kept.
