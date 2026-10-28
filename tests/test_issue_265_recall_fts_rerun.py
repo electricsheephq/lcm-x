@@ -132,7 +132,7 @@ def recall_case(recall_engine, monkeypatch):
         source="chat",
     )
     real_fts = lcm_tools._lcm_recall_fts_arm
-    calls = []
+    calls, starts = [], []
 
     def make_fts(second="real", *, capped=True, advance=True):
         if capped:
@@ -140,6 +140,7 @@ def recall_case(recall_engine, monkeypatch):
 
         def fts(engine, query, *, candidate_limit, deadline, excluded_session_ids):
             calls.append((deadline, candidate_limit, frozenset(excluded_session_ids)))
+            starts.append(clock[0])
             if len(calls) == 1 or second == "expire":
                 if advance:
                     clock[0] = deadline
@@ -150,6 +151,8 @@ def recall_case(recall_engine, monkeypatch):
                     "timeout_stage": "full_text",
                 }
             assert len(calls) == 2
+            if second == "fail":  # fails without a timeout, before the deadline
+                return [], {"error": "full-text worker failed", "mode": "recall"}
             return real_fts(
                 engine, query, candidate_limit=candidate_limit, deadline=deadline,
                 excluded_session_ids=excluded_session_ids,
@@ -159,7 +162,7 @@ def recall_case(recall_engine, monkeypatch):
 
     return SimpleNamespace(
         engine=recall_engine, clock=clock, node=node, sid=sid,
-        calls=calls, make_fts=make_fts,
+        calls=calls, starts=starts, make_fts=make_fts,
     )
 
 
@@ -171,6 +174,14 @@ def _recall(case, **args):
 
 def _reasons(payload):
     return payload.get("degraded_reason", "").split("; ")
+
+
+def _assert_reran_once_under_remaining_deadline(case):
+    # The capped arm gets a quarter of the 8 s request budget (100 to 102). The
+    # re-run starts when that cap has expired and gets the rest of the request:
+    # exactly one more call, from 102 up to the request deadline at 108.
+    assert case.starts == [100.0, 102.0]
+    assert [call[0] for call in case.calls] == [102.0, 108.0]
 
 
 @pytest.mark.parametrize("outcome", ("raises", "none"))
@@ -185,9 +196,7 @@ def test_capped_fts_reruns_when_provider_resolution_fails(recall_case, monkeypat
 
     monkeypatch.setattr(lcm_tools, "_resolve_recall_provider", resolve)
     payload = _recall(case)
-    assert len(case.calls) == 2
-    assert case.calls[0][0] == 102.0
-    assert case.calls[1][0] == 108.0
+    _assert_reran_once_under_remaining_deadline(case)
     assert case.calls[0][1:] == case.calls[1][1:]
     provenance = payload["provenance"]
     assert provenance["coverage"]["fts"] == "ok"
@@ -207,9 +216,7 @@ def test_capped_fts_reruns_when_strict_summaries_yield_only_leads(recall_case, m
     monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: MockProvider())
     assert case.engine._config.recall_reference_strict is True
     payload = _recall(case, detail="answer_ready")
-    assert len(case.calls) == 2
-    assert case.calls[0][0] == 102.0
-    assert case.calls[1][0] == 108.0
+    _assert_reran_once_under_remaining_deadline(case)
     assert payload["hits"]
     assert all(hit["kind"] == "message_excerpt" for hit in payload["hits"])
     assert case.sid in {hit["store_id"] for hit in payload["hits"]}
@@ -227,12 +234,42 @@ def test_rerun_that_expires_reports_request_timeout(recall_case, monkeypatch):
     case.make_fts("expire")
     monkeypatch.setattr(lcm_tools, "_resolve_recall_provider", lambda *_a, **_k: None)
     payload = _recall(case)
-    assert len(case.calls) == 2
-    assert [call[0] for call in case.calls] == [102.0, 108.0]
+    _assert_reran_once_under_remaining_deadline(case)
     assert payload["provenance"]["coverage"]["fts"] == "none"
     assert "full-text arm unavailable" in _reasons(payload)
     assert CAPPED_REASON not in _reasons(payload)
     assert payload["timeout"] is True
+    assert payload["provenance"]["fts_rerun"] is True
+    assert payload["hits"] == []
+
+
+def test_successful_rerun_without_other_degradation_is_not_degraded(recall_case, monkeypatch):
+    case = recall_case
+    case.make_fts()
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: MockProvider())
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_catchup_reason", lambda *_a, **_k: None)
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_summary_arm", lambda *_a, **_k: ([], "full", 1, 1, []))
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_chunk_arm", lambda *_a, **_k: ([], "full", 1, 1))
+    payload = _recall(case)
+    _assert_reran_once_under_remaining_deadline(case)
+    assert case.sid in {hit["store_id"] for hit in payload["hits"]}
+    assert payload["provenance"]["coverage"]["fts"] == "ok"
+    assert payload["provenance"]["fts_rerun"] is True
+    assert payload["degraded"] is False
+    assert "degraded_reason" not in payload
+    assert "timeout" not in payload
+
+
+def test_rerun_that_fails_without_timeout_reports_unavailable(recall_case, monkeypatch):
+    case = recall_case
+    case.make_fts("fail")
+    monkeypatch.setattr(lcm_tools, "_resolve_recall_provider", lambda *_a, **_k: None)
+    payload = _recall(case)
+    _assert_reran_once_under_remaining_deadline(case)
+    assert payload["provenance"]["coverage"]["fts"] == "none"
+    assert "full-text arm unavailable" in _reasons(payload)
+    assert CAPPED_REASON not in _reasons(payload)
+    assert "timeout" not in payload
     assert payload["provenance"]["fts_rerun"] is True
     assert payload["hits"] == []
 

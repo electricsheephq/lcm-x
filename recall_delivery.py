@@ -44,6 +44,7 @@ def deliver_recall(
     degraded_reasons: list[str],
     timed_out: bool,
     fts_anchor_info: dict[str, Any] | None,
+    fts_rerun: bool = False,
     summary_leads: list[dict[str, Any]],
     limit_cap: int,
     snippet_chars: int,
@@ -353,6 +354,8 @@ def deliver_recall(
     }
     if rerank_enabled() and rerank_scores:
         response["provenance"]["rerank_scores"] = rerank_scores
+    if fts_rerun:
+        response["provenance"]["fts_rerun"] = True
     if fts_anchor_info is not None and len(arm_order) > 1:
         # The anchor only places the hit in the ranked window; answer_ready
         # selection (citation and per-session rules) and the response cap still
