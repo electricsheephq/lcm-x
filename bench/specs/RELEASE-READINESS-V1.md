@@ -290,7 +290,7 @@ not re-score or rewrite any past raw verdict. The comparison arm is the previous
 - **Statistic.** At cp-304, take the mean over seeds of candidate mean run share minus
   comparison mean run share. Estimate pooled variance after centering each arm×seed group;
   SE = pooled SD × sqrt(2/(seeds×runs)), degrees of freedom = 2×seeds×(runs−1).
-  Order: an incomplete comparison, one over the replacement budget, or one past the elapsed stop is INCONCLUSIVE; otherwise a tripped cp-176 placebo is INCONCLUSIVE; otherwise PASS iff the one-sided 90% lower bound is above −0.05, FAIL otherwise.
+  Order: a summariser timeout or failure shown to be caused or made more likely by the candidate (by a named candidate commit or a reproduction recorded in the receipt) is FAIL; otherwise an incomplete comparison, one over the replacement budget, or one past the elapsed stop is INCONCLUSIVE; otherwise a tripped cp-176 placebo is INCONCLUSIVE; otherwise FAIL unless the one-sided 90% lower bound is above −0.05; otherwise, in a gated comparison, a candidate arm with at least 2 more service-invalid attempts than the comparison arm (every attempt counted, replacements included) is INCONCLUSIVE; otherwise PASS.
 - **Reader placebo.** On the full fixed run set at cp-176, two-sided stratified pooled-t
   p<0.05 AND absolute mean difference≥0.05 makes D2 INCONCLUSIVE. No second look or
   result-dependent continuation is allowed. The old exact 2+2 enumeration is not this test.
@@ -301,7 +301,14 @@ not re-score or rewrite any past raw verdict. The comparison arm is the previous
   instrument's validity checks is invalid, not a low score. Admission loss still fails D3.
 - **Completeness and replacements.** Every planned replay stays in the completeness
   denominator. A failed, partial, rate-limited, missing or truncated replay never earns a
-  score. Keep both attempts; allow at most one replacement per invalid replay that is not rate-limited (a rate-limit
+  score. From v0.29.1's D2 runs, the prospective A/A included, a replay with a summariser call
+  attempt that timed out or failed (retries and fallback attempts included) is service-invalid: it
+  never earns a D2 score and is an invalid replay for the replacement rule that follows; D3's
+  admission check still applies to it. The receipt lists each service-invalid replay (arm, seed,
+  replay index, the summariser events and the rows its survival fit dropped); those rows are
+  reported, not scored, and the product behaviour is tracked in #2004. Service invalidation never
+  waives a release-caused defect: the verdict order above makes a candidate-caused summariser
+  failure FAIL and a candidate-arm excess of service-invalid attempts INCONCLUSIVE. Keep both attempts; allow at most one replacement per invalid replay that is not rate-limited (a rate-limit
    marker triggers the stop below) under
   unchanged pins, and at most 2 replacement attempts across the whole comparison.
   Never rerun a valid low score. If the fixed set cannot complete within budget, return
