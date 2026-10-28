@@ -17,7 +17,8 @@ Release dates are ceilings, not schedules: a release ships as soon as its gate p
 3. **Run the gauntlet** (phases A-D below) against the rc tag. Every phase produces a receipt
    file under the run artifacts directory; the GA cut references all of them. Phase D's full
    tier runs at the rc1 of every release, major, minor or patch (later rcs: its carry-forward rule).
-   From v0.31.0, the Tiers section below selects the required rows; v0.29.x and v0.30.0 keep running all phases.
+   From v0.31.0, and for patch releases from v0.29.1, the Tiers section below selects the required rows; the minor
+   releases v0.29.0 and v0.30.0 run all phases.
 4. **Fix-and-respin**: any P0/P1 finding → fix PR (through the gate) → `-rc2` → re-run.
    Carry-forward rule (every receipt binds an exact tree, so carrying needs proof): **Phase B
    re-runs on every respin** (it is diff-scoped by definition). Phases A and C may carry a prior
@@ -25,25 +26,32 @@ Release dates are ceilings, not schedules: a release ships as soon as its gate p
    .github/release-notes/ — AND nothing under bench/instruments/release_gauntlet/ (a changed
    gauntlet invalidates its own receipts) — the carried receipt is referenced WITH the diff-scope proof
    (`git diff rcN..rcN+1 --name-only`) recorded beside it. Any product-code delta re-runs all
-   affected phases (ingest/recall/privacy deltas re-run everything).
-5. **GA tag `vX.Y.Z`** only when A+B+C+D receipts are green for the passing rc tree. Because
+   affected phases (ingest/recall/privacy deltas re-run everything; under the Tiers section, every selected row).
+5. **GA tag `vX.Y.Z`** only when A+B+C+D receipts are green for the passing rc tree (under the Tiers section,
+   the receipts for the selected rows). Because
    release.yml reads curated notes from the tagged tree, the GA commit may differ from the rc
    tree by EXACTLY the release-notes addition and nothing else — verified mechanically:
    `git diff --name-status rcN..GA` must show ONLY `A` (added) entries under `.github/release-notes/` — modifying or deleting existing notes is not the exception. GA notes =
    rc notes + gauntlet summary + receipt links.
 
-## Tiers (from v0.31.0)
+## Tiers (from v0.31.0; patch releases from v0.29.1)
 
 The tiers select which rows run; selected rows keep their existing pass, validity and
-carry-forward rules. From v0.31.0, this cadence supersedes the every-rc/every-rc1 labels
-below and the full-tier cadence in Pipeline step 3. Phase receipts account for the selected
+carry-forward rules. From v0.31.0, and for patch releases from v0.29.1, this cadence supersedes the every-rc/every-rc1 labels
+and the cadence lines under Carry-forward below, and the full-tier cadence in Pipeline step 3. Phase receipts account for the selected
 rows and identify rows assigned to M; an unrun selected gating row is never green.
 
 - **R, every release candidate:** Phase B, the CI-required checks, the Phase C live soak
   and the reference-agent window (D5), and the upgrade/rollback roundtrip.
 - **T, per release:** the rows behind that release's own gate, named in its milestone
-  and `ROADMAP.md`.
+  and `ROADMAP.md`. For a patch release, T is the rows the promotion map selects for its
+  diff, plus any row its milestone names. For v0.29.1, D1 (in the shipped LOCAL default) and D4/D8
+  are also T rows (D8 reads D4's runs), because the v0.29.0-only decisions below commit them to v0.29.1. D2 runs in
+  v0.29.1 only when this selection selects it, and the D2 validity addition those decisions name
+  applies to that run.
 - **M, weekly on main:** every other row, run on the main tip once a week, with receipts kept.
+  Before v0.31.0 there is no weekly M run: a patch release's unselected rows are not run, and
+  its release notes list them as not run.
 
 **Promotion map.** Ingest, storage or retry changes promote Phase A, D1 and D4/D8 into
 the rc; compaction or summariser changes promote D2/D3 and D7; recall or delivery changes
