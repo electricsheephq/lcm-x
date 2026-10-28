@@ -15,6 +15,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - **Doctor:** local recall reads ready, preparing or unavailable; model faults and coverage read errors are separate; a stalled catch-up is reported as a problem; an exhausted model preparation retries from existing background triggers with bounded backoff (#1959, PR #1976).
 - **Install payload:** documentation links fall back to `main` for an unknown version; the payload README omits links to pages missing from its source commit; link checks resolve from the linking page (#1960, PR #1977, PR #1985).
 - **Testing:** pinned-host fixtures load each host's real profile helpers and the catalog-scanner test expects each host's verdict (#1968, #1975, PR #1972, PR #1979); reliability re-score inputs are kept and undecidable cells refused (#1987, PR #1988, PR #1991); benchmark producers and the D1 local-recall arm are fixed (#1959, #1971, PR #1965, PR #1973, PR #1974, PR #1980, PR #1981); patch releases run the gauntlet rows their diff selects (#1995, PR #2008, PR #2009).
+- **rc2:** after a compaction's session rotation, the new session also reads the escape records of its verified compression parents; in rc1, compaction could stop making progress after a rotation (#2027, PR #2028). Compress-trace goldens pin the host message-ID probe (PR #2028); the reliability matrix pins `pyasn1` on 0.21.x hosts (PR #2023).
 - **Store:** the schema version stays 5; no new settings. Rollback target: v0.29.0.
 
 ## v0.29.0 (agentic memory)
