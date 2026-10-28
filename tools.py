@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 import math
+import os
 import re
 import sqlite3
 import threading
@@ -184,6 +185,20 @@ def _session_and_lineage(engine: "LCMEngine", session_id: str) -> set[str]:
     return {session_id, *(lineage(session_id) if callable(lineage) else [])}
 
 
+def _is_inside_named_profile(path: Path, home: Path) -> bool:
+    profiles = home / "profiles"
+    try:
+        profiles.stat()
+    except FileNotFoundError:
+        return False
+    profile_dirs = (profiles, *profiles.iterdir())
+    for parent in (path, *path.parents):
+        if parent.is_relative_to(home):
+            if any(os.path.samefile(parent, profile) for profile in profile_dirs):
+                return True
+    return False
+
+
 def _get_externalized_payload(
     engine: "LCMEngine",
     ref: str,
@@ -199,10 +214,14 @@ def _get_externalized_payload(
             storage_dir = get_large_output_storage_dir(
                 engine._config, hermes_home=engine._hermes_home, create=False
             ).resolve()
+            payload_path = (storage_dir / ref).resolve()
             storage_dir.relative_to(home)
-            if storage_dir.is_relative_to(home / "profiles"):
+            payload_path.relative_to(storage_dir)
+            if (
+                _is_inside_named_profile(storage_dir, home)
+                or _is_inside_named_profile(payload_path, home)
+            ):
                 return None
-            (storage_dir / ref).resolve().relative_to(storage_dir)
         except (OSError, RuntimeError, ValueError):
             return None
     payload = load_externalized_payload(ref, config=engine._config, hermes_home=engine._hermes_home)

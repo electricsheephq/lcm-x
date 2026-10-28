@@ -157,11 +157,24 @@ def test_explicit_session_rejects_cross_profile_payload_path(tmp_path, path_mode
         engine.shutdown()
 
 
-@pytest.mark.parametrize("path_mode", ["configured_directory", "directory_symlink"])
-def test_explicit_session_rejects_nested_profile_payload_path(tmp_path, path_mode):
+@pytest.mark.parametrize("path_mode", [
+    "configured_directory", "directory_symlink", "symlinked_profiles_dir",
+    "symlinked_named_profile", "payload_target_symlink", "case_variant", "root_default",
+])
+def test_explicit_session_nested_profile_payload_containment(tmp_path, path_mode):
+    if path_mode == "case_variant":
+        (tmp_path / "case-probe").write_text("probe", encoding="utf-8")
+        if not (tmp_path / "CASE-PROBE").exists():
+            pytest.skip("requires a case-insensitive filesystem")
     engine = _rotation_engine(tmp_path, hermes_home=tmp_path)
-    other_home = tmp_path / "profiles" / "work"
+    profile_parent = {"symlinked_profiles_dir": "alternate", "symlinked_named_profile": "elsewhere"}
+    other_home = tmp_path / profile_parent.get(path_mode, "profiles") / "work"
     other_home.mkdir(parents=True)
+    if path_mode == "symlinked_profiles_dir":
+        (tmp_path / "profiles").symlink_to(other_home.parent, target_is_directory=True)
+    elif path_mode == "symlinked_named_profile":
+        (tmp_path / "profiles").mkdir()
+        (tmp_path / "profiles" / "work").symlink_to(other_home, target_is_directory=True)
     other = _rotation_engine(other_home, hermes_home=other_home)
     try:
         _restart(other, session_id="work-session")
@@ -169,14 +182,27 @@ def test_explicit_session_rejects_nested_profile_payload_path(tmp_path, path_mod
         other_storage = get_large_output_storage_dir(
             other._config, hermes_home=other._hermes_home, create=False
         )
-        if path_mode == "configured_directory":
-            engine._config.large_output_externalization_path = str(other_storage)
-        else:
+        assert _expand(other, externalized_ref=ref, session_id="work-session")["content"]
+        if path_mode == "root_default":
+            content = "RESULT from root profile " * 50
+            ref = _externalize(engine, "session-a", content)
+            _restart(engine)
+            assert _expand(engine, externalized_ref=ref, session_id="session-a")["content"] == content
+            return
+        if path_mode == "payload_target_symlink":
+            engine._config.large_output_externalization_path = str(tmp_path)
+            (tmp_path / ref).symlink_to(other_storage / ref)
+        elif path_mode == "case_variant":
+            engine._config.large_output_externalization_path = str(
+                tmp_path / "Profiles" / other_storage.relative_to(tmp_path / "profiles")
+            )
+        elif path_mode == "directory_symlink":
             storage = get_large_output_storage_dir(
                 engine._config, hermes_home=engine._hermes_home, create=False
             )
             storage.symlink_to(other_storage, target_is_directory=True)
-        assert _expand(other, externalized_ref=ref, session_id="work-session")["content"]
+        else:
+            engine._config.large_output_externalization_path = str(other_storage.resolve())
         assert _expand(engine, externalized_ref=ref, session_id="work-session") == {
             "error": f"Externalized payload {ref} not found in session work-session"
         }
