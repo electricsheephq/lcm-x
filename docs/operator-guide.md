@@ -10,7 +10,7 @@ adoption; this file is the operator reference.
 
 - Hermes Agent with the pluggable context engine slot ([PR #7464](https://github.com/NousResearch/hermes-agent/pull/7464))
 - Python 3.11+
-- No required third-party runtime dependencies. `tiktoken` is used if available; otherwise LCM falls back to character-based token estimates. `regex` is used if available to apply timeouts to message ignore patterns; if it is not installed, message-level regex filtering is disabled with a warning rather than running unbounded stdlib `re` matches.
+- No required third-party runtime dependencies. `tiktoken` is used if available; otherwise LCM falls back to character-based token estimates. `/lcm status` and `/lcm doctor` show which one is active (`token_counter: tiktoken` or `token_counter: char_estimate`; `not_loaded` before anything has been counted in the process). `regex` is used if available to apply timeouts to message ignore patterns; if it is not installed, message-level regex filtering is disabled with a warning rather than running unbounded stdlib `re` matches.
 - Images in structured message content (list parts of type `image`, `image_url` or `input_image`, and multimodal tool results) count at the host's per-image price (`agent.image_token_cost`, default 1,500 tokens), not by the characters of the encoded image. Image data inside plain text content counts as text.
 
 ## Install
