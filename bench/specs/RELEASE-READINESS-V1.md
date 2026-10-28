@@ -293,11 +293,15 @@ not re-score or rewrite any past raw verdict. The comparison arm is the previous
   instrument's validity checks is invalid, not a low score. Admission loss still fails D3.
 - **Completeness and replacements.** Every planned replay stays in the completeness
   denominator. A failed, partial, rate-limited, missing or truncated replay never earns a
-  score. From v0.29.1, a replay in which any summariser call timed out or failed is
-  service-invalid: it never earns a score and is an invalid replay for the replacement rule that follows. The receipt lists
-  each service-invalid replay (arm, seed, replay index, the summariser events and the rows its
-  survival fit dropped); those rows are reported, not scored, and the product behaviour is
-  tracked in #2004. Keep both attempts; allow at most one replacement per invalid replay that is not rate-limited (a rate-limit
+  score. From v0.29.1's D2 runs, the prospective A/A included, a replay with a summariser call
+  attempt that timed out or failed (retries and fallback attempts included) is service-invalid: it
+  never earns a D2 score and is an invalid replay for the replacement rule that follows; D3's
+  admission check still applies to it. The receipt lists each service-invalid replay (arm, seed,
+  replay index, the summariser events and the rows its survival fit dropped); those rows are
+  reported, not scored, and the product behaviour is tracked in #2004. Service invalidation never
+  waives a release-caused defect: in a gated comparison, D2 is INCONCLUSIVE when the candidate arm
+  has more service-invalid replays than the comparison arm, and FAIL when a summariser timeout or
+  failure is shown to be caused or made more likely by the candidate. Keep both attempts; allow at most one replacement per invalid replay that is not rate-limited (a rate-limit
    marker triggers the stop below) under
   unchanged pins, and at most 2 replacement attempts across the whole comparison.
   Never rerun a valid low score. If the fixed set cannot complete within budget, return
