@@ -211,6 +211,30 @@ def test_explicit_session_nested_profile_payload_containment(tmp_path, path_mode
         engine.shutdown()
 
 
+def test_explicit_session_skips_dangling_profile_link(tmp_path):
+    engine = _rotation_engine(tmp_path, hermes_home=tmp_path)
+    other_home = tmp_path / "profiles" / "work"
+    other_home.mkdir(parents=True)
+    (tmp_path / "profiles" / "gone").symlink_to(tmp_path / "missing", target_is_directory=True)
+    other = _rotation_engine(other_home, hermes_home=other_home)
+    try:
+        _restart(other, session_id="work-session")
+        other_ref = _externalize(other, "work-session", "RESULT from nested profile " * 50)
+        content = "RESULT from root profile " * 50
+        ref = _externalize(engine, "session-a", content)
+        _restart(engine)
+        assert _expand(engine, externalized_ref=ref, session_id="session-a")["content"] == content
+        engine._config.large_output_externalization_path = str(
+            get_large_output_storage_dir(other._config, hermes_home=other._hermes_home, create=False)
+        )
+        assert _expand(engine, externalized_ref=other_ref, session_id="work-session") == {
+            "error": f"Externalized payload {other_ref} not found in session work-session"
+        }
+    finally:
+        other.shutdown()
+        engine.shutdown()
+
+
 def test_explicit_session_requires_payload_ownership(tmp_path):
     engine = _rotation_engine(tmp_path)
     try:
