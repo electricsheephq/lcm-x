@@ -175,16 +175,40 @@ def _session_expand_hint(node_id: int, session_id: str) -> str:
     return f"lcm_expand(node_id={node_id}, session_id={session_id!r})"
 
 
+def _externalized_expand_hint(ref: str, session_id: str) -> str:
+    return f"lcm_expand(externalized_ref={ref!r}, session_id={session_id!r})"
+
+
+def _session_and_lineage(engine: "LCMEngine", session_id: str) -> set[str]:
+    lineage = getattr(engine, "_rotation_predecessor_session_ids", None)
+    return {session_id, *(lineage(session_id) if callable(lineage) else [])}
+
+
 def _get_externalized_payload(
     engine: "LCMEngine",
     ref: str,
     *,
     allowed_session_ids: set[str] | None = None,
+    require_profile_containment: bool = False,
 ) -> dict[str, Any] | None:
+    if require_profile_containment:
+        if not engine._hermes_home or not ref or Path(ref).name != ref:
+            return None
+        try:
+            home = Path(engine._hermes_home).expanduser().resolve()
+            storage_dir = get_large_output_storage_dir(
+                engine._config, hermes_home=engine._hermes_home, create=False
+            ).resolve()
+            storage_dir.relative_to(home)
+            (storage_dir / ref).resolve().relative_to(storage_dir)
+        except (OSError, RuntimeError, ValueError):
+            return None
     payload = load_externalized_payload(ref, config=engine._config, hermes_home=engine._hermes_home)
     if payload is None:
         return None
     payload_session_id = payload.get("session_id") or ""
+    if require_profile_containment and not payload_session_id:
+        return None
     allowed = allowed_session_ids
     if not allowed:
         # #680: a ref written before a compression-boundary rotation stays readable.
@@ -4555,11 +4579,12 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
     """Expand a summary node, externalized payload, or raw message to its content.
 
     Mode selection (exactly one is required):
-    - ``externalized_ref``: open a stored externalized payload by ref filename (current session only)
+    - ``externalized_ref``: open a stored payload; current session by default, pass ``session_id`` for another
     - ``store_id``: fetch a single raw message by store_id; works across sessions
     - ``node_id``: expand a summary node to its source content (explicit ``session_id`` required cross-session)
 
-    Omitting ``session_id`` preserves current-session node lookup. Carried-over
+    ``session_id`` is valid with ``node_id`` or ``externalized_ref`` only.
+    Omitting it preserves current-session lookup. Carried-over
     current-session nodes may reference raw source rows from the previous session.
     """
     return _expand_tools.lcm_expand(args, **kwargs)

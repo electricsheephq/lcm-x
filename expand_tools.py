@@ -118,11 +118,12 @@ def lcm_expand(args: Dict[str, Any], **kwargs: Any) -> str:
     """Expand a summary node, externalized payload, or raw message to its content.
 
     Mode selection (exactly one is required):
-    - ``externalized_ref``: open a stored externalized payload by ref filename (current session only)
+    - ``externalized_ref``: open a stored payload; current session by default, pass ``session_id`` for another
     - ``store_id``: fetch a single raw message by store_id; works across sessions
     - ``node_id``: expand a summary node to its source content (explicit ``session_id`` required cross-session)
 
-    Omitting ``session_id`` preserves current-session node lookup. Carried-over
+    ``session_id`` is valid with ``node_id`` or ``externalized_ref`` only.
+    Omitting it preserves current-session lookup. Carried-over
     current-session nodes may reference raw source rows from the previous session.
     """
     engine = _tools._require_engine(kwargs)
@@ -159,8 +160,8 @@ def lcm_expand(args: Dict[str, Any], **kwargs: Any) -> str:
 
     session_id_explicit = "session_id" in args
     session_id_arg = args.get("session_id")
-    if session_id_explicit and "node_id" not in modes_provided:
-        return _tools.json.dumps({"error": "session_id is only valid with node_id"})  # type: ignore[attr-defined, no-any-return]
+    if session_id_explicit and not ({"node_id", "externalized_ref"} & set(modes_provided)):
+        return _tools.json.dumps({"error": "session_id is only valid with node_id or externalized_ref"})  # type: ignore[attr-defined, no-any-return]
     if session_id_explicit:
         if not isinstance(session_id_arg, str) or not session_id_arg.strip():
             return _tools.json.dumps({"error": "session_id must be a non-empty string"})  # type: ignore[attr-defined, no-any-return]
@@ -185,7 +186,16 @@ def lcm_expand(args: Dict[str, Any], **kwargs: Any) -> str:
         return _tools.json.dumps({"error": "include_exact_ref is supported only with store_id mode"})  # type: ignore[attr-defined, no-any-return]
 
     if externalized_ref:
-        payload = _tools._get_externalized_payload(engine, externalized_ref)
+        if session_id_explicit:
+            payload = _tools._get_externalized_payload(
+                engine, externalized_ref,
+                allowed_session_ids=_tools._session_and_lineage(engine, session_id),
+                require_profile_containment=True,
+            )
+            if payload is None:
+                return _tools.json.dumps({"error": f"Externalized payload {externalized_ref} not found in session {session_id}"})  # type: ignore[attr-defined, no-any-return]
+        else:
+            payload = _tools._get_externalized_payload(engine, externalized_ref)
         if payload is None:
             return _tools.json.dumps(  # type: ignore[attr-defined, no-any-return]
                 {
@@ -254,8 +264,8 @@ def lcm_expand(args: Dict[str, Any], **kwargs: Any) -> str:
         # Surface externalized-payload metadata when the row references one. Content
         # is not hydrated by default, mirroring the existing _expand_message_sources
         # default. Externalized lookup remains session-scoped (per the existing
-        # _get_externalized_payload contract); cross-session rows surface only the
-        # ref string, with a hint pointing at the same-session expansion path.
+        # _get_externalized_payload contract); cross-session rows carry an
+        # explicit-session expand hint when their session is recorded.
         ref_values = [transcript_content]
         if stored.get("tool_calls"):
             try:
@@ -292,10 +302,18 @@ def lcm_expand(args: Dict[str, Any], **kwargs: Any) -> str:
                     result["externalized_payloads"] = payload_summaries
                     result["externalized"] = payload_summaries[0]
             else:
-                result["externalized_note"] = (
-                    "Externalized payload metadata is session-scoped; "
-                    "cross-session ref is surfaced for traceability only and cannot be expanded in this version."
-                )
+                if stored_session_id:
+                    result["externalized_note"] = (
+                        "Externalized payload metadata is session-scoped; "
+                        "to read this payload from another session call lcm_expand with externalized_ref "
+                        "and the row's session_id (see externalized_expand_hint)."
+                    )
+                    result["externalized_expand_hint"] = _tools._externalized_expand_hint(refs[0], stored_session_id)
+                else:
+                    result["externalized_note"] = (
+                        "Externalized payload metadata is session-scoped; "
+                        "cross-session ref is surfaced for traceability only and cannot be expanded in this version."
+                    )
         return _tools.json.dumps(result)  # type: ignore[attr-defined, no-any-return]
 
     assert raw_node_id_arg is not None

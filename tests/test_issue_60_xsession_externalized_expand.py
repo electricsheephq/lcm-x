@@ -2,9 +2,11 @@
 
 import json
 
+import pytest
+
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
-from hermes_lcm.externalize import maybe_externalize_tool_output
+from hermes_lcm.externalize import get_large_output_storage_dir, maybe_externalize_tool_output
 
 
 def _rotation_engine(tmp_path):
@@ -107,6 +109,79 @@ def test_wrong_explicit_session_is_refused(tmp_path):
             assert result == {"error": "session_id must be a non-empty string"}
         result = _expand(engine, node_id=1, externalized_ref=ref, session_id="session-a")
         assert "Provide only one" in result["error"]
+    finally:
+        engine.shutdown()
+
+
+def test_explicit_session_missing_payload_is_not_found(tmp_path):
+    engine = _rotation_engine(tmp_path)
+    try:
+        ref = _externalize(engine, "session-a", "RESULT in session a " * 50)
+        storage = get_large_output_storage_dir(
+            engine._config, hermes_home=engine._hermes_home, create=False
+        )
+        (storage / ref).unlink()
+        _restart(engine)
+        assert _expand(engine, externalized_ref=ref, session_id="session-a") == {
+            "error": f"Externalized payload {ref} not found in session session-a"
+        }
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("path_mode", ["payload_symlink", "configured_directory"])
+def test_explicit_session_rejects_cross_profile_payload_path(tmp_path, path_mode):
+    engine = _rotation_engine(tmp_path)
+    other_root = tmp_path / "other-profile"
+    other_root.mkdir()
+    other = _rotation_engine(other_root)
+    try:
+        ref = _externalize(other, "session-a", "RESULT from another profile " * 50)
+        other_storage = get_large_output_storage_dir(
+            other._config, hermes_home=other._hermes_home, create=False
+        )
+        if path_mode == "payload_symlink":
+            storage = get_large_output_storage_dir(
+                engine._config, hermes_home=engine._hermes_home, create=True
+            )
+            (storage / ref).symlink_to(other_storage / ref)
+        else:
+            engine._config.large_output_externalization_path = str(other_storage)
+        # A matching session id in another profile must not grant access.
+        assert _expand(other, externalized_ref=ref, session_id="session-a")["content"]
+        assert _expand(engine, externalized_ref=ref, session_id="session-a") == {
+            "error": f"Externalized payload {ref} not found in session session-a"
+        }
+    finally:
+        other.shutdown()
+        engine.shutdown()
+
+
+def test_explicit_session_requires_payload_ownership(tmp_path):
+    engine = _rotation_engine(tmp_path)
+    try:
+        ref = _externalize(engine, "", "RESULT without session ownership " * 50)
+        assert _expand(engine, externalized_ref=ref, session_id="session-a") == {
+            "error": f"Externalized payload {ref} not found in session session-a"
+        }
+    finally:
+        engine.shutdown()
+
+
+def test_explicit_session_rejects_path_outside_payload_directory(tmp_path):
+    engine = _rotation_engine(tmp_path)
+    try:
+        ref = _externalize(engine, "session-a", "RESULT in session a " * 50)
+        storage = get_large_output_storage_dir(
+            engine._config, hermes_home=engine._hermes_home, create=False
+        )
+        outside = storage.parent / "outside.json"
+        outside.write_text((storage / ref).read_text(encoding="utf-8"), encoding="utf-8")
+        linked_ref = "linked.json"
+        (storage / linked_ref).symlink_to(outside)
+        assert _expand(engine, externalized_ref=linked_ref, session_id="session-a") == {
+            "error": f"Externalized payload {linked_ref} not found in session session-a"
+        }
     finally:
         engine.shutdown()
 
