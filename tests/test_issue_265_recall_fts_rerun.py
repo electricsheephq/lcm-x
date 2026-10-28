@@ -328,7 +328,7 @@ def test_no_rerun_when_request_deadline_already_spent(recall_case, monkeypatch):
 
 def test_summaries_only_recall_never_reruns_its_fallback_fts(recall_case, monkeypatch):
     case = recall_case
-    case.make_fts()
+    case.make_fts(advance=False)  # the fallback fails with time left, so only the guard can stop a re-run
     monkeypatch.setattr(lcm_tools, "_resolve_recall_provider", lambda *_a, **_k: None)
     payload = _recall(case, include="summaries")
     # Summaries-only recall runs no capped arm: its #887 fallback is the only
