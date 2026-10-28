@@ -8,8 +8,7 @@
 
 **Lossless context memory for [Hermes Agent](https://github.com/NousResearch/hermes-agent).**
 
-> Bounded context, unbounded memory. [Nothing is ever lost.](VISION.md#the-promise)
-> Known exceptions are bugs against that promise, listed in the latest release's [Known issues](https://github.com/electricsheephq/lcm-x/releases/latest).
+> Bounded context, unbounded memory. Nothing is ever lost.
 
 <!-- results-highlights:start -->
 <a id="benchmark-highlights"></a>
@@ -30,6 +29,9 @@ Configuration, evidence and disclosures: [benchmarks/RESULTS.md](benchmarks/RESU
 LCM-X replaces one-shot active-context compression with a SQLite-backed,
 DAG-based context engine. It keeps the live prompt bounded, preserves raw
 messages, and gives the agent tools to recover exact detail after compaction.
+[The promise](VISION.md#the-promise) says exactly what "nothing is ever lost" covers; known
+exceptions are bugs against it, listed in the latest release's
+[Known issues](https://github.com/electricsheephq/lcm-x/releases/latest).
 
 The project name is **LCM-X**. From v0.24.0 the plugin is named
 `hermes-lcm-x` and the runtime context engine `lcm-x`
