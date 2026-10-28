@@ -63,7 +63,12 @@ Use as low-level drill-down after a known handle:
 
 - `node_id` expands a current-session summary with source pagination;
 - `store_id` recovers one raw message and works across LCM sessions;
-- `externalized_ref` opens a payload of the current session, or of a session it replaced at a compression-boundary rotation, with content pagination.
+- `externalized_ref` opens a payload of the current session, or of a session it replaced at a compression-boundary rotation, with content pagination; use `lcm_expand(externalized_ref=..., session_id=...)` to select another session under the same ownership/rotation checks, bounded by `max_tokens` and paged by `content_offset`.
+
+Explicit-session reads require the payload directory (`large_output_externalization_path`, or its
+default) and each ref's resolved payload file to stay inside this Hermes home and outside its
+named profiles, however the path is spelled (symlinks or letter case); otherwise they return the
+not-found error.
 
 Do not use it as broad first-step discovery.
 
