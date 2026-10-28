@@ -182,3 +182,57 @@ def test_multiple_lost_writes_keep_the_lost_projection(engine, monkeypatch):
     observation, guidance, floor = _doctor(engine, monkeypatch)
     assert floor is True
     _assert_rollback(observation, guidance, floor)
+
+
+@pytest.mark.parametrize("shortened", [False, True], ids=["attempt-only", "shortened"])
+def test_lost_projection_stays_with_store_across_home_rebind(tmp_path, monkeypatch, shortened):
+    home_a = tmp_path / "home-a"
+    home_b = tmp_path / "home-b"
+    obj = LCMEngine(config=LCMConfig(embeddings_enabled=False), hermes_home=str(home_a))
+    try:
+        assert not obj._config.database_path
+        obj.on_session_start("A", platform="telegram", conversation_id="conv-a", context_length=6000)
+        store_a_key = str(obj._store.db_path)
+        _fail_once(obj, monkeypatch)
+        _record(obj, projected=True)
+        assert _counter(obj) is None
+
+        assert obj._rebind_storage_for_home(str(home_b)) is True
+        assert str(obj._store.db_path) != store_a_key
+        obj.on_session_start("B", platform="telegram", conversation_id="conv-b", context_length=6000)
+        assert "survival_fit:" not in command._doctor_text(obj)
+        _record(obj, shortened=shortened)
+        record = _counter(obj)
+        assert record["count"] == 1
+        assert record["ever_shortened"] is shortened
+        assert record["projected_count"] == 0
+        assert "a counter write failed" not in command._doctor_text(obj)
+
+        assert obj._rebind_storage_for_home(str(home_a)) is True
+        assert str(obj._store.db_path) == store_a_key
+        obj.on_session_start("A", platform="telegram", conversation_id="conv-a", context_length=6000)
+        assert _counter(obj) is None
+        observation, guidance, floor = _doctor(obj, monkeypatch)
+        assert floor is True
+        assert "applied an unknown number of times (a counter write failed)" in observation
+        assert "projected_count unknown" in observation
+        _assert_rollback(observation, guidance, floor)
+    finally:
+        obj.shutdown()
+
+
+def test_none_return_does_not_clear_lost_projection(engine, monkeypatch):
+    _fail_once(engine, monkeypatch)
+    _record(engine, projected=True)
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "update_metadata_json", lambda key, update: None)
+        _record(engine, shortened=False)
+    assert _counter(engine) is None
+    observation, guidance, floor = _doctor(engine, monkeypatch)
+    assert floor is True
+    assert "applied an unknown number of times (a counter write failed)" in observation
+    assert "projected_count unknown" in observation
+    _assert_rollback(observation, guidance, floor)
+    _record(engine, shortened=False)
+    assert _counter(engine)["ever_shortened"] is True
+    assert "projected_count" not in _counter(engine)

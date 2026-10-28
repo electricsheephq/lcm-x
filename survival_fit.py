@@ -581,8 +581,11 @@ class SurvivalFitMixin:
         self._last_survival_fit = {"reason": reason, "dropped_rows": count, "notice": notice, "at": time.time(),
                                    **({"cause": cause} if cause else {}),
                                    "uncovered_rows": uncovered, "reached_budget": after <= budget}
-        # None: no lost shortened write; False: lost drop-only fit; True: lost projection.
-        lost = getattr(self, "_survival_counter_write_lost", None)
+        # Per store: absent means no lost shortened write; False: lost drop-only fit; True: lost projection.
+        lost_by_store = getattr(self, "_survival_counter_write_lost", {})
+        self._survival_counter_write_lost = lost_by_store
+        store_key = str(self._store.db_path)
+        lost = lost_by_store.get(store_key)
 
         def counted(record):  # runs inside the store's write transaction: concurrent engines add, never overwrite
             record = record if isinstance(record, dict) else {}
@@ -611,14 +614,15 @@ class SurvivalFitMixin:
                     **({"count_lost": True} if record.get("count_lost") else {})}  # #618 item 14: kept
 
         try:
-            self._store.update_metadata_json(SURVIVAL_FIT_COUNTER_KEY, counted)
+            if self._store.update_metadata_json(SURVIVAL_FIT_COUNTER_KEY, counted) is None:
+                raise RuntimeError("survival-fit counter was not written")
         except Exception:
             if shortened:
-                self._survival_counter_write_lost = bool(projected) or lost is True
+                lost_by_store[store_key] = bool(projected) or lost is True
             logger.warning("LCM survival-fit counter write failed (projected=%s); /lcm doctor under-counts survival fits "
                            "for this store", projected, exc_info=True)
         else:
-            self._survival_counter_write_lost = None
+            lost_by_store.pop(store_key, None)
         key = str(self._conversation_id or self._session_id or "")
         if shortened and warn_user and key not in self._survival_fit_warned:
             self._survival_fit_warned.add(key)
