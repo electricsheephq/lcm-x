@@ -1,0 +1,4 @@
+interface:
+  display_name: "Issue Sweep"
+  short_description: "Bounded, maintainer-authorized LCM-X issue label and comment sweep"
+  default_prompt: "Use $issue-sweep to draft a bounded LCM-X issue sweep plan, and apply only the labels and comments a maintainer authorized."
