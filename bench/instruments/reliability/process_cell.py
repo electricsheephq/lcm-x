@@ -1,7 +1,7 @@
 """R2: run one R1 cell through a REAL host process (``run_matrix.py --transport acp-process``).
 
-The host is ``<host venv>/bin/hermes acp`` over stdio (acp_driver.py), with an isolated HERMES_HOME/HOME under the
-cell dir, and every model route (main, LCM summariser, host aux) pointed at the localhost fake provider
+The host is ``<host venv>/bin/hermes acp`` over stdio (acp_driver.py), with an isolated HERMES_HOME/HOME in a
+$TMPDIR scratch dir (deleted once the cell is scored), and every model route (main, LCM summariser, host aux) pointed at the localhost fake provider
 (fake_provider.py), so the summariser and aux LLM are real HTTP code paths. The cell scenario is R1's (prompts,
 replies, tool plans, faults) and the scorers are R1's: the host observer (observer/) writes the same transcript
 events R1's probe writes in-process, the scenario writes what the provider emitted, and the runner writes what
@@ -18,11 +18,14 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import time
 from pathlib import Path
 
-from bench.instruments.reliability import acp_driver as AD, cells as C, fake_provider as FP, probe as P1, run_matrix as RM
+from bench.instruments.reliability import acp_driver as AD, cells as C, fake_provider as FP, plugin_tree, probe as P1
+from bench.instruments.reliability import run_matrix as RM, stop_turn
+from bench.instruments.reliability.scorers import continuity
 
 OBSERVER = Path(__file__).with_name("observer")
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
@@ -30,12 +33,23 @@ SANDBOX = ('(version 1)(allow default)(deny network-outbound)(allow network-outb
            '(allow network-outbound (remote unix-socket))')
 FAKE_KEY = "rel-fake-key-not-a-secret"
 PROCESS_FAULTS = {"acp-process": {"crash_after_compaction_before_reply", "cancel_then_retry",
-                                   "crash_after_rotation_before_child_row"}}
+                                   "crash_after_rotation_before_child_row", "clean_exit_before_turn", "p8_inject",
+                                   "forced_compaction_then_turn"}}
 # R2-only: the main route over the Anthropic Messages API (a ``/anthropic`` base path selects the anthropic_messages
 # transport, hermes_cli/runtime_provider.py _detect_api_mode_for_url); the #550 class.
-R2_CELLS = [{**C.cell("anthropic-route/acp-process", [], in_place=True,
+R2_CELLS = [C.cell("stop-after-tool/no-retry/in-place", [1623], in_place=True, turns=2, repeat=1,
+                   min_compactions=0, stop_after_tool=True, final_compaction_check=False,
+                   tool_plan=[{"turns": [1], "calls": [{"name": "read_file", "args": {"path": "{files}/small.txt"},
+                                                      "expect": {"min_chars": 10}}]}],
+                   lcm_env={"LCM_CONTEXT_THRESHOLD": "0.95", "LCM_EMBEDDING_RETRIEVAL_ENABLED": "false"}),
+            {**C.cell("anthropic-route/acp-process", [], in_place=True,
                       doc="baseline/in-place/acp with the main model on the Anthropic Messages API (fake provider)"),
-             "api": "anthropic"}]
+             "api": "anthropic"}] + C.continuity_cells()
+# #659 probes: selected by an explicit --cells pattern only (cells.select opt_in), so --cells all, the nightly matrix and
+# ci.expected_cells are unchanged.
+R2_PROBE_CELLS = C.probe_cells()
+# #659: the only probe class with a declared bar (the host rebuilds its system prompt at every commit).
+PROBE_BARS = {"host-instruction": 1.0, "host-instruction-rebuild": 1.0}
 # gateway-process: why no local platform can drive an R1 gateway cell, cited per host at run time.
 GATEWAY_ANCHORS = {
     "turn_runner": ("gateway/run_turn.py", "TurnRunner(self, turn_ctx)"),
@@ -44,6 +58,12 @@ GATEWAY_ANCHORS = {
     "api_server_bypass": ("gateway/platforms/api_server.py", "never passes through ``TurnRunner``"),
 }
 
+
+def graceful_exit(returncode: int | None, killed: bool, sent_term: bool) -> bool:
+    """A clean host stop: it exited on stdin EOF (0), or on the SIGTERM close() itself sent to the still-running host
+    within the shutdown grace (-SIGTERM, how a service manager stops a gateway). A SIGKILL escalation, a SIGTERM from
+    anywhere else (the host had already ended before close()) or any other code is not clean."""
+    return not killed and (returncode == 0 or (returncode == -signal.SIGTERM and sent_term))
 
 def gateway_unsupported(src: str) -> str:
     c = cite_all(src, GATEWAY_ANCHORS)
@@ -70,6 +90,8 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def unsupported(cell: dict, transport: str) -> str | None:
+    if cell["id"].startswith("default-window/"):
+        return "default-window bars require R1 ordered provider_request telemetry; R2 is not covered"
     if transport == "gateway-process":
         return None if cell["transport"] == "gateway" else "an R1 acp-transport cell; it runs under acp-process"
     if transport == "api-server":
@@ -97,6 +119,25 @@ def config_yaml(cell: dict, plugin: dict, base_url: str) -> str:
             # ACP session/new runs via model_catalog.build_model_state -> _fetch_opencode_free_models.
             "model_catalog:\n  enabled: false\n  excluded_providers: [opencode-free]\n"
             f"platform_toolsets:\n  acp: [{', '.join(cell.get('toolsets', ['todo', 'context_engine', 'file']))}]\n")
+
+
+def phase_lcm_env(cell: dict, phase: str) -> dict:
+    """Phase defaults (Fixture B), with the global override winning in every phase."""
+    return {**cell["lcm_env"], **((cell.get("drain") or {}).get("phase2_lcm_env") or {} if phase != "A" else {}),
+            **(cell.get("global_lcm_env") or {})}
+
+
+def forget_host_rows(state_db: Path, session_id: str) -> int:
+    """Fixture B, harness state only (no host or plugin code): the host's own soft-archive (active=0, as its in-place
+    compaction ``archive_and_compact`` leaves superseded rows) on every active row of the ACP session, so the next ACP
+    restore starts from an empty list while LCM's stored rows stay unsummarized above the frontier (hidden)."""
+    con = sqlite3.connect(state_db)
+    try:
+        n = con.execute("UPDATE messages SET active = 0 WHERE session_id = ? AND active = 1", (session_id,)).rowcount
+        con.commit()
+        return n
+    finally:
+        con.close()
 
 
 def reply_text(cell: dict, prefix: str, t: int) -> str:
@@ -138,22 +179,27 @@ class Scenario:
     def main(self, messages: list[dict]) -> dict:
         st, run = self.st, self.run
         t, text_tag = st["t"], run.text_tag
-        last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
-        if t is None or (f"[{text_tag}]" not in last_user if text_tag else "continue" not in last_user):
-            self.unexpected.append({"turn": t, "last_user": last_user[:120]})
-            return {"content": "ok", "log": {"unexpected": True}}
-        step, st["step"] = st["step"], st["step"] + 1
-        for m in messages:  # a tool result as the model receives it (post host transform)
+        for m in messages:  # record received results even when the scripted reply returns early
             cid = m.get("tool_call_id") if m["role"] == "tool" else None
             if cid in st["issued"] and cid not in st["seen"]:
                 st["seen"].add(cid)
                 body = m.get("content") or ""
                 run.event(turn=t, event="tool_seen", id=cid, sha=hashlib.sha256(body.encode()).hexdigest(), chars=len(body))
+        last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+        if t is None or (f"[{text_tag}]" not in last_user if text_tag else "continue" not in last_user):
+            if self.cell["id"].startswith("continuity/") and t is not None and text_tag:
+                finding = {"turn": t, "current_user_missing": True,
+                           "current_user_projected": last_user.startswith("[LCM survival fit:")}
+                self.unexpected.append(finding)
+                return {"content": "ok", "log": {"unexpected": True, **finding}}
+            self.unexpected.append({"turn": t, "last_user": last_user[:120]})
+            return {"content": "ok", "log": {"unexpected": True}}
+        step, st["step"] = st["step"], st["step"] + 1
         log = {"turn": t, "kind": st["kind"], "step": step}
         if run.crash_due(t):
             return {"hold_until_killed": True, "on_hold": lambda: run.crash(t), "log": log}
         groups = self.plan(t)
-        cancel = st["kind"] == "cancel" and step == 0
+        cancel = st["kind"] == "cancel" and step == 0 and not self.cell.get("stop_after_tool")
         extra = {"hold": float(self.cell.get("cancel_wait", 5.0)), "on_hold": run.cancel} if cancel else {}
         if step < len(groups):
             calls = []
@@ -176,15 +222,18 @@ class PhaseDeadline(AD.DriverError):
 
 
 class ProcessCell:
-    def __init__(self, cell, d: Path, host: dict, transport: str, turn_timeout: float, phase_timeout: float | None = None):
+    def __init__(self, cell, d: Path, host: dict, transport: str, turn_timeout: float, phase_timeout: float | None = None,
+                 scratch: Path | None = None):
+        """``d`` gets the records; ``scratch`` (default ``d``) the host's HERMES_HOME and HOME/TMPDIR."""
         self.cell, self.d, self.host, self.transport, self.turn_timeout = cell, d, host, transport, turn_timeout
-        self.phase_timeout, self.deadline = phase_timeout, None
-        self.home, self.files, self.work = d / "hermes-home", d / "files", d / "home" / "work"
+        self.phase_timeout, self.deadline, self.scratch = phase_timeout, None, scratch or d
+        self.home, self.files, self.work = self.scratch / "hermes-home", d / "files", self.scratch / "home" / "work"
         self.transcript, self.proc, self.sid, self.text_tag = d / "transcript.jsonl", None, None, None
         self.phase, self.log_mark, self.fired, self.backlog_log, self.last_turn = "A", 0, set(), [], 0
-        self.scenario = Scenario(self)
+        self.scenario, self.carriers, self.rewritten = Scenario(self), None, False
         self.provider = FP.FakeProvider(d / "provider-requests.jsonl", main=self.scenario.main,
-                                        usage_scale=float(cell["assistant"].get("usage_scale", 1.0)))
+                                        usage_scale=float(cell["assistant"].get("usage_scale", 1.0)),
+                                        continuity_context=self.continuity_context)
         self.proxy = FP.ProxySink(d / "proxy-attempts.jsonl")
 
     # -- records ---------------------------------------------------------------------------------------------
@@ -197,6 +246,24 @@ class ProcessCell:
 
     def notes(self, kind: str) -> list[dict]:
         return [n for n in read_jsonl(self.d / "observer.jsonl") if n["kind"] == kind]
+
+    def continuity_context(self) -> dict:
+        ends = [n for n in self.notes("turn_end") if n.get("turn_kind") != "final" and not n.get("failed")
+                and not n.get("interrupted")]
+        probes = (self.cell.get("continuity") or {}).get("probes") or []
+        return {"anchor": "T01" if (self.cell.get("continuity") or {}).get("sole_user") else None,
+                "previous": ends[-1].get("reply_tag") if ends else None, "current": self.text_tag,
+                **({"nonces": sorted({p["nonce"] for p in probes}), "carriers": self.carriers} if probes else {})}
+
+    def soul_rewrite(self, t: int) -> None:
+        """#659 P1b: rewrite HERMES_HOME/SOUL.md with no restart before the first turn >= ``from_turn`` that follows a
+        commit (so main requests precede the next commit); the note's ts is after the write."""
+        rw = ((self.cell.get("continuity") or {}).get("soul") or {}).get("rewrite")
+        if rw and t >= rw["from_turn"] and not self.rewritten and any(
+                n.get("turn") == t - 1 for n in self.notes("compaction_committed")):
+            (self.home / "SOUL.md").write_text(rw["text"] + "\n")
+            self.rewritten = True
+            append(self.d / "observer.jsonl", {"phase": self.phase, "ts": time.time(), "kind": "probe_rewrite", "turn": t})
 
     def fire(self, kind: str, turn: int, **extra) -> None:
         append(self.d / "faults-fired.jsonl", {"kind": kind, "phase": self.phase, "turn": turn})
@@ -213,7 +280,10 @@ class ProcessCell:
 
     def crash(self, t: int) -> None:
         """Called by the provider while it holds turn t's request: a TRUE mid-turn crash of the host."""
-        self.fire("crash_after_compaction_before_reply", t)
+        kind = "crash_after_compaction_before_reply"
+        # Record every phase-dependent piece before the signal: once the host is gone, run_phase may advance the
+        # phase and finish the run. The host waits on this held request meanwhile, so the crash point is unchanged.
+        self.fire(kind, t, phase=self.phase, kill_monotonic_ns=time.monotonic_ns())
         self.proc.kill()
 
     def cancel(self) -> None:
@@ -231,14 +301,14 @@ class ProcessCell:
         return min(self.turn_timeout, left)
 
     def env(self) -> dict:
-        env = {"HOME": str(self.d / "home"), "PATH": "/usr/bin:/bin", "HERMES_HOME": str(self.home),
-               "TMPDIR": str(self.d / "home"), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": str(self.d / "pycache"), "PYTHONUNBUFFERED": "1",
+        env = {"HOME": str(self.scratch / "home"), "PATH": "/usr/bin:/bin", "HERMES_HOME": str(self.home),
+               "TMPDIR": str(self.scratch / "home"), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": str(self.d / "pycache"), "PYTHONUNBUFFERED": "1",
                "PYTHONPATH": str(OBSERVER), "REL_OBSERVER_DIR": str(self.d), "REL_PHASE": self.phase,
                "HERMES_ACP_SKIP_CONFIGURED_MCP": "1", "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost",
                "LCM_SUMMARY_MODEL": "rel/lcm-summary",
                # Time compression: a cell runs 60 turns in ~20 s, which trips the per-window summary spend guard
                # that a real session spreads over hours; without this the "real" summariser path is mostly skipped.
-               "LCM_SUMMARY_SPEND_MAX_CALLS": "100000", **self.cell["lcm_env"],
+               "LCM_SUMMARY_SPEND_MAX_CALLS": "100000", **phase_lcm_env(self.cell, self.phase),
                "LCM_NATIVE_RECOVERY": "true" if self.cell["native_recovery"] else "false"}
         for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
             env[k] = self.proxy.url  # a recording sink that refuses everything
@@ -246,9 +316,17 @@ class ProcessCell:
 
     def argv(self) -> list[str]:
         base = [str(Path(self.host["python"]).parent / "hermes"), "acp"]
+        if self.cell.get("stop_after_tool") and os.path.exists(SANDBOX_EXEC):
+            from .hosts import real_hermes_dir
+            policy = (SANDBOX + '(deny file-write*)' + ''.join(
+                f'(allow file-write* (subpath "{p}"))' for p in (self.scratch, self.d))
+                + '(allow file-write* (literal "/dev/null"))'
+                + f'(deny file-read* (subpath "{real_hermes_dir()}"))')
+            return [SANDBOX_EXEC, "-p", policy, *base]
         return [SANDBOX_EXEC, "-p", SANDBOX, *base] if os.path.exists(SANDBOX_EXEC) else base
 
     def turn(self, t: int, kind: str = "normal") -> str | None:
+        self.soul_rewrite(t)
         text = P1.user_text(self.cell, "T", t)
         n = int(self.cell["user_text"].get("identical_turns", {}).get(str(t), t))
         self.text_tag, self.last_turn = None if text == "continue" else f"T{n:02d}", t
@@ -300,7 +378,10 @@ class ProcessCell:
     def run_phase(self, first: int) -> dict:
         self.first = first
         self.deadline = time.monotonic() + self.phase_timeout if self.phase_timeout else None
+        if self.cell.get("stop_after_tool"):
+            return stop_turn.phase(self, first)
         self.proc = AD.AcpProcess(self.argv(), self.env(), self.work, self.d / f"host-{self.phase}.stderr")
+        closed = False
         try:
             self.proc.initialize(self.budget())
             if self.phase == "A":
@@ -308,7 +389,16 @@ class ProcessCell:
             else:  # ACP _restore: the stable ACP id, restored from state.db by the fresh process
                 self.proc.load_session(self.sid, self.files, self.budget())
             cancel = next((f for f in self.cell["faults"] if f["kind"] == "cancel_then_retry"), None)
+            clean = next((f for f in self.cell["faults"] if f["kind"] == "clean_exit_before_turn"), None)
+            forced = next((f for f in self.cell["faults"] if f["kind"] == "forced_compaction_then_turn"), None)
             for t in P1.extend_turns(self.cell, first, self.low_backlog):
+                if clean and t == clean.get("turn") and t != first and "clean_exit_before_turn" not in self.fired:
+                    rc = self.proc.close()
+                    closed = True
+                    if not graceful_exit(rc, self.proc.killed, getattr(self.proc, "sent_term", False)):
+                        return {"exit": "error", "reason": f"clean exit failed: returncode={rc}, killed={self.proc.killed}"}
+                    self.fire("clean_exit_before_turn", t)  # recorded only after a graceful host exit
+                    return {"exit": "clean_exit", "next_turn": t}
                 if cancel and t == cancel["turn"] and "cancel_then_retry" not in self.fired:
                     self.turn(t, "cancel")
                     end = [n for n in self.notes("turn_end") if n["tag"] == f"T{t:02d}" and n["turn_kind"] == "cancel"]
@@ -317,6 +407,9 @@ class ProcessCell:
                         self.turn(t, "retry")
                 else:
                     self.turn(t)
+                if forced and t == forced["turn"] and forced["kind"] not in self.fired:
+                    check = self.final_check()
+                    self.fire(forced["kind"], t, published=check["published"], outcome=check["outcome"])
             final = {**self.final_check(), "backlog_checks": self.backlog_log} \
                 if self.cell.get("final_compaction_check", True) else None
             self.budget()  # work after the last request may have crossed the deadline: never a late "done"
@@ -332,17 +425,21 @@ class ProcessCell:
         except (AD.DriverError, OSError, ValueError) as exc:
             if self.deadline is not None and time.monotonic() >= self.deadline and not isinstance(exc, PhaseDeadline):
                 exc = PhaseDeadline(f"phase {self.phase} exceeded its {self.phase_timeout}s deadline ({exc})")
-            return {"exit": "error", "reason": f"{type(exc).__name__}: {exc}; stderr: {self.stderr_tail()}"[:600]}
+            return {"exit": "error", "reason": f"{f'{type(exc).__name__}: {exc}'[:280]}; stderr: {self.stderr_tail(150)}"}
         finally:
-            rc = self.proc.close()
+            if not closed:
+                rc = self.proc.close()
             self.event(event="host_exit", returncode=rc, killed=self.proc.killed)
 
     def low_backlog(self, last_turn: int) -> bool:
         return P1.backlog_low(self.d, last_turn, self.backlog_log)
 
-    def stderr_tail(self) -> str:
+    def stderr_tail(self, edge: int = 1000) -> str:
+        """The host's stderr for an error reason: its first and last ``edge`` characters (#985: a bare tail
+        cut off which installer or command a host that exits early asks the operator to run)."""
         path = self.d / f"host-{self.phase}.stderr"
-        return path.read_text(errors="replace")[-300:] if path.exists() else ""
+        text = path.read_text(errors="replace") if path.exists() else ""
+        return text if len(text) <= 2 * edge else f"{text[:edge]} … {text[-edge:]}"
 
     def phase_record(self, first: int, result: dict) -> dict:
         notes = [n for n in read_jsonl(self.d / "observer.jsonl") if n["phase"] == self.phase]
@@ -351,6 +448,7 @@ class ProcessCell:
         log = self.host_log()
         rec = {"phase": self.phase, "start_turn": first, "transport": self.transport, "acp_session": self.sid,
                "citations": cite_all(self.host["src"]),
+               "p8": next((n["p8"] for n in reversed(notes) if "p8" in n), {"supported": False}),
                "counters": snap.get("counters") or {"compacted_turns": [], "failed": [], "orphan_drops": 0, "native_max": 0},
                "compactions_logged": len(re.findall(r"LCM compaction #\d+", log)),
                # #714: the same exit-fit normalization as in-process cells
@@ -363,14 +461,22 @@ class ProcessCell:
         return rec
 
 
+# The provider stamps a request's receive start in its handler thread. On a loaded runner that thread can run after
+# the kill that already cut the body short, so a start up to this long after the kill still counts as in flight.
+RECEIVE_START_SLACK_NS = 1_000_000_000
+
+
 def accounting(d: Path, events: list[dict]) -> dict:
     """The provider log is the complete request set. Every distinct request is a model-role completion, a
     ``/models`` catalog read, or unexpected (an unrouted path/method or an unknown role: the cell ERRORs). Each main
     request is exactly one scripted step (a reply, a tool-call step, a crash hold or an unexpected main request)."""
     reqs = read_jsonl(d / "provider-requests.jsonl")
-    by_role, by_route, unexpected = {}, {}, []
+    by_role, by_route, unexpected, truncated = {}, {}, [], []
     for r in {r["rid"]: r for r in reqs}.values():
         route = FP.route_of(r.get("method"), r.get("path"))  # re-derived, not trusted from the log
+        if route == "completion" and r.get("truncated"):  # no body, never served; match the receive interval below
+            truncated.append(r)
+            continue
         by_route[route] = by_route.get(route, 0) + 1
         if route == "completion":
             by_role[r["role"]] = by_role.get(r["role"], 0) + 1
@@ -380,7 +486,18 @@ def accounting(d: Path, events: list[dict]) -> dict:
                "tool_steps": len({(e["phase"], e["id"].rsplit("_", 1)[0]) for e in events if e["event"] == "tool_issue"}),
                "crash_holds": sum(1 for e in events if e.get("fault") == "crash_after_compaction_before_reply"),
                "unexpected": len({r["rid"] for r in reqs if r.get("unexpected")})}
+    kills = sorted(e["kill_monotonic_ns"] for e in events
+                   if e.get("event") == "crash" and e.get("kill_monotonic_ns") is not None)
+    matched = set()
+    for kill in kills:
+        candidates = [r for r in truncated if r["rid"] not in matched
+                      and r.get("receive_start_ns") is not None and r.get("receive_end_ns") is not None
+                      and r["receive_start_ns"] <= kill + RECEIVE_START_SLACK_NS and kill <= r["receive_end_ns"]]
+        if candidates:  # earliest end preserves later kills for requests still receiving then
+            matched.add(min(candidates, key=lambda r: r["receive_end_ns"])["rid"])
+    unexpected += [{"rid": r["rid"], "route": "truncated"} for r in truncated if r["rid"] not in matched]
     return {"requests_by_role": by_role, "requests_by_route": by_route, "unexpected_requests": unexpected[:20],
+            "truncated_requests": [r["rid"] for r in truncated],
             "main_implied": implied, "faults": sorted({(r["rid"], r["fault"]) for r in reqs if r.get("fault")}),
             "ok": by_role.get("main", 0) == sum(implied.values()) and not unexpected}
 
@@ -403,9 +520,46 @@ def session_count(home: Path) -> int | None:
         return None
 
 
+def apply_f4(rec: dict, cell: dict, unexpected: list) -> None:
+    """F4 applies once the scenario is observed and every continuity row is measured. A missing current user tag fails it,
+    even when the attempt is otherwise UNSUPPORTED (the scripted reply is never emitted for that request)."""
+    if not cell["id"].startswith("continuity/") or rec["verdict"] == "ERROR":
+        return
+    continuity = rec.get("continuity") or {}
+    rows = continuity.get("rows") or []
+    measured = bool(rows) and all(isinstance(row.get("F4"), bool) for row in rows)  # no request is never a pass
+    if unexpected or (rec["verdict"] != "UNSUPPORTED" and measured
+                      and continuity.get("scenario_observed") is not False):
+        rec.setdefault("applicable_bars", []).append("F4")
+    if unexpected:
+        reason = "current user tag missing from the last user message"
+        rec.setdefault("failed_bars", {})["F4"] = {"reason": reason, "requests": unexpected}
+        rec.update(verdict="FAIL", reason=f"continuity F4: {reason}")
+
+
+def apply_probes(rec: dict, cell: dict) -> None:
+    """#659 probes are RECORDED only (modelled on apply_f4): a per-probe rate over the observed compaction events and
+    the declared bar where one exists (an unknown event never meets it). Never a bar, never PASS/FAIL, never the verdict
+    or the gate."""
+    probes = (rec.get("continuity") or {}).get("probes")
+    if not probes or rec["verdict"] == "ERROR":
+        return
+    observed = rec["continuity"].get("scenario_observed") is not False
+    out = {}
+    for name, p in probes.items():
+        decided = p["met"] + p["missed"]
+        rate, bar = (p["met"] / decided if decided else None), PROBE_BARS.get(name)
+        out[name] = {"met": p["met"], "missed": p["missed"], "unknown": p["unknown"], "rate": rate, "bar": bar,
+                     "recorded": "scenario not observed" if not observed else "not observed" if rate is None else
+                     "recorded" if bar is None else "below bar" if rate < bar else
+                     "incomplete (unknown events)" if p["unknown"] else "meets bar"}
+    rec["probes_recorded"] = out
+
+
 def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: Path, timeout: int, keep: bool,
-                     keep_dbs: str = "fail", lcm_env: dict | None = None, identity: dict | None = None,
-                     transport: str = "acp-process", turn_timeout: float = 300.0) -> dict:
+                     keep_dbs: str = "none", lcm_env: dict | None = None, identity: dict | None = None,
+                     transport: str = "acp-process", turn_timeout: float = 300.0,
+                     scratch_root: str | Path | None = None) -> dict:
     cell = RM.with_lcm_env(cell, plugin, lcm_env)
     d = RM.checked_cell_dir(out, out / "cells" / host_name / plugin["sha"][:12] / f"{RM.slug(cell['id'])}@{transport}")
     if d.exists():
@@ -426,56 +580,76 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
         return done(verdict="UNSUPPORTED", reason=gateway_unsupported(host["src"]))
     if cell.get("api") == "anthropic" and not has_dist(host["python"], "anthropic"):
         return done(verdict="UNSUPPORTED", reason="the host venv has no anthropic SDK (hermes-agent[anthropic] not installed)")
-    home = d / "hermes-home"
-    for sub in (home / "plugins", d / "home" / "work", d / "db", d / "files"):
-        sub.mkdir(parents=True)
-    (home / "plugins" / plugin["dir"]).symlink_to(plugin["tree"])
-    # A fresh, non-empty models.dev disk cache (agent/models_dev.py serves it for 4 h), so model metadata
-    # resolution never fetches models.dev; the main model's context_length is pinned in config.yaml.
-    (home / "models_dev_cache.json").write_text(json.dumps({"rel": {"id": "rel", "name": "reliability fake", "models": {}}}))
-    (d / "files" / "small.txt").write_text("small deterministic file\n")
-    (d / "files" / "big.txt").write_text("".join(f"line {i:05d}: " + P1.FILLER * 8 + "\n" for i in range(cell.get("big_lines", 400))))
-    run = ProcessCell(cell, d, host, transport, turn_timeout, phase_timeout=timeout)
-    run.provider.start()
-    (home / "config.yaml").write_text(config_yaml(cell, plugin, run.provider.base_url))
-    (d / "cell.json").write_text(json.dumps({**cell, "plugin": plugin, "host": host_name, "host_src": host["src"],
-                                             "host_python": host["python"], "transport": transport}, indent=1))
-    started, first, last, phases = time.time(), 1, {}, []
-    try:
-        for phase in RM.PHASES:
-            run.phase = phase
-            last = run.run_phase(first)
-            (d / f"phase-{phase}.json").write_text(json.dumps(run.phase_record(first, last), indent=1, default=str))
-            phases.append(phase)
-            if last["exit"] != "crash":
-                break
-            first = last["next_turn"]
+    s = RM.scratch_dir(scratch_root)
+    try:  # every exit below, ERROR included, releases the scratch: no Hermes DB outlives its cell by default
+        home = s / "hermes-home"
+        for sub in (home / "plugins", s / "home" / "work", s / "db", d / "files"):
+            sub.mkdir(parents=True)
+        (home / "plugins" / plugin["dir"]).symlink_to(plugin["tree"])
+        # A fresh, non-empty models.dev disk cache (agent/models_dev.py serves it for 4 h), so model metadata
+        # resolution never fetches models.dev; the main model's context_length is pinned in config.yaml.
+        (home / "models_dev_cache.json").write_text(json.dumps({"rel": {"id": "rel", "name": "reliability fake", "models": {}}}))
+        P1.write_tool_files(d / "files", cell)
+        run = ProcessCell(cell, d, host, transport, turn_timeout, phase_timeout=timeout, scratch=s)
+        if (cell.get("continuity") or {}).get("probes"):
+            try:  # the plugin's own summary/head carrier markers; without them a summary row reads as user_raw
+                run.carriers = plugin_tree.carrier_markers(Path(plugin["tree"]))
+            except (OSError, ValueError, SyntaxError):
+                run.carriers = None
+        if soul := (cell.get("continuity") or {}).get("soul"):  # #659 P1: before the host starts
+            (home / "SOUL.md").write_text(soul["text"] + "\n")
+        run.provider.start()
+        (home / "config.yaml").write_text(config_yaml(cell, plugin, run.provider.base_url))
+        (d / "cell.json").write_text(json.dumps({**cell, "plugin": plugin, "host": host_name, "host_src": host["src"],
+                                                 "host_python": host["python"], "transport": transport}, indent=1))
+        started, first, last, phases = time.time(), 1, {}, []
+        try:
+            for phase in RM.PHASES:
+                run.phase = phase
+                last = run.run_phase(first)
+                (d / f"phase-{phase}.json").write_text(json.dumps(run.phase_record(first, last), indent=1, default=str))
+                phases.append(phase)
+                if last["exit"] not in ("crash", "clean_exit"):
+                    break
+                first = last["next_turn"]
+                drain = cell.get("drain") or {}
+                if drain.get("phase2_lcm_env"):  # the next phase's config carries its LCM threshold too
+                    (home / "config.yaml").write_text(config_yaml({**cell, "lcm_env": phase_lcm_env(cell, "B")}, plugin,
+                                                                  run.provider.base_url))
+                if last["exit"] == "clean_exit" and drain.get("forget_host_rows"):
+                    append(d / "fixture.jsonl", {"kind": "forget_host_rows", "after_phase": phase, "before_turn": first,
+                                                 "rows": forget_host_rows(home / "state.db", run.sid)})
+        finally:
+            run.provider.stop()
+            run.proxy.stop()
+        backup_errors = RM.copy_dbs(home, s / "db")
+        events = read_jsonl(d / "transcript.jsonl")
+        records = [json.loads(p.read_text()) for p in sorted(d.glob("phase-*.json"))]
+        acct = accounting(d, events)
+        network = [n for r in records for n in r.get("network_attempts", [])] + read_jsonl(d / "proxy-attempts.jsonl")
+        prov = [v for r in records for v in ((r.get("provenance") or {}).get("violations") or [])]
+        observer = [n for r in records for n in r.get("observer_errors", [])]
+        rec.update(phases=phases, wall_s=round(time.time() - started, 1), acp_session=run.sid, accounting=acct,
+                   citations=records[0]["citations"] if records else {}, sandbox=os.path.exists(SANDBOX_EXEC))
+        rec["continuity"] = continuity.score_dir(cell, d)
+        if network:  # stop condition: a host process tried to leave localhost
+            return done(verdict="ERROR", reason=f"STOP: host attempted non-localhost network access: {network[:3]}")
+        if prov or observer:
+            return done(verdict="ERROR", reason=f"import provenance / observer failure: {(prov + observer)[:3]}")
+        if acct["unexpected_requests"]:
+            return done(verdict="ERROR", reason=f"unexpected provider requests: {acct['unexpected_requests'][:3]}")
+        if run.scenario.unexpected and not (cell["id"].startswith("continuity/") and
+                                           all(n.get("current_user_missing") for n in run.scenario.unexpected)):
+            return done(verdict="ERROR", reason=f"unexpected main-model requests: {run.scenario.unexpected[:3]}")
+        if last.get("exit") == "done" and not acct["ok"]:
+            return done(verdict="ERROR", reason=f"provider request log does not account for the transcript: {acct}")
+        if cell.get("stop_after_tool"):
+            return done(**stop_turn.score(run, last))
+        run.fired.update(n["kind"] for n in read_jsonl(d / "faults-fired.jsonl"))
+        rec.update(RM.verdict_fields({**cell, "chat_root": run.sid, "transport": transport}, d, last, run.fired, rec["citations"], backup_errors,
+                                     s / "db"))
+        apply_f4(rec, cell, run.scenario.unexpected)
+        apply_probes(rec, cell)
+        return done()
     finally:
-        run.provider.stop()
-        run.proxy.stop()
-    backup_errors = RM.copy_dbs(home, d / "db")
-    events = read_jsonl(d / "transcript.jsonl")
-    records = [json.loads(p.read_text()) for p in sorted(d.glob("phase-*.json"))]
-    acct = accounting(d, events)
-    network = [n for r in records for n in r.get("network_attempts", [])] + read_jsonl(d / "proxy-attempts.jsonl")
-    prov = [v for r in records for v in ((r.get("provenance") or {}).get("violations") or [])]
-    observer = [n for r in records for n in r.get("observer_errors", [])]
-    rec.update(phases=phases, wall_s=round(time.time() - started, 1), acp_session=run.sid, accounting=acct,
-               citations=records[0]["citations"] if records else {}, sandbox=os.path.exists(SANDBOX_EXEC))
-    if network:  # stop condition: a host process tried to leave localhost
-        return done(verdict="ERROR", reason=f"STOP: host attempted non-localhost network access: {network[:3]}")
-    if prov or observer:
-        return done(verdict="ERROR", reason=f"import provenance / observer failure: {(prov + observer)[:3]}")
-    if acct["unexpected_requests"]:
-        return done(verdict="ERROR", reason=f"unexpected provider requests: {acct['unexpected_requests'][:3]}")
-    if run.scenario.unexpected:
-        return done(verdict="ERROR", reason=f"unexpected main-model requests: {run.scenario.unexpected[:3]}")
-    if last.get("exit") == "done" and not acct["ok"]:
-        return done(verdict="ERROR", reason=f"provider request log does not account for the transcript: {acct}")
-    rec.update(RM.verdict_fields({**cell, "chat_root": run.sid}, d, last, run.fired, rec["citations"], backup_errors))
-    done()
-    if keep_dbs == "fail" and rec["verdict"] == "PASS" and not any(RM.report.licensed(rec)):
-        shutil.rmtree(d / "db", ignore_errors=True)
-    if not keep:
-        shutil.rmtree(home, ignore_errors=True)
-    return rec
+        RM.release_scratch(s, d, rec, keep_dbs, keep)

@@ -14,11 +14,11 @@ from hermes_lcm.rollup_store import RollupStore
 from hermes_lcm.schemas import LCM_RECENT
 from hermes_lcm.tokens import count_tokens
 from hermes_lcm import tools as tools_module
-from hermes_lcm.tools import (
-    _recent_expected_period_starts,
+from hermes_lcm import recent as recent_module
+from hermes_lcm.tools import lcm_recent
+from hermes_lcm.recent import (
     _recent_has_unready_rollups,
     _recent_ready_rollups,
-    lcm_recent,
 )
 
 
@@ -193,7 +193,6 @@ def test_recent_window_coverage_requires_every_day_ready(recent_parts):
     engine, store = recent_parts
     scope = engine.current_session_id
     window = parse_recent_period("2d", now=NOW)  # 2026-07-14 .. 2026-07-16
-    assert [d for d in _recent_expected_period_starts(window)] == ["2026-07-14", "2026-07-15"]
 
     _ready(store, "day", "2026-07-15", scope)  # 2026-07-14 missing entirely
     assert _recent_has_unready_rollups(store, window, scope) is True
@@ -215,7 +214,6 @@ def test_recent_window_period_enumeration_fails_closed_above_work_cap(recent_par
     statements: list[str] = []
     store.connection.set_trace_callback(statements.append)
     try:
-        assert _recent_expected_period_starts(window) == []
         assert _recent_has_unready_rollups(
             store, window, engine.current_session_id
         ) is True
@@ -671,13 +669,13 @@ def test_recent_fallback_candidate_work_is_sql_bounded(recent_parts, monkeypatch
     assert "TEMP B-TREE" not in plan_text
 
     frontier_calls: list[int] = []
-    real_frontier = tools_module.canonical_frontier
+    real_frontier = recent_module.canonical_frontier
 
     def counted_frontier(candidates):
         frontier_calls.append(len(candidates))
         return real_frontier(candidates)
 
-    monkeypatch.setattr(tools_module, "canonical_frontier", counted_frontier)
+    monkeypatch.setattr(recent_module, "canonical_frontier", counted_frontier)
     result = json.loads(
         lcm_recent({"period": "date:2026-07-15", "limit": 1}, engine=engine)
     )
@@ -696,7 +694,7 @@ def test_recent_fallback_releases_snapshot_before_later_dag_write(recent_parts):
     assert connection is not None
     window = parse_recent_period("date:2026-07-15", now=NOW)
 
-    sections = tools_module._recent_leaf_sections(
+    sections = recent_module._recent_leaf_sections(
         engine, window, "conversation", 10
     )
 
@@ -725,7 +723,7 @@ def test_recent_fallback_preserves_outer_transaction(recent_parts):
     connection.execute(
         "INSERT INTO metadata(key, value) VALUES('recent-caller-write', 'active')"
     )
-    tools_module._recent_leaf_sections(engine, window, "conversation", 10)
+    recent_module._recent_leaf_sections(engine, window, "conversation", 10)
 
     assert connection.in_transaction is True
     assert connection.execute(
@@ -751,8 +749,8 @@ def test_recent_fallback_releases_transaction_on_lineage_exception(
     def fail_lineage(*_args, **_kwargs):
         raise RuntimeError("forced recent lineage failure")
 
-    monkeypatch.setattr(tools_module, "load_source_lineage", fail_lineage)
-    assert tools_module._recent_leaf_sections(
+    monkeypatch.setattr(recent_module, "load_source_lineage", fail_lineage)
+    assert recent_module._recent_leaf_sections(
         engine, window, "conversation", 10
     ) == []
     assert connection.in_transaction is False

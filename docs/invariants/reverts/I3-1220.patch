@@ -1,0 +1,11 @@
+--- a/survival_fit.py
++++ b/survival_fit.py
+@@ -424,7 +424,7 @@
+                          if key != "tool_calls" or value}
+             if count_message_tokens(projected) < tokens:
+                 out[index] = projected
+-        for roles in (("tool", "assistant"), ("user",)):
++        for roles in (("assistant",), ("user",)):
+             if self._survival_measure(out) <= limit:
+                 break
+             # #1220: exhaust head forms before short-row marks; user rows last, and only to fit.

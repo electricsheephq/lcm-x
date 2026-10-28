@@ -34,35 +34,9 @@ from bench.instruments.scale389.metrics import (  # noqa: E402
     session_gold_metrics,
     summarise_rows,
 )
+from bench.tools.benchpaths import required_path
 
 
-CORPUS = Path(
-    os.environ.get(
-        "SCALE389_CORPUS",
-        "/Volumes/LEXAR/Codex/session-notes/2026-07-25/"
-        "hermes-v1-scale/artifacts/corpus",
-    )
-)
-RESULTS = Path(
-    os.environ.get(
-        "SCALE389_RESULTS",
-        "/Volumes/LEXAR/Codex/session-notes/2026-07-29/"
-        "hermes-r3-1/artifacts/laneINSTPREP-logs/scale389-results",
-    )
-)
-FILESCAN = Path(
-    os.environ.get(
-        "SCALE389_FILESCAN", "/Volumes/LEXAR/hermes-work/phase1a-filescan"
-    )
-)
-WORKDIR = Path(
-    os.environ.get(
-        "SCALE389_WORKDIR", "/Volumes/LEXAR/hermes-work/mb-workdir-phase1a"
-    )
-)
-PRODUCT_REPO = Path(
-    os.environ.get("HERMES_LCM_REPO", "/Volumes/LEXAR/hermes-work/hermes-lcm")
-)
 BRIDGE = Path(
     os.environ.get(
         "SCALE389_BRIDGE",
@@ -81,17 +55,35 @@ UNCENSORED_N = int(
     os.environ.get("SCALE389_UNCENSORED_N", str(DEFAULT_UNCENSORED_N))
 )
 
-os.environ.setdefault("HERMES_LCM_REPO", str(PRODUCT_REPO))
-os.environ.setdefault("HERMES_MB_WORKDIR", str(WORKDIR))
 os.environ.setdefault("HERMES_MB_PROVIDER", "fastembed")
 # The engine's interval-gated FTS integrity check WRITES metadata timestamps on
 # the read path, which breaks store-freeze sha verification mid-run. Disable
 # startup checks for instrument runs (structural checks + doctor still exist).
 os.environ.setdefault("LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS", "-1")
-os.environ.setdefault(
-    "LCM_LONGMEMEVAL_FASTEMBED_CACHE",
-    "/Volumes/LEXAR/hermes-work/fastembed-cache",
-)
+
+def _data_path(relative: str, override: str) -> Path:
+    from bench.tools.benchpaths import bench_path
+
+    if override in os.environ:
+        return Path(os.environ[override])
+    return bench_path(relative, override=override)
+
+
+def _corpus() -> Path:
+    return required_path("SCALE389_CORPUS")
+
+
+def _results() -> Path:
+    return required_path("SCALE389_RESULTS")
+
+
+def _filescan() -> Path:
+    return _data_path("hermes-work/phase1a-filescan", "SCALE389_FILESCAN")
+
+
+def _workdir() -> Path:
+    return _data_path("hermes-work/mb-workdir-phase1a", "SCALE389_WORKDIR")
+
 
 _PROBE_BRIDGE_CLASS: type | None = None
 
@@ -99,6 +91,14 @@ def _probe_bridge_class() -> type:
     global _PROBE_BRIDGE_CLASS
     if _PROBE_BRIDGE_CLASS is not None:
         return _PROBE_BRIDGE_CLASS
+    if "HERMES_LCM_REPO" not in os.environ:
+        os.environ["HERMES_LCM_REPO"] = str(_data_path("hermes-work/hermes-lcm", "HERMES_LCM_REPO"))
+    if "HERMES_MB_WORKDIR" not in os.environ:
+        os.environ["HERMES_MB_WORKDIR"] = str(_workdir())
+    if "LCM_LONGMEMEVAL_FASTEMBED_CACHE" not in os.environ:
+        os.environ["LCM_LONGMEMEVAL_FASTEMBED_CACHE"] = str(
+            _data_path("hermes-work/fastembed-cache", "LCM_LONGMEMEVAL_FASTEMBED_CACHE")
+        )
     spec = importlib.util.spec_from_file_location("scale389_hermes_bridge", BRIDGE)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot import bridge: {BRIDGE}")
@@ -179,7 +179,7 @@ def _probe_bridge_class() -> type:
 
 def load_union() -> dict[str, dict[str, Any]]:
     union: dict[str, dict[str, Any]] = {}
-    with (CORPUS / "union.jsonl").open(encoding="utf-8") as handle:
+    with (_corpus() / "union.jsonl").open(encoding="utf-8") as handle:
         for line in handle:
             row = json.loads(line)
             union[row["sid"]] = row
@@ -187,12 +187,12 @@ def load_union() -> dict[str, dict[str, Any]]:
 
 
 def load_qeval() -> dict[str, Any]:
-    qeval = json.loads((CORPUS / "qeval.json").read_text(encoding="utf-8"))
+    qeval = json.loads((_corpus() / "qeval.json").read_text(encoding="utf-8"))
     missing = [
         row for row in qeval["questions"] if "answer_turns" not in row
     ]
     if missing:
-        union_path = CORPUS / "union.jsonl"
+        union_path = _corpus() / "union.jsonl"
         try:
             union = load_union()
         except (
@@ -222,7 +222,7 @@ def eval_questions(
 
 
 def load_ladder() -> dict[str, Any]:
-    return json.loads((CORPUS / "ladder.json").read_text(encoding="utf-8"))
+    return json.loads((_corpus() / "ladder.json").read_text(encoding="utf-8"))
 
 
 def session_payload(record: dict[str, Any]) -> dict[str, Any]:
@@ -247,7 +247,7 @@ def dates_path(scale: str, question_id: str) -> Path:
         if scale == "S0"
         else tag_for_scale(int(scale))
     )
-    return WORKDIR / f"{tag}.dates.json"
+    return _workdir() / f"{tag}.dates.json"
 
 
 def load_dates(scale: str, question_id: str) -> dict[str, Any]:
@@ -319,8 +319,8 @@ def ingest_scale(n: int) -> None:
         "tag": tag_for_scale(n),
         **store_stats(db_path),
     }
-    RESULTS.mkdir(parents=True, exist_ok=True)
-    (RESULTS / f"ingest-scale-{n}.json").write_text(
+    _results().mkdir(parents=True, exist_ok=True)
+    (_results() / f"ingest-scale-{n}.json").write_text(
         json.dumps(output, indent=2) + "\n", encoding="utf-8"
     )
     print(json.dumps(output, indent=2))
@@ -380,8 +380,8 @@ def ingest_s0(uncensored_n: int) -> None:
         ),
         "stores": len(per_question),
     }
-    RESULTS.mkdir(parents=True, exist_ok=True)
-    (RESULTS / "ingest-s0.json").write_text(
+    _results().mkdir(parents=True, exist_ok=True)
+    (_results() / "ingest-s0.json").write_text(
         json.dumps(output, indent=2) + "\n", encoding="utf-8"
     )
     print(
@@ -395,7 +395,7 @@ def ingest_s0(uncensored_n: int) -> None:
 def materialise_files(uncensored_n: int) -> None:
     union = load_union()
     ladder = load_ladder()
-    base = FILESCAN / "sessions"
+    base = _filescan() / "sessions"
     base.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     for session_id, record in union.items():
@@ -415,7 +415,7 @@ def materialise_files(uncensored_n: int) -> None:
         "write_seconds": round(time.monotonic() - started, 2),
     }
     for n in SCALES:
-        directory = FILESCAN / f"scope-{n}"
+        directory = _filescan() / f"scope-{n}"
         directory.mkdir(parents=True, exist_ok=True)
         members = ladder["scales"][str(n)]["ingest_order"]
         scale_started = time.monotonic()
@@ -437,7 +437,7 @@ def materialise_files(uncensored_n: int) -> None:
     s0_started = time.monotonic()
     questions = eval_questions("A2", uncensored_n)
     for question in questions:
-        directory = FILESCAN / f"scope-s0-{question['question_id']}"
+        directory = _filescan() / f"scope-s0-{question['question_id']}"
         directory.mkdir(parents=True, exist_ok=True)
         for session_id in dict.fromkeys(question["haystack"]):
             link = directory / f"{session_id}.txt"
@@ -447,8 +447,8 @@ def materialise_files(uncensored_n: int) -> None:
         "link_seconds": round(time.monotonic() - s0_started, 2),
         "stores": len(questions),
     }
-    RESULTS.mkdir(parents=True, exist_ok=True)
-    (RESULTS / "setup-filescan.json").write_text(
+    _results().mkdir(parents=True, exist_ok=True)
+    (_results() / "setup-filescan.json").write_text(
         json.dumps(setup, indent=2) + "\n", encoding="utf-8"
     )
     print(json.dumps(setup, indent=2))
@@ -506,7 +506,7 @@ def filescan_search(
     scope = (
         f"scope-s0-{question_id}" if scale == "S0" else f"scope-{scale}"
     )
-    directory = FILESCAN / scope
+    directory = _filescan() / scope
     args.append(str(directory))
     completed = subprocess.run(args, capture_output=True, text=True)
     counts: list[tuple[int, str]] = []
@@ -543,9 +543,9 @@ def _persisted_hit(hit: dict[str, Any]) -> dict[str, Any]:
 
 def run_query_arm(arm: str, scale: str, uncensored_n: int) -> None:
     questions = eval_questions(arm, uncensored_n)
-    probe_pin = emit_probe_question_pin(arm, questions, RESULTS)
+    probe_pin = emit_probe_question_pin(arm, questions, _results())
     reps = 1 if arm in UNCENSORED_ARMS and scale in {"8000", "19829"} else REPS
-    RESULTS.mkdir(parents=True, exist_ok=True)
+    _results().mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
 
     if arm == "B":
@@ -584,7 +584,7 @@ def run_query_arm(arm: str, scale: str, uncensored_n: int) -> None:
                         question,
                         persisted,
                         load_dates(scale, question["question_id"]),
-                        CORPUS / "union.jsonl",
+                        _corpus() / "union.jsonl",
                     ),
                 }
                 rows.append(row)
@@ -649,7 +649,7 @@ def run_query_arm(arm: str, scale: str, uncensored_n: int) -> None:
                         question,
                         persisted,
                         load_dates(scale, question["question_id"]),
-                        CORPUS / "union.jsonl",
+                        _corpus() / "union.jsonl",
                     ),
                 }
                 rows.append(row)
@@ -662,11 +662,11 @@ def run_query_arm(arm: str, scale: str, uncensored_n: int) -> None:
 
     summary = summarise_rows(rows)
     summary["probe_questions"] = probe_pin
-    query_path = RESULTS / f"query-{arm}-{scale}.jsonl"
+    query_path = _results() / f"query-{arm}-{scale}.jsonl"
     with query_path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
-    (RESULTS / f"summary-{arm}-{scale}.json").write_text(
+    (_results() / f"summary-{arm}-{scale}.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )

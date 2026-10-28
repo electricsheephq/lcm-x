@@ -1,0 +1,11 @@
+--- a/survival_fit.py
++++ b/survival_fit.py
+@@ -413,7 +413,7 @@
+                 continue
+             fields = self._survival_projected_fields(row, tokens, _HEAD, _TAIL)
+             marked = _PROJECTED_PREFIX in (normalize_content_value(message.get("content")) or "")
+-            if fields["tool_calls"] != (message.get("tool_calls") or None) or (fields["tool_calls"] and marked):
++            if fields["tool_calls"] != (message.get("tool_calls") or None):
+                 # A storage-only call projection keeps a mark when it is projected again.
+                 fields = self._survival_projected_fields(row, tokens, _HEAD, _TAIL, mark_calls=True)
+             stored_text = normalize_content_value(row.get("content")) or ""

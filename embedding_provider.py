@@ -8,6 +8,7 @@ command; resolving a provider never performs network or disk-heavy work.
 from __future__ import annotations
 
 import importlib.util
+import ipaddress
 import json
 import logging
 import os
@@ -22,8 +23,11 @@ from email.utils import parsedate_to_datetime
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
+from urllib.parse import urlsplit
 
-from .config import LCMConfig
+from .ingest_policy import embedding_prefix_suffix
+from .runtime_identity import _plugin_metadata, plugin_docs_url
+from .config import companion_enable_command, effective_embedding_model, LCMConfig, embedding_provider_id, lcm_env_get, normalize_embedding_provider, profile_bound
 from .tokens import count_tokens
 
 logger = logging.getLogger(__name__)
@@ -72,6 +76,11 @@ _VOYAGE_CONTEXT_REQUEST_TOKEN_BUDGET = int(
 _MAX_ATTEMPTS = 3
 _RETRY_AFTER_BUDGET_S = 60.0
 _DEFAULT_FASTEMBED_CACHE = Path.home() / ".cache" / "fastembed"
+_FASTEMBED_THREADS = 2
+_FASTEMBED_MODEL_LOCK = threading.RLock()
+_FASTEMBED_MODELS: dict[tuple[str, str, int], Any] = {}
+# Cached-only loads never wait for a download of the same key.
+_FASTEMBED_BUILD_LOCKS: dict[tuple[tuple[str, str, int], bool], Any] = {}
 _LOCAL_EMBED_MAX_WORKERS = 4
 _LOCAL_EMBED_WORKER_SLOTS = threading.BoundedSemaphore(_LOCAL_EMBED_MAX_WORKERS)
 
@@ -80,7 +89,7 @@ BeforeDispatch = Callable[[tuple[int, ...]], None]
 # Default model per provider for the raw-history CHUNK corpus. Voyage maps to
 # voyage-context-4 (its contextualized-chunks model); local providers reuse the
 # configured model unchanged (local-first posture, plain per-chunk embedding).
-_DEFAULT_CHUNK_MODELS = {"voyage": "voyage-context-4", "voyageai": "voyage-context-4"}
+_DEFAULT_CHUNK_MODELS = {"voyage": "voyage-context-4"}
 
 
 def default_chunk_model(provider: str, configured_model: str) -> str:
@@ -92,7 +101,7 @@ def default_chunk_model(provider: str, configured_model: str) -> str:
     """
     configured = str(configured_model or "").strip()
     key = str(provider or "").strip().lower()
-    mapped = _DEFAULT_CHUNK_MODELS.get(key)
+    mapped = _DEFAULT_CHUNK_MODELS.get(embedding_provider_id(key))
     if mapped:
         # An explicit context model is the operator's stated chunk-model intent
         # and wins over the mapping; the voyage-context-4 default applies ONLY
@@ -274,6 +283,21 @@ class EmbeddedDocumentBatch:
     vectors: tuple[tuple[float, ...], ...]
 
 
+def _drain_local_embedding_workers(deadline: float) -> bool:
+    """Wait for occupied encoder slots within the caller's shared exit deadline."""
+    slots = _LOCAL_EMBED_WORKER_SLOTS
+    acquired = 0
+    try:
+        for _ in range(_LOCAL_EMBED_MAX_WORKERS):
+            if not slots.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                return False
+            acquired += 1
+        return True
+    finally:
+        for _ in range(acquired):
+            slots.release()
+
+
 def _run_blocking_with_deadline(
     call: Callable[[], Any], *, timeout: float, provider: str
 ) -> Any:
@@ -299,7 +323,7 @@ def _run_blocking_with_deadline(
             worker_slots.release()
 
     worker = threading.Thread(
-        target=run, name=f"lcm-{provider.lower()}-embedding", daemon=True
+        target=profile_bound(run), name=f"lcm-{provider.lower()}-embedding", daemon=True
     )
     try:
         worker.start()
@@ -313,6 +337,14 @@ def _run_blocking_with_deadline(
     if not ok:
         raise value
     return value
+
+
+def _is_loopback_url(url: str) -> bool:
+    try:
+        host = urlsplit(url).hostname or ""
+        return host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _default_http_transport(
@@ -330,7 +362,10 @@ def _default_http_transport(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        open_request = urllib.request.urlopen
+        if _is_loopback_url(url):
+            open_request = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+        with open_request(request, timeout=timeout) as response:
             return HttpResponse(
                 status=int(response.status),
                 headers=dict(response.headers.items()),
@@ -359,6 +394,12 @@ class EmbeddingCircuitBreaker:
             self._open_until = 0.0
             self._failures = 0
         return current >= self._open_until
+
+    def is_open(self, *, now: float | None = None) -> bool:
+        """Read-only peek: never resets state another thread may have just set."""
+        open_until = self._open_until
+        current = time.monotonic() if now is None else now
+        return bool(open_until) and current < open_until
 
     def record_success(self) -> None:
         self._failures = 0
@@ -612,7 +653,7 @@ class VoyageProvider(_ResilientProvider):
         the flat ``/v1/embeddings`` request unchanged and returns
         ``list[list[float]]`` ordered to ``texts``.
         """
-        api_key = os.environ.get("VOYAGE_API_KEY", "").strip()
+        api_key = lcm_env_get("VOYAGE_API_KEY", "").strip()
         if not api_key:
             raise VoyageError("auth", "VOYAGE_API_KEY is not set")
         if payload is None:
@@ -1276,7 +1317,7 @@ class VoyageProvider(_ResilientProvider):
             return []
         budget = max(0.001, float(timeout))
         deadline = time.monotonic() + budget
-        api_key = os.environ.get("VOYAGE_API_KEY", "").strip()
+        api_key = lcm_env_get("VOYAGE_API_KEY", "").strip()
         if not api_key:
             raise VoyageError("auth", "VOYAGE_API_KEY is not set")
         payload: dict[str, Any] = {
@@ -1332,6 +1373,7 @@ class OllamaProvider(_ResilientProvider):
         self,
         model: str,
         *,
+        config: LCMConfig | None = None,
         base_url: str = "http://localhost:11434",
         transport: HttpTransport | None = None,
         timeout: float = 3.0,
@@ -1348,6 +1390,9 @@ class OllamaProvider(_ResilientProvider):
         self.timeout = float(timeout)
         self._sleep = sleeper
         self._dim = 0
+        self._query_prefix = getattr(config, "embedding_query_prefix", "")
+        self._document_prefix = getattr(config, "embedding_document_prefix", "")
+        self.identity_revision_suffix = embedding_prefix_suffix(config, self.provider_id)
 
     @property
     def model_id(self) -> str:
@@ -1478,15 +1523,16 @@ class OllamaProvider(_ResilientProvider):
         # Normal operations also get ONE absolute deadline across attempts +
         # backoff (self.timeout), so retryable failures cannot stack backoff
         # sleeps beyond the configured budget.
-        return self._embed(texts, deadline_budget_s=self.timeout)
+        return self._embed([self._document_prefix + str(text) for text in texts], deadline_budget_s=self.timeout)
 
+    # Shared: OpenAICompatibleProvider reuses this method object; keep it provider-neutral.
     def embed_document_batches(
         self,
         texts: Sequence[str],
         *,
         before_dispatch: BeforeDispatch | None = None,
     ) -> Iterator[EmbeddedDocumentBatch]:
-        normalized = tuple(str(text) for text in texts)
+        normalized = tuple(self._document_prefix + str(text) for text in texts)
         if not normalized:
             return
         indexes = tuple(range(len(normalized)))
@@ -1506,12 +1552,12 @@ class OllamaProvider(_ResilientProvider):
         )
 
     def embed_query(self, text: str) -> list[float]:
-        return self._embed((text,), deadline_budget_s=self.timeout)[0]
+        return self._embed((self._query_prefix + text,), deadline_budget_s=self.timeout)[0]
 
     def embed_query_interactive(self, text: str, *, timeout: float) -> list[float]:
         """Embed a latency-sensitive query under one absolute time budget."""
         return self._embed(
-            (text,), timeout=timeout, deadline_budget_s=timeout
+            (self._query_prefix + text,), timeout=timeout, deadline_budget_s=timeout
         )[0]
 
 
@@ -1544,6 +1590,7 @@ class OpenAICompatibleProvider(_ResilientProvider):
         self,
         model: str,
         *,
+        config: LCMConfig | None = None,
         base_url: str = "",
         api_key_env: str = "LCM_EMBEDDING_API_KEY",
         transport: HttpTransport | None = None,
@@ -1566,6 +1613,9 @@ class OpenAICompatibleProvider(_ResilientProvider):
         self.timeout = float(timeout)
         self._sleep = sleeper
         self._dim = 0
+        self._query_prefix = getattr(config, "embedding_query_prefix", "")
+        self._document_prefix = getattr(config, "embedding_document_prefix", "")
+        self.identity_revision_suffix = embedding_prefix_suffix(config, self.provider_id)
 
     @property
     def model_id(self) -> str:
@@ -1584,10 +1634,10 @@ class OpenAICompatibleProvider(_ResilientProvider):
         deadline_budget_s: float | None = None,
         before_transport: Callable[[], None] | None = None,
     ) -> list[list[float]]:
-        api_key = os.environ.get(self.api_key_env, "").strip()
+        api_key = lcm_env_get(self.api_key_env, "").strip()
         if not api_key:
             # Convenience fallback: SiliconFlow key name used by OpenViking.
-            api_key = os.environ.get("SILICONFLOW_API_KEY", "").strip()
+            api_key = lcm_env_get("SILICONFLOW_API_KEY", "").strip()
         if not api_key:
             raise EmbeddingProviderError(
                 f"{self.api_key_env} (or SILICONFLOW_API_KEY) is not set"
@@ -1719,40 +1769,18 @@ class OpenAICompatibleProvider(_ResilientProvider):
         return vectors
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
-        return self._embed(texts, deadline_budget_s=self.timeout)
+        return self._embed([self._document_prefix + str(text) for text in texts], deadline_budget_s=self.timeout)
 
-    def embed_document_batches(
-        self,
-        texts: Sequence[str],
-        *,
-        before_dispatch: BeforeDispatch | None = None,
-    ) -> Iterator[EmbeddedDocumentBatch]:
-        normalized = tuple(str(text) for text in texts)
-        if not normalized:
-            return
-        indexes = tuple(range(len(normalized)))
-        vectors = self._embed(
-            normalized,
-            max_attempts=1 if before_dispatch is not None else _MAX_ATTEMPTS,
-            deadline_budget_s=self.timeout,
-            before_transport=(
-                (lambda: before_dispatch(indexes))
-                if before_dispatch is not None
-                else None
-            ),
-        )
-        yield EmbeddedDocumentBatch(
-            indexes,
-            tuple(tuple(vector) for vector in vectors),
-        )
+    # Both HTTP providers use the same lazy batch adapter around self._embed.
+    embed_document_batches = OllamaProvider.embed_document_batches
 
     def embed_query(self, text: str) -> list[float]:
-        return self._embed((text,), deadline_budget_s=self.timeout)[0]
+        return self._embed((self._query_prefix + text,), deadline_budget_s=self.timeout)[0]
 
     def embed_query_interactive(self, text: str, *, timeout: float) -> list[float]:
         """Embed a latency-sensitive query under one absolute time budget."""
         return self._embed(
-            (text,), timeout=timeout, deadline_budget_s=timeout
+            (self._query_prefix + text,), timeout=timeout, deadline_budget_s=timeout
         )[0]
 
 
@@ -1772,7 +1800,9 @@ class FastembedProvider(_ResilientProvider):
         self._model_id = str(model).strip()
         if not self._model_id:
             raise ValueError("FastEmbed embedding model must not be empty")
-        self.cache_dir = Path(cache_dir) if cache_dir is not None else _DEFAULT_FASTEMBED_CACHE
+        if cache_dir is None:
+            cache_dir = os.environ.get("FASTEMBED_CACHE_PATH", "").strip() or _DEFAULT_FASTEMBED_CACHE
+        self.cache_dir = Path(cache_dir)
         self.timeout = float(timeout)
         self._model: Any = None
         self._dim = 0
@@ -1786,6 +1816,20 @@ class FastembedProvider(_ResilientProvider):
         return self._dim
 
     def _construct(self, *, allow_download: bool) -> Any:
+        key = self._cache_key()
+        with _FASTEMBED_MODEL_LOCK:
+            if key in _FASTEMBED_MODELS:
+                return _FASTEMBED_MODELS[key]
+        model = self._construct_uncached(allow_download=allow_download)
+        with _FASTEMBED_MODEL_LOCK:
+            return _FASTEMBED_MODELS.setdefault(key, model)
+
+    def _cache_key(self) -> tuple[str, str, int]:
+        # #1586: one intra-op thread per process for bge-small, not a CPU quota.
+        threads = 1 if self.model_id == "BAAI/bge-small-en-v1.5" else _FASTEMBED_THREADS
+        return self.model_id, str(self.cache_dir.resolve()), threads
+
+    def _construct_uncached(self, *, allow_download: bool) -> Any:
         try:
             text_embedding = _load_fastembed()
         except ImportError as exc:
@@ -1796,6 +1840,7 @@ class FastembedProvider(_ResilientProvider):
             return text_embedding(
                 model_name=self.model_id,
                 cache_dir=str(self.cache_dir),
+                threads=self._cache_key()[2],
                 local_files_only=not allow_download,
             )
         except Exception as exc:
@@ -1808,9 +1853,20 @@ class FastembedProvider(_ResilientProvider):
                 "run /lcm embed warmup"
             ) from exc
 
-    def _ensure_local(self) -> Any:
+    def _ensure_local(self, *, allow_download: bool = False) -> Any:
         if self._model is None:
-            self._model = self._construct(allow_download=False)
+            key = self._cache_key()
+            with _FASTEMBED_MODEL_LOCK:
+                build_lock = _FASTEMBED_BUILD_LOCKS.setdefault((key, allow_download), threading.Lock())
+            # Serialize each construction mode outside the cache lock. Queries
+            # load cached files only, independently of a warmup's network I/O.
+            with build_lock:
+                with _FASTEMBED_MODEL_LOCK:
+                    model = _FASTEMBED_MODELS.get(key)
+                if model is None:
+                    model = self._construct(allow_download=allow_download)
+                with _FASTEMBED_MODEL_LOCK:
+                    self._model = _FASTEMBED_MODELS.setdefault(key, model)
         return self._model
 
     def _embed(
@@ -1878,9 +1934,9 @@ class FastembedProvider(_ResilientProvider):
         """The only path allowed to download a missing FastEmbed model."""
         if self._model is None:
             try:
-                self._model = self._construct(allow_download=False)
+                self._ensure_local()
             except ProviderNotWarmedUp:
-                self._model = self._construct(allow_download=True)
+                self._ensure_local(allow_download=True)
         return self.embed_query("warmup")
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
@@ -1937,8 +1993,8 @@ def resolve_provider(
     (451 query embeds ≈ 9k tokens ≈ negligible spend). ``max_calls=0`` disables
     the guard entirely; the circuit breaker still trips on real failures.
     """
-    provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
-    model = str(getattr(config, "embedding_model", "") or "").strip()
+    provider = normalize_embedding_provider(getattr(config, "embedding_provider", ""))
+    model = effective_embedding_model(getattr(config, "embedding_provider", ""), getattr(config, "embedding_model", ""))
     if not provider and not model:
         return None
     if not provider or not model:
@@ -1966,7 +2022,7 @@ def resolve_provider(
     )
     timeout_default = 120.0 if for_backfill else 3.0
     timeout = float(getattr(config, timeout_field, timeout_default))
-    if provider in {"voyage", "voyageai"}:
+    if embedding_provider_id(provider) == "voyage":
         return VoyageProvider(
             model,
             timeout=timeout,
@@ -1975,20 +2031,20 @@ def resolve_provider(
                 getattr(config, "embedding_max_batch_items", _VOYAGE_MAX_BATCH_ITEMS)
             ),
         )
-    if provider == "ollama":
+    if embedding_provider_id(provider) == "ollama":
         return OllamaProvider(
-            model,
+            model, config=config,
             base_url=getattr(config, "ollama_base_url", "http://localhost:11434"),
             timeout=timeout,
             spend_guard=spend_guard,
         )
-    if provider in {"fastembed", "fast-embed"}:
+    if embedding_provider_id(provider) == "fastembed":
         return FastembedProvider(
             model, timeout=timeout, spend_guard=spend_guard
         )
-    if provider in {"openai-compatible", "openai", "siliconflow"}:
+    if embedding_provider_id(provider) == "openai-compatible":
         return OpenAICompatibleProvider(
-            model,
+            model, config=config,
             base_url=getattr(config, "embedding_base_url", ""),
             api_key_env=getattr(config, "embedding_api_key_env", "LCM_EMBEDDING_API_KEY"),
             timeout=timeout,
@@ -2019,7 +2075,7 @@ def probe_provider_availability(config: LCMConfig) -> dict[str, Any]:
     ``detail`` string written for an operator.
     """
     provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
-    model = str(getattr(config, "embedding_model", "") or "").strip()
+    model = effective_embedding_model(getattr(config, "embedding_provider", ""), getattr(config, "embedding_model", ""))
 
     def result(available: bool, detail: str, *, probed: bool = True) -> dict[str, Any]:
         return {
@@ -2043,18 +2099,20 @@ def probe_provider_availability(config: LCMConfig) -> dict[str, Any]:
             f"embeddings are enabled but {missing} is unset; both must be set",
         )
 
-    if provider in {"fastembed", "fast-embed"}:
+    if embedding_provider_id(provider) == "fastembed":
         if importlib.util.find_spec("fastembed") is None:
             return result(
                 False,
-                "FastEmbed is not installed; install the optional fastembed "
-                "dependency (a dependency installed by hand can be dropped by a "
-                "Hermes update; see docs/embeddings-setup.md)",
+                "FastEmbed is not installed; install the dependency companion with "
+                "`hermes plugins install electricsheephq/lcm-x/companions/"
+                "hermes-lcm-x-local-embeddings --ref <LCM-X-40-character-SHA>`; "
+                f"if already installed, run `{companion_enable_command()}`. Restart Hermes after enable; "
+                f"see {plugin_docs_url('docs/embeddings-setup.md', _plugin_metadata()['version'])}",
             )
         return result(True, "fastembed is importable")
 
-    if provider in {"voyage", "voyageai"}:
-        if not os.environ.get("VOYAGE_API_KEY", "").strip():
+    if embedding_provider_id(provider) == "voyage":
+        if not lcm_env_get("VOYAGE_API_KEY", "").strip():
             return result(False, "VOYAGE_API_KEY is not set")
         return result(
             True,
@@ -2062,14 +2120,14 @@ def probe_provider_availability(config: LCMConfig) -> dict[str, Any]:
             probed=False,
         )
 
-    if provider in {"openai-compatible", "openai", "siliconflow"}:
+    if embedding_provider_id(provider) == "openai-compatible":
         api_key_env = str(
             getattr(config, "embedding_api_key_env", "LCM_EMBEDDING_API_KEY")
             or "LCM_EMBEDDING_API_KEY"
         ).strip()
         has_key = bool(
-            os.environ.get(api_key_env, "").strip()
-            or os.environ.get("SILICONFLOW_API_KEY", "").strip()
+            lcm_env_get(api_key_env, "").strip()
+            or lcm_env_get("SILICONFLOW_API_KEY", "").strip()
         )
         if not has_key:
             return result(
@@ -2084,7 +2142,7 @@ def probe_provider_availability(config: LCMConfig) -> dict[str, Any]:
             probed=False,
         )
 
-    if provider == "ollama":
+    if embedding_provider_id(provider) == "ollama":
         return result(
             True,
             "ollama daemon reachability not probed (offline check); verify with "

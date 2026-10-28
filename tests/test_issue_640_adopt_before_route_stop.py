@@ -31,7 +31,8 @@ class _Provider:
 def _engine(tmp_path, **config_overrides):
     config = LCMConfig(database_path=str(tmp_path / "lcm.db"),
                        large_output_externalization_path=str(tmp_path / "externalized"),
-                       **config_overrides)
+                       **{"leaf_chunk_tokens": 20_000,  # #1013: the transcript is sized for the pre-#1013 leaf
+                          **config_overrides})
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
     engine.on_session_start(SID, platform="cli", conversation_id=CID, context_length=200_000)
     return engine

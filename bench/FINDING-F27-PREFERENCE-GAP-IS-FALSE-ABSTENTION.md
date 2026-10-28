@@ -11,7 +11,7 @@
 
 **Date:** 2026-07-25 · **Instrument:** banked 444 report.json (`v1l1-full500-primary-2026-07-23T18-26-13-780Z`)
 **Spend:** zero — pure re-analysis of an existing artifact.
-**Artifacts:** `/Volumes/LEXAR/Codex/session-notes/2026-07-25/hermes-preference-gap/artifacts/`
+**Artifacts:** local run `2026-07-25/hermes-preference-gap` (raw data kept locally; not published), artifacts: `artifacts`
 (`pref_diag.py`, `slice_check.py`, `retrieval_check.py`, `abstain_mass.py`, `gold_map2.py`,
 **`recall_full500.py` ← the definitive recall method (all 500)**, `recall_by_date.py` ← same method on the 100q slice, `shift_test.py`/`recall_v3.py` ← the wrong ones, kept as
 counter-examples; outputs `pref_rows.json`, `failure_split.json`, `recall_by_date.json`, `recall_full500.json`)

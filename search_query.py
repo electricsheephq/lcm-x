@@ -24,6 +24,15 @@ _EMOJI_RE = re.compile(
 )
 _QUOTED_PHRASE_RE = re.compile(r'"([^"]+)"')
 _BOOLEAN_OPERATORS = {"AND", "OR", "NOT", "NEAR"}
+_ASCII_CASE_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+_RECALL_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "by", "did", "do", "does",
+    "for", "from", "had", "has", "have", "how", "i", "in", "is", "it", "me",
+    "my", "of", "on", "or", "that", "the", "to", "was", "were", "what",
+    "when", "where", "which", "who", "why", "with", "you", "your",
+    # contraction tails: the tokenizer splits "Alice's" and "don't" at the apostrophe
+    "d", "ll", "m", "re", "s", "t", "ve",
+})
 _RISKY_FTS_TOKEN_RE = re.compile(r"[A-Za-z0-9][\-:/][A-Za-z0-9]")
 _SPLIT_PUNCT_RE = re.compile(r"[-:/]+")
 _STRIP_EDGE_PUNCT = "\"'()[]{}.,;"
@@ -98,7 +107,8 @@ def _neutralize_bare_operators(sanitized: str) -> str:
     return "".join(out)
 
 
-def sanitize_fts5_query(query: str, *, allow_operators: bool = False) -> str:
+def sanitize_fts5_query(query: str, *, allow_operators: bool = False,
+                        agent_operators: bool = False) -> str:
     """Reduce a query to FTS5-safe terms, preserving balanced phrase quotes.
 
     Composed (NFC) first so a decomposed accent is one alphanumeric character
@@ -111,10 +121,49 @@ def sanitize_fts5_query(query: str, *, allow_operators: bool = False) -> str:
     keeps bare AND/OR/NOT/NEAR intact. It must never be set for text that came
     from a user or an agent: the default assumes raw prose, which is the only
     safe reading when the two cannot be told apart.
+
+    ``agent_operators`` is a separate grep-only mode for infix OR/NOT
+    and term* prefixes. Other callers retain the existing defaults.
     """
     composed = unicodedata.normalize("NFC", query or "")
     sanitized = _sanitize_query(composed, _fts5_safe_char)
+    if agent_operators:
+        return _sanitize_agent_fts5_query(composed, sanitized)
     return sanitized if allow_operators else _neutralize_bare_operators(sanitized)
+
+
+def _sanitize_agent_fts5_query(query: str, neutral: str) -> str:
+    """Grep-only infix operators and term prefixes; malformed quotes stay prose."""
+    outside_phrases = _QUOTED_PHRASE_RE.sub(" ", query)
+    if query.count('"') % 2 or "(" in outside_phrases or ")" in outside_phrases:
+        return _neutralize_bare_operators(neutral)
+    safe = _sanitize_query(query, lambda char: char if char == "*" else _fts5_safe_char(char))
+    tokens: list[str] = []
+    for token in re.findall(r'"[^"]*"|[^\s"]+', safe):
+        if token.startswith('"'):
+            tokens.append(token)
+        elif token.endswith("*") and token.count("*") == 1 and sum(c.isalnum() for c in token[:-1]) >= 2:
+            stem = token[:-1]
+            tokens.append((stem.lower() if stem in _BOOLEAN_OPERATORS else stem) + "*")
+        else:
+            tokens.extend(token.replace("*", " ").split())
+    operators = {"OR", "NOT"}
+    sanitized = " ".join(
+        token.lower() if token in {"AND", "NEAR"} else token
+        for i, token in enumerate(tokens)
+        if token not in operators or (
+            0 < i < len(tokens) - 1
+            and tokens[i - 1] not in operators and tokens[i + 1] not in operators
+        )
+    )
+    return sanitized or _neutralize_bare_operators(neutral)
+
+
+def is_fts5_syntax_error(exc: Exception) -> bool:
+    """Distinguish MATCH grammar failures from a missing/broken index."""
+    return any(marker in str(exc).lower() for marker in (
+        "fts5: syntax error", "unterminated string", "malformed match", "fts5: parser stack overflow",
+    ))
 
 
 def sanitize_like_query(query: str) -> str:
@@ -260,6 +309,52 @@ def extract_quoted_phrases(query: str) -> List[str]:
     return [phrase.strip() for phrase in _QUOTED_PHRASE_RE.findall(query or "") if phrase.strip()]
 
 
+def recall_content_terms(query: str) -> list[str]:
+    """Return recall's FTS5-ready content terms, including quoted literals/phrases.
+
+    Each term is split on the same boundary the sanitizer uses, which is the boundary unicode61 indexes on, so
+    ``Alice's`` searches ``Alice`` and ``3.14`` searches ``3`` and ``14``; deleting the punctuation would search
+    tokens the index never holds. A phrase the query quoted stays one quoted phrase. An exact ``NOT`` or ``NEAR``
+    is quoted so it stays a term, never an operator. Case is left to the tokenizer: Python's case mapping is
+    newer than unicode61's and would change what matches.
+    """
+    composed = unicodedata.normalize("NFC", query or "")
+    quoted = set(extract_quoted_phrases(composed))
+    parts: list[str] = []
+    terms = extract_search_terms(composed)
+    terms.extend(token for token in _QUOTED_PHRASE_RE.sub(" ", composed).split() if token in {"NOT", "NEAR"})
+    for term in terms:
+        tokens = "".join(_fts5_safe_char(char) for char in term).split()
+        if term in quoted:
+            if tokens:
+                parts.append('"' + " ".join(tokens) + '"')
+            continue
+        for token in tokens:
+            if token.translate(_ASCII_CASE_FOLD) in _RECALL_STOPWORDS:
+                continue
+            parts.append(f'"{token}"' if token in _BOOLEAN_OPERATORS else token)
+    # Keep the first spelling; Python's Unicode case mapping is newer than unicode61's.
+    unique: dict[str, str] = {}
+    for part in parts:
+        unique.setdefault(part.translate(_ASCII_CASE_FOLD), part)
+    return list(unique.values())
+
+
+def build_recall_or_query(query: str) -> str:
+    """Compose recall's content terms as one FTS5 OR expression."""
+    return " OR ".join(recall_content_terms(query))
+
+
+def is_identifier_shaped_query(query: str) -> bool:
+    """Recognize unquoted compound identifiers without changing prose/LIKE routes."""
+    if not query or '"' in query or any(char.isspace() for char in query):
+        return False
+    if "_" not in query and not any(char.isdigit() for char in query):
+        return False
+    safe = sanitize_fts5_query(query)
+    return not requires_like_fallback(query, safe) and len(safe.split()) >= 2
+
+
 def escape_like(term: str) -> str:
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -378,21 +473,38 @@ def normalize_search_sort(sort: str | None) -> str:
 
 
 def build_snippet(text: str, terms: List[str], width: int = 80) -> str:
+    return build_snippet_with_span(text, terms, width)[0]
+
+
+def build_snippet_with_span(text: str, terms: List[str], width: int = 80) -> tuple[str, int, int]:
+    """Return the legacy preview and its undecorated source span."""
     content = (text or "")
     if not content:
-        return ""
+        return "", 0, 0
     lowered = content.lower()
     for term in terms:
         if not term:
             continue
         idx = lowered.find(term.lower())
         if idx >= 0:
-            start = max(0, idx - width // 2)
-            end = min(len(content), idx + len(term) + width // 2)
+            match_start, match_end = idx, idx + len(term)
+            if len(lowered) != len(content):
+                lowered_end = idx + len(term.lower())
+                lowered_pos = 0
+                for source_pos, ch in enumerate(content):
+                    next_pos = lowered_pos + len(ch.lower())
+                    if lowered_pos <= idx < next_pos:
+                        match_start = source_pos
+                    if next_pos >= lowered_end:
+                        match_end = source_pos + 1
+                        break
+                    lowered_pos = next_pos
+            start = max(0, match_start - width // 2)
+            end = min(len(content), match_end + width // 2)
             snippet = content[start:end]
             if start > 0:
                 snippet = "..." + snippet
             if end < len(content):
                 snippet = snippet + "..."
-            return snippet
-    return content[:width] + ("..." if len(content) > width else "")
+            return snippet, start, end
+    return content[:width] + ("..." if len(content) > width else ""), 0, min(len(content), width)
