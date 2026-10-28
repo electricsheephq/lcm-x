@@ -224,8 +224,8 @@ class StoreCompleteMixin:
                               accounted_ids=(), scale: int = 1, scanned=None, copy_lookup=None,
                               escape_retained: bool = False, allow_retained_escape: bool = False,
                               lift_allowed: bool = True) -> Optional[list]:
-        """``[(input_row, [store_id, ...]), ...]`` in store order (regrouped with each tool group whole only when the host
-        reordered it); ``[]`` when the leaf cannot start
+        """``[(input_row, [store_id, ...]), ...]`` in walk order (when the host reordered the leaf,
+        ``_store_complete_order`` holds each input row's store-order rank); ``[]`` when the leaf cannot start
         (a retained occurrence, no source rows, or a contiguity cut); None: today's input."""
         from .identity_anchor import _match_occurrences
 
@@ -234,6 +234,7 @@ class StoreCompleteMixin:
         self._store_complete_blocked = None  # #1162: (store_id, role, kind, chunk head position) of a [] return
         self._store_complete_empty_reason = ""
         self._store_complete_escaped = []
+        self._store_complete_order = {}  # #2007: id(input row) -> store-order rank, set only for a host-reordered leaf
         given_claims = claims
         in_chunk = {id(message) for message in chunk}
         claims = {key: list(ids) for key, ids in claims.items()}
@@ -449,14 +450,15 @@ class StoreCompleteMixin:
         emitted = sum(1 for message, _ids in out if id(message) in in_chunk)
         self._store_complete_escaped = [(sid, m.get("role"), escaped[sid])
                                         for m, ids in out for sid in ids if sid in escaped]
-        # #2007: the walk above decides WHICH rows the leaf takes (a host prefix of the chunk, which
-        # _leaf_consumption consumes); the summarizer reads them in store order, each tool group whole.
+        # #2007: the walk above decides WHICH rows the leaf takes and their order (a host prefix of the chunk,
+        # which _leaf_consumption and a rescue prefix rely on); the summarizer reads them in store order, each
+        # tool group whole, through the rank published in _store_complete_order.
         # A call group is an assistant row with tool calls plus every later tool row that answers it (the
         # nearest preceding call with that id). Every other row with a store id is its own unit; a row
         # without one (position 0) stays behind the row before it, a leading one first. A group sorts at
         # its call's store position or, when the call has none, at its earliest stored result; inside it
         # the call stays first and its results follow in store order. A leaf whose stored rows are already
-        # in store order is returned as built, even when the store holds a row inside a group; in a regrouped
+        # in store order gets no rank, even when the store holds a row inside a group; in a regrouped
         # leaf such a row follows the group. The sorts are stable.
         units, answers, part = [], {}, None  # unit = [[head, *id-less], [result, *id-less], ...]
         for message, ids in out:
@@ -481,10 +483,10 @@ class StoreCompleteMixin:
             return [item for _key, item in sorted(zip(keys, parts), key=lambda pair: pair[0])]
         stored = [p for p in (position(m, ids) for m, ids in out) if p]
         if any(a > b for a, b in zip(stored, stored[1:])):
-            out = [pair for unit in by_position(units)
-                   for part in [unit[0], *(p[0] for p in by_position([[r] for r in unit[1:]]))] for pair in part]
-        if (emitted == len(out) == len(chunk) and not excluded and not any(ids for _m, ids in out)
-                and all(m is c for (m, _ids), c in zip(out, chunk))):
+            ordered = [pair for unit in by_position(units)
+                       for part in [unit[0], *(p[0] for p in by_position([[r] for r in unit[1:]]))] for pair in part]
+            self._store_complete_order = {id(m): i for i, (m, _ids) in enumerate(ordered)}
+        if emitted == len(out) == len(chunk) and not excluded and not any(ids for _m, ids in out):
             return None  # nothing hidden, claimed or excluded: today's input and mapping
         last = max(s for m, ids in out for s in ids_of(m, ids)) if any(ids_of(m, ids) for m, ids in out) else frontier
         self._store_complete_excluded = [store_id for store_id in excluded if store_id < last]

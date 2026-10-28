@@ -8,6 +8,7 @@ import math
 
 import pytest
 
+import hermes_lcm.engine as lcm_engine
 from hermes_lcm import leaf_prep
 from hermes_lcm.compaction import _CompressionState, _LeafState, _THRESHOLD_FULL_SWEEP_MAX_PASSES
 from hermes_lcm.tokens import count_messages_tokens
@@ -521,8 +522,11 @@ def test_t12_contiguity_budget_lift(tmp_path, summaries, lines):
         out = engine._store_complete_input(chunk, {}, mapping, chunk, chunk, 0, [], 1,
                                             scanned=(stored, False), allow_retained_escape=True)
         assert out and engine._store_complete_blocked is None
-        # #2007: the leaf input is in store order, not the host's [row 2, row 0] order.
-        assert [sid for m, ids in out for sid in [*ids, *([mapping[id(m)]] if id(m) in mapping else [])]] == [1, 2, 3]
+        def ids_of(pairs):
+            return [sid for m, ids in pairs for sid in [*ids, *([mapping[id(m)]] if id(m) in mapping else [])]]
+        # #2007: the list keeps the walk's order; the summarizer reads it in store order, not [row 2, row 0].
+        assert ids_of(out) == _walk_ids(rows, chunk)
+        assert ids_of(_in_store_order(engine, out)) == [1, 2, 3]
     finally:
         engine.shutdown()
 
@@ -530,6 +534,22 @@ def test_t12_contiguity_budget_lift(tmp_path, summaries, lines):
 def _leaf_ids(engine, out) -> list:
     full_map = engine._compress_run.store_ids_by_message_id or {}
     return [sid for m, ids in out for sid in [*ids, *([full_map[id(m)]] if id(m) in full_map else [])]]
+
+
+def _walk_ids(stored, chunk) -> list:
+    """The walk's (main's) order for these leaves: the chunk rows in host order, each hidden row emitted
+    before the first chunk row stored after it."""
+    host = [next(sid for sid, row in enumerate(stored, start=1) if row is m) for m in chunk]
+    hidden, out = [sid for sid in range(1, len(stored) + 1) if sid not in host], []
+    for sid in host:
+        out += [h for h in hidden if h < sid and h not in out] + [sid]
+    return out
+
+
+def _in_store_order(engine, out) -> list:
+    """#2007: the order the summarizer reads ``out`` in (the rank of a host-reordered leaf)."""
+    rank = engine._store_complete_order
+    return sorted(out, key=lambda pair: rank[id(pair[0])]) if rank else list(out)
 
 
 def test_2007_identity_anchor_input_in_store_order(tmp_path, summaries, lines):
@@ -541,8 +561,9 @@ def test_2007_identity_anchor_input_in_store_order(tmp_path, summaries, lines):
         full_map = engine._get_store_id_map_for_messages(view)
         engine._compress_run.store_ids_by_message_id = full_map
         out = engine._identity_anchor_summary_input(view, full_map, view, view, budget=4000)
-        assert out and _leaf_ids(engine, out) == [1, 2, 3]
-        assert [m["content"] for m, _ids in out] == [r["content"] for r in rows]
+        assert out and _leaf_ids(engine, out) == _walk_ids(rows, view)
+        assert _leaf_ids(engine, _in_store_order(engine, out)) == [1, 2, 3]
+        assert [m["content"] for m, _ids in _in_store_order(engine, out)] == [r["content"] for r in rows]
     finally:
         engine.shutdown()
 
@@ -557,7 +578,9 @@ def test_2007_reordered_tool_group_stays_whole_in_store_order(tmp_path, summarie
         full_map = engine._get_store_id_map_for_messages(view)
         engine._compress_run.store_ids_by_message_id = full_map
         out = engine._identity_anchor_summary_input(view, full_map, view, view, budget=4000)
-        assert out and _leaf_ids(engine, out) == [1, 2, 3, 4, 5]
+        assert out and _leaf_ids(engine, out) == _walk_ids([user, call, result, reply, later], view)
+        out = _in_store_order(engine, out)
+        assert _leaf_ids(engine, out) == [1, 2, 3, 4, 5]
         roles = [m.get("role") for m, _ids in out]
         assert roles[1:3] == ["assistant", "tool"] and out[1][0].get("tool_calls")
         assert out[2][0]["tool_call_id"] == out[1][0]["tool_calls"][0]["id"]
@@ -570,8 +593,8 @@ def _anchored_ids(engine, stored, view) -> list:
     full_map = engine._get_store_id_map_for_messages(view)
     engine._compress_run.store_ids_by_message_id = full_map
     out = engine._identity_anchor_summary_input(view, full_map, view, view, budget=4000)
-    assert out
-    return _leaf_ids(engine, out)
+    assert out and _leaf_ids(engine, out) == _walk_ids(stored, view)  # #2007 r5: the list keeps the walk's order
+    return _leaf_ids(engine, _in_store_order(engine, out))  # the order the summarizer reads
 
 
 def test_2007_swapped_sibling_results_in_store_order(tmp_path, summaries, lines):
@@ -635,8 +658,8 @@ def _walk_order(engine, stored, chunk, mapping, claims):
     full = {id(m): s for m, s in mapping}
     out = engine._store_complete_input(chunk, {id(m): c for m, c in claims}, full, chunk, chunk, 0, [],
                                        100_000, scanned=(_rows(engine), False))
-    assert out
-    return [m for m, _ids in out]
+    assert out and [m for m, _ids in out] == chunk  # #2007 r5: no hidden row, so the walk keeps the chunk order
+    return [m for m, _ids in _in_store_order(engine, out)]
 
 
 @pytest.mark.parametrize("shape", ["G", "H"])
@@ -691,6 +714,7 @@ def test_2007_in_order_tool_shapes_returned_as_built(tmp_path, summaries, lines)
         engine._compress_run.store_ids_by_message_id = full_map
         out = engine._identity_anchor_summary_input(view, full_map, view, view, budget=4000)
         assert _leaf_ids(engine, out) == list(range(1, len(stored) + 1))
+        assert engine._store_complete_order == {}  # #2007 r5: an in-order leaf gets no rank
         assert [m for m, _ids in out if any(m is v for v in view)] == view
         assert [m["content"] for m, _ids in out] == [m["content"] for m in stored]
     finally:
@@ -711,6 +735,106 @@ def test_2007_store_ordered_split_group_returned_as_built(tmp_path, summaries, l
         full = {id(m): s for s, m in enumerate(rows, start=1)}
         assert engine._store_complete_input(rows, {}, full, rows, rows, 0, [], 100_000,
                                             scanned=(_rows(engine), False)) is None
+        assert engine._store_complete_order == {}
+    finally:
+        engine.shutdown()
+
+
+def _leaf_calls(monkeypatch, engine, fail_first: bool):
+    """The leaf summariser texts (a stub whose first call can fail retry-worthy) and each leaf's consumed ids."""
+    texts, consumed = [], []
+
+    def summarize(**kwargs):
+        if kwargs.get("depth", 0) == 0:
+            texts.append(kwargs["text"])
+            if fail_first and len(texts) == 1:
+                raise TimeoutError("request timed out")  # retry-worthy: the rescue retries a smaller prefix
+        return "Earlier turns.\nExpand for details about: turns", 1
+
+    original = engine._leaf_consumption
+
+    def consumption(*args):
+        result = original(*args)
+        consumed.append(result[4])
+        return result
+
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", summarize)
+    monkeypatch.setattr(engine, "_leaf_consumption", consumption)
+    return texts, consumed
+
+
+def _read_ids(text, stored) -> list:
+    """The store ids of the rows a summariser text holds, in the order it holds them."""
+    marks = [(sid, row["content"].split(PAD)[0]) for sid, row in enumerate(stored, start=1)]
+    return [sid for _at, sid in sorted((text.index(mark), sid) for sid, mark in marks if mark in text)]
+
+
+def test_2007_rescue_prefix_consumes_only_rows_it_read(tmp_path, lines, monkeypatch):
+    # B1: the host holds [B(2), A(1)]; the first call fails retry-worthy and the rescue retries one row.
+    engine = _engine(tmp_path, False)
+    a = {"role": "user", "content": "row A" + PAD, "timestamp": 10.0}
+    b = {"role": "user", "content": "row B" + PAD, "timestamp": 20.0}
+    stored = [a, b, *[row for i in (2, 3) for row in _turn(f"T{i}", 100.0 * i)]]
+    view = [b, a, *stored[2:]]
+    texts, consumed = _leaf_calls(monkeypatch, engine, fail_first=True)
+    try:
+        engine.ingest(stored)
+        engine._ingest_cursor = len(view)
+        engine.compress(view, current_tokens=10_000)
+        assert len(texts) >= 2 and sorted(_read_ids(texts[0], stored)) == [1, 2] and consumed, (texts, consumed)
+        read = _read_ids(texts[1], stored)
+        assert len(read) == 1 and consumed[0] == sorted(read)  # no row the summary never read is consumed
+        assert read == sorted(read)  # store order
+    finally:
+        engine.shutdown()
+
+
+def _hidden_row_and_tool_group():
+    user = {"role": "user", "content": "user 1" + PAD, "timestamp": 100.0}
+    hidden = {"role": "user", "content": "hidden 2" + PAD, "timestamp": 150.0}
+    call, result = _call("call_X", content="call 3"), _result("call_X", "result 4")
+    reply = {"role": "assistant", "content": "reply 5" + PAD}
+    later = {"role": "user", "content": "later 6" + PAD, "timestamp": 200.0}
+    return [user, hidden, call, result, reply, later, *[row for i in (3, 4) for row in _turn(f"T{i}", 100.0 * i)]]
+
+
+@pytest.mark.parametrize("rescue", [False, True], ids=["full", "rescue"])
+def test_2007_summariser_reads_a_reordered_leaf_in_store_order(tmp_path, lines, monkeypatch, rescue):
+    engine = _engine(tmp_path, False, leaf_chunk_tokens=4000, dynamic_leaf_chunk_max=4000)
+    stored = _hidden_row_and_tool_group()
+    view = [stored[0], stored[5], *stored[2:5], *stored[6:]]  # row 2 hidden; row 6 moved before the tool group
+    texts, _consumed = _leaf_calls(monkeypatch, engine, fail_first=rescue)
+    try:
+        engine.ingest(stored)
+        engine._ingest_cursor = len(view)
+        engine.compress(view, current_tokens=10_000)
+        read = [_read_ids(text, stored) for text in texts]
+        assert read and {1, 2, 3, 4, 5, 6} <= set(read[0]) and read[0] == sorted(read[0]), read
+        if rescue:  # the rescue prefix of the walk, still read in store order (the call before its result)
+            assert len(read) >= 2 and {3, 4, 6} <= set(read[1]) < set(read[0]), read
+            assert read[1] == sorted(read[1]), read
+    finally:
+        engine.shutdown()
+
+
+def test_2007_in_order_leaf_serialized_as_given(tmp_path, lines, monkeypatch):
+    engine = _engine(tmp_path, False, leaf_chunk_tokens=4000, dynamic_leaf_chunk_max=4000)
+    stored = _hidden_row_and_tool_group()
+    view = [row for i, row in enumerate(stored) if i != 1]  # row 2 hidden, the rest in store order
+    texts, _consumed = _leaf_calls(monkeypatch, engine, fail_first=False)
+    given, original = [], engine._summarize_leaf_chunk_with_rescue
+
+    def summarise(chunk, **kwargs):
+        given.append(engine._serialize_messages_with_clip(list(chunk))[0])
+        return original(chunk, **kwargs)
+
+    monkeypatch.setattr(engine, "_summarize_leaf_chunk_with_rescue", summarise)
+    try:
+        engine.ingest(stored)
+        engine._ingest_cursor = len(view)
+        engine.compress(view, current_tokens=10_000)
+        assert texts and given and texts[0] == given[0]  # main's serialization: the input as given, byte for byte
+        assert {1, 2, 3, 4, 5, 6} <= set(_read_ids(texts[0], stored))
     finally:
         engine.shutdown()
 
