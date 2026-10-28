@@ -177,7 +177,7 @@ def _main(argv, interrupt):
     # Enumerate the product's actual chunk/summary units in each tree, including
     # the placebo corpus. Only this pre-embed phase is allowed to write the cache.
     from benchmarking.d1_cache import merge, seal
-    manifests, role_threads, preembed = {}, {}, []
+    manifests, role_threads, build_threads, preembed = {}, {}, {}, []
     if args.build_workers == 1:
         for role in products:
             if interrupt[0]:
@@ -211,7 +211,7 @@ def _main(argv, interrupt):
 
         builds = run_pool([(role, part) for role in products for part in range(args.build_workers)], 2 * args.build_workers, build)
         preembed = [row for rows in builds for row in rows]
-        merged_entries, duplicate_keys, build_threads = {}, {}, {}
+        merged_entries, duplicate_keys = {}, {}
         for role in products:
             rows = [row for row in preembed if row["role"] == role]
             if interrupt[0] or any(row["exit_code"] for row in rows):
@@ -247,7 +247,10 @@ def _main(argv, interrupt):
         return status
 
     effective = [value["effective_intra_op_threads"] for value in role_threads.values()]
-    budget_ok = args.jobs * max((n for n in effective if n is not None), default=threads) <= args.thread_budget
+    # One-thread build reports still decide the verdict: a capped product stays within threads at the shard
+    # setting, and an uncapped one reports the same count there. They do not make the budget fully known.
+    checked = effective + [row["effective_intra_op_threads"] for rows in build_threads.values() for row in rows]
+    budget_ok = args.jobs * max((n for n in checked if n is not None), default=threads) <= args.thread_budget
     arms = run_pool([task for task in tasks if task[0] in manifests], args.jobs, launch) if budget_ok and not interrupt[0] else []
     receipt = {"instrument_sha": instrument, "products": pins, "jobs": args.jobs,
                "cache_manifests": manifests, "role_threads": role_threads,

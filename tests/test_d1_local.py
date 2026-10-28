@@ -587,8 +587,8 @@ def driver_args(root):
             "--aprime-dir", str(root / "aa"), "--output", str(root / "out"), "--scratch", str(root / "scratch")]
 
 
-@pytest.mark.parametrize("workers,failed_role", [(None, None), (1, None), (3, None), (3, "candidate")])
-def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, workers, failed_role):
+@pytest.mark.parametrize("workers,failed_role,reported", [(None, None, 2), (1, None, 2), (3, None, 1), (3, "candidate", 1), (3, None, 6)])
+def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, workers, failed_role, reported):
     cli = driver()
     argv = driver_args(tmp_path)
     if workers is not None:
@@ -627,7 +627,7 @@ def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, w
             builder = D1Cache(Fake(), cache, options={**OPTIONS, "role": role}, readonly=False)
             builder.partition = (part, workers) if parallel else None
             builder.embed_documents([f"unit {i}" for i in range(30)])
-            Path(env["LCM_D1_THREAD_REPORT"]).write_text(json.dumps({"effective_intra_op_threads": 1 if parallel else 2}))
+            Path(env["LCM_D1_THREAD_REPORT"]).write_text(json.dumps({"effective_intra_op_threads": reported}))
             return {"exit_code": 7 if role == failed_role and part == 0 and arm == "preembed-aa" else 0, "timed_out": False}
         reads.append(role)
         assert env["LCM_D1_ORT_THREADS"] == env["OMP_NUM_THREADS"] == "2"
@@ -640,17 +640,19 @@ def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, w
         return {"exit_code": 0, "timed_out": False}
 
     monkeypatch.setattr(cli, "run_child", fake_run)
-    assert cli.main(argv) == int(failed_role is not None)
+    refused = 3 * reported > 8  # an uncapped product's build report exceeds the shard budget: no arm runs
+    assert cli.main(argv) == int(failed_role is not None or refused)
     receipt = json.loads((tmp_path / "out/d1-receipt.json").read_text())
     assert len(builds) == (2 * workers if parallel else 2)
     assert all(calls == ["preembed", "preembed-aa"] for calls in builds.values())
     assert set(receipt["cache_manifests"]) == ({"base"} if failed_role else {"base", "candidate"})
-    assert len(reads) == (8 if failed_role else 16)
+    assert len(reads) == (0 if refused else 8 if failed_role else 16)
+    assert receipt["thread_budget_ok"] is not refused
     if parallel:
         assert receipt["build_workers"] == workers
         assert receipt["merged_entries"] == {role: 30 for role in receipt["cache_manifests"]}
         assert receipt["duplicate_keys"] == {role: 0 for role in receipt["cache_manifests"]}
-        assert receipt["build_threads"] == {role: [{"effective_intra_op_threads": 1}] * (2 * workers) for role in receipt["cache_manifests"]}
+        assert receipt["build_threads"] == {role: [{"effective_intra_op_threads": reported}] * (2 * workers) for role in receipt["cache_manifests"]}
         assert receipt["role_threads"] == {} and receipt["thread_budget_fully_known"] is False
         assert all({"role", "part", "arm", "exit_code", "timed_out", "elapsed_s"} == set(row) and row["elapsed_s"] >= 0 for row in receipt["preembed"])
         if failed_role:
@@ -672,10 +674,11 @@ def test_build_workers_above_thread_budget_is_parser_error(tmp_path, monkeypatch
     assert not (tmp_path / "out").exists()
 
 
+@pytest.mark.parametrize("workers", [1, 2])
 @pytest.mark.parametrize("phase", ["build", "read"])
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
-def test_driver_interrupt_cleans_groups_and_writes_partial_receipt(tmp_path, phase, signum):
-    argv = driver_args(tmp_path)
+def test_driver_interrupt_cleans_groups_and_writes_partial_receipt(tmp_path, phase, signum, workers):
+    argv = driver_args(tmp_path) + ["--build-workers", str(workers)]
     # A descendant ignores the forwarded signal, exercising bounded escalation
     # even when the worker leader exits immediately.
     grand = "import os,signal,time; signal.signal(signal.SIGINT,signal.SIG_IGN); signal.signal(signal.SIGTERM,signal.SIG_IGN); print(os.getpid(),flush=True); time.sleep(60)"
@@ -691,6 +694,7 @@ spec.loader.exec_module(cli)
 cli.pin=lambda _: "a"*40
 import benchmarking.d1_cache
 benchmarking.d1_cache.seal=lambda _: "fake-manifest"
+benchmarking.d1_cache.merge=lambda parts, target: (0, 0)
 run=cli.run_child
 def fake(command, **kw):
     env=kw["env"]
@@ -704,7 +708,7 @@ cli.run_child=fake
 raise SystemExit(cli.main({argv!r}))
 '''
     process = subprocess.Popen([sys.executable, "-c", runner], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    expected = 1 if phase == "build" else 3
+    expected = (2 * workers if workers > 1 else 1) if phase == "build" else 3
     try:
         wait_until(lambda: len(list((tmp_path / "scratch").glob("*/*.ready"))) == expected)
         ready = list((tmp_path / "scratch").glob("*/*.ready"))
@@ -716,6 +720,8 @@ raise SystemExit(cli.main({argv!r}))
         assert receipt["interrupted"] is True
         rows = receipt["preembed"] if phase == "build" else receipt["arms"]
         assert any(row["exit_code"] == 128 + signum for row in rows)
+        if phase == "build":
+            assert receipt["cache_manifests"] == {} and not list((tmp_path / "out").glob("*/embeddings.sqlite"))
         for leader, grandchild in groups:
             wait_until(lambda: pid_gone(leader) and pid_gone(grandchild))
             with pytest.raises(ProcessLookupError):
