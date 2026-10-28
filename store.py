@@ -9,9 +9,11 @@ row identity (`store_id`) for DAG/source lookup.
 """
 
 
+import hashlib
 import json
 import logging
 import math
+import secrets
 import sqlite3
 import threading
 import time
@@ -64,6 +66,31 @@ from .tokens import count_message_tokens
 logger = logging.getLogger(__name__)
 
 INGESTED_AT_BACKFILL_STEP = "messages_ingested_at_backfill_v1"
+_INGEST_LEDGER_TABLES = (
+    "ledger_meta", "occurrence_bindings", "ledger_emissions", "stamp_observations",
+    "ingest_views", "lineage_marks",
+)
+
+
+def ledger_digest(salt: bytes, *parts) -> bytes:
+    """Digest the P1b-defined identity tuple before redaction (design M4).
+
+    Each part has a one-byte type tag and an eight-byte big-endian payload length.
+    """
+    digest = hashlib.blake2b(key=salt, digest_size=16)
+    for part in parts:
+        if part is None:
+            tag, payload = b"n", b""
+        elif isinstance(part, bytes):
+            tag, payload = b"b", part
+        elif isinstance(part, str):
+            tag, payload = b"s", part.encode("utf-8")
+        elif isinstance(part, int):
+            tag, payload = b"i", part.to_bytes(8, "big", signed=True)
+        else:
+            raise TypeError(f"unsupported ledger digest part: {type(part).__name__}")
+        digest.update(tag + len(payload).to_bytes(8, "big") + payload)
+    return digest.digest()
 
 
 _MESSAGE_ROLE_BIAS_SQL = "CASE m.role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 WHEN 'tool' THEN 2 ELSE 1 END"
@@ -1224,6 +1251,92 @@ class MessageStore:
             """)
         self._identity_anchor_schema_ready = True
         self._carried_relation_connections.add(self._conn)
+
+    # -- #2055 ingest ledger: additive schema only; no production writers yet --
+
+    def _ingest_ledger_tables_exist(self) -> bool:
+        with self._write_lock:
+            if getattr(self, "_ingest_ledger_schema_ready", False):
+                return True
+            names = {row[0] for row in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?,?,?,?,?,?)",
+                _INGEST_LEDGER_TABLES,
+            )}
+            exists = set(_INGEST_LEDGER_TABLES) <= names
+            # A re-entrant read can see DDL that a failed commit will roll back.
+            if not self._conn.in_transaction:
+                self._ingest_ledger_schema_ready = exists
+            return exists
+
+    def _ensure_ingest_ledger_schema(self) -> None:
+        """Plain DDL inside ensure_ingest_ledger's owned transaction; never executescript."""
+        if getattr(self, "_ingest_ledger_schema_ready", False):
+            return
+        for sql in (
+            "CREATE TABLE IF NOT EXISTS ledger_meta (key TEXT PRIMARY KEY, value BLOB NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS occurrence_bindings ("
+            "occ_id INTEGER PRIMARY KEY AUTOINCREMENT, lineage TEXT NOT NULL, ordinal INTEGER, "
+            "store_id INTEGER, identity_digest BLOB NOT NULL, stamp TEXT, "
+            "disposition TEXT NOT NULL CHECK (disposition IN "
+            "('stored','migrated','ambiguous','composite_part','split_part')), "
+            "tag TEXT, key_rank INTEGER, view_seq INTEGER NOT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_occ_lineage_ordinal ON occurrence_bindings(lineage, ordinal) "
+            "WHERE disposition IN ('stored','migrated','ambiguous')",
+            "CREATE INDEX IF NOT EXISTS idx_occ_lineage_stamp_digest "
+            "ON occurrence_bindings(lineage, stamp, identity_digest)",
+            "CREATE INDEX IF NOT EXISTS idx_occ_lineage_digest ON occurrence_bindings(lineage, identity_digest)",
+            "CREATE INDEX IF NOT EXISTS idx_occ_store ON occurrence_bindings(store_id)",
+            "CREATE TABLE IF NOT EXISTS ledger_emissions ("
+            "emission_id INTEGER PRIMARY KEY AUTOINCREMENT, lineage TEXT NOT NULL, view_seq INTEGER NOT NULL, "
+            "output_index INTEGER NOT NULL, descriptor_digest BLOB NOT NULL, "
+            "kind TEXT NOT NULL CHECK (kind IN ('summary','carrier','scaffold','recovery','projection')), "
+            "source_store_ids TEXT NOT NULL DEFAULT '[]', "
+            "state TEXT NOT NULL CHECK (state IN ('proposed','adopted','refused')), "
+            "next_occ_id INTEGER, observed_stamp TEXT, recovered_store_id INTEGER, "
+            "UNIQUE (lineage, view_seq, output_index))",
+            "CREATE INDEX IF NOT EXISTS idx_emissions_lineage_digest ON ledger_emissions(lineage, descriptor_digest)",
+            "CREATE TABLE IF NOT EXISTS stamp_observations ("
+            "lineage TEXT NOT NULL, occ_id INTEGER NOT NULL, stamp TEXT NOT NULL, "
+            "kind TEXT NOT NULL CHECK (kind IN ('alt_stamp','carried_stamp')), view_seq INTEGER NOT NULL, "
+            "source TEXT NOT NULL DEFAULT 'ledger' CHECK (source IN ('ledger','legacy')), UNIQUE (occ_id, kind, stamp))",
+            "CREATE INDEX IF NOT EXISTS idx_stamp_obs_lineage_stamp ON stamp_observations(lineage, stamp)",
+            "CREATE TABLE IF NOT EXISTS ingest_views ("
+            "lineage TEXT NOT NULL, view_seq INTEGER NOT NULL, "
+            "kind TEXT NOT NULL CHECK (kind IN ('ingest','emission')), state TEXT, "
+            "entries BLOB NOT NULL, prefix_chain BLOB NOT NULL, PRIMARY KEY (lineage, kind, view_seq))",
+            "CREATE TABLE IF NOT EXISTS lineage_marks ("
+            "lineage TEXT PRIMARY KEY, max_store_id INTEGER, legacy_proof_digest BLOB, max_leaf_id INTEGER, "
+            "stamp_policy TEXT NOT NULL DEFAULT 'normal' CHECK (stamp_policy IN ('normal','stamp_unreliable')))",
+        ):
+            self._conn.execute(sql)
+        mark_migration_step_complete(self._conn, "ingest_ledger_v1")
+
+    def ensure_ingest_ledger(self) -> None:
+        """Idempotently create the ledger and its per-store metadata in one transaction."""
+        with self._write_lock:
+            if self._conn.in_transaction:
+                raise sqlite3.OperationalError("ingest ledger setup requires its own transaction")
+            with self.atomic(immediate=True):
+                self._ensure_ingest_ledger_schema()
+                self._conn.executemany("INSERT OR IGNORE INTO ledger_meta(key, value) VALUES (?, ?)", (
+                    ("digest_salt", secrets.token_bytes(32)), ("ledger_format", 1), ("view_seq", 0),
+                ))
+            self._ingest_ledger_schema_ready = True
+
+    def ingest_ledger_salt(self) -> bytes | None:
+        """Read the store salt without creating a pre-ledger store's schema."""
+        with self._write_lock:
+            if not self._ingest_ledger_tables_exist():
+                return None
+            row = self._conn.execute("SELECT value FROM ledger_meta WHERE key='digest_salt'").fetchone()
+            return bytes(row[0]) if row is not None else None
+
+    def ingest_ledger_state(self) -> str:
+        """A ledger without a salt is pre-ledger for migration purposes."""
+        with self._write_lock:
+            if not self._ingest_ledger_tables_exist():
+                return "absent"
+            return "ready" if self.ingest_ledger_salt() is not None else "salt_missing"
 
     # -- Host uid shadow bindings: droppable; canonical evidence for #1124 exclusions / #1403 audits --
 

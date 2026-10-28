@@ -344,6 +344,13 @@ _KNOWN_FEATURE_TABLE_PREFIXES = (
     "lcm_trajectory",
     "lcm_entit", "lcm_memory_",
     "summary_node_provenance",  # #441 per-node level/model sidecar, not a derived cache
+    # #2055 ingest ledger (additive named step ingest_ledger_v1; exact names)
+    "ledger_meta",
+    "occurrence_bindings",
+    "ledger_emissions",
+    "stamp_observations",
+    "ingest_views",
+    "lineage_marks",
 )
 
 # The known opt-in feature families whose derived tables an interim build may
