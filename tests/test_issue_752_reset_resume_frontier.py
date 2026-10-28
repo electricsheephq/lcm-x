@@ -303,7 +303,8 @@ def test_bound_engine_adopts_another_engines_reset_frontier(tmp_path, monkeypatc
                 engine.shutdown()
 
 
-def test_unbound_in_place_boundary_adopts_rewound_finalized_frontier(tmp_path, monkeypatch, caplog):
+@pytest.mark.parametrize("reset_inside_bind", [False, True])
+def test_unbound_in_place_boundary_adopts_rewound_finalized_frontier(tmp_path, monkeypatch, caplog, reset_inside_bind):
     #752 R3: adopt the rewound finalized frontier before stale local progress can re-lift it.
     monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
     caplog.set_level("INFO", logger=lcm_engine_module.__name__)
@@ -315,7 +316,15 @@ def test_unbound_in_place_boundary_adopts_rewound_finalized_frontier(tmp_path, m
         engine_a.compress(list(host), force=True)
         engine_b.on_session_start("S1", platform="cli", context_length=200_000)
         engine_a.on_session_end("S1", host)
-        engine_a.on_session_reset()
+        bind = engine_b._lifecycle.bind_session
+        if reset_inside_bind:  # A's reset lands between B's read of the unbound row and B's bind
+            def bind_after_reset(*args, **kwargs):
+                monkeypatch.setattr(engine_b._lifecycle, "bind_session", bind)
+                engine_a.on_session_reset()
+                return bind(*args, **kwargs)
+            monkeypatch.setattr(engine_b._lifecycle, "bind_session", bind_after_reset)
+        else:
+            engine_a.on_session_reset()
         engine_b.on_session_start(
             "S1", boundary_reason="compression", old_session_id="S1", platform="cli", context_length=200_000
         )

@@ -4432,9 +4432,9 @@ class LCMEngine(
         if state.current_session_id is None:
             if state.last_finalized_session_id != session_id:
                 return False
-            finalized_frontier = state.last_finalized_frontier_store_id
             state = self._lifecycle.bind_session(session_id, conversation_id=state.conversation_id)
-            self._adopt_foreign_reset_frontier(state, finalized_frontier)
+            own = state.last_finalized_session_id == session_id  # same snapshot as the reset marker
+            self._adopt_foreign_reset_frontier(state, state.last_finalized_frontier_store_id if own else None)
         else:
             self._adopt_foreign_reset_frontier(state)
         self._bound_reset_at = state.last_reset_at
