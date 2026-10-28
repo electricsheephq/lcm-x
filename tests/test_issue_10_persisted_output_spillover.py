@@ -72,14 +72,14 @@ def _engine(tmp_path):
     return engine, output_dir
 
 
-def _messages(marker):
+def _messages(marker, call_id="call_spill"):
     return [
         {
             "role": "assistant",
             "content": "Calling",
-            "tool_calls": [{"id": "call_spill", "function": {"name": "dump", "arguments": "{}"}}],
+            "tool_calls": [{"id": call_id, "function": {"name": "dump", "arguments": "{}"}}],
         },
-        {"role": "tool", "tool_call_id": "call_spill", "content": marker},
+        {"role": "tool", "tool_call_id": call_id, "content": marker},
     ]
 
 
@@ -122,6 +122,35 @@ def test_ingest_externalizes_spillover_marker_losslessly(tmp_path):
     assert payload["content"] == FULL_OUTPUT
 
 
+def test_ingest_recovers_only_from_the_engine_profile_home_not_the_process_env(tmp_path, monkeypatch):
+    engine, output_dir = _engine(tmp_path)
+    other_home = tmp_path / "other-hermes"
+    monkeypatch.setenv("HERMES_HOME", str(other_home))
+    other_marker = _write_output(other_home / "cache" / "spillover" / "call_other.txt")
+    messages = _messages(other_marker, call_id="call_other")
+
+    engine._ingest_messages(messages)
+
+    stored = engine._store.get_session_messages(SESSION_ID)
+    assert stored[1]["content"] == other_marker
+    assert not any(
+        json.loads(path.read_text(encoding="utf-8"))["tool_call_id"] == "call_other"
+        for path in output_dir.glob("*.json")
+    )
+
+    marker = _write_output(tmp_path / "hermes" / "cache" / "spillover" / "call_spill.txt")
+    messages.extend(_messages(marker))
+    engine._ingest_messages(messages)
+
+    stored = engine._store.get_session_messages(SESSION_ID)
+    assert stored[-1]["content"].startswith("[Externalized tool output:")
+    payload_files = list(output_dir.glob("*.json"))
+    assert len(payload_files) == 1
+    payload = json.loads(payload_files[0].read_text(encoding="utf-8"))
+    assert payload["tool_call_id"] == "call_spill"
+    assert payload["content"] == FULL_OUTPUT
+
+
 @pytest.mark.parametrize("location", ["legacy_tempdir", "spillover"])
 def test_replay_after_restart_does_not_duplicate_live_marker(tmp_path, location):
     engine, _output_dir = _engine(tmp_path)
@@ -144,7 +173,7 @@ def test_replay_after_restart_does_not_duplicate_live_marker(tmp_path, location)
 def test_every_recovery_call_site_passes_hermes_home():
     root = Path(__file__).resolve().parents[1]
     calls = []
-    for filename in ("ingest_protection.py", "engine.py", "reconcile.py"):
+    for filename in ("ingest_persisted.py", "ingest_protection.py", "engine.py", "reconcile.py"):
         tree = ast.parse((root / filename).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -157,7 +186,7 @@ def test_every_recovery_call_site_passes_hermes_home():
     assert not missing, f"Recovery call sites missing hermes_home: {missing}"
     for filename, node in calls:
         home = next(kw.value for kw in node.keywords if kw.arg == "hermes_home")
-        expected = "hermes_home" if filename == "ingest_protection.py" else "self._hermes_home"
+        expected = "hermes_home" if filename in ("ingest_persisted.py", "ingest_protection.py") else "self._hermes_home"
         assert ast.unparse(home) == expected
 
 
