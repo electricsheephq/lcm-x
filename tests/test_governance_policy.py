@@ -225,3 +225,21 @@ def test_triage_prompt_and_contributor_automation_scope_are_bounded():
     assert "issue, pull request, or duplicate cluster" in prompt
     assert "without writing to GitHub" in prompt
     assert "limited to the exact accepted issue and current gate" in guide
+
+
+def test_release_manager_delegation_is_recorded_and_bounded():
+    policy = " ".join((REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8").split())
+    skill = " ".join((
+        REPO_ROOT / ".agents" / "skills" / "triage-backlog" / "SKILL.md"
+    ).read_text(encoding="utf-8").split())
+    guide = " ".join((REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8").split())
+
+    assert "Release-manager delegation (recorded by the code owner on 2026-10-29;" in policy
+    assert "Each action still re-fetches live state first, leaves an evidence comment, and reads back the result." in policy
+    for excluded in ("bypassing checks or the ruleset", "force-pushes", "deleting `main` or a published tag or release",
+                     "repository settings", "private vulnerability handling", "public security disclosure"):
+        assert excluded in policy, excluded
+    assert "Other bots and contributor agents stay proposal-only." in policy
+    assert "release-manager delegation that stands for it" in skill
+    assert "public security disclosure still needs the code owner" in skill
+    assert "other bots and contributor agents stay proposal-only" in guide
