@@ -229,6 +229,22 @@ def test_capped_fts_reruns_when_strict_summaries_yield_only_leads(recall_case, m
     assert provenance["fts_rerun"] is True
 
 
+def test_verbatim_recall_reruns_capped_fts_when_provider_resolution_fails(recall_case, monkeypatch):
+    case = recall_case
+    case.make_fts(capped=False)
+    # A usable chunk corpus applies the cap to verbatim recall's full-text arm.
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_has_usable_vector_corpus", lambda *_a, **_k: True)
+    monkeypatch.setattr(lcm_tools, "_resolve_recall_provider", lambda *_a, **_k: None)
+    payload = _recall(case, include="verbatim")
+    _assert_reran_once_under_remaining_deadline(case)
+    provenance = payload["provenance"]
+    assert provenance["arms_run"] == ["fts"]
+    assert provenance["coverage"]["fts"] == "ok"
+    assert case.sid in {hit["store_id"] for hit in payload["hits"]}
+    assert CAPPED_REASON not in _reasons(payload)
+    assert provenance["fts_rerun"] is True
+
+
 def test_rerun_that_expires_reports_request_timeout(recall_case, monkeypatch):
     case = recall_case
     case.make_fts("expire")
@@ -307,6 +323,18 @@ def test_no_rerun_when_request_deadline_already_spent(recall_case, monkeypatch):
     assert len(case.calls) == 1
     assert case.calls[0][0] == 102.0
     assert CAPPED_REASON in _reasons(payload)
+    assert "fts_rerun" not in payload["provenance"]
+
+
+def test_summaries_only_recall_never_reruns_its_fallback_fts(recall_case, monkeypatch):
+    case = recall_case
+    case.make_fts()
+    monkeypatch.setattr(lcm_tools, "_resolve_recall_provider", lambda *_a, **_k: None)
+    payload = _recall(case, include="summaries")
+    # Summaries-only recall runs no capped arm: its #887 fallback is the only
+    # full-text call, and it already gets the whole request deadline.
+    assert [call[0] for call in case.calls] == [108.0]
+    assert CAPPED_REASON not in _reasons(payload)
     assert "fts_rerun" not in payload["provenance"]
 
 
