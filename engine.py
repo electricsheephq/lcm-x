@@ -7340,7 +7340,10 @@ class LCMEngine(
             warned = self.__dict__.setdefault("_ingest_ledger_warned", set())
             if error is not None and key not in warned:
                 warned.add(key)
-                logger.warning("LCM %s (%s); %s unaffected", key, type(error).__name__, subject)
+                if subject == "ingest":
+                    logger.warning("LCM %s (%s); ingest unaffected", key, type(error).__name__)
+                else:
+                    logger.warning("LCM %s (%s); %s unaffected", key, type(error).__name__, subject)
             if key == "ledger.respaced" and error is None:
                 logger.info("LCM ledger ordinals respaced")
         except Exception:
