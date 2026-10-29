@@ -7,8 +7,10 @@ of the parent may change. AUXILIARY sessions keep storing nothing.
 """
 
 import importlib
+import itertools
 import json
 import sqlite3
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -19,6 +21,8 @@ from tests.test_issue_622_slow_load import _Ctx, _Manager, _install_host, _load_
 MARKER = "quokkaledger"
 DELEGATE = {"_subagent_id": "sa-1", "_delegate_depth": 1, "log_prefix": "[subagent-0]",
             "enabled_toolsets": ["terminal", "file"]}
+
+_LOADS = itertools.count()
 
 
 class Agent:
@@ -66,10 +70,12 @@ PARENT_VIEW = [{"role": "user", "content": "Delegate the ledger check."},
 def host(tmp_path, monkeypatch):
     monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
     _install_host(monkeypatch, tmp_path)
-    opened, names = [], iter(f"hermes_lcm_1931_{id(tmp_path)}_{i}" for i in range(10))
+    opened, loaded = [], []
 
     def load():
-        name = next(names)
+        # id(tmp_path) repeats once a path is freed; a repeated name reuses that test's cached submodules.
+        name = f"hermes_lcm_1931_{next(_LOADS)}"
+        loaded.append(name)
         module = _load_plugin(name)
         ctx = _Ctx(_Manager())
         module.register(ctx)
@@ -84,6 +90,9 @@ def host(tmp_path, monkeypatch):
     yield load, clone
     for engine in reversed(opened):
         engine.shutdown()
+    for name in loaded:
+        for key in [key for key in sys.modules if key == name or key.startswith(name + ".")]:
+            sys.modules.pop(key, None)
 
 
 def parent_state(engine):
