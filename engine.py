@@ -4480,7 +4480,7 @@ class LCMEngine(
         if self._embedding_maintenance_retired:
             self._rearm_embedding_maintenance()
             self._schedule_embedding_maintenance()
-        self._signal_emission_state("adopted", session_id)
+        self._signal_emission_state("adopted", session_id, require_conversation=True)
         return True
 
     def _continue_compression_boundary(

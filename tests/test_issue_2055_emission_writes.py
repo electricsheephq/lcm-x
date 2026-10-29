@@ -262,6 +262,18 @@ def test_reset_after_a_move_counts_no_boundary(engines, monkeypatch, move, reset
     assert engine._emission_handle is None
 
 
+@pytest.mark.parametrize("conversation", ["conv", "other"])
+def test_in_place_adoption_needs_the_compressing_conversation(engines, monkeypatch, conversation):
+    engine = engines()
+    compress_path(engine, monkeypatch)
+    if conversation != "conv":  # a same-session rebind keeps the handle
+        engine.on_session_start("S", platform="cli", conversation_id=conversation)
+    engine.on_session_start("S", boundary_reason="compression", old_session_id="S", platform="cli",
+                            conversation_id=conversation)
+    assert emissions(engine)[0]["state"] == ("adopted" if conversation == "conv" else "proposed")
+    assert count(engine, "emission_signal_unmatched") == (0 if conversation == "conv" else 1)
+
+
 def test_bypass_source_boundary_counts_once(engines, monkeypatch, caplog):
     engine = engines()
     compress_path(engine, monkeypatch)
