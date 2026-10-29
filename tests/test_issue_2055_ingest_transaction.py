@@ -1,5 +1,6 @@
 """P1b-1: fault production evidence helpers without replacing row decisions."""
 
+import contextvars
 import copy
 import gc
 import json
@@ -9,7 +10,18 @@ from contextlib import contextmanager, nullcontext
 
 import pytest
 
+from hermes_lcm.sqlite_util import _SqliteSavepointError
 from tests.test_host_uid_shadow import _engine, _m, _state_db
+
+
+@pytest.fixture(autouse=True)
+def _no_background_maintenance(monkeypatch):
+    # Rollup and embedding passes write on their own connections. A faked busy first attempt
+    # leaves only the 0 ms admission recheck, which such a write can fail at random.
+    import hermes_lcm.engine as engine_module
+
+    for name in ("_schedule_rollup_maintenance", "_schedule_embedding_maintenance"):
+        monkeypatch.setattr(engine_module.LCMEngine, name, lambda *args: None)
 
 
 @pytest.fixture
@@ -533,6 +545,7 @@ def replay_fields(rows):
 def test_ingest_ends_only_unowned_transactions(ingest_case, owned, shape):
     engine, seed, host = ingest_case
     store, trace = engine._store, []
+    cursor, proof = engine._frontier.cursor, copy.deepcopy(engine._frontier.commit_proof)
     with store.atomic() if owned else nullcontext():
         if shape == "snapshot":
             store._conn.execute("BEGIN")
@@ -543,9 +556,13 @@ def test_ingest_ends_only_unowned_transactions(ingest_case, owned, shape):
             store._conn.execute("INSERT INTO metadata VALUES ('dangling', 'true')")
         store._conn.set_trace_callback(trace.append)
         try:
-            if owned and shape == "snapshot":
-                with pytest.raises(sqlite3.OperationalError):
-                    engine._ingest_messages(host)  # Only the holder may end its stale snapshot.
+            if owned:
+                with pytest.raises(_SqliteSavepointError, match="cannot join an enclosing transaction"):
+                    engine._ingest_messages(host)
+                assert not any(sql.lstrip().upper().startswith(("BEGIN", "SAVEPOINT", "INSERT INTO MESSAGES"))
+                               for sql in trace)
+                assert engine._frontier.cursor == cursor and engine._frontier.commit_proof == proof
+                assert store._transaction_owner.owns_connection(store._conn)
             else:
                 assert replay_fields(engine._ingest_messages(host)) == replay_fields(host)
         finally:
@@ -556,10 +573,44 @@ def test_ingest_ends_only_unowned_transactions(ingest_case, owned, shape):
             if shape == "write":
                 assert bool(reader.execute("SELECT 1 FROM metadata WHERE key='dangling'").fetchone()) == (not owned)
         assert store._conn.in_transaction == owned
-        assert len(store.get_session_messages("S")) == (2 if owned and shape == "snapshot" else 3)
-    if owned and shape == "snapshot":
+        assert len(store.get_session_messages("S")) == (2 if owned else 3)
+        if owned and shape == "write":
+            assert store._conn.execute("SELECT 1 FROM metadata WHERE key='dangling'").fetchone()
+    if owned:
         assert replay_fields(engine._ingest_messages(host)) == replay_fields(host)
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
+    engine._ingest_messages(host)
+    assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
+
+
+def test_enclosing_rollback_cannot_lose_rows(ingest_case):
+    engine, _seed, host = ingest_case
+    store, cursor, failures = engine._store, engine._frontier.cursor, engine._ingest_failure_count
+    with pytest.raises(RuntimeError, match="outer rollback"):
+        with store.atomic():
+            engine.ingest(host)  # The public entry records the refusal without raising.
+            raise RuntimeError("outer rollback")
+    assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply"]
+    assert engine._frontier.cursor == cursor
+    assert engine._ingest_failure_count == failures + 1
+    engine.ingest(host)
+    assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
+
+
+def test_copied_context_cannot_join_enclosing_transaction(ingest_case):
+    engine, _seed, host = ingest_case
+    store = engine._store
+    cursor, proof = engine._frontier.cursor, copy.deepcopy(engine._frontier.commit_proof)
+    ctx = contextvars.copy_context()
+    with pytest.raises(RuntimeError, match="outer rollback"):
+        with store.atomic():
+            with pytest.raises(_SqliteSavepointError, match="cannot join an enclosing transaction"):
+                ctx.run(engine._ingest_messages, host)
+            assert engine._frontier.cursor == cursor and engine._frontier.commit_proof == proof
+            assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply"]
+            assert store._transaction_owner.owns(store._conn)
+            assert store._transaction_owner.owns_connection(store._conn)
+            raise RuntimeError("outer rollback")
     engine._ingest_messages(host)
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
 

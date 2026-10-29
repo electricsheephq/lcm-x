@@ -1967,6 +1967,8 @@ class MessageStore:
     @contextmanager
     def _ingest_atomic(self, *, admission_retry=False):
         with self._write_lock:
+            if self._transaction_owner.owns(self._conn):
+                raise _SqliteSavepointError("Foreground ingest cannot join an enclosing transaction")
             if self._conn.in_transaction and not self._transaction_owner.owns_connection(self._conn):
                 self._conn.commit()  # Preserve standalone writes, and end stale read snapshots.
                 logger.debug("LCM ingest committed an unowned transaction before BEGIN IMMEDIATE")
