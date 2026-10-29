@@ -602,7 +602,7 @@
     },
     "row-filter-generated-append-error": {
       "outcome_sha": "b73f7f2d3c6989b9b32a484eced9b468e33428a8d69d096131540815c19e519b",
-      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
+      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged. On main this failed ingest also committed an empty message_relations table without its rows; now it stores nothing, and after the next ingest the stored tables match main"
     },
     "row-filter-ignore-ledger-lock": {
       "outcome_sha": "bcafb078d602be92313e0051b3743210267c854ab17672cc5f85fdf1ee7e7bbf",
@@ -610,7 +610,7 @@
     },
     "row-filter-ignored-append-error": {
       "outcome_sha": "7859a262312ce560392be5e5f2b46e8c9f713bb254a681e26eaaff1100670656",
-      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
+      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged. On main this failed ingest also committed an empty message_relations table and the ignored_active_replay_placeholder_hashes metadata key without its rows; now it stores nothing, and after the next ingest the stored tables match main"
     },
     "scaffold-metadata": {
       "outcome_sha": "ac12f7e348a3b9bbde60aacd737522a1eadcc5e6041b2987240468e8ddc1a245",
