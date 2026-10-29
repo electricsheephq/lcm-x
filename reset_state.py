@@ -53,7 +53,8 @@ class ResetStateMixin:
         Proven carry-over paths must restore/advance state from the verified
         source lifecycle after rebinding.
         """
-        if self._emission_handle is not None:
+        # An engine created without __init__ has no handle until its first compaction.
+        if getattr(self, "_emission_handle", None) is not None:
             self._ledger_count("ledger.emission_boundary_unadopted")
         self._emission_handle = None
         self._reset_session_counters()
