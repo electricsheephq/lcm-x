@@ -14,7 +14,9 @@ mixes this in, so no call site and no test changes.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 import logging
 import sqlite3
 import threading
@@ -810,7 +812,7 @@ _COUNTS: Counter = Counter()
 # Shared by clones and hook engines: compare and append form one process-local operation.
 _DELEGATE_STORE_LOCK = threading.RLock()
 _DELEGATE_AUXILIARY_IDS: set[tuple[str, str]] = set()
-_DELEGATE_RESUME_BOUNDARIES: dict[tuple[str, str], list[tuple]] = {}
+_DELEGATE_RESUME_BOUNDARIES: dict[tuple[str, str], list[bytes]] = {}
 _DELEGATE_COMPRESSION_PARENTS: dict[tuple[str, str], str] = {}
 
 
@@ -883,7 +885,13 @@ class DelegateChildMixin:
         return sessions
 
     @staticmethod
-    def _delegate_child_unique_end(identities: list[tuple], anchor: list[tuple]) -> Optional[int]:
+    def _delegate_child_boundary_digest(identity: tuple) -> bytes:
+        return hashlib.sha256(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8", "surrogatepass")).digest()
+
+    @staticmethod
+    def _delegate_child_unique_end(identities: list[tuple] | list[bytes],
+                                   anchor: list[tuple] | list[bytes]) -> Optional[int]:
         if not anchor:
             return None
         width = len(anchor)
@@ -896,8 +904,9 @@ class DelegateChildMixin:
                       if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
         tail = identities[-_ANCHOR_ROWS:]
         # Repeated tails need the full output to identify the actual end uniquely.
-        _DELEGATE_RESUME_BOUNDARIES[self._delegate_child_key(session_id)] = (
-            tail if self._delegate_child_unique_end(identities, tail) is not None else identities)
+        boundary = tail if self._delegate_child_unique_end(identities, tail) is not None else identities
+        _DELEGATE_RESUME_BOUNDARIES[self._delegate_child_key(session_id)] = [
+            self._delegate_child_boundary_digest(identity) for identity in boundary]
 
     def _compress_delegate_child_bypassed(self, messages, current_tokens, focus_topic, force):
         session_id = self._bypass_lcm_session_id()
@@ -955,6 +964,12 @@ class DelegateChildMixin:
                 if old_key in _DELEGATE_RESUME_BOUNDARIES:
                     _DELEGATE_RESUME_BOUNDARIES[new_key] = _DELEGATE_RESUME_BOUNDARIES[old_key]
                 self._store.record_session_lineage(new_session_id, old_session_id, source="compression")
+                try:
+                    stored_link = self._stored_delegate_child_link(new_session_id)
+                    if stored_link.get("source") == "compression" and stored_link.get("parent_session_id") == old_session_id:
+                        _DELEGATE_COMPRESSION_PARENTS.pop(new_key, None)
+                except Exception:
+                    pass  # Cleanup alone must not change storage or fallback counts.
         except Exception as exc:
             self._note_delegate_child_fallback(new_session_id, f"compression parent link not recorded: {exc}")
 
@@ -1077,17 +1092,26 @@ class DelegateChildMixin:
         if not view:
             return 0
         try:
-            if not self._stored_delegate_child_link(session_id):
+            stored_link = self._stored_delegate_child_link(session_id)
+            if not stored_link:
                 self._store.record_session_lineage(session_id, link["parent_session_id"], source=link["source"],
                                                    child_subagent_id=link["child_subagent_id"],
                                                    parent_subagent_id=link["parent_subagent_id"],
                                                    child_role=link["child_role"])
+                try:
+                    stored_link = self._stored_delegate_child_link(session_id)
+                except Exception:
+                    pass  # Retain the bind parent if cleanup cannot confirm the link.
+            if stored_link:
+                with self._auxiliary_session_lock:
+                    self._delegate_child_bind_parent_ids.pop(session_id, None)
         except Exception as exc:  # the rows still go in; they stay reachable by session id
             self._note_delegate_child_fallback(session_id, f"parent link not recorded: {type(exc).__name__}: {exc}")
         key = self._delegate_child_key(session_id)
         boundary = _DELEGATE_RESUME_BOUNDARIES.get(key)
         identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
-        start = self._delegate_child_unique_end(identities, boundary) if boundary else None
+        start = self._delegate_child_unique_end(
+            [self._delegate_child_boundary_digest(identity) for identity in identities], boundary) if boundary else None
         anchored = start is not None
         if start is not None:
             logger.debug("LCM delegated child %s: resuming after compression boundary", session_id)
