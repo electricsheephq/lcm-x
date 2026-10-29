@@ -17,15 +17,20 @@ if "jobs:" in text:
     if not job:
         sys.exit(f"ci_step: no test job in {path}")
     text = job[0]
+# CI anchors the test job's step list (steps: &name) for its shard jobs.
+steps = re.search(r"(?m)^( *)steps:(?: &[\w-]+)? *$", text)
+if not steps:
+    sys.exit(f"ci_step: no steps in {path}")
+# A step starts only at the step list's own indentation, so a "- name:" line inside a run
+# block never starts one.
+indent = steps[1] + "  "
 
 
 def depth(line):
     return len(line) - len(line.lstrip(" "))
 
 
-steps = re.split(r"(?m)^([ ]*)- name: ", text)
-for i in range(1, len(steps), 2):
-    indent, body = steps[i:i + 2]
+for body in re.split(r"(?m)^" + indent + "- name: ", text[steps.end():])[1:]:
     if not body.splitlines()[0].startswith(prefix):
         continue
     block = re.search(r"(?m)^" + indent + r"  run: (.*)\n", body)
@@ -37,7 +42,8 @@ for i in range(1, len(steps), 2):
     if head == "|" and depth(first) > keys:
         end = next((j for j, line in enumerate(lines)
                     if line.strip() and depth(line) < depth(first)), len(lines))
-        print(textwrap.dedent("".join(lines[:end])), end="")
+        # YAML's default (clip) chomping keeps one final line break, not the blank lines.
+        print(textwrap.dedent("".join(lines[:end])).rstrip("\n"))
         sys.exit(0)
     if head and head[0] not in "|>\"'&*!" and depth(first) <= keys:
         print(head)

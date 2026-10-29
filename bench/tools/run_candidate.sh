@@ -24,8 +24,13 @@ done
 [[ "$base" =~ ^[a-fA-F0-9]{40}$ && "$label" =~ ^[a-zA-Z0-9_-]+$ ]] || fail BAD_ARGUMENT
 [[ "$wf" =~ ^[1-9][0-9]*$ && "$wa" =~ ^[1-9][0-9]*$ && "$priority" =~ ^[0-9]+$ ]] || fail BAD_ARGUMENT
 [ -f "$env_file" ] || fail 'NO_ENV: run bash scripts/dev/cloud_setup.sh'
+# A custom env file may expand unset variables, so source it with set -u off.
+set +u
 # shellcheck disable=SC1090
-. "$env_file" || fail NO_ENV
+. "$env_file"
+env_status=$?
+set -u
+[ "$env_status" = 0 ] || fail NO_ENV
 # cloud_setup.sh installs both through ci.yml's "Install test dependencies" step.
 command -v python > /dev/null 2>&1 || fail 'NO_PYTHON: run bash scripts/dev/cloud_setup.sh'
 command -v ruff > /dev/null 2>&1 || fail 'NO_RUFF: run bash scripts/dev/cloud_setup.sh'
@@ -48,7 +53,7 @@ fi
 prune=''
 trap '[ -z "$prune" ] || printf "%s" "$prune"' EXIT
 prepare() {
-  local wt=$1 mode=$2 path paths=()
+  local wt=$1 mode=$2 path
   git worktree add --detach "$wt" "$base" > "$run/$mode-setup.log" 2>&1 || fail WORKTREE_FAILED
   printf -v path 'git worktree remove %q\n' "$wt"
   prune="$prune$path"
@@ -57,13 +62,14 @@ prepare() {
   else
     git -C "$wt" apply --index "$patch" || fail APPLY_FAILED
   fi
-  while IFS= read -r -d '' path; do paths+=("$path"); done < <(git -C "$wt" diff --cached --name-only -z)
-  if [ "${#paths[@]}" -eq 0 ]; then
+  if git -C "$wt" diff --cached --quiet; then
     [ "$mode" != red ] || fail NO_TEST_HUNKS
     fail EMPTY_PATCH
   fi
+  # Commit the whole index: in this fresh worktree it holds only what the patch staged, and a
+  # path list would leave a rename's deletion uncommitted.
   git -C "$wt" -c user.name=Candidate -c user.email=candidate@example.invalid -c commit.gpgsign=false \
-    commit --no-verify -qm candidate -- "${paths[@]}" || fail COMMIT_FAILED
+    commit --no-verify -qm candidate || fail COMMIT_FAILED
   if [ "$stub" = 1 ]; then
     local script
     script=$(step_script "$wt/.github/workflows/ci.yml" 'Stub hermes-agent ABC') || fail STUB_FAILED
@@ -144,9 +150,8 @@ if [ -n "$red" ]; then prepare "$redwt" red; pytest_phase red-on-base "$redwt" "
 if [ "$full" = 1 ]; then
   # ci.yml: Collect deterministic test shards (--ignore) and Run embedding privacy tests alone.
   pytest_phase green-full "$green" tests/ "$wa" --ignore=tests/test_embedding_privacy.py
-  if [ -f "$green/tests/test_embedding_privacy.py" ]; then
-    pytest_phase green-privacy "$green" tests/test_embedding_privacy.py 0
-  fi
+  # CI runs this file even if a candidate removes it; a missing file fails as PYTEST_SETUP_FAILED.
+  pytest_phase green-privacy "$green" tests/test_embedding_privacy.py 0
 fi
 echo "dirs: $run $green"
 exit 0

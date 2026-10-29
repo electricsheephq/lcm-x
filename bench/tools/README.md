@@ -5,7 +5,7 @@ These are Python 3.11+ program-side tools. They use only the standard library.
 ## Run a candidate the way CI does
 
 Prepare a Linux host or container as a non-root user with `bash scripts/dev/cloud_setup.sh`.
-Make a patch with `git diff BASE..HEAD > candidate.patch`, then run:
+Make a patch with `git -c diff.noprefix=false diff --binary BASE..HEAD > candidate.patch`, then run:
 
 ```bash
 bash bench/tools/run_candidate.sh --base SHA40 --patch candidate.patch --label example \
@@ -30,6 +30,7 @@ For a remote host, copy the patch and run the same command over your own SSH usi
 setup environment and run CI's stub step. Defaults: 4 focused/red workers, 6 full workers,
 nice 10; override with `--workers-focused N`, `--workers-full N`, `--nice N`.
 Use `--no-fetch` only when the base is already available locally.
+The runner sets no time limit; on an unattended host, wrap the command in `timeout`.
 Test targets are whitespace-separated, checkout-relative paths or node IDs.
 
 ## Fail-close accounting
