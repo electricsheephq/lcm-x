@@ -80,6 +80,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_identity_anchor_recoveries", "_identity_anchor_recovery", "_identity_anchor_user_generation",
     "_identity_anchor_versions", "_pressure_yield_tail_token_limit", "_survival_projected_fields",
     "_host_uid_lineage_cache", "_engine_uids_pending", "_engine_uids_recorded",
+    "_pending_ingest_frontier", "_last_ingest_attribution", "_end_attribution", "_ingest_read_only",
 })
 Trace = list[str]
 Message = dict[str, Any]
@@ -275,6 +276,8 @@ class IngestCanonical(Canonical):
         return text
 
     def value(self, value: Any, path: str = "", *, in_payload: bool = False) -> Any:
+        if not in_payload and path in {"lock_hold_ms", "bytes_written", "ingest_lock_hold_ms", "ingest_bytes_written"}:
+            return 0
         if path == "_no_progress_replay" and isinstance(value, tuple) and len(value) == 3:
             # The digest includes sandbox paths/file generations. Preserve its
             # equality and every transition; replay bytes are observed separately.
@@ -335,7 +338,7 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
                 register(getattr(value, field.name))
     for name in sorted(OBSERVED_ATTRIBUTES - {"_store", "_dag", "_lifecycle", "_host_rewrite_store"}):
         register(observed_attribute(engine, name))
-    for name in sorted(OBSERVED_ATTRIBUTES):
+    for name in sorted(OBSERVED_ATTRIBUTES - {"_last_ingest_attribution"}):
         value = observed_attribute(engine, name)
         if name in {"_store", "_host_rewrite_store"}:
             value = {"present": value is not None}
@@ -377,8 +380,11 @@ class Logs(logging.Handler):
         self.events, self.canonical = events, canonical
 
     def emit(self, record: logging.LogRecord) -> None:
+        args = record.args
+        if str(record.msg).startswith("LCM attribution phase=ingest lock_hold_ms="):
+            args = (0, args[1], 0, args[3])
         self.events.append("log " + encoded([record.name, record.levelname,
-                            self.canonical.text(str(record.msg)), self.canonical.value(record.args)]))
+                            self.canonical.text(str(record.msg)), self.canonical.value(args)]))
 
 
 def reopen(engine: Any, root: Path, engines: ExitStack) -> Any:

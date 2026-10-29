@@ -762,8 +762,10 @@ class IdentityAnchorMixin:
             return
         store_id = int(row["store_id"])
         try:
-            self._record_ws_host_rewrite(row, head)  # existing payload, protection and skip_unchanged writer
+            with self._ingest_evidence():
+                self._record_ws_host_rewrite(row, head)  # existing payload, protection and skip_unchanged writer
         except Exception as exc:
+            self._raise_ingest_busy(exc)
             logger.warning("LCM merge-head capture for store_id %s failed (%s)", store_id, type(exc).__name__)
             return
         self._identity_anchor_text_memo.pop(store_id, None)
@@ -1476,7 +1478,7 @@ class IdentityAnchorMixin:
         plan["replayed"].update(idx for idx in range(min(rewritten), cursor) if idx not in rewritten)
         plan["replayed"].difference_update(rewritten)
 
-    def _identity_anchor_record_versions(self, stored) -> None:
+    def _identity_anchor_record_versions(self, stored, *, after_commit=None) -> None:
         """R6: a rewritten host object that this ingest stored as a row of its own is a new version of
         the row it was stored as before: ``supersedes`` relation, both versions' bytes kept. A version
         this ingest recognised as stored occurrences (a composite, a replay) records nothing here."""
@@ -1487,7 +1489,10 @@ class IdentityAnchorMixin:
             if old is not None:
                 versions.remove(old)
                 groups.append([(int(store_id), "supersedes", old[1], None, _normalize_observed_at(message.get("timestamp")))])
-        self._identity_anchor_versions = versions
+        if after_commit is None:
+            self._identity_anchor_versions = versions
+        else:
+            after_commit.append(lambda: setattr(self, "_identity_anchor_versions", versions))
         if groups:
             self._store.add_message_relations(groups)
 

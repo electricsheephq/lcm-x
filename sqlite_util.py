@@ -16,6 +16,8 @@ import uuid
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Iterator, List, TypeVar
 
+from .sqlite_session import TransactionOwner
+
 
 _T = TypeVar("_T")
 logger = logging.getLogger(__name__)
@@ -29,6 +31,21 @@ def _is_sqlite_locked_error(exc: BaseException) -> bool:
         seen.add(id(current))
         message = str(current).lower()
         if isinstance(current, sqlite3.Error) and "locked" in message:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _is_ingest_busy_error(exc: BaseException, *, require_code=False) -> bool:
+    """The ingest owner also retries code-based BUSY, including BUSY_SNAPSHOT."""
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, sqlite3.Error) and (
+            not require_code and ("locked" in str(current).lower() or "busy" in str(current).lower())
+            or (getattr(current, "sqlite_errorcode", 0) or 0) & 255 in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+        ):
             return True
         current = current.__cause__ or current.__context__
     return False
@@ -55,14 +72,19 @@ def _run_sqlite_write_with_snapshot_retry(
     operation: Callable[[], _T],
     *,
     operation_name: str,
+    owner_active: bool = False,
 ) -> _T:
     """Run one write transaction, retrying one stale-snapshot upgrade.
 
     ``SQLITE_BUSY_SNAPSHOT`` cannot be fixed by waiting: the connection must
     roll back its old read snapshot and begin the write from current state.
     Ordinary ``SQLITE_BUSY`` already receives SQLite's configured busy timeout
-    and is not multiplied here.
+    and is not multiplied here. An explicit owner runs the operation directly
+    and retains responsibility for rollback and retry of the complete decision.
     """
+    if owner_active:
+        # The owner must roll back and repeat classification, not just the INSERT.
+        return operation()
     for attempt in range(2):
         try:
             with conn:
@@ -89,23 +111,41 @@ def _sqlite_busy_timeout_ms(conn: sqlite3.Connection) -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
+class _SqliteSavepointError(RuntimeError):
+    """The failed writer could not be isolated; its enclosing owner must abort."""
+
+
 @contextmanager
-def _sqlite_savepoint(conn: sqlite3.Connection) -> Iterator[None]:
+def _sqlite_savepoint(conn: sqlite3.Connection, *, abort_on_cleanup_failure: bool = False,
+                      owner_active: bool = False) -> Iterator[None]:
     """Isolate helper writes without taking ownership of a caller transaction."""
-    # UUID hex contains only identifier-safe characters and keeps every nested
-    # helper's SAVEPOINT name unique with a fixed upper bound on name length.
-    name = f"lcm_{uuid.uuid4().hex}"
+    # Owned scopes nest with SQLite's innermost-name semantics. Stable names
+    # keep diagnostic observers from changing the ordered write trace.
+    owner_active = owner_active and TransactionOwner.owns_connection(conn)
+    name = "lcm_ingest" if owner_active else f"lcm_{uuid.uuid4().hex}"
+    if owner_active and not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")  # RELEASE must never commit an empty owner's transaction.
     conn.execute(f"SAVEPOINT {name}")
     try:
         yield
-    except BaseException:
-        try:
-            conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
-        finally:
+        if abort_on_cleanup_failure:
             conn.execute(f"RELEASE SAVEPOINT {name}")
+    except BaseException:
+        if abort_on_cleanup_failure and not conn.in_transaction:
+            raise  # SQLite already aborted the owner; preserve the original error.
+        try:
+            try:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
+            finally:
+                conn.execute(f"RELEASE SAVEPOINT {name}")
+        except Exception as exc:
+            if abort_on_cleanup_failure:
+                raise _SqliteSavepointError("Could not roll back writer savepoint") from exc
+            raise
         raise
     else:
-        conn.execute(f"RELEASE SAVEPOINT {name}")
+        if not abort_on_cleanup_failure:
+            conn.execute(f"RELEASE SAVEPOINT {name}")
 
 
 @contextmanager
@@ -176,6 +216,8 @@ class PhaseSqlTrace:
         """The rare path: a statement of at least a second. Another thread's is not counted."""
         if self.owner != _get_ident():
             return
+        if getattr(self, "ingest_admission", False) and str(sql) == "BEGIN IMMEDIATE":
+            sql = "INSERT INTO messages (ingest admission)"  # Charge reservation to its logical write.
         took = _monotonic() - started
         self.slow_count, self.slow_seconds = self.slow_count + 1, self.slow_seconds + took
         if took > self.slowest:

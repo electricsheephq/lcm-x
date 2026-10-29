@@ -480,7 +480,9 @@ class ReconcileMixin:
         store = getattr(self, "_store", None)
         if not session_id or store is None:
             return False
-        cache = getattr(self, "_out_of_band_durable_rows", None)
+        pending = getattr(self, "_pending_ingest_frontier", None)
+        cache = pending.oob_rows if pending is not None and hasattr(pending, "oob_rows") else getattr(
+            self, "_out_of_band_durable_rows", None)
         if cache is None:
             cache = set()
             self._out_of_band_durable_rows = cache
@@ -831,8 +833,10 @@ class ReconcileMixin:
                 del watch[store_id]
                 continue
             try:  # best-effort: a failure keeps the watch for the next ingest, never blocks this one
-                self._capture_host_rewrite(store_id, identity, stored, message)
+                with self._ingest_evidence():
+                    self._capture_host_rewrite(store_id, identity, stored, message)
             except Exception as exc:
+                self._raise_ingest_busy(exc)
                 logger.warning("LCM host-rewrite capture for store_id %s failed (%s); retrying next ingest",
                                store_id, type(exc).__name__)
 
@@ -2722,12 +2726,14 @@ class ReconcileMixin:
         the record as it was (today's carry)."""
         key = self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
         try:
-            payload = self._store.read_metadata_json(key)
-            if isinstance(payload, dict):
-                payload["carry_ranges"] = [list(item) for item in self._coalesce_compression_carry_ranges(carry_ranges)]
-                self._store.write_metadata_json([key], json.dumps(payload, sort_keys=True))
-                logger.info("LCM rewrote the rotation child's carry ranges (%s): store ids %s", reason, store_ids)
-        except Exception:
+            with self._ingest_evidence():
+                payload = self._store.read_metadata_json(key)
+                if isinstance(payload, dict):
+                    payload["carry_ranges"] = [list(item) for item in self._coalesce_compression_carry_ranges(carry_ranges)]
+                    self._store.write_metadata_json([key], json.dumps(payload, sort_keys=True))
+                    logger.info("LCM rewrote the rotation child's carry ranges (%s): store ids %s", reason, store_ids)
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
             logger.debug("LCM carry-range rewrite failed", exc_info=True)
 
     def _cursor_from_host_rewrite_head(self, messages, session_count: int) -> Optional[int]:
