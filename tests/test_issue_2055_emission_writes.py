@@ -240,7 +240,38 @@ def test_false_and_skipped_boundaries_stay_proposed(engines, monkeypatch):
     engine._session_id = "unrelated"
     engine._continue_compression_boundary("child", "missing", dict(conversation_id="other"))
     assert emissions(engine)[0]["state"] == "proposed"
-    assert count(engine, "emission_boundary_unadopted") >= 2
+    assert count(engine, "emission_boundary_unadopted") == 2
+    assert engine._emission_handle is None
+
+
+@pytest.mark.parametrize("reset", ["session_reset", "session_start"])
+@pytest.mark.parametrize("move", ["adopted", "refused"])
+def test_reset_after_a_move_counts_no_boundary(engines, monkeypatch, move, reset):
+    engine = engines()
+    compress_path(engine, monkeypatch)
+    if move == "adopted":
+        assert adopt(engine)
+    else:
+        engine.record_rejected_compaction()
+    if reset == "session_reset":
+        engine.on_session_reset()
+    else:
+        engine.on_session_start("next", platform="cli", conversation_id="next-conv")
+    assert emissions(engine)[0]["state"] == move
+    assert count(engine, "emission_boundary_unadopted") == 0
+    assert engine._emission_handle is None
+
+
+def test_bypass_source_boundary_counts_once(engines, monkeypatch, caplog):
+    engine = engines()
+    compress_path(engine, monkeypatch)
+    engine._lcm_session_last_bypassed["S"] = True
+    with caplog.at_level(logging.INFO):
+        engine.on_session_start("child", boundary_reason="compression", old_session_id="S",
+                                platform="cli", conversation_id="conv")
+    assert "source session bypasses LCM storage" in caplog.text
+    assert emissions(engine)[0]["state"] == "proposed"
+    assert count(engine, "emission_boundary_unadopted") == 1
     assert engine._emission_handle is None
 
 

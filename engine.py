@@ -4748,8 +4748,7 @@ class LCMEngine(
                 previous_session_id,
             )
             self._finalize_pending_reset_boundary(previous_session_id)
-            if self._emission_handle is None:
-                self._ledger_count("ledger.emission_boundary_unadopted")
+            self._ledger_count("ledger.emission_boundary_unadopted")
             self._reset_session_scoped_runtime_state()
             self._last_boundary_skip_time = time.monotonic()
             self._apply_session_start_metadata(session_id, kwargs)
