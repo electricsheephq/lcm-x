@@ -1049,6 +1049,7 @@ class DelegateChildMixin:
         platform: str = "",
         after_ingest: bool = False,
         require_agent: bool = False,
+        outcome: Optional[dict] = None,
     ) -> Optional[int]:
         """Store a delegated child's new rows; return their count, or None on failure. Never raises."""
         try:
@@ -1063,6 +1064,8 @@ class DelegateChildMixin:
                 link = self._delegate_child_link(session_id, platform=platform, require_agent=require_agent)
                 if link is None:
                     return 0
+                if isinstance(outcome, dict):
+                    outcome["linked"] = True
                 with self._attribution_span("delegate_child_store", len(messages)):
                     return self._append_delegate_child_rows(session_id, messages, link)
         except Exception as exc:
@@ -1087,7 +1090,7 @@ class DelegateChildMixin:
         start = self._delegate_child_unique_end(identities, boundary) if boundary else None
         anchored = start is not None
         if start is not None:
-            self._note_delegate_child_fallback(session_id, "resuming after compression boundary")
+            logger.debug("LCM delegated child %s: resuming after compression boundary", session_id)
         else:
             start = self._session_end_store_prefix_count(session_id, view)
             if start == 0 and len(self._delegate_child_store_sessions(session_id)) > 1:
@@ -1114,7 +1117,7 @@ class DelegateChildMixin:
                     else:
                         suffix.append(msg)
             else:
-                self._note_delegate_child_fallback(session_id, "resuming after stored tail anchor")
+                logger.debug("LCM delegated child %s: resuming after stored tail anchor", session_id)
                 suffix = view[start:]
         else:
             suffix = view[start:]
