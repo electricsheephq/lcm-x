@@ -469,6 +469,8 @@ class HostUidShadowMixin:
             return
         counts = self._host_uid_counters = getattr(self, "_host_uid_counters", None) or Counter()
         counts.update(delta)
+        if getattr(self, "_ingest_read_only", None) is not None:
+            return
         durable = {key: value for key, value in delta.items() if key != "skipped.no_uid"}
         if not durable:
             return

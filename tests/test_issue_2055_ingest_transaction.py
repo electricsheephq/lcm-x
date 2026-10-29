@@ -276,6 +276,37 @@ def test_lost_ingest_transaction_aborts_instead_of_reopening(ingest_case, monkey
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
 
 
+@pytest.mark.parametrize("session_end", [False, True])
+def test_busy_context_does_not_swallow_keyboard_interrupt(ingest_case, monkeypatch, session_end):
+    engine, _seed, host = ingest_case
+    before, frontier = durable(engine), copy.deepcopy(vars(engine._frontier))
+    transaction, calls = engine._ingest_messages_transaction, []
+
+    def interrupted(*args, **kwargs):
+        calls.append(True)
+        transaction(*args, **kwargs)
+        try:
+            raise sqlite3.OperationalError("database is locked")
+        except sqlite3.OperationalError:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(engine, "_ingest_messages_transaction", interrupted)
+    engine._session_end_flush_active = session_end
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            if session_end:
+                engine._ingest_messages(host, allow_session_end_replay_proof=True)
+            else:
+                engine.ingest(host)
+    finally:
+        engine._session_end_flush_active = False
+    assert calls == [True]
+    assert durable(engine) == before and vars(engine._frontier) == frontier
+    assert not engine._store._conn.in_transaction
+    assert getattr(engine, "_ingest_read_only", None) is None
+    assert engine._pending_session_tails == []
+
+
 def test_crash_after_savepoint_release_rolls_back_whole_ingest(ingest_case, monkeypatch):
     engine, seed, host = ingest_case
     before, released = durable(engine), []
@@ -726,6 +757,64 @@ def test_session_end_classifies_read_only_and_freezes_once(ingest_case, monkeypa
     assert all(sql.lstrip().upper().startswith(("SELECT", "WITH", "PRAGMA")) for sql in statements)
     engine.on_session_start("other", platform="cli", context_length=200_000, conversation_id="other")
     assert [row["content"] for row in engine._store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
+
+
+def test_session_end_read_only_shadow_keeps_tally_in_memory(ingest_case, monkeypatch):
+    from hermes_lcm.host_uid import HOST_UID_COUNTER_KEY
+
+    engine, _seed, host = ingest_case
+    host = host[:2]  # An already stored view reaches shadow counting without appending a tail.
+    engine.ingest(host)
+    store = engine._store
+    before = store.read_metadata_json(HOST_UID_COUNTER_KEY)
+    assert before is not None
+    classify, count = engine._ingest_messages_transaction, engine._host_uid_count
+    statements, writes, counted, fallback = [], [], [], []
+
+    def classified(*args, **kwargs):
+        if getattr(engine, "_ingest_read_only", None) is not None:
+            fallback.append(True)
+            store._conn.set_trace_callback(statements.append)
+        return classify(*args, **kwargs)
+
+    def counted_delta(delta, error=None):
+        previous = dict(engine._host_uid_counters)
+        result = count(delta, error)
+        if getattr(engine, "_ingest_read_only", None) is not None:
+            # Observe attempt-local counters before fallback cleanup restores memory.
+            counted.append((dict(delta), previous, dict(engine._host_uid_counters)))
+        return result
+
+    def tracked(name):
+        original = getattr(store, name)
+
+        def write(*args, **kwargs):
+            if getattr(engine, "_ingest_read_only", None) is not None:
+                writes.append(name)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(store, name, write)
+
+    monkeypatch.setattr(engine, "_ingest_messages_transaction", classified)
+    monkeypatch.setattr(engine, "_host_uid_count", counted_delta)
+    tracked("update_metadata_json")
+    tracked("write_metadata_json")
+    locker = sqlite3.connect(store.db_path)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        engine.on_session_end("S", host)
+    finally:
+        store._conn.set_trace_callback(None)
+        locker.rollback()
+        locker.close()
+    assert fallback == [True] and len(counted) == 1
+    delta, previous, current = counted[0]
+    assert delta["errors"] == 1
+    assert current["errors"] == previous.get("errors", 0) + 1
+    assert not writes and not any(sql.lstrip().upper().startswith("BEGIN") for sql in statements)
+    assert store.read_metadata_json(HOST_UID_COUNTER_KEY) == before
+    assert engine._pending_session_tails == []
+    assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply"]
 
 
 def test_batched_negative_relation_probe_is_cached_inside_a_transaction(tmp_path):

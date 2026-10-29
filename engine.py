@@ -7213,12 +7213,12 @@ class LCMEngine(
                 if not tail_registered:
                     _PENDING_TAIL_ENGINES.discard(self)
                 attribution.update(rows_written=0, bytes_written=0)
-                if attempt == 0 and (_is_ingest_busy_error(exc)
-                                     or held_at is None and isinstance(exc, sqlite3.Error)):
+                if isinstance(exc, Exception) and attempt == 0 and (_is_ingest_busy_error(exc)
+                                                                  or held_at is None and isinstance(exc, sqlite3.Error)):
                     attribution["busy_snapshot_retry"] = True
                     admission_retry = held_at is None and _is_ingest_busy_error(exc)
                     continue
-                if self._session_end_flush_active and _is_ingest_busy_error(exc):
+                if isinstance(exc, Exception) and self._session_end_flush_active and _is_ingest_busy_error(exc):
                     self._ingest_read_only = exc
                     frozen_replay = None
                     read_only_thread = getattr(self._store, "_read_only_ingest_thread", None)
