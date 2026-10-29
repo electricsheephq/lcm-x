@@ -408,7 +408,7 @@ def test_overlapping_store_points_across_clones_append_once(host, monkeypatch):
         one = pool.submit(first._store_delegate_child_turn, "child", child_view())
         assert entered.wait(5)
         two = pool.submit(second._store_delegate_child_turn, "child", child_view())
-        assert one.result(timeout=10) + two.result(timeout=10) == 3
+        assert (one.result(timeout=10) or 0) + (two.result(timeout=10) or 0) == 3
     assert [row["content"] for row in child_rows(first)] == [row["content"] for row in child_view()]
 
 
@@ -552,7 +552,7 @@ def test_store_during_compression_does_not_publish_stale_boundary(host, monkeypa
     compacted = [{"role": "user", "content": "compacted head"}, original[-1]]
 
     def compress_with_store(*args):
-        assert other._store_delegate_child_turn("child", [*original, concurrent], platform="subagent") == 1
+        assert (other._store_delegate_child_turn("child", [*original, concurrent], platform="subagent") or 0) == 1
         return compacted
 
     monkeypatch.setattr(parent, "_compress_bypassed", compress_with_store)
@@ -725,7 +725,8 @@ def test_delegate_fallback_reads_real_tail_and_uncapped_rows(host, monkeypatch):
 
 
 @pytest.mark.parametrize("parent_kind", ["ignored", "delegate"])
-def test_stateless_rotated_parent_requires_delegate_identity(host, monkeypatch, parent_kind):
+@pytest.mark.parametrize("route", ["shared", "clone", "prototype"])
+def test_stateless_rotated_parent_requires_delegate_identity(host, monkeypatch, parent_kind, route):
     monkeypatch.setenv("LCM_IGNORE_SESSION_PATTERNS", "old-parent")
     load, clone = host
     ctx, _ = load()
@@ -745,9 +746,42 @@ def test_stateless_rotated_parent_requires_delegate_identity(host, monkeypatch, 
     assert engine._session_id == "parent" and engine._session_stateless and not engine._session_ignored
     links_before = lineage_rows(engine)
     child = Agent("child", **DELEGATE)
-    child.turn(ctx, child_view(), engine)
+    child_engine = engine if route == "shared" else None
+    if route == "clone":
+        child_engine = clone(ctx)
+        child.start(child_engine)
+    child.turn(ctx, child_view(), child_engine)
     if parent_kind == "ignored":
         assert child_rows(engine) == [] and lineage_rows(engine) == []
     else:
         assert [row["content"] for row in child_rows(engine)] == [row["content"] for row in child_view()]
         assert lineage_rows(engine) == [*links_before, ("child", "parent", "parent_frame")]
+
+
+def test_failed_pre_store_with_repeated_tail_publishes_no_boundary(host, monkeypatch):
+    load, clone = host
+    ctx, module = load()
+    engine = clone(ctx)
+    engine.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    user = {"role": "user", "content": "initial request"}
+    repeated = {"role": "assistant", "content": "repeated answer"}
+    unwritten = {"role": "user", "content": "unwritten request"}
+    child.turn(ctx, [user, repeated], engine)
+    append = engine._append_off_current_session_end_suffix
+    attempts = []
+
+    def fail_once(*args, **kwargs):
+        attempts.append(args)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("synthetic append failure")
+        return append(*args, **kwargs)
+
+    compacted = [{"role": "user", "content": "compressed head"}, unwritten, repeated]
+    monkeypatch.setattr(engine, "_append_off_current_session_end_suffix", fail_once)
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: compacted)
+    aux = module("aux_session")
+    before = aux.delegate_child_store_counts().get("fallbacks", 0)
+    child.compress(engine, [user, repeated, unwritten, repeated])
+    assert engine._delegate_child_key("child") not in aux._DELEGATE_RESUME_BOUNDARIES
+    assert aux.delegate_child_store_counts()["fallbacks"] > before

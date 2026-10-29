@@ -812,6 +812,7 @@ _DELEGATE_STORE_LOCK = threading.RLock()
 _DELEGATE_AUXILIARY_IDS: set[tuple[str, str]] = set()
 _DELEGATE_RESUME_BOUNDARIES: dict[tuple[str, str], list[tuple]] = {}
 _DELEGATE_COMPRESSION_PARENTS: dict[tuple[str, str], str] = {}
+_DELEGATE_BYPASS_LINEAGE_IDS: set[tuple[str, str]] = set()
 
 
 def delegate_child_store_counts() -> Dict[str, int]:
@@ -903,13 +904,13 @@ class DelegateChildMixin:
         session_id = self._bypass_lcm_session_id()
         stored_tail = None
         with _DELEGATE_STORE_LOCK:
-            self._store_delegate_child_turn(session_id, messages, platform=_DELEGATE_SOURCE, require_agent=True)
+            pre_store = self._store_delegate_child_turn(session_id, messages, platform=_DELEGATE_SOURCE, require_agent=True)
             try:
                 if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
                     tail = self._store.get_session_tail(session_id, limit=1)
                     view = [msg for msg in messages
                             if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
-                    if tail and view and self._session_end_prefix_compare_identity(
+                    if pre_store is not None and tail and view and self._session_end_prefix_compare_identity(
                         tail[-1], session_id=session_id,
                     ) == self._session_end_prefix_compare_identity(view[-1], session_id=session_id):
                         stored_tail = tail
@@ -1031,6 +1032,8 @@ class DelegateChildMixin:
                 return None
         else:
             parent_platform = self._lcm_session_last_platform.get(parent, "") or self._host_session_parent(parent)[1]
+        if self._delegate_child_key(parent) in _DELEGATE_BYPASS_LINEAGE_IDS and not self._is_known_delegate_child(parent):
+            return None
         if self._session_id_matches_lcm_bypass_filters(parent, platform=parent_platform):
             return None
         return {
@@ -1049,8 +1052,8 @@ class DelegateChildMixin:
         platform: str = "",
         after_ingest: bool = False,
         require_agent: bool = False,
-    ) -> int:
-        """Store a delegated child's new rows under its own id; return how many were stored. Never raises."""
+    ) -> Optional[int]:
+        """Store a delegated child's new rows; return their count, or None on failure. Never raises."""
         try:
             session_id = str(session_id or "")
             if not session_id or not messages:
@@ -1067,7 +1070,7 @@ class DelegateChildMixin:
                     return self._append_delegate_child_rows(session_id, messages, link)
         except Exception as exc:
             self._note_delegate_child_fallback(session_id, f"rows not stored: {type(exc).__name__}: {exc}")
-            return 0
+            return None
 
     def _append_delegate_child_rows(self, session_id: str, messages: List[Dict[str, Any]], link: Dict[str, str]) -> int:
         view = [msg for msg in messages if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
