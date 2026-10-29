@@ -195,7 +195,8 @@ def test_unmatched_child_view_is_a_visible_fallback(host, caplog):
         child.turn(ctx, [{"role": "user", "content": "an unrelated history"}], parent)
     assert [row["content"] for row in child_rows(parent)] == [row["content"] for row in child_view()] + ["an unrelated history"]
     assert module("aux_session").delegate_child_store_counts()["fallbacks"] == before + 1
-    assert any("delegated child child" in r.getMessage() and "counted identities" in r.getMessage()
+    assert any(r.levelname == "WARNING" and "delegated child child" in r.getMessage()
+               and "counted identities" in r.getMessage()
                for r in caplog.records)
 
 
