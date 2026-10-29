@@ -354,6 +354,7 @@ _KNOWN_FEATURE_TABLE_NAMES = frozenset({
     "stamp_observations",
     "ingest_views",
     "lineage_marks",
+    "session_lineage",  # #1931 additive delegated-child links
 })
 
 # The known opt-in feature families whose derived tables an interim build may

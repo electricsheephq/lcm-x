@@ -20,7 +20,8 @@ import sqlite3
 import threading
 import weakref
 from pathlib import Path
-from typing import Any, Dict
+from collections import Counter
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -789,3 +790,358 @@ class AuxiliarySessionMixin:
             logger.debug("LCM auxiliary ancestor probe failed: %s", exc)
             return False
         return False
+
+
+# --- Delegated subagent sessions (#1931) ------------------------------------
+#
+# A session the host's delegate tool started (a DELEGATE child) stays bypassed for context management, but
+# its rows are stored under the child's own session id and conversation id, with a ``session_lineage`` link
+# to its parent. AUXILIARY sessions (background review, memory/skills-only toolsets, auxiliary model calls)
+# are never stored; when both classes match, AUXILIARY wins. Rows reach the store only through the
+# non-current-session route (a stored-prefix match, or a unique tail anchor, plus
+# ``_append_off_current_session_end_suffix``), so an engine bound to another session keeps its binding,
+# cursor, frontier, lifecycle state and DAG. Classification and resume boundaries are shared by clones.
+
+_DELEGATE_SOURCE = "subagent"  # the host's platform (and state.db ``sessions.source``) for a delegate child
+_ANCHOR_ROWS = 3
+_FRAME_DEPTH = 48
+_COUNTS_LOCK = threading.Lock()
+_COUNTS: Counter = Counter()
+# Shared by clones and hook engines: compare and append form one process-local operation.
+_DELEGATE_STORE_LOCK = threading.RLock()
+_DELEGATE_AUXILIARY_IDS: set[tuple[str, str]] = set()
+_DELEGATE_RESUME_BOUNDARIES: dict[tuple[str, str], list[tuple]] = {}
+_DELEGATE_COMPRESSION_PARENTS: dict[tuple[str, str], str] = {}
+
+
+def delegate_child_store_counts() -> Dict[str, int]:
+    """Process-lifetime counts: ``rows_stored`` and ``fallbacks`` (rows a delegated child could not store)."""
+    with _COUNTS_LOCK:
+        return dict(_COUNTS)
+
+
+def _count(key: str, amount: int = 1) -> None:
+    with _COUNTS_LOCK:
+        _COUNTS[key] += amount
+
+
+def _is_auxiliary_agent(agent: Any) -> bool:
+    origin = str(getattr(agent, "_memory_write_origin", "") or "")
+    context = str(getattr(agent, "_memory_write_context", "") or "")
+    if "background_review" in (origin, context):
+        return True
+    toolsets = getattr(agent, "enabled_toolsets", None)
+    try:
+        names = {str(toolset) for toolset in toolsets} if toolsets is not None else set()
+    except TypeError:
+        names = set()
+    return bool(names) and names <= {"memory", "skills"}
+
+
+def _is_delegate_agent(agent: Any) -> bool:
+    if getattr(agent, "_subagent_id", None) or getattr(agent, "_parent_subagent_id", None):
+        return True
+    try:
+        if int(getattr(agent, "_delegate_depth", 0) or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(getattr(agent, "log_prefix", "") or "").strip().startswith("[subagent-")
+
+
+class DelegateChildMixin:
+    def _delegate_child_key(self, session_id: str) -> tuple[str, str]:
+        return (str(self._store.db_path), session_id)
+
+    def _remember_delegate_child_auxiliary(self, session_id: str) -> None:
+        agent = self._delegate_child_agent(session_id)
+        if agent is not None and _is_auxiliary_agent(agent):
+            with _DELEGATE_STORE_LOCK:
+                _DELEGATE_AUXILIARY_IDS.add(self._delegate_child_key(session_id))
+
+    def _stored_delegate_child_link(self, session_id: str) -> Dict[str, str]:
+        if not self._store._session_lineage_table_exists():
+            return {}
+        columns = ("parent_session_id", "source", "child_subagent_id", "parent_subagent_id", "child_role")
+        row = self._store.connection.execute(
+            "SELECT parent_session_id, source, child_subagent_id, parent_subagent_id, child_role "
+            "FROM session_lineage WHERE child_session_id = ?", (session_id,)).fetchone()
+        return dict(zip(columns, (str(value or "") for value in row))) if row else {}
+
+    def _is_known_delegate_child(self, session_id: str) -> bool:
+        key = self._delegate_child_key(session_id)
+        return bool(self._stored_delegate_child_link(session_id)
+                    or key in _DELEGATE_RESUME_BOUNDARIES or key in _DELEGATE_COMPRESSION_PARENTS)
+
+    def _delegate_child_store_sessions(self, session_id: str) -> list[str]:
+        sessions = []
+        while session_id and session_id not in sessions:
+            sessions.append(session_id)
+            link = self._stored_delegate_child_link(session_id)
+            parent = _DELEGATE_COMPRESSION_PARENTS.get(self._delegate_child_key(session_id), "")
+            session_id = link["parent_session_id"] if link.get("source") == "compression" else parent
+        return sessions
+
+    @staticmethod
+    def _delegate_child_unique_end(identities: list[tuple], anchor: list[tuple]) -> Optional[int]:
+        if not anchor:
+            return None
+        width = len(anchor)
+        ends = [index + width for index in range(len(identities) - width + 1)
+                if identities[index:index + width] == anchor]
+        return ends[0] if len(ends) == 1 else None
+
+    def _remember_delegate_child_boundary(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in messages
+                      if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
+        tail = identities[-_ANCHOR_ROWS:]
+        # Repeated tails need the full output to identify the actual end uniquely.
+        _DELEGATE_RESUME_BOUNDARIES[self._delegate_child_key(session_id)] = (
+            tail if self._delegate_child_unique_end(identities, tail) is not None else identities)
+
+    def _compress_delegate_child_bypassed(self, messages, current_tokens, focus_topic, force):
+        session_id = self._bypass_lcm_session_id()
+        stored_tail = None
+        with _DELEGATE_STORE_LOCK:
+            pre_store = self._store_delegate_child_turn(session_id, messages, platform=_DELEGATE_SOURCE, require_agent=True)
+            try:
+                if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
+                    tail = self._store.get_session_tail(session_id, limit=1)
+                    view = [msg for msg in messages
+                            if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
+                    if pre_store is not None and tail and view and self._session_end_prefix_compare_identity(
+                        tail[-1], session_id=session_id,
+                    ) == self._session_end_prefix_compare_identity(view[-1], session_id=session_id):
+                        stored_tail = tail
+                    else:
+                        self._note_delegate_child_fallback(
+                            session_id, "compression boundary not recorded: input not stored")
+            except Exception as exc:
+                self._note_delegate_child_fallback(session_id, f"compression boundary not recorded: {exc}")
+        result = self._compress_bypassed(messages, current_tokens, focus_topic, force)
+        try:
+            with _DELEGATE_STORE_LOCK:
+                if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
+                    if stored_tail and self._store.get_session_tail(session_id, limit=1) == stored_tail:
+                        self._remember_delegate_child_boundary(session_id, result)
+                    else:
+                        # A concurrent store advanced the tail: its rows must not be replayed from an older boundary.
+                        _DELEGATE_RESUME_BOUNDARIES.pop(self._delegate_child_key(session_id), None)
+        except Exception as exc:
+            self._note_delegate_child_fallback(session_id, f"compression boundary not recorded: {exc}")
+        return result
+
+    def _handoff_delegate_child_compression(self, old_session_id: str, new_session_id: str) -> None:
+        try:
+            with _DELEGATE_STORE_LOCK:
+                old_key, new_key = self._delegate_child_key(old_session_id), self._delegate_child_key(new_session_id)
+                if old_key in _DELEGATE_AUXILIARY_IDS:
+                    _DELEGATE_AUXILIARY_IDS.add(new_key)
+                    return
+                if not self._is_known_delegate_child(old_session_id):
+                    return
+                if not self._stored_delegate_child_link(old_session_id):
+                    try:
+                        link = self._delegate_child_link(old_session_id, platform=_DELEGATE_SOURCE)
+                        if link:
+                            self._store.record_session_lineage(old_session_id, **link)
+                        else:
+                            self._note_delegate_child_fallback(
+                                old_session_id, "parent link not recorded during compression handoff: no parent identity resolves")
+                    except Exception as exc:
+                        self._note_delegate_child_fallback(
+                            old_session_id, f"parent link not recorded during compression handoff: {exc}")
+                _DELEGATE_COMPRESSION_PARENTS[new_key] = old_session_id
+                if old_key in _DELEGATE_RESUME_BOUNDARIES:
+                    _DELEGATE_RESUME_BOUNDARIES[new_key] = _DELEGATE_RESUME_BOUNDARIES[old_key]
+                self._store.record_session_lineage(new_session_id, old_session_id, source="compression")
+        except Exception as exc:
+            self._note_delegate_child_fallback(new_session_id, f"compression parent link not recorded: {exc}")
+
+    def _delegate_child_agent(self, session_id: str) -> Any:
+        """The running agent object for ``session_id`` on this call stack, or None."""
+        frame = inspect.currentframe()
+        try:
+            frame = frame.f_back if frame is not None else None
+            for _ in range(_FRAME_DEPTH):
+                if frame is None:
+                    return None
+                caller = frame.f_locals.get("self")
+                if caller is not None and caller is not self and \
+                        str(getattr(caller, "session_id", "") or "") == session_id:
+                    return caller
+                frame = frame.f_back
+        finally:
+            del frame
+        return None
+
+    def _host_session_parent(self, session_id: str) -> tuple[str, str]:
+        """``(parent_session_id, source)`` of the host state.db row, read-only; ``("", "")`` when unknown."""
+        try:
+            path = self._state_db_path({})
+            if not path.exists():
+                return "", ""
+            conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+            try:
+                row = conn.execute("SELECT parent_session_id, source FROM sessions WHERE id = ? LIMIT 1",
+                                   (session_id,)).fetchone()
+            finally:
+                conn.close()
+        except Exception as exc:  # pragma: no cover - defensive against host DB drift
+            logger.debug("LCM delegated-child state.db probe failed: %s", exc)
+            return "", ""
+        return (str(row[0] or ""), str(row[1] or "")) if row else ("", "")
+
+    def _delegate_child_link(self, session_id: str, *, platform: str = "",
+                             require_agent: bool = False) -> Optional[Dict[str, str]]:
+        """The parent link of a DELEGATE child, or None for an AUXILIARY or unproven session."""
+        agent = self._delegate_child_agent(session_id)
+        if agent is not None and _is_auxiliary_agent(agent):
+            _DELEGATE_AUXILIARY_IDS.add(self._delegate_child_key(session_id))
+            return None  # AUXILIARY wins over every delegate signal
+        if self._delegate_child_key(session_id) in _DELEGATE_AUXILIARY_IDS:
+            return None
+        platform = platform or self._lcm_session_last_platform.get(session_id, "") or _DELEGATE_SOURCE
+        if (agent is None and require_agent) or self._session_id_matches_lcm_bypass_filters(
+            session_id, platform=platform,
+        ):
+            return None
+        record = explicit_subagent_lineage(session_id)
+        stored_link = self._stored_delegate_child_link(session_id)
+        compression_parent = _DELEGATE_COMPRESSION_PARENTS.get(self._delegate_child_key(session_id), "")
+        delegate = bool(record or stored_link or compression_parent) or (agent is not None and _is_delegate_agent(agent))
+        with self._auxiliary_session_lock:
+            bind_parent = self._delegate_child_bind_parent_ids.get(session_id, "")
+        candidates = [("subagent_start", record.get("parent_session_id", "")), ("bind_kwargs", bind_parent),
+                      ("parent_frame", str(getattr(agent, "_parent_session_id", "") or ""))]
+        if not delegate or not any(parent for _, parent in candidates):
+            host_parent, host_source = self._host_session_parent(session_id)
+            delegate = delegate or (bool(host_parent) and host_source == _DELEGATE_SOURCE)
+            candidates.append(("state_db", host_parent))
+        source, parent = (stored_link["source"], stored_link["parent_session_id"]) if stored_link else next(
+            ((name, value) for name, value in [("compression", compression_parent), *candidates] if value), ("", ""))
+        if not delegate:
+            return None
+        if not parent or parent == session_id:
+            self._note_delegate_child_fallback(session_id, "rows not stored: no parent identity resolves")
+            return None
+        if parent == self._session_id:
+            parent_platform = self._session_platform
+            if self._session_ignored or (self._session_stateless and not self._is_known_delegate_child(parent)):
+                return None
+        else:
+            parent_platform = self._lcm_session_last_platform.get(parent, "") or self._host_session_parent(parent)[1]
+        if self._session_id_matches_lcm_bypass_filters(parent, platform=parent_platform):
+            return None
+        return {
+            "parent_session_id": parent, "source": source,
+            "child_subagent_id": record.get("child_subagent_id") or str(getattr(agent, "_subagent_id", "") or ""),
+            "parent_subagent_id": record.get("parent_subagent_id")
+            or str(getattr(agent, "_parent_subagent_id", "") or ""),
+            "child_role": record.get("role") or str(getattr(agent, "_delegate_role", "") or ""),
+        }
+
+    def _store_delegate_child_turn(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+        *,
+        platform: str = "",
+        after_ingest: bool = False,
+        require_agent: bool = False,
+    ) -> Optional[int]:
+        """Store a delegated child's new rows; return their count, or None on failure. Never raises."""
+        try:
+            session_id = str(session_id or "")
+            if not session_id or not messages:
+                return 0
+            if self._session_id and not self._bypasses_lcm_context_management() and (
+                after_ingest or session_id == self._session_id
+            ):
+                return 0  # this engine's own ingest owns the view
+            with _DELEGATE_STORE_LOCK:
+                link = self._delegate_child_link(session_id, platform=platform, require_agent=require_agent)
+                if link is None:
+                    return 0
+                with self._attribution_span("delegate_child_store", len(messages)):
+                    return self._append_delegate_child_rows(session_id, messages, link)
+        except Exception as exc:
+            self._note_delegate_child_fallback(session_id, f"rows not stored: {type(exc).__name__}: {exc}")
+            return None
+
+    def _append_delegate_child_rows(self, session_id: str, messages: List[Dict[str, Any]], link: Dict[str, str]) -> int:
+        view = [msg for msg in messages if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
+        if not view:
+            return 0
+        try:
+            if not self._stored_delegate_child_link(session_id):
+                self._store.record_session_lineage(session_id, link["parent_session_id"], source=link["source"],
+                                                   child_subagent_id=link["child_subagent_id"],
+                                                   parent_subagent_id=link["parent_subagent_id"],
+                                                   child_role=link["child_role"])
+        except Exception as exc:  # the rows still go in; they stay reachable by session id
+            self._note_delegate_child_fallback(session_id, f"parent link not recorded: {type(exc).__name__}: {exc}")
+        key = self._delegate_child_key(session_id)
+        boundary = _DELEGATE_RESUME_BOUNDARIES.get(key)
+        identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
+        start = self._delegate_child_unique_end(identities, boundary) if boundary else None
+        anchored = start is not None
+        if start is not None:
+            self._note_delegate_child_fallback(session_id, "resuming after compression boundary")
+        else:
+            start = self._session_end_store_prefix_count(session_id, view)
+            if start == 0 and len(self._delegate_child_store_sessions(session_id)) > 1:
+                start = None  # an empty continuation is not an empty logical child history
+        if start is None:
+            sessions = self._delegate_child_store_sessions(session_id)
+            stored_tail = []
+            for sid in sessions:
+                stored_tail = [(sid, row) for row in self._store.get_session_tail(
+                    sid, limit=_ANCHOR_ROWS - len(stored_tail))] + stored_tail
+                if len(stored_tail) == _ANCHOR_ROWS:
+                    break
+            start = self._delegate_child_anchor_end(session_id, view, stored_tail)
+            anchored = start is not None
+            if start is None:
+                self._note_delegate_child_fallback(
+                    session_id, "stored rows no longer match the child's view; resuming with counted identities")
+                remaining = Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
+                                    for sid in sessions for row in self._store.get_session_messages(sid, limit=-1))
+                suffix = []
+                for msg, identity in zip(view, identities):
+                    if remaining[identity] > 0:
+                        remaining[identity] -= 1
+                    else:
+                        suffix.append(msg)
+            else:
+                self._note_delegate_child_fallback(session_id, "resuming after stored tail anchor")
+                suffix = view[start:]
+        else:
+            suffix = view[start:]
+        if not suffix:
+            return 0
+        stored = self._append_off_current_session_end_suffix(
+            session_id, suffix, source=_DELEGATE_SOURCE, conversation_id=session_id)
+        if boundary and anchored:
+            self._remember_delegate_child_boundary(session_id, view)
+        _count("rows_stored", len(stored))
+        logger.debug("LCM stored %d delegated-child rows: session=%s parent=%s",
+                     len(stored), session_id, link["parent_session_id"])
+        return len(stored)
+
+    def _delegate_child_anchor_end(self, session_id: str, view: List[Dict[str, Any]],
+                                  stored_rows: list[tuple[str, Dict[str, Any]]]) -> Optional[int]:
+        """After the host rewrote the child's head (native compaction), resume after the stored tail when
+        it occurs exactly once in the view."""
+        anchor = [self._session_end_prefix_compare_identity(row, session_id=sid)
+                  for sid, row in stored_rows]
+        identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
+        for width in range(len(anchor), 0, -1):
+            end = self._delegate_child_unique_end(identities, anchor[-width:])
+            if end is not None:
+                return end
+        return None
+
+    def _note_delegate_child_fallback(self, session_id: str, reason: str) -> None:
+        _count("fallbacks")
+        logger.warning("LCM delegated child %s: %s", session_id or "(unknown)", reason)

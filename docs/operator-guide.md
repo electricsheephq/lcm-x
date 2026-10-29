@@ -1165,6 +1165,19 @@ If the native compressor is unavailable, LCM falls back to a deterministic
 head/tail trim as a last-resort safety net, still without writing the bypassed
 session to `lcm.db`.
 
+Delegated subagents (sessions the host's delegate tool starts) are stored under
+their own session ids, with a link to the parent session in `session_lineage`,
+but LCM does not manage their context: no compaction, summaries or context
+rewriting, so the native fallback above still bounds a child's window. Their
+rows are found from the parent by `lcm_grep` with the default
+`session_scope='current'` (the current session plus its delegated subagents), by
+`session_scope='all'`, by `session_scope='session'` with the child's id, and by
+`lcm_recall`; a hit from a child carries `lineage: "subagent of <parent id>"`.
+Auxiliary sessions (background memory review, memory/skills-only toolsets and
+auxiliary model calls such as compaction and titles) stay excluded and store
+nothing. If a child's rows cannot be stored, LCM logs one warning naming the
+child and the reason.
+
 ### Large tool-output handling
 
 Externalization for ordinary large tool output is on by default. When enabled,

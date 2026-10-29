@@ -1104,6 +1104,27 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
     return _recent.lcm_recent(args, **kwargs)
 
 
+_SUBAGENT_SOURCE = "subagent"  # #1931: the source a delegated subagent's stored rows carry
+
+
+def _annotate_subagent_lineage(engine: "LCMEngine", hits: list[dict[str, Any]]) -> None:
+    """#1931: a hit from a delegated subagent session (its rows carry source 'subagent') names its parent."""
+    hits = [hit for hit in hits if hit.get("source") == _SUBAGENT_SOURCE]
+    parents_of = getattr(getattr(engine, "_store", None), "session_lineage_parents", None)
+    if not hits or not callable(parents_of):
+        return
+    try:
+        parents = parents_of({str(hit.get("session_id") or "") for hit in hits})
+    except Exception as exc:  # lineage is an annotation; a failed read never drops hits
+        logger.debug("LCM subagent lineage read failed: %s", exc)
+        return
+    for hit in hits:
+        parent = parents.get(str(hit.get("session_id") or ""))
+        if parent:
+            hit["parent_session_id"] = parent
+            hit["lineage"] = f"subagent of {parent}"
+
+
 def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     """Search raw messages + summaries with optional cross-session scoping.
 
@@ -1246,36 +1267,44 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         and search_session_id not in excluded_session_ids
     ):
         try:
-            msg_hits = engine._store.search(
-                query,
-                session_id=search_session_id,
-                limit=source_limit,
-                sort=sort,
-                source=source,
-                conversation_id=conversation_id,
-                role=role,
-                time_from=time_from,
-                time_to=time_to,
-                exclude_session_ids=excluded_session_ids,
-                allow_operators=bool(args.get("_allow_operators", False)),
-                **({"stemmed": True} if args.get("_stemmed") else {}),
-                **({"_include_like_excerpt": True} if args.get("mode") == "recall" else {}),
-                **({"agent_operators": True} if args.get("_agent_operators") else {}),
-            )
-            if args.get("mode") != "recall":
-                msg_hits = collapse_duplicate_hits(msg_hits)
-            for hit in msg_hits:
-                if hit.get("session_id") in excluded_session_ids:
-                    continue
-                results.append(
-                    _shape_message_hit(
-                        hit,
-                        current_session_id=current_session_id,
-                        has_current_session=has_current_session,
-                    )
+            # #1931: 'current' also covers the current session's delegated subagents (session_lineage).
+            descendant_ids = [
+                child_id for child_id in (
+                    getattr(engine._store, "session_lineage_descendants", lambda _sid: ())(current_session_id)
+                    if session_scope == "current" and has_current_session else ()
+                ) if child_id not in excluded_session_ids
+            ]
+            for scoped_session_id in (search_session_id, *descendant_ids):
+                msg_hits = engine._store.search(
+                    query,
+                    session_id=scoped_session_id,
+                    limit=source_limit,
+                    sort=sort,
+                    source=source,
+                    conversation_id=conversation_id,
+                    role=role,
+                    time_from=time_from,
+                    time_to=time_to,
+                    exclude_session_ids=excluded_session_ids,
+                    allow_operators=bool(args.get("_allow_operators", False)),
+                    **({"stemmed": True} if args.get("_stemmed") else {}),
+                    **({"_include_like_excerpt": True} if args.get("mode") == "recall" else {}),
+                    **({"agent_operators": True} if args.get("_agent_operators") else {}),
                 )
-                if args.get("mode") == "recall" and "_like_excerpt" in hit:
-                    results[-1]["_like_excerpt"] = hit["_like_excerpt"]
+                if args.get("mode") != "recall":
+                    msg_hits = collapse_duplicate_hits(msg_hits)
+                for hit in msg_hits:
+                    if hit.get("session_id") in excluded_session_ids:
+                        continue
+                    results.append(
+                        _shape_message_hit(
+                            hit,
+                            current_session_id=current_session_id,
+                            has_current_session=has_current_session,
+                        )
+                    )
+                    if args.get("mode") == "recall" and "_like_excerpt" in hit:
+                        results[-1]["_like_excerpt"] = hit["_like_excerpt"]
         except Exception as exc:
             # Grep degrades to whatever the other stages produce, but the
             # failure must reach the PAYLOAD, not just the log: lcm_recall's
@@ -1516,6 +1545,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         result.pop("_sort_rank", None)
         result.pop("_sort_directness", None)
         result.pop("_hybrid_summary_override", None)
+    _annotate_subagent_lineage(engine, results)
 
     response: Dict[str, Any] = {
         "query": query,
@@ -4536,6 +4566,11 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     fts_arm_index = arm_order.index("fts") if "fts" in arm_order else None
     now = time.time()
     scope_session_ids = set(_recent._recent_conversation_scope_session_ids(engine))
+    try:  # #1931: the current session's delegated subagents share its scope boost (only child hits need it)
+        if any(entry.get("hit", {}).get("source") == _SUBAGENT_SOURCE for entry in ordered):
+            scope_session_ids.update(engine._store.session_lineage_descendants(str(engine.current_session_id or "")))
+    except Exception as exc:
+        logger.debug("LCM subagent scope read failed: %s", exc)
     ordered = apply_prior(ordered, scope_session_ids, now, scope_bias)
 
     # -- Optional rerank stage (default OFF): a pure rank-REORDER within the top
@@ -4557,6 +4592,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
         )
 
+    _annotate_subagent_lineage(engine, [entry["hit"] for entry in ordered if isinstance(entry.get("hit"), dict)])
     session_delivery = None
     if kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) == "session":
         from .recall_session import deliver_session

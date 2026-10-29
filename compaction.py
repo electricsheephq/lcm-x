@@ -711,7 +711,8 @@ class CompactionMixin:
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         with self._bypass_compression_binding() as bypassed:
             if bypassed:
-                return self._compress_bypassed(messages, current_tokens, focus_topic, force)
+                # #1931: a delegated child's rows are stored before the host's compaction rewrites its view.
+                return self._compress_delegate_child_bypassed(messages, current_tokens, focus_topic, force)
         self._last_compress_leaves = None
         self._last_hidden_backlog = None
         self._compress_escaped = []

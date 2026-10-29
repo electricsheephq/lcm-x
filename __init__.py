@@ -796,6 +796,7 @@ def register(ctx):
                 try:
                     with getattr(active_engine, "_attribution_span", lambda *_: nullcontext())("post_llm_call", len(history)):
                         ingested = active_engine.ingest(history)
+                    _store_delegate_child(active_engine, after_ingest=True)
                 finally:
                     try:
                         note = getattr(active_engine, "note_turn_complete", None)
@@ -808,6 +809,12 @@ def register(ctx):
                 if callable(prepare) and not kwargs.get("interrupted"):
                     prepare(history)
                 return ingested
+
+            def _store_delegate_child(active_engine, **flags):
+                # #1931: a delegated child the engine bypassed is stored under its own id; never raises.
+                store_child = getattr(active_engine, "_store_delegate_child_turn", None)
+                if session_id and callable(store_child):
+                    store_child(session_id, history, platform=platform, **flags)
 
             def _bind_and_ingest(active_engine):
                 # The host-supplied engine or genuinely cold plugin prototype
@@ -843,6 +850,9 @@ def register(ctx):
                             _bind_and_ingest,
                             timeout=None,
                         )
+                        if result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT:
+                            # No engine of the child's own: store its rows without binding one.
+                            use_lcm_engine(engine, _store_delegate_child, timeout=None)
 
                 if not result.used:
                     logger.warning(
