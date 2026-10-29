@@ -1201,6 +1201,7 @@ class LCMEngine(
         # Track which store_ids have been ingested into the DAG
         self._frontier = FrontierState()
         self._last_compacted_store_id: int = 0
+        self._bound_reset_at: float | None = None
 
         # Cursor: index in the current messages list up to which all
         # messages have been persisted.  After compress() shortens the
@@ -3383,6 +3384,7 @@ class LCMEngine(
         conversation_id: str | None = None,
     ) -> None:
         state = self._lifecycle.bind_session(session_id, conversation_id=conversation_id)
+        self._bound_reset_at = state.last_reset_at
         self._rearm_embedding_maintenance()
         if getattr(self, "_survival_overhead_observation", None) is not None and \
                 self._survival_overhead_observation[0] != state.conversation_id:
@@ -4362,6 +4364,21 @@ class LCMEngine(
             )
         self._update_model_pending_session_start = False
 
+    def _adopt_foreign_reset_frontier(self, state: Any, frontier: int | None = None) -> None:
+        #752 R3: a still-bound sibling may have rewound this row after our bind.
+        if self._config.new_session_retain_depth < 0:
+            return  # #2048 shape 6: such a reset deletes nothing and never rewinds, so there is nothing to adopt
+        if (state is not None and state.current_session_id == self._session_id
+                and state.last_reset_at is not None and state.last_reset_at != self._bound_reset_at):
+            previous = int(self._last_compacted_store_id or 0)
+            frontier = int((state.current_frontier_store_id if frontier is None else frontier) or 0)
+            self._frontier_holder().bind_frontier(frontier)
+            self._bound_reset_at = state.last_reset_at
+            logger.info(
+                "LCM adopted lifecycle frontier %d for %s after another engine's reset (in-process %d)",
+                frontier, self._session_id, previous,
+            )
+
     def _rebind_after_unadopted_compaction_commit(self) -> None:
         """This engine is bound to (session, conversation), but the conversation's lifecycle row is
         unbound and was last finalized by this session: an end ran with no start after it. The host
@@ -4371,12 +4388,14 @@ class LCMEngine(
         covers any engine or process that unbinds it.
 
         Re-bind it as that start would. bind_session restores the session's own finalized
-        frontier (#5: never another session's, never from the in-process value); a reset after the
+        frontier (#5: never another session's, never from the in-process value). A still-bound engine first
+        adopts the row's frontier after another engine's reset (#752 R3). A reset after the
         finalize means the host is moving on, so nothing is re-bound then.
         """
         if not self._session_id or not self._conversation_id or self._bypasses_lcm_context_management():
             return
         state = self._lifecycle.get_by_conversation(self._conversation_id)
+        self._adopt_foreign_reset_frontier(state)
         if state is None or state.current_session_id is not None or state.last_finalized_session_id != self._session_id:
             return
         if state.last_reset_at is not None and (state.last_finalized_at or 0) < state.last_reset_at:
@@ -4385,6 +4404,7 @@ class LCMEngine(
         state = self._lifecycle.rebind_own_finalized(self._session_id, state.conversation_id)
         if state is None:
             return  # another session holds the row now: nothing written, the frontier unchanged
+        self._bound_reset_at = state.last_reset_at
         frontier = int(state.current_frontier_store_id or 0)
         if int(self._last_compacted_store_id or 0) != frontier:
             logger.warning(
@@ -4422,6 +4442,11 @@ class LCMEngine(
             if state.last_finalized_session_id != session_id:
                 return False
             state = self._lifecycle.bind_session(session_id, conversation_id=state.conversation_id)
+            own = state.last_finalized_session_id == session_id  # same snapshot as the reset marker
+            self._adopt_foreign_reset_frontier(state, state.last_finalized_frontier_store_id if own else None)
+        else:
+            self._adopt_foreign_reset_frontier(state)
+        self._bound_reset_at = state.last_reset_at
         resumable_finalized = (
             state.last_finalized_frontier_store_id
             if state.last_finalized_session_id == session_id
@@ -4637,6 +4662,10 @@ class LCMEngine(
             if source_session_id and previous_session_id == source_session_id
             else 0
         )
+        #752 R3: do not carry a local frontier from before another engine's reset.
+        if (source_state is not None and source_state.last_reset_at is not None
+                and source_state.last_reset_at != self._bound_reset_at):
+            process_local_frontier = 0
         pending_reset_frontier = int(
             self._pending_reset_frontier_store_id
             if self._pending_reset_session_id
@@ -5606,6 +5635,8 @@ class LCMEngine(
         session_id: str,
         messages: List[Dict[str, Any]],
     ) -> None:
+        self._adopt_foreign_reset_frontier(
+            self._lifecycle.get_by_conversation(self._conversation_id))
         with self._attribution_span("classifier"):
             proof = getattr(self, "_compress_commit_proof", None)
             reason = next((reason for reason, gate in (
@@ -5764,7 +5795,8 @@ class LCMEngine(
         self._pending_reset_conversation_id = self._conversation_id
         self._pending_reset_frontier_store_id = self._last_compacted_store_id
         super().on_session_reset()
-        self._lifecycle.record_reset(self._conversation_id)
+        state = self._lifecycle.record_reset(self._conversation_id)
+        self._bound_reset_at = state.last_reset_at if state is not None else None
         if self._session_id:
             try:
                 self._store.write_metadata_json(
@@ -5780,17 +5812,31 @@ class LCMEngine(
         #    N  → keep nodes at depth >= N (e.g. 2 keeps d2+)
         retain = self._config.new_session_retain_depth
         if self._session_id and retain != -1:
-            if retain == 0:
-                self._dag.delete_session_nodes(
+            min_depth = None if retain == 0 else retain  # below -1 deletes nothing, as before
+            # #752: read before deleting, while the retained nodes' lineage still resolves.
+            first_lost = self._dag.first_unretained_row(self._session_id, min_depth)
+            observed = self._lifecycle.get_by_conversation(self._conversation_id)
+            if min_depth is None:
+                deleted = self._dag.delete_session_nodes(
                     self._session_id,
                     on_deleted_batch=self._purge_embeddings_for_nodes,
                 )
             else:
-                self._dag.delete_below_depth(
+                deleted = self._dag.delete_below_depth(
                     self._session_id,
-                    retain,
+                    min_depth,
                     on_deleted_batch=self._purge_embeddings_for_nodes,
                 )
+            if deleted and first_lost is not None:
+                # Rows from first_lost on lost their only summaries: record the frontier the retained nodes
+                # still cover, so a resume, rotation or another engine re-summarises instead of skipping them.
+                retained_frontier = first_lost - 1
+                state = self._lifecycle.rewind_reset_frontier(
+                    self._conversation_id, self._session_id, retained_frontier, observed=observed)
+                if state is not None:
+                    self._bound_reset_at = state.last_reset_at
+                self._pending_reset_frontier_store_id = min(
+                    int(self._pending_reset_frontier_store_id or 0), retained_frontier)
 
     def _purge_embeddings_for_nodes(
         self,

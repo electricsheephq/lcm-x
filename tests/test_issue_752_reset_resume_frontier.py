@@ -1,0 +1,461 @@
+"""#752: resuming a session after /new must not restore a frontier whose summaries the reset deleted.
+
+Real engine, lifecycle and store code; only the summariser (the model call) is faked.
+"""
+import re
+from collections import Counter
+
+import pytest
+
+import hermes_lcm.engine as lcm_engine_module
+from hermes_lcm.config import LCMConfig
+from hermes_lcm.dag import SummaryNode
+from hermes_lcm.engine import LCMEngine
+
+
+def _turn(i):
+    return (
+        {"role": "user", "content": f"[T{i:02d}] user turn {i}: " + "alpha beta gamma delta " * 40},
+        {"role": "assistant", "content": f"reply to T{i:02d}: noted item {i}."},
+    )
+
+
+def _summarize(*args, **kwargs):
+    turns = sorted(set(re.findall(r"\[(T\d\d)\] user", kwargs.get("text") or "")))
+    return "Summary covers " + " ".join(turns) + ".", 1
+
+
+def _engine(tmp_path, **overrides):
+    config = LCMConfig(
+        database_path=str(tmp_path / "lcm.db"),
+        fresh_tail_count=6,
+        leaf_chunk_tokens=400,
+        large_output_externalization_path=str(tmp_path / "externalized"),
+        **overrides,
+    )
+    return LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
+
+
+def _ingest_turns(engine, host, turns):
+    for i in turns:
+        user, reply = _turn(i)
+        host.append(user)
+        engine.ingest(host)
+        host.append(reply)
+        engine.ingest(host)
+
+
+def _compact_then_new_then_resume(tmp_path, monkeypatch, *, end_first=True, restart=True, **overrides):
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
+    engine = _engine(tmp_path, **overrides)
+    engine.on_session_start("S1", platform="cli", context_length=200_000)
+    host = []
+    _ingest_turns(engine, host, range(1, 13))
+    engine.compress(list(host), force=True)  # d0 leaf over T01-T09 (store ids 1-18)
+    assert engine._last_compacted_store_id == 18
+    if end_first:
+        engine.on_session_end("S1", host)
+    engine.on_session_reset()
+    engine.on_session_start("S2", platform="cli", context_length=200_000)
+    if restart:
+        engine.shutdown()
+        engine = _engine(tmp_path, **overrides)
+    engine.on_session_start("S1", platform="cli", context_length=200_000)
+    return engine
+
+
+def _covered_max(engine, session_id="S1"):
+    return max((sid for node in engine._dag.get_session_nodes(session_id) for sid in node.source_ids), default=0)
+
+
+@pytest.mark.parametrize(
+    "end_first,restart,retain",
+    [(True, True, 2), (False, True, 2), (True, False, 2), (True, True, 0)],
+    ids=["end-reset-start-restart", "no-end", "same-engine", "retain-0"],
+)
+def test_resume_after_new_binds_at_zero_when_the_reset_dropped_the_summaries(
+    tmp_path, monkeypatch, end_first, restart, retain
+):
+    resumed = _compact_then_new_then_resume(
+        tmp_path, monkeypatch, end_first=end_first, restart=restart, new_session_retain_depth=retain
+    )
+    try:
+        assert _covered_max(resumed) == 0
+        assert resumed._last_compacted_store_id == 0
+        state = resumed._lifecycle.get_by_conversation("S1")
+        assert state.current_session_id == "S1"
+        assert state.last_finalized_session_id == "S1"
+        assert state.last_finalized_frontier_store_id == 0
+        assert state.last_finalized_at >= state.last_reset_at
+    finally:
+        resumed.shutdown()
+
+
+@pytest.mark.parametrize("resumed_view", ["new-turns-only", "full-raw-transcript"])
+def test_next_leaf_after_resume_covers_the_pre_new_user_turns(tmp_path, monkeypatch, resumed_view):
+    resumed = _compact_then_new_then_resume(tmp_path, monkeypatch)
+    try:
+        host = [] if resumed_view == "new-turns-only" else [m for i in range(1, 13) for m in _turn(i)]
+        _ingest_turns(resumed, host, range(13, 21))
+        context = resumed.compress(list(host), force=True)
+        assert resumed._last_compression_status == "compacted"
+        covered = {
+            sid for node in resumed._dag.get_session_nodes("S1") if node.depth == 0 for sid in node.source_ids
+        }
+        assert 1 in covered
+        shown = {str(message.get("content")) for message in context}
+        user_rows = resumed._store._conn.execute(
+            "SELECT store_id, content FROM messages WHERE session_id = 'S1' AND role = 'user' AND store_id <= ?",
+            (max(covered),),
+        ).fetchall()
+        skipped = [c[1:4] for sid, c in user_rows if sid not in covered and c not in shown]
+        assert skipped == []
+    finally:
+        resumed.shutdown()
+
+
+def test_retain_all_keeps_the_resumable_frontier(tmp_path, monkeypatch):
+    resumed = _compact_then_new_then_resume(tmp_path, monkeypatch, new_session_retain_depth=-1)
+    try:
+        assert _covered_max(resumed) == 18
+        assert resumed._last_compacted_store_id == 18
+    finally:
+        resumed.shutdown()
+
+
+def test_frontier_published_after_the_reset_stays_resumable(tmp_path):
+    engine = _engine(tmp_path)
+    try:
+        engine.on_session_start("S1", platform="cli", context_length=200_000)
+        first = engine._store.append("S1", {"role": "user", "content": "before reset"}, token_estimate=7, source="cli")
+        engine._last_compacted_store_id = first
+        engine.on_session_reset()
+        second = engine._store.append(
+            "S1", {"role": "assistant", "content": "same session continued after reset"}, token_estimate=11, source="cli"
+        )
+        engine._last_compacted_store_id = second
+        engine._persist_frontier_marker()
+        engine.on_session_start("S2", platform="cli", context_length=200_000)
+        state = engine._lifecycle.get_by_conversation("S1")
+        assert state.last_finalized_frontier_store_id == second
+        assert state.last_finalized_at >= state.last_reset_at
+        engine.on_session_start("S1", platform="cli", context_length=200_000)
+        assert engine._last_compacted_store_id == second
+    finally:
+        engine.shutdown()
+
+
+def test_in_place_compression_boundary_after_resume_keeps_frontier_zero(tmp_path, monkeypatch):
+    resumed = _compact_then_new_then_resume(tmp_path, monkeypatch)
+    try:
+        resumed.on_session_start(
+            "S1", boundary_reason="compression", old_session_id="S1", platform="cli", context_length=200_000
+        )
+        assert resumed._last_compacted_store_id == 0
+    finally:
+        resumed.shutdown()
+
+
+@pytest.mark.parametrize("retain", [2, 0])
+def test_a_reset_whose_deletion_fails_keeps_the_frontier_resumable(tmp_path, monkeypatch, retain):
+    # The summaries survive a failed deletion, so the frontier must stay resumable as on main;
+    # binding at 0 would make every later leaf collide with the surviving one.
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
+    engine = _engine(tmp_path, new_session_retain_depth=retain)
+    engine.on_session_start("S1", platform="cli", context_length=200_000)
+    host = []
+    _ingest_turns(engine, host, range(1, 13))
+    engine.compress(list(host), force=True)
+    assert engine._last_compacted_store_id == 18
+    engine.on_session_end("S1", host)
+
+    def _locked(*args, **kwargs):
+        raise lcm_engine_module.sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(engine._dag, "delete_below_depth", _locked)
+    monkeypatch.setattr(engine._dag, "delete_session_nodes", _locked)
+    monkeypatch.setattr(engine._lifecycle, "rewind_reset_frontier", lambda *a, **kw: pytest.fail("unexpected rewind"))
+    with pytest.raises(lcm_engine_module.sqlite3.OperationalError):
+        engine.on_session_reset()
+    monkeypatch.undo()
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
+    engine.on_session_start("S2", platform="cli", context_length=200_000)
+    engine.shutdown()
+    resumed = _engine(tmp_path, new_session_retain_depth=retain)
+    try:
+        resumed.on_session_start("S1", platform="cli", context_length=200_000)
+        assert _covered_max(resumed) == 18
+        assert resumed._last_compacted_store_id == 18
+        _ingest_turns(resumed, host, range(13, 21))
+        resumed.compress(list(host), force=True)
+        assert resumed._last_compression_status == "compacted"
+    finally:
+        resumed.shutdown()
+
+
+@pytest.mark.parametrize("shutdown_b", [False, True], ids=["B-live", "B-shut-down"])
+def test_two_engine_publication_after_reset_then_resume(tmp_path, monkeypatch, caplog, shutdown_b):
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
+    engine_a = _engine(tmp_path)
+    engine_b = resumed = None
+    try:
+        engine_a.on_session_start("S1", platform="cli", context_length=200_000)
+        host = []
+        _ingest_turns(engine_a, host, range(1, 13))
+        engine_a.compress(list(host), force=True)
+        assert engine_a._last_compacted_store_id == 18
+        engine_a.on_session_end("S1", host)
+        engine_a.on_session_reset()
+        engine_b = _engine(tmp_path)
+        engine_b.on_session_start("S1", platform="cli", context_length=200_000)
+        assert engine_b._last_compacted_store_id == 0
+        _ingest_turns(engine_b, host, range(13, 21))
+        engine_b.compress(list(host), force=True)
+        published = engine_b._lifecycle.get_by_conversation("S1").current_frontier_store_id
+        assert published >= 18
+        if shutdown_b:
+            engine_b.shutdown()
+        engine_a.on_session_start("S2", platform="cli", context_length=200_000)
+        engine_a.shutdown()
+        engine_b.shutdown()
+        resumed = _engine(tmp_path)
+        resumed.on_session_start("S1", platform="cli", context_length=200_000)
+        assert resumed._last_compacted_store_id == published
+        _ingest_turns(resumed, host, range(21, 29))
+        resumed.compress(list(host), force=True)
+        assert resumed._last_compression_status == "compacted"
+        frontier = resumed._last_compacted_store_id
+        counts = Counter(
+            sid for node in resumed._dag.get_session_nodes("S1") if node.depth == 0 for sid in node.source_ids
+        )
+        rows = resumed._store._conn.execute(
+            "SELECT store_id FROM messages WHERE session_id = 'S1' AND store_id <= ?", (frontier,)
+        ).fetchall()
+        assert counts == Counter({row[0]: 1 for row in rows})
+        assert not any("publication_invariant_conflict" in r.message or "already claimed" in r.message
+                       for r in caplog.records)
+    finally:
+        for engine in (resumed, engine_b, engine_a):
+            if engine is not None:
+                engine.shutdown()
+
+
+@pytest.mark.parametrize("case", ["publication", "race", "end", "in_place", "rotation", "bound_after_reset", "own_reset"])
+def test_bound_engine_adopts_another_engines_reset_frontier(tmp_path, monkeypatch, caplog, case):
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
+    caplog.set_level("INFO", logger=lcm_engine_module.__name__)
+    engine_a = _engine(tmp_path, new_session_retain_depth=2)
+    engine_b = None
+    try:
+        engine_a.on_session_start("S1", platform="cli", context_length=200_000)
+        host = []
+        _ingest_turns(engine_a, host, range(1, 13))
+        engine_a.compress(list(host), force=True)
+        assert engine_a._last_compacted_store_id == 18
+        if case not in ("bound_after_reset", "own_reset"):
+            engine_b = _engine(tmp_path)
+            engine_b.on_session_start("S1", platform="cli", context_length=200_000)
+            assert engine_b._last_compacted_store_id == 18
+        if case == "race":
+            delete = engine_a._dag.delete_below_depth
+
+            def _delete(*args, **kwargs):
+                engine_b._rebind_after_unadopted_compaction_commit()
+                return delete(*args, **kwargs)
+
+            monkeypatch.setattr(engine_a._dag, "delete_below_depth", _delete)
+        engine_a.on_session_reset()  #752 R3: S1 stays bound; only the durable frontier rewinds.
+        state = engine_a._lifecycle.get_by_conversation("S1")
+        frontier = state.current_frontier_store_id
+        assert state.current_session_id == "S1"
+        assert frontier == _covered_max(engine_a) == 0
+        if case == "bound_after_reset":
+            engine_b = _engine(tmp_path)
+            engine_b.on_session_start("S1", platform="cli", context_length=200_000)
+            assert engine_b._last_compacted_store_id == frontier
+        engine = engine_a if case == "own_reset" else engine_b
+        caplog.clear()
+        if case in ("publication", "race"):
+            _ingest_turns(engine, host, range(13, 21))
+            engine.compress(list(host), force=True)
+            assert engine._last_compression_status == "compacted"
+            counts = Counter(
+                sid for node in engine._dag.get_session_nodes("S1") if node.depth == 0 for sid in node.source_ids
+            )
+            assert all(counts[sid] == 1 for sid in range(frontier + 1, 19))
+            assert not any("publication_invariant_conflict" in r.message for r in caplog.records)
+        elif case == "end":
+            engine.on_session_end("S1", host)
+            assert engine._lifecycle.get_by_conversation("S1").last_finalized_frontier_store_id == frontier
+        else:
+            engine.on_session_start(
+                "S3" if case == "rotation" else "S1", boundary_reason="compression",
+                old_session_id="S1", platform="cli", context_length=200_000,
+            )
+            state = engine._lifecycle.get_by_conversation(engine._conversation_id)
+            assert state.current_session_id == ("S3" if case == "rotation" else "S1")
+            assert state.current_frontier_store_id == engine._last_compacted_store_id == frontier
+        adopted = [r for r in caplog.records if "after another engine's reset (in-process" in r.message]
+        assert len(adopted) == (1 if case in ("publication", "race", "end", "in_place") else 0)
+    finally:
+        for engine in (engine_b, engine_a):
+            if engine is not None:
+                engine.shutdown()
+
+
+@pytest.mark.parametrize("reset_inside_bind", [False, True])
+def test_unbound_in_place_boundary_adopts_rewound_finalized_frontier(tmp_path, monkeypatch, caplog, reset_inside_bind):
+    #752 R3: adopt the rewound finalized frontier before stale local progress can re-lift it.
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
+    caplog.set_level("INFO", logger=lcm_engine_module.__name__)
+    engine_a, engine_b = _engine(tmp_path), _engine(tmp_path)
+    try:
+        engine_a.on_session_start("S1", platform="cli", context_length=200_000)
+        host = []
+        _ingest_turns(engine_a, host, range(1, 13))
+        engine_a.compress(list(host), force=True)
+        engine_b.on_session_start("S1", platform="cli", context_length=200_000)
+        engine_a.on_session_end("S1", host)
+        bind = engine_b._lifecycle.bind_session
+        if reset_inside_bind:  # A's reset lands between B's read of the unbound row and B's bind
+            def bind_after_reset(*args, **kwargs):
+                monkeypatch.setattr(engine_b._lifecycle, "bind_session", bind)
+                engine_a.on_session_reset()
+                return bind(*args, **kwargs)
+            monkeypatch.setattr(engine_b._lifecycle, "bind_session", bind_after_reset)
+        else:
+            engine_a.on_session_reset()
+        engine_b.on_session_start(
+            "S1", boundary_reason="compression", old_session_id="S1", platform="cli", context_length=200_000
+        )
+        state = engine_b._lifecycle.get_by_conversation("S1")
+        assert state.current_session_id == "S1"
+        assert state.current_frontier_store_id == engine_b._last_compacted_store_id == 0
+        assert sum("after another engine's reset (in-process" in r.message for r in caplog.records) == 1
+    finally:
+        engine_b.shutdown()
+        engine_a.shutdown()
+
+
+def test_keep_all_reset_never_adopts_a_siblings_stale_low_finalize(tmp_path, monkeypatch):
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
+    engines, host = [_engine(tmp_path, new_session_retain_depth=-1) for _ in range(2)], []
+    try:
+        for engine, turns in zip(engines, (range(1, 9), range(9, 17))):  # B compacts past A's frontier
+            engine.on_session_start("S1", platform="cli", context_length=200_000)
+            _ingest_turns(engine, host, turns)
+            engine.compress(list(host), force=True)
+        engines[0].on_session_end("S1", host)  # finalizes A's stale-low in-process frontier
+        engines[0].on_session_reset()
+        engines[1].on_session_start(
+            "S1", boundary_reason="compression", old_session_id="S1", platform="cli", context_length=200_000
+        )
+        _ingest_turns(engines[1], host, range(17, 25))
+        engines[1].compress(list(host), force=True)
+        assert engines[1]._last_compression_status == "compacted"
+    finally:
+        for engine in engines:
+            engine.shutdown()
+
+
+def test_compression_rotation_after_resume_does_not_restore_the_pre_reset_frontier(tmp_path, monkeypatch):
+    engine = _compact_then_new_then_resume(tmp_path, monkeypatch)
+    try:
+        engine.on_session_start(
+            "S3", boundary_reason="compression", old_session_id="S1", platform="cli", context_length=200_000
+        )
+        assert engine._last_compacted_store_id == 0
+        state = engine._lifecycle.get_by_conversation(engine._conversation_id)
+        assert state.current_frontier_store_id == 0
+        assert state.last_finalized_frontier_store_id == 0
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("prefix", [True, False], ids=["retained-prefix", "retained-gap"])
+def test_retained_d2_coverage_sets_the_resume_frontier(tmp_path, monkeypatch, prefix):
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
+    engine = _engine(tmp_path)
+    try:
+        engine.on_session_start("S1", platform="cli", context_length=200_000)
+        _ingest_turns(engine, [], range(1, 10))
+
+        def add(depth, sources, summary):
+            return engine._dag.add_node(SummaryNode(
+                session_id="S1", depth=depth, summary=summary, token_count=10, source_token_count=100,
+                source_ids=sources, source_type="messages" if depth == 0 else "nodes", created_at=1.0,
+            ))
+
+        leaves = [add(0, list(range(i, i + 3)), f"old leaf {i}") for i in range(1, 19, 3)]
+        a = add(1, leaves[:2], "old d1 A")
+        b = add(1, leaves[2:4], "old d1 B")
+        x = add(2, [a, b] if prefix else [b], "Retained d2 X")
+        engine._lifecycle.advance_frontier(engine._conversation_id, "S1", 18)
+        engine._last_compacted_store_id = 18
+        engine.on_session_end("S1", [])
+        engine.on_session_reset()
+        engine.on_session_start("S2", platform="cli", context_length=200_000)
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        engine.on_session_start("S1", platform="cli", context_length=200_000)
+        assert engine._last_compacted_store_id == (12 if prefix else 0)
+        assert [n.node_id for n in engine._dag.get_session_nodes("S1")] == [x]
+        host = []
+        _ingest_turns(engine, host, range(10, 21))
+        context = engine.compress(list(host), force=True)
+        assert engine._last_compression_status == "compacted"
+        new_leaves = [n for n in engine._dag.get_session_nodes("S1") if n.depth == 0]
+        assert new_leaves
+        if prefix:
+            assert all(min(n.source_ids) > 12 for n in new_leaves)
+            text = "\n".join(str(m.get("content")) for m in context)
+            assert text.count("Retained d2 X") == 1
+            assert all(f"T{i:02d}" not in text for i in range(1, 7))
+    finally:
+        engine.shutdown()
+
+
+def test_reset_without_end_then_same_id_start_binds_at_retained_frontier(tmp_path, monkeypatch):
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
+    engine = _engine(tmp_path)
+    try:
+        engine.on_session_start("S1", platform="cli", context_length=200_000)
+        host = []
+        _ingest_turns(engine, host, range(1, 13))
+        engine.compress(list(host), force=True)
+        assert engine._last_compacted_store_id == 18
+        engine.on_session_reset()
+        engine.on_session_start("S1", platform="cli", context_length=200_000)
+        assert engine._last_compacted_store_id == 0
+        assert engine._lifecycle.get_by_conversation("S1").current_frontier_store_id == 0
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("retain", [-1, -2, 2], ids=["retain-all", "retain-minus-2", "empty-d2-only"])
+def test_reset_that_loses_nothing_writes_no_rewind(tmp_path, monkeypatch, retain):
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
+    engine = _engine(tmp_path, new_session_retain_depth=retain)
+    try:
+        engine.on_session_start("S1", platform="cli", context_length=200_000)
+        if retain < 0:
+            host = []
+            _ingest_turns(engine, host, range(1, 13))
+            engine.compress(list(host), force=True)
+            assert engine._last_compacted_store_id == 18
+            engine.on_session_end("S1", host)
+        else:
+            engine._dag.add_node(SummaryNode(session_id="S1", depth=2, source_type="nodes", source_ids=[]))
+        monkeypatch.setattr(engine._lifecycle, "rewind_reset_frontier", lambda *a, **kw: pytest.fail("unexpected rewind"))
+        nodes = len(engine._dag.get_session_nodes("S1"))
+        engine.on_session_reset()
+        if retain < 0:
+            assert len(engine._dag.get_session_nodes("S1")) == nodes
+            engine.on_session_start("S2", platform="cli", context_length=200_000)
+            engine.on_session_start("S1", platform="cli", context_length=200_000)
+            assert engine._last_compacted_store_id == 18
+        else:
+            state = engine._lifecycle.get_by_conversation("S1")
+            assert state.updated_at == state.last_reset_at
+    finally:
+        engine.shutdown()
