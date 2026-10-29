@@ -2,6 +2,7 @@
 
 import importlib.util
 from pathlib import Path
+import re
 import sqlite3
 import sys
 import types
@@ -89,7 +90,7 @@ def _handler(plugin, monkeypatch, prototype, context, resolved=None):
 
 def _stable_status(text):
     # database_size is the main file's st_size, raced by WAL checkpoints and background maintenance.
-    return "\n".join(line for line in text.splitlines() if not line.startswith("database_size:"))
+    return re.sub(r"(?m)^database_size: (?!missing$).*$", "database_size: <size>", text)
 
 
 @pytest.mark.parametrize("raw_args", ["embed backfill --apply", "embed warmup"])

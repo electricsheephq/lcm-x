@@ -7778,16 +7778,19 @@ class LCMEngine(
                 accepted = {"accepted_prefix": accepted_compaction_prefix} if accepted_compaction_prefix else {}
                 with self._ingest_evidence(classification=True):
                     anchor_plan = self._identity_anchor_prematch(messages, reconcile_messages, cursor, audit_from, **accepted)
-                if getattr(self, "_ingest_read_only", None) is not None and any(
-                    anchor_plan.get(key) for key in ("backfill", "relations", "ws", "carry")
-                ):
-                    raise sqlite3.OperationalError("session-end evidence deferred")
                 anchor_plan["replayed"] -= replayed_tool_segment_indexes
                 # A reused stamp cannot override positive evidence of a new uid.
                 anchor_plan["replayed"] -= new_prefix_occurrences
                 for idx in new_prefix_occurrences:
                     anchor_plan.get("matched", {}).pop(idx, None)
                 self._identity_anchor_version_rewind(messages, anchor_plan)
+                # A frozen decision cannot rely on a backfill it cannot persist (A2). Dropping a plan that rewinds the
+                # cursor (here or in the version rewind) or replays or splits a tail row would lose or duplicate rows,
+                # so such a plan is kept, as on main (#2082).
+                if getattr(self, "_ingest_read_only", None) is not None and anchor_plan.get("backfill") and (
+                        anchor_plan["cursor"] >= cursor and not any(
+                            idx >= cursor for idx in anchor_plan["replayed"] | set(anchor_plan["remainders"]))):
+                    raise sqlite3.OperationalError("session-end evidence deferred")
                 if getattr(self, "_ingest_read_only", None) is None:
                     with self._ingest_evidence():
                         self._identity_anchor_commit(anchor_plan)

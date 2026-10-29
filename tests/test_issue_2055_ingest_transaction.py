@@ -951,6 +951,91 @@ def test_read_only_backfill_plan_falls_back_to_anchor_disabled_tail(ingest_case,
         locker.close()
 
 
+@pytest.mark.parametrize("backfill", [False, True])
+@pytest.mark.parametrize("fresh_ts", [10.5, 13.0])
+def test_read_only_replay_plan_keeps_its_replayed_rows(tmp_path, monkeypatch, fresh_ts, backfill):
+    """#2082: a plan that replays tail rows keeps main's frozen tail; dropping it froze them as new."""
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "shadow")
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "on")
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path)
+    plans, prematch = [], engine._identity_anchor_prematch
+
+    def spy(*args, **kwargs):
+        plan = prematch(*args, **kwargs)
+        if getattr(engine, "_ingest_read_only", None) is not None:
+            assert not plan["relations"] and not plan.get("ws")
+            if backfill:  # A real backfill plan usually replays tail rows too.
+                plan["backfill"].append((engine._store.get_session_messages("S")[0]["store_id"], 10.))
+            plans.append((bool(plan["carry"]), bool(plan["backfill"])))
+        return plan
+
+    monkeypatch.setattr(engine, "_identity_anchor_prematch", spy)
+    try:
+        rows = [_m("user", "alpha", 10., "a-uid"), _m("assistant", "beta", 11., "b-uid"), _m("user", "gamma", 12., "c-uid")]
+        engine.ingest(rows)
+        engine.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")
+        view = copy.deepcopy(rows)
+        view.insert(1, _m("user", "fresh", fresh_ts, "fresh-uid"))
+        locker = sqlite3.connect(engine._store.db_path)
+        locker.execute("BEGIN IMMEDIATE")
+        try:
+            engine.on_session_end("S", view)
+        finally:
+            locker.rollback()
+            locker.close()
+        assert plans == [(True, backfill)]
+        assert [m["content"] for tail in engine._pending_session_tails for m in tail["messages"]] == ["fresh"]
+        engine.on_session_start("other", platform="cli", context_length=200_000, conversation_id="other")
+        assert sorted(row["content"] for row in engine._store.get_session_messages("S")) == ["alpha", "beta", "fresh", "gamma"]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("backfill", [False, True])
+def test_read_only_version_rewind_keeps_an_in_place_edit(tmp_path, monkeypatch, backfill):
+    """#2082: a plan the R6 version rewind moves back is kept; dropping it lost the host's in-place edit."""
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "shadow")
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "on")
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path)
+    rewinds, prematch, rewind = [], engine._identity_anchor_prematch, engine._identity_anchor_version_rewind
+
+    def spy(*args, **kwargs):
+        plan = prematch(*args, **kwargs)
+        if backfill and getattr(engine, "_ingest_read_only", None) is not None:
+            # A placeholder pair (alpha is stamped already): the deferral check reads only that backfill is non-empty.
+            plan["backfill"].append((engine._store.get_session_messages("S")[0]["store_id"], 10.))
+        return plan
+
+    def rewind_spy(messages, plan):
+        cursor = plan["cursor"]
+        rewind(messages, plan)
+        if getattr(engine, "_ingest_read_only", None) is not None:
+            rewinds.append((cursor, plan["cursor"]))
+
+    monkeypatch.setattr(engine, "_identity_anchor_prematch", spy)
+    monkeypatch.setattr(engine, "_identity_anchor_version_rewind", rewind_spy)
+    try:
+        rows = [_m("user", "alpha", 10., "a-uid"), _m("assistant", "beta", 11., "b-uid"), _m("user", "gamma")]
+        engine.ingest(rows)
+        rows[2]["content"] = "gamma edited"  # The host rewrites the stored, unstamped user row in place.
+        locker = sqlite3.connect(engine._store.db_path)
+        locker.execute("BEGIN IMMEDIATE")
+        try:
+            engine.on_session_end("S", rows)
+        finally:
+            locker.rollback()
+            locker.close()
+        assert rewinds == [(3, 2)]
+        assert [m["content"] for tail in engine._pending_session_tails for m in tail["messages"]] == ["gamma edited"]
+        engine.on_session_start("other", platform="cli", context_length=200_000, conversation_id="other")
+        stored = sorted(row["content"] for row in engine._store.get_session_messages("S"))
+        assert stored == ["alpha", "beta", "gamma", "gamma edited"]
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.parametrize("fail_committing_attempt", [False, True])
 def test_prematch_failure_is_counted_only_after_commit(ingest_case, monkeypatch, fail_committing_attempt):
     """A3: the callback of the BUSY-aborted attempt must never be published."""

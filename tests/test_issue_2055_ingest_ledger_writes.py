@@ -416,12 +416,13 @@ def test_r1_read_only_sentinel_is_debug_and_preserves_frozen_tail(engines, monke
     view = [*prefix, _m("user", "fresh", 20.)]
     prematch = engine._identity_anchor_prematch
 
-    def replay_with_carry(*args, **kwargs):
+    def needs_backfill(*args, **kwargs):
+        # A backfill pair is what a read-only pass defers (A2, narrowed in #2082).
         plan = prematch(*args, **kwargs)
-        plan["carry"] = engine._store.get_session_messages("S")
+        plan["backfill"].append((engine._store.get_session_messages("S")[0]["store_id"], 10.))
         return plan
 
-    monkeypatch.setattr(engine, "_identity_anchor_prematch", replay_with_carry)
+    monkeypatch.setattr(engine, "_identity_anchor_prematch", needs_backfill)
     before = engine._ingest_failure_count
     locker = sqlite3.connect(engine._store.db_path)
     locker.execute("BEGIN IMMEDIATE")
