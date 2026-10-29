@@ -389,6 +389,22 @@ class _StoreCursorRun:
     stored_tail: List[tuple[str, str, str, str, str]] = field(init=False)
 
 
+def _strip_volatile_host_scaffolding(content: str) -> str:
+    """Strip only the deterministic todo span (#516), then model-switch prefix."""
+    _todo_idx = content.find(_PRESERVED_TODO_CONTEXT_PREFIX)
+    if _todo_idx > 0:
+        _tail = content[_todo_annotation_span(content, _todo_idx):]
+        _rest = _tail[2:] if _tail.startswith("\n\n") else _tail  # one host delimiter, never user newlines
+        if _rest.startswith(_MODEL_SWITCH_NOTIFICATION_PREFIX) and "]" in _rest:  # same rule as below
+            _rest = _rest[_rest.find("]") + 1:].lstrip("\n")
+        content = content[:_todo_idx].rstrip() + ("\n\n" + _rest if _rest.strip() else "")
+    if content.startswith(_MODEL_SWITCH_NOTIFICATION_PREFIX):
+        _bracket_end = content.find("]")
+        if _bracket_end != -1:
+            content = content[_bracket_end + 1:].lstrip("\n")
+    return content
+
+
 class ReconcileMixin:
     @staticmethod
     def _canonicalize_tool_call_identity_value(value: Any) -> Any:
@@ -958,13 +974,6 @@ class ReconcileMixin:
         # re-ingest of already-stored messages (duplication bug).  Only the
         # annotation SPAN is cut: a user row the host merged in behind it is
         # new content and keeps the identity distinct (#516).
-        _todo_idx = content.find(_PRESERVED_TODO_CONTEXT_PREFIX)
-        if _todo_idx > 0:
-            _tail = content[_todo_annotation_span(content, _todo_idx):]
-            _rest = _tail[2:] if _tail.startswith("\n\n") else _tail  # one host delimiter, never user newlines
-            if _rest.startswith(_MODEL_SWITCH_NOTIFICATION_PREFIX) and "]" in _rest:  # same rule as below
-                _rest = _rest[_rest.find("]") + 1:].lstrip("\n")
-            content = content[:_todo_idx].rstrip() + ("\n\n" + _rest if _rest.strip() else "")
         # Model-switch notifications are ephemeral host scaffolding: the
         # host prepends "[Note: model was just switched from X to Y...]"
         # to the user's message, then strips the prefix on the next turn.
@@ -972,10 +981,7 @@ class ReconcileMixin:
         # Strip ONLY the prefix (up to and including the closing "]" and
         # trailing newlines) so the user's actual content survives and
         # identity matching works across the switch boundary.
-        if content.startswith(_MODEL_SWITCH_NOTIFICATION_PREFIX):
-            _bracket_end = content.find("]")
-            if _bracket_end != -1:
-                content = content[_bracket_end + 1:].lstrip("\n")
+        content = _strip_volatile_host_scaffolding(content)
         # Out-of-band user messages appended mid-turn are delivery scaffolding
         # ONLY once THIS row is durable with them: the stored row carries them
         # and the replayed row does not, or vice versa.  Stripping a block this

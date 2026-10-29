@@ -490,6 +490,15 @@ def test_prefix_preflight_reports_invalid_provider_config(provider_name, missing
         assert conn.execute("SELECT count(*) FROM lcm_embedding_meta").fetchone()[0] == 0
 
 
+def drained_chunk_backfill(engine):
+    # Session bind schedules a background embedding pass. A manual backfill that overlaps
+    # it can be refused (lease held or database busy) and returns refusal text (#2013).
+    assert engine.drain_embedding_maintenance(timeout=10)
+    result = backfill(engine, "chunk")
+    assert isinstance(result, dict), result
+    return result
+
+
 @pytest.mark.parametrize("batch", (False, True))
 def test_remote_prefixed_chunk_ingest_discloses_backlog(tmp_path, monkeypatch, batch):
     from hermes_lcm import embedding_maintenance
@@ -504,7 +513,7 @@ def test_remote_prefixed_chunk_ingest_discloses_backlog(tmp_path, monkeypatch, b
             engine._config, engine._store.db_path, allow_download=False), dict)
         assert not embedding_maintenance._automatic_chunks_allowed(engine._config, command)
         engine._store.append("session-a", {"role": "user", "content": "initial remote chunk"})
-        assert backfill(engine, "chunk")["embedded"] == 1
+        assert drained_chunk_backfill(engine)["embedded"] == 1
         assert tools._lcm_recall_catchup_reason(engine, provider, "chunk") is None
         message = {"role": "user", "content": "fresh remote chunk requiring manual embedding"}
         ids = (engine._store.append_batch("session-a", [message]) if batch
@@ -512,5 +521,5 @@ def test_remote_prefixed_chunk_ingest_discloses_backlog(tmp_path, monkeypatch, b
         assert engine._store.get(ids[0])["content"] == message["content"]
         reason = tools._lcm_recall_catchup_reason(engine, provider, "chunk")
         assert reason and "chunk semantic index catching up" in reason
-        assert backfill(engine, "chunk")["embedded"] == 1
+        assert drained_chunk_backfill(engine)["embedded"] == 1
         assert tools._lcm_recall_catchup_reason(engine, provider, "chunk") is None

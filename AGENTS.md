@@ -129,7 +129,9 @@ Run `actionlint` when workflows change. Record exact commands and results in the
 - Treat AI and bot output as proposal and evidence by default.
 - Deterministic tooling must re-fetch the live issue, PR head, checks, reviews, threads, and
   authorization immediately before an authorized write.
-- Model output alone cannot close, label, assign, push, approve, or merge.
+- Model output alone cannot close, label, assign, push, approve, or merge. The code owner's
+  delegated release manager (Maintainer And Bot Roles) acts with maintainer authority for the
+  actions that bullet lists, so its decisions there are not model output alone.
 - Automated repair is opt-in and limited to the exact accepted issue and current gate.
 - AI review is recorded evidence, not enforcement. The `land-pr` review obligation is a
   maintainer discipline, not a protected check: it does not authenticate review artifacts, and a
@@ -139,7 +141,8 @@ Run `actionlint` when workflows change. Record exact commands and results in the
   authorizes one exact mutation; never use it for an automatic backlog sweep.
 - Invoking a skill never creates write authority. Routine reversible issue metadata needs one
   exact maintainer authorization and live read-back; public sensitive disclosure and terminal
-  lifecycle actions retain the stronger owner and lifecycle gates in `triage-backlog`.
+  lifecycle actions retain the stronger owner and lifecycle gates in `triage-backlog`, which the
+  release-manager delegation satisfies for the actions it lists.
 - Preserve open executable upstream work as an active continuation. Do not silently turn it into
   an archive-only record, supersede it, or close it while its continuation state is ambiguous.
 
@@ -187,6 +190,22 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   obligation, issue acceptance, or a product/security owner decision.
 - Maintainers own feature acceptance, priority, compatibility decisions, terminal dispositions,
   and releases.
+- Release-manager delegation (recorded by the code owner on 2026-10-29; the code owner revokes
+  or narrows it by editing this bullet; widening this bullet stays with the code owner). The code
+  owner delegates maintainer authority to one
+  release-manager agent that acts through the code owner's own account and decides from data.
+  It covers: issue and feature acceptance, priority and compatibility decisions; triage metadata
+  and milestones; public data-integrity disclosure; issue lifecycle (close as fixed once the issue's own
+  acceptance is met, as duplicate, or as not planned with the reason; reopen); merges through the
+  `land-pr` barrier; rc tags; and GA cuts after the release gate passes. For these actions its
+  decision is the maintainer authorization and the human code-owner approval that this file,
+  CONTRIBUTING.md, `land-pr` and `triage-backlog` require. Each action still re-fetches live state first,
+  leaves an evidence comment, and reads back the result. It decides `REVIEW_SKIPPED` lanes; on a PR
+  it authored it uses the fallback reviewer (a lane from a model other than the author's that meets
+  the `land-pr` review obligation) instead of skipping. It does not cover bypassing checks or
+  the ruleset, force-pushes, deleting `main` or a published tag or release, repository settings,
+  private vulnerability handling, or public security disclosure; those stay with the code owner.
+  Other bots and contributor agents stay proposal-only.
 
 ## Releases are rc-first (RELEASE-READINESS-V1)
 
@@ -218,4 +237,4 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   the next patch release. If any condition fails, the normal P0/P1 rule applies and the rc
   respins. A duplicate on any path without an injected fault still respins.
 - Agents preparing a release produce the rc tag and receipts; the GA cut itself follows the
-  maintainers-own-releases rule above.
+  maintainers-own-releases rule above, which the release-manager delegation meets.

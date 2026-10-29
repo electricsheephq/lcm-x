@@ -135,14 +135,17 @@ classified as security or data-integrity work.
 Public security or data-integrity disclosure and every close or reopen are sensitive or terminal
 actions. Require current non-author human code-owner approval, confirm the exact public content or
 lifecycle transition, and stop if an active continuation would be archived or closed. Route
-private vulnerability handling outside this public triage workflow.
+private vulnerability handling outside this public triage workflow. For close and reopen, the
+release manager's decision under the code owner's recorded delegation (AGENTS.md, Maintainer And
+Bot Roles) is that approval, and the same holds for public data-integrity disclosure; public
+security disclosure still needs the code owner.
 
 If a maintainer explicitly authorizes one of the remaining GitHub metadata mutations:
 
 1. name the exact item and requested change;
 2. re-fetch current item, repository, and authorization state;
 3. apply the routine-metadata or sensitive/terminal gate above and record any required
-   non-author human code-owner approval;
+   non-author human code-owner approval, or the release-manager delegation that stands for it;
 4. stop on any other drift or ambiguity;
 5. perform only the named write;
 6. read back the result.

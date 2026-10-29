@@ -206,7 +206,7 @@
   },
   "delete_failure": {
     "error": "after first write",
-    "in_transaction": true,
+    "in_transaction": false,
     "messages": [
       [
         1,
@@ -230,7 +230,8 @@
     "metadata": [],
     "relations": [],
     "trace": [
-      "BEGIN IMMEDIATE"
+      "BEGIN IMMEDIATE",
+      "ROLLBACK"
     ]
   },
   "delete_success": {

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 import sqlite3
+import threading
 
 
 @dataclass(frozen=True)
@@ -57,9 +59,18 @@ class TransactionOwner:
     retain their existing owners; this primitive does not absorb those paths.
     """
 
+    _active_owners = ContextVar("sqlite_transaction_owners", default=())
+
+    @classmethod
+    def owns_connection(cls, conn: sqlite3.Connection) -> bool:
+        """Connection-level helpers must join an owner in this execution context."""
+        return any(owner.owns(conn) and owner._owner_thread == threading.get_ident()
+                   for owner in cls._active_owners.get())
+
     def __init__(self, lock: AbstractContextManager[object]) -> None:
         self._lock = lock
         self._active_connection: sqlite3.Connection | None = None
+        self._owner_thread: int | None = None
 
     def owns(self, conn: sqlite3.Connection) -> bool:
         """Whether an enclosing atomic scope owns this connection, even before a write."""
@@ -83,6 +94,8 @@ class TransactionOwner:
             if immediate:
                 conn.execute("BEGIN IMMEDIATE")
             self._active_connection = conn
+            self._owner_thread = threading.get_ident()
+            token = self._active_owners.set((*self._active_owners.get(), self))
             try:
                 yield
                 conn.commit()
@@ -91,3 +104,8 @@ class TransactionOwner:
                 raise
             finally:
                 self._active_connection = None
+                self._owner_thread = None
+                try:
+                    self._active_owners.reset(token)
+                except ValueError:
+                    pass
