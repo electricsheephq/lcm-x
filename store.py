@@ -17,7 +17,7 @@ import secrets
 import sqlite3
 import threading
 import time
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Collection, Dict, Iterable, List, Optional
@@ -58,7 +58,10 @@ from .search_query import (
 from .message_content import normalize_content_value as _normalize_content_value
 from .sqlite_session import ConnectionPolicy, TransactionOwner, open_connection
 from .sqlite_util import (
+    _SqliteSavepointError,
+    _is_ingest_busy_error,
     _run_sqlite_write_with_snapshot_retry,
+    _sqlite_savepoint,
     _temporary_sqlite_busy_timeout,
 )
 from .tokens import count_message_tokens
@@ -621,11 +624,27 @@ class MessageStore:
             from . import command, embedding_maintenance
             if embedding_maintenance._automatic_chunks_allowed(config, command):
                 return
-            if self._conn.in_transaction:
+            if self._conn.in_transaction and not (getattr(self, "_foreground_ingest_owner", False)
+                                                  and self._transaction_owner.owns_connection(self._conn)):
                 self._manual_chunk_backlog_pending = True
-                return  # An enclosing atomic owner has not committed ingest yet.
+                return  # Outside foreground ingest, retain the caller's deferred marker boundary.
             self._manual_chunk_backlog_pending = False
-            self._conn.execute(
+            with (_sqlite_savepoint(self._conn, abort_on_cleanup_failure=True, owner_active=True,
+                                    foreground_ingest=getattr(self, "_foreground_ingest_owner", False))
+                  if self._transaction_owner.owns_connection(self._conn) else nullcontext()):
+                self._write_manual_chunk_backlog()
+        except Exception as exc:
+            if self._transaction_owner.owns_connection(self._conn) and (
+                isinstance(exc, _SqliteSavepointError) or _is_ingest_busy_error(exc)
+                or isinstance(exc, sqlite3.Error) and not self._conn.in_transaction
+            ):
+                raise
+            if not was_in_transaction and self._conn.in_transaction:
+                self._conn.rollback()
+            logging.getLogger(__name__).debug("Could not mark manual chunk backlog", exc_info=True)
+
+    def _write_manual_chunk_backlog(self):
+        self._conn.execute(
                 "UPDATE metadata SET value=json_set(value, '$.remaining', json('true'), '$.updated_at', ?) "
                 "WHERE key='embedding_catchup:chunk:' || (SELECT identity_hash FROM lcm_embedding_profile "
                 "WHERE active=1 AND archived_at IS NULL AND task IN ('chunk', 'chunk+prefix') "
@@ -633,11 +652,7 @@ class MessageStore:
                 "AND json_type(value, '$.remaining') IS NOT 'true'",
                 (time.time(),),
             )
-            self._conn.commit()
-        except Exception:
-            if not was_in_transaction and self._conn.in_transaction:
-                self._conn.rollback()
-            logging.getLogger(__name__).debug("Could not mark manual chunk backlog", exc_info=True)
+        self._commit()
 
     def append(self, session_id: str, msg: Dict[str, Any],
                token_estimate: int = 0, source: str = "",
@@ -797,10 +812,14 @@ class MessageStore:
             return ids
 
         with self._write_lock:
+            if (getattr(self, "_foreground_ingest_owner", False)
+                    and self._transaction_owner.owns_connection(conn) and not conn.in_transaction):
+                raise _SqliteSavepointError("Foreground ingest transaction lost before INSERT")
             ids = _run_sqlite_write_with_snapshot_retry(
                 conn,
                 insert_messages,
                 operation_name="message_store.append_protected_batch",
+                owner_active=self._transaction_owner.owns_connection(conn),
             )
             if ids:
                 self._mark_manual_chunk_backlog()
@@ -1268,10 +1287,14 @@ class MessageStore:
     def _ensure_identity_anchor_schema(self) -> None:
         """Additive, created on first anchored use: one non-unique index and ``message_relations``
         (no UNIQUE constraint beyond its primary key)."""
+        if getattr(self, "_read_only_ingest_thread", None) == threading.get_ident():
+            return  # Session-end fallback may read existing schema, never create it.
         if getattr(self, "_identity_anchor_schema_ready", False):
             return
+        if getattr(self, "_pending_relation_schema", False) and self._transaction_owner.owns_connection(self._conn):
+            return
         with self._write_lock:
-            self._conn.executescript("""
+            schema = """
                 CREATE INDEX IF NOT EXISTS idx_msg_conversation_observed ON messages(conversation_id, observed_at);
                 CREATE TABLE IF NOT EXISTS message_relations (
                     relation_id INTEGER PRIMARY KEY,
@@ -1285,9 +1308,18 @@ class MessageStore:
                 CREATE INDEX IF NOT EXISTS idx_msg_relations_store ON message_relations(store_id, kind);
                 CREATE INDEX IF NOT EXISTS idx_msg_relations_related ON message_relations(related_store_id, kind);
                 CREATE INDEX IF NOT EXISTS idx_msg_relations_observed ON message_relations(kind, observed_at);
-            """)
-        self._identity_anchor_schema_ready = True
-        self._carried_relation_connections.add(self._conn)
+            """
+            if self._transaction_owner.owns_connection(self._conn):
+                # executescript commits an open transaction before running DDL.
+                # Same schema, same owner; do not cache uncommitted creation.
+                for statement in schema.split(";"):
+                    if statement.strip():
+                        self._conn.execute(statement)
+                self._pending_relation_schema = True
+            else:
+                self._conn.executescript(schema)
+                self._identity_anchor_schema_ready = True
+                self._carried_relation_connections.add(self._conn)
 
     # -- #2055 ingest ledger: additive schema only; no production writers yet --
 
@@ -1394,6 +1426,8 @@ class MessageStore:
         with self._write_lock:
             if getattr(self, "_host_uid_schema_ready", False):
                 return True
+            if getattr(self, "_pending_host_uid_schema", False) and self._transaction_owner.owns_connection(self._conn):
+                return True
             exists = bool(self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='host_uid_bindings'").fetchone())
             # A re-entrant read can see DDL that a failed commit will roll back.
@@ -1404,6 +1438,8 @@ class MessageStore:
     def _ensure_host_uid_schema(self) -> None:
         """On the first binding, NAMED step ``host_uid_bindings_v1``: no SCHEMA_VERSION bump, ``messages`` untouched."""
         if getattr(self, "_host_uid_schema_ready", False):
+            return
+        if getattr(self, "_pending_host_uid_schema", False) and self._transaction_owner.owns_connection(self._conn):
             return
         def create(conn) -> None:  # plain ``execute`` in the write's own transaction (executescript would commit)
             for sql in (
@@ -1419,7 +1455,10 @@ class MessageStore:
             mark_migration_step_complete(conn, "host_uid_bindings_v1")
 
         self._host_uid_write(create)
-        self._host_uid_schema_ready = True
+        # Uncommitted DDL must not survive rollback as a positive cache entry.
+        self._host_uid_schema_ready = not self._transaction_owner.owns_connection(self._conn)
+        if not self._host_uid_schema_ready:
+            self._pending_host_uid_schema = True
 
     def host_uid_bindings_for(self, lineage_key: str, uids, kinds=("canonical", "version")) -> dict[str, list[tuple[int, str]]]:
         """``{uid: [(store_id, kind), ...]}`` of the ``kinds`` bindings (canonical and version: never ``engine``)."""
@@ -1481,12 +1520,14 @@ class MessageStore:
              for store_id, uid, kind, proof_kind in rows]))
 
     def _host_uid_write(self, write: Callable[[sqlite3.Connection], Any]) -> None:
-        """One shadow write in its OWN transaction. Skipped (raised, so the caller counts one error) when the
-        connection is already in a transaction: someone else's work is never committed or rolled back. Any
-        failure, at commit included, rolls it back, so the connection is never left in a transaction."""
+        """Join the explicit owner, otherwise retain the standalone shadow boundary.
+
+        An unowned open transaction is still refused: never commit or roll back
+        another caller's work.
+        """
         conn = self._conn
         with self._write_lock:
-            if conn.in_transaction:
+            if conn.in_transaction and not self._transaction_owner.owns_connection(conn):
                 raise sqlite3.OperationalError("host-uid shadow write skipped: the connection is in a transaction")
             with self.atomic(immediate=True):
                 write(conn)
@@ -1638,11 +1679,16 @@ class MessageStore:
         if batched:
             known = getattr(self, '_memory_relation_connections', {})
             self._memory_relation_connections = known
-            if conn not in known and conn not in self._carried_relation_connections:
-                known[conn] = bool(conn.execute(
+            available = (conn in self._carried_relation_connections or known.get(conn, False)
+                         or conn is self._conn and getattr(self, "_pending_relation_schema", False)
+                         and self._transaction_owner.owns_connection(conn))
+            if not available and conn not in known:
+                available = bool(conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
                 ).fetchone())
-            relation = ('message_relations' if conn in self._carried_relation_connections or known.get(conn)
+                if not available or not conn.in_transaction:
+                    known[conn] = available
+            relation = ('message_relations' if available
                         else '(SELECT NULL AS store_id, NULL AS kind)')
             return {int(r[0]) for r in conn.execute(
                 f"SELECT store_id FROM {relation} WHERE kind='carried_stamp' "
@@ -1703,12 +1749,17 @@ class MessageStore:
         rows = [(float(stamp), int(store_id)) for store_id, stamp in pairs]
         if not rows:  # no commit: an empty pass must not commit a caller's open transaction (the per-row loop did not)
             return 0
-        with self._write_lock, self._conn:
+        def write():
             return self._conn.executemany(
                 "UPDATE messages SET observed_at = ?, observed_at_source = 'host_message_timestamp' "
                 "WHERE store_id = ? AND observed_at IS NULL",
                 rows,
             ).rowcount
+        with self._write_lock:
+            if self._transaction_owner.owns_connection(self._conn):
+                return write()
+            with self._conn:
+                return write()
 
     def has_session_messages(self, session_id: str) -> bool:
         """Whether a session contains any messages, without counting them."""
@@ -1978,12 +2029,46 @@ class MessageStore:
         """Commit a standalone helper; an enclosing atomic block owns its commit."""
         self._transaction_owner.commit(self._conn)
 
+    def ingest_atomic(self, *, admission_retry=False):
+        """End only an unowned dangling transaction before reserving foreground ingest."""
+        return self._ingest_atomic(admission_retry=admission_retry)
+
+    @contextmanager
+    def _ingest_atomic(self, *, admission_retry=False):
+        with self._write_lock:
+            if self._transaction_owner.owns(self._conn):
+                raise _SqliteSavepointError("Foreground ingest cannot join an enclosing transaction")
+            if self._conn.in_transaction and not self._transaction_owner.owns_connection(self._conn):
+                self._conn.commit()  # Preserve standalone writes, and end stale read snapshots.
+                logger.debug("LCM ingest committed an unowned transaction before BEGIN IMMEDIATE")
+            with ExitStack() as owner:
+                # An ordinary BEGIN wait already spent the configured budget.
+                # Its retry is an immediate recheck, not another full timeout.
+                trace = getattr(self._conn, "_lcm_trace", None)
+                if trace is not None:
+                    trace.ingest_admission = True
+                try:
+                    with (_temporary_sqlite_busy_timeout([self._conn], 0) if admission_retry else nullcontext()):
+                        owner.enter_context(self.atomic(immediate=True))
+                finally:
+                    if trace is not None:
+                        trace.ingest_admission = False
+                previous = getattr(self, "_foreground_ingest_owner", False)
+                self._foreground_ingest_owner = True
+                try:
+                    yield
+                    if not self._conn.in_transaction:
+                        raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT")
+                finally:
+                    self._foreground_ingest_owner = previous
+
     def atomic(self, *, immediate: bool = False) -> AbstractContextManager[None]:
         """Own a transaction under the existing write lock, joining nested entries.
 
         By default the first write opens the transaction. Explicit owners use
         ``immediate=True`` to begin before reading. Simple write helpers defer
-        their commits here. Schema scripts, retry-owning writes, telemetry,
+        their commits here. The ingest INSERT delegates retries to its owner.
+        Schema scripts, telemetry,
         ``update_metadata_json`` and explicit commit/rollback operations retain
         their own boundaries and must not be grouped through this primitive.
         """
@@ -1999,10 +2084,24 @@ class MessageStore:
                 except BaseException:
                     if not conn.in_transaction:
                         self._manual_chunk_backlog_pending = False
+                        self._pending_relation_schema = self._pending_host_uid_schema = False
                     raise
+                if not self._transaction_owner.owns_connection(conn):
+                    self._publish_ingest_schemas()
                 if self._manual_chunk_backlog_pending:
                     self._mark_manual_chunk_backlog()
         return marked()
+
+    def _publish_ingest_schemas(self):
+        # Savepoint rollback restores these flags; an owner rollback clears them.
+        if getattr(self, "_pending_relation_schema", False):
+            self._pending_relation_schema = False
+            self._identity_anchor_schema_ready = True
+            self._carried_relation_connections.add(self._conn)
+            getattr(self, "_memory_relation_connections", {}).pop(self._conn, None)
+        if getattr(self, "_pending_host_uid_schema", False):
+            self._pending_host_uid_schema = False
+            self._host_uid_schema_ready = True
 
 
     def update_metadata_json(self, key: str, update: Any) -> Any:

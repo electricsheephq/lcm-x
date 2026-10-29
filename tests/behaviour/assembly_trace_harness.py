@@ -295,7 +295,11 @@ class Logs(logging.Handler):
         self.events, self.canonical = events, canonical
 
     def emit(self, record: logging.LogRecord) -> None:
-        self.events.append(f'log {record.levelname} {self.canonical.text(record.getMessage())}')
+        message = record.getMessage()
+        if str(record.msg).startswith("LCM attribution phase=ingest lock_hold_ms="):
+            args = record.args
+            message = str(record.msg) % (0, args[1], 0, args[3])
+        self.events.append(f'log {record.levelname} {self.canonical.text(message)}')
 
 
 def install_clock(patch: pytest.MonkeyPatch) -> None:

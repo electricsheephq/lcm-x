@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
+from time import perf_counter as _perf_counter
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from agent.context_engine import ContextEngine
@@ -171,11 +172,14 @@ from .message_content import (
     text_content_for_pattern_matching,
 )
 from .sqlite_util import (
+    _SqliteSavepointError,
+    _is_ingest_busy_error,
     _is_sqlite_locked_error,
+    _sqlite_savepoint,
     _temporary_sqlite_busy_timeout,
 )
 from .store import MessageStore, _normalize_conversation_id_value, _normalize_observed_at
-from .tokens import count_message_tokens, count_messages_tokens, count_tokens
+from .tokens import _get_encoder, count_message_tokens, count_messages_tokens, count_tokens
 from .assembly_plan import PrefixBudgetFacts, default_prefix_budget, select_prefix, select_tail
 from .frontier_state import FrontierState
 from . import tools as lcm_tools
@@ -1463,30 +1467,29 @@ class LCMEngine(
         self._engine_name = ENGINE_NAME
         self._identity_migration: Dict[str, Any] | None = None
 
-    def _frontier_holder(self) -> FrontierState:
-        if not hasattr(self, "_frontier"):
+    def _frontier_holder(self, *, create=True) -> FrontierState:
+        pending = getattr(self, "_pending_ingest_frontier", None)
+        if pending is not None:
+            return pending
+        if create and not hasattr(self, "_frontier"):
             self._frontier = FrontierState()
         return self._frontier
 
     @property
     def _ingest_cursor(self) -> int:
-        return self._frontier.cursor
+        return self._frontier_holder(create=False).cursor
 
     @_ingest_cursor.setter
     def _ingest_cursor(self, value: int) -> None:
-        if not hasattr(self, "_frontier"):
-            self._frontier = FrontierState()
-        self._frontier.cursor = value
+        self._frontier_holder(create=True).cursor = value
 
     @property
     def _ingest_cursor_needs_reconcile(self) -> bool:
-        return self._frontier.needs_reconcile
+        return self._frontier_holder(create=False).needs_reconcile
 
     @_ingest_cursor_needs_reconcile.setter
     def _ingest_cursor_needs_reconcile(self, value: bool) -> None:
-        if not hasattr(self, "_frontier"):
-            self._frontier = FrontierState()
-        self._frontier.needs_reconcile = value
+        self._frontier_holder(create=True).needs_reconcile = value
 
     @property
     def _last_compacted_store_id(self) -> int:
@@ -1500,13 +1503,11 @@ class LCMEngine(
 
     @property
     def _compress_commit_proof(self) -> dict[str, Any] | None:
-        return self._frontier.commit_proof
+        return self._frontier_holder(create=False).commit_proof
 
     @_compress_commit_proof.setter
     def _compress_commit_proof(self, value: dict[str, Any] | None) -> None:
-        if not hasattr(self, "_frontier"):
-            self._frontier = FrontierState()
-        self._frontier.commit_proof = value
+        self._frontier_holder(create=True).commit_proof = value
 
     @property
     def _last_emission_descriptors(self) -> dict[str, Any] | None:
@@ -6538,6 +6539,7 @@ class LCMEngine(
         self,
         original_messages: List[Dict[str, Any]],
         active_replay_messages: List[Dict[str, Any]],
+        *, persist_placeholder_evidence: bool = True,
     ) -> List[Dict[str, Any]]:
         self._last_active_replay_source_identities = [  # full identity (#488): no carrier aliasing
             self._message_replay_identity(message, strip_carrier=False) for message in original_messages
@@ -6550,14 +6552,16 @@ class LCMEngine(
             active_replay_messages,
             self._last_active_replay_messages,
         )
-        self._write_generated_ignored_placeholder_hash_counts(
-            self._generated_placeholder_digest_budget_for_active_replay(active_replay_messages)
-        )
-        self._write_generated_ignored_placeholder_hash_ordinals(
-            self._generated_placeholder_digest_ordinals_for_active_replay(active_replay_messages)
-        )
+        if persist_placeholder_evidence:
+            self._persist_ingest_replay_evidence(active_replay_messages)
         self._observe_no_progress_replay(original_messages, active_replay_messages)
         return active_replay_messages
+
+    def _persist_ingest_replay_evidence(self, active):
+        self._write_generated_ignored_placeholder_hash_counts(
+            self._generated_placeholder_digest_budget_for_active_replay(active))
+        self._write_generated_ignored_placeholder_hash_ordinals(
+            self._generated_placeholder_digest_ordinals_for_active_replay(active))
 
     def _keep_host_held_stubs(
         self,
@@ -7159,9 +7163,205 @@ class LCMEngine(
             )
             return self._redact_active_replay_messages(messages)
 
-        if getattr(self, "_identity_anchor_recovery", None):
-            self._identity_anchor_observe_recovery()
         sender_capture.try_update(self)
+        try:
+            _get_encoder()  # The first bounded encoder wait must precede BEGIN.
+        except Exception:
+            pass  # Token counting retains its existing estimator fallback.
+        attribution = self._last_ingest_attribution = dict(
+            lock_hold_ms=0.0, rows_written=0, bytes_written=0, busy_snapshot_retry=False)
+        admission_retry = False
+        for attempt in range(2):
+            # Keep the published frontier untouched until COMMIT. Helpers read
+            # and write the attempt-local holder through the legacy properties.
+            pending = copy.copy(self._frontier)
+            pending.commit_proof = copy.deepcopy(pending.commit_proof)
+            pending.oob_rows = set(getattr(self, "_out_of_band_durable_rows", ()))
+            self._pending_ingest_frontier = pending
+            missing = object()
+            snapshots = {name: copy.copy(self.__dict__[name])
+                         if name in self.__dict__ else missing for name in (
+                "_host_rewrite_watch", "_host_rewrite_overrides",
+                "_identity_anchor_versions", "_identity_anchor_text_memo", "_host_uid_counters",
+                "_host_uid_error_logged", "_retired_durable_proof", "_last_ingest_reconciliation",
+                "_pruned_tool_source_generation", "_pruned_tool_source_identities",
+                "_compression_boundary_active_placeholder_digest_budget", "_ignored_message_count",
+                "_ignore_pattern_dropped_count", "_no_progress_public_rows",
+                "_generated_ignored_active_replay_placeholder_message_ids",
+                "_generated_ignored_active_replay_placeholder_messages",
+                "_generated_ignored_active_replay_placeholder_hashes",
+                "_generated_ignored_active_replay_placeholder_hash_counts",
+                "_generated_ignored_active_replay_placeholder_hash_ordinals",
+                "_out_of_band_durable_rows", "_emitted_carriers_seen", "_emitted_carriers_retired",
+                "_pending_session_tails",
+            )}
+            # Stores and host objects are identity-bearing; never deepcopy them.
+            for name in ("_host_rewrite_store", "_pruned_tool_source_store"):
+                snapshots[name] = self.__dict__.get(name, missing)
+            receipts = [(receipt, dict(receipt)) for receipt in getattr(self, "_identity_anchor_recoveries", ())]
+            after_commit = []
+            prepared = {}
+            tail_registered = self in _PENDING_TAIL_ENGINES
+            held_at = None
+            try:
+                if getattr(self, "_identity_anchor_recovery", None):
+                    self._identity_anchor_observe_recovery()
+                with self._store.ingest_atomic(admission_retry=admission_retry):
+                    held_at = _perf_counter()
+                    active, finish = self._ingest_messages_transaction(
+                        messages, after_commit, attribution,
+                        prepared=prepared,
+                        allow_session_end_replay_proof=allow_session_end_replay_proof)
+                attribution["lock_hold_ms"] += (_perf_counter() - held_at) * 1000
+            except BaseException as exc:
+                if held_at is not None:
+                    attribution["lock_hold_ms"] += (_perf_counter() - held_at) * 1000
+                for name, value in snapshots.items():
+                    if value is missing:
+                        self.__dict__.pop(name, None)
+                    else:
+                        self.__dict__[name] = value
+                for receipt, previous in receipts:
+                    receipt.clear()
+                    receipt.update(previous)
+                if not tail_registered:
+                    _PENDING_TAIL_ENGINES.discard(self)
+                attribution.update(rows_written=0, bytes_written=0)
+                if isinstance(exc, Exception) and attempt == 0 and (_is_ingest_busy_error(exc)
+                                                                  or held_at is None and isinstance(exc, sqlite3.Error)):
+                    attribution["busy_snapshot_retry"] = True
+                    admission_retry = held_at is None and _is_ingest_busy_error(exc)
+                    continue
+                if isinstance(exc, Exception) and self._session_end_flush_active and _is_ingest_busy_error(exc):
+                    self._ingest_read_only = exc
+                    frozen_replay = None
+                    read_only_thread = getattr(self._store, "_read_only_ingest_thread", None)
+                    self._store._read_only_ingest_thread = threading.get_ident()
+                    try:
+                        for name, value in snapshots.items():
+                            if value is not missing:
+                                self.__dict__[name] = (value if name in ("_host_rewrite_store", "_pruned_tool_source_store")
+                                                       else copy.copy(value))
+                        self._pending_ingest_frontier = copy.deepcopy(self._frontier)
+                        frozen_replay, _finish = self._ingest_messages_transaction(messages, [], attribution,
+                            allow_session_end_replay_proof=allow_session_end_replay_proof)
+                    except Exception:
+                        pass  # Keep the original lock error; the frozen tail is the only result.
+                    finally:
+                        self.__dict__.pop("_ingest_read_only", None)
+                        self._store._read_only_ingest_thread = read_only_thread
+                        for name, value in snapshots.items():
+                            if name != "_pending_session_tails":
+                                if value is missing:
+                                    self.__dict__.pop(name, None)
+                                else:
+                                    self.__dict__[name] = value
+                        for receipt, previous in receipts:
+                            receipt.clear()
+                            receipt.update(previous)
+                    if frozen_replay is not None:
+                        return frozen_replay  # Classification proved there is no tail to freeze.
+                self._frontier.needs_reconcile = True
+                raise  # The existing ingest/compress caller records the failure.
+            finally:
+                self.__dict__.pop("_pending_ingest_frontier", None)
+                if self._end_attribution is not None:
+                    self._end_attribution.update({"ingest_" + key: value for key, value in attribution.items()})
+            self._frontier.cursor = pending.cursor
+            self._frontier.needs_reconcile = pending.needs_reconcile
+            self._frontier.commit_proof = pending.commit_proof
+            if pending.oob_rows or "_out_of_band_durable_rows" in self.__dict__:
+                self._out_of_band_durable_rows = pending.oob_rows
+            if "protected" in prepared:
+                protected_messages, replay_messages = prepared["protected"], prepared["replay"]
+                active_replay_messages = active  # Keep the public ingest frame's protection observation.
+                _ = protected_messages, replay_messages, active_replay_messages
+            try:
+                logger.debug("LCM attribution phase=ingest lock_hold_ms=%.3f rows_written=%d "
+                             "bytes_written=%d busy_snapshot_retry=%s", attribution["lock_hold_ms"],
+                             attribution["rows_written"], attribution["bytes_written"],
+                             attribution["busy_snapshot_retry"])
+            except Exception:
+                pass  # Diagnostic handlers cannot turn a durable ingest into failure.
+            # Cursor publication precedes every fallible cache operation.
+            for callback in [self._finish_ingest_memory, *after_commit]:
+                try:
+                    callback()
+                except Exception as exc:
+                    self._record_ingest_failure("post-commit cache", exc)
+            if prepared.get("sender_update"):
+                sender_capture.try_update(self)
+            try:
+                return finish()
+            except Exception as exc:
+                self._record_ingest_failure("post-commit replay cache", exc)
+                return active
+        raise AssertionError("unreachable ingest retry state")
+
+    def _finish_ingest_memory(self):
+        self._compression_boundary_ingest_pending = False
+        self._compression_boundary_active_placeholder_digest_budget = {}
+        self._compression_boundary_active_placeholder_digest_ordinals = {}
+        self._compression_boundary_stored_placeholder_digest_counts = {}
+        self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
+
+    def _raise_ingest_busy(self, error):
+        if self._store._transaction_owner.owns_connection(self._store._conn) and (
+            isinstance(error, _SqliteSavepointError) or _is_ingest_busy_error(error, require_code=True)
+            or isinstance(error, sqlite3.Error) and not self._store._conn.in_transaction
+        ):
+            raise error
+
+    @contextmanager
+    def _ingest_evidence(self, *, classification=False):
+        """Keep a fail-open writer's SQL and identity memory within its savepoint."""
+        if getattr(self, "_ingest_read_only", None) is not None:
+            if classification:
+                yield
+                return
+            raise sqlite3.OperationalError("session-end evidence deferred")
+        if not self._store._transaction_owner.owns_connection(self._store._conn):
+            yield
+            return
+        names = ("_host_rewrite_store", "_host_rewrite_watch", "_host_rewrite_overrides",
+                 "_identity_anchor_versions", "_identity_anchor_text_memo")
+        missing = object()
+        saved = {name: (self.__dict__[name], copy.copy(self.__dict__[name]))
+                 for name in names if name != "_host_rewrite_store" and name in self.__dict__}
+        old_store = self.__dict__.get("_host_rewrite_store", missing)
+        receipts = [(receipt, dict(receipt)) for receipt in getattr(self, "_identity_anchor_recoveries", ())]
+        schemas = {name: getattr(self._store, name, False)
+                   for name in ("_pending_relation_schema", "_pending_host_uid_schema")}
+        try:
+            with _sqlite_savepoint(self._store._conn, abort_on_cleanup_failure=True, owner_active=True,
+                                   foreground_ingest=getattr(self._store, "_foreground_ingest_owner", False)):
+                yield
+        except BaseException:
+            for name, value in schemas.items():
+                setattr(self._store, name, value)
+            for name in names:
+                if name in saved:
+                    original, previous = saved[name]
+                    if isinstance(original, dict):
+                        original.clear()
+                        original.update(previous)
+                    self.__dict__[name] = original if isinstance(original, dict) else previous
+                else:
+                    self.__dict__.pop(name, None)
+            if old_store is not missing:
+                self._host_rewrite_store = old_store
+            for receipt, previous in receipts:
+                receipt.clear()
+                receipt.update(previous)
+            raise
+
+    def _ingest_messages_transaction(self, messages, after_commit, attribution, *,
+                                     allow_session_end_replay_proof=False, prepared=None):
+        """Today's classifier and evidence; caller owns COMMIT and retry.
+
+        Store-dependent protection/token counts are part of lock_hold_ms, and
+        would move out with classification under the design's section 5 fallback.
+        """
         self._capture_host_rewrites(messages)
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
@@ -7406,21 +7606,27 @@ class LCMEngine(
                                    if idx >= accepted_compaction_prefix
                                    and identity != cached_source_identities[idx]), None)
             try:
-                if (reconciled_existing_session or accepted_compaction_prefix) and cursor > 0:
-                    self._store.backfill_observed_at_many(
-                        self._identity_anchor_backfill_prefix(messages, reconcile_messages, cursor))
+                if ((reconciled_existing_session or accepted_compaction_prefix) and cursor > 0
+                        and getattr(self, "_ingest_read_only", None) is None):
+                    with self._ingest_evidence():
+                        self._store.backfill_observed_at_many(
+                            self._identity_anchor_backfill_prefix(messages, reconcile_messages, cursor))
                 # #1403: the accepted output supersedes the stale pre-compaction cache for
                 # this ingest only. The one-shot commit proof has already retired above.
                 accepted = {"accepted_prefix": accepted_compaction_prefix} if accepted_compaction_prefix else {}
-                anchor_plan = self._identity_anchor_prematch(messages, reconcile_messages, cursor, audit_from, **accepted)
+                with self._ingest_evidence(classification=True):
+                    anchor_plan = self._identity_anchor_prematch(messages, reconcile_messages, cursor, audit_from, **accepted)
                 anchor_plan["replayed"] -= replayed_tool_segment_indexes
                 # A reused stamp cannot override positive evidence of a new uid.
                 anchor_plan["replayed"] -= new_prefix_occurrences
                 for idx in new_prefix_occurrences:
                     anchor_plan.get("matched", {}).pop(idx, None)
                 self._identity_anchor_version_rewind(messages, anchor_plan)
-                self._identity_anchor_commit(anchor_plan)
+                if getattr(self, "_ingest_read_only", None) is None:
+                    with self._ingest_evidence():
+                        self._identity_anchor_commit(anchor_plan)
             except Exception as exc:
+                self._raise_ingest_busy(exc)
                 logger.warning("LCM identity-anchor pre-match failed (%s); ordered-prefix path only", type(exc).__name__)
                 anchor_plan = None
                 if audit_from is not None:
@@ -7488,7 +7694,7 @@ class LCMEngine(
             previous_generated_ids = (
                 self._generated_ignored_active_replay_placeholder_message_ids.copy() if unaudited_from is not None else ()
             )
-            result = self._remember_active_replay_messages(messages, active)
+            result = self._remember_active_replay_messages(messages, active, persist_placeholder_evidence=False)
             # #1353: keep paired proof for the unaudited prefix, never the newly stored tail.
             if unaudited_from is not None:
                 end = min(cursor, len(cached_source_identities), len(previous_replay),
@@ -7502,16 +7708,19 @@ class LCMEngine(
             return result
 
         if not new_messages:
-            cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
-            self._compression_boundary_ingest_pending = False
-            self._compression_boundary_active_placeholder_digest_budget = {}
-            self._compression_boundary_active_placeholder_digest_ordinals = {}
-            self._compression_boundary_stored_placeholder_digest_counts = {}
-            self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
             self._host_uid_shadow(host_uids)
-            if cached_replay is not None:
-                return cached_replay
-            return remember(replay_messages)
+            has_cached_replay = (
+                [self._message_replay_identity(message, strip_carrier=False) for message in messages]
+                == getattr(self, "_last_active_replay_source_identities", None)
+                and getattr(self, "_last_active_replay_messages", None) is not None)
+            if not has_cached_replay:
+                self._persist_ingest_replay_evidence(replay_messages)
+
+            def finish_no_new():
+                cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
+                return cached_replay if cached_replay is not None else remember(replay_messages)
+
+            return replay_messages, finish_no_new
 
         active_replay_messages = replay_messages
         compression_boundary_ingest_pending = self._compression_boundary_ingest_pending
@@ -7549,15 +7758,12 @@ class LCMEngine(
         )
 
         if not messages_to_store_with_index:
+            if prepared is not None:
+                prepared["sender_update"] = True
             self._ingest_cursor = n
-            self._compression_boundary_ingest_pending = False
-            self._compression_boundary_active_placeholder_digest_budget = {}
-            self._compression_boundary_active_placeholder_digest_ordinals = {}
-            self._compression_boundary_stored_placeholder_digest_counts = {}
-            self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
             self._host_uid_shadow(host_uids)
-            sender_capture.try_update(self)
-            return remember(active_replay_messages)
+            self._persist_ingest_replay_evidence(active_replay_messages)
+            return active_replay_messages, lambda: remember(active_replay_messages)
 
         protected_messages, active_replay_messages = self._protect_ingest_rows(
             messages=messages,
@@ -7565,34 +7771,50 @@ class LCMEngine(
             active_replay_messages=active_replay_messages,
             replay_messages=replay_messages,
         )
+        if prepared is not None:
+            prepared.update(protected=protected_messages, replay=replay_messages)
 
         store_ids = self._store_ingest_rows(
             messages_to_store_with_index=messages_to_store_with_index,
             protected_messages=protected_messages,
             sender_originals=[(idx, messages[idx]) for idx, _msg in messages_to_store_with_index],
             sender_excluded=anchor_remainders,
+            after_commit=after_commit,
         )
-        sender_capture.exclude(self, {sid for (idx, _m), sid in zip(messages_to_store_with_index, store_ids)
-                                      if idx in anchor_remainders and sid})
+        attribution["rows_written"] = len(store_ids)
+        # Logical row payload bytes, not SQLite page/WAL amplification.
+        attribution["bytes_written"] = sum(
+            len((normalize_content_value(message.get("content")) or "").encode("utf-8"))
+            + (len(json.dumps(message["tool_calls"]).encode("utf-8")) if message.get("tool_calls") else 0)
+            for message in protected_messages)
+        if prepared is not None:
+            prepared["sender_update"] = True
+        after_commit.append(lambda: sender_capture.exclude(
+            self, {sid for (idx, _m), sid in zip(messages_to_store_with_index, store_ids)
+                   if idx in anchor_remainders and sid}))
         originals = [messages[idx] for idx, _msg in messages_to_store_with_index]
-        self._watch_stored_user_rows(zip(originals, protected_messages, store_ids))
-        sender_capture.try_update(self)
+        after_commit.append(lambda: self._watch_stored_user_rows(zip(originals, protected_messages, store_ids)))
         if anchor_plan is not None:
             stored_at = {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index, store_ids)}
-            try:  # #1501 provenance: read right after R is stored (R3 has a NULL stamp); a miss duplicates
-                self._identity_anchor_mark_carried(messages, stored_at, anchor_plan)
+            try:
+                with self._ingest_evidence():
+                    self._identity_anchor_mark_carried(messages, stored_at, anchor_plan)
             except Exception as exc:
+                self._raise_ingest_busy(exc)
                 logger.warning("LCM carried-stamp marker write failed (%s)", type(exc).__name__)
             try:
-                self._identity_anchor_commit(anchor_plan, {idx: stored_at[idx] for idx in anchor_remainders if idx in stored_at})
-                self._identity_anchor_remember([
+                with self._ingest_evidence():
+                    self._identity_anchor_commit(anchor_plan, {idx: stored_at[idx] for idx in anchor_remainders if idx in stored_at})
+                after_commit.append(lambda: self._identity_anchor_remember([
                     (self._message_replay_identity(reconcile_messages[idx], strip_carrier=False), store_id, messages[idx])
                     for idx, store_id in stored_at.items() if idx not in anchor_remainders
-                ])
-                self._identity_anchor_record_versions(
-                    [(messages[idx], store_id) for idx, store_id in stored_at.items() if idx not in anchor_remainders]
-                )
+                ]))
+                with self._ingest_evidence():
+                    self._identity_anchor_record_versions(
+                        [(messages[idx], store_id) for idx, store_id in stored_at.items() if idx not in anchor_remainders],
+                        after_commit=after_commit)
             except Exception as exc:
+                self._raise_ingest_busy(exc)
                 logger.warning("LCM identity-anchor relation write failed (%s)", type(exc).__name__)
         self._host_uid_shadow(host_uids, {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index,
                                                                                          store_ids)}, anchor_remainders)
@@ -7602,17 +7824,13 @@ class LCMEngine(
         # would let a rebuild publish 'ready' from old sources and omit the leaf
         # (maintainer #388 P1).
         self._ingest_cursor = n
-        self._compression_boundary_ingest_pending = False
-        self._compression_boundary_active_placeholder_digest_budget = {}
-        self._compression_boundary_active_placeholder_digest_ordinals = {}
-        self._compression_boundary_stored_placeholder_digest_counts = {}
+        self._persist_ingest_replay_evidence(active_replay_messages)
         logger.debug("Ingested %d messages into LCM store", len(messages_to_store_with_index))
-        self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
         # Most ``protected_messages`` changes are storage-only: inline media and
         # data/base64 substrings stay provider-usable in active replay. The
         # exceptions are whole-message ``raw_payload`` externalization and the
         # separately opt-in textual tool-result interceptor above.
-        return remember(active_replay_messages)
+        return active_replay_messages, lambda: remember(active_replay_messages)
 
     def _build_ingest_replay(
         self,
@@ -7986,6 +8204,7 @@ class LCMEngine(
         messages_to_store_with_index: list[tuple[int, Dict[str, Any]]],
         protected_messages: List[Dict[str, Any]],
         sender_originals=(), sender_excluded=(),
+        after_commit=None,
     ) -> list[int]:
         estimates = [count_message_tokens(m) for m in protected_messages]
         batch = dict(
@@ -8017,7 +8236,10 @@ class LCMEngine(
                 _PENDING_TAIL_ENGINES.add(self)
             raise
         if senders is not None:
-            sender_capture.record(self, pending, store_ids, senders)
+            if after_commit is None:
+                sender_capture.record(self, pending, store_ids, senders)
+            else:
+                after_commit.append(lambda: sender_capture.record(self, pending, store_ids, senders))
         return store_ids
 
     @staticmethod
@@ -10668,6 +10890,8 @@ class LCMEngine(
 
     def _append_ingest_batch(self, batch: dict) -> list[int]:
         """The same atomic raw-row/provenance write for ingest and end retry."""
+        if getattr(self, "_ingest_read_only", None) is not None:
+            raise self._ingest_read_only  # Freeze without issuing a write or BEGIN.
         return batch["store"]._append_protected_batch(
             batch["session_id"], batch["messages"], batch["estimates"],
             source=batch["source"], conversation_id=batch["conversation_id"],

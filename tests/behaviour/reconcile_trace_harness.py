@@ -62,7 +62,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_generated_ignored_active_replay_placeholder_hashes",
     "_generated_ignored_active_replay_placeholder_hash_counts",
     "_generated_ignored_active_replay_placeholder_hash_ordinals",
-    "_out_of_band_durable_rows",
+    "_out_of_band_durable_rows", "_pending_ingest_frontier",
     "_foreground_budget", "_ingest_cursor", "_consecutive_ingest_failures",
     "_pruned_tool_source_generation", "_pruned_tool_source_identities", "_pruned_tool_source_store",
 })
@@ -327,7 +327,11 @@ class Logs(logging.Handler):
         self.events, self.canonical = events, canonical
 
     def emit(self, record: logging.LogRecord) -> None:
-        self.events.append(f"log {record.levelname} {self.canonical.text(record.getMessage())}")
+        message = record.getMessage()
+        if str(record.msg).startswith("LCM attribution phase=ingest lock_hold_ms="):
+            args = record.args
+            message = str(record.msg) % (0, args[1], 0, args[3])
+        self.events.append(f"log {record.levelname} {self.canonical.text(message)}")
 
 
 class LiteralPattern:

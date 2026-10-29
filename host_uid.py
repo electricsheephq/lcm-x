@@ -1,8 +1,8 @@
 """v0.26.0 slice A: host ``message_uid`` SHADOW bindings (design REVISION 3). After #436 decides an ingest,
 each uid-bearing host dict gets one R3-3 class and the row #436 chose goes to the droppable ``host_uid_bindings``
 table. #1124 reads canonical bindings for store-complete copy exclusions; #1403 also reads them
-as occurrence proof for NULL-stamp audit copies. Every shadow exception is caught, counted and fails
-open. Event counter keys are ``[replay.]class.outcome[.reason]``; ``skipped.no_uid`` stays in memory, so a no-uid
+as occurrence proof for NULL-stamp audit copies. Shadow writes fail open inside foreground savepoints;
+lock contention escapes to the ingest owner. Event counter keys are ``[replay.]class.outcome[.reason]``; ``skipped.no_uid`` stays in memory, so a no-uid
 host writes nothing. The shadow GATE is counted per binding in the table (``first_check`` / ``disagree_seen``),
 so a replayed prefix never inflates it. ``LCM_HOST_MESSAGE_UID=off`` does nothing; ``on`` runs as ``shadow``.
 From the first release, a persisted lineage key is ``<home_tag>:<root>`` (#836): one database shared by several
@@ -233,13 +233,16 @@ class HostUidShadowMixin:
             return
         delta, error = Counter({"skipped.no_uid": capture["no_uid"]}), None
         try:
-            error = self._host_uid_classify(capture, stored_at or {}, set(remainders or ()), delta)
+            with self._ingest_evidence():
+                error = self._host_uid_classify(capture, stored_at or {}, set(remainders or ()), delta)
         except Exception as exc:
+            self._raise_ingest_busy(exc)
             delta["errors"] += 1
             error = exc
         try:
             self._host_uid_count(delta, error)
-        except Exception:  # pragma: no cover - counting never blocks ingest
+        except Exception as exc:  # Shadow counting remains best-effort.
+            self._raise_ingest_busy(exc)
             logger.debug("LCM host-uid count failed")
 
     def _host_uid_classify(self, capture, stored_at: dict, remainders: set, delta: Counter):
@@ -248,7 +251,11 @@ class HostUidShadowMixin:
         delta["skipped.invalid_uid"] += len(capture["entries"]) - len(valid)
         if not valid:
             return None
-        lineage, problem = self._host_uid_lineage_key(capture["session_id"])
+        try:
+            lineage, problem = self._host_uid_lineage_key(capture["session_id"])
+        except Exception as exc:
+            delta["errors"] += 1
+            return exc  # Host ancestry unavailable: preserve the standalone no-binding decision.
         if lineage is None:
             delta[f"skipped.no_lineage_root.{problem}"] += len(valid)
             if problem == "read_error":
@@ -462,6 +469,8 @@ class HostUidShadowMixin:
             return
         counts = self._host_uid_counters = getattr(self, "_host_uid_counters", None) or Counter()
         counts.update(delta)
+        if getattr(self, "_ingest_read_only", None) is not None:
+            return
         durable = {key: value for key, value in delta.items() if key != "skipped.no_uid"}
         if not durable:
             return
@@ -475,11 +484,20 @@ class HostUidShadowMixin:
                     record[key] = value
             return record
 
-        try:  # never inside someone else's transaction: skipped and counted
-            if getattr(self._store._conn, "in_transaction", False):
+        owned = self._store._transaction_owner.owns_connection(self._store._conn)
+        try:
+            if owned:
+                # Same read-modify-write, serialized by the enclosing owner.
+                # update_metadata_json must never issue a nested BEGIN here.
+                with self._ingest_evidence():
+                    value = merged(self._store.read_metadata_json(HOST_UID_COUNTER_KEY))
+                    self._store.write_metadata_json([HOST_UID_COUNTER_KEY], json.dumps(value, sort_keys=True))
+            elif getattr(self._store._conn, "in_transaction", False):
                 raise sqlite3.OperationalError("host-uid tally skipped: the connection is in a transaction")
-            self._store.update_metadata_json(HOST_UID_COUNTER_KEY, merged)
+            else:
+                self._store.update_metadata_json(HOST_UID_COUNTER_KEY, merged)
         except Exception as exc:
+            self._raise_ingest_busy(exc)
             counts["errors"] += 1
             logger.debug("LCM host-uid counter write failed (%s)", type(exc).__name__)
 
