@@ -87,6 +87,11 @@ def _handler(plugin, monkeypatch, prototype, context, resolved=None):
     return plugin._make_command_handler(command.handle_lcm_command, prototype, resolve), calls
 
 
+def _stable_status(text):
+    # database_size is the main file's st_size, raced by WAL checkpoints and background maintenance.
+    return "\n".join(line for line in text.splitlines() if not line.startswith("database_size:"))
+
+
 @pytest.mark.parametrize("raw_args", ["embed backfill --apply", "embed warmup"])
 @pytest.mark.parametrize("context_key", ["HERMES_SESSION_ID", "HERMES_SESSION_KEY"])
 def test_unresolved_session_refuses_writes(plugin, engines, monkeypatch, raw_args, context_key):
@@ -186,11 +191,7 @@ def test_cold_start_same_profile_matches_resolved_output(
     expected = resolved(raw_args)
     fallback, _ = _handler(plugin, monkeypatch, prototype, context)
 
-    # database_size is the main file's st_size, raced by background maintenance.
-    def stable_status(text):
-        return "\n".join(line for line in text.splitlines() if not line.startswith("database_size:"))
-
-    assert stable_status(fallback(raw_args)) == stable_status(expected)
+    assert _stable_status(fallback(raw_args)) == _stable_status(expected)
     if raw_args == "embed warmup":
         assert _snapshot(prototype)["lcm_embedding_profile"] == 2
 
@@ -245,7 +246,8 @@ def test_unresolved_other_bound_session_refuses_write_allows_read(
     handler, _ = _handler(plugin, monkeypatch, prototype, context)
 
     assert handler(raw_args) == OWNERSHIP_REFUSAL
-    assert handler("status") == expected
+    # Session start creates the shadow ingest ledger (#2055), so a checkpoint between reads grows the file.
+    assert _stable_status(handler("status")) == _stable_status(expected)
     assert prototype._session_id == "bound-session"
     assert _snapshot(prototype) == before
 
@@ -389,7 +391,7 @@ def test_store_line_names_opened_database(plugin, engines, monkeypatch, config_p
     expected = command.handle_lcm_command("status", prototype)
     handler, _ = _handler(plugin, monkeypatch, prototype, {"HERMES_SESSION_KEY": "fresh"})
 
-    assert handler("status") == expected + f"\nstore: {prototype._store.db_path}"
+    assert _stable_status(handler("status")) == _stable_status(expected + f"\nstore: {prototype._store.db_path}")
 
 
 def test_engine_profile_seam_uses_captured_home(plugin, engines, monkeypatch):

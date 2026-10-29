@@ -178,6 +178,8 @@ P1 shadow notes (P1b-2b, `LCM_INGEST_LEDGER=shadow`, default; `off` preserves Pa
 - **X10:** `MessageStore.ingest_atomic` owns the transaction; ledger setup occurs separately at session start.
 - **X11:** no store-mark advancement until P1g proves coverage of earlier unbound rows, including failed ledger batches, drain and S3 writes.
 - **X12:** missing named non-fork ancestry is provisional only for the ledger, bypasses the legacy cache, and is never persisted; persisted complete lineage wins over later unresolved or drifting lookups.
+- **X13:** an ingest vector carries a ref only for a row that this ingest maps, so the unchanged prefix of an appended view is unbound in the new vector. Carrying refs across a verified prefix is new matching, left to the cold-start cursor reader, which needs it before it reads a vector.
+- **X14:** the persisted lineage is keyed by session id, as the store keys session rows. A store shared by two Hermes homes that reuse one session id keeps the first home's lineage and counts `ledger.lineage_drift`; P1f revisits the key.
 - **R3/R17 deviation:** skip an equal-prefix-chain ingest vector when no new binding, observation or newly resolved ref changes it; an unavailable mapping alone does not invalidate the prior vector. This avoids per-turn write load on no-op turns.
 - Preparation hashes the full raw view before BEGIN, including absorbed uids, and records `ledger_digest_ms`; the savepoint records `ledger_ms` within lock hold. Latency on real hosts remains unproven.
 
