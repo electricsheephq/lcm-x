@@ -2,6 +2,37 @@
 
 These are Python 3.11+ program-side tools. They use only the standard library.
 
+## Run a candidate the way CI does
+
+Prepare a Linux host or container as a non-root user with `bash scripts/dev/cloud_setup.sh`.
+Make a patch with `git -c diff.noprefix=false diff --binary BASE..HEAD > candidate.patch`, then run:
+
+```bash
+bash bench/tools/run_candidate.sh --base SHA40 --patch candidate.patch --label example \
+  --focused "tests/test_example.py" --red "tests/test_example.py" --full
+```
+
+Each run makes fresh stamped directories under `--root` (default `candidate-runs/` in the
+checkout, which git ignores): a run directory, a green worktree with the whole patch, and, with
+`--red`, a red worktree at the base with only the patch's `tests/` hunks. The phases are ruff on
+the changed `.py` files, `green-focused`, `red-on-base`, and, with `--full`, CI's main run
+without `tests/test_embedding_privacy.py` (`green-full`) followed by that file alone
+(`green-privacy`), as CI runs them. Each pytest phase gets an empty HOME in the run directory.
+The runner prints each phase's exit and last lines and writes `summary.json` to the run
+directory; its commands use paths relative to that directory. Test failures are recorded: exit 0
+means every requested phase ran, and exit 2 reports a setup failure with its reason, such as
+`NO_ENV`, `NO_RUFF`, `APPLY_FAILED` or `NO_TEST_HUNKS`. Nothing is deleted; the runner prints
+the `git worktree remove` commands for the worktrees it made.
+Red-on-base applies only `tests/` hunks, so a test that needs a new non-test file errors on base.
+For a remote host, copy the patch and run the same command over your own SSH using
+`<remote>` and `<checkout>` placeholders. A green run is advisory; GitHub CI gates.
+`--env-file PATH` and `--no-stub` exist for the runner's own fixture test; normal runs load the
+setup environment and run CI's stub step. Defaults: 4 focused/red workers, 6 full workers,
+nice 10; override with `--workers-focused N`, `--workers-full N`, `--nice N`.
+Use `--no-fetch` only when the base is already available locally.
+The runner sets no time limit; on an unattended host, wrap the command in `timeout`.
+Test targets are whitespace-separated, checkout-relative paths or node IDs.
+
 ## Fail-close accounting
 
 `python bench/tools/failclose.py RUN_DIR [--compare OTHER_RUN_DIR]` emits raw and adjusted scores, fail-closed qids, and each row's signature as one JSON object. Paired comparisons use the named **union-drop** convention: a qid that fail-closes in either arm is dropped from both. This prevents the F35/#165 fail-close classes from silently becoming capability zeros ([F35](../FINDING-F35-SANITY-SLICE-RED.md), [F32 §3](../FINDING-F32-RELEASE-NUMBER-VERDICT.md)).
