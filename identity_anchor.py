@@ -724,6 +724,9 @@ class IdentityAnchorMixin:
             groups.append([(store_id, "carried_stamp", store_id - 1, None, stamp)])
         if groups:
             self._store.add_message_relations(groups)
+            if getattr(self, "_ingest_ledger_observations", None) is not None:
+                self._ingest_ledger_observations.extend((sid, kind, stamp) for group in groups
+                                                       for sid, kind, _related, _ordinal, stamp in group)
 
     def _identity_anchor_inserted(self, messages, start: int, cursor: int) -> set:
         """#633: indexes in ``[start, cursor)`` the host inserted into the last list LCM ingested (Hermes
@@ -1435,6 +1438,9 @@ class IdentityAnchorMixin:
                       for idx, store_id in remainder_ids.items()]
         if groups:
             self._store.add_message_relations(groups)
+            if getattr(self, "_ingest_ledger_observations", None) is not None:
+                self._ingest_ledger_observations.extend((sid, kind, stamp) for group in groups
+                                                       for sid, kind, _related, _ordinal, stamp in group if kind == "alt_stamp")
         for row, message in plan.get("ws", ()) if remainder_ids is None else ():
             self._record_ws_host_rewrite(row, message)
         self._store.backfill_observed_at_many(plan["backfill"] if remainder_ids is None else ())

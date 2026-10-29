@@ -795,6 +795,8 @@ class Provider:
 
 
 def install_clock(patch: pytest.MonkeyPatch, clock: Clock) -> None:
+    from tests.behaviour.reconcile_trace_harness import install_ledger_salt
+    install_ledger_salt(patch)
     replacement = SimpleNamespace(**{name: getattr(time, name) for name in dir(time) if not name.startswith("__")})
     replacement.monotonic, replacement.perf_counter, replacement.time = clock.monotonic, clock.monotonic, clock.wall
     replacement.time_ns = clock.time_ns

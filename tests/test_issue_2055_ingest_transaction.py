@@ -228,9 +228,12 @@ def test_encoder_warmup_precedes_begin_and_runs_once_across_retry(ingest_case, m
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
 
 
-@pytest.mark.parametrize("boundary", ["SAVEPOINT", "INSERT", "COMMIT"])
+@pytest.mark.parametrize("boundary", ["SAVEPOINT", "INSERT", "LEDGER", "COMMIT", "COMMIT-off"])
 def test_lost_ingest_transaction_aborts_instead_of_reopening(ingest_case, monkeypatch, boundary):
     engine, seed, host = ingest_case
+    if boundary == "COMMIT-off":
+        # With the ledger off (the rollback switch), the last owned statement is the transaction body again.
+        monkeypatch.setenv("LCM_INGEST_LEDGER", "off")
     store, lost = engine._store, []
     before, failures = durable(engine), engine._ingest_failure_count
 
@@ -264,7 +267,10 @@ def test_lost_ingest_transaction_aborts_instead_of_reopening(ingest_case, monkey
 
         monkeypatch.setattr(store, "_append_protected_batch", append)
     else:
-        original = engine._ingest_messages_transaction
+        # LEDGER: lost after the last row write, caught by the shadow ledger's savepoint (#2055).
+        # COMMIT: lost after the ledger writes, caught at COMMIT.
+        name = "_write_ingest_ledger" if boundary == "COMMIT" else "_ingest_messages_transaction"
+        original = getattr(engine, name)
 
         def transaction(*args, **kwargs):
             result = original(*args, **kwargs)
@@ -274,10 +280,11 @@ def test_lost_ingest_transaction_aborts_instead_of_reopening(ingest_case, monkey
                 pass  # Model a swallowed read error after the last owned statement.
             return result
 
-        monkeypatch.setattr(engine, "_ingest_messages_transaction", transaction)
+        monkeypatch.setattr(engine, name, transaction)
     engine.ingest(host)
     assert lost == [True] and engine._ingest_failure_count == failures + 1
-    assert engine._last_ingest_error == "_SqliteSavepointError: Foreground ingest transaction lost before " + boundary
+    expected = {"LEDGER": "SAVEPOINT", "COMMIT-off": "COMMIT"}.get(boundary, boundary)
+    assert engine._last_ingest_error == "_SqliteSavepointError: Foreground ingest transaction lost before " + expected
     assert durable(engine) == before and not store._conn.in_transaction
     engine.ingest(host)
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]

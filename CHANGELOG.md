@@ -6,6 +6,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Ingest records shadow ledger bindings, stamp observations and view vectors in its own transaction; `LCM_INGEST_LEDGER=off` disables this without changing stored rows (#2055).
 - Fix: successful delegated-child resumes and store-only turns log at DEBUG without false fallback counts or skipped-ingest warnings; storage is unchanged (#2074).
 
 ## v0.29.1 (compaction fixes)

@@ -122,7 +122,7 @@ def test_product_env_derivation_covers_config_and_root_reads():
     keys = product_env_keys(ROOT)
     assert {spec.env_key for spec in ENV_FIELD_SPECS} <= keys
     assert {
-        "LCM_LEAF_CHUNK_TOKENS", "LCM_HOST_MESSAGE_UID", "LCM_MODEL_THRESHOLDS",
+        "LCM_LEAF_CHUNK_TOKENS", "LCM_HOST_MESSAGE_UID", "LCM_INGEST_LEDGER", "LCM_MODEL_THRESHOLDS",
         "LCM_DISABLED_TOOLS", "LCM_HERMES_BASE_DIR", "LCM_IDENTITY_ANCHOR",
         "LCM_ABSOLUTE_THRESHOLD_TOKENS", "LCM_EMBEDDING_BACKFILL_BATCH_SIZE",
         "LCM_SENSITIVE_PATTERNS", "LCM_SUMMARY_FALLBACK_MODELS",

@@ -222,6 +222,7 @@ def isolated_environment(monkeypatch):
             monkeypatch.delenv(key)
     monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda: {})
     monkeypatch.setattr(config, "_host_message_uid_mode_warned", False)
+    monkeypatch.setattr(config, "_ingest_ledger_mode_warned", False)
     monkeypatch.setattr(config, "_sqlite_mmap_size_warned", False)
 
 
@@ -261,6 +262,8 @@ def test_from_env_construction_table(monkeypatch, field, key, kind, default):
 # Standalone readers resolve again on every invocation, including after a
 # config object exists. Defaults here are literals, independent of production.
 DYNAMIC_ROWS = (
+    ("LCM_INGEST_LEDGER", config.ingest_ledger_mode,
+     ("shadow",) * 9 + ("off",) + ("shadow",) * 6),
     ("LCM_HOST_MESSAGE_UID", config.host_message_uid_mode,
      ("shadow",) * 8 + ("on", "off") + ("shadow",) * 6),
     ("LCM_SQLITE_MMAP_SIZE", config.sqlite_mmap_size,

@@ -99,6 +99,10 @@ def snapshot(directory, before_columns=None, *, source_reader):
             assert set(columns) <= set(schema[table]), table
             names = ", ".join(f'"{column}"' for column in columns)
             rows = conn.execute(f'SELECT {names} FROM "{table}" ORDER BY rowid').fetchall()
+            if table == "lcm_migration_state":
+                # Session start creates the #2055 ingest ledger in shadow mode; its marker is the one new row.
+                step = columns.index("step_name")
+                rows = [row for row in rows if row[step] != "ingest_ledger_v1"]
             if table == "metadata":
                 markers = [row for row in rows if row[0] == "fts_stem_state"]
                 if source_reader == PREVIOUS_GA:
@@ -160,6 +164,7 @@ def test_previous_ga_forward_migration(tmp_path, old_tree, host_root, monkeypatc
         finally:
             engine.shutdown()
         after = snapshot(tmp_path, before[0], source_reader=source_reader)
+        assert "ledger_meta" in after[0], "session start creates the shadow ingest ledger"
         for table, digest in before[1].items():
             assert after[1][table] == digest, f"upgrade changed old columns/rows in {table}"
         assert after[2] == before[2], "upgrade changed externalized payloads"

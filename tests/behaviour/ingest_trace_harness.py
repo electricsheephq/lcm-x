@@ -52,6 +52,7 @@ engine_module: Any = importlib.import_module("hermes_lcm.engine")
 ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = ROOT / "tests" / "fixtures" / "ingest_trace.json"
 TRACE_GUIDANCE = "Regenerate deliberately: python -m tests.behaviour.ingest_trace_harness --repo . --regenerate"
+LEDGER_SQL = re.compile(r"\b(?:ledger_meta|occurrence_bindings|ledger_emissions|stamp_observations|ingest_views|lineage_marks)\b")
 # FROZEN inventory, never generated from _ingest_messages at observation time.
 OBSERVED_ATTRIBUTES = frozenset({
     "_no_progress_replay", "_no_progress_public_rows", "_no_progress_metadata_warned", "_no_progress_hold_persisted",
@@ -81,6 +82,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_identity_anchor_versions", "_pressure_yield_tail_token_limit", "_survival_projected_fields",
     "_host_uid_lineage_cache", "_engine_uids_pending", "_engine_uids_recorded",
     "_pending_ingest_frontier", "_last_ingest_attribution", "_end_attribution", "_ingest_read_only",
+    "_ingest_ledger_attempt", "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
 })
 Trace = list[str]
 Message = dict[str, Any]
@@ -261,6 +263,7 @@ class IngestCanonical(Canonical):
         super().__init__(root, messages)
         self.path_hashes: dict[str, str] = {}
         self.replay_digests: dict[str, str] = {}
+        self.ledger_blobs: dict[str, str] = {}
         # Labels outlive individual snapshots. Keep their objects alive too, so
         # a later placeholder cannot inherit a freed object's address/label.
         self.retained_messages = {id(row): row for row in messages}
@@ -338,7 +341,8 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
                 register(getattr(value, field.name))
     for name in sorted(OBSERVED_ATTRIBUTES - {"_store", "_dag", "_lifecycle", "_host_rewrite_store"}):
         register(observed_attribute(engine, name))
-    for name in sorted(OBSERVED_ATTRIBUTES - {"_last_ingest_attribution"}):
+    for name in sorted(OBSERVED_ATTRIBUTES - {"_last_ingest_attribution", "_ingest_ledger_attempt",
+                                            "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned"}):
         value = observed_attribute(engine, name)
         if name in {"_store", "_host_rewrite_store"}:
             value = {"present": value is not None}
@@ -360,9 +364,13 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
     # Exact durable rows, including relation IDs, observed_at/source, UID bindings,
     # scaffold/carry/proof metadata. Searchability is observed via the store API,
     # separately from this snapshot; SQLite FTS internals stay excluded.
-    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+    # #2067 compares row outcomes against Part A, excluding the shadow ledger.
+    from hermes_lcm.store import _INGEST_LEDGER_TABLES
+    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+              if r[0] not in _INGEST_LEDGER_TABLES]
     state["tables"] = {name: canonical.value([tuple(row) for row in conn.execute(
-                           f'SELECT {messages_snapshot_columns(conn) if name == "messages" else "*"} FROM "{name}" ORDER BY 1')])
+                           f'SELECT {messages_snapshot_columns(conn) if name == "messages" else "*"} FROM "{name}" '
+                           + ("WHERE step_name != 'ingest_ledger_v1' " if name == "lcm_migration_state" else "") + 'ORDER BY 1')])
                        for name in tables if not name.startswith(("messages_fts", "sqlite_"))}
     return state
 
@@ -853,7 +861,13 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
             def sql_trace(name: str, sql: str) -> None:
                 if sql.lstrip().startswith("--") or re.search(r"(['\"])(main|temp)\1\s*\.", sql):
                     return
-                emit("sql " + name, canonical.text(sql))
+                text = canonical.text(sql)
+                if LEDGER_SQL.search(text):
+                    # Ledger digests cover pre-redaction content, which can hold sandbox
+                    # paths. Preserve each blob's equality, as for _no_progress_replay.
+                    text = re.sub(r"[Xx]'([0-9A-Fa-f]*)'", lambda m: "x'" + canonical.ledger_blobs.setdefault(
+                        m.group(1), f"<ledger-blob-{len(canonical.ledger_blobs)}>") + "'", text)
+                emit("sql " + name, text)
 
             def wrap(name: str, original: Callable[..., Any], inject_faults: bool) -> Callable[..., Any]:
                 def observed(*args: Any, **kwargs: Any) -> Any:

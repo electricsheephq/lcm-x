@@ -303,6 +303,8 @@ class Logs(logging.Handler):
 
 
 def install_clock(patch: pytest.MonkeyPatch) -> None:
+    from tests.behaviour.reconcile_trace_harness import install_ledger_salt
+    install_ledger_salt(patch)
     clock = SimpleNamespace(**{name: getattr(time, name) for name in dir(time) if not name.startswith('__')})
     clock.time = lambda: 1700001000.0
     clock.monotonic = clock.perf_counter = lambda: 1000.0

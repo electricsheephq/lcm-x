@@ -67,7 +67,17 @@ def identity_digest(salt, message):
                          str(message.get("tool_name") or message.get("name") or "") if role == "tool" else "")
 
 
+def stamp_text(stamp):
+    """Stored and digested form of a normalized host stamp: the shortest round-trip float text."""
+    if stamp is None or isinstance(stamp, str):
+        return stamp
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        raise LedgerError("stamps must be numbers or text")
+    return repr(float(stamp))
+
+
 def stamp_digest(salt, stamp):
+    stamp = stamp_text(stamp)
     return None if stamp is None else ledger_digest(salt, stamp)
 
 
@@ -251,11 +261,12 @@ def apply_respace(conn, lineage, mapping):
     return count
 
 
-def write_view(conn, salt, lineage, kind, state, entries):
+def write_view(conn, salt, lineage, kind, state, entries, *, view_seq=None, precomputed_chain=None):
     _require_owner(conn)
     entries = list(entries)
-    encoded, chain = encode_entries(entries), prefix_chain(salt, entries)
-    seq = next_view_seq(conn)
+    encoded = encode_entries(entries)
+    chain = prefix_chain(salt, entries) if precomputed_chain is None else precomputed_chain
+    seq = next_view_seq(conn) if view_seq is None else view_seq
     conn.execute("INSERT INTO ingest_views VALUES (?,?,?,?,?,?)", (lineage, seq, kind, state, encoded, chain))
     conn.execute("DELETE FROM ingest_views WHERE lineage=? AND kind=? AND view_seq NOT IN "
                  "(SELECT view_seq FROM ingest_views WHERE lineage=? AND kind=? ORDER BY view_seq DESC LIMIT 2)",

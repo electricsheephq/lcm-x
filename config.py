@@ -267,6 +267,19 @@ def host_message_uid_mode() -> str:
     return raw if raw in _HOST_MESSAGE_UID_MODES else "shadow"
 
 
+_ingest_ledger_mode_warned = False
+
+
+def ingest_ledger_mode() -> str:
+    """Unknown ``LCM_INGEST_LEDGER`` values mean shadow, warning once per process."""
+    global _ingest_ledger_mode_warned
+    raw = (lcm_env_get("LCM_INGEST_LEDGER") or "").strip().lower()
+    if raw and raw not in ("off", "shadow") and not _ingest_ledger_mode_warned:
+        _ingest_ledger_mode_warned = True
+        logger.warning("invalid env LCM_INGEST_LEDGER=%r ignored; using shadow", raw)
+    return raw if raw in ("off", "shadow") else "shadow"
+
+
 def _parse_int_env_with_source(
     key: str,
     default: int,
