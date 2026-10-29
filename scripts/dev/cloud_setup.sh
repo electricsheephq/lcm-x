@@ -40,22 +40,7 @@ export PATH="$repo/.venv/bin:$PATH"
 # pytest run has no PyYAML (config.py falls back to its own parser without it).
 python -m pip install -q PyYAML==6.0.3
 
-# Print the `run:` script of the first step whose name starts with $2, from the composite
-# action or the workflow's `test` job in file $1. A missing step is an error.
-step_script() {
-  python - "$1" "$2" <<'PY'
-import sys
-import yaml
-
-path, prefix = sys.argv[1], sys.argv[2]
-doc = yaml.safe_load(open(path))
-steps = doc["runs"]["steps"] if "runs" in doc else doc["jobs"]["test"]["steps"]
-runs = [step["run"] for step in steps if step.get("name", "").startswith(prefix)]
-if not runs:
-    sys.exit(f"cloud_setup: no step named {prefix!r} in {path}")
-print(runs[0])
-PY
-}
+. "$repo/scripts/dev/ci_step.sh"
 
 # Assign each script first: under `set -e` a failed command substitution inside an argument
 # would not stop the script, and an empty script would "succeed".
@@ -74,14 +59,16 @@ for key in ("version", "url", "sha256"):
 PY
 )"
 
+# GitHub runs a workflow step's script with `bash -e`, and a composite-action step that
+# declares `shell: bash` with `bash -eo pipefail`; each step runs here the same way.
 # 1. CI's test tools. 2. SQLite: CI's build-and-verify step with the action's defaults.
-bash -c "$install"
+bash -e -c "$install"
 : > "$cache/github-env"
-RUNNER_TEMP="$cache" GITHUB_ENV="$cache/github-env" bash -c "$sqlite"
+RUNNER_TEMP="$cache" GITHUB_ENV="$cache/github-env" bash -eo pipefail -c "$sqlite"
 # 3. The hermes-agent ContextEngine stub (agent/ is gitignored).
-bash -c "$stub"
+bash -e -c "$stub"
 # 4. The rollback-reader commits. Without them the old-reader tests fail here (#841).
-if ! bash -c "$rollback"; then
+if ! bash -e -c "$rollback"; then
   echo "cloud_setup: warning: could not fetch the rollback-reader commits; the old-reader tests will fail" >&2
 fi
 # CI's main pytest run has neither YAML library (config.py then uses its own parser); CI's ruamel
