@@ -204,11 +204,20 @@ class SurvivalFitMixin:
         if before <= budget:
             return result
         if exit_fit and window_budget is not None and before > window_budget:
-            return self._survival_fit(messages, result, observed_tokens, reason[len("exit_fit:"):],
-                                      after_exception=after_exception, summary_failure=summary_failure, fit_cause=fit_cause)
-        plan, persisted = self._plan_survival_fit(
-            messages, result, observed_tokens, before, budget, reason, exit_fit=exit_fit,
-            after_exception=after_exception, window_cap=window_cap, request_cap=request_cap)
+            # #2039: keep exit headroom when whole turns suffice, with the plain at-risk semantics.
+            reason = reason[len("exit_fit:"):]
+            # No whole-turn cut: the plain fit below applies and logs its own fit, so no "skipped" line here.
+            plan, persisted = self._plan_survival_fit(
+                messages, result, observed_tokens, before, budget, reason, exit_fit=True,
+                after_exception=after_exception, window_cap=window_cap, request_cap=request_cap, log_skip=False)
+            if plan is None:
+                return self._survival_fit(messages, result, observed_tokens, reason,
+                                          after_exception=after_exception, summary_failure=summary_failure, fit_cause=fit_cause)
+            exit_fit = False
+        else:
+            plan, persisted = self._plan_survival_fit(
+                messages, result, observed_tokens, before, budget, reason, exit_fit=exit_fit,
+                after_exception=after_exception, window_cap=window_cap, request_cap=request_cap)
         if plan is None:
             return result
         fitted = self._apply_survival_fit(result, plan, before, budget, reason,
@@ -225,7 +234,7 @@ class SurvivalFitMixin:
 
     def _plan_survival_fit(self, messages, result, observed_tokens, before: int, budget: int, reason: str, *,
                            exit_fit: bool, after_exception: bool = False, window_cap: Optional[int] = None,
-                           request_cap: Optional[int] = None) -> tuple[Optional[FitPlan], bool]:
+                           request_cap: Optional[int] = None, log_skip: bool = True) -> tuple[Optional[FitPlan], bool]:
         """Select a fit and preserve the pre-cut durability proof for the caller's apply step."""
         system = 0
         while system < len(result) and isinstance(result[system], dict) and result[system].get("role") == "system":
@@ -254,8 +263,9 @@ class SurvivalFitMixin:
             cut = self._survival_cut(result, prefix, budget, persisted, reason, store_ids, True,
                                      keep_from=self._fresh_tail_start(result))
             if cut is None:
-                logger.info("LCM exit fit skipped: no whole-turn cut between the summary prefix and the fresh tail "
-                            "reaches the exit cap (tokens=%d, budget=%d)", before, budget)
+                if log_skip:
+                    logger.info("LCM exit fit skipped: no whole-turn cut between the summary prefix and the fresh tail "
+                                "reaches the exit cap (tokens=%d, budget=%d)", before, budget)
                 return None, persisted
             emergency = False
         else:
