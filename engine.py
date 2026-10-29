@@ -7148,6 +7148,8 @@ class LCMEngine(
         assistant loops replaced by quarantine placeholders. Existing callers may
         ignore the return value when they only need durable persistence.
         """
+        if self._store._transaction_owner.owns_connection(self._store._conn):
+            raise _SqliteSavepointError("Foreground ingest cannot join an enclosing transaction")
         self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
         self._no_progress_ingest_generation = self._ingest_failure_count
         self._ingest_replay_redaction_changes = {}
@@ -7243,6 +7245,7 @@ class LCMEngine(
                                 self.__dict__[name] = (value if name in ("_host_rewrite_store", "_pruned_tool_source_store")
                                                        else copy.copy(value))
                         self._pending_ingest_frontier = copy.deepcopy(self._frontier)
+                        self._identity_anchor_observe_recovery()
                         frozen_replay, _finish = self._ingest_messages_transaction(messages, [], attribution,
                             allow_session_end_replay_proof=allow_session_end_replay_proof)
                     except Exception:
@@ -7616,6 +7619,10 @@ class LCMEngine(
                 accepted = {"accepted_prefix": accepted_compaction_prefix} if accepted_compaction_prefix else {}
                 with self._ingest_evidence(classification=True):
                     anchor_plan = self._identity_anchor_prematch(messages, reconcile_messages, cursor, audit_from, **accepted)
+                if getattr(self, "_ingest_read_only", None) is not None and any(
+                    anchor_plan.get(key) for key in ("backfill", "relations", "ws", "carry")
+                ):
+                    raise sqlite3.OperationalError("session-end evidence deferred")
                 anchor_plan["replayed"] -= replayed_tool_segment_indexes
                 # A reused stamp cannot override positive evidence of a new uid.
                 anchor_plan["replayed"] -= new_prefix_occurrences
@@ -7631,7 +7638,7 @@ class LCMEngine(
                 anchor_plan = None
                 if audit_from is not None:
                     unaudited_from = audit_from
-                    self._record_ingest_failure("identity-anchor pre-match", exc)
+                    after_commit.append(lambda exc=exc: self._record_ingest_failure("identity-anchor pre-match", exc))
             if anchor_plan and anchor_plan["cursor"] < cursor:
                 cursor = anchor_plan["cursor"]
                 self._ingest_cursor = cursor

@@ -237,8 +237,10 @@ class HostUidShadowMixin:
                 error = self._host_uid_classify(capture, stored_at or {}, set(remainders or ()), delta)
         except Exception as exc:
             self._raise_ingest_busy(exc)
-            delta["errors"] += 1
-            error = exc
+            if not (getattr(self, "_ingest_read_only", None) is not None
+                    and str(exc) == "session-end evidence deferred"):
+                delta["errors"] += 1
+                error = exc
         try:
             self._host_uid_count(delta, error)
         except Exception as exc:  # Shadow counting remains best-effort.

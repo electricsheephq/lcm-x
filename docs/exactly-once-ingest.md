@@ -55,7 +55,7 @@ Tracker: #1993 (v0.30.0, "nothing lost"). Status: reviewed; ready for phase P1 (
   - An unknown absorbed uid classifies its own constituent. A merged scaffold's outer uid is engine-minted, so its match may come from rank 2.
 - **E5b Same-stamp rules.**
   - Same stamp, and the identity is in the stored occurrence's alias set: REPLAY, subject to E5c and E2b.
-    - The alias set covers the pruned-tool alias (#773), host-rewrite overrides, carrier strip (the reconcile.py:924 aliases), and an externalized stub equal to its raw output (reconcile.py:993-1051, #588).
+    - The alias set covers the pruned-tool alias (`reconcile.py::_pruned_tool_output_identity`, #773), host-rewrite overrides, carrier strip (`reconcile.py::_message_replay_identity` via `_generated_context_carrier_remainder`), and an externalized stub equal to its raw output (`reconcile.py::_message_replay_identity` via `load_externalized_payload`, #588).
     - It applies at rank 2, and at rank 3 when the incoming row has no stamp (scoped to the user anchor).
   - Same stamp, and the identity extends the stored one: PARTIAL (the §3.4.6 guards).
   - Same stamp, any other identity: NEW plus `possible_replay_of`.
@@ -111,7 +111,7 @@ A replay with an unchanged stamp writes nothing except the view vector.
    - **carried_stamp:** an LCM carrier row arrived carrying its source occurrence's stamp.
    - **source** is `ledger`, or `legacy` when it is read from a legacy relation (§3.6).
    - An observation is usable from the next view on. A row never certifies itself with the stamp it brought (Astra 7).
-   - At most 4 per occurrence and kind (L3-8, L5-9). Reaching the cap on 3 occurrences of a lineage marks the lineage stamp_unreliable (M14).
+   - At most 4 per occurrence and kind (L3-8, L5-9). Reaching the cap on 3 distinct occurrences of a lineage, each capped in either kind (an occurrence capped in both kinds counts once), marks the lineage stamp_unreliable (M14).
    - Readers that need host time for a NULL `observed_at` take the binding's stamp, or else the earliest observation (#1978, L5-10).
 5. **View vectors (M10):** `ingest_views(lineage, view_seq, kind, state, entries BLOB, prefix_chain BLOB)`.
    - Kind is ingest or emission.
@@ -127,7 +127,7 @@ A replay with an unchanged stamp writes nothing except the view vector.
 
 Two definitions:
 - **The durable cursor** is the newest ingest vector. A cold start finds the anchored run against it (§3.4.2). At P1 that run is one more candidate in today's cursor choice, never a replacement for tail matching (§5); at P2 it is the classifier's base.
-- **identity_digest** is a per-store salted digest of the PRE-redaction identity tuple (M4). A redaction-policy change therefore cannot change a ledger-era identity (#758), The salt stops precomputed lookups across stores. A reader of the same file holds the salt and can still test a guessed text, so the digests are not a confidentiality control. Pre-ledger rows keep today's matching until they are migrated (§3.6).
+- **identity_digest** is a per-store salted digest of the PRE-redaction identity tuple (M4). A redaction-policy change therefore cannot change a ledger-era identity (#758). The salt stops precomputed lookups across stores. A reader of the same file holds the salt and can still test a guessed text, so the digests are not a confidentiality control. Pre-ledger rows keep today's matching until they are migrated (§3.6).
 
 ### 3.2 One transaction per ingest
 In order:

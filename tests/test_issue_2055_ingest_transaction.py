@@ -6,6 +6,7 @@ import gc
 import json
 import sqlite3
 import threading
+from collections import Counter
 from contextlib import contextmanager, nullcontext
 
 import pytest
@@ -466,11 +467,28 @@ def test_post_commit_cache_failure_never_restores_old_cursor(ingest_case, monkey
 
 
 @pytest.mark.parametrize("failures", [0, 1, 2])
-def test_busy_snapshot_restarts_classification_once(ingest_case, monkeypatch, failures):
+def test_busy_snapshot_restarts_classification_once(ingest_case, monkeypatch, tmp_path, failures):
+    from tests.harness import make_engine
+
     engine, seed, host = ingest_case
     append, classify = engine._store._append_protected_batch, engine._capture_host_rewrites
     classifications, inserts = [], []
     before = durable(engine)
+    # A7 lock-in: an independent fresh connection starts from exactly the same seed.
+    clean_path = tmp_path / "clean"
+    clean_path.mkdir()
+    with sqlite3.connect(clean_path / "lcm.db") as conn:
+        engine._store._conn.backup(conn)
+    clean = make_engine(clean_path, fresh_tail_count=2, leaf_chunk_tokens=1)
+    clean._hermes_home = engine._hermes_home  # Keep the home-scoped lineage identical.
+    clean._store._hermes_home = engine._hermes_home
+    try:
+        clean.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")
+        monkeypatch.setattr("hermes_lcm.store.time.time", lambda: 1_700_000_000.)
+        clean.ingest(copy.deepcopy(host))
+        expected = durable(clean)
+    finally:
+        clean.shutdown()
 
     def classified(messages):
         classifications.append(True)
@@ -480,6 +498,7 @@ def test_busy_snapshot_restarts_classification_once(ingest_case, monkeypatch, fa
         inserts.append(True)
         result = append(*args, **kwargs)
         if len(inserts) <= failures:
+            engine._store.write_metadata_json(["retry-probe"], "true")
             error = sqlite3.OperationalError("injected busy snapshot")
             error.sqlite_errorcode = sqlite3.SQLITE_BUSY_SNAPSHOT
             raise error
@@ -497,6 +516,10 @@ def test_busy_snapshot_restarts_classification_once(ingest_case, monkeypatch, fa
         assert engine._ingest_cursor_needs_reconcile
         engine.ingest(host)
     assert [row["content"] for row in engine._store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
+    actual = durable(engine)
+    actual["metadata"] = [row for row in actual["metadata"] if row[0] != "retry-probe"]
+    assert actual == expected
+    assert engine._store.read_metadata_json("retry-probe") is None
     engine.ingest(host)
     assert [row["content"] for row in engine._store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
 
@@ -615,7 +638,7 @@ def test_copied_context_cannot_join_enclosing_transaction(ingest_case):
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
 
 
-def test_foreign_lineage_lock_counts_error_and_commits_rows(ingest_case, monkeypatch):
+def test_foreign_lineage_lock_counts_error_and_commits_rows(ingest_case, monkeypatch, caplog):
     engine, _seed, host = ingest_case
     engine._host_uid_lineage_cache = {}
     previous = engine._host_uid_counters.get("errors", 0)
@@ -629,6 +652,7 @@ def test_foreign_lineage_lock_counts_error_and_commits_rows(ingest_case, monkeyp
     engine._ingest_messages(host)
     assert [row["content"] for row in engine._store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
     assert engine._host_uid_counters.get("errors", 0) == previous + 1
+    assert sum("LCM host-uid shadow failed" in record.getMessage() for record in caplog.records) == 1
     assert engine._ingest_failure_count == 0 and not engine._last_ingest_attribution["busy_snapshot_retry"]
 
 
@@ -810,7 +834,7 @@ def test_session_end_classifies_read_only_and_freezes_once(ingest_case, monkeypa
     assert [row["content"] for row in engine._store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
 
 
-def test_session_end_read_only_shadow_keeps_tally_in_memory(ingest_case, monkeypatch):
+def test_session_end_read_only_shadow_keeps_tally_in_memory(ingest_case, monkeypatch, caplog):
     from hermes_lcm.host_uid import HOST_UID_COUNTER_KEY
 
     engine, _seed, host = ingest_case
@@ -860,12 +884,207 @@ def test_session_end_read_only_shadow_keeps_tally_in_memory(ingest_case, monkeyp
         locker.close()
     assert fallback == [True] and len(counted) == 1
     delta, previous, current = counted[0]
-    assert delta["errors"] == 1
-    assert current["errors"] == previous.get("errors", 0) + 1
+    assert delta.get("errors", 0) == 0
+    assert current.get("errors", 0) == previous.get("errors", 0)
+    assert not any("LCM host-uid shadow failed" in record.getMessage() for record in caplog.records)
     assert not writes and not any(sql.lstrip().upper().startswith("BEGIN") for sql in statements)
     assert store.read_metadata_json(HOST_UID_COUNTER_KEY) == before
     assert engine._pending_session_tails == []
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply"]
+
+
+def test_read_only_backfill_plan_falls_back_to_anchor_disabled_tail(ingest_case, monkeypatch):
+    """A2: a frozen decision cannot rely on a backfill the pass cannot persist."""
+    engine, seed, host = ingest_case
+    store, plans, backfills, observations = engine._store, [], [], []
+    prematch, capture = engine._identity_anchor_prematch, engine._host_uid_capture
+    observe = engine._identity_anchor_observe_recovery
+
+    def needs_backfill(*args, **kwargs):
+        plan = prematch(*args, **kwargs)
+        assert store.get(seed)["observed_at"] is None
+        assert not any(plan.get(key) for key in ("relations", "ws", "carry"))
+        plan["backfill"].append((seed, 10.))
+        backfills.append(list(plan["backfill"]))
+        return plan
+
+    def captured(*args, **kwargs):
+        if getattr(engine, "_ingest_read_only", None) is not None:
+            plans.append(args[4])
+        return capture(*args, **kwargs)
+
+    def observed():
+        if getattr(engine, "_ingest_read_only", None) is not None:
+            observations.append(True)
+        return observe()
+
+    monkeypatch.setattr(engine, "_identity_anchor_prematch", needs_backfill)
+    monkeypatch.setattr(engine, "_host_uid_capture", captured)
+    monkeypatch.setattr(engine, "_identity_anchor_observe_recovery", observed)
+    locker = sqlite3.connect(store.db_path)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        # The same fixture/view without the anchor is the ordered-prefix baseline.
+        with monkeypatch.context() as patch:
+            patch.setenv("LCM_IDENTITY_ANCHOR", "off")
+            engine.on_session_end("S", copy.deepcopy(host))
+        assert len(engine._pending_session_tails) == 1
+        expected = copy.deepcopy(engine._pending_session_tails[0]["messages"])
+        engine._pending_session_tails.clear()
+        plans.clear()
+        observations.clear()
+        engine.on_session_end("S", copy.deepcopy(host))
+        assert backfills == [[(seed, 10.)]]
+        assert plans == [None]
+        assert observations == [True]
+        assert len(engine._pending_session_tails) == 1
+        assert engine._pending_session_tails[0]["messages"] == expected
+    finally:
+        locker.rollback()
+        locker.close()
+
+
+@pytest.mark.parametrize("fail_committing_attempt", [False, True])
+def test_prematch_failure_is_counted_only_after_commit(ingest_case, monkeypatch, fail_committing_attempt):
+    """A3: the callback of the BUSY-aborted attempt must never be published."""
+    engine, _seed, host = ingest_case
+    engine.ingest(host[:2])
+    host = [{**host[0], "content": "changed seed"}, *host[1:]]
+    prematch, append = engine._identity_anchor_prematch, engine._store._append_protected_batch
+    matches, inserts, recorded = [], [], []
+    record = engine._record_ingest_failure
+
+    def matched(messages, identities, cursor, audit_from, **kwargs):
+        assert audit_from is not None  # This is the failure-recording audit path.
+        matches.append(True)
+        if len(matches) == 1 or fail_committing_attempt:
+            raise RuntimeError("injected pre-match failure")
+        return prematch(messages, identities, cursor, audit_from, **kwargs)
+
+    def appended(*args, **kwargs):
+        inserts.append(True)
+        result = append(*args, **kwargs)
+        if len(inserts) == 1:
+            error = sqlite3.OperationalError("injected busy snapshot")
+            error.sqlite_errorcode = sqlite3.SQLITE_BUSY_SNAPSHOT
+            raise error
+        return result
+
+    def recorded_failure(where, error):
+        assert not engine._store._conn.in_transaction
+        recorded.append(where)
+        return record(where, error)
+
+    monkeypatch.setattr(engine, "_identity_anchor_prematch", matched)
+    monkeypatch.setattr(engine._store, "_append_protected_batch", appended)
+    monkeypatch.setattr(engine, "_record_ingest_failure", recorded_failure)
+    engine._ingest_messages(host)
+    assert len(matches) == len(inserts) == 2
+    assert recorded == (["identity-anchor pre-match"] if fail_committing_attempt else [])
+    assert engine._ingest_failure_count == int(fail_committing_attempt)
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+def test_other_thread_evidence_never_joins_foreground_owner(ingest_case, rollback):
+    """A5 lock-in: B has neither A's context ownership nor A's savepoint name."""
+    engine, _seed, _host = ingest_case
+    store, attempted, done = engine._store, threading.Event(), threading.Event()
+    statements, errors, ownership, refused = [], [], [], []
+
+    def writer():
+        try:
+            ownership.append(store._transaction_owner.owns_connection(store._conn))
+            engine._host_uid_count(Counter(errors=1))
+            ownership.append(store._transaction_owner.owns_connection(store._conn))
+            attempted.set()
+            with engine._ingest_evidence():
+                store.write_metadata_json(["other-thread-evidence"], "true")
+        except sqlite3.Error:
+            refused.append(True)  # Refusal is also safe; no write may join A's transaction.
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=writer)
+    store._conn.set_trace_callback(lambda sql: statements.append((threading.get_ident(), sql)))
+    try:
+        with pytest.raises(Crash) if rollback else nullcontext():
+            with store.ingest_atomic():
+                store.write_metadata_json(["foreground-owner-probe"], "true")
+                thread.start()
+                assert attempted.wait(2)
+                assert not done.wait(.05) or refused
+                assert store._conn.execute("SELECT 1 FROM metadata WHERE key='other-thread-evidence'").fetchone() is None
+                if rollback:
+                    raise Crash()
+    finally:
+        thread.join(6)
+        store._conn.set_trace_callback(None)
+    assert done.is_set() and not thread.is_alive() and not errors
+    assert ownership == [False, False]
+    worker_sql = [sql for ident, sql in statements if ident == thread.ident]
+    assert not any(sql.startswith("SAVEPOINT lcm_ingest") for sql in worker_sql)
+    writes = [index for index, (ident, sql) in enumerate(statements)
+              if ident == thread.ident and "INSERT INTO metadata" in sql]
+    terminal = next(index for index, (_ident, sql) in enumerate(statements)
+                    if sql == ("ROLLBACK" if rollback else "COMMIT"))
+    assert all(index > terminal for index in writes)
+    assert store.read_metadata_json("other-thread-evidence") is True or not writes
+
+
+def test_nested_snapshot_retry_runs_once_per_classification(ingest_case, monkeypatch):
+    """A6 lock-in: the append helper delegates BUSY_SNAPSHOT to the outer owner."""
+    import hermes_lcm.store as store_module
+
+    engine, _seed, host = ingest_case
+    retry, classify = store_module._run_sqlite_write_with_snapshot_retry, engine._capture_host_rewrites
+    classifications, runs = [], []
+
+    def classified(messages):
+        classifications.append(True)
+        return classify(messages)
+
+    def nested_retry(conn, operation, **kwargs):
+        def busy_once():
+            runs.append(len(classifications))
+            if len(runs) == 1:
+                error = sqlite3.OperationalError("injected busy snapshot")
+                error.sqlite_errorcode = sqlite3.SQLITE_BUSY_SNAPSHOT
+                raise error
+            return operation()
+        return retry(conn, busy_once, **kwargs)
+
+    monkeypatch.setattr(engine, "_capture_host_rewrites", classified)
+    monkeypatch.setattr(store_module, "_run_sqlite_write_with_snapshot_retry", nested_retry)
+    engine._ingest_messages(host)
+    assert len(classifications) == 2 and runs == [1, 2]
+    assert [row["content"] for row in engine._store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
+
+
+def test_refused_nested_ingest_preserves_outer_attempt_state(ingest_case, monkeypatch):
+    """A11: enter through the classifier while the real foreground owner is open."""
+    engine, _seed, host = ingest_case
+    classify, seen = engine._capture_host_rewrites, []
+
+    def classified(messages):
+        pending = engine._pending_ingest_frontier
+        published = copy.deepcopy(vars(engine._frontier))
+        memory = dict(engine.__dict__)
+        assert engine._store._transaction_owner.owns_connection(engine._store._conn)
+        with pytest.raises(_SqliteSavepointError, match="Foreground ingest cannot join an enclosing transaction"):
+            engine._ingest_messages([_m("user", "nested", 30.)])
+        assert engine._pending_ingest_frontier is pending
+        assert vars(engine._frontier) == published
+        assert engine.__dict__.keys() == memory.keys()
+        assert all(engine.__dict__[name] is value for name, value in memory.items())
+        seen.append(True)
+        return classify(messages)
+
+    monkeypatch.setattr(engine, "_capture_host_rewrites", classified)
+    engine._ingest_messages(host)
+    assert seen == [True]
+    assert [row["content"] for row in engine._store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
 
 
 def test_batched_negative_relation_probe_is_cached_inside_a_transaction(tmp_path):

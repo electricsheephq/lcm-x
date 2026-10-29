@@ -142,6 +142,8 @@ content decision:
 - the `host_uid_*` counters in `/lcm doctor`;
 - the proof kinds `stored_new`, `version_new` and `anchor_replay`.
 
+A session-end pass deferred under contention is absent from the durable host-uid tally because `_retry_pending_session_tails` does not recount uids; this affects counters only, never stored rows.
+
 `on` mode changes which answer is applied. The counters keep running, so a disagreement stays visible.
 
 **What `on` mode saves, and what it does not.**
