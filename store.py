@@ -622,7 +622,8 @@ class MessageStore:
                 self._manual_chunk_backlog_pending = True
                 return  # Outside foreground ingest, retain the caller's deferred marker boundary.
             self._manual_chunk_backlog_pending = False
-            with (_sqlite_savepoint(self._conn, abort_on_cleanup_failure=True, owner_active=True)
+            with (_sqlite_savepoint(self._conn, abort_on_cleanup_failure=True, owner_active=True,
+                                    foreground_ingest=getattr(self, "_foreground_ingest_owner", False))
                   if self._transaction_owner.owns_connection(self._conn) else nullcontext()):
                 self._write_manual_chunk_backlog()
         except Exception as exc:
@@ -804,6 +805,9 @@ class MessageStore:
             return ids
 
         with self._write_lock:
+            if (getattr(self, "_foreground_ingest_owner", False)
+                    and self._transaction_owner.owns_connection(conn) and not conn.in_transaction):
+                raise _SqliteSavepointError("Foreground ingest transaction lost before INSERT")
             ids = _run_sqlite_write_with_snapshot_retry(
                 conn,
                 insert_messages,

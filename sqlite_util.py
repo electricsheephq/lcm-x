@@ -117,13 +117,15 @@ class _SqliteSavepointError(RuntimeError):
 
 @contextmanager
 def _sqlite_savepoint(conn: sqlite3.Connection, *, abort_on_cleanup_failure: bool = False,
-                      owner_active: bool = False) -> Iterator[None]:
+                      owner_active: bool = False, foreground_ingest: bool = False) -> Iterator[None]:
     """Isolate helper writes without taking ownership of a caller transaction."""
     # Owned scopes nest with SQLite's innermost-name semantics. Stable names
     # keep diagnostic observers from changing the ordered write trace.
     owner_active = owner_active and TransactionOwner.owns_connection(conn)
     name = "lcm_ingest" if owner_active else f"lcm_{uuid.uuid4().hex}"
     if owner_active and not conn.in_transaction:
+        if foreground_ingest:
+            raise _SqliteSavepointError("Foreground ingest transaction lost before SAVEPOINT")
         conn.execute("BEGIN IMMEDIATE")  # RELEASE must never commit an empty owner's transaction.
     conn.execute(f"SAVEPOINT {name}")
     try:

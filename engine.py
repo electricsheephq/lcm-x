@@ -179,7 +179,7 @@ from .sqlite_util import (
     _temporary_sqlite_busy_timeout,
 )
 from .store import MessageStore, _normalize_conversation_id_value, _normalize_observed_at
-from .tokens import count_message_tokens, count_messages_tokens, count_tokens
+from .tokens import _get_encoder, count_message_tokens, count_messages_tokens, count_tokens
 from .assembly_plan import PrefixBudgetFacts, default_prefix_budget, select_prefix, select_tail
 from .frontier_state import FrontierState
 from . import tools as lcm_tools
@@ -7150,6 +7150,10 @@ class LCMEngine(
             return self._redact_active_replay_messages(messages)
 
         sender_capture.try_update(self)
+        try:
+            _get_encoder()  # The first bounded encoder wait must precede BEGIN.
+        except Exception:
+            pass  # Token counting retains its existing estimator fallback.
         attribution = self._last_ingest_attribution = dict(
             lock_hold_ms=0.0, rows_written=0, bytes_written=0, busy_snapshot_retry=False)
         admission_retry = False
@@ -7315,7 +7319,8 @@ class LCMEngine(
         schemas = {name: getattr(self._store, name, False)
                    for name in ("_pending_relation_schema", "_pending_host_uid_schema")}
         try:
-            with _sqlite_savepoint(self._store._conn, abort_on_cleanup_failure=True, owner_active=True):
+            with _sqlite_savepoint(self._store._conn, abort_on_cleanup_failure=True, owner_active=True,
+                                   foreground_ingest=getattr(self._store, "_foreground_ingest_owner", False)):
                 yield
         except BaseException:
             for name, value in schemas.items():

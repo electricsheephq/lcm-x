@@ -183,6 +183,86 @@ def test_fault_at_each_former_commit(ingest_case, monkeypatch, caplog, boundary,
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
 
 
+@pytest.mark.parametrize("load_fails", [False, True])
+def test_encoder_warmup_precedes_begin_and_runs_once_across_retry(ingest_case, monkeypatch, load_fails):
+    import hermes_lcm.engine as engine_module
+
+    engine, _seed, host = ingest_case
+    store, events, attempts = engine._store, [], []
+    reserve = store.ingest_atomic
+
+    def encoder_load():
+        events.append(("encoder", store._conn.in_transaction))
+        if load_fails:
+            raise RuntimeError("encoder unavailable")
+
+    @contextmanager
+    def admission(**kwargs):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        with reserve(**kwargs):
+            yield
+
+    monkeypatch.setattr(engine_module, "_get_encoder", encoder_load)
+    monkeypatch.setattr(store, "ingest_atomic", admission)
+    store._conn.set_trace_callback(lambda sql: events.append(("begin", True)) if sql == "BEGIN IMMEDIATE" else None)
+    try:
+        engine._ingest_messages(host)
+    finally:
+        store._conn.set_trace_callback(None)
+    assert events == [("encoder", False), ("begin", True)] and len(attempts) == 2
+    assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
+
+
+@pytest.mark.parametrize("boundary", ["SAVEPOINT", "INSERT"])
+def test_lost_ingest_transaction_aborts_instead_of_reopening(ingest_case, monkeypatch, boundary):
+    engine, seed, host = ingest_case
+    store, lost = engine._store, []
+    before, failures = durable(engine), engine._ingest_failure_count
+
+    def read():
+        assert store._transaction_owner.owns_connection(store._conn)
+        store.write_metadata_json(["lost-owner-evidence"], "true")
+        store._conn.execute("SELECT 1").fetchone()
+        if not lost:
+            lost.append(True)
+            store._conn.execute("ROLLBACK")
+            raise sqlite3.OperationalError("simulated transaction-aborting read")
+
+    if boundary == "SAVEPOINT":
+        original = engine._durable_commit_proof_payload
+
+        def proof(*args, **kwargs):
+            if store._transaction_owner.owns_connection(store._conn) and not engine._ingest_cursor_needs_reconcile:
+                read()  # The classifier catches this read failure before its next evidence scope.
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(engine, "_durable_commit_proof_payload", proof)
+    else:
+        original = store._append_protected_batch
+
+        def append(*args, **kwargs):
+            try:
+                read()
+            except sqlite3.Error:
+                pass  # Model a swallowed read error immediately before the owned INSERT.
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(store, "_append_protected_batch", append)
+    engine.ingest(host)
+    assert lost == [True] and engine._ingest_failure_count == failures + 1
+    assert engine._last_ingest_error == "_SqliteSavepointError: Foreground ingest transaction lost before " + boundary
+    assert durable(engine) == before and not store._conn.in_transaction
+    engine.ingest(host)
+    assert engine._ingest_failure_count == failures + 1
+    assert store.read_metadata_json("lost-owner-evidence") is True
+    assert store.get(seed)["observed_at"] == 10.
+    assert len(store._conn.execute("SELECT 1 FROM host_uid_bindings WHERE uid='fresh-uid'").fetchall()) == 1
+    engine.ingest(host)
+    assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
+
+
 def test_crash_after_savepoint_release_rolls_back_whole_ingest(ingest_case, monkeypatch):
     engine, seed, host = ingest_case
     before, released = durable(engine), []
