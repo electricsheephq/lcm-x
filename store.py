@@ -1986,6 +1986,8 @@ class MessageStore:
                 self._foreground_ingest_owner = True
                 try:
                     yield
+                    if not self._conn.in_transaction:
+                        raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT")
                 finally:
                     self._foreground_ingest_owner = previous
 

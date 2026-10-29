@@ -215,7 +215,7 @@ def test_encoder_warmup_precedes_begin_and_runs_once_across_retry(ingest_case, m
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
 
 
-@pytest.mark.parametrize("boundary", ["SAVEPOINT", "INSERT"])
+@pytest.mark.parametrize("boundary", ["SAVEPOINT", "INSERT", "COMMIT"])
 def test_lost_ingest_transaction_aborts_instead_of_reopening(ingest_case, monkeypatch, boundary):
     engine, seed, host = ingest_case
     store, lost = engine._store, []
@@ -239,7 +239,7 @@ def test_lost_ingest_transaction_aborts_instead_of_reopening(ingest_case, monkey
             return original(*args, **kwargs)
 
         monkeypatch.setattr(engine, "_durable_commit_proof_payload", proof)
-    else:
+    elif boundary == "INSERT":
         original = store._append_protected_batch
 
         def append(*args, **kwargs):
@@ -250,11 +250,24 @@ def test_lost_ingest_transaction_aborts_instead_of_reopening(ingest_case, monkey
             return original(*args, **kwargs)
 
         monkeypatch.setattr(store, "_append_protected_batch", append)
+    else:
+        original = engine._ingest_messages_transaction
+
+        def transaction(*args, **kwargs):
+            result = original(*args, **kwargs)
+            try:
+                read()
+            except sqlite3.Error:
+                pass  # Model a swallowed read error after the last owned statement.
+            return result
+
+        monkeypatch.setattr(engine, "_ingest_messages_transaction", transaction)
     engine.ingest(host)
     assert lost == [True] and engine._ingest_failure_count == failures + 1
     assert engine._last_ingest_error == "_SqliteSavepointError: Foreground ingest transaction lost before " + boundary
     assert durable(engine) == before and not store._conn.in_transaction
     engine.ingest(host)
+    assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
     assert engine._ingest_failure_count == failures + 1
     assert store.read_metadata_json("lost-owner-evidence") is True
     assert store.get(seed)["observed_at"] == 10.
