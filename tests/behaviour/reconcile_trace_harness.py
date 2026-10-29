@@ -363,7 +363,14 @@ def snapshot(engine: Any, canonical: Canonical) -> dict[str, Any]:
     return state
 
 
+def install_ledger_salt(patch: pytest.MonkeyPatch) -> None:
+    """Test-only salt hook: stable SQL blobs without changing production entropy."""
+    store = importlib.import_module("hermes_lcm.store")
+    patch.setattr(store, "secrets", SimpleNamespace(token_bytes=lambda size: b"l" * size))
+
+
 def install_clock(patch: pytest.MonkeyPatch) -> None:
+    install_ledger_salt(patch)
     clock = SimpleNamespace(**{name: getattr(time, name) for name in dir(time) if not name.startswith("__")})
     clock.time = lambda: 1700001000.0
     clock.monotonic = clock.perf_counter = lambda: 1000.0

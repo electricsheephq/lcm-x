@@ -55,7 +55,7 @@ Tracker: #1993 (v0.30.0, "nothing lost"). Status: reviewed; ready for phase P1 (
   - An unknown absorbed uid classifies its own constituent. A merged scaffold's outer uid is engine-minted, so its match may come from rank 2.
 - **E5b Same-stamp rules.**
   - Same stamp, and the identity is in the stored occurrence's alias set: REPLAY, subject to E5c and E2b.
-    - The alias set covers the pruned-tool alias (#773), host-rewrite overrides, carrier strip (the reconcile.py:924 aliases), and an externalized stub equal to its raw output (reconcile.py:993-1051, #588).
+    - The alias set covers the pruned-tool alias (`reconcile.py::_pruned_tool_output_identity`, #773), host-rewrite overrides, carrier strip (`reconcile.py::_message_replay_identity` via `_generated_context_carrier_remainder`), and an externalized stub equal to its raw output (`reconcile.py::_message_replay_identity` via `load_externalized_payload`, #588).
     - It applies at rank 2, and at rank 3 when the incoming row has no stamp (scoped to the user anchor).
   - Same stamp, and the identity extends the stored one: PARTIAL (the §3.4.6 guards).
   - Same stamp, any other identity: NEW plus `possible_replay_of`.
@@ -108,10 +108,10 @@ A replay with an unchanged stamp writes nothing except the view vector.
    - A recovery emission records (emission, observed stamp, recovered store_id) on the first ingest that observes it (A11, #1523).
 4. **Stamp observations:** `stamp_observations(lineage, occ_id, stamp, kind, view_seq, source)`.
    - **alt_stamp:** the occurrence arrived bound strongly (rank 1 or the anchored run) with a stamp not yet recorded for it.
-   - **carried_stamp:** an LCM carrier row arrived carrying its source occurrence's stamp.
+   - **carried_stamp:** the row was stored at its absent predecessor's stamp, carried, not observed from the host. The LCM carrier's stamp lives in `ledger_emissions.observed_stamp` (P1c).
    - **source** is `ledger`, or `legacy` when it is read from a legacy relation (§3.6).
    - An observation is usable from the next view on. A row never certifies itself with the stamp it brought (Astra 7).
-   - At most 4 per occurrence and kind (L3-8, L5-9). Reaching the cap on 3 occurrences of a lineage marks the lineage stamp_unreliable (M14).
+   - At most 4 per occurrence and kind (L3-8, L5-9). Reaching the cap on 3 distinct occurrences of a lineage, each capped in either kind (an occurrence capped in both kinds counts once), marks the lineage stamp_unreliable (M14).
    - Readers that need host time for a NULL `observed_at` take the binding's stamp, or else the earliest observation (#1978, L5-10).
 5. **View vectors (M10):** `ingest_views(lineage, view_seq, kind, state, entries BLOB, prefix_chain BLOB)`.
    - Kind is ingest or emission.
@@ -127,7 +127,7 @@ A replay with an unchanged stamp writes nothing except the view vector.
 
 Two definitions:
 - **The durable cursor** is the newest ingest vector. A cold start finds the anchored run against it (§3.4.2). At P1 that run is one more candidate in today's cursor choice, never a replacement for tail matching (§5); at P2 it is the classifier's base.
-- **identity_digest** is a per-store salted digest of the PRE-redaction identity tuple (M4). A redaction-policy change therefore cannot change a ledger-era identity (#758), The salt stops precomputed lookups across stores. A reader of the same file holds the salt and can still test a guessed text, so the digests are not a confidentiality control. Pre-ledger rows keep today's matching until they are migrated (§3.6).
+- **identity_digest** is a per-store salted digest of the PRE-redaction identity tuple (M4). A redaction-policy change therefore cannot change a ledger-era identity (#758). The salt stops precomputed lookups across stores. A reader of the same file holds the salt and can still test a guessed text, so the digests are not a confidentiality control. Pre-ledger rows keep today's matching until they are migrated (§3.6).
 
 ### 3.2 One transaction per ingest
 In order:
@@ -156,7 +156,7 @@ Rules:
 - A rank-1 disagreement blocks any rebind.
 - Concurrent writers serialize on the lock. The UNIQUE indexes are a backstop that sends the loser back to classify again (M5).
 - Today's decision evidence (the C1 data) is written inside the same transaction and gets no commit of its own. The classifier reads it back on the same connection. Under the fallback in step 2 it is staged in memory instead.
-- **At P1 the writers on the ingest path defer to the ingest transaction's owner** (`store.atomic`, store.py:1757):
+- **At P1 the writers on the ingest path defer to the ingest transaction's owner** (`MessageStore.ingest_atomic`):
   - `backfill_observed_at_many` and the insert retry wrapper (sqlite_util.py:53-74) drop their own `with conn:`, which would commit or roll back the open transaction;
   - `_host_uid_write` (store.py:1325) and `_host_uid_count` (host_uid.py:479) join the transaction instead of refusing it;
   - `update_metadata_json` (store.py:1784), which opens its own `BEGIN IMMEDIATE`, is not called inside it;
@@ -164,6 +164,24 @@ Rules:
   - the tests that pin the own-transaction rule change with them (test_host_uid_shadow.py:1012 and the ingest-trace golden test).
 - Faulted ingests close here (#1815: three shapes that duplicate or skip the retry). A failed transaction leaves no partial evidence, and the retry classifies again.
 - Each ingest counts its lock-hold time, rows classified, rank-5 DP cells, bytes written, cost fallbacks and re-spacings. These are the §5 instruments.
+
+P1 shadow notes (P1b-2b, `LCM_INGEST_LEDGER=shadow`, default; `off` preserves Part A's SQL stream):
+- **X1:** all ledger writes use one strict SAVEPOINT inside `MessageStore.ingest_atomic`; ordinary isolated failures fail open, while busy errors, cancellation and integrity loss keep owner semantics.
+- **X2:** existing vector bits are stamp 1, uidset 2, descriptor 4, unbound 8.
+- **X3:** the frozen-tail drain and delegated-child S3 path write no ledger rows; their unbound rows await P1g.
+- **X4:** `key_rank` is NULL; ranks are P2.
+- **X5:** alt_stamp observations require a bound same-lineage occurrence and successful evidence-savepoint release at today's relation sites.
+- **X6:** `add_stamp_observation` retains its existing trigger; nothing reads `stamp_policy` for decisions.
+- **X7:** P1 does not re-read `PRAGMA data_version`.
+- **X8:** `view_seq` is store-global, shared by an ingest's bindings and vector, and allocated only when needed.
+- **X9:** `plan_ordinals` places new rows in view order between pre-existing same-lineage neighbours; crossed bounds skip the ledger batch, and respacing is atomic and logged at INFO.
+- **X10:** `MessageStore.ingest_atomic` owns the transaction; ledger setup occurs separately at session start.
+- **X11:** no store-mark advancement until P1g proves coverage of earlier unbound rows, including failed ledger batches, drain and S3 writes.
+- **X12:** missing named non-fork ancestry is provisional only for the ledger, bypasses the legacy cache, and is never persisted; persisted complete lineage wins over later unresolved or drifting lookups.
+- **X13:** an ingest vector carries a ref only for a row that this ingest stores or that the identity anchor matches to exactly one binding. A prefix row the anchor does not match, as on an ordinary append, is unbound in the new vector. Carrying refs across a verified prefix is new matching, left to the cold-start cursor reader, which needs it before it reads a vector.
+- **X14:** the persisted lineage is keyed by session id, as the store keys session rows. A store shared by two Hermes homes that reuse one session id keeps the first home's lineage and counts `ledger.lineage_drift`; P1f revisits the key.
+- **R3/R17 deviation:** skip an equal-prefix-chain ingest vector when no new binding, observation or newly resolved ref changes it; an unavailable mapping alone does not invalidate the prior vector. This avoids per-turn write load on no-op turns.
+- Preparation hashes the full raw view before BEGIN, including absorbed uids, and records `ledger_digest_ms`; the savepoint records `ledger_ms` within lock hold. Latency on real hosts remains unproven.
 
 ### 3.3 Emissions: proposed, adopted or refused (A4)
 **M10, the generation model.**

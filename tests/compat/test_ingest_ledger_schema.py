@@ -41,7 +41,10 @@ def _snapshot(conn, tables):
     return result
 
 
-def test_previous_ga_store_upgrades_without_row_changes(tmp_path, old_tree, host_root):
+def test_previous_ga_store_upgrades_without_row_changes(tmp_path, old_tree, host_root, monkeypatch):
+    # Shadow mode creates the ledger at session start (test_forward_migration.py covers that path);
+    # off leaves this explicit setup call as the only writer.
+    monkeypatch.setenv("LCM_INGEST_LEDGER", "off")
     report = run_old(old_tree(PREVIOUS_GA, READERS), tmp_path, host_root, OLD_TURN, mode="seed")
     engine = open_engine(tmp_path)
     try:

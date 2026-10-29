@@ -277,6 +277,24 @@ def test_stamp_reliability_counts_each_occurrence_once(store):
                 assert ledger.marks(conn, "L") is None
 
 
+def test_stamp_reliability_is_scoped_to_lineage(store):
+    """A10 lock-in: capped L1 occurrences never promote L2's stamp policy."""
+    conn = store.connection
+    with store.atomic():
+        for lineage in ("L1", "L2"):
+            ids = ledger.insert_bindings(conn, lineage, [binding(1), binding(2), binding(3)])
+            for index, occ_id in enumerate(ids):
+                for number in range(4):
+                    assert ledger.add_stamp_observation(
+                        conn, lineage, occ_id, str(number), "alt_stamp", 0) == ledger.STAMP_WRITTEN
+                    marks = ledger.marks(conn, lineage)
+                    if index == 2 and number == 3:
+                        assert marks["stamp_policy"] == "stamp_unreliable"
+                    else:
+                        assert marks is None
+            assert ledger.add_stamp_observation(conn, lineage, ids[0], "overflow", "alt_stamp", 0) == ledger.STAMP_CAPPED
+
+
 def test_copied_context_cannot_write_from_worker_and_missing_stamp_reads_nothing(store):
     conn, statements = store.connection, []
     with store.atomic():

@@ -41,7 +41,10 @@ def normalized(value):
 
 def replay(path, patch, caplog, fault, ws, uid, observe):
     from hermes_lcm.identity_anchor import IdentityAnchorMixin
+    from tests.behaviour.reconcile_trace_harness import install_ledger_salt
 
+    # Both arms share one ledger salt, so the shadow ledger's digests compare equal (#2055).
+    install_ledger_salt(patch)
     (path / "home").mkdir(parents=True)
     with sqlite3.connect(path / "home/state.db") as db:
         db.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, end_reason TEXT)")

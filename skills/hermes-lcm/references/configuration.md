@@ -117,6 +117,7 @@ Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/
 - `LCM_HOST_MESSAGE_UID` (default `shadow`; `off`, `shadow`, `on`; env only): on a host whose messages carry `message_uid`, record which stored row each uid was bound to in the droppable `host_uid_bindings` table and count agreement with the existing identity matching; ingest decisions are unchanged. `/lcm doctor` reports `host_uid_*` counts. `off`: no capture, no table writes, no counts, no log line. Under `shadow` and `on`, canonical uid evidence can also exclude a proven hidden re-ingest copy of an assistant message from leaf summary input (the row stays stored and searchable); `off` disables that. `on` behaves exactly like `shadow`: both record count-only would-reject alias UID-conflict diagnostics in the debug log without changing matching, stored rows, bindings, or ingest writes. `off` performs no UID/binding reads on this diagnostic path. Unknown values behave as `shadow` and warn once. No-op on hosts without uids;
 - `FASTEMBED_CACHE_PATH` (fastembed's own variable, not an `LCM_*` key): the model cache the local `fastembed` provider loads from (default: the user cache directory); it may be a shared, read-only cache. A read-only cache must be pre-seeded, because preparation cannot download into it. Bge-small uses one ONNX Runtime intra-op thread; other models use two;
 - `LCM_IGNORE_SESSION_PATTERNS` and `LCM_STATELESS_SESSION_PATTERNS`: storage ownership boundaries;
+- `LCM_INGEST_LEDGER` (default `shadow`; `off`, `shadow`; env only): write foreground ingest bindings, stamp observations and view vectors in the ingest transaction, without changing row decisions. Ordinary isolated ledger failures fail open; busy errors still retry the ingest, and a lost owner transaction or savepoint error still rolls it back. `off` disables setup and ingest ledger work. Unknown values mean `shadow` and warn once per process. Tail drain, delegated children and compaction write no ledger rows at P1b-2b;
 - summary/embedding provider settings only after confirming credentials, cost, and data handling; see [docs/embeddings-setup.md, "Install consent, updates and recovery"](https://github.com/electricsheephq/lcm-x/blob/main/docs/embeddings-setup.md#install-consent-updates-and-recovery) for the embedding-dependency recovery note. Known cloud providers protect provider-bound copies automatically with the configured nonempty known pattern list while durable storage stays raw. `LCM_SENSITIVE_PATTERNS_ENABLED=true` is a separate irreversible durable-ingest opt-in. `LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly sends raw cloud copies under the `privacy:off` vector revision; warmup binds the chosen posture and later query/backfill calls fail closed on identity drift.
 
 `LCM_EMBEDDING_QUERY_PREFIX` / `LCM_EMBEDDING_DOCUMENT_PREFIX` default to `""` and apply only to Ollama and OpenAI-compatible embeddings.
@@ -398,11 +399,12 @@ Put routed settings and provider keys in each profile's files or secret sources.
 `LCM_HERMES_BASE_DIR` is the exception: the containment root always comes from the
 process environment, so a profile can neither drop nor widen it.
 
-Three additional standalone helpers in `config.py` are also outside the scalar
+Four additional standalone helpers in `config.py` are also outside the scalar
 registry and `LCMConfig.from_env()`:
 
 | Environment key | Reader file(s) | Purpose |
 | --- | --- | --- |
 | `LCM_DISABLED_TOOLS` | `config.py` (called by `engine.py`, `__init__.py`) | Call-time tool exclusion list |
 | `LCM_HOST_MESSAGE_UID` | `config.py` (called by `host_uid.py`, `host_uid_emit.py`, `message_analysis.py`) | Host message-identity capture mode |
+| `LCM_INGEST_LEDGER` | `config.py` (called by `engine.py`) | Shadow ingest ledger writes |
 | `LCM_SQLITE_MMAP_SIZE` | `config.py` (called by `db_bootstrap.py`) | Connection-time mapped-read budget |

@@ -70,8 +70,9 @@ def test_fixture_scenario_inventory_and_size() -> None:
     assert set(data) == set(names), TRACE_GUIDANCE
     # Initial, next and cold ingests now each retain their full observer stream.
     # Owned evidence savepoints enlarge the complete observer stream (round up to 100,000 bytes).
-    assert GOLDEN.stat().st_size <= 4_000_000
-    assert all(len(json.dumps(trace).encode()) <= 45_000 for trace in data.values())
+    # P1b-2b's shadow-ledger SQL adds about 140,000 bytes (4,138,779 in all; largest trace 46,288).
+    assert GOLDEN.stat().st_size <= 4_200_000
+    assert all(len(json.dumps(trace).encode()) <= 47_000 for trace in data.values())
 
 
 def test_first_divergence() -> None:
