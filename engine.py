@@ -145,7 +145,7 @@ from .message_analysis import (
 )
 from .fresh_tail import FreshTailBoundary, resolve_fresh_tail_boundary, tool_group_safe_end
 from .message_patterns import compile_message_patterns, matches_message_pattern
-from .aux_session import AuxiliarySessionMixin, DelegateChildMixin, _DELEGATE_BYPASS_LINEAGE_IDS
+from .aux_session import AuxiliarySessionMixin, DelegateChildMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity
@@ -3506,7 +3506,6 @@ class LCMEngine(
         platform = self._session_platform if platform is None else str(platform or "")
         with self._auxiliary_session_lock:
             self._lcm_bypass_lineage_session_ids.add(session_id)
-            _DELEGATE_BYPASS_LINEAGE_IDS.add(self._delegate_child_key(session_id))
             self._lcm_bypass_lineage_platforms.setdefault(session_id, set()).add(platform)
             self._lcm_session_last_platform[session_id] = platform
             self._lcm_session_last_bypassed[session_id] = True
@@ -3521,11 +3520,9 @@ class LCMEngine(
         with self._auxiliary_session_lock:
             if old_session_id:
                 self._lcm_bypass_lineage_session_ids.add(old_session_id)
-                _DELEGATE_BYPASS_LINEAGE_IDS.add(self._delegate_child_key(old_session_id))
             if new_session_id:
                 new_platform = str(new_platform or "")
                 self._lcm_bypass_lineage_session_ids.add(new_session_id)
-                _DELEGATE_BYPASS_LINEAGE_IDS.add(self._delegate_child_key(new_session_id))
                 self._lcm_bypass_lineage_platforms.setdefault(new_session_id, set()).add(new_platform)
                 self._lcm_session_last_platform[new_session_id] = new_platform
                 self._lcm_session_last_bypassed[new_session_id] = True

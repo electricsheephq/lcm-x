@@ -726,7 +726,9 @@ def test_delegate_fallback_reads_real_tail_and_uncapped_rows(host, monkeypatch):
 
 @pytest.mark.parametrize("parent_kind", ["ignored", "delegate"])
 @pytest.mark.parametrize("route", ["shared", "clone", "prototype"])
-def test_stateless_rotated_parent_requires_delegate_identity(host, monkeypatch, parent_kind, route):
+def test_stateless_rotated_parent_requires_delegate_identity(host, monkeypatch, request, parent_kind, route):
+    if parent_kind == "ignored" and route != "shared":
+        request.applymarker(pytest.mark.xfail(strict=True, reason="#2070: bypass lineage is per engine"))
     monkeypatch.setenv("LCM_IGNORE_SESSION_PATTERNS", "old-parent")
     load, clone = host
     ctx, _ = load()

@@ -812,7 +812,6 @@ _DELEGATE_STORE_LOCK = threading.RLock()
 _DELEGATE_AUXILIARY_IDS: set[tuple[str, str]] = set()
 _DELEGATE_RESUME_BOUNDARIES: dict[tuple[str, str], list[tuple]] = {}
 _DELEGATE_COMPRESSION_PARENTS: dict[tuple[str, str], str] = {}
-_DELEGATE_BYPASS_LINEAGE_IDS: set[tuple[str, str]] = set()
 
 
 def delegate_child_store_counts() -> Dict[str, int]:
@@ -1032,8 +1031,6 @@ class DelegateChildMixin:
                 return None
         else:
             parent_platform = self._lcm_session_last_platform.get(parent, "") or self._host_session_parent(parent)[1]
-        if self._delegate_child_key(parent) in _DELEGATE_BYPASS_LINEAGE_IDS and not self._is_known_delegate_child(parent):
-            return None
         if self._session_id_matches_lcm_bypass_filters(parent, platform=parent_platform):
             return None
         return {
