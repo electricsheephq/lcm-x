@@ -71,8 +71,11 @@ def import_graph(repo, head):
         def add(target):
             if not target.startswith("hermes_lcm"):
                 target = "hermes_lcm." + target
-            if target in modules:
-                graph[path].add(modules[target])
+            parts = target.split(".")
+            for end in range(2, len(parts) + 1):  # importing a.b runs a/__init__.py too
+                name = ".".join(parts[:end])
+                if name in modules:
+                    graph[path].add(modules[name])
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -117,7 +120,10 @@ def path_classes(path, table):
 
 
 def placement(table, graph):
-    """Return the reverse import graph (standalone importers dropped) and the hub-reachable set."""
+    """Return the reverse import graph (standalone importers dropped) and the hub-reachable set.
+
+    A module no hub reaches cannot be placed: nothing shows how the plugin would load it.
+    """
     hubs = set(table["hubs"])
     if not hubs <= graph.keys():
         raise ValueError("table hub missing at HEAD")
@@ -148,7 +154,9 @@ def classify(path, table, graph, reverse, reachable):
     hubs = set(table["hubs"])
     loose = standalone(path, table)
     if not module_name(path):
-        pass
+        if path.endswith(".py") and not path.startswith(NON_PRODUCT) and not loose:
+            include(MEMORY, "not importable")
+            closed = True
     elif path in hubs:
         include(MEMORY, "hub change")
     elif path not in graph:
@@ -170,7 +178,7 @@ def classify(path, table, graph, reverse, reachable):
         if path in reachable and not selected & PHASE_D and path not in table["exempt"]:
             include(MEMORY, "hub closure")
             closed = True
-        if not reverse[path] and not loose:
+        if path not in reachable and not loose:
             include(MEMORY, "not in import graph")
             closed = True
     return classes, reasons, closed

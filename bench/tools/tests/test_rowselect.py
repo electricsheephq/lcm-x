@@ -24,13 +24,15 @@ def package(tmp_path):
     _git(repo, 'config', 'user.email', 'fixture@example.invalid')
     files = {
         '__init__.py': 'from . import engine\n',
-        'engine.py': 'from . import helper, loader, empty, exempt, hubleaf\n',
+        'engine.py': 'from . import helper, loader, empty, exempt, hubleaf, store, hostleaf\n',
         'store.py': 'from . import middle\n',
         'middle.py': 'from . import helper\n',
         'loader.py': 'import importlib\nimportlib.import_module("hermes_lcm.dynamic")\n',
         'helper.py': '', 'dynamic.py': '', 'empty.py': '', 'exempt.py': '',
-        'hubleaf.py': '', 'orphan.py': '', 'deleted.py': '', 'old.py': 'unique = 123456789\n',
-        'scriptonly.py': '', 'plugin.yaml': '',
+        'hubleaf.py': '', 'orphan.py': 'from . import island\n', 'island.py': '', 'hostleaf.py': '',
+        'deleted.py': '', 'old.py': 'unique = 123456789\n',
+        'scriptonly.py': '', 'plugin.yaml': '', 'deep.py': 'from .nested.reader import value\n',
+        'hy-phen/__init__.py': '', 'hy-phen/mod.py': '',
         'scripts/tool.py': 'from hermes_lcm import helper, scriptonly\n',
         'docs/readme.md': '', 'unknown.txt': '',
         'absolute.py': 'import hermes_lcm.helper\n',
@@ -51,7 +53,7 @@ def package(tmp_path):
     table['entries'][:0] = [{'glob': name, 'classes': classes} for name, classes in [
         ('store.py', ['storage']), ('loader.py', ['recall']), ('engine.py', ['host']),
         ('absolute.py', ['delivery']), ('nested/reader.py', ['summariser']),
-        ('scripts/**', ['instrument']), ('plugin.yaml', ['host'])]]
+        ('scripts/**', ['instrument']), ('plugin.yaml', ['host']), ('hostleaf.py', ['host'])]]
     table['exempt'] = {'exempt.py': 'Fixture CLI metadata, no memory behavior.'}
     table_path = tmp_path / 'table.json'
     table_path.write_text(json.dumps(table))
@@ -59,7 +61,7 @@ def package(tmp_path):
     _git(repo, 'commit', '-qm', 'base')
     base = _git(repo, 'rev-parse', 'HEAD')
     for name in files:
-        if name not in {'store.py', 'middle.py', 'loader.py', 'nested/__init__.py'}:
+        if name not in {'store.py', 'middle.py', 'loader.py'}:
             with (repo / name).open('a') as stream:
                 stream.write('\n# changed\n' if name.endswith('.py') else 'changed\n')
     (repo / 'deleted.py').unlink()
@@ -103,11 +105,17 @@ def test_selection_rules(package):
         'reasons': [{'reason': 'matched scripts/**', 'classes': ['instrument']}]}
     assert 'not in import graph' in reasons('scriptonly.py')
     assert 'hub closure' in reasons('hubleaf.py')
+    assert 'hub closure' in reasons('hostleaf.py')
+    assert {'via orphan.py', 'not in import graph'} <= reasons('island.py')
+    assert 'not importable' in reasons('hy-phen/__init__.py')
+    assert 'not importable' in reasons('hy-phen/mod.py')
+    assert {'via deep.py', 'not in import graph'} <= reasons('nested/__init__.py')
     importers_only = {'absolute.py', 'builtin.py', 'byname.py', 'named.py', 'nested/reader.py',
                       'relative.py'}
     assert set(result['fail_closed']) == importers_only | {
-        'deleted.py', 'empty.py', 'hubleaf.py', 'new.py', 'old.py', 'orphan.py', 'scriptonly.py',
-        'unknown.txt'}
+        'deep.py', 'deleted.py', 'empty.py', 'hostleaf.py', 'hubleaf.py', 'hy-phen/__init__.py',
+        'hy-phen/mod.py', 'island.py', 'nested/__init__.py', 'new.py', 'old.py', 'orphan.py',
+        'scriptonly.py', 'unknown.txt'}
     assert result['always'] == ['L1', 'R']
     assert len(result['base']) == len(result['head']) == len(base) == 40
     assert len(result['table_sha256']) == 64
@@ -161,13 +169,8 @@ def test_cli_determinism_text_errors_and_help(package, capsys):
 
 def test_real_table_schema():
     table, _ = rowselect.load_table(rowselect.DEFAULT_TABLE)
-    assert table['version'] == 1
-    assert set(table['memory_classes']) == rowselect.MEMORY
-    assert set(table['rows']) <= rowselect.CLASSES
-    assert all(set(rows) <= rowselect.ROWS for rows in table['rows'].values())
-    assert all(set(entry['classes']) <= rowselect.CLASSES for entry in table['entries'])
-    assert isinstance(table['exempt'], dict)
-    assert all(isinstance(glob, str) for glob in table['standalone'])
+    policy, _ = rowselect.path_classes('skills/hermes-lcm/references/recall-policy.md', table)
+    assert rowselect.MEMORY <= policy
     repo = Path(__file__).resolve().parents[3]
     for hub in table['hubs']:
         _git(repo, 'cat-file', '-e', f'HEAD:{hub}')

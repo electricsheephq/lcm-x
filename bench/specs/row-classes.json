@@ -28,6 +28,7 @@
     {"glob": "teams/**", "classes": ["host"]},
     {"glob": "companions/**", "classes": ["host", "recall"]},
     {"glob": "release/**", "classes": ["install"]},
+    {"glob": "skills/hermes-lcm/references/recall-policy.md", "classes": ["compaction", "delivery", "ingest", "install", "recall", "retry", "storage", "summariser"]},
     {"glob": "skills/**", "classes": ["install"]},
     {"glob": "scripts/install.sh", "classes": ["install"]},
     {"glob": "scripts/import_lossless_claw.py", "classes": ["ingest", "install", "storage"]},
