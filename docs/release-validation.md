@@ -103,6 +103,8 @@ The checklist is safe to paste into a release note or PR validation section afte
       forward test's explicit latest-GA assertion. Verify the new reader's compatibility cells in CI;
       investigate failures rather than weakening their assertions. This repin does not
       change the published GA tree or replace the release gauntlet's rollback proof.
+      Keep regressions that require a specific pre-feature reader pinned to that reader,
+      and exercise the current GA separately against the same data-preservation invariant.
 
 ### Doctor triage
 - [ ] `lcm_doctor` warnings were classified as `safe/ignore`, `inspect`, or `backup-first cleanup`
