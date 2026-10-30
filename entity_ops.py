@@ -534,9 +534,8 @@ def resolved_view(store, access_scope=None, principal_is_owner=False, *, _platfo
             for row in keys:
                 if row["method"] == "alias_match" and row["subject_key"].partition(":")[0] not in {"user", "assistant"}:
                     candidates = _key_candidates(view, row["subject_key"], row["owner_entity_id"])
-                    if len(candidates) != 1:
+                    if candidates != [row["entity_id"]]:
                         continue
-                    row["entity_id"] = candidates[0]
                 visible_keys.append(row)
             keys = visible_keys
         if keys:
@@ -582,7 +581,12 @@ def _key_sources(store, access_scope=None, principal_is_owner=False):
 def _relation_groups(view, value):
     relations = view.get("relations", {})
     norm = normalize_alias(value)
-    return relations.get(norm, relations.get("my " + norm, {}))
+    merged = {}
+    for text in (norm, "my " + norm):
+        for owner, group in relations.get(text, {}).items():
+            ids = set(merged.get(owner, {}).get("candidates", [])) | set(group["candidates"])
+            merged[owner] = dict(candidates=sorted(ids), ambiguous=len(ids) > 1)
+    return merged
 
 
 def _key_candidates(view, subject_key, owner=None):
@@ -622,6 +626,11 @@ def _overrides(events, undone):
             if e["op"] == "override_key" and e["event_id"] not in undone]
 
 
+def _override_compatible(view, subject, target):
+    return target in view["cards"] and view["cards"][target]["kind"] in {
+        _NAMESPACE_KINDS.get(subject.partition(":")[0]), "other", "topic"}
+
+
 def rebuild_entity_keys(store, *, sender_lookup=None, profile_entities=None):
     """Reconcile the derived index without appending memory events."""
     with store.transaction():
@@ -632,7 +641,7 @@ def rebuild_entity_keys(store, *, sender_lookup=None, profile_entities=None):
             namespace, _, value = subject.partition(":")
             owner, candidates = None, _key_candidates(view, subject)
             if namespace in {"user", "assistant"}:
-                candidates = [profiles[namespace == "assistant"]] if profiles else []
+                candidates = [view["canonical"].get(profiles[namespace == "assistant"])] if profiles else []
             if namespace == "user" or _relation_groups(view, value):
                 sender = sender_lookup(source) if sender_lookup else None
                 if sender and sender[1] and sender[2] and sender[0] in view["canonical"]:
@@ -653,11 +662,19 @@ def rebuild_entity_keys(store, *, sender_lookup=None, profile_entities=None):
             if not override["global_override"]:
                 continue
             subject, owner = override["subject_key"], override["owner_entity_id"]
+            if owner is None and _relation_groups(view, subject.partition(":")[2]):
+                continue
             bound = {source for key, source in sources if key == subject} & set(override["scope_store_ids"])
             if owner is not None:
                 bound &= owner_sources.get((subject, owner), set())
             target = view["canonical"].get(override["entity_id"])
-            if bound and target in view["cards"]:
+            if bound and not _override_compatible(view, subject, target):
+                # A newer invalid choice still supersedes older explicit choices.
+                desired.pop((subject, owner), None)
+                if (subject, owner) in alias_desired:
+                    desired[(subject, owner)] = alias_desired[(subject, owner)]
+                continue
+            if bound and _override_compatible(view, subject, target):
                 alias = alias_desired.get((subject, owner))
                 # Sender attribution can change even when aliases no longer resolve.
                 prior = _owner_alias_rows(store, subject, owner)[:1] if owner is not None else []
@@ -704,32 +721,39 @@ def resolve_key(store, subject_key, store_id, *, owner_entity_id=None,
         if (subject_key, store_id) not in _key_sources(store, access_scope, principal_is_owner):
             return None
         view = resolved_view(store, access_scope, principal_is_owner)
+        if access_scope is not None and owner_entity_id is not None and owner_entity_id not in view["canonical"]:
+            return None
         # Relation membership changes immediately; sender admission is rebuilt.
         namespace, _, value = subject_key.partition(":")
+        relation = any(r["alias_kind"] == "relation_phrase" and r["retired_at"] is None
+                       and r["alias_norm"] in {normalize_alias(value), "my " + normalize_alias(value)}
+                       for r in _records(store, "aliases"))
+        if relation and owner_entity_id is None:
+            return None
         if owner_entity_id is not None and namespace not in {"user", "assistant"} and not (
                 _relation_groups(view, value).get(owner_entity_id, {}).get("candidates")):
             return None
         events, undone, _, _ = _history(store)
         for override in reversed(_overrides(events, undone)):
             if (override["subject_key"], override["owner_entity_id"]) == (subject_key, owner_entity_id) and store_id in override["scope_store_ids"]:
-                if override["global_override"] and owner_entity_id is not None and not any(
-                        (r["subject_key"], r["owner_entity_id"], r["method"]) == (subject_key, owner_entity_id, "override")
-                        and store_id in json.loads(r["source_store_ids"]) for r in _active_keys(store)):
-                    continue
                 target = view["canonical"].get(override["entity_id"])
-                return target if target in view["cards"] else None
+                if not _override_compatible(view, subject_key, target):
+                    # Superseded choices stay superseded; use the alias fallback.
+                    break
+                if override["global_override"] and owner_entity_id is not None and not any(
+                        # An alias fallback retains sender admission while the target is incompatible.
+                        (r["subject_key"], r["owner_entity_id"]) == (subject_key, owner_entity_id)
+                        and store_id in json.loads(r["source_store_ids"]) for r in _active_keys(store)):
+                    break
+                return target
         rows = [r for r in view.get("keys", []) if (r["subject_key"], r["owner_entity_id"], r["method"]) ==
                 (subject_key, owner_entity_id, "alias_match") and store_id in r["source_store_ids"]]
         if owner_entity_id is not None and not rows:
             derived = _owner_alias_rows(store, subject_key, owner_entity_id)
             rows = [r for r in derived[:1] if store_id in json.loads(r["source_store_ids"])
-                    and r["entity_id"] in view["cards"]]
-        relation = any(r["alias_kind"] == "relation_phrase" and r["retired_at"] is None
-                       and r["alias_norm"] in {normalize_alias(subject_key.partition(":")[2]),
-                                               "my " + normalize_alias(subject_key.partition(":")[2])}
-                       for r in _records(store, "aliases"))
-        if relation and owner_entity_id is None:
-            return None
+                    and r["entity_id"] in view["cards"] and (access_scope is None or store._read(
+                        "lcm_entity_keys", "t.key_id=:id", {"id": r["key_id"]}, access_scope=access_scope,
+                        principal_is_owner=principal_is_owner))]
         candidates = _key_candidates(view, subject_key, owner_entity_id)
         if owner_entity_id is not None and not rows:
             return None
