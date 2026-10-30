@@ -57,6 +57,7 @@ TURN_PATH_FILES = {
     "db_bootstrap.py",  # Conversation-range selection shapes compaction inputs and ownership.
     "diagnostics.py",  # State-db path resolution decides foreground branch restoration/rebind.
     "engine_registry.py",  # Post-turn hooks select the clone that ingests each session turn.
+    "maintenance_scheduler.py",  # Runs default-on maintenance and the exit drain that stores pending session-end tails.
     "message_patterns.py",  # Pattern matches omit rows from ingest, replay and compaction.
     "model_routing.py",  # Sets provider, model and effort on the summary request.
     "plugin_identity.py",  # Engine-name matching gates post-turn ingest and clone resolution.

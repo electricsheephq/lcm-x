@@ -56,6 +56,7 @@ jobs:
             ingest_protection.py
             leaf_prep.py
             lifecycle_state.py
+            maintenance_scheduler.py
             message_analysis.py
             message_content.py
             message_patterns.py
