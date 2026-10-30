@@ -155,6 +155,8 @@ def _main(argv, interrupt):
     parser.add_argument("--build-workers", type=int, default=1)
     parser.add_argument("--thread-budget", type=int, default=8)
     parser.add_argument("--worker-timeout", type=float, default=14400)
+    parser.add_argument("--concurrent-roles", action="store_true",
+                        help="run the two roles' serial pre-embed chains at once (--build-workers 1 only)")
     parser.add_argument("--seed-cache", action="append", default=[], metavar="ROLE=PATH",
                         help="start ROLE's serial build from a copy of this committed cache (repeatable; --build-workers 1)")
     args = parser.parse_args(argv)
@@ -164,6 +166,8 @@ def _main(argv, interrupt):
         parser.error("require two roles and 1 <= jobs <= thread-budget <= 8")
     if args.build_workers < 1 or (args.build_workers > 1 and 2 * args.build_workers > args.thread_budget):
         parser.error("require build-workers >= 1 and 2 * build-workers <= thread-budget for parallel builds")
+    if args.concurrent_roles and args.build_workers != 1:
+        parser.error("--concurrent-roles requires --build-workers 1")
     products = dict(item.split("=", 1) for item in args.product)
     if len(products) != 2 or any(not role.isidentifier() for role in products):
         parser.error("require two distinct identifier role names")
@@ -234,20 +238,28 @@ def _main(argv, interrupt):
             caches[role].chmod(0o644)
             if file_sha256(caches[role]) != seed["sha256"]:
                 raise ValueError(f"seed cache copy hash mismatch for {role}")
-        for role in products:
+
+        def chain(role):
+            rows = []
             if interrupt[0]:
-                break
+                return rows
             caches[role].parent.mkdir(exist_ok=role in seeds)
             for name, prepared in (("preembed", args.prepared_dir), ("preembed-aa", args.aprime_dir)):
                 command = ["prewarm-cache", "--prepared-dir", str(prepared.resolve()), "--shards-manifest", str(prepared.resolve()), *common]
                 result = invoke(role, name, command, "build")
-                preembed.append({"role": role, "arm": name, **result})
+                rows.append({"role": role, "arm": name, **result})
                 if result["exit_code"]:
                     break
                 role_threads[role] = json.loads((args.output / f"{role}-{name}-threads.json").read_text())
-            if preembed[-1]["exit_code"]:
-                continue
-            manifests[role] = seal(caches[role])
+            if not rows[-1]["exit_code"]:
+                manifests[role] = seal(caches[role])
+            return rows
+
+        # Concurrent roles keep each role's chain intact; rows and dicts keep role order.
+        chains = run_pool(list(products), 2, chain) if args.concurrent_roles else [chain(role) for role in products]
+        preembed = [row for rows in chains for row in rows]
+        manifests = {role: manifests[role] for role in products if role in manifests}
+        role_threads = {role: role_threads[role] for role in products if role in role_threads}
     else:
         for role in products:
             (caches[role].parent / "parts").mkdir(parents=True)
@@ -321,6 +333,8 @@ def _main(argv, interrupt):
                "not_proven": "Eight-hour acceptance requires the complete quiet-window run; recall equivalence is a separate gate."}
     if seeds:
         receipt["seeds"] = seeds
+    if args.concurrent_roles:
+        receipt["concurrent_roles"] = True
     if args.build_workers > 1:
         receipt.update(build_workers=args.build_workers, merged_entries=merged_entries, duplicate_keys=duplicate_keys, build_threads=build_threads)
     (args.output / "d1-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
