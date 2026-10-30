@@ -22,8 +22,8 @@ its rc1 is cut, and the gauntlet runs once for the whole train, not once per fix
   fix waits at most 14 days for its train's rc1; that is a ceiling, not a schedule.
 - **Hotfixes:** only a P0 or P1 ships outside a train, in its own rc. That rc still runs the
   smoke stage and the rows its diff selects. It may carry other ready fixes only when they add
-  no row to its selection. A hotfix GA that ships while a train is in its gauntlet makes the
-  train respin onto that GA, which becomes the train's previous GA for the selector.
+  no row to its selection. A hotfix GA that ships after a train's cut and before the train's GA makes
+  the train respin onto that GA, which becomes the train's previous GA for the selector.
 - **After the cut,** a train's tree changes only by fix-and-respin (Pipeline step 4). A fix
   that misses the cut waits for the next train.
 - **Minor releases** are trains cut from main at their milestone's gate.
@@ -99,7 +99,8 @@ not depend on judgment:
 - **Rows:** ingest, storage and retry select Phase A, D1 and D4/D8. Compaction and summariser
   select D2/D3 and D7. Recall and delivery select D1 and D4/D8. Host integration selects the
   Phase C cells. Other classes (for example the CLI, doctor or installer) select no Phase D
-  row, so a train that touches only them runs L1 and the R rows.
+  row when the hub closure below does not apply to the module (no hub reaches it, or the table
+  exempts it), so a train that touches only such modules runs L1 and the R rows.
 - **Record:** the selector prints each changed path's classes with the reason (the matching
   table entry or the import chain) and the selected rows. The output is committed in the
   train's kit at rc1 and at every respin, and quoted in the receipts. The release manager may
@@ -165,8 +166,9 @@ receipt is completed in L2 by the rest of its hands-on lane.
   INVALID verdict under D4's own validity rules. So do net losses above the bound declared from
   the previous GA's A/A′ runs; until a bound is declared, it is 3.
 - **Compaction (D2/D3, D7):** one D7 seed on the rc, judged on D7's bars 1, 2, 3, 5 and 6.
-  Facts kept is recorded, not judged, because one seed is too noisy for bar 4. A hard failure
-  or a missed bar stops the rc. A rate-limited or service-invalid run re-runs once under D7's
+  Facts kept is recorded, not judged, because one seed is too noisy for bar 4. A missed bar
+  re-runs on a second seed, and the rc stops only if both seeds miss; a hard failure stops it at
+  once. A rate-limited or service-invalid run re-runs once under D7's
   and D2's rules and is not, by itself, a product defect.
 
 The kit records each mini row's measured time. A mini row that would push L1 past its target
@@ -493,7 +495,7 @@ Until the producer and scorer (#1824) exist and, for option B, the prospective A
   The receipt records that diff (`git diff --name-only`). Any other change, including a default recall configuration change, invalidates prior carry-forward and re-runs D2-D4, D7 and D8 on the new rc, with the new configuration's own A/A′ prerequisite. The preference no-loss row follows D4 and is recorded or gated according to its activation rule.
 - D5's soak is the reference-agent acceptance window on the rc tree, with the duration and path defined in D5, not Phase C's scripted battery. A later rc of the same release may carry it forward under the same diff-scope rule as D2-D4 (no product change and an unchanged field counter), with the diff in the receipt; otherwise a new window runs on the new rc.
 
-**Wall clock.** The target is ≤ 60 min per rc for D1. D2 and D4 are hours-long and run in parallel with Phases A-C; from v0.29.2 they start only after the smoke stage passes:
+**Wall clock.** The target is ≤ 60 min per rc for D1. D2 and D4 are hours-long. Until v0.29.2 they run in parallel with Phases A-C; from v0.29.2 they start after the smoke stage passes and run in parallel with the other L2 rows:
 - D2: a 6-hour ELAPSED reservation including setup and scoring, at most two replays in parallel (one per arm), under the fixed stop rules above;
 - D4: about 3-5 h per configuration. Arms may run in parallel only within one concurrency envelope: the same machine, provider lane and tier, and worker count, with interleaved or simultaneous starts. A stopped parallel arm resumes only while its peer is still running in the same envelope. Otherwise both arms re-run one after the other in isolation. If they cannot share that envelope, the arms run one after the other in isolation. In serial runs, an arm stopped by a transport error may resume under the same run id and pins. Models, prompts, trees, harness, scoring and pins must stay identical. The receipt logs the resumed question ids; no question is scored twice. The receipt records the concurrency envelope and machine load. Rows that judge latency still get the machine to themselves (#1554), except under the overlap row in the release-manager decisions.
 
