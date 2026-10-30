@@ -15,13 +15,15 @@ its rc1 is cut, and the gauntlet runs once for the whole train, not once per fix
 
 - **Patch trains** are cut from the previous GA commit on the maintenance branch
   `release/vX.Y.x`, never from main once main holds the next minor's work. Each fix merges on
-  main first. Its maintenance-branch twin carries the same fix and links the main PR's
-  review evidence; a twin that has to differ because main has moved gets its own review. The
-  release manager cuts rc1 when the queued fixes are worth a gauntlet. A
-  ready fix waits at most 14 days; that is a ceiling, not a schedule.
+  main first, unless main does not have the defect (for example, its code was rewritten); that
+  fix lands on the maintenance branch only, with the reason recorded. A twin whose
+  `git patch-id` equals its main PR's links that PR's review evidence; any other twin gets its
+  own review. The release manager cuts rc1 when the queued fixes are worth a gauntlet. A ready
+  fix waits at most 14 days for its train's rc1; that is a ceiling, not a schedule.
 - **Hotfixes:** only a P0 or P1 ships outside a train, in its own rc. That rc still runs the
   smoke stage and the rows its diff selects. It may carry other ready fixes only when they add
-  no row to its selection.
+  no row to its selection. A hotfix GA that ships while a train is in its gauntlet makes the
+  train respin onto that GA, which becomes the train's previous GA for the selector.
 - **After the cut,** a train's tree changes only by fix-and-respin (Pipeline step 4). A fix
   that misses the cut waits for the next train.
 - **Minor releases** are trains cut from main at their milestone's gate.
@@ -85,10 +87,15 @@ not depend on judgment:
   take none. Any other path that matches no entry takes every class, so a gap in the table
   fails closed.
 - **Imports:** a changed product module also takes the classes of each product module that
-  imports it, directly or through a chain of imports. The plugin entry point and the engine
-  are marked as hubs: a change to a hub takes every memory class, but a module does not
-  inherit classes through a hub. So a helper that the store imports counts as a storage
-  change.
+  imports it, directly or through a chain of imports that does not pass through a hub. The
+  plugin entry point and the engine are hubs, and a change to a hub takes every memory class.
+  So a helper that the store imports counts as a storage change. A module the package loads by
+  name (through importlib or a registration table) counts as imported by the module that loads
+  it. A product module the selector cannot place in the import graph takes every memory class.
+- **Hub closure:** a changed module that a hub reaches, directly or through any chain, and
+  whose classes still select no Phase D row, takes every memory class, even when a table entry
+  matched it. The exception is a module the table names as exempt, one module at a time,
+  with the reason it cannot change ingest, storage, recall, compaction or delivery.
 - **Rows:** ingest, storage and retry select Phase A, D1 and D4/D8. Compaction and summariser
   select D2/D3 and D7. Recall and delivery select D1 and D4/D8. Host integration selects the
   Phase C cells. Other classes (for example the CLI, doctor or installer) select no Phase D
@@ -127,7 +134,7 @@ Testing runs in four levels:
 | Level | When | What | Effect |
 |---|---|---|---|
 | L0 | every PR | the CI-required checks and the differential tests | as now |
-| L1 | every rc, first | the smoke stage below; target 2 h elapsed or less | can stop the rc; never passes a row |
+| L1 | every rc, first | the smoke stage below; target 2 h elapsed or less | can stop the rc; its full rows give their receipts |
 | L2 | every rc, after L1 passes | the rows the Tiers section selects, with their existing bars | the GA receipts |
 | L3 | at its cadence | the full tier and the weekly M rows | as now |
 
@@ -136,7 +143,10 @@ cheaper layers, not the long rows. The reliability matrix found rc1's rotation d
 Phase B review sweep and the soak found the others. With L1 first, a broken rc fails in hours
 instead of after a day of long rows.
 
-**L1 checks,** run on every rc whatever the selection:
+**L1 checks,** run on every rc whatever the selection. Each one that is itself a row gives
+that row's receipt when it runs on the rc tree with the row's full bars, and is not run again
+in L2; a respin that may carry a receipt (Pipeline step 4) carries it instead. Phase B's
+receipt is completed in L2 by the rest of its hands-on lane.
 - the reliability matrix and the hands-on lane's fault cells, on one supported host build
   (the other host builds run in L2);
 - Phase A, both postures;
@@ -146,21 +156,26 @@ instead of after a day of long rows.
 
 **Mini rows,** only for rows the selection puts in L2:
 - **D1 LOCAL:** a fixed 25-question subset of the D1 set, stratified by question type, drawn
-  once and listed in the kit, comparing the rc with the previous GA. Any per-question
-  `lcm_recall` flip that is not attributed to a named commit stops the rc. So do timeouts and
-  fallbacks.
-- **D4:** a fixed 30-question sample at the shipped default, compared with the previous GA's
-  per-question outcomes on the same questions. A hard failure stops the rc. So do net losses
-  above the bound declared from the previous GA's A/A′ runs; until a bound is declared, it is
-  3.
-- **D2:** a fixed slice of the D2 set, both arms, small enough for L1 to meet its target
-  (the kit names it). A hard failure stops the rc. So does a facts-kept drop larger than the
-  run-to-run spread the D2 rule allows (0.10).
+  once and listed in the kit. The rc runs it and is compared with the previous GA's stored
+  per-question outcomes. Any per-question `lcm_recall` flip that is not attributed to a named
+  commit stops the rc. So do timeouts and fallbacks.
+- **D4:** a fixed 30-question sample of LongMemEval-S at the shipped default, stratified by
+  question type and drawn once, compared with the previous GA's stored per-question outcomes.
+  A hard failure stops the rc: a crash, a timeout, a missing or unreadable result, or an
+  INVALID verdict under D4's own validity rules. So do net losses above the bound declared from
+  the previous GA's A/A′ runs; until a bound is declared, it is 3.
+- **Compaction (D2/D3, D7):** one D7 seed on the rc, judged on D7's bars 1, 2, 3, 5 and 6.
+  Facts kept is recorded, not judged, because one seed is too noisy for bar 4. A hard failure
+  or a missed bar stops the rc. A rate-limited or service-invalid run re-runs once under D7's
+  and D2's rules and is not, by itself, a product defect.
+
+The kit records each mini row's measured time. A mini row that would push L1 past its target
+starts alongside L2 instead, and its failure still stops the rc.
 
 **Rules:**
 - L1 bars are written into the train's kit before rc1 is cut and are not changed afterwards.
-- A mini row is a tripwire. Passing it never stands in for its L2 row, and no L2 verdict
-  depends on it.
+- A mini row is a tripwire. It gives no receipt and no credit: passing it never stands in
+  for its L2 row, and no L2 verdict depends on it.
 - An L1 failure stops the rc. A product defect goes through fix-and-respin. An instrument
   defect is fixed, and L1 re-runs on the same rc.
 - Each rc records L1's elapsed hours beside the elapsed and machine-exclusive hours the Tiers
@@ -478,7 +493,7 @@ Until the producer and scorer (#1824) exist and, for option B, the prospective A
   The receipt records that diff (`git diff --name-only`). Any other change, including a default recall configuration change, invalidates prior carry-forward and re-runs D2-D4, D7 and D8 on the new rc, with the new configuration's own A/A′ prerequisite. The preference no-loss row follows D4 and is recorded or gated according to its activation rule.
 - D5's soak is the reference-agent acceptance window on the rc tree, with the duration and path defined in D5, not Phase C's scripted battery. A later rc of the same release may carry it forward under the same diff-scope rule as D2-D4 (no product change and an unchanged field counter), with the diff in the receipt; otherwise a new window runs on the new rc.
 
-**Wall clock.** The target is ≤ 60 min per rc for D1. D2 and D4 are hours-long and run in parallel with Phases A-C:
+**Wall clock.** The target is ≤ 60 min per rc for D1. D2 and D4 are hours-long and run in parallel with Phases A-C; from v0.29.2 they start only after the smoke stage passes:
 - D2: a 6-hour ELAPSED reservation including setup and scoring, at most two replays in parallel (one per arm), under the fixed stop rules above;
 - D4: about 3-5 h per configuration. Arms may run in parallel only within one concurrency envelope: the same machine, provider lane and tier, and worker count, with interleaved or simultaneous starts. A stopped parallel arm resumes only while its peer is still running in the same envelope. Otherwise both arms re-run one after the other in isolation. If they cannot share that envelope, the arms run one after the other in isolation. In serial runs, an arm stopped by a transport error may resume under the same run id and pins. Models, prompts, trees, harness, scoring and pins must stay identical. The receipt logs the resumed question ids; no question is scored twice. The receipt records the concurrency envelope and machine load. Rows that judge latency still get the machine to themselves (#1554), except under the overlap row in the release-manager decisions.
 
