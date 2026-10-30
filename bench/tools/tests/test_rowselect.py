@@ -169,8 +169,10 @@ def test_cli_determinism_text_errors_and_help(package, capsys):
 
 def test_real_table_schema():
     table, _ = rowselect.load_table(rowselect.DEFAULT_TABLE)
-    policy, _ = rowselect.path_classes('skills/hermes-lcm/references/recall-policy.md', table)
-    assert rowselect.MEMORY <= policy
+    for runtime in ('SKILL.md', 'references/recall-policy.md', 'references/recall-tools.md'):
+        classes, _ = rowselect.path_classes(f'skills/hermes-lcm/{runtime}', table)
+        assert rowselect.MEMORY | {'host'} <= classes
+    assert 'host' in rowselect.path_classes('skills/hermes-lcm/references/configuration.md', table)[0]
     repo = Path(__file__).resolve().parents[3]
     for hub in table['hubs']:
         _git(repo, 'cat-file', '-e', f'HEAD:{hub}')
