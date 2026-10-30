@@ -506,3 +506,31 @@ Sources: the r3.2 findings of the Codex reviewer (A) and of the Claude reviewer 
 1. Phase P1 is implemented against this design, in its own issue (linked from #1993).
 2. The G child (#1931) gets its own spec.
 3. The P2 issue's spec review closes the §5a items, each with a named regression, before the P2 flip.
+
+## P1c-1 shadow emission writes
+
+The shadow ledger records fresh summary, carrier, recovery and objective (as
+`scaffold`) descriptors from the exact list returned by that compress call.
+It does not yet participate in classification or alter commit proofs or stored
+messages. Unlike L5-8's eventual every-return writer, it writes no emission on a
+bypass, an identical-list return, hidden-only or carried-only output, a raise,
+or a gated-off proof without a separately bound fit carrier.
+
+Each emission view includes every returned row. Host rows, rewritten host rows
+and carried generated rows have no ref (flag 8); only this call's fresh generated
+rows reference emission ids with the descriptor flag. Source ids remain `[]`
+and `next_occ_id` remains NULL. The descriptor digest covers the full returned
+row and matches a later ingest only when the host returns it verbatim; merged
+recovery and host-appended suffixes require the later span-matching work.
+
+The exit write and handle-scoped signals own separate transactions, skip an
+already-open transaction, and bound SQLite reservation waits to 100 ms. Ordinary
+ledger exceptions warn once per failure counter per engine and leave compress
+output unaffected. A `BaseException` rolls back and propagates, replacing a
+pending return; foreground budget finalization still runs.
+
+Keep-2 pruning leaves emission rows behind and a refused vector can evict the
+last adopted view. Adoption is limited to the two verified boundary continuation
+exits; other exits leave proposals unadopted and count them. The immutable handle
+is process-local: after restart, unsignalled vectors remain `proposed`. These
+limits remain for P1c-2, P1d and P2; this slice does not repair them.

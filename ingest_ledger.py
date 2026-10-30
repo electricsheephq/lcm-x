@@ -1,4 +1,4 @@
-"""Connection-level ingest ledger API; not yet called by ingest or compress.
+"""Connection-level shadow ledger API for ingest and compress.
 
 Placements are in view order with non-decreasing bounds. Natural gaps are
 clamped to the preceding gap, so a later supersedes joins it after earlier NEWs.
@@ -43,6 +43,14 @@ class ViewEntry(NamedTuple):
     uidset_digest: bytes | None
     ref: int | None
     is_descriptor: bool = False
+
+
+class EmissionHandle(NamedTuple):
+    lineage: str
+    view_seq: int
+    compress_call: int
+    session_id: str
+    conversation_key: str
 
 
 class Placement(NamedTuple):
@@ -237,6 +245,26 @@ def insert_bindings(conn, lineage, rows):
         "INSERT INTO occurrence_bindings(lineage, " + ",".join(columns) + ") VALUES (?,?,?,?,?,?,?,?,?)",
         (lineage, *(row.get(column) for column in columns)),
     ).lastrowid for row in rows]
+
+
+def insert_emissions(conn, lineage, view_seq, rows):
+    _require_owner(conn)
+    return [conn.execute(
+        "INSERT INTO ledger_emissions(lineage,view_seq,output_index,descriptor_digest,kind,source_store_ids,state,next_occ_id) "
+        "VALUES (?,?,?,?,?,?,'proposed',NULL)",
+        (lineage, view_seq, row["output_index"], row["descriptor_digest"], row["kind"], '[]'),
+    ).lastrowid for row in rows]
+
+
+def set_emission_state(conn, lineage, view_seq, new_state):
+    _require_owner(conn)
+    if new_state not in ("adopted", "refused"):
+        raise LedgerError("emission state must be adopted or refused")
+    moved = conn.execute("UPDATE ledger_emissions SET state=? WHERE lineage=? AND view_seq=? AND state='proposed'",
+                         (new_state, lineage, view_seq)).rowcount
+    views = conn.execute("UPDATE ingest_views SET state=? WHERE lineage=? AND view_seq=? "
+                         "AND kind='emission' AND state='proposed'", (new_state, lineage, view_seq)).rowcount if moved else 0
+    return moved, views
 
 
 def apply_respace(conn, lineage, mapping):

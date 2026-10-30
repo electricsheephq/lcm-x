@@ -1215,6 +1215,7 @@ class LCMEngine(
         # and output identities, so the host's commit end call and the first
         # post-compaction ingest can be verified instead of trusted by position.
         self._compress_commit_proof: Optional[Dict[str, Any]] = None
+        self._emission_handle = None
         self._last_emission_descriptors: Optional[Dict[str, Any]] = None
         self._last_ingest_reconciliation: Dict[str, Any] = {
             "action": "none",
@@ -2724,6 +2725,7 @@ class LCMEngine(
         leaves = self._last_compress_leaves
         progress = leaves is not None and leaves[0] == self._hold_conversation_key() and leaves[1] >= 1
         self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
+        self._signal_emission_state("refused", self._session_id, require_conversation=True)
 
     def _discard_prepared_leaves(self) -> None:
         """#787: shutdown and storage rebind drop this store's queued preparations and prepared leaves."""
@@ -4385,6 +4387,7 @@ class LCMEngine(
         state = self._lifecycle.rebind_own_finalized(self._session_id, state.conversation_id)
         if state is None:
             return  # another session holds the row now: nothing written, the frontier unchanged
+        self._ledger_count("ledger.emission_boundary_unadopted")
         frontier = int(state.current_frontier_store_id or 0)
         if int(self._last_compacted_store_id or 0) != frontier:
             logger.warning(
@@ -4414,12 +4417,15 @@ class LCMEngine(
         generic rebind when the lifecycle row does not prove continuity.
         """
         if self._bypasses_lcm_context_management() or not self._conversation_id:
+            self._ledger_count("ledger.emission_boundary_unadopted")
             return False
         state = self._lifecycle.get_by_conversation(self._conversation_id)
         if state is None or state.current_session_id not in (None, session_id):
+            self._ledger_count("ledger.emission_boundary_unadopted")
             return False
         if state.current_session_id is None:
             if state.last_finalized_session_id != session_id:
+                self._ledger_count("ledger.emission_boundary_unadopted")
                 return False
             state = self._lifecycle.bind_session(session_id, conversation_id=state.conversation_id)
         resumable_finalized = (
@@ -4474,6 +4480,7 @@ class LCMEngine(
         if self._embedding_maintenance_retired:
             self._rearm_embedding_maintenance()
             self._schedule_embedding_maintenance()
+        self._signal_emission_state("adopted", session_id, require_conversation=True)
         return True
 
     def _continue_compression_boundary(
@@ -4741,6 +4748,7 @@ class LCMEngine(
                 previous_session_id,
             )
             self._finalize_pending_reset_boundary(previous_session_id)
+            self._ledger_count("ledger.emission_boundary_unadopted")
             self._reset_session_scoped_runtime_state()
             self._last_boundary_skip_time = time.monotonic()
             self._apply_session_start_metadata(session_id, kwargs)
@@ -4823,11 +4831,15 @@ class LCMEngine(
             if (commit_proof.get("published") or commit_proof.get("native") or commit_proof.get("recovery")
                     or commit_proof.get("filtered") or commit_proof.get("stub_first")):
                 self._persist_compress_commit_proof(commit_proof)
+            self._signal_emission_state("adopted", source_session_id)
         elif can_reassign:
+            self._ledger_count("ledger.emission_boundary_unadopted")
             # No transferred commit proof (proof creation failed, an end that
             # ingested, native recovery): the cursor does not index the child's
             # list. Reconcile it against the store (#484 round 2).
             self._frontier_holder().invalidate(drop_proof=True)
+        else:
+            self._ledger_count("ledger.emission_boundary_unadopted")
         self._log_session_filter_diagnostics()
 
     @staticmethod
@@ -5012,6 +5024,7 @@ class LCMEngine(
                     old_session_id,
                     session_id,
                 )
+                self._ledger_count("ledger.emission_boundary_unadopted")
                 return
             pre_reset_preserve_ambiguous_no_frame_old_session = bool(
                 active_old_auxiliary_generation is not None
@@ -5115,6 +5128,7 @@ class LCMEngine(
                     old_session_id,
                     session_id,
                 )
+                self._ledger_count("ledger.emission_boundary_unadopted")
                 return
             if (
                 self._has_auxiliary_lineage_session(old_session_id)
@@ -5144,6 +5158,7 @@ class LCMEngine(
                     old_session_id,
                     session_id,
                 )
+                self._ledger_count("ledger.emission_boundary_unadopted")
                 return
             if self._compression_boundary_from_lcm_bypassed_session(old_session_id):
                 self._handoff_lcm_bypass_lineage(
@@ -5153,6 +5168,7 @@ class LCMEngine(
                 )
                 self._handoff_delegate_child_compression(old_session_id, session_id)
                 self._clear_thread_context_stateless()
+                self._ledger_count("ledger.emission_boundary_unadopted")
                 if previous_session_id and previous_session_id != session_id:
                     self._finalize_pending_reset_boundary(previous_session_id)
                     self._reset_session_scoped_runtime_state()
@@ -5178,6 +5194,10 @@ class LCMEngine(
             self._clear_thread_context_stateless()
             self._continue_compression_boundary(session_id, old_session_id, kwargs)
             return
+        if boundary_reason == "compression" and not (
+                old_session_id and old_session_id == session_id == previous_session_id):
+            # Neither continuation took this boundary; the in-place one counts its own False returns (#2055).
+            self._ledger_count("ledger.emission_boundary_unadopted")
 
         if self._is_live_auxiliary_child_session(session_id, previous_session_id, kwargs):
             self._remember_delegate_child_auxiliary(session_id)
@@ -7316,18 +7336,138 @@ class LCMEngine(
                 return active
         raise AssertionError("unreachable ingest retry state")
 
-    def _ledger_count(self, key, error=None, amount=1):
+    def _ledger_count(self, key, error=None, amount=1, subject="ingest"):
         try:
             counts = self.__dict__.setdefault("_ingest_ledger_counters", Counter())
             counts[key] += amount
             warned = self.__dict__.setdefault("_ingest_ledger_warned", set())
             if error is not None and key not in warned:
                 warned.add(key)
-                logger.warning("LCM %s (%s); ingest unaffected", key, type(error).__name__)
+                if subject == "ingest":
+                    logger.warning("LCM %s (%s); ingest unaffected", key, type(error).__name__)
+                else:
+                    logger.warning("LCM %s (%s); %s unaffected", key, type(error).__name__, subject)
             if key == "ledger.respaced" and error is None:
                 logger.info("LCM ledger ordinals respaced")
         except Exception:
             pass  # Telemetry must never fail the ingest.
+
+    @contextmanager
+    def _emission_owner(self, salt):
+        store, conn = self._store, self._store._conn
+        with store._write_lock:
+            if store._transaction_owner.owns(conn) or conn.in_transaction:
+                self._ledger_count("ledger.emission_skipped_in_transaction")
+                yield None
+                return
+            with _temporary_sqlite_busy_timeout([conn], 100), store.atomic(immediate=True):
+                if store.ingest_ledger_state() != "ready" or getattr(self, "_ingest_read_only", None) is not None:
+                    self._ledger_count("ledger.emission_skipped_not_ready")
+                    yield None
+                elif store.ingest_ledger_salt() != salt:
+                    self._ledger_count("ledger.salt_changed")
+                    yield None
+                else:
+                    yield conn
+
+    def _compress_exit_write(self, returned, capture):
+        if ingest_ledger_mode() == "off":
+            return
+        reason = "no_capture" if capture is None else "list_mismatch" if capture[0] is not returned else None
+        fresh = capture[1] if capture is not None else []
+        if reason is None:
+            indices = [d["output_occurrence"]["index"] for d in fresh]
+            if any(d["output_occurrence"].get("of") != len(returned) for d in fresh) or (
+                    len(set(indices)) != len(indices) or any(not 0 <= i < len(returned) for i in indices)):
+                reason = "stale"
+            elif not fresh:
+                reason = capture[2] or "no_capture"
+        if reason is not None:
+            self._ledger_count("ledger.emission_no_descriptors." + reason)
+            return
+        started = _perf_counter()
+        try:
+            salt = self._store.ingest_ledger_salt()
+            if salt is None or self._store.ingest_ledger_state() != "ready":
+                self._ledger_count("ledger.emission_skipped_not_ready")
+                return
+            sid = self._session_id
+            resolved, _problem = self._host_uid_lineage_key(sid, require_complete=True)
+            key = "session_lineage:" + str(sid)
+            persisted = self._store._conn.execute("SELECT value FROM ledger_meta WHERE key=?", (key,)).fetchone()
+            lineage = persisted[0] if persisted else ingest_ledger.lineage_key(resolved, sid)
+            entries, _stamps = self._ledger_view_entries(salt, returned)
+            rows = [dict(output_index=i, descriptor_digest=entries[i].identity_digest,
+                         kind="scaffold" if d["kind"] == "objective" else d["kind"])
+                    for i, d in zip(indices, fresh)]
+            conversation_key = self._hold_conversation_key()
+        except Exception as exc:
+            self._ledger_count("ledger.emission_prepare_failed", exc, subject="compress output")
+            return
+        finally:
+            self._last_emission_write_ms = {"digest": (_perf_counter() - started) * 1000, "ledger": 0.0}
+        started = _perf_counter()
+        try:
+            with self._emission_owner(salt) as conn:
+                if conn is None:
+                    return
+                persisted = conn.execute("SELECT value FROM ledger_meta WHERE key=?", (key,)).fetchone()
+                lineage = persisted[0] if persisted else lineage
+                seq = ingest_ledger.next_view_seq(conn)
+                ids = ingest_ledger.insert_emissions(conn, lineage, seq, rows)
+                for i, emission_id in zip(indices, ids):
+                    entries[i] = entries[i]._replace(ref=emission_id, is_descriptor=True)
+                ingest_ledger.write_view(conn, salt, lineage, "emission", "proposed", entries, view_seq=seq)
+            self._ledger_count("ledger.emissions_written", amount=len(ids))
+            self._ledger_count("ledger.emission_views_written")
+            self._emission_handle = ingest_ledger.EmissionHandle(lineage, seq, self._compress_calls, sid, conversation_key)
+        except Exception as exc:
+            self._ledger_count("ledger.emission_busy" if _is_ingest_busy_error(exc) else "ledger.emission_write_failed",
+                               exc, subject="compress output")
+        finally:
+            self._last_emission_write_ms["ledger"] = (_perf_counter() - started) * 1000
+            logger.debug("LCM emission write ledger_digest_ms=%.3f ledger_ms=%.3f",
+                         self._last_emission_write_ms["digest"], self._last_emission_write_ms["ledger"])
+
+    def _signal_emission_state(self, new_state, session_id, *, require_conversation=False):
+        if ingest_ledger_mode() == "off":
+            return
+        try:
+            handle = self._emission_handle
+            if (handle is None or handle.compress_call != self._compress_calls or handle.session_id != session_id
+                    or require_conversation and handle.conversation_key != self._hold_conversation_key()):
+                self._ledger_count("ledger.emission_signal_unmatched")
+                return
+            salt = self._store.ingest_ledger_salt()
+            if salt is None or self._store.ingest_ledger_state() != "ready":
+                self._ledger_count("ledger.emission_skipped_not_ready")
+                return
+            with self._emission_owner(salt) as conn:
+                if conn is None:
+                    return
+                moved, _views = ingest_ledger.set_emission_state(conn, handle.lineage, handle.view_seq, new_state)
+                states = [] if moved else conn.execute(
+                    "SELECT DISTINCT state FROM ledger_emissions WHERE lineage=? AND view_seq=?",
+                    (handle.lineage, handle.view_seq)).fetchall()
+            if moved:
+                self._ledger_count("ledger.emission_" + new_state, amount=moved)
+            elif new_state == "refused" and ("adopted",) in states:
+                self._ledger_count("ledger.refused_after_adopted")
+            else:
+                self._ledger_count("ledger.emission_signal_unmatched")
+        except Exception as exc:
+            self._ledger_count("ledger.emission_state_failed", exc, subject="compress output")
+
+    @staticmethod
+    def _ledger_view_entries(salt, messages):
+        entries, stamps = [], [ingest_ledger.stamp_text(_normalize_observed_at(row.get("timestamp"))) for row in messages]
+        for row, stamp in zip(messages, stamps):
+            uid, absorbed = row.get("message_uid"), row.get("_absorbed_message_uids")
+            absorbed = [u for u in absorbed if _valid_uid(u)] if isinstance(absorbed, (list, tuple)) else []
+            entries.append(ingest_ledger.ViewEntry(ingest_ledger.identity_digest(salt, row),
+                ingest_ledger.stamp_digest(salt, stamp),
+                ingest_ledger.uidset_digest(salt, uid, absorbed) if _valid_uid(uid) else None, None))
+        return entries, stamps
 
     def _prepare_ingest_ledger(self, messages, attribution):
         started = _perf_counter()
@@ -7341,13 +7481,7 @@ class LCMEngine(
             if salt is None:
                 return None
             resolved, _problem = self._host_uid_lineage_key(self._session_id, require_complete=True)
-            entries, stamps = [], [ingest_ledger.stamp_text(_normalize_observed_at(row.get("timestamp"))) for row in messages]
-            for row, stamp in zip(messages, stamps):
-                uid, absorbed = row.get("message_uid"), row.get("_absorbed_message_uids")
-                absorbed = [u for u in absorbed if _valid_uid(u)] if isinstance(absorbed, (list, tuple)) else []
-                entries.append(ingest_ledger.ViewEntry(ingest_ledger.identity_digest(salt, row),
-                    ingest_ledger.stamp_digest(salt, stamp),
-                    ingest_ledger.uidset_digest(salt, uid, absorbed) if _valid_uid(uid) else None, None))
+            entries, stamps = self._ledger_view_entries(salt, messages)
             return dict(salt=salt, resolved=resolved, lineage=ingest_ledger.lineage_key(resolved, self._session_id),
                         entries=entries, stamps=stamps, chain=ingest_ledger.prefix_chain(salt, entries))
         except Exception as exc:

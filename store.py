@@ -1321,7 +1321,7 @@ class MessageStore:
                 self._identity_anchor_schema_ready = True
                 self._carried_relation_connections.add(self._conn)
 
-    # -- #2055 ingest ledger: additive schema only; no production writers yet --
+    # -- #2055 ingest ledger: additive schema with shadow ingest and emission writers --
 
     def _ingest_ledger_tables_exist(self) -> bool:
         with self._write_lock:
