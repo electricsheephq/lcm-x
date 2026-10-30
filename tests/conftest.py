@@ -167,9 +167,9 @@ def _drain_background_maintenance(monkeypatch, _isolate_embedding_process_state)
     otherwise it runs during a later test and calls that test's monkeypatched provider.
     """
     yield
-    engine = sys.modules.get("hermes_lcm.engine")
+    schedulers = sys.modules.get("hermes_lcm.maintenance_scheduler")
     for name in _MAINTENANCE_SCHEDULERS:
-        scheduler = getattr(engine, name, None)
+        scheduler = getattr(schedulers, name, None)
         if scheduler is not None and not _wait_scheduler_idle(scheduler, timeout=30.0):
             # Fail closed: a job still running here would call a later test's fakes.
             pytest.fail(f"{name} still had background work 30 s after the test ended")

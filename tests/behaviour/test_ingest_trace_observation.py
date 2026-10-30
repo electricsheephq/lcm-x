@@ -166,7 +166,7 @@ def test_pending_tail_freezes_batch_and_registers_retry(
                 independent = (pending["messages"] is not batch["messages"]
                                and all(a is not b for a, b in zip(pending["messages"], batch["messages"])))
                 receipts.append((frozen, independent,
-                                 self in harness.engine_module._PENDING_TAIL_ENGINES, exc is original))
+                                 self in harness.maintenance_scheduler_module._PENDING_TAIL_ENGINES, exc is original))
             raise
 
     monkeypatch.setattr(engine_type, "_append_ingest_batch", append_observed)

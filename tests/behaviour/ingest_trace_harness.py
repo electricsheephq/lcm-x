@@ -49,6 +49,7 @@ from tests.harness import ScriptedSummarizer, engine_context, pin_char_counter  
 from tests.phase0_hygiene import product_env_keys  # noqa: E402
 
 engine_module: Any = importlib.import_module("hermes_lcm.engine")
+maintenance_scheduler_module: Any = importlib.import_module("hermes_lcm.maintenance_scheduler")
 ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = ROOT / "tests" / "fixtures" / "ingest_trace.json"
 TRACE_GUIDANCE = "Regenerate deliberately: python -m tests.behaviour.ingest_trace_harness --repo . --regenerate"

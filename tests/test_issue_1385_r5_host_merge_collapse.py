@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from hermes_lcm import engine as engine_module
+from hermes_lcm import maintenance_scheduler
 from hermes_lcm import escalation, tokens
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
@@ -110,7 +110,7 @@ def test_fresh_structured_exchange_after_repeated_users_and_host_merge(tmp_path,
     finally:
         engine.shutdown()
         for name in _MAINTENANCE_SCHEDULERS:
-            scheduler = getattr(engine_module, name, None)
+            scheduler = getattr(maintenance_scheduler, name, None)
             if scheduler is not None:
                 assert _wait_scheduler_idle(scheduler, 30.0), name
         tokens._count_tokens_cached.cache_clear()
