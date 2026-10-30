@@ -1,0 +1,812 @@
+{
+  "ingest": {
+    "admission-aliases": {
+      "outcome_sha": "d4c0e95d9831c3380029c611954607bade2fc6723a59805e56081fd2a9831f17",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "admission-empty": {
+      "outcome_sha": "805fd0090ecd7c8d012261a9cd75fb1c2d351f824c0a5c335f3608d6554feee0",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "admission-full": {
+      "outcome_sha": "a9ea8af16a6a360638413ec95c121de5c9e969a97a7ebd904cf2a1d5986ec410",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "admission-ignored": {
+      "outcome_sha": "cf130c30d3abd36789162c77d73d8fc79afdf2603431209d9a9ee214891724a3",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "admission-no-session": {
+      "outcome_sha": "c4d03344f49782eaa66ba3c4c05cc21295bb8707eaec7bddc75c3464de9acdd3",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "admission-stateless": {
+      "outcome_sha": "1bf6346a5f31a1cc83e882f53b4eb87a1febc5f7eb09f91296d686faea1d7fe3",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "anchor-disabled": {
+      "outcome_sha": "dd43692fd1862cb024decab865b26f2c3003ea1dd7c63f1d8809ee6d5c4cff32",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "anchor-remainder": {
+      "outcome_sha": "8efd72d5baa7c41a7fcd9b48c263e631149d8ddea1e7e4fd126c9557ee8a9bd6",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "anchor-stamp-new-uid": {
+      "outcome_sha": "3709ddbdc9d310cd8eeb28f5885ce625cc5a29191aec9998e2f14e6ba95cdb3c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "anchor-stamp-replay": {
+      "outcome_sha": "12c9d6da86dbb8cbe1eb8702ba43c71425de46f3f5a85290b190acb37d878e3c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "anchor-version": {
+      "outcome_sha": "495c5327d922bd53767e877c46842e07c4322b87b682755ba2a994cb215f9650",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "anchor-version-ignore": {
+      "outcome_sha": "0511ce9778ae264f07b5197c1a210baf96ba66774776c715922d5b79eef5c3a6",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "boundary-exhausted-other-digest": {
+      "outcome_sha": "c932bb8128a2f9929a96564e69ddf1f73cc86b8c70c49d800fd2e83b08b75233",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "boundary-stored-counts-mixed": {
+      "outcome_sha": "2c975f138081d4bad8a38db3dd2465fc5e79aa46de21e87d16052c41174c046b",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "boundary-two-digests": {
+      "outcome_sha": "41f6a8c71b220a4d885c8cdc730a914b9bbda85e1a2a0f6dc6b97421854f991e",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "cache-absent": {
+      "outcome_sha": "12c9d6da86dbb8cbe1eb8702ba43c71425de46f3f5a85290b190acb37d878e3c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "cache-divergent-cache": {
+      "outcome_sha": "199c2b9b466e161e1f2f86e4ce56074ff9fabb067fa0d86c7233238b30884c37",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "cache-empty-delta": {
+      "outcome_sha": "12c9d6da86dbb8cbe1eb8702ba43c71425de46f3f5a85290b190acb37d878e3c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "cache-new-stamp": {
+      "outcome_sha": "763f4bdd2cb7d09a499cd9ecc1a7888bae09e3133ff0129d3ebd2fed6ed10cc3",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "cache-new-uid": {
+      "outcome_sha": "3709ddbdc9d310cd8eeb28f5885ce625cc5a29191aec9998e2f14e6ba95cdb3c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "cache-rewrite": {
+      "outcome_sha": "e48cb14212952f1081a3b0b222b6aa1ee9fe30a6cb315fa335e8c8ceeff7fefa",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "cache-short-cache": {
+      "outcome_sha": "12c9d6da86dbb8cbe1eb8702ba43c71425de46f3f5a85290b190acb37d878e3c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-end-allow-end": {
+      "outcome_sha": "0e77bec217ec02734e46b39d5089152ce50b60790f78d3a2780e8b71dc26bdef",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-end-delta": {
+      "outcome_sha": "2fc4f6b5ae8400e12c556e445af46b87d7a4af0e32094018b076091d6da5f96a",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-end-full": {
+      "outcome_sha": "0e77bec217ec02734e46b39d5089152ce50b60790f78d3a2780e8b71dc26bdef",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-end-new-uid": {
+      "outcome_sha": "b146775f3083cd2fbcbbee599db7cb82c9c1224cd63f3facb65cf18a04e2526d",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-metadata-conflict": {
+      "outcome_sha": "31f4c3b6be2b63591edd1878a76cdc709d8bcbb8255e6afcdd8d7ca9d31c5918",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-v2-allow-end": {
+      "outcome_sha": "4a50c398cb1026a014036d2a12d052468fb33f95339269d020fee89a3c81beee",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-v2-delta": {
+      "outcome_sha": "26b40c1f2bf7c76820e8d93b7a707b47c7a3363be99ee326ce1fe13e309f4198",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-v2-full": {
+      "outcome_sha": "4a50c398cb1026a014036d2a12d052468fb33f95339269d020fee89a3c81beee",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-v2-new-uid": {
+      "outcome_sha": "936ffebd7b95bd6bef668ade320b30ccd13802125bf3003b0553e288ac85f4f9",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-v3-allow-end": {
+      "outcome_sha": "61e86d395657e48c7c5469b7ce34633ce64d5a3aa3a61afd74aea1f101ab67de",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-v3-delta": {
+      "outcome_sha": "0d2e232c77a238016cf646541715e40ea1534605c9f0bc0eb4be6dc1de687f02",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-v3-full": {
+      "outcome_sha": "61e86d395657e48c7c5469b7ce34633ce64d5a3aa3a61afd74aea1f101ab67de",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-v3-new-uid": {
+      "outcome_sha": "14fea8573cadc03f4c0273db9cd65c351d1d744bdd86a24803247b5bdf73398c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-v4-allow-end": {
+      "outcome_sha": "d8f09b8f8a162ab9e882725dbcebe2a1213a131c959ba7a8fc471e708a032c8f",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-v4-delta": {
+      "outcome_sha": "68710f3c72326f79a84b5d9d12fde24bb6e84a31f2304c0b33d69ff03cf2380b",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-v4-full": {
+      "outcome_sha": "d8f09b8f8a162ab9e882725dbcebe2a1213a131c959ba7a8fc471e708a032c8f",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "durable-v4-new-uid": {
+      "outcome_sha": "f9f9b928213d9ec3d145f16a43c3b6321260ce53adaf7e829c716dace222278e",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "empty-all-ordinals": {
+      "outcome_sha": "ee6153c1df98fa617f1af800f7c328f47da3ea5d0368fccc6df7b266fd9ec604",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "empty-child-placeholder-prefix": {
+      "outcome_sha": "4a65d4d8af23c6fd552570dd4983f01a72d8e27c6335489e2a15ba78aed97a34",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "ignored-changed": {
+      "outcome_sha": "42dcd99b0688d51b3b234d6370b24952ef1a952a8fd58fff3011f790d90fd362",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "ignored-delta": {
+      "outcome_sha": "e8f630f3dd3a0bc1716d41264e9f298f853a5aac2ff61e609d3436be6db40c6b",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "ignored-full": {
+      "outcome_sha": "7bb879ba5b8e7b7e830fadc0eb20f8f9660705d1c765690f94f1f8e2e3519211",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "ignored-new": {
+      "outcome_sha": "c46b6a943ff59b3722d9f873d30c7ec251bb48bbbb796c470babf13f31265431",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "ignored-prefix": {
+      "outcome_sha": "8e33bbe2dfd2e224c196d0a336e7996b51f3551ed0096041b39e8673a9f68bfb",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "ignored-rewrite": {
+      "outcome_sha": "62e5731d823156842e5d1d324ac8b057f5fe3757c96a2a69dceda1090abeccf0",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "ignored-suffix": {
+      "outcome_sha": "d6785c9d193e38e1cf67375ac016297c85dce4d8bc7413e9d61a22e42c147577",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "ignored-warm": {
+      "outcome_sha": "627d3b776dac73070d0768f6a15e41487b0c3847ec8e34db7e16959588e76e3e",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "marker-changed": {
+      "outcome_sha": "c6dda998e740e8100a22023eca55267ee19a1297699599a46574b5a6a45cb754",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "marker-delta": {
+      "outcome_sha": "353dca9f35ebbbef4019cbd66193ef5da0db54574e810dcc39d44e22b68cb283",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "marker-full": {
+      "outcome_sha": "976deacf7e8b87a42115f6b662eba6d13afe145eca34e1f6e3b3d82ddd50836b",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "marker-new": {
+      "outcome_sha": "359e6ad7c0294bba0c98d40562bc6be3e1418cee28b2d6d6bfa843ca5a48c803",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "marker-prefix": {
+      "outcome_sha": "d88827044c14188d766f5b0fcc96d3acac502f7ad3b902975ba71bb473bf4277",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "marker-rewrite": {
+      "outcome_sha": "728011472f07b7753f35c0c5aa933628655561db9d33c2e1d21682b42c8a680a",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "marker-suffix": {
+      "outcome_sha": "ac89e15112f10da29abd9ad64845aa5d08f7e87a5e51fb131feb65aa17a7c755",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "marker-warm": {
+      "outcome_sha": "ba2d1063d732a3283f7af2de38e7bba515864750506562bb20cdb9f5b1afb864",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "opaque-raw-stub-assistant-1": {
+      "outcome_sha": "1d5eab18ed89ed405a4b466e3536f081866150ad9bbc7bdad6235b3e7034da03",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "opaque-raw-stub-assistant-2": {
+      "outcome_sha": "bfbdc1c761ef02593bc510b47dd566b710d73e664f78f0cbf1723600c81b8b76",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "opaque-raw-stub-tool-1": {
+      "outcome_sha": "ce95697bd075f4e6af374053f4ec05f95302e335957d1903db1728fed6b5bc83",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "opaque-raw-stub-tool-2": {
+      "outcome_sha": "6a5343ae5fbd6eb66090c97713a8a09e2cd2a67e8ab2247458cc55a011d88573",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "opaque-raw-stub-user-1": {
+      "outcome_sha": "1e4216934f42f891dfb4c19df997485f5f8195cfbc430334a9c072a745a9dd7e",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "opaque-raw-stub-user-2": {
+      "outcome_sha": "808883c6e5071202ef28f4536db84d5792d18d9683b5cafc5fbe235dd3f2e703",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-0-1-all": {
+      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-0-1-generated": {
+      "outcome_sha": "7da53ec70efa894bdf6c2b8ea1451d71a009c02acbfe1e58980461cff88caf39",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-0-1-mixed": {
+      "outcome_sha": "2c975f138081d4bad8a38db3dd2465fc5e79aa46de21e87d16052c41174c046b",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-0-1-single": {
+      "outcome_sha": "644616b7c4a5736da231ded21674e051efd8ffab516fbd16c3523db4d7242bc2",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-0-1-stored-counts": {
+      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-0-1-summary": {
+      "outcome_sha": "7d463cdef32f1c06e17fabd65b1c5c2e07ff8bd9331437f9bf48096cd423c06d",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-0-2-all": {
+      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-0-2-generated": {
+      "outcome_sha": "7da53ec70efa894bdf6c2b8ea1451d71a009c02acbfe1e58980461cff88caf39",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-0-2-mixed": {
+      "outcome_sha": "fd47e3436df0ff560fa17915882e0a40875f695bcf62a755415dd9ef9c5901dd",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-0-2-single": {
+      "outcome_sha": "644616b7c4a5736da231ded21674e051efd8ffab516fbd16c3523db4d7242bc2",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-0-2-stored-counts": {
+      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-0-2-summary": {
+      "outcome_sha": "7d463cdef32f1c06e17fabd65b1c5c2e07ff8bd9331437f9bf48096cd423c06d",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-1-1-all": {
+      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-1-1-generated": {
+      "outcome_sha": "eedc4681fc94616004e2a4416aab030eb5f4273d4f7982fafc0313c4bb232f08",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-1-1-mixed": {
+      "outcome_sha": "2c975f138081d4bad8a38db3dd2465fc5e79aa46de21e87d16052c41174c046b",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-1-1-single": {
+      "outcome_sha": "644616b7c4a5736da231ded21674e051efd8ffab516fbd16c3523db4d7242bc2",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-1-1-stored-counts": {
+      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-1-1-summary": {
+      "outcome_sha": "35d6c0ecc9cb34a545493799ac1c248fff46e4c31c3df4bf9e826fe54bf36de5",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-1-2-all": {
+      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-1-2-generated": {
+      "outcome_sha": "eedc4681fc94616004e2a4416aab030eb5f4273d4f7982fafc0313c4bb232f08",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-1-2-mixed": {
+      "outcome_sha": "fd47e3436df0ff560fa17915882e0a40875f695bcf62a755415dd9ef9c5901dd",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-1-2-single": {
+      "outcome_sha": "644616b7c4a5736da231ded21674e051efd8ffab516fbd16c3523db4d7242bc2",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-1-2-stored-counts": {
+      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-1-2-summary": {
+      "outcome_sha": "7d463cdef32f1c06e17fabd65b1c5c2e07ff8bd9331437f9bf48096cd423c06d",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-2-1-all": {
+      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-2-1-generated": {
+      "outcome_sha": "eedc4681fc94616004e2a4416aab030eb5f4273d4f7982fafc0313c4bb232f08",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-2-1-mixed": {
+      "outcome_sha": "2c975f138081d4bad8a38db3dd2465fc5e79aa46de21e87d16052c41174c046b",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-2-1-single": {
+      "outcome_sha": "644616b7c4a5736da231ded21674e051efd8ffab516fbd16c3523db4d7242bc2",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-2-1-stored-counts": {
+      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-2-1-summary": {
+      "outcome_sha": "35d6c0ecc9cb34a545493799ac1c248fff46e4c31c3df4bf9e826fe54bf36de5",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-2-2-all": {
+      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-2-2-generated": {
+      "outcome_sha": "eedc4681fc94616004e2a4416aab030eb5f4273d4f7982fafc0313c4bb232f08",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-2-2-mixed": {
+      "outcome_sha": "fd47e3436df0ff560fa17915882e0a40875f695bcf62a755415dd9ef9c5901dd",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-2-2-single": {
+      "outcome_sha": "644616b7c4a5736da231ded21674e051efd8ffab516fbd16c3523db4d7242bc2",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-2-2-stored-counts": {
+      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "placeholder-2-2-summary": {
+      "outcome_sha": "7d463cdef32f1c06e17fabd65b1c5c2e07ff8bd9331437f9bf48096cd423c06d",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-consumed-consulted": {
+      "outcome_sha": "63f07512f4ecdc1b66088eadd07159856a02237704daf08ac6a7e42ac6d7d299",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-consumed-divergent": {
+      "outcome_sha": "1fa8c2526dba74e532fbd3ebe3238eaee97f0aab7f63556519fd5468cacb5cf4",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-consumed-foreign-conversation": {
+      "outcome_sha": "2d2f5366b452b02cb22b74773067e4df8e3da1200c9f4387d4638e004d8e3cd4",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-consumed-foreign-session": {
+      "outcome_sha": "fc59462319d9208953675ffcbb15392c2bcf1581eb4706db24d0db900d3c4693",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-consumed-full": {
+      "outcome_sha": "bc5c0dd2c04c8f17fc25f2ad44447a207f14b37cb896e91cc238e04eae37fdb8",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-consumed-input": {
+      "outcome_sha": "bc5c0dd2c04c8f17fc25f2ad44447a207f14b37cb896e91cc238e04eae37fdb8",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-consumed-merge": {
+      "outcome_sha": "75777188f8f4948223560e5eb80e5732b0a1794442981251e8a68098b0a7e8c0",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-consumed-missing-metadata": {
+      "outcome_sha": "736e7ed69abb0750ef57ed26e43e5673f4bd22a9032747bcb73468ac8f54de1c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-consumed-new-stamp": {
+      "outcome_sha": "763f4bdd2cb7d09a499cd9ecc1a7888bae09e3133ff0129d3ebd2fed6ed10cc3",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-consumed-new-uid": {
+      "outcome_sha": "3709ddbdc9d310cd8eeb28f5885ce625cc5a29191aec9998e2f14e6ba95cdb3c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-consumed-repair": {
+      "outcome_sha": "2a7d15bf235bd9f3a1b2853becf2634e6f56d0e4a34f601993972dde48f68cf4",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-consumed-short": {
+      "outcome_sha": "64336a597d21f789fc52fdf8e59348b7f4c38bc9824664ba7b880bfead912b1d",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-consumed-zero": {
+      "outcome_sha": "4331f59e0ea21b29a98c11e4f3c0bf7028bfaf9b58c9ee8bf23ef98087552ed0",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-consulted": {
+      "outcome_sha": "111ad6878024573f47d564f34989054c7c9e928300cc8d6013b35aebdc25f305",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-divergent": {
+      "outcome_sha": "efe8704bdb79fc0c755a8433d1206fb836dec97c8e515b57b5eaca0ae51a68af",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-foreign-conversation": {
+      "outcome_sha": "b948f3732569dc6f6a335e370ad4bd5a6c6e004851bac6bd799639d4a8c83810",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-foreign-session": {
+      "outcome_sha": "dbe8c69f5c5e080e0a74d4a9fc30bd2a14e43b1e13bdf5d6521ef21f70d6d7ce",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-full": {
+      "outcome_sha": "bc5c0dd2c04c8f17fc25f2ad44447a207f14b37cb896e91cc238e04eae37fdb8",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-input": {
+      "outcome_sha": "bc5c0dd2c04c8f17fc25f2ad44447a207f14b37cb896e91cc238e04eae37fdb8",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-lossy": {
+      "outcome_sha": "631c124094c33cf943fc3756f8356ceed5e6ce0bde0c711574d6b752945bc0fb",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-merge": {
+      "outcome_sha": "6afaa84e77c3bb1be80f34d4d29fc1b6b4b2af14f0945724b8af4721fea27872",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-missing-metadata": {
+      "outcome_sha": "736e7ed69abb0750ef57ed26e43e5673f4bd22a9032747bcb73468ac8f54de1c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-new-stamp": {
+      "outcome_sha": "763f4bdd2cb7d09a499cd9ecc1a7888bae09e3133ff0129d3ebd2fed6ed10cc3",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-new-uid": {
+      "outcome_sha": "3709ddbdc9d310cd8eeb28f5885ce625cc5a29191aec9998e2f14e6ba95cdb3c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-remap": {
+      "outcome_sha": "ff20ec62360275c81a58a112d12a27894be9364d028134219b18d61b0dd09bc9",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-remap-new-stamp": {
+      "outcome_sha": "ed4d8410510f56f2e8feacb02861ba8cb9aebd1bba5c3af820e8b06e392c9edf",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-repair": {
+      "outcome_sha": "212b791feeddbd2d5ea8396d00a2449403364f86f58468f76aa6823d54300ffd",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-short": {
+      "outcome_sha": "9c057a7ef04e8fdb4ac0161a37599db3685a710ee284d1bc22d498525edb0a04",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-native-zero": {
+      "outcome_sha": "ab38b157c298ab3b280de44f801d8dad71790ad0e05a85b191a4a197f86a4640",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-output-consulted": {
+      "outcome_sha": "e3995cf1c36d1d2fe3b951e783bf52dad6dad3f64056525db735c82ada0adedc",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-output-divergent": {
+      "outcome_sha": "d144b6db0bb88c5fbaa2a7eed06b91757ed6a02f2996a234c868dd5e3232fa2a",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-output-foreign-conversation": {
+      "outcome_sha": "c54e80126a5bc966e459fdf9b46b2c04348bbea164ce43c3939e3e5893042b85",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-output-foreign-session": {
+      "outcome_sha": "5420777b688148bf856be565aa7635a84acc6a99a4d9569595e1fe1af499b9b1",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-output-full": {
+      "outcome_sha": "bc5c0dd2c04c8f17fc25f2ad44447a207f14b37cb896e91cc238e04eae37fdb8",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-output-input": {
+      "outcome_sha": "bc5c0dd2c04c8f17fc25f2ad44447a207f14b37cb896e91cc238e04eae37fdb8",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-output-merge": {
+      "outcome_sha": "ab7b407d1798fca6b9d988a83c91255909bf39338be55b621706103bcaad350d",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-output-missing-metadata": {
+      "outcome_sha": "736e7ed69abb0750ef57ed26e43e5673f4bd22a9032747bcb73468ac8f54de1c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-output-new-stamp": {
+      "outcome_sha": "763f4bdd2cb7d09a499cd9ecc1a7888bae09e3133ff0129d3ebd2fed6ed10cc3",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-output-new-uid": {
+      "outcome_sha": "3709ddbdc9d310cd8eeb28f5885ce625cc5a29191aec9998e2f14e6ba95cdb3c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-output-repair": {
+      "outcome_sha": "37335b5e368bc38778145b0d2413551971dc16856570400c3749e1870f213179",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-output-short": {
+      "outcome_sha": "86f28a6df479ef59d4d143ac86bcc393c729d13d9d68f51ef46e0302d0a02571",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "proof-output-zero": {
+      "outcome_sha": "16af7586bfee4ded0eb078ce0cd8a9133b1f76eaf76c40e8a7afad52dee545ed",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "protect-after-filter-copy": {
+      "outcome_sha": "51ccce0f523470a2f8509ac336e2b27ab7398f9a579ea36171a93f37b17e3aa4",
+      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
+    },
+    "protect-large-assistant": {
+      "outcome_sha": "978bdce946042638ae228c9d702189795cc8300f839fa36ff4a4d86b8ef4722c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "protect-large-user": {
+      "outcome_sha": "3f97fa9ca138cd00b1b1020bd19f47c241dcf6117f9876d3058753e69a9c1d29",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "protect-path-error": {
+      "outcome_sha": "f10495541421f6cf5df4d9c92f846527c52de0df55607a6d66e7ba9a7508a9de",
+      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
+    },
+    "reconcile-tool-after-new": {
+      "outcome_sha": "e3c1327bfc997b086d9a4a7cac9c6bb9e2f3e5359a2d8557358b14f119092d13",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "repeated-equal-occurrences": {
+      "outcome_sha": "6c9ca3d51c8850c00c16ef49d814db811c715f68f328e6f8cccee8365991fa3b",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "repeated-tool-id": {
+      "outcome_sha": "14d595579063940d261252aab97b1a14a505843fd279992bfdb1071cfcfe5729",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "replay-build-mapped-ignore": {
+      "outcome_sha": "d54ef74dbf2113f6e83c890378a24ef3fe9d4cd6b207182db8f0df38a3bbb701",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "replay-build-quarantine-prefix": {
+      "outcome_sha": "981187f57076efaef9bd8603a8e0f01afef2c3dcb74fa5e4144a6b79c50bd8f4",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "row-filter-generated-append-error": {
+      "outcome_sha": "b73f7f2d3c6989b9b32a484eced9b468e33428a8d69d096131540815c19e519b",
+      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged. On main this failed ingest also committed an empty message_relations table without its rows; now it stores nothing, and after the next ingest the stored tables match main"
+    },
+    "row-filter-ignore-ledger-lock": {
+      "outcome_sha": "bcafb078d602be92313e0051b3743210267c854ab17672cc5f85fdf1ee7e7bbf",
+      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
+    },
+    "row-filter-ignored-append-error": {
+      "outcome_sha": "7859a262312ce560392be5e5f2b46e8c9f713bb254a681e26eaaff1100670656",
+      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged. On main this failed ingest also committed an empty message_relations table and the ignored_active_replay_placeholder_hashes metadata key without its rows; now it stores nothing, and after the next ingest the stored tables match main"
+    },
+    "scaffold-metadata": {
+      "outcome_sha": "ac12f7e348a3b9bbde60aacd737522a1eadcc5e6041b2987240468e8ddc1a245",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "sequence-compaction": {
+      "outcome_sha": "a37af98893381354bb65922d9aa8dd335f0beb4a39aea6080a08ff925ba72389",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "sequence-host-merge": {
+      "outcome_sha": "98564592816cee9505ff6c2ac785d1fea082ed049070ffe0e586d91a06de32a9",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "sequence-rewrite": {
+      "outcome_sha": "2cea267a4e1a39c7e0b7c55a4a4515afc3cbb3f690bd9a3583585a0f49b25975",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "sequence-rotation": {
+      "outcome_sha": "8bbb5c7d0ac702e19089ca444eb06b6f091133935e07c03e882b6e2e1b42f44e",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "sqlite-append": {
+      "outcome_sha": "63aa55284cd9397586ae5f25cebbb891c9cb85425aef8f9ac140e6ee4355607d",
+      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
+    },
+    "sqlite-duplicate-existing-tail": {
+      "outcome_sha": "6cf1a0ab9b8261259cb10ed2d4e6e7e578febf055e621fd15300df4a1ef70df3",
+      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
+    },
+    "sqlite-duplicate-tail": {
+      "outcome_sha": "4de3d7855e918bb7588eb2ac04ac963779f5f4fd69f86132df29ca33e43d7e25",
+      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
+    },
+    "sqlite-durable": {
+      "outcome_sha": "43eaf4b0f0f8d2c75d7fb204fa7c9d59eb255d7ebb123d5eef1b5cd6115a8092",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "sqlite-locked": {
+      "outcome_sha": "c8a65866d71c290e23db43bf7e191ce4591cbe2a659e14b7376d7657a8530cba",
+      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
+    },
+    "sqlite-locked-existing-tail": {
+      "outcome_sha": "0a2db0bbe2df38f4cd935c397639d9358226ea9d949afe1e6875f7a1aecfd93a",
+      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
+    },
+    "sqlite-metadata": {
+      "outcome_sha": "cc3feb25e3656e751d76427225f8bba12188305726552b46ec168923a54a0b1f",
+      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
+    },
+    "sqlite-prematch": {
+      "outcome_sha": "2764e3094b9bbece23701d352a64b9d51a8f95782c9c9cdde93ea65d181f6566",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "sqlite-probe": {
+      "outcome_sha": "a9ea8af16a6a360638413ec95c121de5c9e969a97a7ebd904cf2a1d5986ec410",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "sqlite-relation": {
+      "outcome_sha": "b3724e7fde7fbd907fc8fb6258e41a5f0b99d84f17f667b4868befb7ad4dc20b",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "sqlite-snapshot": {
+      "outcome_sha": "15422467aa78792e9fa5771379a9d1cbab8881ea4e7c182dfb5ab3edd53ba039",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "tool-segments-after-new": {
+      "outcome_sha": "633e597101fff9a2ca677cc6e33a4105ad11ed951165a4e91042b014bf4a36ac",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "tool-stub-host-held": {
+      "outcome_sha": "5ed364a1f316b20014fba80f61e3e448d73591a531e9e31a22529c8206268ae7",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "tool-stub-pair": {
+      "outcome_sha": "65e98b251c579d0e1f437e88440e53c7e7de406e4b3bcd856eeb2800a2b465fb",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "tool-stub-recovery": {
+      "outcome_sha": "ad46c11b76ecfddcf43908ce4b50531b3811d431e9bebdd942e97ea50b14f655",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "tool-stub-single": {
+      "outcome_sha": "d947f12b3a3771c5b4ef3c1cb2976ecd0a889afaeaf4546888b49524905fb251",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "tool-stub-warm": {
+      "outcome_sha": "d92a48d7259c0d48d5f8675048ae1f9d7566caf96c99e9fe15152c1bd59c8c5d",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "tools-changed": {
+      "outcome_sha": "b13ecf54cc1e635d01b9a4259b2e8af6be4c101ac661d13ba431eeb6823140ed",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "tools-delta": {
+      "outcome_sha": "0c1c64cbb04be8a8f335ae71901105a9e9ad04c741769c00083209fdcbf6b052",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "tools-full": {
+      "outcome_sha": "ea01ed4c9a7cd1216edffbc216fb9be79338a62a5aa17b9cc9be6cbb59b91cc7",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "tools-new": {
+      "outcome_sha": "f300a7e059328c9a46dea32458ae6e90d8674e195ce1387323da96b0432c0034",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "tools-prefix": {
+      "outcome_sha": "f1896ee1c3ff77e2e5fa5b8c73bdeab3e25067e5f22aa0de2ec765005285c19d",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "tools-rewrite": {
+      "outcome_sha": "1209f86f1f0a12b1dc945dae17a24ecfa377378acc3ed9e31b20c5c33224587f",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "tools-suffix": {
+      "outcome_sha": "1744867d0b0a515b7bb427a50c87d098165396bb5d4e10fcf7ac2f7c744af989",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "tools-warm": {
+      "outcome_sha": "f2e432c20ab432faed0ddaee99599a0f4767db3d2d1a4d0366fbaafff3b89586",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "turns-changed": {
+      "outcome_sha": "d6793986bc31efc812e1ee3d6437f84532360bb62ba6a96a43246a0437f6e4c0",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "turns-delta": {
+      "outcome_sha": "2fc4f6b5ae8400e12c556e445af46b87d7a4af0e32094018b076091d6da5f96a",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "turns-full": {
+      "outcome_sha": "0e77bec217ec02734e46b39d5089152ce50b60790f78d3a2780e8b71dc26bdef",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "turns-new": {
+      "outcome_sha": "5623eaef3bdf620323e0f109e7751f551d6b39624b7b793a4fa98821544c5df7",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "turns-prefix": {
+      "outcome_sha": "2e6ab8ceceade23f4ae24e6caeb3e3190e33f971151c292f357d091138a64258",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "turns-rewrite": {
+      "outcome_sha": "ace738b9edb593e843ca96d8ce7a50bf7fcba23bb4ad2febfe055d00788fc39d",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "turns-suffix": {
+      "outcome_sha": "20014c2e61b80467d2ff82c807b0f1c2fd096ffbe0b7445d5425cb6d7abd6581",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "turns-warm": {
+      "outcome_sha": "12c9d6da86dbb8cbe1eb8702ba43c71425de46f3f5a85290b190acb37d878e3c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "uid-bindings-new": {
+      "outcome_sha": "d50bfb965e5b46d8974fb1216dbcf2762d7f89e2c3b9afefd275bb7e0c9c33c6",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "uid-bindings-new-occurrence": {
+      "outcome_sha": "2111425b453f6974832ec4e97450fa30b105838fabef467e0e9a6a4aebad49e6",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "uid-bindings-replay": {
+      "outcome_sha": "98723e792401a6d4d624ef178deb9838bfea789f519ac202232b70578e26fecb",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "whitespace-changed": {
+      "outcome_sha": "6febd4d72882d9d8f5feedffc1d4ce20ceb68d853fb3a6b800217f0dfcd8b46b",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "whitespace-delta": {
+      "outcome_sha": "6f54eb8e02acbde772db17c82a4599de5811a2f16046243569c602135b6576b7",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "whitespace-full": {
+      "outcome_sha": "58fadd706e836d5cc8d9226b8fc7e1dc0ccfcb8a60a4c069412db50cc71a704f",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "whitespace-new": {
+      "outcome_sha": "fc561790bebde706a91e89bc6ce7614299356da69eef02d58f4111085ae6541c",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "whitespace-prefix": {
+      "outcome_sha": "f9eebc240f419ddfed8183cafd58232517594640e127488979d16bce64a4aff9",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "whitespace-rewrite": {
+      "outcome_sha": "5cfef677a6de268d596dc208d016347400c90f7b77e7f2c8f7207390dea88285",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "whitespace-suffix": {
+      "outcome_sha": "1fcdbe737f2abde8790e80ef222a0fa38766decafa8a83b41d867b47d5194886",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    },
+    "whitespace-warm": {
+      "outcome_sha": "489a4f0037919e5b1d52091a36bb2899734904748c90824e88d093c63f3d6df6",
+      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+    }
+  }
+}

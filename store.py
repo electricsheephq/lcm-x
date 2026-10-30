@@ -9,13 +9,15 @@ row identity (`store_id`) for DAG/source lookup.
 """
 
 
+import hashlib
 import json
 import logging
 import math
+import secrets
 import sqlite3
 import threading
 import time
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Collection, Dict, Iterable, List, Optional
@@ -56,7 +58,10 @@ from .search_query import (
 from .message_content import normalize_content_value as _normalize_content_value
 from .sqlite_session import ConnectionPolicy, TransactionOwner, open_connection
 from .sqlite_util import (
+    _SqliteSavepointError,
+    _is_ingest_busy_error,
     _run_sqlite_write_with_snapshot_retry,
+    _sqlite_savepoint,
     _temporary_sqlite_busy_timeout,
 )
 from .tokens import count_message_tokens
@@ -64,6 +69,34 @@ from .tokens import count_message_tokens
 logger = logging.getLogger(__name__)
 
 INGESTED_AT_BACKFILL_STEP = "messages_ingested_at_backfill_v1"
+_INGEST_LEDGER_TABLES = (
+    "ledger_meta", "occurrence_bindings", "ledger_emissions", "stamp_observations",
+    "ingest_views", "lineage_marks",
+)
+
+
+def ledger_digest(salt: bytes, *parts) -> bytes:
+    """Digest the P1b-defined identity tuple before redaction (design M4).
+
+    Each part has a one-byte type tag and an eight-byte big-endian payload length.
+    An int outside the signed 64-bit range raises OverflowError.
+    """
+    digest = hashlib.blake2b(key=salt, digest_size=16)
+    for part in parts:
+        if part is None:
+            tag, payload = b"n", b""
+        elif isinstance(part, bytes):
+            tag, payload = b"b", part
+        elif isinstance(part, str):
+            tag, payload = b"s", part.encode("utf-8")
+        elif isinstance(part, bool):
+            raise TypeError("unsupported ledger digest part: bool")
+        elif isinstance(part, int):
+            tag, payload = b"i", part.to_bytes(8, "big", signed=True)
+        else:
+            raise TypeError(f"unsupported ledger digest part: {type(part).__name__}")
+        digest.update(tag + len(payload).to_bytes(8, "big") + payload)
+    return digest.digest()
 
 
 _MESSAGE_ROLE_BIAS_SQL = "CASE m.role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 WHEN 'tool' THEN 2 ELSE 1 END"
@@ -373,6 +406,32 @@ def delete_host_uid_bindings(conn: sqlite3.Connection, rows_sql: str, args: tupl
         conn.execute(f"DELETE FROM host_uid_bindings WHERE store_id IN ({rows_sql})", args)
 
 
+def delete_ingest_ledger_rows(conn: sqlite3.Connection, rows_sql: str, args: tuple = ()) -> None:
+    """Join the caller's forget/purge transaction; never create absent ledger tables.
+
+    Bindings are kept forever except explicit forget/purge of user data.
+    Marks stay: a lower actual maximum must never be mistaken for rollback.
+    """
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='occurrence_bindings'").fetchone():
+        return
+    lineages = {row[0] for row in conn.execute(
+        f"SELECT DISTINCT lineage FROM occurrence_bindings WHERE store_id IN ({rows_sql})", args)}
+    emission_match = (
+        "(json_valid(source_store_ids) AND EXISTS (SELECT 1 FROM json_each("
+        "CASE WHEN json_valid(source_store_ids) THEN source_store_ids ELSE '[]' END) "
+        f"WHERE CAST(value AS INTEGER) IN ({rows_sql}))) OR "
+        f"next_occ_id IN (SELECT occ_id FROM occurrence_bindings WHERE store_id IN ({rows_sql})) OR "
+        f"recovered_store_id IN ({rows_sql})"
+    )
+    lineages.update(row[0] for row in conn.execute(
+        f"SELECT DISTINCT lineage FROM ledger_emissions WHERE {emission_match}", args * 3))
+    conn.execute(f"DELETE FROM ledger_emissions WHERE {emission_match}", args * 3)
+    conn.execute("DELETE FROM stamp_observations WHERE occ_id IN "
+                 f"(SELECT occ_id FROM occurrence_bindings WHERE store_id IN ({rows_sql}))", args)
+    conn.execute(f"DELETE FROM occurrence_bindings WHERE store_id IN ({rows_sql})", args)
+    conn.executemany("DELETE FROM ingest_views WHERE lineage=?", ((lineage,) for lineage in lineages))
+
+
 def delete_chunk_inflight(conn: sqlite3.Connection, rows_sql: str, args: tuple = ()) -> None:
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='lcm_embedding_backfill_inflight'").fetchone():
         conn.execute(
@@ -381,12 +440,30 @@ def delete_chunk_inflight(conn: sqlite3.Connection, rows_sql: str, args: tuple =
         )
 
 
+def delete_session_lineage(conn: sqlite3.Connection, sessions_sql: str, args: tuple = ()) -> None:
+    """#1931: a deleted session's own parent link goes with its messages (``sessions_sql`` selects the session
+    ids), on the caller's transaction. The links of its children stay, so a child id still works on its own."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_lineage'").fetchone():
+        conn.execute(f"DELETE FROM session_lineage WHERE child_session_id IN ({sessions_sql})", args)
+
+
+def _database_identity(path: Path, store: object) -> str:
+    """#719: the file a store opens, however its path was spelled; ``:memory:`` is one per store."""
+    if str(path) == ":memory:":
+        return f":memory:{id(store)}"
+    try:
+        return str(path.resolve())
+    except (OSError, RuntimeError, ValueError):  # unresolvable: keep the spelled path
+        return str(path)
+
+
 class MessageStore:
     """SQLite-backed immutable message store."""
 
     def __init__(self, db_path: str | Path, *, ingest_protection_config=None, hermes_home: str = ""):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.db_identity = _database_identity(self.db_path, self)  # fixed at open: a later cwd or symlink change cannot move it
         self._ingest_protection_config = ingest_protection_config or LCMConfig(database_path=str(self.db_path))
         self._hermes_home = hermes_home or str(self.db_path.parent)
         self._context_window_tokens: dict[str, int] = {}  # transient, session-keyed; never LCMConfig/SQLite
@@ -547,11 +624,27 @@ class MessageStore:
             from . import command, embedding_maintenance
             if embedding_maintenance._automatic_chunks_allowed(config, command):
                 return
-            if self._conn.in_transaction:
+            if self._conn.in_transaction and not (getattr(self, "_foreground_ingest_owner", False)
+                                                  and self._transaction_owner.owns_connection(self._conn)):
                 self._manual_chunk_backlog_pending = True
-                return  # An enclosing atomic owner has not committed ingest yet.
+                return  # Outside foreground ingest, retain the caller's deferred marker boundary.
             self._manual_chunk_backlog_pending = False
-            self._conn.execute(
+            with (_sqlite_savepoint(self._conn, abort_on_cleanup_failure=True, owner_active=True,
+                                    foreground_ingest=getattr(self, "_foreground_ingest_owner", False))
+                  if self._transaction_owner.owns_connection(self._conn) else nullcontext()):
+                self._write_manual_chunk_backlog()
+        except Exception as exc:
+            if self._transaction_owner.owns_connection(self._conn) and (
+                isinstance(exc, _SqliteSavepointError) or _is_ingest_busy_error(exc)
+                or isinstance(exc, sqlite3.Error) and not self._conn.in_transaction
+            ):
+                raise
+            if not was_in_transaction and self._conn.in_transaction:
+                self._conn.rollback()
+            logging.getLogger(__name__).debug("Could not mark manual chunk backlog", exc_info=True)
+
+    def _write_manual_chunk_backlog(self):
+        self._conn.execute(
                 "UPDATE metadata SET value=json_set(value, '$.remaining', json('true'), '$.updated_at', ?) "
                 "WHERE key='embedding_catchup:chunk:' || (SELECT identity_hash FROM lcm_embedding_profile "
                 "WHERE active=1 AND archived_at IS NULL AND task IN ('chunk', 'chunk+prefix') "
@@ -559,11 +652,7 @@ class MessageStore:
                 "AND json_type(value, '$.remaining') IS NOT 'true'",
                 (time.time(),),
             )
-            self._conn.commit()
-        except Exception:
-            if not was_in_transaction and self._conn.in_transaction:
-                self._conn.rollback()
-            logging.getLogger(__name__).debug("Could not mark manual chunk backlog", exc_info=True)
+        self._commit()
 
     def append(self, session_id: str, msg: Dict[str, Any],
                token_estimate: int = 0, source: str = "",
@@ -723,10 +812,14 @@ class MessageStore:
             return ids
 
         with self._write_lock:
+            if (getattr(self, "_foreground_ingest_owner", False)
+                    and self._transaction_owner.owns_connection(conn) and not conn.in_transaction):
+                raise _SqliteSavepointError("Foreground ingest transaction lost before INSERT")
             ids = _run_sqlite_write_with_snapshot_retry(
                 conn,
                 insert_messages,
                 operation_name="message_store.append_protected_batch",
+                owner_active=self._transaction_owner.owns_connection(conn),
             )
             if ids:
                 self._mark_manual_chunk_backlog()
@@ -796,15 +889,16 @@ class MessageStore:
 
     def delete_session_messages(self, session_id: str) -> int:
         """Delete all messages for a session. Returns count deleted."""
-        with self._write_lock:
+        with self.atomic(immediate=True):
+            delete_ingest_ledger_rows(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_message_relations(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_host_uid_bindings(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_chunk_inflight(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
+            delete_session_lineage(self._conn, "SELECT ?", (session_id,))
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),
             )
-            self._commit()
             deleted = cur.rowcount if cur.rowcount is not None else 0
             return deleted
 
@@ -1193,10 +1287,14 @@ class MessageStore:
     def _ensure_identity_anchor_schema(self) -> None:
         """Additive, created on first anchored use: one non-unique index and ``message_relations``
         (no UNIQUE constraint beyond its primary key)."""
+        if getattr(self, "_read_only_ingest_thread", None) == threading.get_ident():
+            return  # Session-end fallback may read existing schema, never create it.
         if getattr(self, "_identity_anchor_schema_ready", False):
             return
+        if getattr(self, "_pending_relation_schema", False) and self._transaction_owner.owns_connection(self._conn):
+            return
         with self._write_lock:
-            self._conn.executescript("""
+            schema = """
                 CREATE INDEX IF NOT EXISTS idx_msg_conversation_observed ON messages(conversation_id, observed_at);
                 CREATE TABLE IF NOT EXISTS message_relations (
                     relation_id INTEGER PRIMARY KEY,
@@ -1210,15 +1308,125 @@ class MessageStore:
                 CREATE INDEX IF NOT EXISTS idx_msg_relations_store ON message_relations(store_id, kind);
                 CREATE INDEX IF NOT EXISTS idx_msg_relations_related ON message_relations(related_store_id, kind);
                 CREATE INDEX IF NOT EXISTS idx_msg_relations_observed ON message_relations(kind, observed_at);
-            """)
-        self._identity_anchor_schema_ready = True
-        self._carried_relation_connections.add(self._conn)
+            """
+            if self._transaction_owner.owns_connection(self._conn):
+                # executescript commits an open transaction before running DDL.
+                # Same schema, same owner; do not cache uncommitted creation.
+                for statement in schema.split(";"):
+                    if statement.strip():
+                        self._conn.execute(statement)
+                self._pending_relation_schema = True
+            else:
+                self._conn.executescript(schema)
+                self._identity_anchor_schema_ready = True
+                self._carried_relation_connections.add(self._conn)
+
+    # -- #2055 ingest ledger: additive schema with shadow ingest and emission writers --
+
+    def _ingest_ledger_tables_exist(self) -> bool:
+        with self._write_lock:
+            if getattr(self, "_ingest_ledger_schema_ready", False):
+                return True
+            names = {row[0] for row in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?,?,?,?,?,?)",
+                _INGEST_LEDGER_TABLES,
+            )}
+            exists = set(_INGEST_LEDGER_TABLES) <= names
+            # A re-entrant read can see DDL that a failed commit will roll back.
+            if not self._conn.in_transaction:
+                self._ingest_ledger_schema_ready = exists
+            return exists
+
+    def _ensure_ingest_ledger_schema(self) -> None:
+        """Plain DDL inside ensure_ingest_ledger's owned transaction; never executescript."""
+        if getattr(self, "_ingest_ledger_schema_ready", False):
+            return
+        for sql in (
+            "CREATE TABLE IF NOT EXISTS ledger_meta (key TEXT PRIMARY KEY, value BLOB NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS occurrence_bindings ("
+            "occ_id INTEGER PRIMARY KEY AUTOINCREMENT, lineage TEXT NOT NULL, ordinal INTEGER, "
+            "store_id INTEGER, identity_digest BLOB NOT NULL, stamp TEXT, "
+            "disposition TEXT NOT NULL CHECK (disposition IN "
+            "('stored','migrated','ambiguous','composite_part','split_part')), "
+            "tag TEXT, key_rank INTEGER, view_seq INTEGER NOT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_occ_lineage_ordinal ON occurrence_bindings(lineage, ordinal) "
+            "WHERE disposition IN ('stored','migrated','ambiguous')",
+            "CREATE INDEX IF NOT EXISTS idx_occ_lineage_stamp_digest "
+            "ON occurrence_bindings(lineage, stamp, identity_digest)",
+            "CREATE INDEX IF NOT EXISTS idx_occ_lineage_digest ON occurrence_bindings(lineage, identity_digest)",
+            "CREATE INDEX IF NOT EXISTS idx_occ_store ON occurrence_bindings(store_id)",
+            "CREATE TABLE IF NOT EXISTS ledger_emissions ("
+            "emission_id INTEGER PRIMARY KEY AUTOINCREMENT, lineage TEXT NOT NULL, view_seq INTEGER NOT NULL, "
+            "output_index INTEGER NOT NULL, descriptor_digest BLOB NOT NULL, "
+            "kind TEXT NOT NULL CHECK (kind IN ('summary','carrier','scaffold','recovery','projection')), "
+            "source_store_ids TEXT NOT NULL DEFAULT '[]', "
+            "state TEXT NOT NULL CHECK (state IN ('proposed','adopted','refused')), "
+            "next_occ_id INTEGER, observed_stamp TEXT, recovered_store_id INTEGER, "
+            "UNIQUE (lineage, view_seq, output_index))",
+            "CREATE INDEX IF NOT EXISTS idx_emissions_lineage_digest ON ledger_emissions(lineage, descriptor_digest)",
+            "CREATE TABLE IF NOT EXISTS stamp_observations ("
+            "lineage TEXT NOT NULL, occ_id INTEGER NOT NULL, stamp TEXT NOT NULL, "
+            "kind TEXT NOT NULL CHECK (kind IN ('alt_stamp','carried_stamp')), view_seq INTEGER NOT NULL, "
+            "source TEXT NOT NULL DEFAULT 'ledger' CHECK (source IN ('ledger','legacy')), UNIQUE (occ_id, kind, stamp))",
+            "CREATE INDEX IF NOT EXISTS idx_stamp_obs_lineage_stamp ON stamp_observations(lineage, stamp)",
+            "CREATE TABLE IF NOT EXISTS ingest_views ("
+            "lineage TEXT NOT NULL, view_seq INTEGER NOT NULL, "
+            "kind TEXT NOT NULL CHECK (kind IN ('ingest','emission')), state TEXT, "
+            "entries BLOB NOT NULL, prefix_chain BLOB NOT NULL, PRIMARY KEY (lineage, kind, view_seq))",
+            "CREATE TABLE IF NOT EXISTS lineage_marks ("
+            "lineage TEXT PRIMARY KEY, max_store_id INTEGER, legacy_proof_digest BLOB, max_leaf_id INTEGER, "
+            "stamp_policy TEXT NOT NULL DEFAULT 'normal' CHECK (stamp_policy IN ('normal','stamp_unreliable')))",
+        ):
+            self._conn.execute(sql)
+        mark_migration_step_complete(self._conn, "ingest_ledger_v1")
+
+    def ensure_ingest_ledger(self) -> None:
+        """Idempotently create the ledger and its per-store metadata in one transaction."""
+        deleted = {}
+        with self._write_lock:
+            if self._conn.in_transaction or self._transaction_owner.owns(self._conn):
+                raise sqlite3.OperationalError("ingest ledger setup requires its own transaction")
+            with self.atomic(immediate=True):
+                if not self._ingest_ledger_tables_exist():
+                    self._ensure_ingest_ledger_schema()
+                if not self._conn.execute("SELECT 1 FROM ledger_meta WHERE key='digest_salt'").fetchone():
+                    counts = {table: self._conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                              for table in _INGEST_LEDGER_TABLES if table != "ledger_meta"}
+                    if any(counts.values()):
+                        for table in counts:
+                            self._conn.execute(f"DELETE FROM {table}")
+                        self._conn.execute("INSERT INTO ledger_meta(key,value) VALUES ('salt_epoch',1) "
+                                           "ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1")
+                        deleted = counts
+                self._conn.executemany("INSERT OR IGNORE INTO ledger_meta(key, value) VALUES (?, ?)", (
+                    ("digest_salt", secrets.token_bytes(32)), ("ledger_format", 1), ("view_seq", 0),
+                ))
+            self._ingest_ledger_schema_ready = True
+            if deleted:
+                logger.warning("ingest ledger salt_missing: cleared ledger rows %s", deleted)
+
+    def ingest_ledger_salt(self) -> bytes | None:
+        """Read the store salt without creating a pre-ledger store's schema."""
+        with self._write_lock:
+            if not self._ingest_ledger_tables_exist():
+                return None
+            row = self._conn.execute("SELECT value FROM ledger_meta WHERE key='digest_salt'").fetchone()
+            return bytes(row[0]) if row is not None else None
+
+    def ingest_ledger_state(self) -> str:
+        """A ledger without a salt is pre-ledger for migration purposes."""
+        with self._write_lock:
+            if not self._ingest_ledger_tables_exist():
+                return "absent"
+            return "ready" if self.ingest_ledger_salt() is not None else "salt_missing"
 
     # -- Host uid shadow bindings: droppable; canonical evidence for #1124 exclusions / #1403 audits --
 
     def _host_uid_table_exists(self) -> bool:
         with self._write_lock:
             if getattr(self, "_host_uid_schema_ready", False):
+                return True
+            if getattr(self, "_pending_host_uid_schema", False) and self._transaction_owner.owns_connection(self._conn):
                 return True
             exists = bool(self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='host_uid_bindings'").fetchone())
@@ -1230,6 +1438,8 @@ class MessageStore:
     def _ensure_host_uid_schema(self) -> None:
         """On the first binding, NAMED step ``host_uid_bindings_v1``: no SCHEMA_VERSION bump, ``messages`` untouched."""
         if getattr(self, "_host_uid_schema_ready", False):
+            return
+        if getattr(self, "_pending_host_uid_schema", False) and self._transaction_owner.owns_connection(self._conn):
             return
         def create(conn) -> None:  # plain ``execute`` in the write's own transaction (executescript would commit)
             for sql in (
@@ -1245,7 +1455,10 @@ class MessageStore:
             mark_migration_step_complete(conn, "host_uid_bindings_v1")
 
         self._host_uid_write(create)
-        self._host_uid_schema_ready = True
+        # Uncommitted DDL must not survive rollback as a positive cache entry.
+        self._host_uid_schema_ready = not self._transaction_owner.owns_connection(self._conn)
+        if not self._host_uid_schema_ready:
+            self._pending_host_uid_schema = True
 
     def host_uid_bindings_for(self, lineage_key: str, uids, kinds=("canonical", "version")) -> dict[str, list[tuple[int, str]]]:
         """``{uid: [(store_id, kind), ...]}`` of the ``kinds`` bindings (canonical and version: never ``engine``)."""
@@ -1307,12 +1520,14 @@ class MessageStore:
              for store_id, uid, kind, proof_kind in rows]))
 
     def _host_uid_write(self, write: Callable[[sqlite3.Connection], Any]) -> None:
-        """One shadow write in its OWN transaction. Skipped (raised, so the caller counts one error) when the
-        connection is already in a transaction: someone else's work is never committed or rolled back. Any
-        failure, at commit included, rolls it back, so the connection is never left in a transaction."""
+        """Join the explicit owner, otherwise retain the standalone shadow boundary.
+
+        An unowned open transaction is still refused: never commit or roll back
+        another caller's work.
+        """
         conn = self._conn
         with self._write_lock:
-            if conn.in_transaction:
+            if conn.in_transaction and not self._transaction_owner.owns_connection(conn):
                 raise sqlite3.OperationalError("host-uid shadow write skipped: the connection is in a transaction")
             with self.atomic(immediate=True):
                 write(conn)
@@ -1322,6 +1537,67 @@ class MessageStore:
         return int(self._conn.execute(f"SELECT COUNT(*) FROM host_uid_bindings WHERE kind IN "
                                       f"({','.join('?' * len(kinds))})", kinds).fetchone()[0]) \
             if self._host_uid_table_exists() else None
+
+    # -- #1931 delegated-child lineage: additive, created on the first link --
+
+    def _session_lineage_table_exists(self) -> bool:
+        with self._write_lock:
+            if getattr(self, "_session_lineage_schema_ready", False):
+                return True
+            exists = bool(self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_lineage'").fetchone())
+            # A re-entrant read can see DDL that a failed commit will roll back.
+            if not self._conn.in_transaction:
+                self._session_lineage_schema_ready = exists
+            return exists
+
+    def record_session_lineage(self, child_session_id: str, parent_session_id: str, *, source: str,
+                               child_subagent_id: str = "", parent_subagent_id: str = "",
+                               child_role: str = "") -> None:
+        """INSERT OR IGNORE in its own transaction, so the first link wins. The table is the NAMED step
+        ``session_lineage_v1``: no SCHEMA_VERSION bump, no existing table touched."""
+        conn = self._conn
+        with self._write_lock:
+            if conn.in_transaction:
+                raise sqlite3.OperationalError("session lineage write skipped: the connection is in a transaction")
+            with self.atomic(immediate=True):
+                if not getattr(self, "_session_lineage_schema_ready", False):
+                    conn.execute(
+                        "CREATE TABLE IF NOT EXISTS session_lineage (child_session_id TEXT PRIMARY KEY, "
+                        "parent_session_id TEXT NOT NULL, child_subagent_id TEXT, parent_subagent_id TEXT, "
+                        "child_role TEXT, source TEXT NOT NULL, created_at REAL)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_session_lineage_parent "
+                                 "ON session_lineage(parent_session_id)")
+                    mark_migration_step_complete(conn, "session_lineage_v1")
+                conn.execute(
+                    "INSERT OR IGNORE INTO session_lineage(child_session_id, parent_session_id, child_subagent_id, "
+                    "parent_subagent_id, child_role, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (child_session_id, parent_session_id, child_subagent_id or None, parent_subagent_id or None,
+                     child_role or None, source, time.time()))
+            self._session_lineage_schema_ready = True
+
+    def session_lineage_parents(self, session_ids: Iterable[str]) -> dict[str, str]:
+        """``{child_session_id: parent_session_id}`` for the ids that are recorded children."""
+        ids, out = sorted({str(sid) for sid in session_ids if sid}), {}
+        for start in range(0, len(ids) if ids and self._session_lineage_table_exists() else 0, 500):
+            chunk = ids[start:start + 500]
+            out.update((str(child), str(parent)) for child, parent in self._conn.execute(
+                f"SELECT child_session_id, parent_session_id FROM session_lineage WHERE child_session_id IN "
+                f"({','.join('?' * len(chunk))})", chunk))
+        return out
+
+    def session_lineage_descendants(self, session_id: str, limit: int = 64) -> list[str]:
+        """Children of ``session_id`` and their children (at most 8 levels and ``limit`` ids), newest link first."""
+        if not session_id or not self._session_lineage_table_exists():
+            return []
+        rows = self._conn.execute(
+            "WITH RECURSIVE tree(id, depth, created_at) AS ("
+            "SELECT child_session_id, 1, created_at FROM session_lineage WHERE parent_session_id = ? "
+            "UNION SELECT link.child_session_id, tree.depth + 1, link.created_at FROM session_lineage AS link "
+            "JOIN tree ON link.parent_session_id = tree.id WHERE tree.depth < 8) "
+            "SELECT id FROM tree WHERE id != ? GROUP BY id ORDER BY MAX(created_at) DESC LIMIT ?",
+            (session_id, session_id, int(limit))).fetchall()
+        return [str(row[0]) for row in rows]
 
     def find_rows_by_observed_at(
         self, conversation_id: str, session_ids: List[str], observed_ats: List[float],
@@ -1403,11 +1679,16 @@ class MessageStore:
         if batched:
             known = getattr(self, '_memory_relation_connections', {})
             self._memory_relation_connections = known
-            if conn not in known and conn not in self._carried_relation_connections:
-                known[conn] = bool(conn.execute(
+            available = (conn in self._carried_relation_connections or known.get(conn, False)
+                         or conn is self._conn and getattr(self, "_pending_relation_schema", False)
+                         and self._transaction_owner.owns_connection(conn))
+            if not available and conn not in known:
+                available = bool(conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
                 ).fetchone())
-            relation = ('message_relations' if conn in self._carried_relation_connections or known.get(conn)
+                if not available or not conn.in_transaction:
+                    known[conn] = available
+            relation = ('message_relations' if available
                         else '(SELECT NULL AS store_id, NULL AS kind)')
             return {int(r[0]) for r in conn.execute(
                 f"SELECT store_id FROM {relation} WHERE kind='carried_stamp' "
@@ -1468,12 +1749,17 @@ class MessageStore:
         rows = [(float(stamp), int(store_id)) for store_id, stamp in pairs]
         if not rows:  # no commit: an empty pass must not commit a caller's open transaction (the per-row loop did not)
             return 0
-        with self._write_lock, self._conn:
+        def write():
             return self._conn.executemany(
                 "UPDATE messages SET observed_at = ?, observed_at_source = 'host_message_timestamp' "
                 "WHERE store_id = ? AND observed_at IS NULL",
                 rows,
             ).rowcount
+        with self._write_lock:
+            if self._transaction_owner.owns_connection(self._conn):
+                return write()
+            with self._conn:
+                return write()
 
     def has_session_messages(self, session_id: str) -> bool:
         """Whether a session contains any messages, without counting them."""
@@ -1743,12 +2029,46 @@ class MessageStore:
         """Commit a standalone helper; an enclosing atomic block owns its commit."""
         self._transaction_owner.commit(self._conn)
 
+    def ingest_atomic(self, *, admission_retry=False):
+        """End only an unowned dangling transaction before reserving foreground ingest."""
+        return self._ingest_atomic(admission_retry=admission_retry)
+
+    @contextmanager
+    def _ingest_atomic(self, *, admission_retry=False):
+        with self._write_lock:
+            if self._transaction_owner.owns(self._conn):
+                raise _SqliteSavepointError("Foreground ingest cannot join an enclosing transaction")
+            if self._conn.in_transaction and not self._transaction_owner.owns_connection(self._conn):
+                self._conn.commit()  # Preserve standalone writes, and end stale read snapshots.
+                logger.debug("LCM ingest committed an unowned transaction before BEGIN IMMEDIATE")
+            with ExitStack() as owner:
+                # An ordinary BEGIN wait already spent the configured budget.
+                # Its retry is an immediate recheck, not another full timeout.
+                trace = getattr(self._conn, "_lcm_trace", None)
+                if trace is not None:
+                    trace.ingest_admission = True
+                try:
+                    with (_temporary_sqlite_busy_timeout([self._conn], 0) if admission_retry else nullcontext()):
+                        owner.enter_context(self.atomic(immediate=True))
+                finally:
+                    if trace is not None:
+                        trace.ingest_admission = False
+                previous = getattr(self, "_foreground_ingest_owner", False)
+                self._foreground_ingest_owner = True
+                try:
+                    yield
+                    if not self._conn.in_transaction:
+                        raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT")
+                finally:
+                    self._foreground_ingest_owner = previous
+
     def atomic(self, *, immediate: bool = False) -> AbstractContextManager[None]:
         """Own a transaction under the existing write lock, joining nested entries.
 
         By default the first write opens the transaction. Explicit owners use
         ``immediate=True`` to begin before reading. Simple write helpers defer
-        their commits here. Schema scripts, retry-owning writes, telemetry,
+        their commits here. The ingest INSERT delegates retries to its owner.
+        Schema scripts, telemetry,
         ``update_metadata_json`` and explicit commit/rollback operations retain
         their own boundaries and must not be grouped through this primitive.
         """
@@ -1764,10 +2084,24 @@ class MessageStore:
                 except BaseException:
                     if not conn.in_transaction:
                         self._manual_chunk_backlog_pending = False
+                        self._pending_relation_schema = self._pending_host_uid_schema = False
                     raise
+                if not self._transaction_owner.owns_connection(conn):
+                    self._publish_ingest_schemas()
                 if self._manual_chunk_backlog_pending:
                     self._mark_manual_chunk_backlog()
         return marked()
+
+    def _publish_ingest_schemas(self):
+        # Savepoint rollback restores these flags; an owner rollback clears them.
+        if getattr(self, "_pending_relation_schema", False):
+            self._pending_relation_schema = False
+            self._identity_anchor_schema_ready = True
+            self._carried_relation_connections.add(self._conn)
+            getattr(self, "_memory_relation_connections", {}).pop(self._conn, None)
+        if getattr(self, "_pending_host_uid_schema", False):
+            self._pending_host_uid_schema = False
+            self._host_uid_schema_ready = True
 
 
     def update_metadata_json(self, key: str, update: Any) -> Any:

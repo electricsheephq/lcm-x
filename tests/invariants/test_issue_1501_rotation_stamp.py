@@ -280,13 +280,15 @@ def test_interleaved_unrelated_predecessor_writes_no_marker(tmp_path: Path, owne
             [(prior["store_id"], 10.)] if owner == "parent" else [])
 
 
-def test_marker_write_failure_keeps_the_post_store_steps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("error", ["injected marker I/O error", "database is locked"])
+def test_marker_write_failure_keeps_the_post_store_steps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                       error: str) -> None:
     """The marker is provenance only: a failed write leaves the duplicate fallback, never a skipped commit."""
     lineage(tmp_path)
     remembered: list[Any] = []
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
         def fail(*_args: Any, **_kwargs: Any) -> None:
-            raise sqlite3.OperationalError("database is locked")
+            raise sqlite3.OperationalError(error)
 
         original = engine._identity_anchor_remember
         monkeypatch.setattr(engine, "_identity_anchor_mark_carried", fail)

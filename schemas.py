@@ -4,7 +4,7 @@ LCM_GREP = {
     "name": "lcm_grep",
     "description": (
         "Search the plugin-local LCM database for past conversation content using full-text, semantic, or hybrid retrieval. "
-        "Default scope is the active session and returns both raw messages and summary nodes across all depths. "
+        "Default scope includes the active session and its delegated descendants, with raw messages and active-session summary nodes across all depths. "
         "Broader scopes ('all' or 'session') must be requested explicitly and exist for bounded archive recovery "
         "over rows already present in lcm.db, including externally backfilled rows that may carry source strings "
         "such as openclaw-lcm:* . In broader scopes only raw-message hits are returned; cross-session summary "
@@ -76,7 +76,7 @@ LCM_GREP = {
                 "enum": ["current", "all", "session"],
                 "description": (
                     "Scope of the search across the plugin-local LCM database. "
-                    "'current' (default) restricts to the active session and preserves historical behavior. "
+                    "'current' (default) includes the active session and its delegated descendants. "
                     "'all' searches every session in the local LCM database. "
                     "'session' restricts to the session_id supplied via the session_id parameter. "
                     "Cross-session search returns snippets and message store_ids; cross-session summary node expansion is deferred. "
@@ -1049,7 +1049,7 @@ LCM_EXPAND = {
         "Mode selection (exactly one): node_id returns the source messages or lower-depth summaries "
         "that were compacted into a summary node, defaulting to the active session unless an explicit "
         "matching session_id is supplied; externalized_ref "
-        "(current session only) returns a stored externalized payload's content; store_id returns "
+        "(current session by default, or an explicit session_id) returns a stored externalized payload's content; store_id returns "
         "a single raw message by store_id and works across sessions, suitable for drilling into "
         "cross-session lcm_grep results. Output is bounded by max_tokens; raw recovery is pageable "
         "via content_offset (and source_offset/source_limit for node_id mode). For Hermes-tracked "
@@ -1068,13 +1068,13 @@ LCM_EXPAND = {
             "session_id": {
                 "type": "string",
                 "description": (
-                    "Optional explicit LCM session id for node_id mode only. Must be non-empty and "
-                    "match the node; it is rejected with externalized_ref or store_id mode."
+                    "Optional explicit LCM session id for node_id or externalized_ref mode. Must be non-empty "
+                    "and own the node or payload (including compression-rotation predecessors for payloads); rejected with store_id."
                 ),
             },
             "externalized_ref": {
                 "type": "string",
-                "description": "Externalized payload ref filename to expand instead of a summary node. Current-session only.",
+                "description": "Externalized payload ref filename to expand instead of a summary node. Defaults to the current session and its compression-rotation predecessors; pass session_id for another session's payload.",
             },
             "store_id": {
                 "type": "integer",
@@ -1084,7 +1084,8 @@ LCM_EXPAND = {
                     "content paged by content_offset. If the row references an externalized payload, "
                     "the ref is surfaced via 'externalized_ref'; payload metadata and content are "
                     "session-scoped, so a cross-session row also includes 'externalized_note' "
-                    "explaining that the ref is for traceability only and cannot be expanded in this version."
+                    "and, for rows with a recorded session, 'externalized_expand_hint' with the "
+                    "explicit-session call to read the payload."
                 ),
             },
             "max_tokens": {

@@ -6,6 +6,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Ingest records shadow ledger bindings, stamp observations and view vectors in its own transaction; `LCM_INGEST_LEDGER=off` disables this without changing stored rows (#2055).
+- Fix: successful delegated-child resumes and store-only turns log at DEBUG without false fallback counts or skipped-ingest warnings; storage is unchanged (#2074).
+
 ## v0.29.1 (compaction fixes)
 
 - **Compaction gets past an unresolved retained row.** When the stored history before a row the host still holds could not be cut, compaction now summarises the blocked rows from the stored copy and moves on; the host's copy stays in context (duplicated, never lost). It also works in the protected recent turns and behind a backlog larger than one leaf. The escape records hashes for up to 256 rows per session in the existing session metadata, and each escape pass logs one WARNING (row IDs, role and kind only) plus an `escaped=` field on the compaction stop line (#1162, #1880, PR #2003).

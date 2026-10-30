@@ -388,6 +388,22 @@ class _StoreCursorRun:
     stored_tail: List[tuple[str, str, str, str, str]] = field(init=False)
 
 
+def _strip_volatile_host_scaffolding(content: str) -> str:
+    """Strip only the deterministic todo span (#516), then model-switch prefix."""
+    _todo_idx = content.find(_PRESERVED_TODO_CONTEXT_PREFIX)
+    if _todo_idx > 0:
+        _tail = content[_todo_annotation_span(content, _todo_idx):]
+        _rest = _tail[2:] if _tail.startswith("\n\n") else _tail  # one host delimiter, never user newlines
+        if _rest.startswith(_MODEL_SWITCH_NOTIFICATION_PREFIX) and "]" in _rest:  # same rule as below
+            _rest = _rest[_rest.find("]") + 1:].lstrip("\n")
+        content = content[:_todo_idx].rstrip() + ("\n\n" + _rest if _rest.strip() else "")
+    if content.startswith(_MODEL_SWITCH_NOTIFICATION_PREFIX):
+        _bracket_end = content.find("]")
+        if _bracket_end != -1:
+            content = content[_bracket_end + 1:].lstrip("\n")
+    return content
+
+
 class ReconcileMixin:
     @staticmethod
     def _canonicalize_tool_call_identity_value(value: Any) -> Any:
@@ -463,7 +479,9 @@ class ReconcileMixin:
         store = getattr(self, "_store", None)
         if not session_id or store is None:
             return False
-        cache = getattr(self, "_out_of_band_durable_rows", None)
+        pending = getattr(self, "_pending_ingest_frontier", None)
+        cache = pending.oob_rows if pending is not None and hasattr(pending, "oob_rows") else getattr(
+            self, "_out_of_band_durable_rows", None)
         if cache is None:
             cache = set()
             self._out_of_band_durable_rows = cache
@@ -555,7 +573,7 @@ class ReconcileMixin:
             or not persisted_output_preview_sha256
         ):
             return False
-        recovered_with_stat = recover_hermes_persisted_output_with_file_stat(content)
+        recovered_with_stat = recover_hermes_persisted_output_with_file_stat(content, hermes_home=self._hermes_home)
         if recovered_with_stat is None:
             return False
         require_live_file_freshness = True
@@ -814,8 +832,10 @@ class ReconcileMixin:
                 del watch[store_id]
                 continue
             try:  # best-effort: a failure keeps the watch for the next ingest, never blocks this one
-                self._capture_host_rewrite(store_id, identity, stored, message)
+                with self._ingest_evidence():
+                    self._capture_host_rewrite(store_id, identity, stored, message)
             except Exception as exc:
+                self._raise_ingest_busy(exc)
                 logger.warning("LCM host-rewrite capture for store_id %s failed (%s); retrying next ingest",
                                store_id, type(exc).__name__)
 
@@ -957,13 +977,6 @@ class ReconcileMixin:
         # re-ingest of already-stored messages (duplication bug).  Only the
         # annotation SPAN is cut: a user row the host merged in behind it is
         # new content and keeps the identity distinct (#516).
-        _todo_idx = content.find(_PRESERVED_TODO_CONTEXT_PREFIX)
-        if _todo_idx > 0:
-            _tail = content[_todo_annotation_span(content, _todo_idx):]
-            _rest = _tail[2:] if _tail.startswith("\n\n") else _tail  # one host delimiter, never user newlines
-            if _rest.startswith(_MODEL_SWITCH_NOTIFICATION_PREFIX) and "]" in _rest:  # same rule as below
-                _rest = _rest[_rest.find("]") + 1:].lstrip("\n")
-            content = content[:_todo_idx].rstrip() + ("\n\n" + _rest if _rest.strip() else "")
         # Model-switch notifications are ephemeral host scaffolding: the
         # host prepends "[Note: model was just switched from X to Y...]"
         # to the user's message, then strips the prefix on the next turn.
@@ -971,10 +984,7 @@ class ReconcileMixin:
         # Strip ONLY the prefix (up to and including the closing "]" and
         # trailing newlines) so the user's actual content survives and
         # identity matching works across the switch boundary.
-        if content.startswith(_MODEL_SWITCH_NOTIFICATION_PREFIX):
-            _bracket_end = content.find("]")
-            if _bracket_end != -1:
-                content = content[_bracket_end + 1:].lstrip("\n")
+        content = _strip_volatile_host_scaffolding(content)
         # Out-of-band user messages appended mid-turn are delivery scaffolding
         # ONLY once THIS row is durable with them: the stored row carries them
         # and the replayed row does not, or vice versa.  Stripping a block this
@@ -995,7 +1005,7 @@ class ReconcileMixin:
             persisted_output_source_path = _persisted_output_saved_path(content)
             persisted_output_preview_sha256, allow_redacted_preview_match = self._persisted_output_marker_replay_proof(content)
             durable_content = None
-            recovered_with_stat = recover_hermes_persisted_output_with_file_stat(content) if not stored_row else None
+            recovered_with_stat = recover_hermes_persisted_output_with_file_stat(content, hermes_home=self._hermes_home) if not stored_row else None
             recovered_content = recovered_with_stat[0] if recovered_with_stat is not None else None
             recovered_identity_content = None
             if recovered_content is not None:
@@ -1969,7 +1979,8 @@ class ReconcileMixin:
             str(msg.get("role") or "") == "tool"
             and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
             and recover_hermes_persisted_output_with_file_stat(
-                normalize_content_value(msg.get("content")) or ""
+                normalize_content_value(msg.get("content")) or "",
+                hermes_home=self._hermes_home,
             )
             is None
             for msg in candidate_identity_messages
@@ -2342,7 +2353,8 @@ class ReconcileMixin:
                 str(msg.get("role") or "") == "tool"
                 and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
                 and recover_hermes_persisted_output_with_file_stat(
-                    normalize_content_value(msg.get("content")) or ""
+                    normalize_content_value(msg.get("content")) or "",
+                    hermes_home=self._hermes_home,
                 )
                 is None
                 for msg in candidate_identity_messages
@@ -2713,12 +2725,14 @@ class ReconcileMixin:
         the record as it was (today's carry)."""
         key = self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
         try:
-            payload = self._store.read_metadata_json(key)
-            if isinstance(payload, dict):
-                payload["carry_ranges"] = [list(item) for item in self._coalesce_compression_carry_ranges(carry_ranges)]
-                self._store.write_metadata_json([key], json.dumps(payload, sort_keys=True))
-                logger.info("LCM rewrote the rotation child's carry ranges (%s): store ids %s", reason, store_ids)
-        except Exception:
+            with self._ingest_evidence():
+                payload = self._store.read_metadata_json(key)
+                if isinstance(payload, dict):
+                    payload["carry_ranges"] = [list(item) for item in self._coalesce_compression_carry_ranges(carry_ranges)]
+                    self._store.write_metadata_json([key], json.dumps(payload, sort_keys=True))
+                    logger.info("LCM rewrote the rotation child's carry ranges (%s): store ids %s", reason, store_ids)
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
             logger.debug("LCM carry-range rewrite failed", exc_info=True)
 
     def _cursor_from_host_rewrite_head(self, messages, session_count: int) -> Optional[int]:
@@ -2970,7 +2984,8 @@ class ReconcileMixin:
             str(msg.get("role") or "") == "tool"
             and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
             and recover_hermes_persisted_output_with_file_stat(
-                normalize_content_value(msg.get("content")) or ""
+                normalize_content_value(msg.get("content")) or "",
+                hermes_home=self._hermes_home,
             )
             is None
             for msg in messages

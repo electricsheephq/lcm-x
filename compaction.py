@@ -710,8 +710,12 @@ class CompactionMixin:
         host's mark of a recovery attempt (#608): the returned list fits under the compaction threshold."""
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         with self._bypass_compression_binding() as bypassed:
+            sid = self._bypass_lcm_session_id() if bypassed else self._session_id
+            if self._emission_handle is not None and self._emission_handle.session_id == sid:
+                self._emission_handle = None
             if bypassed:
-                return self._compress_bypassed(messages, current_tokens, focus_topic, force)
+                # #1931: a delegated child's rows are stored before the host's compaction rewrites its view.
+                return self._compress_delegate_child_bypassed(messages, current_tokens, focus_topic, force)
         self._last_compress_leaves = None
         self._last_hidden_backlog = None
         self._compress_escaped = []
@@ -723,6 +727,7 @@ class CompactionMixin:
         if thread_context is not None:
             thread_context.foreground_budget = budget
         returned = None
+        exit_capture = None
         try:
             budget.pre_leaf = PhaseSqlTrace()  # #1127: timed until the first leaf call, or the stop before one
             budget.pre_leaf.install([(self._store, "_conn"), (self._store, "_write_lock"), (self._dag, "_conn"),
@@ -792,9 +797,9 @@ class CompactionMixin:
             pending_no_progress = (self._no_progress_candidate and not bypass_cooldown
                     and self._last_compression_status != "error" and len(result) >= len(messages)) and (
                     count_messages_tokens(result) >= count_messages_tokens(messages))
-            self._record_compress_commit_proof(messages, result)
+            exit_capture = self._record_compress_commit_proof(messages, result)
             if self._compress_commit_proof is None:  # #1000: no proof recorded the fit's carrier
-                self._bind_survival_fit_emission(messages, result)
+                exit_capture = self._bind_survival_fit_emission(messages, result) or exit_capture
             self._host_uid_record_engine(result)
             self._host_uid_log_compaction_summary()
             logger.debug("LCM compaction emission descriptor count=%d",
@@ -823,7 +828,7 @@ class CompactionMixin:
                     logger.debug("LCM survival fit after a compress exception failed", exc_info=True)
                     fitted = messages
                 if fitted is not messages:
-                    self._bind_survival_fit_emission(messages, fitted)  # #1000: no proof on this path
+                    exit_capture = self._bind_survival_fit_emission(messages, fitted)  # #1000: no proof on this path
                     self._host_uid_record_engine(fitted)
                     logger.warning("LCM compress failed (%s); returning the survival-fitted list",
                                    type(exc).__name__, exc_info=True)
@@ -837,7 +842,11 @@ class CompactionMixin:
             self._foreground_budget = None
             if thread_context is not None:
                 thread_context.foreground_budget = None
-            self._finish_foreground_budget(budget, returned, current_tokens if (current_tokens or 0) > 0 else messages)
+            try:
+                if returned is not None and returned is not messages:
+                    self._compress_exit_write(returned, exit_capture)
+            finally:
+                self._finish_foreground_budget(budget, returned, current_tokens if (current_tokens or 0) > 0 else messages)
 
     def _compress_bypassed(self, messages, current_tokens, focus_topic, force):
         """Bypassed calls own a local budget; only child diagnostics are thread-local."""
@@ -989,7 +998,7 @@ class CompactionMixin:
         return {key: value for key, value in message.items()
                 if key != "timestamp" and not str(key).startswith("_")}
 
-    def _record_compress_commit_proof(self, messages, result) -> None:
+    def _record_compress_commit_proof(self, messages, result):
         """Remember the exact host input of this compress() call (process-local).
 
         Hermes commits a compaction by calling ``on_session_end(sid, <this input>)``
@@ -1007,7 +1016,7 @@ class CompactionMixin:
                 else "reconcile_pending" if self._ingest_cursor_needs_reconcile
                 else "cursor_mismatch" if self._ingest_cursor != len(result) else "ready")
             if self._compress_commit_reason != "ready":
-                return
+                return result, [], self._compress_commit_reason
             emission_binding = self._emission_binding()
             emissions = _finalize_emission_descriptors(
                 result, getattr(self, "_pending_emission_candidates", ()), emission_binding
@@ -1017,6 +1026,7 @@ class CompactionMixin:
                 taken = {item["output_occurrence"]["index"] for item in emissions}
                 emissions.extend(item for item in _finalize_emission_descriptors(result, [fit], emission_binding)
                                  if item["output_occurrence"]["index"] not in taken)
+            fresh = list(emissions)
             self._carry_prior_emissions(messages, result, emissions, emission_binding)
             # The output's rows map through THIS proof's emissions (A3), never a DAG-shaped strip (F1).
             occurrences, _v4 = self._replay_occurrences(result, {"version": 4, **emission_binding, "emissions": emissions})
@@ -1044,7 +1054,7 @@ class CompactionMixin:
                 self._compress_commit_reason = "identity_noop"
                 # No-progress compress: Hermes has nothing to commit, and an
                 # end call with this list must stay a real session end.
-                return
+                return result, [], self._compress_commit_reason
             _projection, output_identities = self._occurrence_replay_identities(
                 result, {**proof, **emission_binding}
             )
@@ -1091,10 +1101,12 @@ class CompactionMixin:
                 # commit signal (the compression boundary), with the store tail of this compress().
                 proof["stub_first_last_store_id"] = self._commit_proof_last_store_id()
                 proof["stub_first_compress_call"] = self._compress_calls
+            return result, fresh, None
         except Exception:
             self._compress_commit_proof = None
             self._compress_commit_reason = "construction_error"
             logger.warning("LCM occurrence-proof construction failed; proof unavailable", exc_info=True)
+            return result, [], self._compress_commit_reason
 
     def _carry_prior_emissions(self, messages, result, emissions, emission_binding) -> None:
         """Extend ``emissions`` with the prior proof's descriptors still emitted once in ``result``; sorted."""
@@ -1135,7 +1147,7 @@ class CompactionMixin:
                 del emissions[fresh_count:]
         emissions.sort(key=lambda item: item["output_occurrence"]["index"])
 
-    def _bind_survival_fit_emission(self, messages, result) -> None:
+    def _bind_survival_fit_emission(self, messages, result):
         """#1000: a fitted list no commit proof records (the exception path, or a cursor that does not index
         it) still binds the fit's re-formed carrier in memory, with the prior descriptors it still emits.
         Process-local, as the proof's own descriptors; nothing is persisted."""
@@ -1148,12 +1160,14 @@ class CompactionMixin:
             emissions = _finalize_emission_descriptors(result, [candidate], emission_binding)
             if not emissions:
                 return
+            fresh = list(emissions)
             self._carry_prior_emissions(messages, result, emissions, emission_binding)
             self._last_emission_descriptors = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
                 "emissions": emissions,
             }
+            return result, fresh, None
         except Exception:  # the carrier stays unbound: a replay of it is stored again, never lost
             logger.debug("LCM survival-fit carrier binding failed", exc_info=True)
 

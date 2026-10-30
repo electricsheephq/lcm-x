@@ -91,6 +91,19 @@ def _get_encoder():
     return _encoder if _encoder_ready else None
 
 
+def token_counter_status() -> Dict[str, str]:
+    """Report the active counter (#615) without starting or waiting on its load."""
+    with _encoder_lock:
+        ready, enc, started = _encoder_ready, _encoder, _encoder_thread is not None
+    if ready and enc is not None:
+        return {"counter": "tiktoken", "encoding": "cl100k_base", "state": "ready"}
+    if ready:
+        return {"counter": "char_estimate", "encoding": "", "state": "unavailable"}
+    if started:
+        return {"counter": "char_estimate", "encoding": "", "state": "loading"}
+    return {"counter": "not_loaded", "encoding": "", "state": "not_started"}
+
+
 def _fallback_token_estimate(text: str) -> int:
     # Latin text is ~4 chars/token, but CJK and other non-Latin scripts
     # tokenize far denser (~1-2 tokens/char). A flat len//4 undercounts them

@@ -205,7 +205,10 @@ claim that Hermes core has no persisted record of pre-compression history.
 - No required third-party runtime dependencies
 
 `tiktoken` is used if available; otherwise LCM falls back to character-based
-token estimates. `regex` is used if available to apply timeouts to message ignore
+token estimates. `/lcm status` and `/lcm doctor` show which one is active
+(`token_counter: tiktoken` or `token_counter: char_estimate`; `not_loaded` before
+anything has been counted in the process).
+`regex` is used if available to apply timeouts to message ignore
 patterns; without it, message-level regex filtering is disabled with a warning
 rather than running unbounded stdlib `re` matches.
 
@@ -397,7 +400,13 @@ self-updater. An install pinned with `--ref <sha>` (outside the catalog) refuses
 `hermes plugins install https://github.com/electricsheephq/lcm-x --force --ref <40-character commit SHA>`
 (the refusal prints that command).
 
-Restart Hermes after updating.
+Restart Hermes after updating — and restart every other long-running process
+that imports Hermes or LCM-X, not only the gateway: for example a separately
+launched web UI, dashboard, or custom runner. This applies after `hermes update`
+as well as after an LCM-X update. A process that keeps running holds the old
+modules in memory and mixes them with the new files on disk the next time it
+imports one lazily. See
+[Troubleshooting](#errors-in-one-process-after-hermes-update-or-an-lcm-x-update).
 
 Before upgrading to v0.23.1, resolve the effective database path from
 `LCM_DATABASE_PATH` or `lcm_status`. For an online backup, set
@@ -642,7 +651,7 @@ use the default with one WARNING per process. `/lcm doctor` shows the effective
 | Variable | Default | Use |
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.75` | Fraction of the context window that triggers LCM compaction; the survival fit (`LCM_SURVIVAL_FIT`) protects against overflow, so the trigger does not need to be low for safety |
-| `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall |
+| `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall. Also settable as `lcm.context_threshold_tokens` in config.yaml; the environment variable wins when it holds an integer (`0` turns the YAML value off); an empty or non-integer value falls back to the YAML key. |
 | `LCM_MODEL_THRESHOLDS` | empty | Per-model threshold overrides. Format: `"glm-5.2:0.70,glm-5.2-1M:0.25"`. Keys matched as substrings (longest wins). Also settable as `lcm.model_thresholds` in config.yaml. |
 | `LCM_FRESH_TAIL_COUNT` | `24` | Recent messages protected from compaction |
 | `LCM_FRESH_TAIL_MAX_TOKENS` | `24000` | Token cap for the protected fresh tail; while `LCM_FRESH_TAIL_COUNT` is nonzero it always retains the newest message and complete assistant/tool-result groups (`LCM_FRESH_TAIL_COUNT=0` keeps no fresh tail, whatever the cap). `0` removes the explicit cap (on a window of 50k tokens or more the engine then derives one at half the window) |
@@ -790,6 +799,9 @@ agents) so a larger window does not silently delay compaction, lower recall, or
 let long sessions accumulate more noise before LCM intervenes. Leave it at `0`
 to keep ratio-based behavior. When the absolute override is active, Codex
 GPT-5.5 ratio auto-raise is suppressed so the absolute setpoint stays pinned.
+The same pin can be set as `lcm.context_threshold_tokens` in `config.yaml`;
+`LCM_ABSOLUTE_THRESHOLD_TOKENS` takes precedence, and `lcm_status` reports which
+one applied under `config_sources.absolute_threshold_tokens`.
 
 A single fraction scales the trigger with each route's window. That is fine when
 you want each route to use the same share of its window, but on a profile that
@@ -941,6 +953,19 @@ context threshold, LCM delegates the compaction call to Hermes' native
 If the native compressor is unavailable, LCM falls back to a deterministic
 head/tail trim as a last-resort safety net, still without writing the bypassed
 session to `lcm.db`.
+
+Delegated subagents (sessions the host's delegate tool starts) are stored under
+their own session ids, with a link to the parent session in `session_lineage`,
+but LCM does not manage their context: no compaction, summaries or context
+rewriting, so the native fallback above still bounds a child's window. Their
+rows are found from the parent by `lcm_grep` with the default
+`session_scope='current'` (the current session plus its delegated subagents), by
+`session_scope='all'`, by `session_scope='session'` with the child's id, and by
+`lcm_recall`; a hit from a child carries `lineage: "subagent of <parent id>"`.
+Auxiliary sessions (background memory review, memory/skills-only toolsets and
+auxiliary model calls such as compaction and titles) stay excluded and store
+nothing. If a child's rows cannot be stored, LCM logs one warning naming the
+child and the reason.
 
 ### Large tool-output handling
 
@@ -1156,6 +1181,18 @@ resolves the same active LCM runtime as `lcm_status`, including its foreground
 view while an ignored or stateless side channel is bound. Before the first
 normal message constructs an agent, or in a genuinely sessionless process,
 `session_id: (unbound)` and `threshold_tokens: (uninitialized)` remain expected.
+
+### Errors in one process after `hermes update` or an LCM-X update
+
+If one process fails after an update while others work, for example with
+`ImportError: cannot import name ...`, `TypeError: ... got an unexpected keyword
+argument ...`, or `Context engine '...' not found — falling back to built-in
+compressor`, check how long that process has been running. A process started
+before the update still holds the old Hermes or LCM-X modules in memory and
+mixes them with the new files on disk. Restart that process (and the Hermes
+gateway). This is separate from the
+config case in the [migration section](#migrating-from-hermes-lcm-v023x-and-earlier), where `Context engine 'lcm' not found` means
+`config.yaml` still names the old engine.
 
 ### Reporting a bug
 
