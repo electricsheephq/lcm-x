@@ -8,6 +8,24 @@ needs a live soak. Docs/bench-only releases may skip to GA with a note in the re
 
 Release dates are ceilings, not schedules: a release ships as soon as its gate passes; scope is never added to fill time; a failed invariant is never moved.
 
+## Release trains (from v0.29.2)
+
+A release is a train. One release candidate carries every fix that is merged and ready when
+its rc1 is cut, and the gauntlet runs once for the whole train, not once per fix.
+
+- **Patch trains** are cut from the previous GA commit on the maintenance branch
+  `release/vX.Y.x`, never from main once main holds the next minor's work. Each fix merges on
+  main first. Its maintenance-branch twin carries the same fix and links the main PR's
+  review evidence; a twin that has to differ because main has moved gets its own review. The
+  release manager cuts rc1 when the queued fixes are worth a gauntlet. A
+  ready fix waits at most 14 days; that is a ceiling, not a schedule.
+- **Hotfixes:** only a P0 or P1 ships outside a train, in its own rc. That rc still runs the
+  smoke stage and the rows its diff selects. It may carry other ready fixes only when they add
+  no row to its selection.
+- **After the cut,** a train's tree changes only by fix-and-respin (Pipeline step 4). A fix
+  that misses the cut waits for the next train.
+- **Minor releases** are trains cut from main at their milestone's gate.
+
 ## Pipeline
 
 1. **Merge** the release PRs through `land-pr` (exact-head CI, resolved threads, recorded
@@ -18,7 +36,7 @@ Release dates are ceilings, not schedules: a release ships as soon as its gate p
    file under the run artifacts directory; the GA cut references all of them. Phase D's full
    tier runs at the rc1 of every release, major, minor or patch (later rcs: its carry-forward rule).
    From v0.31.0, and for patch releases from v0.29.1, the Tiers section below selects the required rows; the minor
-   releases v0.29.0 and v0.30.0 run all phases.
+   releases v0.29.0 and v0.30.0 run all phases. From v0.29.2 the smoke stage (L1, below) runs first, and no L2 row starts until it passes.
 4. **Fix-and-respin**: any P0/P1 finding → fix PR (through the gate) → `-rc2` → re-run.
    Carry-forward rule (every receipt binds an exact tree, so carrying needs proof): **Phase B
    re-runs on every respin** (it is diff-scoped by definition). Phases A and C may carry a prior
@@ -57,7 +75,32 @@ rows and identify rows assigned to M; an unrun selected gating row is never gree
 the rc; compaction or summariser changes promote D2/D3 and D7; recall or delivery changes
 promote D1 and D4/D8; host-integration changes promote Phase C cells. The release manager
 records the promotion decision per rc with the diff-scope proof
-(`git diff <prevGA>..rcN --name-only`).
+(`git diff <prevGA>..rcN --name-only`). From v0.29.2 the row selector below applies the map.
+
+**Row selector (from v0.29.2).** A script applies the promotion map, so the selection does
+not depend on judgment:
+- **Diff:** `git diff --name-only <previous GA>..<rc tree>`.
+- **Path classes:** each changed path takes the classes of the first matching entry in the
+  committed class table. Paths under `bench/`, `docs/`, `tests/` and `.github/release-notes/`
+  take none. Any other path that matches no entry takes every class, so a gap in the table
+  fails closed.
+- **Imports:** a changed product module also takes the classes of each product module that
+  imports it, directly or through a chain of imports. The plugin entry point and the engine
+  are marked as hubs: a change to a hub takes every memory class, but a module does not
+  inherit classes through a hub. So a helper that the store imports counts as a storage
+  change.
+- **Rows:** ingest, storage and retry select Phase A, D1 and D4/D8. Compaction and summariser
+  select D2/D3 and D7. Recall and delivery select D1 and D4/D8. Host integration selects the
+  Phase C cells. Other classes (for example the CLI, doctor or installer) select no Phase D
+  row, so a train that touches only them runs L1 and the R rows.
+- **Record:** the selector prints each changed path's classes with the reason (the matching
+  table entry or the import chain) and the selected rows. The output is committed in the
+  train's kit at rc1 and at every respin, and quoted in the receipts. The release manager may
+  add rows, with a reason. Removing a selected row needs a release-manager decision in the
+  table below.
+- **Review:** changes to the class table or the selector need an independent review, like
+  code. A train records the instrument commit it ran the selector from. Until the selector
+  merges, the release manager applies these rules by hand and records the same output.
 
 **Conditional promotions.** When D5 uses its integrity-only path (b), or the patch-only
 integrity-only alternative in the release-manager decisions below, D7 and D5-B are promoted
@@ -76,6 +119,53 @@ covers this defect class.
 **Full tier:** all phases and rows, at least every third minor and at every default flip.
 v0.30.0 runs the full tier. Each rc records elapsed hours and machine-exclusive hours
 separately.
+
+## Smoke stage — L1 (from v0.29.2)
+
+Testing runs in four levels:
+
+| Level | When | What | Effect |
+|---|---|---|---|
+| L0 | every PR | the CI-required checks and the differential tests | as now |
+| L1 | every rc, first | the smoke stage below; target 2 h elapsed or less | can stop the rc; never passes a row |
+| L2 | every rc, after L1 passes | the rows the Tiers section selects, with their existing bars | the GA receipts |
+| L3 | at its cadence | the full tier and the weekly M rows | as now |
+
+No L2 row starts until L1 passes. In v0.29.x the release-changing defects came from the
+cheaper layers, not the long rows. The reliability matrix found rc1's rotation defect, and the
+Phase B review sweep and the soak found the others. With L1 first, a broken rc fails in hours
+instead of after a day of long rows.
+
+**L1 checks,** run on every rc whatever the selection:
+- the reliability matrix and the hands-on lane's fault cells, on one supported host build
+  (the other host builds run in L2);
+- Phase A, both postures;
+- the upgrade/rollback roundtrip;
+- D1 OFF in full (the fast tier: deterministic, about 10 minutes);
+- the Phase B review sweep, alongside the checks above.
+
+**Mini rows,** only for rows the selection puts in L2:
+- **D1 LOCAL:** a fixed 25-question subset of the D1 set, stratified by question type, drawn
+  once and listed in the kit, comparing the rc with the previous GA. Any per-question
+  `lcm_recall` flip that is not attributed to a named commit stops the rc. So do timeouts and
+  fallbacks.
+- **D4:** a fixed 30-question sample at the shipped default, compared with the previous GA's
+  per-question outcomes on the same questions. A hard failure stops the rc. So do net losses
+  above the bound declared from the previous GA's A/A′ runs; until a bound is declared, it is
+  3.
+- **D2:** a fixed slice of the D2 set, both arms, small enough for L1 to meet its target
+  (the kit names it). A hard failure stops the rc. So does a facts-kept drop larger than the
+  run-to-run spread the D2 rule allows (0.10).
+
+**Rules:**
+- L1 bars are written into the train's kit before rc1 is cut and are not changed afterwards.
+- A mini row is a tripwire. Passing it never stands in for its L2 row, and no L2 verdict
+  depends on it.
+- An L1 failure stops the rc. A product defect goes through fix-and-respin. An instrument
+  defect is fixed, and L1 re-runs on the same rc.
+- Each rc records L1's elapsed hours beside the elapsed and machine-exclusive hours the Tiers
+  section asks for.
+- Checks that judge latency keep the machine to themselves, as elsewhere.
 
 ## Phase A — Live all-tools matrix (the "clone" test)
 
