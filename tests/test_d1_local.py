@@ -135,7 +135,6 @@ def test_partitioned_merge_matches_serial_manifest(tmp_path, monkeypatch, count,
     assert not (tmp_path / "reader-must-not-write.jsonl").exists()
 
 
-
 def test_compare_tool_seal_matches_d1_seal(tmp_path, monkeypatch):
     monkeypatch.delenv("LCM_D1_BUILD_PARTITION", raising=False)
     monkeypatch.delenv("LCM_D1_DISPATCH_LOG", raising=False)
@@ -143,6 +142,7 @@ def test_compare_tool_seal_matches_d1_seal(tmp_path, monkeypatch):
     D1Cache(Fake(), path, options=OPTIONS, readonly=False).embed_documents([f"unit {i}" for i in range(5)])
     compare = importlib.import_module("bench.tools.d1-shard-check.compare_d1_caches")
     assert compare.load_cache(path)[2] == seal(path)
+
 
 @pytest.mark.parametrize("fault", ["identity", "duplicate"])
 def test_merge_rejects_identity_mismatch_and_conflicting_duplicate(tmp_path, monkeypatch, fault):
