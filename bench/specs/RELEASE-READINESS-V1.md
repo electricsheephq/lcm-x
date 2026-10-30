@@ -99,7 +99,7 @@ not depend on judgment:
 - **Rows:** ingest, storage and retry select Phase A, D1 and D4/D8. Compaction and summariser
   select D2/D3 and D7. Recall and delivery select D1 and D4/D8. Host integration selects the
   Phase C cells. Other classes (for example the CLI, doctor or installer) select no Phase D
-  row when the hub closure below does not apply to the module (no hub reaches it, or the table
+  row when the hub closure above does not apply to the module (no hub reaches it, or the table
   exempts it), so a train that touches only such modules runs L1 and the R rows.
 - **Record:** the selector prints each changed path's classes with the reason (the matching
   table entry or the import chain) and the selected rows. The output is committed in the
