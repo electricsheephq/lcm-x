@@ -41,8 +41,13 @@ def load_tree(tree: Path) -> tuple[Any, Any]:
 
 
 def drain(engine_module: Any, timeout: float = 30.0) -> None:
+    # Trees with maintenance_scheduler.py keep the schedulers there and must have both;
+    # older trees keep them in engine, where a missing one is skipped as before.
+    origin = getattr(engine_module, "__file__", None)
+    moved = origin is not None and Path(origin).with_name("maintenance_scheduler.py").is_file()
+    holder = importlib.import_module("hermes_lcm.maintenance_scheduler") if moved else engine_module
     for name in ("_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER"):
-        scheduler = getattr(engine_module, name, None)
+        scheduler = getattr(holder, name) if moved else getattr(holder, name, None)
         if scheduler is None:
             continue
         deadline = time.monotonic() + timeout
