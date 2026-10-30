@@ -25,7 +25,8 @@ import hermes_lcm.command as command_mod
 import hermes_lcm.embedding_maintenance as maintenance_mod
 import hermes_lcm.embedding_provider as provider_mod
 import hermes_lcm.engine as lcm_engine
-import hermes_lcm.maintenance_scheduler as maintenance_scheduler
+# The tests that use maintenance_scheduler import it themselves: tests/compat imports FakeProvider
+# from this module under older releases, which do not have maintenance_scheduler.
 import hermes_lcm.tools as lcm_tools
 from hermes_lcm.command import handle_lcm_command
 from hermes_lcm.config import LCMConfig
@@ -423,6 +424,7 @@ def test_scheduling_prepares_schema_before_the_background_pass(
 def test_schema_preparation_retries_and_caches_per_database_and_chunk_policy(
     tmp_path, home, monkeypatch, caplog
 ):
+    from hermes_lcm import maintenance_scheduler
     engine = _make_engine(tmp_path, home, provider="voyage", register=False)
     scheduled = []
     ensured_paths = []
@@ -463,6 +465,7 @@ def test_schema_preparation_retries_and_caches_per_database_and_chunk_policy(
 
 
 def test_schema_preparation_is_shared_by_engines(tmp_path, home, monkeypatch):
+    from hermes_lcm import maintenance_scheduler
     engine = _make_engine(tmp_path, home, register=False)
     other = _make_engine(tmp_path, home, register=False)
     ensured = []
@@ -653,6 +656,7 @@ def test_d_cloud_provider_embeds_summaries_but_never_chunks(
 def test_e_embeddings_off_never_schedules_a_pass(
     tmp_path, home, providers, monkeypatch, enabled
 ):
+    from hermes_lcm import maintenance_scheduler
     scheduled = []
     monkeypatch.setattr(
         maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER,
@@ -741,6 +745,7 @@ def test_status_backlog_names_uncertain_rows_the_pass_cannot_retry(tmp_path, hom
 
 
 def test_embedding_worker_is_named_for_embeddings_not_rollups(caplog):
+    from hermes_lcm import maintenance_scheduler
     scheduler = maintenance_scheduler._RollupMaintenanceScheduler(
         max_pending_jobs=1, kind="incremental embedding",
         thread_name="lcm-embedding-maintenance",
