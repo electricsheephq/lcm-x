@@ -295,6 +295,18 @@ def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False, re
         candidate.setdefault(qid, {"questionId": qid, "questionType": row.get("questionType", row.get("category")),
                                    "_failed": True})
     cc, bc = candidate_report.get("recallConfig"), baseline_report.get("recallConfig")
+
+    def defective(qid):  # A row-level completeness failure on either side of a pair.
+        pair = ((candidate[qid], cc), (baseline[qid], bc))
+        return (_failed(baseline[qid]) or any(_unscorable(row) for row, _ in pair)
+                or any(classify_recall_health(row.get("recallHealth"), config) == "missing"
+                       for row, config in pair))
+
+    defects = {qid for qid in baseline if defective(qid)}
+    # Failures no single category owns make every category INCOMPLETE (d8-count-margin-v1).
+    wrong_total = not subset and len(baseline) != {"longmemeval": 500, "locomo": 1986}[benchmark]
+    run_wide = (bool(issues) or bool(extra) or wrong_total
+                or any(not any(_category(baseline[qid], name) for name in names) for qid in defects))
     overall = {"candidate": degraded_rate(list(candidate.values()), cc),
                "baseline": degraded_rate(list(baseline.values()), bc)}
     issues += [f"{side}: unscorable rows: {rate['unscorable']}"
@@ -303,7 +315,7 @@ def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False, re
     if failed_baseline:
         issues.append(f"baseline: failed rows: {failed_baseline} (rerun the baseline)")
     incomplete = (bool(issues) or bool(extra) or any(row["INCOMPLETE"] for row in overall.values())
-                  or (not subset and len(baseline) != {"longmemeval": 500, "locomo": 1986}[benchmark]))
+                  or wrong_total)
     cr, br = overall["candidate"], overall["baseline"]
     rate_pass = None if placebo else (not cr["INCOMPLETE"] and not br["INCOMPLETE"]
                                      and cr["rate_points"] <= br["rate_points"] + 1)
@@ -342,8 +354,9 @@ def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False, re
         margin = count_margin(n)
         can_fail = n >= margin
         count_pass = abs(b - c) < margin if placebo else (c - b) < margin
-        category_incomplete = not n or (not subset and n != PINNED_SIZES[name])
-        if category_incomplete:
+        size_incomplete = not n or (not subset and n != PINNED_SIZES[name])
+        category_incomplete = size_incomplete or run_wide or bool(defects & base.keys())
+        if size_incomplete:
             issues.append(f"category {name}: n {n}" + ("" if subset else f" (pinned {PINNED_SIZES[name]})"))
         category = result["categories"][name] = {"paired_n": n, "clusters": len(clusters),
             "difference_points": 100 * sum(vals) / n if n else None,

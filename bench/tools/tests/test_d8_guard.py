@@ -82,6 +82,8 @@ def test_missing_candidate_is_incorrect_and_extra_question_excluded(tmp_path):
     result = compare_runs(candidate, baseline, subset=True)
     assert result["categories"]["abstention"]["lower_bound_points"] == -100
     assert result["categories"]["abstention"]["paired_n"] == 1
+    # d8-count-margin-v1: the missing candidate row is a failed loss.
+    assert (result["categories"]["abstention"]["c"], result["categories"]["abstention"]["c_failed"]) == (1, 1)
     assert result["excluded_absent_from_baseline"] == 1
     assert result["runs"]["candidate"]["INCOMPLETE"]
     assert not result["pass"]
@@ -465,6 +467,7 @@ def test_placebo_count_fail_with_defect_is_incomplete(tmp_path, defect):
 
 @pytest.mark.parametrize("benchmark,counts,expected", [
     ("longmemeval", {"abstention": (0, 3)}, False),
+    ("longmemeval", {"abstention": (0, 2)}, True),  # boundary
     ("longmemeval", {"abstention": (3, 0)}, True),
     ("longmemeval", {"knowledge-update": (0, 3)}, False),
     ("locomo", {"adversarial": (12, 21)}, False),
@@ -614,3 +617,44 @@ def test_disclosure_statistics():
     conversations = {"x": {"b": 2, "c": 0, "net": 2}, "y": {"b": 0, "c": 2, "net": -2}}
     assert d8_guard.cluster_dispersion(conversations, 0, 4) == 2.0
     assert d8_guard.cluster_dispersion({"x": {"b": 0, "c": 0, "net": 0}}, 0, 0) is None
+
+
+@pytest.mark.parametrize("placebo", [False, True])
+@pytest.mark.parametrize("defect", ["missing health", "failed baseline"])
+def test_category_completeness_failure_beats_count(tmp_path, placebo, defect):
+    rows = full_rows()
+    base_rows, cand_rows = [dict(r) for r in rows], [dict(r) for r in rows]
+    if defect == "missing health":
+        cand_rows[0]["recallHealth"] = None  # a_abs: abstention only.
+    else:
+        base_rows[0]["status"] = "failed"
+    result = compare_runs(write_run(tmp_path / "c", cand_rows), write_run(tmp_path / "b", base_rows),
+                          placebo=placebo)
+    abstention, update = result["categories"]["abstention"], result["categories"]["knowledge-update"]
+    assert abstention["count_pass"]  # A clean count does not outrank INCOMPLETE.
+    assert abstention["INCOMPLETE"] and not abstention["pass"]
+    assert not update["INCOMPLETE"] and update["pass"]  # Not attributable to knowledge-update.
+    assert result["INCOMPLETE"]
+    assert not result["pass"]
+
+
+def test_subset_category_at_margin_gates(tmp_path):
+    rows = [row(f"a{i}_abs", kind="single-session-user") for i in range(3)] + [row(f"k{i}") for i in range(3)]
+    baseline = write_run(tmp_path / "b", rows)
+    result = compare_runs(write_run(tmp_path / "c", rows), baseline, subset=True)
+    for category in result["categories"].values():
+        assert (category["paired_n"], category["margin_questions"]) == (3, 3)
+        assert category["can_fail"] and category["gating"] and category["pass"]
+    assert result["pass"]  # n == T gates; with `n > T` no category would gate.
+    losses = write_run(tmp_path / "c3", [{**r, "score": 0} if r["questionId"].startswith("k") else r for r in rows])
+    assert not compare_runs(losses, baseline, subset=True)["pass"]
+
+
+def test_subset_empty_category_is_incomplete(tmp_path):
+    rows = [row(f"k{i}") for i in range(10)]
+    result = compare_runs(write_run(tmp_path / "c", rows), write_run(tmp_path / "b", rows), subset=True)
+    assert result["categories"]["abstention"]["paired_n"] == 0
+    assert result["categories"]["abstention"]["INCOMPLETE"]
+    assert result["INCOMPLETE"]
+    assert not result["pass"]
+    assert "category abstention: n 0" in result["reason"]
