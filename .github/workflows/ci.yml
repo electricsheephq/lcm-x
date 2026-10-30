@@ -175,7 +175,7 @@ jobs:
       - name: Fetch the rollback-reader commits
         # The old-reader tests run these releases' code against a store the
         # current code wrote; under CI a missing commit fails them (#841).
-        run: git fetch --no-tags --depth=1 origin c36b46e3a7b1bff23cfa45fa117565ab8624441d f47b55e031b507b424ff5f480d8f2a80d358f1f0 6800cf45ad05280e6cf6fa9e1ad96c62b7132646 49e99a272d2d461e5c90732e7ef2bc20e96f0826 c67d7633d963a2ffd24cf90995189ee58e2f88c7 709099b3a397a7893a7abae8802ebe7bf605f79e f3cc8de918ba14c21ae246099652762a26255554 849da257b52fc9833955928816dd1585184988b1 77b2b4f795fb6a4f84c55abf6d0441da4469971e 10407e12e33c1d7b09fe0e05141153555aec5d62
+        run: git fetch --no-tags --depth=1 origin c36b46e3a7b1bff23cfa45fa117565ab8624441d f47b55e031b507b424ff5f480d8f2a80d358f1f0 6800cf45ad05280e6cf6fa9e1ad96c62b7132646 49e99a272d2d461e5c90732e7ef2bc20e96f0826 c67d7633d963a2ffd24cf90995189ee58e2f88c7 709099b3a397a7893a7abae8802ebe7bf605f79e f3cc8de918ba14c21ae246099652762a26255554 849da257b52fc9833955928816dd1585184988b1 77b2b4f795fb6a4f84c55abf6d0441da4469971e 10407e12e33c1d7b09fe0e05141153555aec5d62 c13dea3783bdbd1aab52d83dff5d009bfade0bd2
 
       - name: Print linked SQLite version
         run: python -c "import sqlite3; print('sqlite', sqlite3.sqlite_version)"

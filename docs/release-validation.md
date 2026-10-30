@@ -94,6 +94,16 @@ The checklist is safe to paste into a release note or PR validation section afte
       every gating row green; none `UNRUN`, `UNAVAILABLE`, `INCOMPLETE` or `INCONCLUSIVE`); N/A for a
       non-product release
 
+### GA closeout (after publication)
+- [ ] In a separate post-GA PR, add the published GA's resolved commit SHA to both
+      `tests/compat/helpers.py::READERS` and `tests/test_host_uid_shadow.py::ROLLBACK_READERS`,
+      keep the maps identical, and set `PREVIOUS_GA` to that release for the next candidate.
+      Preserve the older reader pins and add the new SHA to the rollback-reader fetch in
+      `.github/workflows/ci.yml`. Update the projection replay reader order and the entity
+      forward test's explicit latest-GA assertion. Verify the new reader's compatibility cells in CI;
+      investigate failures rather than weakening their assertions. This repin does not
+      change the published GA tree or replace the release gauntlet's rollback proof.
+
 ### Doctor triage
 - [ ] `lcm_doctor` warnings were classified as `safe/ignore`, `inspect`, or `backup-first cleanup`
 - [ ] no warning-only class was auto-cleaned without operator review
