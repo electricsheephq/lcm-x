@@ -5168,6 +5168,7 @@ class LCMEngine(
                 )
                 self._handoff_delegate_child_compression(old_session_id, session_id)
                 self._clear_thread_context_stateless()
+                self._ledger_count("ledger.emission_boundary_unadopted")
                 if previous_session_id and previous_session_id != session_id:
                     self._finalize_pending_reset_boundary(previous_session_id)
                     self._reset_session_scoped_runtime_state()
@@ -5189,11 +5190,14 @@ class LCMEngine(
                     old_session_id,
                     session_id,
                 )
-                self._ledger_count("ledger.emission_boundary_unadopted")
                 return
             self._clear_thread_context_stateless()
             self._continue_compression_boundary(session_id, old_session_id, kwargs)
             return
+        if boundary_reason == "compression" and not (
+                old_session_id and old_session_id == session_id == previous_session_id):
+            # Neither continuation took this boundary; the in-place one counts its own False returns (#2055).
+            self._ledger_count("ledger.emission_boundary_unadopted")
 
         if self._is_live_auxiliary_child_session(session_id, previous_session_id, kwargs):
             self._remember_delegate_child_auxiliary(session_id)

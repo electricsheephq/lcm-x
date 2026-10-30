@@ -274,6 +274,38 @@ def test_in_place_adoption_needs_the_compressing_conversation(engines, monkeypat
     assert count(engine, "emission_signal_unmatched") == (0 if conversation == "conv" else 1)
 
 
+@pytest.mark.parametrize("shape", ["other_session", "no_old_session", "live_child"])
+@pytest.mark.parametrize("pending", [True, False])
+def test_untaken_compression_boundary_counts_once(engines, monkeypatch, pending, shape):
+    engine = engines()
+    if pending:
+        compress_path(engine, monkeypatch)
+    kwargs = dict(boundary_reason="compression", platform="cli", conversation_id="conv-t")
+    if shape != "no_old_session":
+        kwargs["old_session_id"] = "T"
+    if shape == "live_child":
+        monkeypatch.setattr(engine, "_is_live_auxiliary_child_session", lambda *args: True)
+    # Neither continuation takes these boundaries: T is not the bound session S.
+    engine.on_session_start("T", **kwargs)
+    assert count(engine, "emission_boundary_unadopted") == 1
+    if shape == "live_child":
+        assert engine._session_id == "S" and (engine._emission_handle is not None) == pending
+    else:
+        assert engine._session_id == "T" and engine._emission_handle is None
+    if pending:
+        assert emissions(engine)[0]["state"] == "proposed"
+
+
+def test_in_place_false_boundary_counts_once(engines, monkeypatch):
+    engine = engines()
+    compress_path(engine, monkeypatch)
+    engine._conversation_id = ""  # the in-place continuation refuses without a bound conversation
+    engine.on_session_start("S", boundary_reason="compression", old_session_id="S", platform="cli",
+                            conversation_id="conv")
+    assert count(engine, "emission_boundary_unadopted") == 1
+    assert emissions(engine)[0]["state"] == "proposed"
+
+
 def test_bypass_source_boundary_counts_once(engines, monkeypatch, caplog):
     engine = engines()
     compress_path(engine, monkeypatch)
