@@ -257,13 +257,17 @@ def _main(argv, interrupt):
 
     effective = [value["effective_intra_op_threads"] for value in role_threads.values()]
     built = [row["effective_intra_op_threads"] for rows in build_threads.values() for row in rows]
-    shard_ok = args.jobs * max((n for n in effective + built if n is not None), default=threads) <= args.thread_budget
+    # The A-prime build report runs at the shard setting in both modes, so it alone decides the shard verdict.
+    shard_ok = args.jobs * max((n for n in effective if n is not None), default=threads) <= args.thread_budget
     # The build runs 2 * P workers at once, so its own verdict uses that concurrency.
     build_ok = not built or 2 * args.build_workers * max((n for n in built if n is not None), default=1) <= args.thread_budget
     budget_ok = shard_ok and build_ok
     arms = run_pool([task for task in tasks if task[0] in manifests], args.jobs, launch) if budget_ok and not interrupt[0] else []
     receipt = {"instrument_sha": instrument, "products": pins, "jobs": args.jobs,
-               "aprime_dispatches": {role: len(path.read_text().splitlines()) if path.exists() else None
+               # A clean A-prime arm that found every unit cached never creates its log: that is 0, not unknown.
+               "aprime_dispatches": {role: len(path.read_text().splitlines()) if path.exists()
+                                     else 0 if any(row["role"] == role and row["arm"] == "preembed-aa" and not row["exit_code"] for row in preembed)
+                                     else None
                                      for role in products for path in [args.output / f"{role}-preembed-aa-dispatch.jsonl"]},
                "cache_manifests": manifests, "role_threads": role_threads,
                "thread_budget_ok": budget_ok, "build_thread_budget_ok": build_ok, "shard_thread_budget_ok": shard_ok,

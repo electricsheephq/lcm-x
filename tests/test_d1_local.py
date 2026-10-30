@@ -44,8 +44,8 @@ class BatchFake(lme.StubEmbedder):
 
 
 def drive(cache, batches):
-    # Prewarm skips repeated digests, but one text can recur under another digest, so a later
-    # batch may repeat keys an earlier call (owned by any worker) already embedded.
+    # Stricter than prewarm, whose seen set never repeats a key within an arm: these batches also
+    # repeat keys an earlier call (owned by any worker) already embedded.
     for batch in batches:
         cache.embed_documents(batch)
 
@@ -134,6 +134,15 @@ def test_partitioned_merge_matches_serial_manifest(tmp_path, monkeypatch, count,
     assert not raw.documents
     assert not (tmp_path / "reader-must-not-write.jsonl").exists()
 
+
+
+def test_compare_tool_seal_matches_d1_seal(tmp_path, monkeypatch):
+    monkeypatch.delenv("LCM_D1_BUILD_PARTITION", raising=False)
+    monkeypatch.delenv("LCM_D1_DISPATCH_LOG", raising=False)
+    path = tmp_path / "cache.sqlite"
+    D1Cache(Fake(), path, options=OPTIONS, readonly=False).embed_documents([f"unit {i}" for i in range(5)])
+    compare = importlib.import_module("bench.tools.d1-shard-check.compare_d1_caches")
+    assert compare.load_cache(path)[2] == seal(path)
 
 @pytest.mark.parametrize("fault", ["identity", "duplicate"])
 def test_merge_rejects_identity_mismatch_and_conflicting_duplicate(tmp_path, monkeypatch, fault):
@@ -724,7 +733,7 @@ def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, w
     assert receipt["thread_budget_ok"] is not refused
     assert receipt["build_thread_budget_ok"] is not build_refused
     assert receipt["shard_thread_budget_ok"] is not (3 * reported > 8)
-    assert receipt["aprime_dispatches"] == {"base": 1, "candidate": None}
+    assert receipt["aprime_dispatches"] == {"base": 1, "candidate": None if failed_arm else 0}
     if parallel:
         assert receipt["build_workers"] == workers
         assert receipt["build_threads_requested"] == (requested or 2)
