@@ -20,17 +20,29 @@ def load_cache(path):
 def caches(serial, other):
     si, s, sh = load_cache(serial)
     oi, o, oh = load_cache(other)
-    diff = [k for k in s.keys() & o.keys() if s[k][2] != o[k][2]]
+    common = s.keys() & o.keys()
+    diff = [k for k in common if s[k][2] != o[k][2]]
+    dim_mismatches = sum(s[k][0] != o[k][0] for k in common)
+    payload_mismatches = sum(s[k][:2] != o[k][:2] for k in common)
+    corrupt_serial, corrupt_other = (
+        sum(hashlib.sha256(k.encode() + payload).hexdigest() != checksum or len(payload) != 8 * dim
+            for k, (dim, payload, checksum) in rows.items())
+        for rows in (s, o)
+    )
     worst_abs, worst_cos = 0.0, 1.0
-    for k in diff:
+    for k in common:
+        if s[k] == o[k] or s[k][0] != o[k][0] or any(len(row[1]) != 8 * row[0] for row in (s[k], o[k])):
+            continue
         a, b = (struct.unpack(f"<{row[0]}d", row[1]) for row in (s[k], o[k]))
-        worst_abs = max(worst_abs, max(abs(x - y) for x, y in zip(a, b)))
+        worst_abs = max(worst_abs, max((abs(x - y) for x, y in zip(a, b)), default=0.0))
         norm = sqrt(sum(x * x for x in a)) * sqrt(sum(y * y for y in b))
         worst_cos = min(worst_cos, sum(x * y for x, y in zip(a, b)) / norm if norm else float(a == b))
     out = {"identity_equal": si == oi, "serial_entries": len(s), "other_entries": len(o),
            "only_serial": len(s.keys() - o.keys()), "only_other": len(o.keys() - s.keys()),
-           "checksum_mismatches": len(diff), "max_abs_diff": worst_abs, "min_cosine": worst_cos, "seal_equal": sh == oh}
-    return out, si == oi and s.keys() == o.keys() and not diff
+           "checksum_mismatches": len(diff), "max_abs_diff": worst_abs, "min_cosine": worst_cos, "seal_equal": sh == oh,
+           "dim_mismatches": dim_mismatches, "payload_mismatches": payload_mismatches,
+           "corrupt_serial": corrupt_serial, "corrupt_other": corrupt_other}
+    return out, si == oi and s.keys() == o.keys() and not (payload_mismatches or diff or corrupt_serial or corrupt_other)
 
 
 def jsonl(path):
