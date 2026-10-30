@@ -8,6 +8,9 @@ from importlib import import_module
 
 import pytest
 
+from benchmarking.d1_cache import D1Cache
+from benchmarking.longmemeval import StubEmbedder
+
 compare = import_module("bench.tools.d1-shard-check.compare_d1_caches")
 
 
@@ -42,6 +45,59 @@ def test_caches_readonly_seals_and_differences(tmp_path, capsys, fault):
     manifest = json.dumps({"identity": identity, "entries": sorted((k, r[2]) for k, r in rows.items())}, separators=(",", ":"))
     assert digest == hashlib.sha256(manifest.encode()).hexdigest()
     assert {p: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
+def cache_file(path, vector):
+    payload = struct.pack(f"<{len(vector)}d", *vector)
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("CREATE TABLE binding (identity TEXT)")
+        db.execute("INSERT INTO binding VALUES ('same')")
+        db.execute("CREATE TABLE entries (key TEXT, dim INTEGER, payload BLOB, checksum TEXT)")
+        db.execute("INSERT INTO entries VALUES ('k',?,?,?)", (len(vector), payload, hashlib.sha256(b"k" + payload).hexdigest()))
+    return path
+
+
+@pytest.mark.parametrize("side", ["serial", "other"])
+def test_caches_changed_payload_with_unchanged_checksum(tmp_path, capsys, side):
+    paths = {name: cache_file(tmp_path / f"{name}.sqlite", [1.0, 0.0]) for name in ("serial", "other")}
+    with closing(sqlite3.connect(paths[side])) as db, db:
+        db.execute("UPDATE entries SET payload=?", (struct.pack("<2d", 0.0, 1.0),))
+    assert compare.main(["caches", *map(str, paths.values())]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["payload_mismatches"] == 1 and out["checksum_mismatches"] == 0
+    assert out["corrupt_serial"] == int(side == "serial")
+    assert out["corrupt_other"] == int(side == "other")
+    assert out["max_abs_diff"] == 1.0 and out["min_cosine"] == 0.0
+
+
+def test_caches_dimension_mismatch_skips_vector_metrics(tmp_path, capsys):
+    a = cache_file(tmp_path / "serial.sqlite", [1.0, 0.0])
+    b = cache_file(tmp_path / "other.sqlite", [0.0, 1.0, 1.0])
+    assert compare.main(["caches", str(a), str(b)]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["dim_mismatches"] == out["payload_mismatches"] == 1
+    assert out["corrupt_serial"] == out["corrupt_other"] == 0
+    assert out["max_abs_diff"] == 0.0 and out["min_cosine"] == 1.0
+
+
+def test_caches_invalid_payload_length_is_corrupt(tmp_path, capsys):
+    a = cache_file(tmp_path / "serial.sqlite", [1.0, 0.0])
+    b = cache_file(tmp_path / "other.sqlite", [0.0, 1.0])
+    with closing(sqlite3.connect(b)) as db, db:
+        db.execute("UPDATE entries SET dim=3")
+    assert compare.main(["caches", str(a), str(b)]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["corrupt_serial"] == 0 and out["corrupt_other"] == 1
+
+
+def test_caches_d1_writer_checksum_matches(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("LCM_D1_BUILD_PARTITION", raising=False)
+    monkeypatch.delenv("LCM_D1_DISPATCH_LOG", raising=False)
+    path = tmp_path / "cache.sqlite"
+    D1Cache(StubEmbedder(), path, options={"dimension": 64}, readonly=False).embed_documents(["unit"])
+    assert compare.main(["caches", str(path), str(path)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["corrupt_serial"] == out["corrupt_other"] == 0
 
 
 @pytest.mark.parametrize("fault", [None, "duplicate_serial_calls", "duplicate_part_calls", "only_serial", "only_parts", "count_mismatches", "hash_mismatches"])

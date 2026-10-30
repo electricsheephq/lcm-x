@@ -755,7 +755,65 @@ def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, w
         assert not {"build_workers", "merged_entries", "duplicate_keys", "build_threads"} & receipt.keys()
 
 
-@pytest.mark.parametrize("extra,message", [(["--build-workers", "3", "--thread-budget", "5"], "2 * build-workers * build-threads <= thread-budget"), (["--build-threads", "0"], "build-threads >= 1")])
+@pytest.mark.parametrize("reported", [1, 8, 9])
+def test_serial_build_threads_override_and_budget(tmp_path, monkeypatch, reported):
+    cli = driver()
+    monkeypatch.setattr(cli, "pin", lambda _: "a" * 40)
+    monkeypatch.setattr("benchmarking.d1_cache.seal", lambda _: "fake-manifest")
+    builds = []
+
+    def fake_run(command, *, env, **kwargs):
+        if env["LCM_D1_CACHE_MODE"] == "build":
+            arm = Path(env["TMPDIR"]).name
+            builds.append((env["LCM_D1_ROLE"], arm))
+            expected = 1 if arm == "preembed" else 2
+            assert env["LCM_D1_ORT_THREADS"] == env["OMP_NUM_THREADS"] == str(expected)
+            Path(env["LCM_D1_THREAD_REPORT"]).write_text(json.dumps({"effective_intra_op_threads": reported if arm == "preembed" else 2}))
+        else:
+            out = Path(command[command.index("--output") + 1])
+            out.mkdir(parents=True)
+            (out / "per_question_checkpoint.jsonl").write_text('{"question_id":"q0"}\n')
+            (out / "embedding-metrics.jsonl").write_text('{"wall_ms":1,"hits":1,"misses":0,"corruptions":0}\n')
+        return {"exit_code": 0, "timed_out": False}
+
+    monkeypatch.setattr(cli, "run_child", fake_run)
+    assert cli.main([*driver_args(tmp_path), "--build-workers", "1", "--build-threads", "1"]) == int(reported > 8)
+    receipt = json.loads((tmp_path / "out/d1-receipt.json").read_text())
+    assert builds == [(role, arm) for role in ("base", "candidate") for arm in ("preembed", "preembed-aa")]
+    assert receipt["build_threads_requested"] == 1
+    assert not {"build_workers", "build_threads", "merged_entries", "duplicate_keys"} & receipt.keys()
+    assert receipt["build_thread_budget_ok"] is (reported <= 8)
+    assert receipt["shard_thread_budget_ok"] is True
+    assert len(receipt["arms"]) == (16 if reported <= 8 else 0)
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+@pytest.mark.parametrize("failure", ["exit", "timeout", "missing", "interrupt"])
+def test_failed_aprime_partial_log_is_unknown(tmp_path, monkeypatch, workers, failure):
+    cli = driver()
+    monkeypatch.setattr(cli, "pin", lambda _: "a" * 40)
+    monkeypatch.setattr("benchmarking.d1_cache.seal", lambda _: "fake-manifest")
+    monkeypatch.setattr("benchmarking.d1_cache.merge", lambda *args: (0, 0))
+
+    def fake_run(command, *, env, interrupt, **kwargs):
+        Path(env["LCM_D1_THREAD_REPORT"]).write_text(json.dumps({"effective_intra_op_threads": 2}))
+        aa = Path(env["TMPDIR"]).name == "preembed-aa"
+        if aa:
+            Path(env["LCM_D1_DISPATCH_LOG"]).write_text('{"call":0}\n')
+        if aa and failure == "interrupt":
+            interrupt[0] = signal.SIGINT
+        return {"exit_code": 7 if failure == "missing" or aa and failure == "exit" else 124 if aa and failure == "timeout" else 0,
+                "timed_out": aa and failure == "timeout"}
+
+    monkeypatch.setattr(cli, "run_child", fake_run)
+    assert cli.main([*driver_args(tmp_path), "--build-workers", str(workers)]) != 0
+    receipt = json.loads((tmp_path / "out/d1-receipt.json").read_text())
+    assert receipt["aprime_dispatches"] == {"base": None, "candidate": None}
+    if failure != "missing":
+        assert (tmp_path / "out/base-preembed-aa-dispatch.jsonl").read_text() == '{"call":0}\n'
+
+
+@pytest.mark.parametrize("extra,message", [(["--build-workers", "3", "--thread-budget", "5"], "2 * build-workers * build-threads <= thread-budget"), (["--build-threads", "0"], "build-threads >= 1"), (["--build-threads", "9"], "build-threads <= thread-budget")])
 def test_build_workers_above_thread_budget_is_parser_error(tmp_path, monkeypatch, capsys, extra, message):
     cli = driver()
     monkeypatch.setattr(cli, "pin", lambda _: pytest.fail("pin called before budget validation"))
