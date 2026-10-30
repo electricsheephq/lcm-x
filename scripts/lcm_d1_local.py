@@ -119,6 +119,7 @@ def _main(argv, interrupt):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--jobs", type=int, default=3)
     parser.add_argument("--build-workers", type=int, default=1)
+    parser.add_argument("--build-threads", type=int, default=None)
     parser.add_argument("--thread-budget", type=int, default=8)
     parser.add_argument("--worker-timeout", type=float, default=14400)
     args = parser.parse_args(argv)
@@ -126,8 +127,11 @@ def _main(argv, interrupt):
         parser.error("worker-timeout must be positive and finite")
     if not 1 <= args.jobs <= args.thread_budget <= 8 or len(args.product) != 2:
         parser.error("require two roles and 1 <= jobs <= thread-budget <= 8")
-    if args.build_workers < 1 or (args.build_workers > 1 and 2 * args.build_workers > args.thread_budget):
-        parser.error("require build-workers >= 1 and 2 * build-workers <= thread-budget for parallel builds")
+    build_threads_requested = args.build_threads if args.build_threads is not None else args.thread_budget // args.jobs
+    if build_threads_requested < 1:
+        parser.error("require build-threads >= 1")
+    if args.build_workers < 1 or (args.build_workers > 1 and 2 * args.build_workers * build_threads_requested > args.thread_budget):
+        parser.error("require build-workers >= 1 and 2 * build-workers * build-threads <= thread-budget for parallel builds")
     products = dict(item.split("=", 1) for item in args.product)
     if len(products) != 2 or any(not role.isidentifier() for role in products):
         parser.error("require two distinct identifier role names")
@@ -155,6 +159,7 @@ def _main(argv, interrupt):
     env = dict(os.environ, LCM_D1_ORT_THREADS=str(threads), OMP_NUM_THREADS=str(threads),
                HF_HUB_OFFLINE="1", PYTHONDONTWRITEBYTECODE="1")
     env.pop("LCM_D1_BUILD_PARTITION", None)  # Only parallel build workers get a partition.
+    env.pop("LCM_D1_DISPATCH_LOG", None)
     common = ["--dataset-label", "m", "--provider", "fastembed", "--model", "BAAI/bge-small-en-v1.5"]
     started = time.monotonic()
 
@@ -167,10 +172,13 @@ def _main(argv, interrupt):
                          LCM_D1_PRODUCT_SHA=pins[role], LCM_D1_ROLE=role,
                          LCM_D1_THREAD_REPORT=str(args.output.resolve() / f"{role}-{name}-threads.json"),
                          LCM_D1_CACHE_MODE=mode, HERMES_HOME=str(scratch / "home"), TMPDIR=str(scratch))
+        if mode == "build":
+            child_env["LCM_D1_DISPATCH_LOG"] = str(args.output.resolve() / f"{role}-{name}-dispatch.jsonl")
         if part is not None:
+            # Matching serial threads keeps ORT arithmetic the same; 1 thread needs measured byte-identity proof.
             child_env.update(LCM_LONGMEMEVAL_EMBED_CACHE=str(caches[role].parent / "parts" / f"part-{part}.sqlite"),
                              LCM_D1_BUILD_PARTITION=f"{part}/{args.build_workers}",
-                             LCM_D1_ORT_THREADS="1", OMP_NUM_THREADS="1")
+                             LCM_D1_ORT_THREADS=str(build_threads_requested), OMP_NUM_THREADS=str(build_threads_requested))
         with (args.output / f"{role}-{name}.log").open("w") as log:
             return run_child([sys.executable, str(Path(__file__).resolve()), "--worker", products[role], pins[role], instrument, *command], cwd=products[role], env=child_env, stdout=log, stderr=subprocess.STDOUT, timeout=args.worker_timeout, interrupt=interrupt)
 
@@ -199,27 +207,28 @@ def _main(argv, interrupt):
 
         def build(task):
             role, part = task
-            rows = []
-            for name, prepared in (("preembed", args.prepared_dir), ("preembed-aa", args.aprime_dir)):
-                command = ["prewarm-cache", "--prepared-dir", str(prepared.resolve()), "--shards-manifest", str(prepared.resolve()), *common]
-                began = time.monotonic()
-                result = invoke(role, f"{name}-part-{part}", command, "build", part=part)
-                rows.append({"role": role, "part": part, "arm": name, **result, "elapsed_s": time.monotonic() - began})
-                if result["exit_code"] or interrupt[0]:
-                    break
-            return rows
+            command = ["prewarm-cache", "--prepared-dir", str(args.prepared_dir.resolve()), "--shards-manifest", str(args.prepared_dir.resolve()), *common]
+            began = time.monotonic()
+            result = invoke(role, f"preembed-part-{part}", command, "build", part=part)
+            return {"role": role, "part": part, "arm": "preembed", **result, "elapsed_s": time.monotonic() - began}
 
         builds = run_pool([(role, part) for role in products for part in range(args.build_workers)], 2 * args.build_workers, build)
-        preembed = [row for rows in builds for row in rows]
+        preembed = builds
         merged_entries, duplicate_keys = {}, {}
         for role in products:
             rows = [row for row in preembed if row["role"] == role]
             if interrupt[0] or any(row["exit_code"] for row in rows):
                 continue
-            # Build workers run one ORT thread, so their reports stay out of role_threads (the shard setting).
             build_threads[role] = [json.loads((args.output / f"{role}-{row['arm']}-part-{row['part']}-threads.json").read_text()) for row in rows]
             parts = [caches[role].parent / "parts" / f"part-{part}.sqlite" for part in range(args.build_workers)]
             merged_entries[role], duplicate_keys[role] = merge(parts, caches[role])
+            command = ["prewarm-cache", "--prepared-dir", str(args.aprime_dir.resolve()), "--shards-manifest", str(args.aprime_dir.resolve()), *common]
+            began = time.monotonic()
+            result = invoke(role, "preembed-aa", command, "build")
+            preembed.append({"role": role, "part": None, "arm": "preembed-aa", **result, "elapsed_s": time.monotonic() - began})
+            if result["exit_code"] or interrupt[0]:
+                continue
+            role_threads[role] = json.loads((args.output / f"{role}-preembed-aa-threads.json").read_text())
             manifests[role] = seal(caches[role])
     tasks = [(role, path.parent.name, path.parent) for role in products for path in shards]
     tasks += [(role, name, args.aprime_dir) for role in products for name in ("aa-A", "aa-Aprime")]
@@ -248,14 +257,18 @@ def _main(argv, interrupt):
 
     effective = [value["effective_intra_op_threads"] for value in role_threads.values()]
     built = [row["effective_intra_op_threads"] for rows in build_threads.values() for row in rows]
-    # One-thread build reports still decide the shard verdict: a capped product stays within threads at the shard
-    # setting, and an uncapped one reports the same count there. They do not make the budget fully known.
-    shard_ok = args.jobs * max((n for n in effective + built if n is not None), default=threads) <= args.thread_budget
+    # The A-prime build report runs at the shard setting in both modes, so it alone decides the shard verdict.
+    shard_ok = args.jobs * max((n for n in effective if n is not None), default=threads) <= args.thread_budget
     # The build runs 2 * P workers at once, so its own verdict uses that concurrency.
     build_ok = not built or 2 * args.build_workers * max((n for n in built if n is not None), default=1) <= args.thread_budget
     budget_ok = shard_ok and build_ok
     arms = run_pool([task for task in tasks if task[0] in manifests], args.jobs, launch) if budget_ok and not interrupt[0] else []
     receipt = {"instrument_sha": instrument, "products": pins, "jobs": args.jobs,
+               # A clean A-prime arm that found every unit cached never creates its log: that is 0, not unknown.
+               "aprime_dispatches": {role: len(path.read_text().splitlines()) if path.exists()
+                                     else 0 if any(row["role"] == role and row["arm"] == "preembed-aa" and not row["exit_code"] for row in preembed)
+                                     else None
+                                     for role in products for path in [args.output / f"{role}-preembed-aa-dispatch.jsonl"]},
                "cache_manifests": manifests, "role_threads": role_threads,
                "thread_budget_ok": budget_ok, "build_thread_budget_ok": build_ok, "shard_thread_budget_ok": shard_ok,
                "thread_budget_fully_known": len(effective) == 2 and None not in effective,
@@ -265,7 +278,7 @@ def _main(argv, interrupt):
                "wall_seconds": time.monotonic() - started, "arms": arms,
                "not_proven": "Eight-hour acceptance requires the complete quiet-window run; recall equivalence is a separate gate."}
     if args.build_workers > 1:
-        receipt.update(build_workers=args.build_workers, merged_entries=merged_entries, duplicate_keys=duplicate_keys, build_threads=build_threads)
+        receipt.update(build_workers=args.build_workers, build_threads_requested=build_threads_requested, merged_entries=merged_entries, duplicate_keys=duplicate_keys, build_threads=build_threads)
     (args.output / "d1-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     return 128 + interrupt[0] if interrupt[0] else int(not budget_ok or any(row["exit_code"] for row in preembed) or any(arm["exit_code"] or arm["parse_error"] for arm in arms))
 
