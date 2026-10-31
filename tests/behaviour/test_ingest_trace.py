@@ -66,8 +66,8 @@ def test_fixture_scenario_inventory_and_size() -> None:
     assert len(names) == len(set(names))
     assert set(data) == set(names), TRACE_GUIDANCE
     # Initial, next and cold ingests now each retain their full observer stream.
-    # Parts A/B both add transient ingest observations.
-    assert GOLDEN.stat().st_size <= 3_400_000
+    # Parts A/B both add transient ingest observations. #1286: a store below the cursor reads the durable proof.
+    assert GOLDEN.stat().st_size <= 3_450_000
     assert all(len(json.dumps(trace).encode()) <= 45_000 for trace in data.values())
 
 
