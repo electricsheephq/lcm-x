@@ -594,6 +594,46 @@ def test_a_one_row_cleanup_proof_does_not_swallow_a_new_identical_message(host, 
     assert durable is stamped
 
 
+def _two_new_messages():
+    return [{"role": "user", "content": f"[{tag}] {RAW}"} for tag in "AB"]  # distinct, unstamped, oversized
+
+
+def test_a_multi_row_delta_cleanup_proof_does_not_swallow_new_identical_messages(host):
+    """Round 7b (I1): a session already holds history; after a restart the gateway delivers only two new unstamped
+    oversized messages (a delta, not a replay of the session), and a committed cleanup stubs them. That list does not
+    replay the session from the compaction frontier, so its proof stays local: after the next restart, a new raw
+    delivery of the same two texts is stored. Proven durable, it matched them and neither was stored."""
+    _turns(host, None, n=3)
+    host.restart()
+    host.live = _two_new_messages()
+    host.engine.ingest(host.live)
+    rows = host.stored()
+    result, before = host.cleanup_pass(preflight=False)
+    assert sum(str(m.get("content")).startswith("[Externalized payload: kind=raw_payload;") for m in result) == 2
+    host.commit_in_place(result, before)
+    durable = host.engine._durable_commit_proof_payload()
+    host.restart()
+    host.live = _two_new_messages()  # genuinely new messages with the same texts, delivered alone
+    host.engine.ingest(host.live)
+    assert host.stored() == rows + 2  # (the store holds the externalized form, so the rows are counted)
+    assert durable is None
+
+
+def test_a_multi_row_cleanup_that_replays_the_session_keeps_its_proof_durable(host):
+    """Round 7b control: the same two-row cleanup in a session whose host list replays its history from the frontier
+    proves the first stored row after it, so the proof stays durable and a restart stores only the next turn."""
+    _turns(host, None, n=3)
+    host.live += _two_new_messages()
+    host.engine.ingest(host.live)
+    result, before = host.cleanup_pass(preflight=False)
+    assert sum(str(m.get("content")).startswith("[Externalized payload: kind=raw_payload;") for m in result) == 2
+    assert host.engine._compress_commit_proof.get("cleanup_rewrite") is True
+    host.commit_in_place(result, before)
+    assert host.engine._durable_commit_proof_payload() is not None
+    _restart_stores_only_the_next_turn(host)
+    assert host.duplicated() == {}
+
+
 @pytest.mark.parametrize("variant", ["stub", "reasoning"])
 def test_a_delta_only_bind_does_not_re_key_the_proof_to_the_delta(host, variant):
     """Round 7 (I1): a session holding rows with a durable proof, then a restart whose first delivery is only one new

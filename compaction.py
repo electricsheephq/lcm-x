@@ -1084,7 +1084,9 @@ class CompactionMixin:
                     and not getattr(self, "_compress_dropped_ignored_rows", False) and not (
                         proof["published"] or proof["recovery"] or proof["stub_first"] or proof["filtered"])
                     and not (len(effective) == 1 and not self._host_occurrence_known(effective[0]))
-                    and not self._rekey_unstored_rows(result, occurrences, output_identities, remapped)):
+                    and not self._rekey_unstored_rows(result, occurrences, output_identities, remapped)
+                    and all(int(row["store_id"]) in remapped.values() for row in self._store.get_session_messages_after(
+                        self._session_id, after_store_id=int(self._last_compacted_store_id or 0), limit=1))):
                 # #1286: a cleanup-only pass (replay stubs, stripped reasoning) hands the host a rewritten list too: a
                 # restart after the host commits it must not leave the cold rebind a stale proof. Absent unless true
                 # (traces dump it). A held pass's survival fit stays local: a durable claim of its carrier would
@@ -1094,7 +1096,10 @@ class CompactionMixin:
                 # a list of one effective row no host stamp or uid witnesses: a stub's identity restores its payload,
                 # so a new message with the same text, delivered alone after a restart, would match it and be lost
                 # (the tail path's singleton rule stores it). A stamped or uid row stays durable: the proof's
-                # host-occurrence snapshot tells the two occurrences apart (_host_occurrence_changed).
+                # host-occurrence snapshot tells the two occurrences apart (_host_occurrence_changed). Round 7b: so does
+                # a list that does not replay this session from the compaction frontier (its first stored row after the
+                # frontier unmapped): a delta of new rows, whose new copies after a restart would match it (the tail
+                # path's rule: replay is proven only by covering the durable session).
                 proof["cleanup_rewrite"] = True
                 # Round 7: its carry is the re-key's (the rows the guard mapped again, the previous proof's parent
                 # ranges), or a compression child's committed cleanup drops the parent rows after an out-of-order row.
