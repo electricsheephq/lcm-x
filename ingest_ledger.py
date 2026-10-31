@@ -11,6 +11,9 @@ from __future__ import annotations
 from bisect import bisect_left
 from collections import defaultdict
 import struct
+import threading
+import time
+import weakref
 from typing import NamedTuple
 
 from .message_content import normalize_content_value
@@ -51,6 +54,57 @@ class EmissionHandle(NamedTuple):
     compress_call: int
     session_id: str
     conversation_key: str
+
+
+_PENDING_EMISSIONS = {}
+_PENDING_EMISSIONS_LOCK = threading.Lock()
+
+
+def mark_pending_emission(store_key, lineage, **payload):
+    """Keep only payloads, never stores or strong engine references, under this lock."""
+    payload.update(lineage=lineage, created_at=time.time(), claim=None,
+                   origin=weakref.ref(payload.pop("origin")))
+    with _PENDING_EMISSIONS_LOCK:
+        entries = _PENDING_EMISSIONS.setdefault((store_key, lineage), [])
+        entries.append(payload)
+        dropped = len(entries) > 2
+        if dropped:
+            entries.pop(0)
+    return dropped
+
+
+def claim_pending_emissions(store_key, token):
+    claimed, dropped = [], 0
+    with _PENDING_EMISSIONS_LOCK:
+        for (key, lineage), entries in list(_PENDING_EMISSIONS.items()):
+            if key[0] != store_key[0]:
+                continue
+            if key[1] != store_key[1]:
+                dropped += len(entries)
+                del _PENDING_EMISSIONS[(key, lineage)]
+                continue
+            for entry in entries:
+                if entry["claim"] is None:
+                    entry["claim"] = token
+                    claimed.append(entry)
+    return claimed, dropped
+
+
+def settle_pending_emissions(token, completed=(), release=None):
+    with _PENDING_EMISSIONS_LOCK:
+        for key, entries in list(_PENDING_EMISSIONS.items()):
+            entries[:] = [e for e in entries if not (e["claim"] is token and any(e is c for c in completed))]
+            for entry in entries:
+                if entry["claim"] is token and (release is None or any(entry is e for e in release)):
+                    entry["claim"] = None
+            if not entries:
+                del _PENDING_EMISSIONS[key]
+
+
+def pending_emission_digests(store_key, lineage, excluded=()):
+    with _PENDING_EMISSIONS_LOCK:
+        return {row["descriptor_digest"] for entry in _PENDING_EMISSIONS.get((store_key, lineage), ())
+                if not any(entry is e for e in excluded) for row in entry["rows"]}
 
 
 class Placement(NamedTuple):
