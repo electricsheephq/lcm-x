@@ -848,6 +848,15 @@ def register(ctx):
                     if (
                         result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT
                     ):
+                        if not conversation_id:
+                            # A session-only cold bind would persist a provisional
+                            # conversation ID that a later gateway bind cannot own.
+                            # Leave the cursor untouched so a correctly bound
+                            # engine can ingest the retained history later.
+                            logger.warning(
+                                "LCM post_llm_call deferred cold ingest: conversation identity unavailable"
+                            )
+                            return
                         result = use_cold_lcm_engine(
                             engine,
                             _bind_and_ingest,
