@@ -11435,9 +11435,11 @@ class TestEngineCompress:
 
         monkeypatch.setattr(lcm_engine, "summarize_with_escalation", fail_summary)
 
+        # Canonical wire shape after the expand-hint dedup: the body's plain
+        # 'Expand for details about:' line is rendered as exactly one bracketed hint.
         active_summary_marker = (
             f"[Recent Summary (d0, node {node_id})]\n"
-            f"{summary_text}\n"
+            "backed compressed details\n"
             "[Expand for details: backed prior]"
         )
         messages = [

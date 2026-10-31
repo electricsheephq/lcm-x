@@ -64,6 +64,16 @@ def assert_restored_history(messages: list[dict[str, Any]], terminal: list[str])
     assert [canonical(m) for m in messages] == terminal, "I5 continuity: restored history changed"
 
 
+def assert_resumed_input(messages: list[dict[str, Any]], terminal: dict[str, list[str]], newest: str) -> None:
+    """The first input after a restart: the entire restored conversation, unchanged
+    and in order, then the newest user turn. A leading host system prompt is ignored."""
+    assert canonical(messages[-1]) == canonical({"role": "user", "content": newest}), \
+        "I5 continuity: first request newest user changed"
+    restored = messages[-len(terminal["history"]) - 1:-1]
+    assert_restored_history(restored, terminal["history"])
+    assert_ordered_tail(restored, terminal["tail"])
+
+
 def paired(messages: list[dict[str, Any]]) -> None:
     pending: set[str] = set()
     for message in messages:
@@ -241,12 +251,8 @@ def run(first: int, last: int, out: Path) -> None:
                     # The leading system prompt is host-owned. Before answering
                     # the first new user turn, the entire restored conversation
                     # must still precede it, unchanged and in order.
-                    assert canonical(messages[-1]) == canonical({"role": "user", "content": user_text(first)}), \
-                        "I5 continuity: first request newest user changed"
-                    restored = messages[-len(terminal["history"]) - 1:-1]
-                    (out / "resume-request.json").write_text(json.dumps(restored, indent=2))
-                    assert_restored_history(restored, terminal["history"])
-                    assert_ordered_tail(restored, terminal["tail"])
+                    (out / "resume-request.json").write_text(json.dumps(messages, indent=2))
+                    assert_resumed_input(messages, terminal, user_text(first))
                     resume_request_checked = True
                 if pending_tail is not None:
                     # The provider must receive the very same emitted suffix,
@@ -307,10 +313,25 @@ def run(first: int, last: int, out: Path) -> None:
     original_compress = engine.compress
 
     def compress(messages: list[dict[str, Any]], *args: Any, **kwargs: Any) -> Any:
-        nonlocal pending_tail
+        nonlocal pending_tail, resume_request_checked
+        resume_input: list[str] | None = None
+        if terminal is not None and not resume_request_checked:
+            # The compaction schedule can fall on the first resumed turn, before
+            # any provider request. The host must hand compaction the same
+            # restored input; the emitted tail is then checked at the provider.
+            (out / "resume-compaction-input.json").write_text(json.dumps(messages, indent=2))
+            try:
+                assert_resumed_input(messages, terminal, user_text(first))
+                resume_input = [canonical(m) for m in messages]
+            except AssertionError as exc:
+                failures.append(f"{exc} at compaction")
         protected = [canonical(m) for m in messages[-TAIL:]]
         started = time.perf_counter()
         result = original_compress(messages, *args, **kwargs)
+        # Only a pass that changed the messages exempts the first request;
+        # after a no-op it must still carry the whole restored history.
+        if resume_input is not None and [canonical(m) for m in result] != resume_input:
+            resume_request_checked = True
         compactions.append({"turn": turn, "seconds": time.perf_counter() - started,
                             "status": engine._last_compression_status})
         emitted = result[-len(protected):]
