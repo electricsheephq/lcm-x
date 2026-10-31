@@ -182,7 +182,8 @@ if globals().get("TWO_TREE"):  # D2: material that no longer matches its manifes
     _bad = [x for n in SEEDS for x in material_files(n)]
     if _bad:
         print(json.dumps({"arms": ARMS, "labels": LABELS, "seeds": SEEDS, "checkpoints": CPS, "status": "INCOMPLETE",
-                          "d2": {"material_mismatch": _bad, "status": "INCOMPLETE", "verdict": "INCOMPLETE"}}, indent=1))
+                          "d2": {"material_mismatch": _bad, "status": "INCOMPLETE", "verdict": "INCOMPLETE",
+                                 "d2_rule": "cp-304 gates; cp-176 is the reader placebo (v0.28.0, #1128)"}}, indent=1))
         sys.exit(0)
 
 
@@ -437,9 +438,12 @@ d2 = {cp: {"unit": "run (stratified by seed)", "test": r["test"], "n_seeds": r["
                               "sign_test_p_exact": u["sign_test_p_exact"], "occurrence_mcnemar_p_exact": a["p_exact"],
                               "diagnostic_only": u["diagnostic_only"]}}
       for cp, r, u, a in ((cp, p["run_level"], p["facts_per_fact"], p["axes"]["facts_all"]) for cp, p in paired.items())}
-for v in d2.values():
+for cp, v in d2.items():
     v["net_loss_ge_5"] = v["effect_pts_exact"] is not None and v["effect_pts_exact"] <= -5
     v["blocks"] = v["p_exact"] is not None and v["p_exact"] < 0.05 and v["net_loss_ge_5"]
+    if cp == "cp-176":
+        v["placebo_fires"] = (v["p_exact"] is not None and v["p_exact"] < 0.05
+                              and v["effect_pts_exact"] is not None and abs(v["effect_pts_exact"]) >= 5)
 spread = {label: arm_stats.get(label, {}).get("spread_over_0.10", []) for label in labels}
 missing_spread = [f"{label}/cp-{cp}/seed-{n}" for label in labels for cp in CPS for n in SEEDS  # receipt-skipped or unscored
                   if arm_stats.get(label, {}).get("facts_r1_r2_spread_by_cp", {}).get(f"cp-{cp}", {}).get(f"seed-{n}") is None]
@@ -519,11 +523,14 @@ diff += sorted({f"arm.{k}" for c in configs if "arm" in diff and isinstance(c["a
                 for k in {*c["arm"], *configs[0]["arm"]} if c["arm"].get(k) != configs[0]["arm"].get(k)})
 verdict = ("INCOMPLETE" if status == "INCOMPLETE" or missing_spread or sha_mismatch or receipts or diff or material_mismatch
            or missing_required
-           else "REPEAT_SEEDS" if any(spread.values()) else "BLOCK" if any(v["blocks"] for v in d2.values()) else "PASS")
+           else "REPEAT_SEEDS" if any(spread.values())
+           else "INCONCLUSIVE" if d2.get("cp-176", {}).get("placebo_fires")
+           else "BLOCK" if d2.get("cp-304", {}).get("blocks") else "PASS")
 d2.update({"candidate": labels[1], "spread_over_0.10": spread, "missing_spread": missing_spread,
            "expected_shas": dict(zip(labels, expect)) if expect else None, "sha_mismatch": sha_mismatch, "receipt_mismatch": receipts,
            "material_mismatch": material_mismatch, "missing_required": missing_required, "config_equal": (not diff) if two_tree else None, **({"config_diff_keys": diff} if diff else {}),
            **(dict(zip(("effective_config_diff_keys", "effective_config_unavailable"), effective_config_keys())) if two_tree else {}),
+           "d2_rule": "cp-304 gates; cp-176 is the reader placebo (v0.28.0, #1128)",
            "status": status, "verdict": verdict})
 print(
     json.dumps(

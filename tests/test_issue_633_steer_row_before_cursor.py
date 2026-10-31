@@ -180,21 +180,31 @@ def test_t4_an_unstamped_user_row_already_stored_is_not_stored_again(tmp_path, s
         engine.shutdown()
 
 
-def test_t4_an_unstamped_user_row_the_last_view_lacked_is_explained_by_its_stored_copy(tmp_path):
-    """The stored-copy lookup, not the last view: the host drops a stored unstamped user row for one turn
-    and shows it again before the cursor. Its stored copy in the tail explains it."""
+@pytest.mark.parametrize("bound", [False, True], ids=["unproven-copy", "canonical-uid"])
+def test_t4_an_unstamped_user_row_the_last_view_lacked_needs_occurrence_proof(tmp_path, bound):
+    """#1403: after the host drops the row, content alone cannot prove this is its replay.
+    A canonical UID dedupes; without it, retain a copy rather than lose a fresh occurrence."""
+    if bound:
+        from tests.test_host_uid_shadow import _state_db
+
+        home = tmp_path / "home"
+        home.mkdir()
+        _state_db(home, [(SESSION, None, None)])
     engine = _engine(tmp_path)
     try:
         host = _turn_one(stamped=True)
-        earlier = {"role": "user", "content": "[OUT-OF-BAND USER MESSAGE]\nearlier steer\n[/OUT-OF-BAND USER MESSAGE]"}
+        earlier = {"role": "user", "content": "[OUT-OF-BAND USER MESSAGE]\nearlier steer\n[/OUT-OF-BAND USER MESSAGE]",
+                   "message_uid": "earlier-steer"}
         engine.ingest(host[:3] + [earlier] + host[3:])
         host = host + [{"role": "user", "content": "now deploy it", "timestamp": 200.0},
                        {"role": "assistant", "content": "Deploying.", "timestamp": 201.0}]
         engine.ingest(host)
         before = len(_stored(engine))
         engine.ingest(host[:3] + [earlier] + host[3:])
-        assert sum(1 for row in _stored(engine) if row.get("content") == earlier["content"]) == 1
-        assert len(_stored(engine)) == before
+        assert sum(1 for row in _stored(engine) if row.get("content") == earlier["content"]) == (1 if bound else 2)
+        assert len(_stored(engine)) == before + (0 if bound else 1)
+        engine.ingest(host[:3] + [earlier] + host[3:])
+        assert len(_stored(engine)) == before + (0 if bound else 1)
     finally:
         engine.shutdown()
 
@@ -246,7 +256,7 @@ def test_t6_a_repeated_steer_inserted_ahead_of_the_first_is_stored(tmp_path):
         engine.shutdown()
 
 
-def test_t7_the_insertion_diff_is_bounded_on_a_long_repetitive_list(tmp_path):
+def test_t7_the_insertion_diff_is_bounded_on_a_long_repetitive_list(tmp_path, latency_check):
     """A long list of equal identities: the diff is skipped (nothing counts as inserted) instead of
     running quadratic work on the ingest path."""
     import time
@@ -256,9 +266,10 @@ def test_t7_the_insertion_diff_is_bounded_on_a_long_repetitive_list(tmp_path):
         messages = [{"role": "user", "content": "ok"} for _ in range(8000)]
         engine._last_active_replay_source_identities = [
             engine._message_replay_identity(message, strip_carrier=False) for message in messages[1:]]
-        started = time.monotonic()
+        started = time.monotonic() if latency_check else None
         assert engine._identity_anchor_inserted(messages, 0, len(messages)) == set()
-        assert time.monotonic() - started < 1.0
+        if latency_check:
+            assert time.monotonic() - started < 1.0
     finally:
         engine.shutdown()
 

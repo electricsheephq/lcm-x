@@ -69,7 +69,7 @@ def parse_bool(tree: Path, key: str, value: str) -> tuple[bool, str]:
     an unparseable value keeps the field default False (config.py ``native_recovery: bool = False``)."""
     src = (Path(tree) / "config.py").read_text()
     fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "_parse_bool_env")
-    ns = {"os": SimpleNamespace(environ={key: value})}
+    ns = {"os": SimpleNamespace(environ={key: value}), "lcm_env_get": {key: value}.get}
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "config.py", "exec"), ns)  # noqa: S102 - the plugin's parser
     return bool(ns["_parse_bool_env"](key, False)), f"config.py:{fn.lineno}"
 

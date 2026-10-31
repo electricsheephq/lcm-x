@@ -1,0 +1,11 @@
+--- a/engine.py
++++ b/engine.py
+@@ -8338,8 +8338,6 @@
+                     trimmed["content"] = "\n\n---\n\n".join(parts)
+                     trimmed_result.append(trimmed)
+             result = self._sanitize_active_context_messages(trimmed_result)
+-        if not persist:
+-            return result
+
+         existing_folded_lineage = self._load_folded_tail_lineage(result)
+         if (

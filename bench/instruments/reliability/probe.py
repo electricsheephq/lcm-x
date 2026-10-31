@@ -40,7 +40,7 @@ ANCHORS = {  # shape -> (host file, text on the cited line)
     "user_merge": ("agent/agent_runtime_helpers.py", "def _merge_consecutive_users"),
     "orphan_drop": ("agent/agent_runtime_helpers.py", "def _drop_stray_tool_results"),
     "rotation_start": ("agent/conversation_compression.py", "def _notify_context_engine_compression_complete"),
-    "rotation_end": ("agent/conversation_compression.py", "agent.commit_memory_session(messages)"),
+    "rotation_end": ("agent/conversation_compression.py", "agent.commit_memory_session("),  # r34.10 passes original_messages
     "session_transition": ("run_agent.py", "def _transition_context_engine_session"),
     "summary_aborted": ("agent/context_compressor.py", '"summary_generation_aborted"'),
     "cron_agent": ("cron/scheduler.py", 'platform="cron"'),
@@ -76,14 +76,146 @@ LOG_COUNTS = {
     "exit_fit": "LCM survival fit applied (reason=exit_fit:",
     "exit_fit_skipped": "LCM exit fit skipped",
 }
+
+
+def occurrence_rows(messages):
+    """Complete, payload-free occurrence hashes at the observed seam (never unique-key counts)."""
+    return [{"index": i, "role": m.get("role"), "sha256": hashlib.sha256(m["content"].encode()).hexdigest(),
+             "bytes": len(m["content"].encode())}
+            for i, m in enumerate(messages) if isinstance(m, dict) and isinstance(m.get("content"), str)]
+
+
+def observe(emit, seam, action):
+    """Observation is best effort, including its error sink; never replace engine execution."""
+    try:
+        return action()
+    except Exception as exc:
+        try:
+            emit(event="observer_error", seam=seam, error=type(exc).__name__)
+        except Exception:
+            try:
+                logging.getLogger(__name__).warning("observer_error seam=%s error=%s", seam, type(exc).__name__)
+            except Exception:
+                pass
+
+
+def trace_final_tail(etype, is_final):
+    """Observe the engine's actual boundary; never recompute it outside its invocation."""
+    original = getattr(etype, "_fresh_tail_boundary", None)
+    if original is None:
+        return  # older products without the seam cannot provide drained proof
+    def traced(self, messages, *args, **kwargs):
+        boundary = original(self, messages, *args, **kwargs)
+        if is_final():
+            def record():
+                observations = getattr(self, "_probe_tail_observations", [])
+                observations.append({"session": self._session_id, "boundary": dict(vars(boundary)),
+                                     "rows": [{"role": m.get("role"), "sha256": hashlib.sha256(
+                                         str(m.get("content") or "").encode()).hexdigest()} for m in messages]})
+                self._probe_tail_observations = observations
+            observe(lambda **kw: setattr(self, "_probe_tail_observations", [{"error": "unobserved"}]),
+                    "final_tail", record)
+        return boundary
+    etype._fresh_tail_boundary = traced
+
+
+def trace_occurrences(etype, emit, context):
+    """Observe actual engine ingress without changing arguments, return values or exceptions."""
+    def carriers(engine, messages):
+        verify = getattr(engine, "_generated_context_carrier_remainder", None)
+        if verify is None:
+            return
+        for message in messages:
+            remainder = verify(message)  # the product checks the summary bytes against its DAG nodes
+            if not isinstance(remainder, str) or not remainder.strip():
+                continue
+            content = message["content"]
+            if not content.endswith(remainder):
+                continue
+            offset = len(content[:-len(remainder)].encode()) + len(remainder.encode()) - len(remainder.lstrip().encode())
+            offset -= len(content.encode()) - len(content.lstrip().encode())
+            emit(event="engine_carrier", session=getattr(engine, "_session_id", None), **context(),
+                 sha256=hashlib.sha256(content.strip().encode()).hexdigest(), bytes=len(content.strip().encode()),
+                 spans=[{"sha256": hashlib.sha256(remainder.strip().encode()).hexdigest(),
+                         "byte_offset": offset, "bytes": len(remainder.strip().encode())}])
+
+    for name in ("ingest", "on_turn_complete", "compress"):
+        original = getattr(etype, name, None)
+        if original is None:
+            continue
+
+        def traced(self, messages, *args, _original=original, _name=name, **kwargs):
+            observe(emit, _name + ":ingress", lambda: emit(
+                event="engine_ingress", seam=_name, session=getattr(self, "_session_id", None),
+                **context(), occurrences=occurrence_rows(messages)))
+            observe(emit, _name + ":carriers", lambda: carriers(self, messages))
+            result = _original(self, messages, *args, **kwargs)
+            if _name == "compress" and isinstance(result, list):
+                observe(emit, _name + ":post_carriers", lambda: carriers(self, result))
+            return result
+        setattr(etype, name, traced)
+
+
+def trace_user_merges(helpers, emit, context):
+    """Record exact input spans only when the real host merge pass emits their newline join."""
+    original = getattr(helpers, "_merge_consecutive_users", None)
+    passes = getattr(helpers, "_SEQUENCE_REPAIR_PASSES", ())
+    if original is None or original not in passes:
+        return False
+
+    def record(before, result, count):
+        if count and before is not None:
+            outputs = {m.get("content") for m in result if isinstance(m, dict) and m.get("role") == "user"
+                       and isinstance(m.get("content"), str)}
+            for start in range(len(before)):
+                parts = []
+                for role, text in before[start:start + 64]:
+                    if role != "user" or not isinstance(text, str) or not text:
+                        break
+                    parts.append(text)
+                    joined = "\n\n".join(parts)
+                    if len(parts) < 2 or joined not in outputs:
+                        continue
+                    spans, offset = [], 0
+                    leading = len(joined.encode()) - len(joined.lstrip().encode())
+                    for part in parts:
+                        raw = part.encode()
+                        spans.append({"sha256": hashlib.sha256(part.strip().encode()).hexdigest(),
+                                      "byte_offset": offset + len(raw) - len(part.lstrip().encode()) - leading,
+                                      "bytes": len(part.strip().encode())})
+                        offset += len(raw) + 2
+                    emit(event="host_merge", **context(), sha256=hashlib.sha256(joined.strip().encode()).hexdigest(),
+                         bytes=len(joined.strip().encode()), spans=spans,
+                         occurrences=occurrence_rows([{"role": "user", "content": t} for t in parts]))
+    def traced(messages):
+        before = observe(emit, "host_merge:before", lambda: [
+            (m.get("role"), m.get("content")) if isinstance(m, dict) else (None, None) for m in messages])
+        result = original(messages)
+        observe(emit, "host_merge:after", lambda: record(before, *result))
+        return result
+    helpers._SEQUENCE_REPAIR_PASSES = tuple(traced if p is original else p for p in passes)
+    return True
 UNSHORTENED = "LCM survival fit could not shorten the list"
 FILLER = "alpha beta gamma delta "
+
+
+def request_contains(messages: list[dict], text: str) -> bool:
+    """Full current-request bytes in one provider message; a tag alone is insufficient."""
+    return any(text in str(m.get("content") or "") for m in messages)
 
 
 def write_tool_files(files: Path, cell: dict) -> None:
     """Shared R1/R2 fixtures; distinct paths bypass the host's identical-read dedup."""
     files.mkdir(exist_ok=True)
     (files / "small.txt").write_text("small deterministic file\n")
+    if cell.get("id") == "default-window/objective-1221":
+        # Real reads use fixed ~/ paths; --out and --scratch-root never enter the tool arguments.
+        objective_files = Path.home() / "objective-1221"
+        objective_files.mkdir(exist_ok=True)
+        for n, size in enumerate([24000, 16000] + [7400] * 9, 1):
+            text = "".join(f"Record {i:04d}: datum for task step {n:02d}.\n"
+                           for i in range(size // 30 + 1))[:size]
+            (objective_files / f"big-{n:02d}.txt").write_text(text)
     lines = cell.get("big_lines", 400)
     (files / "big.txt").write_text("".join(f"line {i:05d}: " + FILLER * 8 + "\n" for i in range(lines)))
     for n in range(1, cell.get("big_files", 0) + 1):
@@ -150,7 +282,7 @@ def check_result(name, args, result):
     if isinstance(data, dict) and (data.get("error") or data.get("success") is False):
         return False, f"error: {str(data.get('error'))[:160]}", len(text)
     if name == "read_file":
-        path = Path(str((args or {}).get("path", "")))
+        path = Path(str((args or {}).get("path", ""))).expanduser()  # the host expands "~" itself
         want = len(path.read_text().splitlines()) if path.is_file() else None
         if not isinstance(data, dict) or data.get("truncated") or want is None or data.get("total_lines") != want:
             return False, f"read_file result incomplete (total_lines {(data or {}).get('total_lines')} of {want})", len(text)
@@ -184,6 +316,11 @@ def refusal(cell_dir):
 
 
 def user_text(cell, prefix, t):
+    if cell.get("id") == "default-window/objective-1221":
+        if t == 2:
+            # Fixed plain-row objective from #1221's engine regression, with the harness turn tag.
+            return "[T02] user turn 2: Keep the following objective verbatim.\n" + ("plan " * 9600) + " end."
+        return f"[{prefix}{t:02d}] user turn {t}: Earlier request. end."
     ut = cell["user_text"]
     if t in ut.get("continue_turns", []):
         return "continue"
@@ -510,7 +647,7 @@ def main():
                 + ".\nExpand for details about: stub" + FILLER * cell.get("summary_repeat", 0)), 1
 
     window = int(cell["window"])
-    cur = {"turn": 0, "step": 0, "native": 0, "sess": "S0", "ended": None, "final": False, "commits0": 0,
+    cur = {"turn": 0, "prefix": "T", "step": 0, "native": 0, "sess": "S0", "ended": None, "final": False, "commits0": 0,
            "issued": set(), "seen": set()}
 
     # A real gateway builds its agent with the chat's stable session key (gateway/run_turn_runner.py
@@ -565,8 +702,22 @@ def main():
             return None
 
     etype = type(engine)
+    trace_final_tail(etype, lambda: cur["final"])
+    trace_occurrences(etype, event, lambda: {"turn": cur["turn"], "session_prefix": cur["prefix"]})
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
     orig_start, orig_end = etype.on_session_start, getattr(etype, "on_session_end", None)
+
+    if "F4" in cell.get("bars", []):
+        orig_gate = etype.should_compress
+
+        def traced_gate(self, prompt_tokens=None):
+            result = orig_gate(self, prompt_tokens)
+            event(turn=cur["turn"], event="compression_gate", session_prefix=cur.get("prefix", "T"),
+                  final=cur["final"], tool_round=cur["step"],
+                  tokens=prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens,
+                  threshold_tokens=self.threshold_tokens, triggered=result)
+            return result
+        etype.should_compress = traced_gate
 
     recovery_turns = []
     fr = faults.get("forced_recovery")
@@ -575,6 +726,7 @@ def main():
         ("placeholder", "_OVERFLOW_RECOVERY_PLACEHOLDER"), ("note", "_OVERFLOW_RECOVERY_OVERCAP_NOTE"))}
 
     def traced_compress(self, messages, *args, **kwargs):
+        message_count = len(messages)
         injecting = fr and cur["turn"] == fr["turn"] and cur["step"] > 0
         if injecting:
             if fr["kind"] not in fired:
@@ -586,7 +738,7 @@ def main():
                 result = orig_compress(self, messages, *args, **kwargs)
         else:
             result = orig_compress(self, messages, *args, **kwargs)
-        status = getattr(self, "_last_compression_status", None)
+        status = getattr(self, "last_compression_status", getattr(self, "_last_compression_status", None))
         recovery = {}
         if status == "overflow_recovery":
             paths = [k for k, text in recovery_texts.items() if text and any(
@@ -600,9 +752,14 @@ def main():
             counters["compacted_turns"].append(cur["turn"])
         event(turn=cur["turn"], event="compaction", session=getattr(self, "_session_id", None), final=cur["final"],
               session_prefix=cur.get("prefix", "T"),
-              compression_status=status, noop_reason=getattr(self, "_last_compression_noop_reason", None),
+              compression_status=status, noop_reason=getattr(self, "last_compression_noop_reason", getattr(self, "_last_compression_noop_reason", None)),
               depth0_nodes=depth0() if status == "compacted" else None,
-              rejection=rejection(self), native_attempts=cur["native"], **recovery)
+              rejection=rejection(self), native_attempts=cur["native"], **recovery,
+              **({"input_tokens": recovery_module.count_messages_tokens(messages),
+                  "message_count": message_count,
+                  "output_tokens": recovery_module.count_messages_tokens(result),
+                  "threshold_tokens": self.threshold_tokens, "config_threshold": self._config.context_threshold}
+                 if set(cell.get("bars", [])) & {"C1", "F4"} else {}))
         p8_pin(result)
         return result
     etype.compress = traced_compress
@@ -675,6 +832,8 @@ def main():
             return orig_native(self, *args, **kwargs)
         native_cls.compress = counted_native
     import agent.agent_runtime_helpers as helpers
+    out["merge_occurrence_hook"] = trace_user_merges(
+        helpers, event, lambda: {"turn": cur["turn"], "session_prefix": cur["prefix"], "session": cur.get("session")})
     try:  # the host's dangling-tail notices (tool_seen host_wire_notice); absent at a host sha: nothing is licensed
         from agent import replay_cleanup
         wire_notices = tuple(getattr(replay_cleanup, "_DANGLING_NOTICES", ()))
@@ -759,6 +918,13 @@ def main():
                     body = m.get("content") if isinstance(m.get("content"), str) else json.dumps(m.get("content"))
                     event(turn=t, event="tool_seen", id=cid, sha=hashlib.sha256(body.encode()).hexdigest(), chars=len(body),
                           **({"host_wire_notice": True} if body in wire_notices else {}))  # tool_calls.bind
+            if set(cell.get("bars", [])) & {"C1", "F4"}:
+                # Opt-in R1 continuity: only synthetic tags and a literal-presence boolean escape.
+                current = user_text(cell, prefix, t).strip()
+                messages = kw.get("messages") or []
+                event(turn=t, event="provider_request", session_prefix=prefix, final=cur["final"],
+                      continuity={"F4": any(f"[{prefix}{t:02d}]" in str(m.get("content") or "") for m in messages),
+                                  "current_request_present": request_contains(messages, current)})
             sent = sum(len(str(m.get("content") or "")) for m in kw.get("messages") or []) // 4 + 800
             usage = int((sent if asst.get("real_usage") else est) * float(asst.get("usage_scale", 1.0)))
             if cancel and step == 0:  # the ACP cancel lands while the provider call is in flight
@@ -810,7 +976,8 @@ def main():
             text = _attach_interrupted_prompt(text.strip(), text.strip())
         persist = text.strip() if (persist_strip if persist_strip is not None else cell["transport"] == "acp") else text
         est = sum(len(str(m.get("content") or "")) for m in history) // 4 + len(text) // 4 + 800
-        cur.update(turn=t, prefix=prefix, step=0, native=0, commits0=buf.getvalue().count(COMMITTED), issued=set(), seen=set())
+        cur.update(turn=t, prefix=prefix, session=ag.session_id, step=0, native=0,
+                   commits0=buf.getvalue().count(COMMITTED), issued=set(), seen=set())
         event(turn=t, event="user_sent" if kind != "retry" else "retry", tag=f"{prefix}{t:02d}", role="user",
               session_prefix=prefix, content=text, persist=persist if persist != text else None,
               content_sha256=hashlib.sha256(text.encode()).hexdigest())
@@ -1009,7 +1176,7 @@ def session_count():
 def rejection(engine):
     """LCM's native-recovery rejection reason for the call that just ended (it doubles as the noop reason)."""
     reason = getattr(engine, "_last_native_recovery_rejection", None)
-    return reason if reason and reason == getattr(engine, "_last_compression_noop_reason", None) else None
+    return reason if reason and reason == getattr(engine, "last_compression_noop_reason", getattr(engine, "_last_compression_noop_reason", None)) else None
 
 
 def final_check(agent, history, buf):
@@ -1031,6 +1198,7 @@ def final_check(agent, history, buf):
         entry = "_compress_context(force=True)"
     for _ in range(2):
         before, rec = buf.getvalue().count("publication_invariant_conflict"), {}
+        engine._probe_tail_observations = []
         calls0 = getattr(engine, "_probe_calls", 0)
         saved = getattr(agent, "_session_db", None)
         try:
@@ -1052,7 +1220,9 @@ def final_check(agent, history, buf):
             agent._session_db = saved
         rec["engine_calls"] = getattr(engine, "_probe_calls", 0) - calls0  # a compress() inside THIS invocation
         rec["engine_status"] = getattr(engine, "_probe_status", None) if rec["engine_calls"] else None
-        rec["noop_reason"] = getattr(engine, "_last_compression_noop_reason", None)
+        rec["noop_reason"] = getattr(engine, "last_compression_noop_reason", getattr(engine, "_last_compression_noop_reason", None))
+        rec["session"] = getattr(engine, "_session_id", None)
+        rec["tail_observations"] = engine._probe_tail_observations
         rec["rejection"] = rejection(engine)
         rec["conflicts"] = buf.getvalue().count("publication_invariant_conflict") - before
         attempts.append(rec)

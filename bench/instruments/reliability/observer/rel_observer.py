@@ -251,9 +251,12 @@ def patch_engine(agent):
     if engine is None or getattr(etype, "_rel_patched", False):
         return
     etype._rel_patched = True
+    _r1.trace_occurrences(etype, event, lambda: {"turn": cur["turn"], "session_prefix": cur["prefix"]})
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
     cell_path = DIR / "cell.json"
-    in_place = json.loads(cell_path.read_text()).get("in_place") if cell_path.exists() else None
+    cell = json.loads(cell_path.read_text()) if cell_path.exists() else {}
+    in_place = cell.get("in_place")
+    cur["stop_after_tool"] = cell.get("stop_after_tool", False)
 
     def observer_failed(where, exc):
         try:  # an observer failure is evidence (the cell ERRORs on it), never a change to the engine call
@@ -285,7 +288,7 @@ def patch_engine(agent):
         try:
             secs = elapsed(started)
             _p8_pin(result)
-            status = getattr(self, "_last_compression_status", None)
+            status = getattr(self, "last_compression_status", getattr(self, "_last_compression_status", None))
             cover = store_cover()  # leaves written by this call and the stored rows they newly cover (hidden or host)
             delta = [None if a is None or b is None else b - a for a, b in zip(cover0, cover)]
             counters["compactions"].append({"turn": cur["turn"], **list_counts(given, result), "status": status,
@@ -312,7 +315,7 @@ def patch_engine(agent):
                      if fitted else None, compacted_reply_tags=tags)
             event(turn=cur["turn"], event="compaction", session=getattr(self, "_session_id", None), final=cur["final"],
                   session_prefix=cur["prefix"], compression_status=status,
-                  noop_reason=getattr(self, "_last_compression_noop_reason", None),
+                  noop_reason=getattr(self, "last_compression_noop_reason", getattr(self, "_last_compression_noop_reason", None)),
                   depth0_nodes=depth0() if status == "compacted" else None, rejection=_r1.rejection(self),
                   native_attempts=cur["native"])
         except Exception as exc:
@@ -373,6 +376,8 @@ def patch_run_agent(mod):
     def run_conversation(self, *a, **k):
         ensure_tap()
         tc = load_turn()
+        cur["session"] = self.session_id
+        cur["agent"] = self
         try:
             from agent.turn_failure_copy import FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE
             notices = [FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE]
@@ -404,6 +409,7 @@ def patch_run_agent(mod):
               interrupted=interrupted, session=self.session_id, user_tags=user_tags, host_notices=own,
               host_commits=logstate["commits"] - cur["commits0"])
         note("turn_end", tag=tag(), turn_kind=cur["kind"], interrupted=interrupted, failed=failed, session=self.session_id,
+             reason=result.get("turn_exit_reason"),
              reply_tag=next(iter(re.findall(r"reply to ([A-Z]\d{2,3}):", tc.get("reply") or "")), None)
              if reply_held and not failed and not interrupted else None)
         snapshot(failed_turn_notices=notices, provenance=_r1.provenance(json.loads((DIR / "cell.json").read_text()), []))
@@ -431,7 +437,7 @@ def final_attempt(agent, entry, run, status_of):
     finally:
         rec["engine_calls"] = getattr(engine, "_probe_calls", 0) - calls0
         rec["engine_status"] = getattr(engine, "_probe_status", None) if rec["engine_calls"] else None
-        rec["noop_reason"] = getattr(engine, "_last_compression_noop_reason", None)
+        rec["noop_reason"] = getattr(engine, "last_compression_noop_reason", getattr(engine, "_last_compression_noop_reason", None))
         rec["rejection"] = _r1.rejection(engine)
         note("final_attempt", **rec)
         snapshot()
@@ -457,7 +463,15 @@ def patch_model_tools(mod):
 
     def traced(*a, **kw):
         name, args = (a[0] if a else kw.get("function_name")), (a[1] if len(a) > 1 else kw.get("function_args"))
-        return dispatched(lambda: orig(*a, **kw), name, args, kw.get("tool_call_id"), "tool_dispatch")
+        result = dispatched(lambda: orig(*a, **kw), name, args, kw.get("tool_call_id"), "tool_dispatch")
+        if cur.get("stop_after_tool") and PHASE == "A" and not cur.get("stop_waited"):
+            cur["stop_waited"] = True
+            note("stop_tool_ready")
+            deadline = time.monotonic() + 15
+            while not getattr(cur["agent"], "_interrupt_requested", False) and time.monotonic() < deadline:
+                time.sleep(.01)
+            note("stop_interrupt_observed", interrupted=bool(getattr(cur["agent"], "_interrupt_requested", False)))
+        return result
     mod.handle_function_call = traced
 
 
@@ -476,6 +490,8 @@ def patch_inline_tools(mod):
 
 
 def patch_helpers(mod):
+    _r1.trace_user_merges(mod, event, lambda: {"turn": cur["turn"], "session_prefix": cur["prefix"],
+                                            "session": cur.get("session")})
     passes, drop = getattr(mod, "_SEQUENCE_REPAIR_PASSES", None), getattr(mod, "_drop_stray_tool_results", None)
     if not (passes and drop in passes):
         cur["orphan_hook"] = "unavailable at this host sha; B6 orphan count falls back to the log"

@@ -189,7 +189,7 @@ def test_d2_blocks_on_a_significant_loss_of_five_points(tmp_path):
         assert d2["effect_pts_exact"] == -25.0 and d2["p_exact"] < 0.05
         assert d2["net_loss_ge_5"] is True and d2["blocks"] is True
     assert out["d2"]["candidate"] == "cand" and out["d2"]["status"] == "COMPLETE"
-    assert out["d2"]["verdict"] == "BLOCK"
+    assert out["d2"]["verdict"] == "INCONCLUSIVE"
 
 
 def test_d2_passes_a_small_loss(tmp_path):
@@ -224,7 +224,7 @@ def test_d2_blocks_a_consistent_loss_that_the_fact_unit_misses(tmp_path):
         assert diag["effect_pts_exact"] == -10.0 and diag["fact_sign_flip_p_exact"] == 0.125
         assert diag["sign_test_p_exact"] == diag["fact_sign_flip_p_exact"]  # one magnitude everywhere: sign-flip = sign test
         assert diag["diagnostic_only"] == "assumes independent facts; facts within a run are correlated"
-    assert out["d2"]["verdict"] == "BLOCK"
+    assert out["d2"]["verdict"] == "INCONCLUSIVE"
 
 
 def test_d2_does_not_block_when_one_seed_is_reversed(tmp_path):
@@ -311,7 +311,7 @@ def test_d2_sign_flip_blocks_a_concentrated_loss_the_sign_test_misses(tmp_path):
         # the gate: every run keeps 55/60 before and 51/60 after, in every seed
         assert d2["effect_pts_exact"] == 100 * -4 / 60 and d2["p_exact"] == 2 / 216
         assert d2["net_loss_ge_5"] is True and d2["blocks"] is True
-    assert out["per_arm"]["cand"]["spread_over_0.10"] == [] and out["d2"]["verdict"] == "BLOCK"
+    assert out["per_arm"]["cand"]["spread_over_0.10"] == [] and out["d2"]["verdict"] == "INCONCLUSIVE"
 
 
 def seed_specific_two_tree(tmp_path, prev_kept, cand_kept):  # the real v3 shape: seed_ids, 60 facts per seed

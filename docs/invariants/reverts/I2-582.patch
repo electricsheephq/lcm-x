@@ -1,0 +1,11 @@
+--- a/survival_fit.py
++++ b/survival_fit.py
+@@ -287,7 +287,7 @@
+         body_ids = {id(m) for m in body}
+
+         def durable(message) -> bool:  # unproven rows: only DAG-verified scaffold, never a phrase match
+-            return persisted or id(message) in store_ids or self._is_verified_replay_scaffold_message(message)
++            return persisted or id(message) in store_ids or self._survival_generated(message)
+
+         def build(cut: int, kept, reply=None):
+             nonlocal formed

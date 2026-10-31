@@ -1,0 +1,43 @@
+{
+  "run_id": "lcmx-1451-pra-20261023",
+  "claim_class": "advisory",
+  "product_commit": "0eb95e50f4bae6ef0bcc305efde49c83f3d41fca",
+  "compat_cost_commit": "e6e4f0e5586245e0cf87bb0fec52745c82f17fd0",
+  "requested_base": "10407e12e33c1d7b09fe0e05141153555aec5d62",
+  "supplied_matrix_base": "5df5a3c2736c01b46acf26906a510e41e367e73e",
+  "matrix": {
+    "base_error_cells": 172,
+    "base_loss_cells": 622,
+    "base_duplicate_cells": 482,
+    "base_growth_cells": 298,
+    "candidate_error_cells": 0,
+    "candidate_loss_cells": 594,
+    "candidate_duplicate_cells": 482,
+    "candidate_growth_cells": 298,
+    "cells": 1296,
+    "changed_cells": 176,
+    "new_loss_checkpoints": 0,
+    "unjustified_duplicate_growth": 0
+  },
+  "cost": {
+    "samples": 200,
+    "base_sha": "10407e12e33c1d7b09fe0e05141153555aec5d62",
+    "candidate_sha": "e6e4f0e5586245e0cf87bb0fec52745c82f17fd0",
+    "base_median_ms": 1.5960415000000001,
+    "candidate_median_ms": 1.4105205,
+    "paired_median_delta_ms": -0.20008400000000004,
+    "allowed_delta_ms": 0.15960415000000003,
+    "pass_gate": true,
+    "method": "20 warmup pairs then 200 pairs; AB/BA alternating; timed _record_compress_commit_proof only on same synthetic compaction; no concurrent samples"
+  },
+  "raw_sha256": {
+    "candidate.jsonl": "3c51fae0ebb79d790f2afaf0d82b3ec84ba98e771daac1e908272edd106aca14",
+    "inputs/red-base.jsonl": "a20c6c7d3bce413ad8406be192376aec66b448e1d32e3f31bd88cccdfcfb2757",
+    "comparison.json": "bdd0ce2589251e2ee6c24e2051eb6de9e31cdd5fdeca67946c0ba4598ad33252",
+    "cost-samples.json": "5b491c2b51b0029e384f26e9a26246ac8be670b46838ea9be7708d385f9b1407"
+  },
+  "t2_tag": "lcm-x/lcmx-1451-pra-20261023",
+  "t2_state": "unpublished; raw results retained; no result disposal",
+  "delta_source_commit": "9538c8387bba578db127729697f428b38a9d5551",
+  "delta_coverage": "DELTA.md and matrix-delta-coverage.json; original measurement identities preserved"
+}

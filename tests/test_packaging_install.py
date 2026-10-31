@@ -13,6 +13,8 @@ import types
 
 import pytest
 
+from tests.timing_helpers import ContentionProbe
+
 
 @pytest.fixture(autouse=True)
 def _isolate_plugin_registration_storage(tmp_path, monkeypatch):
@@ -20,6 +22,7 @@ def _isolate_plugin_registration_storage(tmp_path, monkeypatch):
     hermes_home = tmp_path / "hermes-home"
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.delenv("LCM_DATABASE_PATH", raising=False)
+    monkeypatch.delenv("LCM_ENTITIES_ENABLED", raising=False)
     monkeypatch.delenv("LCM_ASSERTIONS_ENABLED", raising=False)
     monkeypatch.delenv("LCM_ADAPTIVE_RETRIEVAL_ENABLED", raising=False)
     monkeypatch.delenv("LCM_DISABLED_TOOLS", raising=False)
@@ -43,7 +46,7 @@ EXPECTED_LCM_TOOLS = {
 }
 
 
-ALL_LCM_TOOLS = EXPECTED_LCM_TOOLS | {"lcm_query_state", "lcm_retrieve"}
+ALL_LCM_TOOLS = EXPECTED_LCM_TOOLS | {"lcm_query_state", "lcm_retrieve", "lcm_memory"}
 
 
 def _load_plugin_entrypoint_module(module_name: str):
@@ -640,7 +643,7 @@ def test_plugin_entrypoint_registers_lcm_context_engine(_isolate_plugin_registra
     identity = engine.get_status()["runtime_identity"]
     repo_root = Path(__file__).resolve().parent.parent
     assert identity["plugin_name"] == "hermes-lcm-x"
-    assert identity["plugin_version"] == "0.27.0"
+    assert identity["plugin_version"] == "0.29.1"
     assert Path(identity["plugin_path"]) == repo_root
     assert identity["database_path_source"] == "hermes_home"
     assert Path(identity["database_path"]) == _isolate_plugin_registration_storage / "lcm.db"
@@ -655,6 +658,7 @@ def test_plugin_entrypoint_registers_lcm_context_engine(_isolate_plugin_registra
 
 
 def test_plugin_entrypoint_registers_declared_lcm_tools(monkeypatch):
+    monkeypatch.setenv("LCM_ENTITIES_ENABLED", "true")
     monkeypatch.setenv("LCM_ASSERTIONS_ENABLED", "true")
     monkeypatch.setenv("LCM_ADAPTIVE_RETRIEVAL_ENABLED", "true")
     module = _load_plugin_entrypoint_module("hermes_lcm_packaging_tool_registration")
@@ -797,8 +801,8 @@ def test_plugin_entrypoint_registers_bundled_skill_and_keeps_recall_policy_out_o
     assert len(registered_skills) == 1
     name, path, description = registered_skills[0]
     assert name == "hermes-lcm"
-    assert path == Path(module.__file__).resolve().parent / "skills" / "hermes-lcm"
-    assert (path / "SKILL.md").is_file()
+    assert path == Path(module.__file__).resolve().parent / "skills" / "hermes-lcm" / "SKILL.md"
+    assert path.is_file()
     assert "recall" in description.lower()
     assert len(hooks["pre_llm_call"]) == 1
 
@@ -1320,6 +1324,7 @@ def test_register_gracefully_degrades_when_register_tool_hook_raises():
 
 
 def test_registered_tool_handlers_route_through_engine_handle_tool_call(monkeypatch):
+    monkeypatch.setenv("LCM_ENTITIES_ENABLED", "true")
     monkeypatch.setenv("LCM_ASSERTIONS_ENABLED", "true")
     monkeypatch.setenv("LCM_ADAPTIVE_RETRIEVAL_ENABLED", "true")
     module = _load_plugin_entrypoint_module("hermes_lcm_packaging_tool_handler_route")
@@ -1695,6 +1700,8 @@ def test_post_llm_hook_keeps_ingest_binding_stable_during_concurrent_rebind(
         platform="discord",
         conversation_id="conversation-a",
     )
+    probe = ContentionProbe(active_clone._stable_use_lock)
+    active_clone._stable_use_lock = probe
     original_ingest = active_clone.ingest
     ingest_started = threading.Event()
     release_ingest = threading.Event()
@@ -1737,7 +1744,8 @@ def test_post_llm_hook_keeps_ingest_binding_stable_during_concurrent_rebind(
         hook_thread.start()
         assert ingest_started.wait(timeout=2)
         rebind_thread.start()
-        assert not rebind_finished.wait(timeout=0.05)
+        assert probe.contended.wait(timeout=10), "competing lifecycle call never attempted the held lock"
+        assert not rebind_finished.is_set()
         release_ingest.set()
         hook_thread.join(timeout=2)
         rebind_thread.join(timeout=2)

@@ -1,0 +1,40 @@
+name: Maintainability report
+
+on:
+  pull_request:
+    paths:
+      - '**/*.py'
+      - 'scripts/maintainability/**'
+      - '.github/workflows/maintainability-report.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maintainability-report-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  maintainability-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+      - name: Install ruff
+        run: pip install ruff==0.15.13
+      - name: Write advisory report
+        shell: bash
+        run: |
+          echo '## Advisory maintainability report' >> "$GITHUB_STEP_SUMMARY"
+          if ! python scripts/maintainability/report.py --format md >> "$GITHUB_STEP_SUMMARY"; then
+            echo 'Maintainability Markdown report exited nonzero; results are incomplete.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if ! python scripts/maintainability/report.py --format json > maintainability-report.json; then
+            echo 'Maintainability JSON report exited nonzero; results are incomplete.' >> "$GITHUB_STEP_SUMMARY"
+          fi

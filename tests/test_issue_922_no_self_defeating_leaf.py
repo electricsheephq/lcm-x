@@ -195,7 +195,7 @@ def test_objective_only_noop_reserves_no_proactive_recall(engine, monkeypatch, e
     assert count_messages_tokens(result) <= cap
 
 
-def test_next_round_compacts_earlier_tool_pair_and_preserves_objective(engine, caplog):
+def test_next_round_compacts_earlier_tool_pair_and_preserves_objective(engine, caplog, monkeypatch):
     instance, summarize = engine
     messages = _cell()
     with caplog.at_level(logging.INFO):
@@ -210,6 +210,16 @@ def test_next_round_compacts_earlier_tool_pair_and_preserves_objective(engine, c
     assert instance.should_compress(ceiling + 1)
     instance._mark_thread_context_stateless("aux-922")
     try:
+        local_state = (instance._no_progress_hold, instance._no_progress_observed_tokens)
+        with monkeypatch.context() as auxiliary:
+            read = Mock(side_effect=AssertionError("auxiliary admission read foreground hold metadata"))
+            auxiliary.setattr(instance._store, "read_metadata_json", read)
+            assert not instance._no_progress_hold_active()
+            assert not instance._persisted_no_progress_hold_active()
+            assert not instance._sweep_budget_hold_applies(instance.threshold_tokens)
+            assert not instance._no_progress_hold_blocks(instance.threshold_tokens)
+            read.assert_not_called()
+        assert (instance._no_progress_hold, instance._no_progress_observed_tokens) == local_state
         instance.note_turn_complete()
         assert instance.get_status()["no_progress_hold"]["reason"] == "objective_only"
     finally:

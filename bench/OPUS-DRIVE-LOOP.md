@@ -8,19 +8,19 @@ issues #152 → #107 → the milestone issues), (4) open issues in the wave-3/H6
 
 ## Canonical paths (cold-start pins — verified 07-24)
 
-- **hermes-lcm working checkout:** `/Volumes/LEXAR/hermes-work/hermes-lcm` — the clone with remote `fork` =
+- **hermes-lcm working checkout:** `hermes-lcm` — the clone with remote `fork` =
   100yenadmin/hermes-lcm. **FIRST ACTION on takeover: `git fetch fork && git checkout fork/main`** — the local
   branch may be stale and `bench/PROGRAM-ARCHITECTURE.md` / `bench/OPUS-DRIVE-LOOP.md` / `bench/specs/` exist
-  only on current fork/main. (`/Volumes/LEXAR/Claude/hermes-lcm` is a DIFFERENT clone without the fork remote —
-  do not use it.) Purpose-built worktrees: `/Volumes/LEXAR/hermes-work/wt-*` (v1l1, h5-recall, upstream-w1, …).
+  only on current fork/main. (`alternate hermes-lcm clone` is a DIFFERENT clone without the fork remote —
+  do not use it.) Purpose-built worktrees: `wt-*` (v1l1, h5-recall, upstream-w1, …).
 - **Official LongMemEval-V2 harness + adapter (H6/W3 official runs):**
-  `/Volumes/LEXAR/hermes-work/wt-bench-h1-v2adapter` (branch `bench/h1-v2-adapter`, org fork
+  `wt-bench-h1-v2adapter` (branch `bench/h1-v2-adapter`, org fork
   100yenadmin/LongMemEval-V2) — THE authoritative adapter worktree; ignore the other longmemeval checkouts on disk.
 - **Official-run batch machinery + raw results:**
-  `/Volumes/LEXAR/Codex/session-notes/2026-07-23/hermes-benchprog-h4/artifacts/phase3-openrouter/` (runners+logs)
+  local run `2026-07-23/hermes-benchprog-h4` (raw data kept locally; not published), artifacts: `artifacts/phase3-openrouter` (runners+logs)
   and `.../hermes-benchprog-h4/artifacts/OFFICIAL-FULL-RAW/` (the 125/451 evidence).
 - **Program packet (specs, scratchpad, artifacts incl. `h5-targets.json`, W2A manifests):**
-  `/Volumes/LEXAR/Codex/session-notes/2026-07-23/hermes-benchprog-h1/` (+ `artifacts/`).
+  local run `2026-07-23/hermes-benchprog-h1` (raw data kept locally; not published) (+ `artifacts/`).
 - **Keys:** macOS keychain; retrieval recipes + service names in `~/.claude/runbooks/hermes-benchmark-ops.md`.
   Never print/log key values.
 - **Gate source of truth:** the ISSUE BODY, always — architecture-doc gate summaries are abbreviations
@@ -40,7 +40,7 @@ issues #152 → #107 → the milestone issues), (4) open issues in the wave-3/H6
    (b) **miscalibrated gate** (a whole class of valid mechanisms would fail it): rule it miscalibrated IN
    WRITING in the issue AND predeclare the replacement gate at correctness level BEFORE any rerun — never
    analysis-then-quietly-proceed (feedback_gate_proxy_calibration.md is the binding precedent).
-4. **Bank**: snapshot-first (cp -R raw outputs to the session-notes artifacts dir BEFORE any further run);
+4. **Bank**: snapshot-first (copy raw outputs to the local run artifact directory BEFORE any further run);
    ledger line to ~/.claude/routing-ledger.jsonl; comment the result on the issue; tag score-bearing milestones
    (`bench-*` tags, pattern in git history).
 5. **Advance**: close the issue with a result comment, or update its state. Return to step 1 without stopping.
@@ -90,7 +90,7 @@ irreversible outside our fork.
 - Keepalive sleep-ticks during active waiting phases (session-scoped sentinels; `touch /tmp/worldos_last_tick.
   $CLAUDE_CODE_SESSION_ID; sleep 250; echo tick` as last call; self-extinguishing); dense turns — process every
   landed wake fully and do parallel plan work before ending a turn.
-- Artifacts → /Volumes/LEXAR/Codex/session-notes/YYYY-MM-DD/<slug>/artifacts/, never /tmp. Scratchpad =
+- Artifacts → the local run `YYYY-MM-DD/<slug>` (raw data kept locally; not published). Scratchpad =
   implementation-notes.html in the packet dir; timestamped entries at every decision.
 - ONE WORKTREE PER LANE: never run two agents (or an agent + a run) against the same checkout — a W3b builder commit switched the shared lme-v2-official HEAD mid-P3-run (07-24; harmless only by luck). Dedicated worktree or explicit lock per lane; restore expected branches after any shared-checkout use.
 - GitHub API budget: 5k/hr shared — don't poll gh in tight loops (burned once tonight); use ScheduleWakeup or

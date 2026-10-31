@@ -1,0 +1,70 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "issue-1828-refit-20261023-r2",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "issue-1828-refit",
+  "claim_class": "advisory",
+  "created": "2026-10-22T17:34:37Z",
+  "settled": "2026-10-22T17:44:03.339975+00:00",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "07510c16558eb3acca0dec0b274a82fa20b99f8d",
+    "dirty": false,
+    "diff_sha256": "ee09b85266b4fa83509e4ce5f8253089399f7a113265481dadb2be7482e381ad",
+    "measured_base_sha": "e5a239ee1d02acf2068150583b7eff2576635d09"
+  },
+  "env": {
+    "command": "cap_scan.py; run_checks.py",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "issue-1828-cap-scan",
+      "metric": "head_subset",
+      "value": 0.0,
+      "n": 1502,
+      "baseline_run": "e5a239ee1d02acf2068150583b7eff2576635d09",
+      "source": "summary.json"
+    },
+    {
+      "benchmark": "issue-1828-cost-no-skips",
+      "metric": "median_ms",
+      "value": 4.7802085,
+      "n": 300,
+      "baseline_run": "e5a239ee1d02acf2068150583b7eff2576635d09",
+      "source": "summary.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "summary.json",
+      "role": "per-item",
+      "sha256": "0fce6a9a3fb60792883a580ad956951615546429287d5a30e1b1398fc7a62de9",
+      "bytes": 51963
+    },
+    {
+      "path": "RESULT.md",
+      "role": "receipt",
+      "sha256": "280d902f39c9f572fceaa4272884ab09277d11a8064c1cb1fe39eb21d0c509ee",
+      "bytes": 2572
+    }
+  ],
+  "rescore": {
+    "command": "python -m pytest tests/test_issue_1828_refit.py -q",
+    "inputs": [
+      "summary.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "summary.json"
+  ]
+}

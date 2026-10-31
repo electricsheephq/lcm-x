@@ -1,0 +1,35 @@
+{
+  "id": "occurrence-1451-pra-2026-10-23",
+  "run_id": "lcmx-1451-pra-20261023",
+  "t2_tag": "lcm-x/lcmx-1451-pra-20261023",
+  "benchmark": "#1451 PR-A occurrence snapshot synthetic acceptance",
+  "metric": "new_loss_checkpoints",
+  "value": 0,
+  "display": "0 new loss checkpoints across1296 cells; error cells172->0",
+  "tier": "P",
+  "date": "2026-10-23",
+  "system_commit": "0eb95e50f4bae6ef0bcc305efde49c83f3d41fca; cost/compat e6e4f0e5586245e0cf87bb0fec52745c82f17fd0, same product tree",
+  "harness_commit": "Inherited occurrence matrix/scorer; public summary 5bd18e57921248a68029688c5c4efb583d3d4f2b",
+  "judge": "n/a (deterministic row-multiset and checkpoint comparison)",
+  "reader": "n/a (synthetic SQLite host histories)",
+  "retrieval_config": "1296 supplied reachable cells, every checkpoint; supplied baseline5df5a3c; requested implementation BASE10407e12; no carry rebind. Cost20warmup+200paired AB/BA, proof-commit path only.",
+  "dataset_exposure": "Synthetic fixtures only; no customer data, model judge or provider calls.",
+  "breakdown": "https://github.com/electricsheephq/lcm-x/blob/5bd18e57921248a68029688c5c4efb583d3d4f2b/bench/results/occurrence-1451-pra-20261023/CHANGED-CELLS.md",
+  "variance": "One matrix execution; cost paired median delta -0.200084ms vs max(+10%,+0.05ms), pass. No cross-machine latency claim.",
+  "failclose": "No increased loss, duplicate or positive restart-growth checkpoint. Errors0; rollback reader v0.28.1 opens candidate store and ingests/replays with integrity ok.",
+  "evidence": [
+    "https://github.com/electricsheephq/lcm-x/blob/5bd18e57921248a68029688c5c4efb583d3d4f2b/bench/results/occurrence-1451-pra-20261023/RESULT.md",
+    "https://github.com/electricsheephq/lcm-x/blob/5bd18e57921248a68029688c5c4efb583d3d4f2b/bench/results/occurrence-1451-pra-20261023/RESULT-MANIFEST.json",
+    "https://github.com/electricsheephq/lcm-x/blob/5bd18e57921248a68029688c5c4efb583d3d4f2b/bench/results/occurrence-1451-pra-20261023/SUMMARY.json",
+    "https://github.com/electricsheephq/lcm-x/blob/5bd18e57921248a68029688c5c4efb583d3d4f2b/bench/results/occurrence-1451-pra-20261023/cost-samples.json",
+    "https://github.com/electricsheephq/lcm-x/blob/334abbd926310340ff2bf1354b872e47bcd6b1b8/bench/results/occurrence-1451-pra-20261023/DELTA.md"
+  ],
+  "caveats": [
+    "Advisory source evidence; final remote CI and independent review tracked by PR. No merge/release/runtime/customer proof.",
+    "Inherited594 loss cells,482 duplicate cells and298 restart-growth cells remain PR-B scope.176 changed cells listed; no cell-average cancellation.",
+    "Supplied matrix baseline5df5a3c differs from requested BASE10407e12 by an unrelated ingest-ignore optimization; no fresh matrix on10407e12 claimed.",
+    "Public summary only; complete raw inputs preserved. T2 unpublished; no result disposal.",
+    "Legacy-only system-anchor correction: named1RED->1GREEN; legacy subset6passed. All5184preserved matrix snapshots include output_length, so changed legacy-only branch is outside every measured cell; matrix/cost not rerun. Measurement identities preserved."
+  ],
+  "validated_delta_commit": "9538c8387bba578db127729697f428b38a9d5551"
+}

@@ -4,7 +4,7 @@
 `bench-H6-P4-298`), executed by a commissioned deep-analysis agent under the F29 granularity rules; validated by
 independent coverage checks (not partition identities) and a from-scratch reimplementation of the official
 scorer reproducing the recorded score on 226/226 phraseset questions.
-**Artifacts:** `/Volumes/LEXAR/Codex/session-notes/2026-07-29/hermes-v2-decomposition/artifacts/` (scripts
+**Artifacts:** local run `2026-07-29/hermes-v2-decomposition` (raw data kept locally; not published), artifacts: `artifacts`; [published summary](https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F30-V2-FAILURE-DECOMPOSITION.md) (scripts
 01–09 + JSON outputs; the 74-question ledger is `08_final_74_ledger.json`).
 
 ---

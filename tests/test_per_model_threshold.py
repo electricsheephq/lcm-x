@@ -1,5 +1,7 @@
 """Tests for per-model compression threshold overrides in LCM."""
 
+import pytest
+
 from hermes_lcm.config import LCMConfig, _parse_model_thresholds_env
 
 
@@ -58,16 +60,40 @@ class TestYamlFallbackParser:
         assert '""' not in keys
         assert keys == {"valid", ""}
 
-    def test_quoted_values_still_parse(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("loader", ["line", "pyyaml"])
+    def test_quoted_values_still_parse(self, tmp_path, monkeypatch, loader):
         import hermes_lcm.config as config_module
 
-        monkeypatch.setattr(config_module, "yaml", None)
+        if loader == "pyyaml":
+            monkeypatch.setattr(config_module, "yaml", pytest.importorskip("yaml"))
+        else:
+            monkeypatch.setattr(config_module, "yaml", None)
+            monkeypatch.setattr(config_module, "ruamel_yaml", None, raising=False)
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         (tmp_path / "config.yaml").write_text('lcm:\n  context_threshold: "0.35"\n')
 
         loaded = config_module._load_hermes_config_yaml()
 
-        assert loaded["lcm"]["context_threshold"] == 0.35
+        assert loaded["lcm"]["context_threshold"] == "0.35"
+        assert config_module._hermes_compression_threshold_with_source(0.6) == (
+            0.35, "config_yaml:lcm.context_threshold"
+        )
+
+    @pytest.mark.parametrize("loader", ["line", "pyyaml"])
+    def test_quoted_model_threshold_is_skipped(self, tmp_path, monkeypatch, loader):
+        import hermes_lcm.config as config_module
+
+        if loader == "pyyaml":
+            monkeypatch.setattr(config_module, "yaml", pytest.importorskip("yaml"))
+        else:
+            monkeypatch.setattr(config_module, "yaml", None)
+            monkeypatch.setattr(config_module, "ruamel_yaml", None, raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            'lcm:\n  model_thresholds:\n    glm: "0.35"\n    numeric: 0.4\n'
+        )
+
+        assert config_module._load_model_thresholds_from_yaml() == {"numeric": 0.4}
 
 
 class TestLCMConfigModelThresholds:

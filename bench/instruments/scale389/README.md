@@ -1,5 +1,20 @@
 # Scale389 benchmark instrument
 
+Its results directory is external data and is not part of this repository.
+Pass run data locations explicitly: `build_corpus.py --output` (or `SCALE389_CORPUS`)
+selects the corpus; `run_scale.py --results` (or `SCALE389_RESULTS`) selects results.
+Direct `phase1a.py` commands require `SCALE389_CORPUS` and `SCALE389_RESULTS` when
+they use those locations. For archive reproduction, pass `--results` and `--qeval`,
+or set `SCALE389_ARCHIVE_RESULTS` and `SCALE389_ARCHIVE_CORPUS` (containing `qeval.json`).
+Other data paths use the common bench data root plus `hermes-work/` for datasets,
+stores, caches and checkouts; explicit CLI paths and per-path overrides still work.
+Set the common root before using default data paths:
+
+```sh
+: "${LCMX_BENCH_ROOT:?set LCMX_BENCH_ROOT to the bench data root}"
+```
+Imports and `--help` do not require data paths.
+
 This is the promoted F34 Phase-1B scale probe. It is bench-side only and uses
 Python's standard library (the product's existing embedding provider may use
 NumPy during a real query run).
@@ -26,7 +41,9 @@ Offline acceptance:
 
 ```sh
 python bench/instruments/scale389/archive_regression.py \
-  --output /Volumes/LEXAR/Codex/session-notes/2026-07-29/hermes-r3-1/artifacts/laneINSTPREP-logs/archive-regression.json
+  --results "${SCALE389_ARCHIVE_RESULTS:?set SCALE389_ARCHIVE_RESULTS}" \
+  --qeval "${SCALE389_ARCHIVE_CORPUS:?set SCALE389_ARCHIVE_CORPUS}/qeval.json" \
+  --output "${SCALE389_RESULTS:?set SCALE389_RESULTS}/archive-regression.json"
 pytest -q bench/instruments/scale389/tests
 ```
 

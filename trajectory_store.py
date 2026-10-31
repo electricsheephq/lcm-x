@@ -22,6 +22,7 @@ import time
 from typing import Any, Callable, Iterable, Protocol, Sequence
 from urllib.parse import quote, unquote
 
+from .sqlite_session import ConnectionPolicy, open_connection
 from .db_bootstrap import (
     configure_connection,
     get_fts_shadow_table_names,
@@ -602,29 +603,27 @@ class TrajectoryStore:
 
     def _open_connection(self) -> sqlite3.Connection:
         if self.read_only:
-            uri = f"file:{quote(str(self.db_path), safe='/')}?mode=ro"
-            conn = sqlite3.connect(
-                uri,
-                uri=True,
-                timeout=5.0,
-                check_same_thread=False,
-                isolation_level=None,
+            database = f"file:{quote(str(self.db_path), safe='/')}?mode=ro"
+            connect_kwargs = (
+                ("uri", True), ("timeout", 5.0), ("check_same_thread", False),
+                ("isolation_level", None),
             )
-            conn.execute("PRAGMA query_only=ON")
-            conn.execute("PRAGMA busy_timeout=30000")
+            setup = ("PRAGMA query_only=ON", "PRAGMA busy_timeout=30000")
         else:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(
-                str(self.db_path),
-                timeout=5.0,
-                check_same_thread=False,
-                isolation_level=None,
+            database = str(self.db_path)
+            connect_kwargs = (
+                ("timeout", 5.0), ("check_same_thread", False), ("isolation_level", None),
             )
-            refuse_schema_version_too_new(conn)
-            configure_connection(conn)
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.row_factory = sqlite3.Row
-        return conn
+            setup = (refuse_schema_version_too_new, configure_connection)
+        return open_connection(ConnectionPolicy(
+            database=database,
+            connect_kwargs=connect_kwargs,
+            before_row_factory=setup + ("PRAGMA foreign_keys=ON",),
+            row_factory=sqlite3.Row,
+            on_open=None,
+            on_setup_error=None,
+        ))
 
     def _validate_existing_schema_version(self) -> None:
         try:

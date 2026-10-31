@@ -146,6 +146,7 @@ class TestRegistrationGating:
         assert registered_tools == []
         assert {schema["name"] for schema in ctx.engine.get_tool_schemas()} == EXPECTED_LCM_TOOLS
 
+    @pytest.mark.parametrize("entities", [False, True])
     @pytest.mark.parametrize(("assertions", "adaptive", "disabled"), [
         (False, False, ""),
         (True, False, ""),
@@ -155,8 +156,9 @@ class TestRegistrationGating:
         (True, True, "lcm_compute,lcm_query_state,lcm_retrieve"),
     ])
     def test_registers_tools_when_host_explicitly_supports_message_forwarding(
-        self, monkeypatch, assertions, adaptive, disabled
+        self, monkeypatch, assertions, adaptive, disabled, entities
     ):
+        monkeypatch.setenv("LCM_ENTITIES_ENABLED", str(entities).lower())
         monkeypatch.setenv("LCM_ASSERTIONS_ENABLED", str(assertions).lower())
         monkeypatch.setenv("LCM_ADAPTIVE_RETRIEVAL_ENABLED", str(adaptive).lower())
         monkeypatch.setenv("LCM_DISABLED_TOOLS", disabled)
@@ -184,6 +186,8 @@ class TestRegistrationGating:
             expected.add("lcm_query_state")
         if adaptive:
             expected.add("lcm_retrieve")
+        if entities:
+            expected.add("lcm_memory")
         expected.difference_update(filter(None, disabled.split(",")))
         try:
             assert set(registered_tools) == expected

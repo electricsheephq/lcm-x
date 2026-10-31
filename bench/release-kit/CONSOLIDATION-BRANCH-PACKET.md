@@ -17,6 +17,6 @@
 Acceptance: targeted tests green (single-process); the F32-run's 8 fail-closed qids re-rendered through the
 validator with a synthetic summary-hit fixture → 0 fail-close; no other behavior change (`git diff` review).
 Then: fork mono-PR (this + #169 content) opens for the multi-bot rounds; Phase 1B re-run points its venv at
-THIS branch's checkout (note: phase1a.py's ProbeBridge imports hermes-lcm from /Volumes/LEXAR/hermes-work/
-hermes-lcm/.venv-fastembed — the re-run needs that venv reinstalled from release/r2-consolidated, or an
+THIS branch's checkout (note: phase1a.py's ProbeBridge imports hermes-lcm from the hermes-lcm checkout's
+fastembed virtual environment — the re-run needs that venv reinstalled from release/r2-consolidated, or an
 equivalent venv; record which in the F34 provenance).

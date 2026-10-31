@@ -21,11 +21,12 @@ import sys
 import tempfile
 import time
 from types import ModuleType
-# This is an all-tools subject (15), not the stock default exposure (13).
-# _engine() opts into both dormant tools so their live scenarios remain covered.
+# This is an all-tools subject (16), not the stock default exposure (13).
+# _engine() opts into all dormant tools so their live scenarios remain covered.
 SCENARIOS = {
     "lcm_grep", "lcm_recall", "lcm_query_state", "lcm_compute", "lcm_compile_evidence", "lcm_evidence_pack", "lcm_retrieve", "lcm_recent",
-    "lcm_load_session", "lcm_describe", "lcm_expand", "lcm_expand_query", "lcm_status", "lcm_inspect", "lcm_doctor",
+    "lcm_load_session", "lcm_describe", "lcm_expand", "lcm_expand_query", "lcm_status", "lcm_inspect", "lcm_doctor", "lcm_memory",
+    "lcm_doctor (prepared)",  # Additional local scenario, not a registry tool.
 }
 # PEM armor markers are built by string concatenation so the Hermes plugin install
 # scanner does not read these planted test fixtures as an embedded private key (#471).
@@ -38,7 +39,7 @@ PLANTED = {
 }
 _RELEASE_TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$")
 @contextmanager
-def _scrubbed_environment(worktree: Path):
+def _scrubbed_environment(worktree: Path, out: Path):
     original = dict(os.environ)
     preserved = {
         "LCM_EMBEDDING_API_KEY", "LCM_EMBEDDING_API_KEY_ENV",
@@ -48,6 +49,9 @@ def _scrubbed_environment(worktree: Path):
     scrubbed = sorted(key for key in original if key.startswith(("LCM_", "HERMES_")) and key not in preserved)
     clean = {key: value for key, value in original.items() if key not in scrubbed}
     clean["HERMES_LCM_REPO"] = str(worktree)
+    state_root = out / "state"
+    state_root.mkdir(parents=True, exist_ok=True)
+    clean["HERMES_HOME"] = tempfile.mkdtemp(prefix="hermes-home-", dir=state_root)
     os.environ.clear()
     os.environ.update(clean)
     try:
@@ -174,7 +178,7 @@ def _engine(
         embedding_provider=provider, embedding_model=model,
         sensitive_patterns_enabled=patterns,
         embedding_privacy_enabled=embedding_privacy, assertions_enabled=True,
-        adaptive_retrieval_enabled=True, proactive_recall_enabled=True,
+        adaptive_retrieval_enabled=True, entities_enabled=True, proactive_recall_enabled=True,
     )
     return mod["engine"].LCMEngine(config=config, hermes_home=str(state / "home"))
 def _seed(mod, engine):
@@ -214,6 +218,7 @@ def _seed(mod, engine):
     context["finance"] = rows[0]
     atlas = engine._store.search("Atlas", session_id="gauntlet-a")[0]
     context["atlas"] = atlas
+    context["entity_name"] = "Atlas"
     snapshot = engine._assertions.snapshot_source(int(atlas["store_id"]))
     quote = "Atlas decision is approved"
     start = snapshot.content.index(quote)
@@ -251,6 +256,10 @@ def _scenario(engine, tool, ctx, *, patterns, posture):
         assert "Constellation anchor" in json.dumps(_payload(engine, tool, {"query": "Constellation anchor"})["results"])
     elif tool == "lcm_recall":
         assert "Constellation anchor" in json.dumps(_payload(engine, tool, {"query": "Constellation anchor"})["hits"]).replace(">>>", "").replace("<<<", "")
+    elif tool == "lcm_memory":
+        value = _payload(engine, tool, {"action": "lookup", "name": ctx["entity_name"]})
+        assert value["mention_count"] == 1 and value["facts"][0]["source_store_id"] == atlas["store_id"]
+        assert _payload(engine, tool, {"action": "list"})["entities"][0]["subject_key"] == "project:atlas"
     elif tool == "lcm_query_state":
         assert "approved" in json.dumps(_payload(engine, tool, {"subject_key": "project:atlas"})["assertions"])
     elif tool == "lcm_compute":
@@ -304,8 +313,16 @@ def _scenario(engine, tool, ctx, *, patterns, posture):
             expected = "pass"
             if check["check"] == "embedding_provider_health" and not embedding_ok:
                 expected = "warn"
+            if (posture == "local" and check["check"] == "embedding_provider_health"
+                    and check["status"] == "warn"
+                    and check.get("detail", {}).get("readiness", "").startswith("model: preparing;")
+                    and "full text" in check.get("detail", {}).get("impact", "")):
+                expected = "warn"
             assert check["status"] == expected, value["checks"]
-        assert value["overall"] == ("healthy" if all(c["status"] == "pass" for c in value["checks"]) else "warnings")
+        assert value["overall"] == ("healthy" if all(
+            c["status"] == "pass" or (c["status"] == "warn" and c.get("detail", {}).get("informational"))
+            for c in value["checks"]
+        ) else "warnings")
     else:
         raise AssertionError(f"no scenario implementation for {tool}")
     return "exact named postcondition passed"
@@ -722,6 +739,20 @@ def _run_matrix(engine, registered, context, *, patterns, posture, missing):
         except Exception as exc:
             records.append((posture, tool, "FAIL", _safe_detail(exc)))
     return records
+def _prepared_doctor(mod, engine):
+    name = "lcm_doctor (prepared)"
+    if importlib.util.find_spec("fastembed") is None:
+        return ("local", name, "SKIP", "SKIP: fastembed is absent")
+    try:
+        command = mod["command"].handle_lcm_command
+        assert "status: ready" in command("embed warmup", engine)
+        assert "status: complete" in command("embed backfill --apply --limit 50", engine)
+        value = _payload(engine, "lcm_doctor", {})
+        assert all(check["status"] == "pass" for check in value["checks"]), value["checks"]
+        assert value["overall"] == "healthy", value
+        return ("local", name, "PASS", "warmup ready, backfill complete; every doctor check passed")
+    except Exception as exc:
+        return ("local", name, "FAIL", _safe_detail(exc))
 def _verdict(records, batteries, *, release, coverage_failed, preflight):
     skipped = any(row[2] == "SKIP" for row in records) or any(row[1] == "SKIP" for row in batteries)
     blocked = any(row[2] == "BLOCKED" for row in records) or any(row[1] == "BLOCKED" for row in batteries)
@@ -822,7 +853,8 @@ def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None 
     missing, unexpected = [], []
     engine_surface = "engine=not-loaded"
     hermes_identity = None
-    with _scrubbed_environment(worktree) as scrubbed:
+    with _scrubbed_environment(worktree, out) as scrubbed:
+        hermes_home = os.environ["HERMES_HOME"]
         mod = None
         world_cleanup = None
         if not preflight:
@@ -830,6 +862,17 @@ def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None 
                 mod, engine_surface, hermes_identity, world_cleanup = _load(
                     worktree, hermes_repo=hermes_repo, release=release
                 )
+                try:
+                    constants = importlib.import_module("hermes_constants")
+                except ModuleNotFoundError as exc:
+                    if exc.name != "hermes_constants":
+                        raise
+                    constants = None
+                resolver = getattr(constants, "get_hermes_home", None)
+                resolved_home = Path(resolver() if callable(resolver) else os.environ["HERMES_HOME"]).resolve()
+                if not resolved_home.is_relative_to(out):
+                    raise RuntimeError(f"HERMES_HOME resolves outside --out: {resolved_home}")
+                home_resolver = "hermes_constants.get_hermes_home" if callable(resolver) else "no host resolver; checked HERMES_HOME environment"
             except Exception as exc:
                 preflight.append(_safe_detail(exc))
         try:
@@ -839,8 +882,9 @@ def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None 
                     context = _seed(mod, local)
                     registered = sorted({schema["name"] for schema in local.get_tool_schemas() if str(schema.get("name", "")).startswith("lcm_")})
                     missing = sorted(set(registered) - SCENARIOS)
-                    unexpected = sorted(SCENARIOS - set(registered))
+                    unexpected = sorted(SCENARIOS - set(registered) - {"lcm_doctor (prepared)"})
                     records += _run_matrix(local, registered, context, patterns=False, posture="local", missing=missing)
+                    records.append(_prepared_doctor(mod, local))
                 finally:
                     local.shutdown()
                 cloud_records, cloud_batteries = _cloud_rows(mod, state_root, registered, missing, expect_365_fixed=expect_365_fixed)
@@ -848,6 +892,10 @@ def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None 
                 batteries += cloud_batteries
         finally:
             if world_cleanup is not None:
+                # Late maintenance must finish before the ambient home returns.
+                for name in ("_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER"):
+                    if not getattr(mod["engine"], name).quiesce(10.0):
+                        preflight.append(f"HERMES_HOME maintenance did not quiesce: {name}")
                 # Restore the host interpreter's module world (agent.* and
                 # hermes_lcm families + the inserted sys.path entry): the
                 # runner must leave zero residue in an embedding process.
@@ -867,6 +915,9 @@ def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None 
     hermes_module_sha256 = hermes_identity["sha256"] if hermes_identity else "not-loaded"
     hermes_dirty = "unavailable" if hermes_git_identity["dirty"] is None else ("dirty" if hermes_git_identity["dirty"] else "clean")
     lines = ["# PHASE-A RECEIPT", "", f"- Mode: `{'release' if release else 'dev'}`", f"- Identity: {identity_note}", f"- Requested release tag: `{rc_tag if rc_tag is not None else 'none'}`", f"- RC tag at HEAD: `{identity['tag']}`", f"- Tree SHA: `{identity['tree']}`", f"- HEAD SHA: `{identity['head']}`", f"- Dirty state: `{'dirty' if identity['dirty'] else 'clean'}`", f"- Engine surface: {engine_surface}", f"- Hermes checkout: `{hermes_repo if hermes_repo else 'not-configured'}`", f"- Hermes checkout HEAD SHA: `{hermes_git_identity['head']}`", f"- Hermes checkout dirty state: `{hermes_dirty}`", f"- Hermes checkout provenance: `{hermes_git_identity['error'] or 'git -C verified'}`", f"- Hermes ContextEngine module __file__: `{hermes_module_path}`", f"- Hermes ContextEngine module sha256: `{hermes_module_sha256}`", f"- Environment scrubbed: `{', '.join(scrubbed) if scrubbed else 'none'}`", f"- #365 expectation: `{'fixed' if expect_365_fixed else 'KNOWN-LEAK-ON-BASE allowed'}`", f"- Command: `{shlex.join([sys.executable, *sys.argv])}`", f"- HERMES_LCM_REPO: `{worktree}`", "- Claim class: `code_green_local`", f"- Runtime registry tools: {len(registered)}", f"- Registry coverage: `{'FAIL' if coverage_failed else 'COMPLETE'}`", f"- Missing matrix rows: `{', '.join(missing) if missing else 'none'}`", f"- Unexpected scenario rows: `{', '.join(unexpected) if unexpected else 'none'}`", "", "## Preflight"]
+    lines.insert(lines.index("## Preflight") - 1, f"- Hermes home: {hermes_home} (synthetic)")
+    if mod is not None and not preflight:
+        lines.insert(lines.index("## Preflight") - 1, f"- Hermes home resolver: {home_resolver}")
     lines += [f"- BLOCKED: {detail}" for detail in preflight] or ["- PASS"]
     lines += ["", "## Tool matrix", "", "| Posture | Tool | Result | Detail |", "|---|---|---|---|"]
     lines += [f"| {posture} | `{tool}` | {result} | {detail} |" for posture, tool, result, detail in records]

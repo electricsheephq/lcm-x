@@ -74,7 +74,7 @@ def test_legacy_record_is_read_and_dead_record_removed(tmp_path, monkeypatch):
 def engine(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("LCM_DATABASE_PATH", raising=False)
-    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db")), hermes_home=str(tmp_path))
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db"), embeddings_enabled=False), hermes_home=str(tmp_path))
     try:
         yield engine
     finally:

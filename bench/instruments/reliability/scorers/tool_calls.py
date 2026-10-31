@@ -126,4 +126,5 @@ def compare(expected: Counter, loose: set, stored: Counter) -> dict:
                if stored[k] > expected[k] + (1 if k in loose else 0)}
     return {"tool_items": sum(expected.values()), "tool_missing_rows": sum(missing.values()),
             "tool_surplus_rows": sum(surplus.values()),
-            "tool_missing": [list(k[:4]) for k in list(missing)[:5]], "tool_surplus": [list(k[:4]) for k in list(surplus)[:5]]}
+            "tool_missing": [list(k[:4]) for k in sorted(missing, key=json.dumps)[:5]],
+            "tool_surplus": [list(k[:4]) for k in sorted(surplus, key=json.dumps)[:5]]}

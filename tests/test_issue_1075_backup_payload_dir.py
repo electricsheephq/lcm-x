@@ -3,7 +3,7 @@
 import pytest
 
 from hermes_lcm import maintenance
-from hermes_lcm.command import _fmt_size, handle_lcm_command
+from hermes_lcm.command import _fmt_size, _rotate_apply_unchecked, handle_lcm_command
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.externalize import get_large_output_storage_dir
@@ -79,7 +79,7 @@ def test_rotate_apply_names_payload_directory(engine, monkeypatch, post_backup_s
 
         monkeypatch.setattr(engine, "rotate_active_session", rotate)
 
-    output = handle_lcm_command("rotate apply", engine)
+    output = _rotate_apply_unchecked(engine)
 
     assert f"status: {post_backup_status}" in output
     assert "rotate_backup_path:" in output
@@ -109,7 +109,7 @@ def test_rotate_preflight_noop_names_payload_directory(engine, monkeypatch):
         return result
 
     monkeypatch.setattr(engine, "rotate_active_session", rotate)
-    output = handle_lcm_command("rotate apply", engine)
+    output = _rotate_apply_unchecked(engine)
 
     assert "rolling backup was not written" in output
     assert f"externalized_payload_dir: absent ({_payload_dir(engine)})" in output
@@ -138,8 +138,10 @@ def test_unreadable_payload_entries_are_reported(engine, monkeypatch):
         def __exit__(self, *exc):
             return self.inner.__exit__(*exc)
 
-    monkeypatch.setattr(maintenance.os, "scandir", lambda p: Entries(real_scandir(p)))
-    output = handle_lcm_command("backup", engine)
+    # Scoped so tmp_path cleanup sees real directory entries.
+    with monkeypatch.context() as patched:
+        patched.setattr(maintenance.os, "scandir", lambda p: Entries(real_scandir(p)))
+        output = handle_lcm_command("backup", engine)
 
     assert "externalized_payload_files: 0" in output
     assert "externalized_payload_unreadable: 1 (not counted above)" in output

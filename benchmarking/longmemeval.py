@@ -37,6 +37,8 @@ import struct
 import sys
 import tempfile
 import time
+import unicodedata
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -612,6 +614,30 @@ def _embedding_privacy_context(
     return config, embedding_privacy_revision(config)
 
 
+def _effective_embedding_model(provider: str, model: str) -> str:
+    """The product's effective model; trees before #1186 have no resolver, so the configured model is effective."""
+    from hermes_lcm import config as config_module
+
+    return getattr(config_module, "effective_embedding_model", lambda _provider, configured: configured)(provider, model)
+
+
+# Settings added after v0.28.1; an older measured tree's config omits them (its behaviour matches the defaults used here).
+_SETTINGS_AFTER_V0281 = frozenset({"embeddings_enabled_explicit", "recall_delivery_unit"})
+
+
+def _measured_config(**settings):
+    """The measured tree's LCMConfig, without the newer settings an older tree does not declare."""
+    import dataclasses
+
+    from hermes_lcm.config import LCMConfig
+
+    if dataclasses.is_dataclass(LCMConfig):
+        known = {item.name for item in dataclasses.fields(LCMConfig)}
+        settings = {name: value for name, value in settings.items()
+                    if name in known or name not in _SETTINGS_AFTER_V0281}
+    return LCMConfig(**settings)
+
+
 def _ensure_hermes_lcm_package() -> None:
     """Make this source checkout importable as ``hermes_lcm`` (no plugin registration)."""
     ensure_agent_context_engine_importable()
@@ -722,7 +748,7 @@ class ContentHashEmbeddingCache:
 
     def _initialize(self) -> None:
         cache_existed = self.cache_path.exists()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             mode = str(connection.execute("PRAGMA journal_mode=WAL").fetchone()[0])
             if mode.casefold() != "wal":
                 raise RuntimeError(
@@ -762,7 +788,7 @@ class ContentHashEmbeddingCache:
         if not digests:
             return {}
         found: dict[str, list[float]] = {}
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             for digest in dict.fromkeys(digests):
                 row = connection.execute(
                     """
@@ -854,7 +880,7 @@ class ContentHashEmbeddingCache:
                     f"{len(vectors)} vectors for {len(missing_texts)} texts"
                 )
             encoded = [self._encode_vector(vector) for vector in vectors]
-            with self._connect() as connection:
+            with closing(self._connect()) as connection, connection:
                 connection.executemany(
                     """
                     INSERT OR IGNORE INTO embedding_cache (
@@ -959,6 +985,20 @@ def _maybe_cache_harness_provider(provider, *, provider_name: str):
         return provider
     if not cache_path.strip():
         raise ValueError(f"{EMBED_CACHE_ENV} must be a non-empty SQLite path")
+    if os.environ.get("LCM_D1_CACHE_MODE"):
+        from importlib.metadata import version
+        from .d1_cache import D1Cache
+        if os.environ["LCM_D1_CACHE_MODE"] not in {"build", "read"}:
+            raise ValueError("D1 cache mode must be build or read")
+        if provider_name not in {"fastembed", "fast-embed", "stub"}:
+            raise ValueError("D1 cache requires a local independent-document provider")
+        product_sha, role = os.environ["LCM_D1_PRODUCT_SHA"], os.environ["LCM_D1_ROLE"]
+        if not re.fullmatch(r"[0-9a-f]{40}", product_sha) or not role.isidentifier():
+            raise ValueError("D1 cache requires a product commit SHA and role")
+        return D1Cache(provider, cache_path, readonly=os.environ["LCM_D1_CACHE_MODE"] == "read",
+                       options={"dimension": provider.dim, "normalization": "fastembed-default",
+                                "product_sha": product_sha, "role": role,
+                                "mode": "document", "implementation": version("fastembed") if provider_name != "stub" else "stub-v1"})
     return ContentHashEmbeddingCache(
         provider,
         cache_path,
@@ -997,20 +1037,33 @@ def resolve_harness_provider(
     reports dim only after the first embed) and any model download happens before
     the scoring loop rather than inside a per-question deadline.
     """
+    if provider != "stub" and not model.strip():
+        raise ValueError(f"--model is required for --provider {provider}")
     resolved = None
     if provider == "stub":
         resolved = StubEmbedder()
     else:
         _ensure_hermes_lcm_package()
-    if provider != "stub" and not model:
-        raise ValueError(f"--model is required for --provider {provider}")
+        model = _effective_embedding_model(provider, model)
     if provider in {"fastembed", "fast-embed"}:
         from hermes_lcm.embedding_provider import EmbeddingSpendGuard, FastembedProvider
 
+        # Product readiness/backfill uses FASTEMBED_CACHE_PATH for this key too.
+        if _fastembed_cache_dir():
+            os.environ["FASTEMBED_CACHE_PATH"] = _fastembed_cache_dir()
         # max_calls=0 disables the per-minute call-rate guard, matching the
         # bulk-backfill contract (resolve_provider(for_backfill=True)); the
         # harness embeds thousands of summaries in one pass.
-        resolved = FastembedProvider(
+        class HarnessFastembed(FastembedProvider):
+            thread_cap_applied = False
+            def _cache_key(self):
+                model, cache, threads = super()._cache_key()
+                self.thread_cap_applied = True
+                self.effective_threads = min(threads, max(1, int(os.environ.get("LCM_D1_ORT_THREADS", threads))))
+                return model, cache, self.effective_threads
+
+        provider_class = HarnessFastembed if "LCM_D1_ORT_THREADS" in os.environ else FastembedProvider
+        resolved = provider_class(
             model,
             cache_dir=_fastembed_cache_dir(),
             timeout=timeout,
@@ -1039,6 +1092,26 @@ def resolve_harness_provider(
             accounting_role,
             lambda: resolved.embed_query("warmup"),
         )
+    if warmup and provider in {"fastembed", "fast-embed"}:
+        from hermes_lcm import embedding_maintenance
+        from hermes_lcm.config import LCMConfig
+        # Trees before the local readiness marker keep no record.
+        note_local_model_present = getattr(embedding_maintenance, "note_local_model_present", None)
+        if note_local_model_present is not None:
+            note_local_model_present(LCMConfig(embedding_provider=provider, embedding_model=model))
+    if os.environ.get("LCM_D1_THREAD_REPORT"):
+        count = getattr(resolved, "effective_threads", None)
+        node = resolved
+        for attr in ("_model", "model", "model"):
+            node = getattr(node, attr, None)
+            if hasattr(node, "get_session_options"):
+                count = node.get_session_options().intra_op_num_threads or None
+                break
+        Path(os.environ["LCM_D1_THREAD_REPORT"]).write_text(json.dumps({
+            "thread_cap_applied": bool(getattr(resolved, "thread_cap_applied", False)),
+            "effective_intra_op_threads": count,
+            "reason": None if count is not None else "product provider does not expose an explicit intra-op thread count",
+        }))
     if not use_embed_cache:
         return resolved
     return _maybe_cache_harness_provider(resolved, provider_name=provider)
@@ -2406,6 +2479,21 @@ def _typed_provider_degraded_outcomes(payload: dict[str, Any]) -> tuple[str, ...
     return tuple(dict.fromkeys(outcomes))
 
 
+def certify_local_recall_store(config, db_path, *, summaries=True):
+    """Have product backfill certify directly populated LOCAL vectors, once per store."""
+    from hermes_lcm import command
+    runs = []
+    if summaries:
+        runs.append(command._embedding_backfill_summary_run(
+            config, db_path, apply=True, limit=1, retry_uncertain=False))
+    runs.append(command._chunk_backfill_run(
+        config, db_path, apply=True, limit=1, retry_uncertain=False,
+        policy="conversational", confirm_raw_text=True))
+    for result in runs:
+        if not isinstance(result, dict) or result.get("status") != "complete":
+            raise RuntimeError(f"LOCAL producer catch-up incomplete: {result}")
+
+
 def production_recall_hits(
     question: "Question",
     config,
@@ -2460,7 +2548,7 @@ def production_recall_hits(
             chunk_provider_embedder,
         )
     payload = json.loads(
-        lcm_tools.lcm_recall({"query": question.question, "limit": limit}, engine=engine)
+        lcm_tools.lcm_recall({"query": question.question, "limit": limit}, engine=engine, delivery_unit="hits")
     )
     if recall_health is not None:
         recall_health["degraded"] = bool(payload.get("degraded"))
@@ -2653,6 +2741,7 @@ def evaluate_question(
     provider_name: str,
     tmp_dir: Path,
     embeddings_enabled: bool,
+    embeddings_enabled_explicit: bool = True,
     top_k: int = 10,
     use_rerank: bool = False,
     recall_rerank: bool = False,
@@ -2674,7 +2763,6 @@ def evaluate_question(
     _PRIVACY_QUESTION.update({key: 0 for key in _PRIVACY_KEYS})
     _ensure_hermes_lcm_package()
     from hermes_lcm.chunking import group_by_store_id, iter_message_chunks
-    from hermes_lcm.config import LCMConfig
     from hermes_lcm.dag import SummaryDAG, SummaryNode
     from hermes_lcm.embedding_provider import default_chunk_model
     from hermes_lcm.store import MessageStore
@@ -2692,6 +2780,8 @@ def evaluate_question(
     cache_start_hits, cache_start_misses = _embed_cache_totals(
         (summary_provider, chunk_provider)
     )
+    d1_providers = {id(p): p for p in (summary_provider, chunk_provider)}.values()
+    d1_start = [sum(getattr(p, field, 0) for p in d1_providers) for field in ("wall_ms", "corruptions")]
     summary_name, model = _provider_binding(summary_provider, provider_name, "")
     chunk_name, chunk_model = _provider_binding(
         chunk_provider, summary_name, default_chunk_model(summary_name, model)
@@ -2742,9 +2832,10 @@ def evaluate_question(
     summary_requires_privacy = embedding_provider_requires_privacy(summary_name)
     chunk_requires_privacy = embedding_provider_requires_privacy(chunk_name)
 
-    config = LCMConfig(
+    config = _measured_config(
         database_path=str(db_path),
         embeddings_enabled=embeddings_enabled,
+        embeddings_enabled_explicit=embeddings_enabled_explicit,
         embedding_provider=summary_name,
         embedding_model=model,
         rerank_enabled=recall_rerank,
@@ -3029,6 +3120,8 @@ def evaluate_question(
                     str(node_id), "summary", model, vector, identity=identity
                 )
                 session_vectors[session_id] = _unit(list(vector))
+        if embeddings_enabled and summary_name in {"fastembed", "fast-embed"}:
+            certify_local_recall_store(config, db_path)
         ingest_ms = (time.perf_counter() - ingest_start) * 1000.0
 
         relevant = evidence_sessions(question)
@@ -3266,6 +3359,11 @@ def evaluate_question(
             "hits": cache_end_hits - cache_start_hits,
             "misses": cache_end_misses - cache_start_misses,
         }
+        if hasattr(summary_provider, "manifest_hash"):
+            scored["embedding"] = dict(zip(("wall_ms", "corruptions"),
+                (sum(getattr(p, field, 0) for p in d1_providers) - before
+                 for field, before in zip(("wall_ms", "corruptions"), d1_start))))
+            scored["embedding"]["manifest_sha256"] = summary_provider.manifest_hash
         return scored
     finally:
         vector_store.close()
@@ -3836,6 +3934,7 @@ def _question_checkpoint_record(
             record["embed_cache_enabled"] = embed_cache_enabled
         return record
     checkpoint_scored = copy.deepcopy(scored)
+    checkpoint_scored.pop("embedding", None)
     checkpoint_scored.pop("_candidate_rankings", None)
     scored_chunk_embedding_mode = checkpoint_scored.pop(
         "chunk_embedding_mode", chunk_embedding_mode
@@ -4104,6 +4203,88 @@ def _accumulate_question_checkpoint(
     return 1, 0
 
 
+def _d1_normalization_insensitive(parent):
+    # Prefer an existing Unicode name, just as the case probe uses an ancestor.
+    for entry in (parent, *parent.parents):
+        if entry.stat().st_dev != parent.stat().st_dev:
+            break
+        nfc = unicodedata.normalize("NFC", entry.name)
+        nfd = unicodedata.normalize("NFD", entry.name)
+        if nfc != nfd:
+            alternate = entry.with_name(nfd if entry.name == nfc else nfc)
+            return alternate.exists() and os.path.samefile(entry, alternate)
+    # Probe only our own temporary directory, outside the output directory.
+    scratch = parent.parent
+    if scratch.stat().st_dev != parent.stat().st_dev:
+        scratch = Path(tempfile.gettempdir())
+    if scratch.stat().st_dev != parent.stat().st_dev or scratch == parent or parent in scratch.parents:
+        raise ValueError("cannot probe normalization outside output on the same volume")
+    with tempfile.TemporaryDirectory(prefix="lcm-d1-normalization-", dir=scratch) as directory:
+        composed = Path(directory) / "caf\u00e9"
+        composed.touch()
+        decomposed = composed.with_name("cafe\u0301")
+        return decomposed.exists() and os.path.samefile(composed, decomposed)
+
+
+def _validate_d1_sidecar_alias(checkpoint_path, dump_path):
+    if checkpoint_path is None or dump_path is None or os.environ.get("LCM_D1_CACHE_MODE") != "read":
+        return
+    sidecar = Path(checkpoint_path).with_name("embedding-metrics.jsonl").resolve()
+    dump = Path(dump_path).resolve()
+    alias = dump == sidecar
+    if dump.exists() and sidecar.exists():
+        alias = os.path.samefile(dump, sidecar)
+    else:
+        parent = sidecar.parent
+        while not parent.exists():
+            parent = parent.parent
+        dump_name, sidecar_name = str(dump), str(sidecar)
+        # Two NFC names are equivalent only if identical, so probe only when one is not NFC.
+        if unicodedata.normalize("NFC", dump_name) != dump_name or unicodedata.normalize("NFC", sidecar_name) != sidecar_name:
+            try:
+                insensitive_normalization = _d1_normalization_insensitive(parent)
+            except (OSError, ValueError):
+                insensitive_normalization = True  # Unprobeable: refuse equivalent spellings.
+        else:
+            insensitive_normalization = False
+        if insensitive_normalization:
+            dump_name = unicodedata.normalize("NFC", dump_name)
+            sidecar_name = unicodedata.normalize("NFC", sidecar_name)
+        alias |= dump_name == sidecar_name
+        while parent.name and parent.name == parent.name.swapcase():
+            parent = parent.parent
+        alternate = parent.with_name(parent.name.swapcase()) if parent.name else parent
+        insensitive = alternate.exists() and alternate != parent and os.path.samefile(parent, alternate)
+        if insensitive:
+            alias |= dump_name.casefold() == sidecar_name.casefold()
+    if alias:
+        raise ValueError("--dump-candidates must not alias embedding-metrics.jsonl in D1 read mode")
+
+
+def _reconcile_d1_metrics(path, completed_ids):
+    if not path.exists():
+        return
+    lines = path.read_bytes().splitlines(keepends=True)
+    records = {}
+    for index, line in enumerate(lines):
+        try:
+            record = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            if index == len(lines) - 1:
+                break
+            raise ValueError("invalid embedding metrics before final line") from None
+        if isinstance(record, dict) and record.get("question_id") in completed_ids:
+            # Keep the original bytes; the last row for a question wins, as consumers dedupe.
+            records[record["question_id"]] = line if line.endswith(b"\n") else line + b"\n"
+    with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent, prefix=".embedding-metrics-", delete=False) as repaired:
+        repaired.writelines(records.values())
+        repaired.flush()
+        os.fsync(repaired.fileno())
+    os.chmod(repaired.name, path.stat().st_mode & 0o7777)
+    os.replace(repaired.name, path)
+    _fsync_parent_directory(path)
+
+
 def run_harness(
     questions: Iterable[Question],
     *,
@@ -4111,6 +4292,7 @@ def run_harness(
     model: str,
     tmp_dir: Path,
     embeddings_enabled: bool | None = None,
+    shipped_default: bool = False,
     use_rerank: bool = False,
     recall_rerank: bool = False,
     recall_rerank_window: int = 0,
@@ -4128,6 +4310,18 @@ def run_harness(
     accounting: ProviderAccounting | None = None,
 ) -> dict[str, Any]:
     """Run every arm over every question and return an aggregate-only report."""
+    _validate_d1_sidecar_alias(checkpoint_path, dump_candidates_path)
+    if shipped_default and (provider_name != "stub" or model or embeddings_enabled is not None):
+        raise ValueError("shipped_default cannot override explicit embedding settings")
+    if not shipped_default and provider_name not in {"stub", "none"} and not model.strip():
+        raise ValueError(f"--model is required for --provider {provider_name}")
+    if shipped_default or provider_name != "stub":
+        _ensure_hermes_lcm_package()
+        from hermes_lcm.config import LCMConfig
+        if shipped_default:
+            defaults = LCMConfig()
+            provider_name, model, embeddings_enabled = defaults.embedding_provider, defaults.embedding_model, defaults.embeddings_enabled
+        model = _effective_embedding_model(provider_name, model)
     _reset_privacy_counts()
     dataset_report: dict[str, Any] = dataset_coordinates(dataset_label)
     if source_sha256 is not None:
@@ -4186,6 +4380,9 @@ def run_harness(
         manifest_sha256=manifest_sha256,
     )
 
+    if shipped_default:
+        expected_checkpoint_header[_CHECKPOINT_HEADER_KEY]["embeddings_enabled_explicit"] = False
+        expected_dump_header[_DUMP_HEADER_KEY]["embeddings_enabled_explicit"] = False
     if resume and checkpoint_path is None:
         raise ValueError("resume=True requires a checkpoint_path")
     checkpoint_records: list[dict[str, Any]] = []
@@ -4276,7 +4473,7 @@ def run_harness(
             # Lexical-only runs retain the historical summary-provider setup but
             # never resolve or warm the distinct production chunk identity.
             summary_provider = resolve_harness_provider(
-                provider_name,
+                "stub" if shipped_default else provider_name,
                 model,
                 accounting=accounting,
                 accounting_role="summary_documents",
@@ -4311,22 +4508,24 @@ def run_harness(
                     )
         if reuse_db_template:
             _ensure_hermes_lcm_package()
-            from hermes_lcm.config import LCMConfig
 
             db_template = Path(tmp_dir) / "_template.db"
             _bootstrap_db_template(
                 db_template,
-                LCMConfig(
+                _measured_config(
                     database_path=str(db_template),
                     embeddings_enabled=embeddings_enabled,
                     embedding_provider=provider_set.summary_binding[0],
                     embedding_model=provider_set.summary_binding[1],
+                    embeddings_enabled_explicit=not shipped_default,
                     # Match the per-question lossless/provider-copy split.
                     sensitive_patterns_enabled=False,
                     embedding_privacy_enabled=None,
                 ),
             )
 
+    if checkpoint_path is not None and resume and os.environ.get("LCM_D1_CACHE_MODE") == "read":
+        _reconcile_d1_metrics(checkpoint_path.with_name("embedding-metrics.jsonl"), completed_question_ids)
     checkpoint_file = None
     if checkpoint_path is not None and not fully_completed_resume:
         checkpoint_file = checkpoint_path.open("a" if resume else "w", encoding="utf-8")
@@ -4336,6 +4535,9 @@ def run_harness(
             # survive a crash that predates the dirent reaching disk.
             _fsync_parent_directory(checkpoint_path)
 
+    embedding_metrics_file = None
+    if checkpoint_file is not None and os.environ.get("LCM_D1_CACHE_MODE") == "read":
+        embedding_metrics_file = checkpoint_path.with_name("embedding-metrics.jsonl").open("a" if resume else "w", encoding="utf-8")
     candidate_dump_file = None
     if dump_candidates_path is not None and not fully_completed_resume:
         dump_candidates_path = Path(dump_candidates_path)
@@ -4406,6 +4608,7 @@ def run_harness(
                         provider_name=provider_name,
                         tmp_dir=tmp_dir,
                         embeddings_enabled=embeddings_enabled,
+                        **({"embeddings_enabled_explicit": False} if shipped_default else {}),
                         use_rerank=use_rerank,
                         recall_rerank=recall_rerank,
                         recall_rerank_window=recall_rerank_window,
@@ -4444,10 +4647,12 @@ def run_harness(
                 abstention_count += abstention_delta
                 # Sidecar row FIRST, checkpoint second: a crash between the two
                 # re-evaluates the question on resume (its checkpoint record
-                # never landed) and appends a fresh sidecar row. The worst case
-                # is a duplicate sidecar row for one question -- consumers
-                # dedupe by question_id keeping the last -- never a checkpointed
-                # question with a silently missing sidecar row.
+                # never landed) and appends a fresh row. In D1 read mode, resume
+                # first reconciles embedding-metrics.jsonl against the completed
+                # checkpoint IDs. The candidate dump is not reconciled: its worst
+                # case is a duplicate row for one question -- consumers dedupe by
+                # question_id keeping the last -- never a checkpointed question
+                # with a silently missing row.
                 if candidate_dump_file is not None:
                     _write_candidate_dump_record(
                         candidate_dump_file,
@@ -4459,6 +4664,11 @@ def run_harness(
                         ),
                     )
                 if checkpoint_file is not None:
+                    if embedding_metrics_file is not None:
+                        metrics = {"wall_ms": 0.0, "corruptions": 0, **(scored.get("embedding", {}) if scored else {})}
+                        _write_checkpoint_record(embedding_metrics_file, {
+                            "question_id": question.question_id, **metrics, **record["embed_cache"],
+                        })
                     _write_checkpoint_record(checkpoint_file, record)
             except Exception as exc:
                 # A run-time privacy refusal (query texts are protected only
@@ -4474,6 +4684,8 @@ def run_harness(
             checkpoint_file.close()
         if candidate_dump_file is not None:
             candidate_dump_file.close()
+        if embedding_metrics_file is not None:
+            embedding_metrics_file.close()
 
     if resume and observed_question_ids != selected_ids:
         missing = sorted(selected_ids - observed_question_ids)

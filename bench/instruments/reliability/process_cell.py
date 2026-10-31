@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 from bench.instruments.reliability import acp_driver as AD, cells as C, fake_provider as FP, plugin_tree, probe as P1
-from bench.instruments.reliability import run_matrix as RM
+from bench.instruments.reliability import run_matrix as RM, stop_turn
 from bench.instruments.reliability.scorers import continuity
 
 OBSERVER = Path(__file__).with_name("observer")
@@ -37,7 +37,12 @@ PROCESS_FAULTS = {"acp-process": {"crash_after_compaction_before_reply", "cancel
                                    "forced_compaction_then_turn"}}
 # R2-only: the main route over the Anthropic Messages API (a ``/anthropic`` base path selects the anthropic_messages
 # transport, hermes_cli/runtime_provider.py _detect_api_mode_for_url); the #550 class.
-R2_CELLS = [{**C.cell("anthropic-route/acp-process", [], in_place=True,
+R2_CELLS = [C.cell("stop-after-tool/no-retry/in-place", [1623], in_place=True, turns=2, repeat=1,
+                   min_compactions=0, stop_after_tool=True, final_compaction_check=False,
+                   tool_plan=[{"turns": [1], "calls": [{"name": "read_file", "args": {"path": "{files}/small.txt"},
+                                                      "expect": {"min_chars": 10}}]}],
+                   lcm_env={"LCM_CONTEXT_THRESHOLD": "0.95", "LCM_EMBEDDING_RETRIEVAL_ENABLED": "false"}),
+            {**C.cell("anthropic-route/acp-process", [], in_place=True,
                       doc="baseline/in-place/acp with the main model on the Anthropic Messages API (fake provider)"),
              "api": "anthropic"}] + C.continuity_cells()
 # #659 probes: selected by an explicit --cells pattern only (cells.select opt_in), so --cells all, the nightly matrix and
@@ -85,6 +90,8 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def unsupported(cell: dict, transport: str) -> str | None:
+    if cell["id"].startswith("default-window/"):
+        return "default-window bars require R1 ordered provider_request telemetry; R2 is not covered"
     if transport == "gateway-process":
         return None if cell["transport"] == "gateway" else "an R1 acp-transport cell; it runs under acp-process"
     if transport == "api-server":
@@ -192,7 +199,7 @@ class Scenario:
         if run.crash_due(t):
             return {"hold_until_killed": True, "on_hold": lambda: run.crash(t), "log": log}
         groups = self.plan(t)
-        cancel = st["kind"] == "cancel" and step == 0
+        cancel = st["kind"] == "cancel" and step == 0 and not self.cell.get("stop_after_tool")
         extra = {"hold": float(self.cell.get("cancel_wait", 5.0)), "on_hold": run.cancel} if cancel else {}
         if step < len(groups):
             calls = []
@@ -273,7 +280,10 @@ class ProcessCell:
 
     def crash(self, t: int) -> None:
         """Called by the provider while it holds turn t's request: a TRUE mid-turn crash of the host."""
-        self.fire("crash_after_compaction_before_reply", t)
+        kind = "crash_after_compaction_before_reply"
+        # Record every phase-dependent piece before the signal: once the host is gone, run_phase may advance the
+        # phase and finish the run. The host waits on this held request meanwhile, so the crash point is unchanged.
+        self.fire(kind, t, phase=self.phase, kill_monotonic_ns=time.monotonic_ns())
         self.proc.kill()
 
     def cancel(self) -> None:
@@ -306,6 +316,13 @@ class ProcessCell:
 
     def argv(self) -> list[str]:
         base = [str(Path(self.host["python"]).parent / "hermes"), "acp"]
+        if self.cell.get("stop_after_tool") and os.path.exists(SANDBOX_EXEC):
+            from .hosts import real_hermes_dir
+            policy = (SANDBOX + '(deny file-write*)' + ''.join(
+                f'(allow file-write* (subpath "{p}"))' for p in (self.scratch, self.d))
+                + '(allow file-write* (literal "/dev/null"))'
+                + f'(deny file-read* (subpath "{real_hermes_dir()}"))')
+            return [SANDBOX_EXEC, "-p", policy, *base]
         return [SANDBOX_EXEC, "-p", SANDBOX, *base] if os.path.exists(SANDBOX_EXEC) else base
 
     def turn(self, t: int, kind: str = "normal") -> str | None:
@@ -361,6 +378,8 @@ class ProcessCell:
     def run_phase(self, first: int) -> dict:
         self.first = first
         self.deadline = time.monotonic() + self.phase_timeout if self.phase_timeout else None
+        if self.cell.get("stop_after_tool"):
+            return stop_turn.phase(self, first)
         self.proc = AD.AcpProcess(self.argv(), self.env(), self.work, self.d / f"host-{self.phase}.stderr")
         closed = False
         try:
@@ -406,7 +425,7 @@ class ProcessCell:
         except (AD.DriverError, OSError, ValueError) as exc:
             if self.deadline is not None and time.monotonic() >= self.deadline and not isinstance(exc, PhaseDeadline):
                 exc = PhaseDeadline(f"phase {self.phase} exceeded its {self.phase_timeout}s deadline ({exc})")
-            return {"exit": "error", "reason": f"{type(exc).__name__}: {exc}; stderr: {self.stderr_tail()}"[:600]}
+            return {"exit": "error", "reason": f"{f'{type(exc).__name__}: {exc}'[:280]}; stderr: {self.stderr_tail(150)}"}
         finally:
             if not closed:
                 rc = self.proc.close()
@@ -415,9 +434,12 @@ class ProcessCell:
     def low_backlog(self, last_turn: int) -> bool:
         return P1.backlog_low(self.d, last_turn, self.backlog_log)
 
-    def stderr_tail(self) -> str:
+    def stderr_tail(self, edge: int = 1000) -> str:
+        """The host's stderr for an error reason: its first and last ``edge`` characters (#985: a bare tail
+        cut off which installer or command a host that exits early asks the operator to run)."""
         path = self.d / f"host-{self.phase}.stderr"
-        return path.read_text(errors="replace")[-300:] if path.exists() else ""
+        text = path.read_text(errors="replace") if path.exists() else ""
+        return text if len(text) <= 2 * edge else f"{text[:edge]} … {text[-edge:]}"
 
     def phase_record(self, first: int, result: dict) -> dict:
         notes = [n for n in read_jsonl(self.d / "observer.jsonl") if n["phase"] == self.phase]
@@ -439,14 +461,22 @@ class ProcessCell:
         return rec
 
 
+# The provider stamps a request's receive start in its handler thread. On a loaded runner that thread can run after
+# the kill that already cut the body short, so a start up to this long after the kill still counts as in flight.
+RECEIVE_START_SLACK_NS = 1_000_000_000
+
+
 def accounting(d: Path, events: list[dict]) -> dict:
     """The provider log is the complete request set. Every distinct request is a model-role completion, a
     ``/models`` catalog read, or unexpected (an unrouted path/method or an unknown role: the cell ERRORs). Each main
     request is exactly one scripted step (a reply, a tool-call step, a crash hold or an unexpected main request)."""
     reqs = read_jsonl(d / "provider-requests.jsonl")
-    by_role, by_route, unexpected = {}, {}, []
+    by_role, by_route, unexpected, truncated = {}, {}, [], []
     for r in {r["rid"]: r for r in reqs}.values():
         route = FP.route_of(r.get("method"), r.get("path"))  # re-derived, not trusted from the log
+        if route == "completion" and r.get("truncated"):  # no body, never served; match the receive interval below
+            truncated.append(r)
+            continue
         by_route[route] = by_route.get(route, 0) + 1
         if route == "completion":
             by_role[r["role"]] = by_role.get(r["role"], 0) + 1
@@ -456,7 +486,18 @@ def accounting(d: Path, events: list[dict]) -> dict:
                "tool_steps": len({(e["phase"], e["id"].rsplit("_", 1)[0]) for e in events if e["event"] == "tool_issue"}),
                "crash_holds": sum(1 for e in events if e.get("fault") == "crash_after_compaction_before_reply"),
                "unexpected": len({r["rid"] for r in reqs if r.get("unexpected")})}
+    kills = sorted(e["kill_monotonic_ns"] for e in events
+                   if e.get("event") == "crash" and e.get("kill_monotonic_ns") is not None)
+    matched = set()
+    for kill in kills:
+        candidates = [r for r in truncated if r["rid"] not in matched
+                      and r.get("receive_start_ns") is not None and r.get("receive_end_ns") is not None
+                      and r["receive_start_ns"] <= kill + RECEIVE_START_SLACK_NS and kill <= r["receive_end_ns"]]
+        if candidates:  # earliest end preserves later kills for requests still receiving then
+            matched.add(min(candidates, key=lambda r: r["receive_end_ns"])["rid"])
+    unexpected += [{"rid": r["rid"], "route": "truncated"} for r in truncated if r["rid"] not in matched]
     return {"requests_by_role": by_role, "requests_by_route": by_route, "unexpected_requests": unexpected[:20],
+            "truncated_requests": [r["rid"] for r in truncated],
             "main_implied": implied, "faults": sorted({(r["rid"], r["fault"]) for r in reqs if r.get("fault")}),
             "ok": by_role.get("main", 0) == sum(implied.values()) and not unexpected}
 
@@ -602,6 +643,8 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
             return done(verdict="ERROR", reason=f"unexpected main-model requests: {run.scenario.unexpected[:3]}")
         if last.get("exit") == "done" and not acct["ok"]:
             return done(verdict="ERROR", reason=f"provider request log does not account for the transcript: {acct}")
+        if cell.get("stop_after_tool"):
+            return done(**stop_turn.score(run, last))
         run.fired.update(n["kind"] for n in read_jsonl(d / "faults-fired.jsonl"))
         rec.update(RM.verdict_fields({**cell, "chat_root": run.sid, "transport": transport}, d, last, run.fired, rec["citations"], backup_errors,
                                      s / "db"))

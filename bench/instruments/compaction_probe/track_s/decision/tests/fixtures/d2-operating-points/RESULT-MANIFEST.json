@@ -1,0 +1,89 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "d2-1824-operating-points",
+  "project": "lcm-x",
+  "kind": "eval",
+  "status": "settled",
+  "owner_lane": "d2-instrument",
+  "claim_class": "advisory",
+  "created": "2026-10-22T04:49:49Z",
+  "settled": "2026-10-22T04:51:03Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "0481889e356b24699ba25a1717879e2689928225",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python -m pytest bench/instruments/compaction_probe/track_s/decision/tests -q -n 4 -o junit_family=xunit1 -o junit_logging=all --junitxml=\"$D2_ARTIFACTS/decision-final.xml\" --basetemp=\"$D2_SCRATCH/pt-decision-final\" -o tmp_path_retention_policy=failed",
+    "models": {
+      "simulation": "independent Gaussian; no provider calls"
+    },
+    "dataset": {
+      "seeds": 3,
+      "runs_per_arm_per_seed": 9,
+      "components": "complete-valid cp304 pooled-t NI only; excludes placebo, A/A cap, retries, elapsed failures"
+    },
+    "seed": 1538
+  },
+  "headline": [
+    {
+      "benchmark": "D2-normal-pooled",
+      "metric": "aa_acceptance",
+      "value": 0.9197666666666666,
+      "n": 30000,
+      "source": "observations.json"
+    },
+    {
+      "benchmark": "D2-normal-upper",
+      "metric": "aa_acceptance",
+      "value": 0.7453,
+      "n": 30000,
+      "source": "observations.json"
+    },
+    {
+      "benchmark": "D2-normal-pooled",
+      "metric": "loss5_nonacceptance",
+      "value": 0.9009666666666667,
+      "n": 30000,
+      "source": "observations.json"
+    },
+    {
+      "benchmark": "D2-normal-upper",
+      "metric": "loss5_nonacceptance",
+      "value": 0.9008666666666667,
+      "n": 30000,
+      "source": "observations.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "raw-output.txt",
+      "role": "per-item",
+      "sha256": "45206325b33667e266f02e3d85e547e1c18cce0df4a1da2b22481789867f2133",
+      "bytes": 572
+    },
+    {
+      "path": "observations.json",
+      "role": "per-item",
+      "sha256": "485b46f690adbdf3ea317f23568092156b0db2487f1f6f8155f9422e688dca3a",
+      "bytes": 677
+    }
+  ],
+  "rescore": {
+    "command": "python -m pytest bench/instruments/compaction_probe/track_s/decision/tests/test_d2_calibrated.py::test_operating_points -q -s",
+    "inputs": [
+      "observations.json",
+      "raw-output.txt"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "observations.json",
+    "raw-output.txt"
+  ]
+}

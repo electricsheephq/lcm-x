@@ -78,6 +78,9 @@ The checklist is safe to paste into a release note or PR validation section afte
 - Output dir: `<validation artifact dir>`
 
 ### Gates
+- [ ] results showcase refreshed: `python benchmarks/results/render_results.py` run on the release commit, no diff left;
+      release body carries the `--release-notes` table. The project site reads `public-results.json` live;
+      refresh its static fallback copy (`FALLBACK_RANKINGS`) with each release.
 - [ ] git diff/whitespace check passed
 - [ ] Python compile checks passed
 - [ ] shell syntax checks passed

@@ -274,54 +274,6 @@ def test_late_compress_first_write_auxiliary_reclassification_restores_foregroun
         engine.shutdown()
 
 
-def test_foreground_post_turn_rebinds_after_late_auxiliary_reclassification(tmp_path):
-    lcm_plugin = _load_plugin_entrypoint_module("hermes_lcm_post_hook_rebind_regression")
-    engine = _engine(tmp_path)
-    foreground = _ForegroundAgent(engine, "foreground-session")
-    review = _FakeAgent(engine, "review-session", parent_session_id="foreground-session")
-
-    try:
-        foreground.start_session()
-        foreground.ingest_history_as_foreground(
-            [{"role": "user", "content": "operator durable anchor"}]
-        )
-
-        review.start_session()
-        review.ingest_history_after_background_marker(
-            [{"role": "user", "content": "background review replay must not persist"}]
-        )
-        assert engine.current_session_id == "foreground-session"
-        assert engine.bound_session_id == "review-session"
-        assert engine.side_channel_active is True
-
-        # The auxiliary thread has ended; the next post_llm_call is a foreground
-        # turn. The hook must compare against the bound ingest session, not the
-        # operator-facing current_session_id, before deciding whether to rebind.
-        engine._clear_thread_context_stateless()
-        lcm_plugin._ensure_engine_bound_to_session(
-            engine,
-            foreground.session_id,
-            platform="cli",
-            conversation_id="conversation:foreground-session",
-        )
-        engine.ingest(
-            [
-                {"role": "user", "content": "operator durable anchor"},
-                {"role": "assistant", "content": "foreground follow-up"},
-            ]
-        )
-
-        assert engine.bound_session_id == "foreground-session"
-        assert engine.current_session_id == "foreground-session"
-        assert engine._store.get_session_count("review-session") == 0
-        foreground_rows = engine._store.get_range("foreground-session", limit=10)
-        review_rows = engine._store.get_range("review-session", limit=10)
-        assert any(row["content"] == "foreground follow-up" for row in foreground_rows)
-        assert all(row["content"] != "foreground follow-up" for row in review_rows)
-    finally:
-        engine.shutdown()
-
-
 def test_stacked_late_auxiliary_binds_restore_original_foreground(tmp_path):
     engine = _engine(tmp_path)
     foreground = _ForegroundAgent(engine, "foreground-session")

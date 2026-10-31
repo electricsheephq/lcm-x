@@ -74,7 +74,6 @@ export class HermesLcmProvider implements Provider {
       ...process.env,
       HERMES_LCM_REPO: repo,
       HERMES_MB_WORKDIR: workdir,
-      HERMES_MB_PROVIDER: process.env.HERMES_MB_PROVIDER || "fastembed",
       PYTHONUNBUFFERED: "1",
     }
 

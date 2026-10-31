@@ -1,0 +1,168 @@
+# Frozen from 7582e302127d7d36ecbcb54e816309c484d7b7dc; ranking reference only.
+def _search_fts(self, query: str, session_id: str | None = None,
+                    limit: int = 20, sort: str | None = None,
+                    source: str | None = None,
+                    conversation_id: str | None = None,
+                    role: str | None = None,
+                    time_from: float | None = None,
+                    time_to: float | None = None,
+                    exclude_session_ids: Collection[str] | None = None,
+                    allow_operators: bool = False,
+                    agent_operators: bool = False,
+                    stemmed: bool = False,
+                    _include_like_excerpt: bool = False) -> List[Dict[str, Any]]:
+        """FTS5 search across raw messages.
+
+        Retrieval contract:
+        - ``session_id`` limits which sessions are eligible
+        - ``session_id=None`` means all sessions; an empty string is treated as
+          a literal session id
+        - ``source`` limits which raw rows inside those sessions are eligible
+        - ``source='unknown'`` means the explicit unknown-source bucket, with
+          legacy blank-source rows treated as equivalent for back-compat
+        - ``conversation_id`` limits rows to one gateway conversation/session key
+        - ``exclude_session_ids`` removes sessions before candidate limits apply
+        - ``allow_operators`` marks a query the CALLER composed as FTS5 syntax,
+          keeping its bare AND/OR/NOT/NEAR. Never set it for user or agent text
+        """
+        fts_table = "messages_fts"
+        self._last_fts_index = "plain"
+        if stemmed and self._stem_state() == "ready":
+            fts_table = "messages_fts_stem"
+        safe_query = sanitize_fts5_query(query, allow_operators=allow_operators, agent_operators=agent_operators)
+        syntax_retried = False
+        terms = extract_search_terms(safe_query)
+        phrases = extract_quoted_phrases(safe_query)
+        # LIKE is the fallback for text sanitization LOSES (CJK/emoji) and for a
+        # query with no term left after it. A raw natural-language question is
+        # NOT one of those: it sanitizes to a term form the index answers, so it
+        # stays on the FTS path (F31 §3).
+        if requires_like_fallback(query, safe_query):
+            return self._search_like(
+                query,
+                session_id=session_id,
+                limit=limit,
+                sort=sort,
+                source=source,
+                conversation_id=conversation_id,
+                role=role,
+                time_from=time_from,
+                time_to=time_to,
+                exclude_session_ids=exclude_session_ids,
+                _include_excerpt=_include_like_excerpt,
+            )
+
+        order_by = _build_search_order_by(
+            sort,
+            "m.timestamp",
+            _MESSAGE_ROLE_BIAS_SQL,
+        )
+        fetch_limit = compute_search_fetch_limit(limit, terms, phrases)
+        candidate_cap = compute_search_candidate_cap(limit)
+        apply_directness_adjustment = should_apply_directness_rank_adjustment(terms, phrases)
+        max_rank_bonus = compute_directness_rank_bonus_upper_bound(terms, phrases) * 3e-7
+        source_clause, source_args = _source_filter_clause("m.source", source)
+        conversation_clause, conversation_args = _conversation_filter_clause("m.conversation_id", conversation_id)
+        offset = 0
+        scanned_rows = 0
+        results: list[Dict[str, Any]] = []
+        while True:
+            try:
+                where = [f"{fts_table} MATCH ?"]
+                args: list[Any] = [safe_query]
+                if session_id is not None:
+                    where.append("m.session_id = ?")
+                    args.append(session_id)
+                if exclude_session_ids:
+                    where.append(
+                        "m.session_id NOT IN (SELECT value FROM json_each(?))"
+                    )
+                    args.append(json.dumps(list(exclude_session_ids)))
+                if source_clause:
+                    where.append(source_clause)
+                    args.extend(source_args)
+                if conversation_clause:
+                    where.append(conversation_clause)
+                    args.extend(conversation_args)
+                if role is not None:
+                    where.append("m.role = ?")
+                    args.append(role)
+                if time_from is not None:
+                    where.append("m.timestamp >= ?")
+                    args.append(time_from)
+                if time_to is not None:
+                    where.append("m.timestamp <= ?")
+                    args.append(time_to)
+                args.extend([fetch_limit, offset])
+                rows = self._conn.execute(
+                    f"""SELECT m.store_id, m.session_id, m.source, m.role, m.content, m.tool_call_id,
+                              m.tool_calls, m.tool_name, m.timestamp, m.token_estimate, m.pinned, m.conversation_id,
+                              m.ingested_at, m.observed_at, m.observed_at_source,
+                              rank as search_rank,
+                              snippet({fts_table}, 0, '>>>', '<<<', '...', 40) as snippet
+                       FROM {fts_table} fts
+                       JOIN messages m ON m.store_id = fts.rowid
+                       WHERE {' AND '.join(where)}
+                       ORDER BY {order_by} LIMIT ? OFFSET ?""",
+                    args,
+                ).fetchall()
+                self._last_fts_index = "stem" if fts_table == "messages_fts_stem" else "plain"
+                scanned_rows += len(rows)
+            except sqlite3.Error as exc:
+                if fts_table == "messages_fts_stem":
+                    fts_table = "messages_fts"
+                    offset = scanned_rows = 0
+                    results.clear()
+                    continue
+                if agent_operators and not syntax_retried and is_fts5_syntax_error(exc):
+                    safe_query = sanitize_fts5_query(query)
+                    syntax_retried = True
+                    offset = scanned_rows = 0
+                    results.clear()
+                    continue
+                logger.warning("FTS message search failed, falling back to LIKE: %s", exc)
+                return self._search_like(
+                    query,
+                    session_id=session_id,
+                    limit=limit,
+                    sort=sort,
+                    source=source,
+                    conversation_id=conversation_id,
+                    role=role,
+                    time_from=time_from,
+                    time_to=time_to,
+                    exclude_session_ids=exclude_session_ids,
+                    _include_excerpt=_include_like_excerpt,
+                )
+
+            raw_primary_values: list[float] = []
+            for r in rows:
+                d = self._row_to_dict(r)
+                base_columns = _MESSAGE_SELECT_COLUMN_COUNT
+                d["search_rank"] = r[base_columns] if len(r) > base_columns else None
+                d["snippet"] = r[base_columns + 1] if len(r) > (base_columns + 1) else ""
+                d["_directness_score"] = _message_directness_score(d.get("role"), d.get("content"), terms, phrases)
+                if apply_directness_adjustment and d["search_rank"] is not None:
+                    rank_adjustment = max(float(d["_directness_score"]), 0.0)
+                    d["search_rank"] = float(d["search_rank"]) - (rank_adjustment * 3e-7)
+                raw_primary_values.append(_fts_primary_value(d, sort))
+                results.append(d)
+            results.sort(key=lambda result: _fts_result_sort_key(result, sort))
+
+            if not apply_directness_adjustment or len(rows) < fetch_limit or len(results) <= limit:
+                return results[:limit]
+
+            worst_visible_primary = _fts_primary_value(results[min(limit, len(results)) - 1], sort)
+            last_fetched_primary = raw_primary_values[-1]
+            best_unseen_primary = last_fetched_primary - max_rank_bonus
+            if best_unseen_primary > worst_visible_primary:
+                return results[:limit]
+
+            if scanned_rows >= candidate_cap:
+                return results[:limit]
+
+            offset += len(rows)
+            remaining = candidate_cap - scanned_rows
+            if remaining <= 0:
+                return results[:limit]
+            fetch_limit = min(fetch_limit * 2, remaining)

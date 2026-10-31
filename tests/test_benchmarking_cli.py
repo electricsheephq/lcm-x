@@ -207,8 +207,11 @@ def test_cli_writes_scrubbed_community_export(tmp_path):
     assert export["provider"] == "openai-codex"
     assert export["model"] == "gpt-5.5"
     assert export["transcript_contents_included"] is False
-    assert export["policy_settings"]["codex_gpt_long_context@1"]["context_length"] == 272000
-    assert "notes" not in export["policy_settings"]["codex_gpt_long_context@1"]
+    assert (
+        export["policy_settings"]["codex_gpt_long_context@2"]["context_length"]
+        == 272000
+    )
+    assert "notes" not in export["policy_settings"]["codex_gpt_long_context@2"]
     assert "database_path" not in serialized
     assert "hermes_home" not in serialized
     assert "messages" not in serialized

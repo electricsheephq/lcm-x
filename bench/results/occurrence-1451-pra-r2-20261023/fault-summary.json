@@ -1,0 +1,11 @@
+{
+  "runs": 264,
+  "replacement_variant_runs": 132,
+  "fired_faults": 192,
+  "replacement_fired_faults": 96,
+  "keys_unchanged": 192,
+  "one_warning_after_rollback": 192,
+  "not_durable": 192,
+  "durable_reader_unavailable": 192,
+  "escaped_exceptions": 0
+}

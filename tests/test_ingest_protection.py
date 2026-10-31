@@ -531,9 +531,11 @@ def test_fsync_directory_still_fsyncs_on_posix(tmp_path, monkeypatch):
     opened_flags = []
     real_open = os.open
 
-    def recording_open(path, flags, *args):
-        opened_flags.append(flags)
-        return real_open(path, flags, *args)
+    def recording_open(path, flags, *args, **kwargs):
+        # tmp_path cleanup opens entries with dir_fd; forward it and skip recording.
+        if kwargs.get("dir_fd") is None:
+            opened_flags.append(flags)
+        return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", recording_open)
     externalize_module._fsync_directory(tmp_path)
@@ -4515,6 +4517,32 @@ def test_delta_only_identical_turn_after_ignored_row_cleanup_is_stored(tmp_path,
     second = _ignored_cleanup_engine(tmp_path, config)
     try:
         second.compress([delta])
+        assert _stored_contents(second) == ["fresh request", "fresh request"]
+    finally:
+        second.shutdown()
+
+
+def test_delta_only_identical_turn_after_a_committed_ignored_row_cleanup_without_host_keys_is_stored(tmp_path):
+    """#1286: Hermes commits the cleanup (session end on the input, then the compression boundary). A returned
+    row with no timestamp and no platform id leaves #1013 no host key to bind, so no durable proof is written; the
+    commit must not make the cleanup-only proof durable in its place, or the delta's same text is taken as replay."""
+    config = _ignored_cleanup_config(tmp_path)
+    session_id, conversation_id = "ignored-cleanup-rebind-session", "ignored-cleanup-rebind-conversation"
+    messages = [{"role": "assistant", "content": _broken_assistant_output()}, {"role": "user", "content": "fresh request"}]
+    first = _ignored_cleanup_engine(tmp_path, config)
+    try:
+        first_active = first.compress(messages)
+        assert [(m["role"], m["content"]) for m in first_active] == [("user", "fresh request")]
+        assert first._last_compression_status == "sanitized"
+        first.on_session_end(session_id, messages)
+        first.on_session_start(session_id, boundary_reason="compression", old_session_id=session_id,
+                               platform="telegram", conversation_id=conversation_id, context_length=10_000)
+    finally:
+        first.shutdown()
+
+    second = _ignored_cleanup_engine(tmp_path, config)
+    try:
+        second.compress([{"role": "user", "content": "fresh request"}])
         assert _stored_contents(second) == ["fresh request", "fresh request"]
     finally:
         second.shutdown()

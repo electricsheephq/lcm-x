@@ -1,0 +1,33 @@
+{
+  "id": "occurrence-1451-pra-r2-2026-10-23",
+  "run_id": "occurrence-1451-pra-r2-20261023",
+  "t2_tag": "lcm-x/occurrence-1451-pra-r2-20261023",
+  "benchmark": "#1451 PR-A r2 publication-fault occurrence acceptance",
+  "metric": "new_or_increased_loss_cells",
+  "value": 0,
+  "display": "0/1296 new loss; errors0; changed vsr1=0; calibrated fault regression fixed",
+  "tier": "P",
+  "date": "2026-10-23",
+  "system_commit": "a2f5158972d9cd736a77c03fd23bf22fa399e683",
+  "harness_commit": "Inherited matrix/scorer; r2 expanded publication fault grid; permanent tests at measured source",
+  "judge": "deterministic; no model judge",
+  "reader": "synthetic SQLite host histories",
+  "retrieval_config": "Same1296 reachable cells as r1; 264 separate grid runs/192 fired faults,96 with timestamp+UID replacement; identity anchor off for replacement arm",
+  "dataset_exposure": "Synthetic only; no customer data or provider calls",
+  "breakdown": "https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/CHANGED-CELLS-base.md",
+  "variance": "200 paired AB/BA; delta -0.17143750000000002ms; allowed +0.15781035000000002ms",
+  "failclose": "0 new/increased loss;0 errors;0 changed cells vsr1; all192 fired faults unchanged keys/one postrollback warning/unavailable durable reader;0 escaped exceptions",
+  "evidence": [
+    "https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/RESULT.md",
+    "https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/RESULT-MANIFEST.json",
+    "https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/SUMMARY.json",
+    "https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/CONSUMERS.md",
+    "https://github.com/electricsheephq/lcm-x/blob/d3e57bb2feb1bd9fccd54bffc29bcf04c48197a1/bench/results/occurrence-1451-pra-r2-20261023/CHANGED-CELLS-r1.md"
+  ],
+  "caveats": [
+    "Advisory synthetic proof; remote final-head CI tracked separately in PR. No merge/release/runtime/customer proof.",
+    "594 inherited loss cells remain; supplied BASE matrix5df5a3c retained, calibration/cost BASEddf04556.",
+    "Focused census372 valid publications,0 rejected across8 selected files including all6 original counterexample files; not a full-corpus census.",
+    "Public summary only; full raw and re-score inputs retained; T2 unpublished; no result disposal."
+  ]
+}

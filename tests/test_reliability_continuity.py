@@ -98,19 +98,21 @@ def test_marker_metadata_has_no_message_text_and_handles_anthropic_system_blocks
     assert not CT.markers([{"role": "user", "content": CT.NOTE}])["F1"]
 
 
-def test_new_cells_are_r2_only_non_gating_and_express_existing_knobs():
+def test_continuity_cells_are_r2_only_and_express_existing_knobs():
     selected = cells.select("continuity/*", extra=PC.R2_CELLS)
     assert len(selected) == 8
     assert not any(c["id"].startswith("continuity/") for c in cells.registry())
     for c in selected:
         assert PC.unsupported(c, "acp-process") is None
-        assert c["id"] in ci.NON_GATE and not ci.in_gate_set(c["id"])
+        promoted = "forced-compaction-then-turn" in c["id"]
+        assert (c["id"] in ci.NON_GATE) is not promoted
+        assert ci.in_gate_set(c["id"]) is promoted
         assert c["id"] in ci.expected_cells("acp-process")
         if c["continuity"].get("sole_user"):
             assert c["turns"] == 1 and len(c["tool_plan"]) == 12
             assert all(g["turns"] == [1] for g in c["tool_plan"])
         if c["id"].startswith("continuity/survival-fit/"):
-            assert c["targets"] == [916] and cells.ISSUES[916][0] == ("F4",)
+            assert c["targets"] == [916, 1799] and cells.ISSUES[916][0] == ("F4",)
             assert c["lcm_env"]["LCM_SURVIVAL_RESERVE"] == "0.9"
             assert c["user_text"]["repeat_from"] == {"9": 100}
         if c["id"].startswith("continuity/survival-fit-older-turns/"):
@@ -260,7 +262,7 @@ def test_missing_current_user_fixture_preserves_cell_boundary(tmp_path, monkeypa
         assert rec["reason"].startswith("unexpected main-model requests:")
         assert req["continuity"]["F4"] is True  # existing non-continuity semantics
         return
-    assert rec["targets"] == [916] and set(rec["failed_bars"]) == {"F4"}
+    assert rec["targets"] == [916, 1799] and set(rec["failed_bars"]) == {"F4"}
     assert "current user tag missing" in rec["failed_bars"]["F4"]["reason"]
     assert req["continuity"]["F4"] is False and "last_user" not in req
     [row] = rec["continuity"]["rows"]

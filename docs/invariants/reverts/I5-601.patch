@@ -1,0 +1,17 @@
+--- a/diagnostics.py
++++ b/diagnostics.py
+@@ -207,12 +207,8 @@
+         rationale = "context pressure is an operating state, not persisted-state corruption"
+     elif name == "survival_fit":
+         detail = detail if isinstance(detail, dict) else {}
+-        within = ("to a 0.24.x version older than v0.24.5, that plugin cannot compact stored rows that a survival fit "
+-                  "removed from the live context, with or without a projection, so stop Hermes, move the configured "
+-                  "database file (by default lcm.db, with its -wal and -shm companions) aside and keep it, then "
+-                  "restore the database backup taken before the first v0.24.5 install together with the plugin (rows "
+-                  "stored after that backup leave the LCM store and stay in the file you moved aside); a rollback of "
+-                  + ("the plugin alone to v0.27.0 or later is fine; a survival fit projected rows (or the projection "
++        within = ("a rollback of " + (
++                  "the plugin alone to v0.27.0 or later is fine; a survival fit projected rows (or the projection "
+                      "count is unknown) and v0.26.x or earlier cannot recognise a short projected row (head + mark) "
+                      "and stores it again on a cold resume (#601 duplicates), so to v0.24.5 through v0.26.x stop "
+                      "Hermes, move the configured database file (by default lcm.db, with its -wal and -shm "

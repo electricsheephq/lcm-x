@@ -79,6 +79,7 @@ def test_bundled_recall_policy_distinguishes_or_and():
     policy = (Path(__file__).resolve().parents[1] / "skills/hermes-lcm/references/recall-policy.md").read_text()
     assert "`lcm_recall`'s full-text arm ORs content words" in policy
     assert "stop words dropped, quoted phrases kept" in policy
+    assert "is first searched as an exact phrase, and only a phrase with no hits falls back to the OR search" in policy
     assert "`lcm_grep` ANDs full-text terms by default" in policy
     assert "retries zero hits once as any-term matching" in policy
     assert "`lcm_expand_query` still ANDs its terms" in policy

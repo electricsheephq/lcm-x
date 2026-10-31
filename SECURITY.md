@@ -1,5 +1,9 @@
 # Security Policy
 
+Please report vulnerabilities privately: [open a security advisory](https://github.com/electricsheephq/lcm-x/security/advisories/new).
+
+We aim to acknowledge reports within 3 business days and to share a decision or fix plan within 14 days.
+
 ## Supported versions
 
 Security fixes target the current `main` branch and the latest supported version
@@ -41,3 +45,17 @@ Useful report details:
 The maintainer will triage reports as time permits. Confirmed vulnerabilities will
 be fixed in the smallest safe change, with tests when practical. Release notes will
 credit reporters when they want credit and when doing so does not increase risk.
+
+## What counts as a vulnerability here
+
+- Another session's or profile's stored context visible where it should not be.
+- Stored context or externalized payloads readable by another local user without authorization.
+- Credentials exposed through a non-cloud path, such as logs or plugin tool output.
+
+## Out of scope
+
+- Problems in Hermes Agent core: report those to [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent/security).
+- Credential-shaped text reaching a cloud embedding or rerank provider you configured:
+  the cloud privacy filter is best-effort; in-process local embeddings send nothing to any
+  provider. For Ollama, verify that the configured endpoint is trusted and local; a remote
+  endpoint sends data off the machine.

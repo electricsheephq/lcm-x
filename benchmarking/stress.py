@@ -147,18 +147,19 @@ class StressRun:
         _ensure_hermes_lcm_package(self.plugin_dir, reload_submodules=True)
         import hermes_lcm.engine as engine_mod
         import hermes_lcm.tools as tools_mod
+        import hermes_lcm.expand_query_tools as expand_query_mod
 
         self._engine_mod = engine_mod
         self._tools_mod = tools_mod
         self._original_summarize = engine_mod.summarize_with_escalation
-        self._original_synthesize = tools_mod._synthesize_expansion_answer
+        self._original_synthesize = expand_query_mod._synthesize_expansion_answer
         engine_mod.summarize_with_escalation = deterministic_summary
-        tools_mod._synthesize_expansion_answer = deterministic_expand_answer
+        expand_query_mod._synthesize_expansion_answer = deterministic_expand_answer
         try:
             yield
         finally:
             engine_mod.summarize_with_escalation = self._original_summarize
-            tools_mod._synthesize_expansion_answer = self._original_synthesize
+            expand_query_mod._synthesize_expansion_answer = self._original_synthesize
 
     def make_engine(self, case: str, **overrides: Any):
         _ensure_hermes_lcm_package(self.plugin_dir)
@@ -169,6 +170,7 @@ class StressRun:
         db_path = self.sandbox_dir / case / "lcm.db"
         hermes_home.mkdir(parents=True, exist_ok=True)
         cfg = LCMConfig(
+            embeddings_enabled=overrides.pop("embeddings_enabled", False),
             temporal_rollups_enabled=False,  # deterministic stubs cover compaction only (#1013 part B)
             database_path=str(db_path),
             fresh_tail_count=overrides.pop("fresh_tail_count", 8),
@@ -841,6 +843,7 @@ def _case_lifecycle_soak_and_profile_rebinds(run: StressRun) -> None:
     conversation_id = "conv-lifecycle-soak"
     current_session = "lifecycle-session-000"
     cfg = LCMConfig(
+        embeddings_enabled=False,  # Deterministic lifecycle probe, no semantic arm.
         temporal_rollups_enabled=False,  # deterministic stubs cover compaction only (#1013 part B)
         database_path=str(db_path),
         fresh_tail_count=5,
@@ -1120,6 +1123,7 @@ def _profile_rebind_probe(run: StressRun, case: str) -> dict[str, Any]:
     profile_a = root / "profile-a"
     profile_b = root / "profile-b"
     cfg = LCMConfig(
+        embeddings_enabled=False,  # Deterministic profile-rebind probe, no semantic arm.
         temporal_rollups_enabled=False,  # deterministic stubs cover compaction only (#1013 part B)
         fresh_tail_count=3,
         leaf_chunk_tokens=40,

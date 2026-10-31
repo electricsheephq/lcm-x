@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
+import sys
+from numbers import Real
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -16,14 +19,25 @@ FAIL_CLOSE_MARKERS = (
     "failed closed",
     "no validated exact source reference",
 )
+FAILURE_FLAGS = ("fail_closed", "failClosed", "failed_closed")
+FAILURE_TEXT_FIELDS = (
+    "fail_close_signature", "failClosedReason", "fail_closed_reason",
+    "error", "exception", "message", "explanation", "hypothesis", "answer",
+    "response", "status", "label",
+)
 
 
 def _qid(row: dict[str, Any]) -> str:
+    # First present key decides; no fallback past a present invalid value.
     for key in ("questionId", "question_id", "qid", "id"):
-        value = row.get(key)
-        if value is not None:
+        if key not in row:
+            continue
+        value = row[key]
+        if ((isinstance(value, str) and value.strip())
+                or (isinstance(value, int) and not isinstance(value, bool))):
             return str(value)
-    raise ValueError("per-question row has no question id")
+        raise ValueError(f"invalid question id: {key} must be a non-empty string or integer")
+    raise ValueError("invalid question id: missing question id")
 
 
 def _normalise(text: Any) -> str:
@@ -31,20 +45,7 @@ def _normalise(text: Any) -> str:
 
 
 def _failure_texts(row: dict[str, Any]) -> Iterable[str]:
-    for key in (
-        "fail_close_signature",
-        "failClosedReason",
-        "fail_closed_reason",
-        "error",
-        "exception",
-        "message",
-        "explanation",
-        "hypothesis",
-        "answer",
-        "response",
-        "status",
-        "label",
-    ):
+    for key in FAILURE_TEXT_FIELDS:
         value = row.get(key)
         if value not in (None, ""):
             yield _normalise(value)
@@ -54,7 +55,7 @@ def fail_close_signature(row: dict[str, Any]) -> str | None:
     """Return the row's fail-close signature, or None for an ordinary row."""
     explicit = any(
         row.get(key) is True
-        for key in ("fail_closed", "failClosed", "failed_closed")
+        for key in FAILURE_FLAGS
     )
     texts = list(_failure_texts(row))
     for text in texts:
@@ -66,15 +67,55 @@ def fail_close_signature(row: dict[str, Any]) -> str | None:
     return None
 
 
+def _failed(row):
+    # memorybench phases use completed for success; evaluations omit status.
+    return (row.get("_failed", False) or ("status" in row and row["status"] != "completed")
+            or bool(row.get("error")) or row.get("judge_fallback") is True
+            or bool(fail_close_signature(row)))
+
+
+def _overlay_row(report, detail):
+    merged = dict(report)
+    verdict_fields = ("correct", "score", "label")
+    if any(key in detail for key in verdict_fields):
+        for key in verdict_fields:
+            merged.pop(key, None)
+    merged.update({key: value for key, value in detail.items()
+                   if value is not None or key in verdict_fields or merged.get(key) is None})
+    # A success annotation cannot erase either source's failure evidence.
+    for key in ("_failed", "judge_fallback", *FAILURE_FLAGS, *FAILURE_TEXT_FIELDS):
+        if key == "label":  # Verdicts stay atomic; retain its failure signature below.
+            continue
+        if (key in report and _failed({key: report[key]})
+                and not (key in detail and _failed({key: detail[key]}))):
+            merged[key] = report[key]
+    signature = fail_close_signature(detail) or fail_close_signature(report)
+    if signature:
+        merged["fail_close_signature"] = signature
+    return merged
+
+
 def _correct(row: dict[str, Any]) -> bool:
     if "correct" in row:
-        return bool(row["correct"])
+        if isinstance(row["correct"], bool):
+            return row["correct"]
+        raise ValueError("unrecognised label: correct must be a bool")
     if "score" in row:
-        return row["score"] == 1
-    label = str(row.get("label", "")).strip().lower()
-    if label:
-        return label in {"correct", "pass", "passed"}
-    raise ValueError(f"question {_qid(row)!r} has no score")
+        score = row["score"]
+        if (isinstance(score, Real) and not isinstance(score, bool)
+                and score == score and score not in (math.inf, -math.inf)):
+            return score == 1
+        raise ValueError("unrecognised label: score must be a finite number, not a bool")
+    label = row.get("label")
+    if isinstance(label, bool):
+        return False  # Preserve the existing boolean-label scoring convention.
+    if isinstance(label, str):
+        label = label.strip().lower()
+        if label in {"correct", "pass", "passed"}:
+            return True
+        if label == "incorrect":
+            return False
+    raise ValueError("unrecognised label: no usable verdict")
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -121,7 +162,7 @@ def load_rows(run_dir: str | Path) -> list[dict[str, Any]]:
     if detail_path:
         for detail in _read_jsonl(detail_path):
             qid = _qid(detail)
-            by_qid[qid] = {**by_qid.get(qid, {}), **detail}
+            by_qid[qid] = _overlay_row(by_qid.get(qid, {}), detail)
 
     if not by_qid:
         raise ValueError("run has no per-question results")
@@ -173,6 +214,9 @@ def compare_rows(
             f"missing_left={missing_left}, missing_right={missing_right}"
         )
 
+    # Validate both arms before union-drop and short-circuit pair counting.
+    for row in (*left.values(), *right.values()):
+        _correct(row)
     dropped = sorted(
         qid
         for qid in left
@@ -208,10 +252,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    rows = load_rows(args.run_dir)
-    result = account_rows(rows)
-    if args.compare:
-        result["paired_comparison"] = compare_rows(rows, load_rows(args.compare))
+    run = args.run_dir
+    try:
+        rows = load_rows(run)
+        result = account_rows(rows)
+        if args.compare:
+            run = args.compare
+            result["paired_comparison"] = compare_rows(rows, load_rows(run))
+    except (ValueError, OSError) as error:
+        print(f"{run}: {' '.join(str(error).splitlines())}", file=sys.stderr)
+        return 2
     print(json.dumps(result, sort_keys=True))
     return 0
 

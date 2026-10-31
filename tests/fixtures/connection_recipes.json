@@ -1,0 +1,312 @@
+{
+  "trajectory": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false, "isolation_level": null}],
+    ["initial", null, null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["execute", "PRAGMA journal_mode=WAL", []],
+    ["execute", "PRAGMA synchronous=FULL", []],
+    ["execute", "PRAGMA wal_autocheckpoint=500", []],
+    ["execute", "PRAGMA journal_size_limit=67108864", []],
+    ["execute", "PRAGMA mmap_size=268435456", []],
+    ["execute", "PRAGMA foreign_keys=ON", []],
+    ["set", "row_factory", "Row"],
+    ["execute", "SELECT"]
+  ],
+  "trajectory_ro": [
+    ["connect", ["file:<database>?mode=ro"], {"uri": true, "timeout": 5.0, "check_same_thread": false, "isolation_level": null}],
+    ["initial", null, null],
+    ["execute", "PRAGMA query_only=ON", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["execute", "PRAGMA foreign_keys=ON", []],
+    ["set", "row_factory", "Row"],
+    ["execute", "SELECT"]
+  ],
+  "assertion": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false, "isolation_level": null}],
+    ["initial", null, null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["execute", "PRAGMA journal_mode=WAL", []],
+    ["execute", "PRAGMA synchronous=FULL", []],
+    ["execute", "PRAGMA wal_autocheckpoint=500", []],
+    ["execute", "PRAGMA journal_size_limit=67108864", []],
+    ["execute", "PRAGMA mmap_size=268435456", []],
+    ["set", "row_factory", "Row"],
+    ["execute", "SELECT"]
+  ],
+  "assertion_ro": [
+    ["connect", ["file:<database>?mode=ro"], {"uri": true, "timeout": 5.0, "check_same_thread": false, "isolation_level": null}],
+    ["initial", null, null],
+    ["execute", "PRAGMA query_only=ON", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["set", "row_factory", "Row"],
+    ["execute", "SELECT"]
+  ],
+  "rollup": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false}],
+    ["initial", "", null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["execute", "PRAGMA journal_mode=WAL", []],
+    ["execute", "PRAGMA synchronous=FULL", []],
+    ["execute", "PRAGMA wal_autocheckpoint=500", []],
+    ["execute", "PRAGMA journal_size_limit=67108864", []],
+    ["execute", "PRAGMA mmap_size=268435456", []],
+    ["set", "row_factory", "Row"],
+    ["execute", "SELECT"]
+  ],
+  "query_view": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false}],
+    ["initial", "", null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["execute", "PRAGMA journal_mode=WAL", []],
+    ["execute", "PRAGMA synchronous=FULL", []],
+    ["execute", "PRAGMA wal_autocheckpoint=500", []],
+    ["execute", "PRAGMA journal_size_limit=67108864", []],
+    ["execute", "PRAGMA mmap_size=268435456", []],
+    ["set", "row_factory", "Row"],
+    ["execute", "SELECT"]
+  ],
+  "lifecycle": [
+    ["connect", ["<database>"], {"timeout": 30.0, "check_same_thread": false, "isolation_level": null}],
+    ["initial", null, null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["execute", "PRAGMA journal_mode=WAL", []],
+    ["execute", "PRAGMA synchronous=FULL", []],
+    ["execute", "PRAGMA wal_autocheckpoint=500", []],
+    ["execute", "PRAGMA journal_size_limit=67108864", []],
+    ["execute", "PRAGMA mmap_size=268435456", []],
+    ["set", "row_factory", "Row"],
+    ["execute", "SELECT"]
+  ],
+  "vector": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false, "isolation_level": null}],
+    ["initial", null, null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["execute", "PRAGMA journal_mode=WAL", []],
+    ["execute", "PRAGMA synchronous=FULL", []],
+    ["execute", "PRAGMA wal_autocheckpoint=500", []],
+    ["execute", "PRAGMA journal_size_limit=67108864", []],
+    ["execute", "PRAGMA mmap_size=268435456", []],
+    ["set", "row_factory", "Row"],
+    ["execute", "SELECT"]
+  ],
+  "store": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false, "isolation_level": "IMMEDIATE"}],
+    ["initial", "IMMEDIATE", null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["execute", "PRAGMA journal_mode=WAL", []],
+    ["execute", "PRAGMA synchronous=FULL", []],
+    ["execute", "PRAGMA wal_autocheckpoint=500", []],
+    ["execute", "PRAGMA journal_size_limit=67108864", []],
+    ["execute", "PRAGMA mmap_size=268435456", []],
+    ["executescript", "CREATE"]
+  ],
+  "dag": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false, "isolation_level": "IMMEDIATE"}],
+    ["initial", "IMMEDIATE", null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["execute", "PRAGMA journal_mode=WAL", []],
+    ["execute", "PRAGMA synchronous=FULL", []],
+    ["execute", "PRAGMA wal_autocheckpoint=500", []],
+    ["execute", "PRAGMA journal_size_limit=67108864", []],
+    ["execute", "PRAGMA mmap_size=268435456", []],
+    ["executescript", "CREATE"]
+  ],
+  "future_trajectory": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false, "isolation_level": null}],
+    ["initial", null, null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", []],
+    ["exception", "SchemaVersionTooNewError", "LCM database schema version 999 is newer than this build supports (v5). Refusing to open to avoid corrupting data written by a newer LCM-X. Upgrade the plugin or restore a pre-upgrade backup (.db/-wal/-shm)."]
+  ],
+  "future_assertion": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false, "isolation_level": null}],
+    ["initial", null, null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", []],
+    ["exception", "SchemaVersionTooNewError", "LCM database schema version 999 is newer than this build supports (v5). Refusing to open to avoid corrupting data written by a newer LCM-X. Upgrade the plugin or restore a pre-upgrade backup (.db/-wal/-shm)."]
+  ],
+  "future_rollup": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false}],
+    ["initial", "", null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", []],
+    ["exception", "SchemaVersionTooNewError", "LCM database schema version 999 is newer than this build supports (v5). Refusing to open to avoid corrupting data written by a newer LCM-X. Upgrade the plugin or restore a pre-upgrade backup (.db/-wal/-shm)."]
+  ],
+  "future_query_view": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false}],
+    ["initial", "", null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", []],
+    ["close"],
+    ["exception", "SchemaVersionTooNewError", "LCM database schema version 999 is newer than this build supports (v5). Refusing to open to avoid corrupting data written by a newer LCM-X. Upgrade the plugin or restore a pre-upgrade backup (.db/-wal/-shm)."]
+  ],
+  "future_lifecycle": [
+    ["connect", ["<database>"], {"timeout": 30.0, "check_same_thread": false, "isolation_level": null}],
+    ["initial", null, null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", []],
+    ["exception", "SchemaVersionTooNewError", "LCM database schema version 999 is newer than this build supports (v5). Refusing to open to avoid corrupting data written by a newer LCM-X. Upgrade the plugin or restore a pre-upgrade backup (.db/-wal/-shm)."]
+  ],
+  "future_vector": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false, "isolation_level": null}],
+    ["initial", null, null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", []],
+    ["exception", "SchemaVersionTooNewError", "LCM database schema version 999 is newer than this build supports (v5). Refusing to open to avoid corrupting data written by a newer LCM-X. Upgrade the plugin or restore a pre-upgrade backup (.db/-wal/-shm)."]
+  ],
+  "future_store": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false, "isolation_level": "IMMEDIATE"}],
+    ["initial", "IMMEDIATE", null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", []],
+    ["exception", "SchemaVersionTooNewError", "LCM database schema version 999 is newer than this build supports (v5). Refusing to open to avoid corrupting data written by a newer LCM-X. Upgrade the plugin or restore a pre-upgrade backup (.db/-wal/-shm)."]
+  ],
+  "future_dag": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false, "isolation_level": "IMMEDIATE"}],
+    ["initial", "IMMEDIATE", null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "SELECT value FROM metadata WHERE key = 'schema_version'", []],
+    ["execute", "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", []],
+    ["exception", "SchemaVersionTooNewError", "LCM database schema version 999 is newer than this build supports (v5). Refusing to open to avoid corrupting data written by a newer LCM-X. Upgrade the plugin or restore a pre-upgrade backup (.db/-wal/-shm)."]
+  ],
+  "failure_trajectory": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false, "isolation_level": null}],
+    ["initial", null, null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["exception", "OperationalError", "recipe failure"]
+  ],
+  "failure_assertion": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false, "isolation_level": null}],
+    ["initial", null, null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["exception", "OperationalError", "recipe failure"]
+  ],
+  "failure_rollup": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false}],
+    ["initial", "", null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["exception", "OperationalError", "recipe failure"]
+  ],
+  "failure_query_view": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false}],
+    ["initial", "", null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["close"],
+    ["exception", "RuntimeError", "query-view schema ensure failed: recipe failure"]
+  ],
+  "failure_lifecycle": [
+    ["connect", ["<database>"], {"timeout": 30.0, "check_same_thread": false, "isolation_level": null}],
+    ["initial", null, null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["exception", "OperationalError", "recipe failure"]
+  ],
+  "failure_vector": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false, "isolation_level": null}],
+    ["initial", null, null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["exception", "OperationalError", "recipe failure"]
+  ],
+  "failure_store": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false, "isolation_level": "IMMEDIATE"}],
+    ["initial", "IMMEDIATE", null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["exception", "OperationalError", "recipe failure"]
+  ],
+  "failure_dag": [
+    ["connect", ["<database>"], {"timeout": 5.0, "check_same_thread": false, "isolation_level": "IMMEDIATE"}],
+    ["initial", "IMMEDIATE", null],
+    ["execute", "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'", []],
+    ["execute", "PRAGMA busy_timeout=30000", []],
+    ["exception", "OperationalError", "recipe failure"]
+  ],
+  "lifetime_store_fresh": [
+    ["helper", "refuse_schema_version_too_new"],
+    ["helper", "configure_connection"],
+    ["helper", "ensure_external_content_fts"],
+    ["commit"],
+    ["helper", "run_versioned_migrations"],
+    ["helper", "_ensure_source_column"],
+    ["helper", "_ensure_time_contract_columns"],
+    ["commit"],
+    ["helper", "ensure_message_stem_fts"],
+    ["write"],
+    ["transaction", "BEGIN IMMEDIATE"],
+    ["transaction", "COMMIT"],
+    ["execute", "PRAGMA wal_checkpoint(PASSIVE)", []],
+    ["close"]
+  ],
+  "lifetime_dag_fresh": [
+    ["helper", "refuse_schema_version_too_new"],
+    ["helper", "configure_connection"],
+    ["helper", "ensure_external_content_fts"],
+    ["commit"],
+    ["helper", "run_versioned_migrations"],
+    ["helper", "_ensure_source_window_columns"],
+    ["commit"],
+    ["write"],
+    ["transaction", "BEGIN IMMEDIATE"],
+    ["transaction", "COMMIT"],
+    ["execute", "PRAGMA wal_checkpoint(PASSIVE)", []],
+    ["close"]
+  ],
+  "lifetime_store_existing": [
+    ["helper", "refuse_schema_version_too_new"],
+    ["helper", "configure_connection"],
+    ["helper", "ensure_external_content_fts"],
+    ["commit"],
+    ["helper", "run_versioned_migrations"],
+    ["helper", "_ensure_source_column"],
+    ["helper", "_ensure_time_contract_columns"],
+    ["commit"],
+    ["helper", "ensure_message_stem_fts"],
+    ["write"],
+    ["transaction", "BEGIN IMMEDIATE"],
+    ["transaction", "COMMIT"],
+    ["execute", "PRAGMA wal_checkpoint(PASSIVE)", []],
+    ["close"]
+  ],
+  "lifetime_dag_existing": [
+    ["helper", "refuse_schema_version_too_new"],
+    ["helper", "configure_connection"],
+    ["helper", "ensure_external_content_fts"],
+    ["commit"],
+    ["helper", "run_versioned_migrations"],
+    ["helper", "_ensure_source_window_columns"],
+    ["commit"],
+    ["write"],
+    ["transaction", "BEGIN IMMEDIATE"],
+    ["transaction", "COMMIT"],
+    ["execute", "PRAGMA wal_checkpoint(PASSIVE)", []],
+    ["close"]
+  ]
+}

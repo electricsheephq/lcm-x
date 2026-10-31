@@ -1,0 +1,25 @@
+H2 product:81229ac490067e2514a29601c0a09f771ae42de0; pre-fix source94e1ffeedce87a02c04bbb916005a0ea5d3cc067.
+Synthetic homes and scratch basetemps; no installed profile reads.
+Bootstrap: benchmarking.standalone.ensure_agent_context_engine_importable(); pytest.main(argv).
+
+red:
+python -m pytest tests/test_issue_1880_persisted_hold.py::test_h2_zero_observation_preserves_legacy_gate tests/test_issue_1880_persisted_hold.py::test_h2_default_pre_yield_hold_survives_rebuild tests/test_issue_1880_persisted_hold.py::test_h2_swallowed_audit_failure_stays_unknown_until_clean_recovery tests/test_issue_1880_persisted_hold.py::test_effective_settings_and_route_only_invalidate[embeddings_enabled] tests/test_issue_1880_persisted_hold.py::test_h2_host_held_pruned_stub_keeps_current_public_proof -q --basetemp=SCRATCH/pt-h2-red -o tmp_path_retention_policy=failed
+8 failed in 0.90s
+
+green:
+python -m pytest tests/test_issue_1880_persisted_hold.py::test_h2_zero_observation_preserves_legacy_gate tests/test_issue_1880_persisted_hold.py::test_h2_default_pre_yield_hold_survives_rebuild tests/test_issue_1880_persisted_hold.py::test_h2_swallowed_audit_failure_stays_unknown_until_clean_recovery tests/test_issue_1880_persisted_hold.py::test_effective_settings_and_route_only_invalidate[embeddings_enabled] tests/test_issue_1880_persisted_hold.py::test_h2_host_held_pruned_stub_keeps_current_public_proof tests/behaviour/test_ingest_trace.py::test_observer_completeness tests/behaviour/test_compress_trace.py::test_compress_observed_attributes_complete tests/behaviour/test_ingest_trace.py::test_copy_return_observer_retains_replaced_owners tests/test_issue_1201_summary_model_only.py::test_t8_second_compress_uses_public_row_noop_shortcut -q --basetemp=SCRATCH/pt-h2-green -o tmp_path_retention_policy=failed
+12 passed in 1.69s
+
+preservation_before_trace:
+python -m pytest tests/test_issue_1880_persisted_hold.py::test_red1_rebuilt_retained_noop tests/test_issue_1880_persisted_hold.py::test_red2_fixed_expiry_and_turn_end tests/test_issue_1880_persisted_hold.py::test_red4_invalid_records_fail_open tests/test_issue_1880_persisted_hold.py::test_red4_isolation_recovery_and_no_rearm tests/test_issue_1880_persisted_hold.py::test_exact_pressure_change_inside_bucket_releases_hold tests/test_issue_1880_persisted_hold.py::test_recovered_direct_ingest_reuses_hold tests/test_issue_1880_persisted_hold.py::test_red3_new_tail_makes_previous_history_eligible tests/test_issue_772_replay_keeps_host_stubs.py::test_the_cached_view_keeps_every_stub_on_the_first_ingest_with_no_new_rows tests/test_issue_773_hermes_pruned_tool_replay.py::test_the_cached_view_never_hands_the_full_output_back tests/behaviour/test_ingest_trace.py::test_ingest_golden[protect-after-filter-copy] tests/behaviour/test_compress_trace.py::test_compress_golden[leaf-phase-rescue-loses] tests/behaviour/test_assembly_trace.py::test_assembly_golden[compress-scaffold] -q --basetemp=SCRATCH/pt-h2-preservation -o tmp_path_retention_policy=failed
+3 failed, 17 passed in 2.30s; only expected pre-regeneration goldens failed
+
+trace_green:
+python -m pytest tests/behaviour/test_compress_trace.py tests/behaviour/test_ingest_trace.py tests/behaviour/test_assembly_trace.py::test_assembly_golden[compress-scaffold] tests/behaviour/test_assembly_trace.py::test_assembly_attribute_inventory tests/behaviour/test_assembly_trace.py::test_fixture_scenario_inventory -q --basetemp=SCRATCH/pt-h2-trace-green -o tmp_path_retention_policy=failed
+419 passed in 67.00s (0:01:07)
+
+Ruff0.15.13: All checks passed!
+git diff --check: exit0, no output.
+Independent acceptance and distinct unsafe-suppression delta3: PASS at81229ac4, preserving prior unaffected coverage.
+Remote invariant1353 old expectation RED:1failed12passed; adaptation now requires current failure and first clean retry recovery, with row/identity assertions preserved. Its GREEN remains remote pending.
+Not proven: full exact-head remote acceptance, H2 cost, reference-session latency, retained-occurrence repair, merge/release/runtime/customer readiness.

@@ -20,22 +20,14 @@ from bench.instruments.scale389.metrics import (
     select_questions,
     summarise_rows,
 )
+from bench.tools.benchpaths import bench_path, required_path
 from bench.tools.pinverify import sha256_file
 from bench.tools.storefreeze import snapshot
 
 
-DEFAULT_RESULTS = Path(
-    "/Volumes/LEXAR/Codex/session-notes/2026-07-29/"
-    "hermes-phase1b-rerun/artifacts/results"
-)
-DEFAULT_QEVAL = Path(
-    "/Volumes/LEXAR/Codex/session-notes/2026-07-25/"
-    "hermes-v1-scale/artifacts/corpus/qeval.json"
-)
-DEFAULT_DATASET = Path("/Volumes/LEXAR/hermes-work/longmemeval-data/longmemeval_s")
+DEFAULT_DATASET = Path("hermes-work/longmemeval-data/longmemeval_s")
 DEFAULT_SIDECAR = Path(
-    "/Volumes/LEXAR/hermes-work/mb-workdir-phase1a/"
-    "phase1a-scale-500.dates.json"
+    "hermes-work/mb-workdir-phase1a/phase1a-scale-500.dates.json"
 )
 EXPECTED_PUBLISHED = {
     "A3": {"500": 0.82, "2000": 0.60, "8000": 0.34, "19829": 0.233},
@@ -172,16 +164,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Reproduce F34's published session table and self-test turn joins."
     )
-    parser.add_argument("--results", type=Path, default=DEFAULT_RESULTS)
-    parser.add_argument("--qeval", type=Path, default=DEFAULT_QEVAL)
-    parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
-    parser.add_argument("--sidecar", type=Path, default=DEFAULT_SIDECAR)
+    parser.add_argument("--results", type=Path)
+    parser.add_argument("--qeval", type=Path)
+    parser.add_argument("--dataset", type=Path)
+    parser.add_argument("--sidecar", type=Path)
     parser.add_argument("--output", type=Path)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    args.results = args.results or required_path("SCALE389_ARCHIVE_RESULTS", argument="--results")
+    args.qeval = args.qeval or (
+        required_path("SCALE389_ARCHIVE_CORPUS", argument="--qeval") / "qeval.json"
+    )
+    args.dataset = args.dataset or bench_path(DEFAULT_DATASET)
+    args.sidecar = args.sidecar or bench_path(DEFAULT_SIDECAR)
     if args.output and args.output.resolve().is_relative_to(args.results.resolve()):
         raise SystemExit("refusing to write regression output inside the F34 archive")
     result = run_regression(

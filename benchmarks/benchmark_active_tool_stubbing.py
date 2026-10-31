@@ -79,6 +79,7 @@ def _run_mode(
     mode = "enabled" if enabled else "disabled"
     hermes_home = root / mode / "hermes"
     config = LCMConfig(
+        embeddings_enabled=False,
         database_path=str(root / mode / "lcm.db"),
         fresh_tail_count=4,
         large_output_externalization_enabled=True,

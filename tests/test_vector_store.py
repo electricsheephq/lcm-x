@@ -1001,7 +1001,7 @@ def test_no_profile_or_vectors_returns_none_coverage(tmp_path):
 
 def test_embedding_config_defaults_are_inert_and_read_environment(monkeypatch):
     defaults = LCMConfig()
-    assert defaults.embeddings_enabled is False
+    assert defaults.embeddings_enabled is True
     assert defaults.embedding_bounded_scan_rows == 2_000
 
     monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "true")
@@ -1251,6 +1251,21 @@ def test_delete_node_batch_stages_scope_past_sqlite_bind_cap(tmp_path):
         assert SummaryDAG.delete_node_batch(dag.connection, session_ids) == []
     finally:
         dag.close()
+
+
+def test_temp_id_tables_respect_bind_limit_and_deduplicate_across_batches(stores):
+    """Large selected sets stay exact under SQLite's historical 999-bind cap."""
+    _, store = stores
+    conn = store.connection
+    previous = conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+    try:
+        ids = [str(i) for i in range(1200)]
+        with store._temp_id_table(ids + ids[:600]) as table:
+            assert {row[0] for row in conn.execute(f"SELECT id FROM {table}")} == set(ids)
+        with store._temp_id_table([]) as table:
+            assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+    finally:
+        conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous)
 
 
 def test_temp_id_tables_are_unique_per_call_and_dropped(stores):

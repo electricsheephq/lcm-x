@@ -35,7 +35,9 @@ def slug(cid: str) -> str:
 
 def config_yaml(cell: dict, plugin: dict) -> str:
     return (f"context:\n  engine: {plugin['engine']}\n"
-            f"compression:\n  enabled: true\n  threshold: 0.8\n  in_place: {'true' if cell['in_place'] else 'false'}\n"
+            "compression:\n  enabled: true\n"
+            + ("" if cell["id"].startswith("default-window/") else "  threshold: 0.8\n")
+            + f"  in_place: {'true' if cell['in_place'] else 'false'}\n"
             "  target_ratio: 0.3\n"
             + (f"lcm:\n  context_threshold: {cell['lcm_env']['LCM_CONTEXT_THRESHOLD']}\n"
                if "LCM_CONTEXT_THRESHOLD" in cell["lcm_env"] else "")

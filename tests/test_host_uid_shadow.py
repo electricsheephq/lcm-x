@@ -22,6 +22,7 @@ from hermes_lcm.db_bootstrap import SCHEMA_VERSION, get_schema_version, run_vers
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.host_uid import HOST_UID_COUNTER_KEY
 from hermes_lcm.store import MessageStore
+from tests.harness import make_engine
 
 PAD = " alpha beta gamma delta" * 4
 
@@ -47,8 +48,10 @@ def _state_db(tmp_path, sessions) -> None:
 
 
 def _engine(tmp_path, session: str = "S", conversation: str = "conv") -> LCMEngine:
-    config = LCMConfig(fresh_tail_count=2, leaf_chunk_tokens=1, database_path=str(tmp_path / "lcm.db"))
-    engine = LCMEngine(config=config)
+    engine = make_engine(tmp_path, fresh_tail_count=2, leaf_chunk_tokens=1)
+    # This fixture places the host state.db beside lcm.db, not in home/.
+    engine._hermes_home = str(tmp_path)
+    engine._store._hermes_home = str(tmp_path)
     engine.on_session_start(session, platform="cli", context_length=200_000, conversation_id=conversation)
     return engine
 
@@ -704,7 +707,7 @@ from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 assert store_mod.__file__.startswith(old)
 # v0.26 readers already ship host_uid; retain the pre-uid premise for older releases.
-if sys.argv[4] != "v0.26.2":
+if sys.argv[4] in ("v0.25.0-rc1", "v0.25.1"):
     assert importlib.util.find_spec("hermes_lcm.host_uid") is None
 engine = LCMEngine(config=LCMConfig(database_path=db))
 engine.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")
@@ -723,7 +726,13 @@ ROLLBACK_READERS = {
     "v0.25.0-rc1": "c36b46e3a7b1bff23cfa45fa117565ab8624441d",
     "v0.25.1": "f47b55e031b507b424ff5f480d8f2a80d358f1f0",
     "v0.26.2": "6800cf45ad05280e6cf6fa9e1ad96c62b7132646",
+    "v0.27.0": "c67d7633d963a2ffd24cf90995189ee58e2f88c7",
+    "v0.28.0": "709099b3a397a7893a7abae8802ebe7bf605f79e",
+    "v0.28.1": "77b2b4f795fb6a4f84c55abf6d0441da4469971e",
 }
+
+PRE_V026_READERS = frozenset({"v0.25.0-rc1", "v0.25.1"})
+assert PRE_V026_READERS <= set(ROLLBACK_READERS)
 
 
 def _skip_or_fail_in_ci(reason):
@@ -790,10 +799,14 @@ def test_f7_capture_failure_leaves_ingest_byte_identical(tmp_path, monkeypatch):
 def test_f7_counter_flush_failure_leaves_ingest_unaffected(tmp_path, monkeypatch):
     off = _run(tmp_path / "off", "off", monkeypatch, _UID_LIST)
 
-    def boom(*_args, **_kwargs):
-        raise sqlite3.OperationalError("database is locked")
+    write = MessageStore.write_metadata_json
 
-    monkeypatch.setattr(MessageStore, "update_metadata_json", boom)
+    def boom(self, keys, *args, **kwargs):
+        if HOST_UID_COUNTER_KEY in keys:
+            raise sqlite3.OperationalError("injected counter I/O error")
+        return write(self, keys, *args, **kwargs)
+
+    monkeypatch.setattr(MessageStore, "write_metadata_json", boom)
     shadow = _run(tmp_path / "shadow", None, monkeypatch, _UID_LIST)
     assert shadow[0] == off[0] and shadow[1] == off[1] and len(shadow[2]) == 3
     assert shadow[3] == {"unbound.agree_new": 3, "errors": 1}
@@ -903,10 +916,14 @@ class _FaultyConn:
                 self._fail = None
                 self._real.execute(sql, params[0])
                 raise sqlite3.OperationalError("injected after the first binding INSERT")
-            self._armed = self._fail == "commit"
+            self._armed = self._armed or self._fail == "commit"
         return self._real.executemany(sql, params)
 
     def execute(self, sql, *args):
+        # The shadow boundary is now RELEASE, while COMMIT belongs to ingest.
+        if self._armed and sql.startswith("RELEASE SAVEPOINT"):
+            self._armed = self._fail = None
+            raise sqlite3.OperationalError("injected at shadow RELEASE")
         if self._fail == "schema_commit" and "CREATE TABLE IF NOT EXISTS host_uid_bindings" in sql:
             self._armed = True
         return self._real.execute(sql, *args)
@@ -1001,6 +1018,7 @@ def _has_table(engine: LCMEngine) -> bool:
 
 @pytest.mark.parametrize("table", ["absent", "present"])
 def test_r4_an_outer_transaction_is_never_committed_or_rolled_back(tmp_path, table):
+    """An unowned SQLite transaction is still refused; explicit owners join below."""
     _state_db(tmp_path, [("S", None, None)])
     engine = _engine(tmp_path)
     conn = engine._store._conn
@@ -1018,6 +1036,29 @@ def test_r4_an_outer_transaction_is_never_committed_or_rolled_back(tmp_path, tab
         conn.rollback()  # the holder decides: its pending row was never committed by the shadow
         assert not conn.execute("SELECT 1 FROM messages WHERE content = 'outer pending'").fetchone()
         assert "u-new" not in [b[1] for b in _bindings(engine)]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("immediate", [False, True])
+def test_r4_explicit_owner_joins_shadow_without_committing_or_rolling_back(tmp_path, immediate):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path)
+    store = engine._store
+    stored = store.append("S", _m("user", "stored" + PAD))
+    message = _m("user", "stored" + PAD, 5., "u-new")
+    try:
+        with pytest.raises(RuntimeError, match="owner rollback"):
+            with store.atomic(immediate=immediate):
+                engine._host_uid_shadow(engine._host_uid_capture([message], [message], 0, 0, None, ()), {0: stored})
+                assert store._conn.in_transaction
+                assert "u-new" in [b[1] for b in _bindings(engine)]
+                assert _durable(engine)
+                with sqlite3.connect(store.db_path) as reader:
+                    assert not reader.execute("SELECT 1 FROM sqlite_master WHERE name='host_uid_bindings'").fetchone()
+                raise RuntimeError("owner rollback")
+        assert not store._conn.in_transaction and not _has_table(engine)
+        assert _durable(engine) == {}
     finally:
         engine.shutdown()
 

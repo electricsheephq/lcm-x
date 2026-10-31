@@ -153,6 +153,8 @@ def _prepare_selector_retrieval(
             continue
         seen.add(exact_ref)
         novel.append({"exact_ref": exact_ref, "quote": quote})
+        if hit.get("duplicate_store_ids"):
+            novel[-1]["duplicate_store_ids"] = hit["duplicate_store_ids"]
         if len(novel) >= max_novel_refs:
             break
     metrics = payload.get("metrics")
@@ -304,6 +306,7 @@ def _context_payload(result: Mapping[str, Any]) -> dict[str, Any]:
                     "observation_time",
                     "role",
                     "source",
+                    "duplicate_store_ids",
                 )
                 if key in raw
             }

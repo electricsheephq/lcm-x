@@ -1,0 +1,187 @@
+name: Real Hermes host
+
+# Non-required check; the owner decides whether to require it after rollout.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-host-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [floor-0.21.3, r34.10-0.21.5, r34.15-0.21.5, ref-0.21.5, upstream-main]
+    env:
+      HERMES_DISABLE_LAZY_INSTALLS: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # PluginManager identity tests archive the legacy GA commit.
+
+      - name: Set up Python (harness)
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install harness dependencies
+        run: pip install uv==0.11.26 pytest numpy
+
+      # ci.py prep recreates its venv; it does not support prepared-host cache reuse.
+      - name: Prepare the pinned Hermes tree
+        run: nice -n 19 python -m bench.instruments.reliability.ci prep --host "${{ matrix.host }}" --root "$RUNNER_TEMP/hosts" --out "$RUNNER_TEMP/hosts.json"
+
+      - name: Export prepared host paths
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          hosts = json.loads((Path(os.environ["RUNNER_TEMP"]) / "hosts.json").read_text())
+          host = hosts["hosts"]["${{ matrix.host }}"]
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"FASTEMBED_CACHE_PATH={os.environ['RUNNER_TEMP']}/fastembed-empty\n")
+              env.write(f"LCM_REAL_HERMES_PYTHON={host['python']}\n")
+              env.write(f"LCM_REAL_HERMES_SRC={host['src']}\n")
+              env.write(f"PYTHONPATH={os.environ['GITHUB_WORKSPACE']}:{host['src']}\n")
+          PY
+
+      - name: Run real-host regressions
+        # LCM_REAL_HERMES_LONG stays unset; the long soak is a separate gate.
+        run: |
+          nice -n 19 python -m pytest -p no:cacheprovider -q -ra \
+            tests/test_issue_524_gen2_replay.py \
+            tests/test_issue_559_tool_group_boundary.py \
+            tests/test_issue_631_not_a_pm_member.py \
+            tests/test_issue_1306_cli_new.py \
+            tests/invariants/test_issue_1438_cli_new.py \
+            tests/test_real_plugin_manager_identity.py \
+            tests/test_real_host_bypass_cooldown_wire.py \
+            tests/test_real_host_config_resolution.py \
+            tests/test_real_turn_loop_acp_override.py \
+            tests/test_session_end_attribution_host.py \
+            tests/test_real_plugin_manager_compaction.py \
+            tests/test_host_stub_parity.py \
+            tests/test_real_long_session.py \
+            --junitxml=real-host-results.xml
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: (success() || failure()) && (matrix.host == 'upstream-main' || matrix.host == 'ref-0.21.5')
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: scanner-source
+      - name: catalog-scanner-on
+        if: (success() || failure()) && (matrix.host == 'upstream-main' || matrix.host == 'ref-0.21.5')
+        working-directory: scanner-source
+        run: python -m pytest tests/test_catalog_scanner_on.py -q -ra --junitxml=catalog-scanner-on.xml
+
+      - name: Upload catalog scanner receipts
+        if: always() && (matrix.host == 'upstream-main' || matrix.host == 'ref-0.21.5')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: catalog-scanner-on-${{ matrix.host }}
+          path: scanner-source/catalog-scanner-1946/
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: real-host-${{ matrix.host }}
+          path: real-host-results.xml
+          if-no-files-found: warn
+
+      - name: Upload failure-only structural capture
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: diag-1753-${{ matrix.host }}
+          path: diag-1753-captures/*.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Separate fresh host environments keep the legacy pin's in-venv dependency
+  # installation from making the second route a false fresh-install pass.
+  dependency-qualification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [ref-0.21.5, upstream-main]
+        route: [native, installer]
+    env:
+      HERMES_DISABLE_LAZY_INSTALLS: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      LCM_1186_QUALIFY: "1"
+      LCM_1186_HOST: ${{ matrix.host }}
+      LCM_1186_ROUTE: ${{ matrix.route }}
+      # S1-C.3: only the two SHA-256-locked Linux tools in isolated CI.
+      LCM_1186_ALLOW_LOCKED_TOOLS: "1"
+      LCM_1186_ARTIFACTS: ${{ github.workspace }}/1186-qualification
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          # Native companion --ref must resolve to this published candidate.
+          ref: ${{ github.sha }}
+
+      - name: Set up Python (qualification harness)
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install qualification harness
+        run: pip install uv==0.11.26 pytest numpy
+
+      - name: Prepare exact pinned host
+        run: |
+          mkdir -p 1186-qualification
+          nice -n 19 python -m bench.instruments.reliability.ci prep \
+            --host "${{ matrix.host }}" --root "$RUNNER_TEMP/1186-hosts" \
+            --out "$RUNNER_TEMP/1186-hosts.json" > 1186-qualification/prep.stdout 2> 1186-qualification/prep.stderr
+
+      - name: Export exact host paths
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          host = json.loads((Path(os.environ["RUNNER_TEMP"]) / "1186-hosts.json").read_text())["hosts"]["${{ matrix.host }}"]
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"LCM_REAL_HERMES_PYTHON={host['python']}\n")
+              env.write(f"LCM_REAL_HERMES_SRC={host['src']}\n")
+              env.write(f"LCM_1186_SCRATCH={os.environ['RUNNER_TEMP']}/1186-${{ matrix.host }}-${{ matrix.route }}\n")
+          Path("1186-qualification/prepared-host.json").write_text(json.dumps(host, indent=2) + "\n")
+          PY
+
+      - name: Qualify native dependency carrier cells
+        run: |
+          pwd
+          git rev-parse HEAD
+          nice -n 19 python -m pytest -p no:cacheprovider -q -ra \
+            tests/test_issue_1186_host_dependencies.py \
+            --junitxml=1186-qualification/results.xml \
+            > 1186-qualification/pytest.stdout 2> 1186-qualification/pytest.stderr
+
+      - name: Upload raw qualification receipts even on failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-1186-${{ matrix.host }}-${{ matrix.route }}
+          path: 1186-qualification/
+          if-no-files-found: warn

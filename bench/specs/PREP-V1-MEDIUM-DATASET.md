@@ -4,7 +4,7 @@
 |---|---|
 | Source | HF dataset `xiaowu0162/longmemeval`, file `longmemeval_m` |
 | Revision | `2ec2a557f339b6c0369619b1ed5793734cc87533` (same pin as the banked `longmemeval_s` lineage) |
-| Local path | `/Volumes/LEXAR/hermes-work/longmemeval-data/longmemeval_m` |
+| Local dataset | `longmemeval_m` in the operator-selected dataset directory |
 | sha256 | `fb5413e3b077c62927daab794836991a2fcfa61ceacab57dc679fb02daaff2d9` |
 | Size | 2,745,274,681 bytes = 9.9× the small tier (matches the 10× haystack design) |
 | Shape check | 500 `question_id` / 500 `question_type` (streaming grep — no full JSON load; the file is too large for json.load on this box) |

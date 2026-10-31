@@ -1,0 +1,11 @@
+{
+  "samples": 200,
+  "base_sha": "10407e12e33c1d7b09fe0e05141153555aec5d62",
+  "candidate_sha": "e6e4f0e5586245e0cf87bb0fec52745c82f17fd0",
+  "base_median_ms": 1.5960415000000001,
+  "candidate_median_ms": 1.4105205,
+  "paired_median_delta_ms": -0.20008400000000004,
+  "allowed_delta_ms": 0.15960415000000003,
+  "pass_gate": true,
+  "method": "20 warmup pairs then 200 pairs; AB/BA alternating; timed _record_compress_commit_proof only on same synthetic compaction; no concurrent samples"
+}

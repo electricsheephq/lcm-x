@@ -1,0 +1,1770 @@
+{
+  "accepted": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "admit",
+      "scope:primary",
+      100.0
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      100.0,
+      "low"
+    ],
+    [
+      "record_call",
+      "scope:primary",
+      1000.0,
+      1001.0
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "accepts",
+      "short"
+    ],
+    [
+      "record_success",
+      "scope:primary"
+    ],
+    [
+      "provenance",
+      "model",
+      "primary"
+    ],
+    [
+      "return",
+      "short"
+    ],
+    [
+      "state",
+      {
+        "model": "primary"
+      },
+      null,
+      true
+    ]
+  ],
+  "accepted-no-predicate": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "record_success",
+      "scope:primary"
+    ],
+    [
+      "provenance",
+      "model",
+      "primary"
+    ],
+    [
+      "return",
+      "short"
+    ],
+    [
+      "state",
+      {
+        "model": "primary"
+      },
+      null,
+      null
+    ]
+  ],
+  "below-granted-window": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "admit",
+      "scope:primary",
+      85.0
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      85.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "request timed out"
+      ],
+      "LLM summarization failed: request timed out"
+    ],
+    [
+      "record_call",
+      "scope:primary",
+      1000.0,
+      1085.0
+    ],
+    [
+      "stop",
+      "summariser call cut by the foreground budget"
+    ],
+    [
+      "raise",
+      "SweepBudgetExhausted",
+      "summariser call cut by the foreground budget",
+      "time_budget_exhausted"
+    ],
+    [
+      "state",
+      {},
+      null,
+      true
+    ]
+  ],
+  "below-hang-window": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "admit",
+      "scope:primary",
+      100.0
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      100.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "host compression deadline timeout"
+      ],
+      "LLM summarization failed: host compression deadline timeout"
+    ],
+    [
+      "record_call",
+      "scope:primary",
+      1000.0,
+      1085.0
+    ],
+    [
+      "stop",
+      "summariser call cut by the foreground budget"
+    ],
+    [
+      "raise",
+      "SweepBudgetExhausted",
+      "summariser call cut by the foreground budget",
+      "time_budget_exhausted"
+    ],
+    [
+      "state",
+      {},
+      null,
+      true
+    ]
+  ],
+  "budget-hang": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "admit",
+      "scope:primary",
+      100.0
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      100.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "request timed out"
+      ],
+      "LLM summarization failed: request timed out"
+    ],
+    [
+      "record_call",
+      "scope:primary",
+      1000.0,
+      1100.0
+    ],
+    [
+      "record_hang",
+      "scope:primary"
+    ],
+    [
+      "allows",
+      "scope:primary",
+      false
+    ],
+    [
+      "hung_route",
+      "scope:primary"
+    ],
+    [
+      "stop",
+      "summariser call cut by the foreground budget"
+    ],
+    [
+      "raise",
+      "SweepBudgetExhausted",
+      "summariser call cut by the foreground budget",
+      "time_budget_exhausted"
+    ],
+    [
+      "state",
+      {},
+      "scope:primary",
+      true
+    ]
+  ],
+  "budget-hang-still-allowed": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "admit",
+      "scope:primary",
+      100.0
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      100.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "request timed out"
+      ],
+      "LLM summarization failed: request timed out"
+    ],
+    [
+      "record_call",
+      "scope:primary",
+      1000.0,
+      1100.0
+    ],
+    [
+      "record_hang",
+      "scope:primary"
+    ],
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "stop",
+      "summariser call cut by the foreground budget"
+    ],
+    [
+      "raise",
+      "SweepBudgetExhausted",
+      "summariser call cut by the foreground budget",
+      "time_budget_exhausted"
+    ],
+    [
+      "state",
+      {},
+      null,
+      true
+    ]
+  ],
+  "budget-no-breaker": [
+    [
+      "admit",
+      "scope:primary",
+      100.0
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      100.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "request timed out"
+      ],
+      "LLM summarization failed: request timed out"
+    ],
+    [
+      "record_call",
+      "scope:primary",
+      1000.0,
+      1100.0
+    ],
+    [
+      "stop",
+      "summariser call cut by the foreground budget"
+    ],
+    [
+      "raise",
+      "SweepBudgetExhausted",
+      "summariser call cut by the foreground budget",
+      "time_budget_exhausted"
+    ],
+    [
+      "state",
+      {},
+      null,
+      true
+    ]
+  ],
+  "budget-partial": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "admit",
+      "scope:primary",
+      40.0
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      40.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "masked failure"
+      ],
+      "LLM summarization failed: masked failure"
+    ],
+    [
+      "record_call",
+      "scope:primary",
+      1000.0,
+      1040.0
+    ],
+    [
+      "stop",
+      "summariser call cut by the foreground budget"
+    ],
+    [
+      "raise",
+      "SweepBudgetExhausted",
+      "summariser call cut by the foreground budget",
+      "time_budget_exhausted"
+    ],
+    [
+      "state",
+      {},
+      null,
+      true
+    ]
+  ],
+  "config": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "log",
+      "DEBUG",
+      "LLM summarization failed: %s",
+      [
+        "Error code: 404 - unknown model"
+      ],
+      "LLM summarization failed: Error code: 404 - unknown model"
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "record_config_error",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      },
+      "Error code: 404 - unknown model",
+      "primary"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "config-before-filter": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "log",
+      "DEBUG",
+      "LLM summarization failed: %s",
+      [
+        "Error code: 400 - unknown model content_filter"
+      ],
+      "LLM summarization failed: Error code: 400 - unknown model content_filter"
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "record_config_error",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      },
+      "Error code: 400 - unknown model content_filter",
+      "primary"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "config-no-breaker": [
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "log",
+      "DEBUG",
+      "LLM summarization failed: %s",
+      [
+        "unknown model"
+      ],
+      "LLM summarization failed: unknown model"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "unknown model"
+      ],
+      "LLM summarization failed: unknown model"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "configured-timeout": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "admit",
+      "scope:primary",
+      100.0
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      30,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "request timed out"
+      ],
+      "LLM summarization failed: request timed out"
+    ],
+    [
+      "record_call",
+      "scope:primary",
+      1000.0,
+      1030.0
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "record_failure",
+      "scope:primary"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      true
+    ]
+  ],
+  "content-filter": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "Error code: 400 - content_filter"
+      ],
+      "LLM summarization failed: Error code: 400 - content_filter"
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "provenance",
+      "content_filter_error",
+      true
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {
+        "content_filter_error": true
+      },
+      null,
+      null
+    ]
+  ],
+  "context-no-rescue": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "maximum context length exceeded"
+      ],
+      "LLM summarization failed: maximum context length exceeded"
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "record_failure",
+      "scope:primary"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "context-rescue": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "maximum context length exceeded"
+      ],
+      "LLM summarization failed: maximum context length exceeded"
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "provenance",
+      "context_length_error",
+      true
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {
+        "context_length_error": true
+      },
+      null,
+      null
+    ]
+  ],
+  "early-host-fence": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "admit",
+      "scope:primary",
+      100.0
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      100.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "host compression deadline timeout"
+      ],
+      "LLM summarization failed: host compression deadline timeout"
+    ],
+    [
+      "record_call",
+      "scope:primary",
+      1000.0,
+      1030.0
+    ],
+    [
+      "stop",
+      "summariser call cut by the foreground budget"
+    ],
+    [
+      "raise",
+      "SweepBudgetExhausted",
+      "summariser call cut by the foreground budget",
+      "time_budget_exhausted"
+    ],
+    [
+      "state",
+      {},
+      null,
+      true
+    ]
+  ],
+  "failure": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "provider unavailable"
+      ],
+      "LLM summarization failed: provider unavailable"
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "record_failure",
+      "scope:primary"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "failure-no-breaker": [
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "provider unavailable"
+      ],
+      "LLM summarization failed: provider unavailable"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "failure-no-error": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "record_failure",
+      "scope:primary"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "fallback-hang-round-two": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "admit",
+      "scope:primary",
+      100.0
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      100.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "quick primary failure"
+      ],
+      "LLM summarization failed: quick primary failure"
+    ],
+    [
+      "record_call",
+      "scope:primary",
+      1000.0,
+      1001.0
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "record_failure",
+      "scope:primary"
+    ],
+    [
+      "allows",
+      "scope:fallback",
+      true
+    ],
+    [
+      "admit",
+      "scope:fallback",
+      99.0
+    ],
+    [
+      "provider",
+      "fallback",
+      10,
+      99.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "host compression deadline timeout"
+      ],
+      "LLM summarization failed: host compression deadline timeout"
+    ],
+    [
+      "record_call",
+      "scope:fallback",
+      1001.0,
+      1100.0
+    ],
+    [
+      "record_hang",
+      "scope:fallback"
+    ],
+    [
+      "allows",
+      "scope:fallback",
+      false
+    ],
+    [
+      "hung_route",
+      "scope:fallback"
+    ],
+    [
+      "stop",
+      "summariser call cut by the foreground budget"
+    ],
+    [
+      "raise",
+      "SweepBudgetExhausted",
+      "summariser call cut by the foreground budget",
+      "time_budget_exhausted"
+    ],
+    [
+      "state",
+      {},
+      "scope:fallback",
+      true
+    ],
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "admit",
+      "scope:primary",
+      100.0
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      100.0,
+      "low"
+    ],
+    [
+      "record_call",
+      "scope:primary",
+      1100.0,
+      1101.0
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "accepts",
+      "short"
+    ],
+    [
+      "record_success",
+      "scope:primary"
+    ],
+    [
+      "provenance",
+      "model",
+      "primary"
+    ],
+    [
+      "return",
+      "short"
+    ],
+    [
+      "state",
+      {
+        "model": "primary"
+      },
+      null,
+      true
+    ]
+  ],
+  "host-no-progress": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "admit",
+      "scope:primary",
+      100.0
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      30,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LLM summarization failed: %s",
+      [
+        "masked failure"
+      ],
+      "LLM summarization failed: masked failure"
+    ],
+    [
+      "record_call",
+      "scope:primary",
+      1000.0,
+      1100.0
+    ],
+    [
+      "record_hang",
+      "scope:primary"
+    ],
+    [
+      "allows",
+      "scope:primary",
+      false
+    ],
+    [
+      "hung_route",
+      "scope:primary"
+    ],
+    [
+      "stop",
+      "summariser call cut by the foreground budget"
+    ],
+    [
+      "raise",
+      "SweepBudgetExhausted",
+      "summariser call cut by the foreground budget",
+      "time_budget_exhausted"
+    ],
+    [
+      "state",
+      {},
+      "scope:primary",
+      true
+    ]
+  ],
+  "no-content-closing_hint-False": [
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LCM summary result rejected (reason=%s, source_tokens=%s, result_tokens=%d, model=%s)",
+      [
+        "no_content contract=closing_hint",
+        10,
+        0,
+        "primary"
+      ],
+      "LCM summary result rejected (reason=no_content contract=closing_hint, source_tokens=10, result_tokens=0, model=primary)"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "no-content-closing_hint-True": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "log",
+      "WARNING",
+      "LCM summary result rejected (reason=%s, source_tokens=%s, result_tokens=%d, model=%s)",
+      [
+        "no_content contract=closing_hint",
+        10,
+        0,
+        "primary"
+      ],
+      "LCM summary result rejected (reason=no_content contract=closing_hint, source_tokens=10, result_tokens=0, model=primary)"
+    ],
+    [
+      "record_rejection",
+      "scope:primary"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "no-content-no-contract-False": [
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LCM summary result rejected (reason=%s, source_tokens=%s, result_tokens=%d, model=%s)",
+      [
+        "no_content",
+        10,
+        0,
+        "primary"
+      ],
+      "LCM summary result rejected (reason=no_content, source_tokens=10, result_tokens=0, model=primary)"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "no-content-no-contract-True": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "log",
+      "WARNING",
+      "LCM summary result rejected (reason=%s, source_tokens=%s, result_tokens=%d, model=%s)",
+      [
+        "no_content",
+        10,
+        0,
+        "primary"
+      ],
+      "LCM summary result rejected (reason=no_content, source_tokens=10, result_tokens=0, model=primary)"
+    ],
+    [
+      "record_rejection",
+      "scope:primary"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "not-shorter-closing_hint-False": [
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "accepts",
+      "long source"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LCM summary result rejected (reason=%s, source_tokens=%s, result_tokens=%d, model=%s)",
+      [
+        "not_shorter",
+        10,
+        11,
+        "primary"
+      ],
+      "LCM summary result rejected (reason=not_shorter, source_tokens=10, result_tokens=11, model=primary)"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "not-shorter-closing_hint-True": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "accepts",
+      "long source"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LCM summary result rejected (reason=%s, source_tokens=%s, result_tokens=%d, model=%s)",
+      [
+        "not_shorter",
+        10,
+        11,
+        "primary"
+      ],
+      "LCM summary result rejected (reason=not_shorter, source_tokens=10, result_tokens=11, model=primary)"
+    ],
+    [
+      "record_rejection",
+      "scope:primary"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "not-shorter-no-contract-False": [
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "accepts",
+      "long source"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LCM summary result rejected (reason=%s, source_tokens=%s, result_tokens=%d, model=%s)",
+      [
+        "not_shorter",
+        10,
+        11,
+        "primary"
+      ],
+      "LCM summary result rejected (reason=not_shorter, source_tokens=10, result_tokens=11, model=primary)"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "not-shorter-no-contract-True": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "accepts",
+      "long source"
+    ],
+    [
+      "log",
+      "WARNING",
+      "LCM summary result rejected (reason=%s, source_tokens=%s, result_tokens=%d, model=%s)",
+      [
+        "not_shorter",
+        10,
+        11,
+        "primary"
+      ],
+      "LCM summary result rejected (reason=not_shorter, source_tokens=10, result_tokens=11, model=primary)"
+    ],
+    [
+      "record_rejection",
+      "scope:primary"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "open-circuit": [
+    [
+      "allows",
+      "scope:primary",
+      false
+    ],
+    [
+      "in_config_episode",
+      "scope:primary",
+      false
+    ],
+    [
+      "log",
+      "WARNING",
+      "LCM summary route skipped by open circuit: %s",
+      [
+        "primary"
+      ],
+      "LCM summary route skipped by open circuit: primary"
+    ],
+    [
+      "in_config_episode",
+      "scope:primary",
+      false
+    ],
+    [
+      "log",
+      "WARNING",
+      "LCM summary fallback chain exhausted: all routes are temporarily open",
+      [],
+      "LCM summary fallback chain exhausted: all routes are temporarily open"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "open-config-circuit": [
+    [
+      "allows",
+      "scope:primary",
+      false
+    ],
+    [
+      "in_config_episode",
+      "scope:primary",
+      true
+    ],
+    [
+      "log",
+      "DEBUG",
+      "LCM summary route skipped by open circuit: %s",
+      [
+        "primary"
+      ],
+      "LCM summary route skipped by open circuit: primary"
+    ],
+    [
+      "in_config_episode",
+      "scope:primary",
+      true
+    ],
+    [
+      "log",
+      "DEBUG",
+      "LCM summary fallback chain exhausted: all routes are temporarily open",
+      [],
+      "LCM summary fallback chain exhausted: all routes are temporarily open"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      null
+    ]
+  ],
+  "spend-exhausted": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "admit",
+      "scope:primary",
+      100.0
+    ],
+    [
+      "spend",
+      false
+    ],
+    [
+      "log",
+      "WARNING",
+      "LCM summary spend guard active; skipping LLM summarization and deferring to deterministic fallback",
+      [],
+      "LCM summary spend guard active; skipping LLM summarization and deferring to deterministic fallback"
+    ],
+    [
+      "return",
+      null
+    ],
+    [
+      "state",
+      {},
+      null,
+      false
+    ]
+  ],
+  "verbatim-small": [
+    [
+      "allows",
+      "scope:primary",
+      true
+    ],
+    [
+      "spend",
+      true
+    ],
+    [
+      "provider",
+      "primary",
+      10,
+      120.0,
+      "low"
+    ],
+    [
+      "note_route",
+      "scope:primary",
+      {
+        "model": "primary",
+        "provider": "scripted"
+      }
+    ],
+    [
+      "accepts",
+      "long source"
+    ],
+    [
+      "log",
+      "INFO",
+      "LCM summary result not shorter; small source stored whole (source_tokens=%d, result_tokens=%d, model=%s)",
+      [
+        10,
+        11,
+        "primary"
+      ],
+      "LCM summary result not shorter; small source stored whole (source_tokens=10, result_tokens=11, model=primary)"
+    ],
+    [
+      "provenance",
+      "model",
+      "deterministic"
+    ],
+    [
+      "return",
+      "long source"
+    ],
+    [
+      "state",
+      {
+        "model": "deterministic"
+      },
+      null,
+      null
+    ]
+  ]
+}

@@ -10,6 +10,7 @@ functions that own it. ``engine.py`` imports the entry points it calls.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,15 @@ def _plugin_metadata() -> dict[str, str]:
     if _PLUGIN_METADATA is not None:
         return dict(_PLUGIN_METADATA)
     return dict(metadata)
+
+
+def plugin_docs_url(path: str, version: str) -> str:
+    """Link to a release's docs, or main when the loaded version is unknown."""
+    release = isinstance(version, str) and re.fullmatch(
+        r"\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+        r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?", version)
+    ref = f"v{version}" if release else "main"
+    return f"https://github.com/electricsheephq/lcm-x/blob/{ref}/{path}"
 
 
 def _git_runtime_identity(root: Path) -> dict[str, Any]:

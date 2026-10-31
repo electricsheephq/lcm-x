@@ -91,7 +91,7 @@ def test_t2_preflight_flag_is_ignored(tmp_path, monkeypatch, state, replay_chang
         if replay_changed or state == "cleanup":
             replay[-1]["content"] += " replay adjustment"
         monkeypatch.setattr(engine, "_ingest_messages", lambda _rows: replay)
-        monkeypatch.setattr(engine, "_replay_diff_requests_ingest_cleanup", lambda *_: state == "cleanup")
+        monkeypatch.setattr(engine, "_replay_diff_requests_ingest_cleanup", lambda *_, **__: state == "cleanup")
         try:
             gate = engine.should_compress(prompt_tokens=engine.threshold_tokens if state == "threshold" else 1)
             decision = engine.should_compress_preflight(rows)

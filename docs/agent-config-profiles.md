@@ -12,12 +12,19 @@ each feature does and why, see [Feature overview](features-overview.md).
 
 1. **Environment variables (`LCM_*`) are the primary surface** and always win.
    Set them in the environment that launches Hermes.
+   On a multiplexed Hermes gateway, routed profiles do not read the gateway's
+   process environment: put these settings and provider keys in each profile's
+   `.env` or configured secret source instead. `LCM_HERMES_BASE_DIR` always comes
+   from the process environment.
 2. **`~/.hermes/config.yaml`** participates in three narrow, deliberate ways:
    - `plugins.enabled: [hermes-lcm-x]` + `context.engine: lcm-x` activate the
      plugin (see [Operator guide → Activate](operator-guide.md#activate));
-   - four LCM keys are supported in YAML, each used only when its
-     environment variable is not set: `lcm.context_threshold`
-     (`LCM_CONTEXT_THRESHOLD`), `lcm.model_thresholds`
+   - five LCM keys are supported in YAML, subject to their
+     environment-variable precedence: `lcm.context_threshold`
+     (`LCM_CONTEXT_THRESHOLD`), `lcm.context_threshold_tokens`
+     (`LCM_ABSOLUTE_THRESHOLD_TOKENS`: the environment variable wins
+     when it holds an integer (`0` turns the YAML value off); an empty or
+     non-integer value falls back to the YAML key), `lcm.model_thresholds`
      (`LCM_MODEL_THRESHOLDS`), `lcm.summary_reasoning_effort`
      (`LCM_SUMMARY_REASONING_EFFORT`) and `lcm.expansion_reasoning_effort`
      (`LCM_EXPANSION_REASONING_EFFORT`); other keys under `lcm:` are ignored
@@ -30,8 +37,10 @@ each feature does and why, see [Feature overview](features-overview.md).
    compaction summaries go through the auxiliary model unless you override
    `LCM_SUMMARY_MODEL` — so a fully-local Hermes (local auxiliary model) makes
    every LCM feature below local too, including temporal rollups.
-4. Secrets stay in the environment: the only one LCM ever reads is
-   `VOYAGE_API_KEY`, and only when `LCM_EMBEDDING_PROVIDER=voyage`.
+4. Provider credentials follow the same routed-profile rule: LCM reads
+   `VOYAGE_API_KEY` for Voyage, and the variable named by
+   `LCM_EMBEDDING_API_KEY_ENV` (default `LCM_EMBEDDING_API_KEY`) with
+   `SILICONFLOW_API_KEY` as a fallback for OpenAI-compatible embeddings.
 
 Check what actually took effect at runtime with `/lcm status` (reports config
 sources) and `/lcm doctor` (flags ignored YAML keys and misconfiguration).
@@ -52,7 +61,7 @@ context:
 You get bounded active context, the summary DAG, lossless recovery, and the
 full `lcm_*` tool set at their tested defaults. The defaults are the
 configuration the managed deployment runs: compaction at `0.75` of the window,
-a 24-message fresh tail capped at 24000 tokens, 8000-token leaf chunks, the
+a 24-message fresh tail capped at 24000 tokens, 24000-token leaf chunks, the
 threshold full sweep.
 
 ## Profile: heavy tool-use coding agent
@@ -73,6 +82,10 @@ export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED=true
 # outside the fresh tail are stubbed from 2000 tokens (0 = the first-sight value)
 # export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS=10000
 # export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS=2000
+# An automatic compaction that these stubs alone bring under its target returns
+# with no summary call (#671); a share of the threshold lowers that target
+# (0 = the built-in min(threshold - leaf chunk, 0.95 x threshold))
+# export LCM_STUB_FIRST_EXIT_TARGET_RATIO=0.2
 
 # Default 24000: caps the protected fresh tail by tokens. Prevents one giant
 # recent tool result from pinning the whole budget; while LCM_FRESH_TAIL_COUNT
@@ -90,6 +103,11 @@ refs, and `lcm_grep(content_scope='both')` searches externalized payloads when
 the agent needs "which run printed that error?".
 
 ## Profile: long-horizon personal / companion agent
+
+Optional session-pack recall: `export LCM_RECALL_DELIVERY_UNIT=session` returns
+source neighborhoods within a fixed 16,000 estimated-token / 64,000-character
+JSON budget. The default `hits` retains the existing response; session mode can
+return partial sessions and more messages than the ranked-seed `limit`.
 
 For agents that live for weeks and get asked "what did we do last Tuesday?"
 and "have we talked about this before?".

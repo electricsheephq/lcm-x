@@ -7,24 +7,20 @@ from pathlib import Path
 
 import pytest
 
-from hermes_lcm.config import LCMConfig
-from hermes_lcm.engine import LCMEngine, _OVERFLOW_RECOVERY_PLACEHOLDER
+from hermes_lcm.engine import _OVERFLOW_RECOVERY_PLACEHOLDER
 from hermes_lcm.reconcile import _emission_identity, _finalize_emission_descriptors
 from tests.test_compression_boundary import (
     _compacted_engine, _durable_commit_proof, _V0240_DURABLE_PROOF_KEYS,
 )
 from tests.test_issue_529_overflow_followups import CAP, SYSTEM, OVERSIZED, ORPHAN, _note
 
-from tests.test_host_uid_shadow import ROLLBACK_READERS, _skip_or_fail_in_ci
+from tests.harness import make_engine
+from tests.test_host_uid_shadow import PRE_V026_READERS, ROLLBACK_READERS, _skip_or_fail_in_ci
 
 
 def _engine(path, sid="S0"):
-    engine = LCMEngine(config=LCMConfig(
-        database_path=str(path / "lcm.db"), fresh_tail_count=10,
-        large_output_externalization_path=str(path / "externalized"),
-    ), hermes_home=str(path / "home"))
-    engine.on_session_start(sid, platform="acp", context_length=200_000)
-    return engine
+    return make_engine(path, window=200_000, session_id=sid, platform="acp", fresh_tail_count=10,
+                       large_output_externalization_path=str(path / "externalized"))
 
 
 def _recover(engine, monkeypatch, *, system=True, older="older request", stamp=False, prefix=None):
@@ -280,8 +276,8 @@ def test_loss_probe_rc1_rollback_reader(tmp_path, monkeypatch, reader):
         engine.ingest(host)
         for name in ("_occurrence_replay_identities", "_durable_commit_proof_payload", "_cursor_from_durable_commit_proof"):
             monkeypatch.setattr(engine, name, types.MethodType(getattr(module.ReconcileMixin, name), engine))
-        # v0.26.2 understands descriptor v4 and generated identities; these are pre-v0.26 premises.
-        if reader != "v0.26.2":
+        # Skip v0.26.2, v0.27.0 and v0.28.0: they understand descriptor v4 and generated identities.
+        if reader in PRE_V026_READERS:
             assert engine._cursor_from_durable_commit_proof(host) is None
             assert engine._cursor_from_durable_commit_proof(_merged(out) + host[-1:]) is None
             assert engine._cursor_from_durable_commit_proof(_merged(out)) is None

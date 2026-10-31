@@ -111,12 +111,13 @@ def _resolve(rows: list[tuple], home: Path) -> tuple[list[tuple], dict, set]:
             ids.add(row[0])
     numbers = {"resolved": len(ids), "unresolved": len(losses), "deficit_rows": len(losses),
                "reasons": dict(Counter(e["reason"] for e in losses)),
-               "store_ids": [e["store_id"] for e in losses][:10], "deficits": losses[:10],
+               "store_ids": [e["store_id"] for e in losses], "deficits": losses,
                "content_mismatch_rows": 0, "content_mismatch": []}
     return resolved, numbers, ids
 
 
-def mismatches(numbers: dict, rows: list[tuple], ids: set, per: dict, group, expected_tools, loose, host) -> None:
+def mismatches(numbers: dict, rows: list[tuple], ids: set, per: dict, group, expected_tools, loose, host,
+               multiset_parts=None) -> None:
     """Diagnostic only: name the resolved rows whose bytes match nothing expected. Ordinary B2 accounting already
     fails a wrong resolved row (a missing key plus a surplus one), so this never adds to ``deficit_rows``. It looks
     only at the rows B2 scores: user/assistant/tool rows of an expected group."""
@@ -136,6 +137,9 @@ def mismatches(numbers: dict, rows: list[tuple], ids: set, per: dict, group, exp
             licensed = role == "user" and (host or {}).get(g, {}).get("keys", {}).get(key, {}).get("n", 0)
             bad = bool(multiset.norm(content)) and key not in want[g] and not licensed
         if bad:
+            receipt = {"store_id": sid, "sha256": multiset.h(content)}
+            if role == "user" and multiset_parts is not None and not multiset_parts[g]["deficit_rows"]:
+                numbers.setdefault("resolved_surplus", []).append(receipt)
+                continue
             numbers["content_mismatch_rows"] += 1
-            if len(numbers["content_mismatch"]) < 10:
-                numbers["content_mismatch"].append({"store_id": sid, "sha256": multiset.h(content)})
+            numbers["content_mismatch"].append(receipt)

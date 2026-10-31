@@ -21,6 +21,7 @@ import time
 from typing import Any, Iterator, Literal, NamedTuple, Sequence
 import uuid
 
+from .sqlite_session import ConnectionPolicy, open_connection
 from .db_bootstrap import (
     configure_connection,
     mark_migration_step_complete,
@@ -535,14 +536,15 @@ class QueryViewStore:
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(
-            str(self.db_path), timeout=5.0, check_same_thread=False
-        )
-        self._write_lock = threading.RLock()
+        open_connection(ConnectionPolicy(
+            database=str(self.db_path),
+            connect_kwargs=(("timeout", 5.0), ("check_same_thread", False)),
+            before_row_factory=(refuse_schema_version_too_new, configure_connection),
+            row_factory=sqlite3.Row,
+            on_open=self._adopt_connection,
+            on_setup_error=self._close_failed_init,
+        ))
         try:
-            refuse_schema_version_too_new(self._conn)
-            configure_connection(self._conn)
-            self._conn.row_factory = sqlite3.Row
             run_versioned_migrations(self._conn)
             _ensure_query_view_schema(self._conn)
             missing = _verify_query_view_schema(self._conn)
@@ -553,11 +555,18 @@ class QueryViewStore:
             mark_migration_step_complete(self._conn, QUERY_VIEW_MIGRATION_STEP)
             self._conn.commit()
         except Exception as exc:
-            self._conn.close()
-            self._conn = None
-            if isinstance(exc, sqlite3.Error):
-                raise RuntimeError(f"query-view schema ensure failed: {exc}") from exc
+            self._close_failed_init(exc)
             raise
+
+    def _adopt_connection(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self._write_lock = threading.RLock()
+
+    def _close_failed_init(self, exc: Exception) -> None:
+        self._conn.close()
+        self._conn = None
+        if isinstance(exc, sqlite3.Error):
+            raise RuntimeError(f"query-view schema ensure failed: {exc}") from exc
 
     @contextmanager
     def _write_transaction(self) -> Iterator[None]:

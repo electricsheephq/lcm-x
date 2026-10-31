@@ -1,0 +1,59 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "1586-idle-duty-probe-2026-10-23",
+  "project": "lcm-x",
+  "kind": "benchmark",
+  "status": "settled",
+  "owner_lane": "lcmx-1586-duty-pr",
+  "claim_class": "advisory",
+  "created": "2026-10-23T06:39:10Z",
+  "settled": "2026-10-23",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "777f6756c3dd7f9976a45b4040d1f6697f0f5474",
+    "dirty": false,
+    "baseline_sha": "7f82e84b25d00fe8a5abcb38590c2b129abe4a8f",
+    "note": "Measured probe commits; imported evidence commit is 5147f75305b5d262dcb30a13a194f2c89e4a109c."
+  },
+  "env": {
+    "command": "Import existing probe summaries from runs 39888055698, 39888063665, 39888076007, 39888085612; no new run",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "LOCAL idle duty floor surrogate",
+      "metric": "max_mean_cpu_cores",
+      "value": 0.5505486880915895,
+      "n": 4,
+      "baseline_run": "39888055698",
+      "source": "1586-idle-duty-probe-2026-10-23.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "1586-idle-duty-probe-2026-10-23.json",
+      "role": "per-item",
+      "sha256": "e4d1059d0cba3a6517a885a12b6f61b9aa7aeb24be35ec74527ac19ed3e2e716",
+      "bytes": 12037
+    }
+  ],
+  "rescore": {
+    "command": "python3 -c 'import json; d=json.load(open(\"1586-idle-duty-probe-2026-10-23.json\")); print(max(c[\"cpu\"][\"mean_cores\"] for c in d[\"cells\"] if c[\"idle_multiplier\"] == 0.82))' ",
+    "inputs": [
+      "1586-idle-duty-probe-2026-10-23.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [
+    "https://github.com/electricsheephq/lcm-x/issues/1586#issuecomment-6359031801"
+  ],
+  "keep": [
+    "1586-idle-duty-probe-2026-10-23.json",
+    "1586-idle-duty-probe-2026-10-23-RESULT.md"
+  ],
+  "publication_note": "Public-safe imported receipt; full original outputs not supplied and T2 incomplete. No cleanup."
+}

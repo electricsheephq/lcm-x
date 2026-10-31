@@ -3,8 +3,8 @@
 Isolated from ``engine.py`` (WS5 seam) so the Codex-specific routing policy —
 which model slugs are on the ChatGPT Codex OAuth route and what effective
 context window that route enforces — lives in one cohesive place. These are
-pure helpers with no engine state; ``engine.py`` imports them and keeps its own
-policy constants (for example the gpt-5.5 compaction threshold).
+pure helpers with no engine state; ``compaction_policy.py`` composes them with
+the compaction threshold and active-assembly policy.
 """
 
 from __future__ import annotations

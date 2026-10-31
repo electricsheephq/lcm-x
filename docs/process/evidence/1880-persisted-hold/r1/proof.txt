@@ -1,0 +1,87 @@
+FIX ROUND r1 — synthetic-regression evidence
+Starting product: e5af80d7c96ee8fedfc4625d853874a844baacd9
+No schema, admission, stored-message or provenance change.
+
+RED before product edits:
+pytest selection: tests/test_issue_1880_persisted_hold.py -k r1
+4 failed, 3 passed, 42 deselected in 1.07s
+Expected failures:
+- test_r1_unpersistable_result_keeps_base_local_hold[route_at]: automatic gate reopened
+- test_r1_unpersistable_result_keeps_base_local_hold[write_failure]: automatic gate reopened
+- test_r1_publication_between_verdict_and_persist_cannot_certify_new_state: reader incorrectly held
+- test_r1_committed_leaf_clears_scoped_record[corrupt]: JSONDecodeError after committed leaf
+The leaf fixture was then isolated from condensation. With unchanged starting product:
+pytest selection: tests/test_issue_1880_persisted_hold.py -k 'r1_committed_leaf and corrupt'
+1 failed, 48 deselected in 0.82s
+
+GREEN:
+pytest selection: tests/test_issue_1880_persisted_hold.py
+49 passed in 2.11s
+All test files containing no_progress (affected-files.txt), including final isolated leaf fixture:
+1100 passed, 1 skipped, 8 xfailed in 74.70s (0:01:14)
+Existing CI ContextEngine stub; offline character counter; synthetic homes/stores;
+pytest.main invoked the selectors above with no cacheprovider, isolated basetemps,
+tmp_path_retention_policy=failed and JUnit capture. No live profile accessed.
+
+Publication-clear sensitivity (exact candidate bytes restored after each mutant):
+- compaction.py, _advance_after_leaf: replace its sole
+  self._clear_persisted_no_progress_hold() with pass
+  pytest selection: tests/test_issue_1880_persisted_hold.py -k 'r1_committed_leaf and valid'
+  1 failed, 48 deselected in 0.82s
+  Failure: scoped record remains non-null after committed leaf.
+- engine.py, _run_threshold_sweep_condensation: replace its sole
+  self._clear_persisted_no_progress_hold() with pass
+  pytest selection: tests/test_issue_1880_persisted_hold.py -k r1_committed_condensation
+  1 failed, 48 deselected in 3.73s
+  Failure: scoped record remains non-null after committed condensation.
+The initial non-isolated leaf mutant passed because a later condensation cleared
+its record. The final fixture disables threshold full sweep and asserts that the
+condensation helper is never called; it now detects removal of the leaf clear.
+
+Golden observation:
+pytest selection: tests/behaviour/test_compress_trace.py
+1 failed, 193 passed in 7.44s
+Only failure: unobserved _no_progress_proof_fingerprint.
+Added that field to OBSERVED_ATTRIBUTES and preserved digest equality/transitions
+with stable labels because the digest incorporates sandbox paths.
+Existing compress_trace_harness --regenerate: Wrote 162 scenarios to compress_trace.json
+Mechanical delta check: all 162 changes contain only the new snapshot observation
+and the complete-state attrs count/digest. No event, SQL, source row, log or
+returned-message observation was removed or weakened.
+pytest selection: tests/behaviour/test_compress_trace.py
+194 passed in 7.57s
+
+Admission/cost:
+12 gate/fingerprint/start methods are byte-identical to the starting product;
+see admission-call-graph.json for hashes and call graph. Snapshotting is in
+_finish_without_leaf at the completed verdict; comparison/fallback is in
+_persist_no_progress_hold after successful commit-proof bookkeeping. Corrupt
+record clearing runs only after publication. No new admission cost run required.
+
+ruff --version
+ruff 0.15.13
+ruff check .
+All checks passed!
+git diff --check
+exit 0; no output
+
+Testing improved: publication-clear tests with mutant proof; persistence-failure
+and concurrent-publication regression tests.
+Not proven: live-host hit rate, group latency, host refresh latency, #1162 repair,
+merge readiness, release, runtime safety or customer readiness.
+
+Conflict-forced main integration:
+GitHub reported PR1888 mergeable=CONFLICTING at the starting remote head.
+Merged main 931ea5562dc0c15f126e22239bdc3699c1da6f35 with a merge commit,
+never rebase. Product source auto-merged; conflicts were limited to the compress
+and ingest golden fixtures. Incoming main changes are separate from the 15-line
+r1 product correction; r1 introduces no DDL or stored-row mutation.
+Regenerated the two conflicting fixtures once from the integrated source.
+Compared to the r1 parent, compress changes only full-state digests and one
+_config observation (incoming default-off config); no other events changed.
+The merged ingest observer includes incoming sender fields and the existing
+current-ingest proof. No observer, assertion, fixture-size cap or scenario removed.
+pytest selection: tests/behaviour/test_compress_trace.py tests/behaviour/test_ingest_trace.py
+416 passed in 26.69s
+ruff check . (0.15.13): All checks passed!
+git diff --cached --check: exit 0; no output

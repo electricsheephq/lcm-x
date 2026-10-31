@@ -9,17 +9,21 @@ row identity (`store_id`) for DAG/source lookup.
 """
 
 
+import hashlib
 import json
 import logging
 import math
+import secrets
 import sqlite3
 import threading
 import time
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Collection, Dict, Iterable, List, Optional
 
 from .db_bootstrap import (
+    owned_conversation_clause,
     select_conversation_range,
     ExternalContentFtsSpec,
     add_column_if_missing,
@@ -33,7 +37,7 @@ from .db_bootstrap import (
 from .config import LCMConfig
 from .ingest_protection import protect_message_for_ingest, protect_messages_for_ingest
 from .search_query import (
-    build_snippet,
+    build_snippet_with_span,
     compute_search_candidate_cap,
     compute_directness_rank_bonus_upper_bound,
     compute_directness_score,
@@ -52,8 +56,12 @@ from .search_query import (
     should_apply_directness_rank_adjustment,
 )
 from .message_content import normalize_content_value as _normalize_content_value
+from .sqlite_session import ConnectionPolicy, TransactionOwner, open_connection
 from .sqlite_util import (
+    _SqliteSavepointError,
+    _is_ingest_busy_error,
     _run_sqlite_write_with_snapshot_retry,
+    _sqlite_savepoint,
     _temporary_sqlite_busy_timeout,
 )
 from .tokens import count_message_tokens
@@ -61,6 +69,34 @@ from .tokens import count_message_tokens
 logger = logging.getLogger(__name__)
 
 INGESTED_AT_BACKFILL_STEP = "messages_ingested_at_backfill_v1"
+_INGEST_LEDGER_TABLES = (
+    "ledger_meta", "occurrence_bindings", "ledger_emissions", "stamp_observations",
+    "ingest_views", "lineage_marks",
+)
+
+
+def ledger_digest(salt: bytes, *parts) -> bytes:
+    """Digest the P1b-defined identity tuple before redaction (design M4).
+
+    Each part has a one-byte type tag and an eight-byte big-endian payload length.
+    An int outside the signed 64-bit range raises OverflowError.
+    """
+    digest = hashlib.blake2b(key=salt, digest_size=16)
+    for part in parts:
+        if part is None:
+            tag, payload = b"n", b""
+        elif isinstance(part, bytes):
+            tag, payload = b"b", part
+        elif isinstance(part, str):
+            tag, payload = b"s", part.encode("utf-8")
+        elif isinstance(part, bool):
+            raise TypeError("unsupported ledger digest part: bool")
+        elif isinstance(part, int):
+            tag, payload = b"i", part.to_bytes(8, "big", signed=True)
+        else:
+            raise TypeError(f"unsupported ledger digest part: {type(part).__name__}")
+        digest.update(tag + len(payload).to_bytes(8, "big") + payload)
+    return digest.digest()
 
 
 _MESSAGE_ROLE_BIAS_SQL = "CASE m.role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 WHEN 'tool' THEN 2 ELSE 1 END"
@@ -71,6 +107,67 @@ _MESSAGE_SELECT_COLUMNS = (
 )
 _MESSAGE_SELECT_COLUMN_COUNT = len(_MESSAGE_SELECT_COLUMNS.split(","))
 _UNKNOWN_SOURCE = "unknown"
+
+
+class _ObservedAtRows(list):
+    """Lookup rows with private, non-persisted provenance from the same fetched data."""
+
+    def __init__(self, rows, canonical_stamps):
+        super().__init__(rows)
+        self.canonical_stamps = canonical_stamps
+
+    def __reduce__(self):
+        return list, (list(self),)
+
+    def __copy__(self):
+        return list(self)
+
+    def __deepcopy__(self, memo):
+        from copy import deepcopy
+
+        return deepcopy(list(self), memo)
+
+
+def _matching_names_filter(names: Collection[str] | None, prefix: str) -> tuple[str, list[Any]]:
+    """Restrict question ranking using the same literal FTS/LIKE name matching."""
+    if names is None:
+        return "", []
+    clauses, args, fts = [], [], []
+    for name in names:
+        query = '"' + name.replace('"', '""') + '"'
+        safe = sanitize_fts5_query(query)
+        if requires_like_fallback(query, safe):
+            for term in extract_search_terms(sanitize_like_query(query)):
+                clauses.append(f"{prefix}content LIKE ? ESCAPE '\\'")
+                args.append(f"%{escape_like(term)}%")
+        else:
+            fts.append(safe)
+    if fts:
+        clauses.append(f"{prefix}store_id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
+        args.append(" OR ".join(f"({query})" for query in fts))
+    return "(" + " OR ".join(clauses) + ")" if clauses else "0", args
+
+
+def _fetch_ranked_search_rows(conn: sqlite3.Connection, sql: str, args: list[Any]) -> list[list[Any]]:
+    # A single SQLite result avoids reacquiring Python's GIL for every candidate.
+    # JSON1 rounds REALs; tagged round-trip decimals preserve the original bits.
+    names = [name.strip() for name in _MESSAGE_SELECT_COLUMNS.split(",")] + ["search_rank", "snippet"]
+    packed = ", ".join(["ordinal"] + [
+        f"CASE WHEN typeof({name})='real' THEN json_object('_real',printf('%!.17g',{name})) ELSE {name} END"
+        for name in names
+    ])
+    aggregate = f"""WITH ranked AS NOT MATERIALIZED ({sql})
+        SELECT json_group_array(json_array({packed})) FROM ranked"""
+    try:
+        decoded = json.loads(conn.execute(aggregate, args).fetchone()[0])
+    except sqlite3.Error as exc:
+        if getattr(exc, "sqlite_errorcode", None) not in (sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM):
+            raise
+        # Only the packed value failed: retain the same ranked full-text window.
+        return [list(row)[1:] for row in conn.execute(sql, args).fetchall()]
+    decoded.sort(key=lambda row: row[0])
+    return [[float(value['_real']) if isinstance(value, dict) else value for value in row[1:]]
+            for row in decoded]
 
 
 def _legacy_blank_source_clause(column: str) -> str:
@@ -309,16 +406,69 @@ def delete_host_uid_bindings(conn: sqlite3.Connection, rows_sql: str, args: tupl
         conn.execute(f"DELETE FROM host_uid_bindings WHERE store_id IN ({rows_sql})", args)
 
 
+def delete_ingest_ledger_rows(conn: sqlite3.Connection, rows_sql: str, args: tuple = ()) -> None:
+    """Join the caller's forget/purge transaction; never create absent ledger tables.
+
+    Bindings are kept forever except explicit forget/purge of user data.
+    Marks stay: a lower actual maximum must never be mistaken for rollback.
+    """
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='occurrence_bindings'").fetchone():
+        return
+    lineages = {row[0] for row in conn.execute(
+        f"SELECT DISTINCT lineage FROM occurrence_bindings WHERE store_id IN ({rows_sql})", args)}
+    emission_match = (
+        "(json_valid(source_store_ids) AND EXISTS (SELECT 1 FROM json_each("
+        "CASE WHEN json_valid(source_store_ids) THEN source_store_ids ELSE '[]' END) "
+        f"WHERE CAST(value AS INTEGER) IN ({rows_sql}))) OR "
+        f"next_occ_id IN (SELECT occ_id FROM occurrence_bindings WHERE store_id IN ({rows_sql})) OR "
+        f"recovered_store_id IN ({rows_sql})"
+    )
+    lineages.update(row[0] for row in conn.execute(
+        f"SELECT DISTINCT lineage FROM ledger_emissions WHERE {emission_match}", args * 3))
+    conn.execute(f"DELETE FROM ledger_emissions WHERE {emission_match}", args * 3)
+    conn.execute("DELETE FROM stamp_observations WHERE occ_id IN "
+                 f"(SELECT occ_id FROM occurrence_bindings WHERE store_id IN ({rows_sql}))", args)
+    conn.execute(f"DELETE FROM occurrence_bindings WHERE store_id IN ({rows_sql})", args)
+    conn.executemany("DELETE FROM ingest_views WHERE lineage=?", ((lineage,) for lineage in lineages))
+
+
+def delete_chunk_inflight(conn: sqlite3.Connection, rows_sql: str, args: tuple = ()) -> None:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='lcm_embedding_backfill_inflight'").fetchone():
+        conn.execute(
+            "DELETE FROM lcm_embedding_backfill_inflight WHERE instr(embedded_id, ':') > 0 "
+            f"AND CAST(substr(embedded_id, 1, instr(embedded_id, ':') - 1) AS INTEGER) IN ({rows_sql})", args,
+        )
+
+
+def delete_session_lineage(conn: sqlite3.Connection, sessions_sql: str, args: tuple = ()) -> None:
+    """#1931: a deleted session's own parent link goes with its messages (``sessions_sql`` selects the session
+    ids), on the caller's transaction. The links of its children stay, so a child id still works on its own."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_lineage'").fetchone():
+        conn.execute(f"DELETE FROM session_lineage WHERE child_session_id IN ({sessions_sql})", args)
+
+
+def _database_identity(path: Path, store: object) -> str:
+    """#719: the file a store opens, however its path was spelled; ``:memory:`` is one per store."""
+    if str(path) == ":memory:":
+        return f":memory:{id(store)}"
+    try:
+        return str(path.resolve())
+    except (OSError, RuntimeError, ValueError):  # unresolvable: keep the spelled path
+        return str(path)
+
+
 class MessageStore:
     """SQLite-backed immutable message store."""
 
     def __init__(self, db_path: str | Path, *, ingest_protection_config=None, hermes_home: str = ""):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.db_identity = _database_identity(self.db_path, self)  # fixed at open: a later cwd or symlink change cannot move it
         self._ingest_protection_config = ingest_protection_config or LCMConfig(database_path=str(self.db_path))
         self._hermes_home = hermes_home or str(self.db_path.parent)
         self._context_window_tokens: dict[str, int] = {}  # transient, session-keyed; never LCMConfig/SQLite
         self._conn: Optional[sqlite3.Connection] = None
+        self._carried_relation_connections: set[sqlite3.Connection] = set()
         # ``self._conn`` is shared across threads (the connection is opened with
         # ``check_same_thread=False``). SQLite's own C-level mutex serializes
         # statements at the engine layer, but the Python ``sqlite3`` module
@@ -336,12 +486,22 @@ class MessageStore:
         # change semantics for single-threaded callers and adds only a single
         # uncontended ``RLock.acquire``/``release`` pair per operation.
         self._write_lock = threading.RLock()
+        self._transaction_owner = TransactionOwner(self._write_lock)
+        self._manual_chunk_backlog_pending = False
         self._init_db()
 
     def _init_db(self):
-        self._conn = sqlite3.connect(str(self.db_path), timeout=5.0, check_same_thread=False)
-        refuse_schema_version_too_new(self._conn)
-        configure_connection(self._conn)
+        # #1159: reserve the write lock before FTS5 can read during re-prepare.
+        open_connection(ConnectionPolicy(
+            database=str(self.db_path),
+            connect_kwargs=(
+                ("timeout", 5.0), ("check_same_thread", False), ("isolation_level", "IMMEDIATE"),
+            ),
+            before_row_factory=(refuse_schema_version_too_new, configure_connection),
+            row_factory=None,
+            on_open=lambda conn: setattr(self, "_conn", conn),
+            on_setup_error=None,
+        ))
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS messages (
                 store_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -358,7 +518,9 @@ class MessageStore:
                 pinned INTEGER DEFAULT 0,
                 ingested_at REAL,
                 observed_at REAL,
-                observed_at_source TEXT
+                observed_at_source TEXT,
+                sender_id TEXT,
+                sender_source TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_msg_session
                 ON messages(session_id, store_id);
@@ -374,9 +536,9 @@ class MessageStore:
             self._conn,
             build_message_fts_spec(),
         )
+        # Also ensures conversation_id and its index on current-schema opens.
         run_versioned_migrations(self._conn)
         self._ensure_source_column()
-        self._ensure_conversation_id_column()
         self._ensure_time_contract_columns()
         self._conn.commit()
         # False: a busy writer deferred stem init, so this handle reads only the plain index.
@@ -392,18 +554,6 @@ class MessageStore:
         )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_msg_source_session ON messages(source, session_id, store_id)"
-        )
-
-    def _ensure_conversation_id_column(self) -> None:
-        columns = {
-            row[1] for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()
-        }
-        add_column_if_missing(
-            self._conn, columns, "conversation_id",
-            "ALTER TABLE messages ADD COLUMN conversation_id TEXT DEFAULT ''",
-        )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_msg_conversation_session ON messages(conversation_id, session_id, store_id)"
         )
 
     def _ensure_time_contract_columns(self) -> None:
@@ -434,6 +584,8 @@ class MessageStore:
             "observed_at_source",
             "ALTER TABLE messages ADD COLUMN observed_at_source TEXT",
         )
+        for name in ("sender_id", "sender_source"):
+            add_column_if_missing(self._conn, columns, name, f"ALTER TABLE messages ADD COLUMN {name} TEXT")
         # The NULL probe has no index and scans the whole table, so run it once
         # per store and remember that it ran; register() opens the store under
         # Hermes' plugin load deadline (#622).
@@ -462,6 +614,45 @@ class MessageStore:
 
     def clear_context_windows(self) -> None:
         self._context_window_tokens.clear()
+
+    def _mark_manual_chunk_backlog(self) -> None:
+        was_in_transaction = self._conn.in_transaction
+        try:
+            config = self._ingest_protection_config
+            if not config.embeddings_enabled:
+                return
+            from . import command, embedding_maintenance
+            if embedding_maintenance._automatic_chunks_allowed(config, command):
+                return
+            if self._conn.in_transaction and not (getattr(self, "_foreground_ingest_owner", False)
+                                                  and self._transaction_owner.owns_connection(self._conn)):
+                self._manual_chunk_backlog_pending = True
+                return  # Outside foreground ingest, retain the caller's deferred marker boundary.
+            self._manual_chunk_backlog_pending = False
+            with (_sqlite_savepoint(self._conn, abort_on_cleanup_failure=True, owner_active=True,
+                                    foreground_ingest=getattr(self, "_foreground_ingest_owner", False))
+                  if self._transaction_owner.owns_connection(self._conn) else nullcontext()):
+                self._write_manual_chunk_backlog()
+        except Exception as exc:
+            if self._transaction_owner.owns_connection(self._conn) and (
+                isinstance(exc, _SqliteSavepointError) or _is_ingest_busy_error(exc)
+                or isinstance(exc, sqlite3.Error) and not self._conn.in_transaction
+            ):
+                raise
+            if not was_in_transaction and self._conn.in_transaction:
+                self._conn.rollback()
+            logging.getLogger(__name__).debug("Could not mark manual chunk backlog", exc_info=True)
+
+    def _write_manual_chunk_backlog(self):
+        self._conn.execute(
+                "UPDATE metadata SET value=json_set(value, '$.remaining', json('true'), '$.updated_at', ?) "
+                "WHERE key='embedding_catchup:chunk:' || (SELECT identity_hash FROM lcm_embedding_profile "
+                "WHERE active=1 AND archived_at IS NULL AND task IN ('chunk', 'chunk+prefix') "
+                "ORDER BY registered_at DESC, identity_hash DESC LIMIT 1) "
+                "AND json_type(value, '$.remaining') IS NOT 'true'",
+                (time.time(),),
+            )
+        self._commit()
 
     def append(self, session_id: str, msg: Dict[str, Any],
                token_estimate: int = 0, source: str = "",
@@ -503,7 +694,8 @@ class MessageStore:
                     "host_message_timestamp" if observed_at is not None else None,
                 ),
             )
-            self._conn.commit()
+            self._commit()
+            self._mark_manual_chunk_backlog()
             return cur.lastrowid
 
     def append_batch(self, session_id: str,
@@ -540,7 +732,8 @@ class MessageStore:
                                 ] = None,
                                 metadata_messages: Optional[
                                     List[Dict[str, Any]]
-                                ] = None) -> List[int]:
+                                ] = None,
+                                senders: Optional[List[Optional[tuple[str, str]]]] = None) -> List[int]:
         """Persist messages that already passed ingest protection.
 
         This is an internal fast path for callers that need the protected form
@@ -554,6 +747,8 @@ class MessageStore:
             raise ValueError(
                 "metadata_messages must align one-to-one with protected messages"
             )
+        if senders is not None and len(senders) != len(messages):
+            raise ValueError("senders must align one-to-one with protected messages")
 
         conn = self._conn
         if conn is None:
@@ -566,12 +761,18 @@ class MessageStore:
                 tc_json = json.dumps(tc) if tc else None
                 ts = time.time()
                 observed_at = _normalize_observed_at(msg.get("timestamp"))
+                sender = senders[index] if senders is not None else None
                 cur = conn.execute(
                     """INSERT INTO messages
                        (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
                         tool_name, timestamp, token_estimate, pinned, ingested_at,
                         observed_at, observed_at_source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""" if sender is None else
+                    """INSERT INTO messages
+                       (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
+                        tool_name, timestamp, token_estimate, pinned, ingested_at,
+                        observed_at, observed_at_source, sender_id, sender_source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         _normalize_source_value(source),
@@ -587,7 +788,7 @@ class MessageStore:
                         ts,
                         observed_at,
                         "host_message_timestamp" if observed_at is not None else None,
-                    ),
+                    ) + (sender or ()),
                 )
                 if cur.lastrowid is None:
                     raise RuntimeError("SQLite did not return a message id")
@@ -611,11 +812,68 @@ class MessageStore:
             return ids
 
         with self._write_lock:
-            return _run_sqlite_write_with_snapshot_retry(
+            if (getattr(self, "_foreground_ingest_owner", False)
+                    and self._transaction_owner.owns_connection(conn) and not conn.in_transaction):
+                raise _SqliteSavepointError("Foreground ingest transaction lost before INSERT")
+            ids = _run_sqlite_write_with_snapshot_retry(
                 conn,
                 insert_messages,
                 operation_name="message_store.append_protected_batch",
+                owner_active=self._transaction_owner.owns_connection(conn),
             )
+            if ids:
+                self._mark_manual_chunk_backlog()
+            return ids
+
+    def get_message_senders(self, store_ids) -> dict[int, tuple[str | None, str | None]]:
+        if not store_ids:
+            return {}
+        marks = ",".join("?" for _ in store_ids)
+        return {int(sid): (sender, source) for sid, sender, source in self._conn.execute(
+            f"SELECT store_id, sender_id, sender_source FROM messages WHERE store_id IN ({marks})", list(store_ids))}
+
+    def set_sender_if_null(self, store_id, sender_id, sender_source, session_ids) -> int:
+        if not session_ids or not self._write_lock.acquire(blocking=False):
+            return 0
+        conn, opened, timeout = self._conn, False, None
+        try:
+            timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            conn.execute("PRAGMA busy_timeout=0")
+            if not conn.in_transaction:
+                conn.execute("BEGIN")
+                opened = True
+            marks = ",".join("?" for _ in session_ids)
+            # Global AUTOINCREMENT store_id orders rows across sessions, regardless of wall clocks.
+            count = conn.execute(
+                "UPDATE messages SET sender_id = ?, sender_source = ?"
+                " WHERE store_id = ? AND role = 'user' AND sender_id IS NULL AND sender_source IS NULL"
+                f" AND session_id IN ({marks})"
+                f" AND NOT EXISTS (SELECT 1 FROM messages later WHERE later.session_id IN ({marks})"
+                " AND later.role = 'user' AND later.store_id > messages.store_id)",
+                (sender_id, sender_source, store_id, *session_ids, *session_ids)).rowcount
+            assert count in (0, 1)
+            if not count:
+                existing = self.get_message_senders([store_id]).get(store_id)
+                if existing not in (None, (None, None), (sender_id, sender_source)):
+                    logger.debug("sender_capture:conflict")
+            if opened:
+                conn.commit()
+            return count
+        except BaseException as exc:
+            if opened:
+                conn.rollback()
+            if not isinstance(exc, Exception):
+                raise
+            logger.debug("sender_capture:write_unavailable")
+            return 0
+        finally:
+            try:
+                if timeout is not None:
+                    conn.execute(f"PRAGMA busy_timeout={int(timeout)}")
+            except Exception:
+                logger.debug("sender_capture:restore_error")
+            finally:
+                self._write_lock.release()
 
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
         """Move all persisted messages from one session_id to another."""
@@ -626,19 +884,21 @@ class MessageStore:
                 "UPDATE messages SET session_id = ? WHERE session_id = ?",
                 (new_session_id, old_session_id),
             )
-            self._conn.commit()
+            self._commit()
             return cur.rowcount if cur.rowcount is not None else 0
 
     def delete_session_messages(self, session_id: str) -> int:
         """Delete all messages for a session. Returns count deleted."""
-        with self._write_lock:
+        with self.atomic(immediate=True):
+            delete_ingest_ledger_rows(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_message_relations(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_host_uid_bindings(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
+            delete_chunk_inflight(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
+            delete_session_lineage(self._conn, "SELECT ?", (session_id,))
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),
             )
-            self._conn.commit()
             deleted = cur.rowcount if cur.rowcount is not None else 0
             return deleted
 
@@ -681,7 +941,7 @@ class MessageStore:
             )
             if before_commit is not None:
                 before_commit(self._conn, store_id)
-            self._conn.commit()
+            self._commit()
             return True
 
     def pin(self, store_id: int) -> None:
@@ -691,14 +951,14 @@ class MessageStore:
             self._conn.execute(
                 "UPDATE messages SET pinned = 1 WHERE store_id = ?", (store_id,)
             )
-            self._conn.commit()
+            self._commit()
 
     def unpin(self, store_id: int) -> None:
         with self._write_lock:
             self._conn.execute(
                 "UPDATE messages SET pinned = 0 WHERE store_id = ?", (store_id,)
             )
-            self._conn.commit()
+            self._commit()
 
     # -- Read operations ----------------------------------------------------
 
@@ -708,6 +968,10 @@ class MessageStore:
             f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE store_id = ?", (store_id,)
         ).fetchone()
         return self._row_to_dict(row) if row else None
+
+    def max_store_id(self) -> int:
+        """The newest stored message id (0 for an empty store)."""
+        return int(self._conn.execute("SELECT COALESCE(MAX(store_id), 0) FROM messages").fetchone()[0])
 
     def get_batch(self, store_ids: List[int]) -> Dict[int, Dict[str, Any]]:
         """Retrieve multiple messages by store_id in a single query.
@@ -723,32 +987,53 @@ class MessageStore:
         ).fetchall()
         return {row[0]: self._row_to_dict(row) for row in rows}
 
+    @contextmanager
+    def _read_snapshot(self):
+        """Hold a deferred read snapshot, retaining an enclosing transaction."""
+        with self._write_lock:
+            conn = self._conn
+            owns = not conn.in_transaction
+            if owns:
+                conn.execute("BEGIN")
+            try:
+                yield
+                if owns:
+                    conn.commit()
+            except BaseException:
+                if owns:
+                    conn.rollback()
+                raise
+
     def scan_evidence_rows(self, *, limit: int = 4096) -> Dict[str, Any]:
         """Return one bounded, read-only whole-corpus evidence snapshot.
 
-        The window metadata and rows come from one SQLite statement, so a
+        The window metadata and rows come from one read transaction, so a
         caller cannot accidentally certify finite coverage from a count and a
         row page taken at different corpus generations.  This API deliberately
         has no query or session filter: a narrower scan is not whole-corpus
         coverage.  Callers must treat ``truncated`` as an honest fallback.
         """
         bounded_limit = min(4096, max(1, int(limit)))
-        rows = self._conn.execute(
-            f"""
-            WITH snapshot AS (
-                SELECT {_MESSAGE_SELECT_COLUMNS},
-                       COUNT(*) OVER () AS snapshot_total_rows,
-                       MAX(store_id) OVER () AS snapshot_max_store_id,
-                       SUM(CASE WHEN observed_at IS NULL THEN 1 ELSE 0 END)
-                           OVER () AS snapshot_observed_at_missing_rows
-                FROM messages
-            )
-            SELECT * FROM snapshot
-            ORDER BY store_id
-            LIMIT ?
-            """,
-            (bounded_limit,),
-        ).fetchall()
+        with self._write_lock:
+            conn = self._conn
+            owns_transaction = not conn.in_transaction
+            if owns_transaction:
+                conn.execute("BEGIN")
+            try:
+                totals = conn.execute(
+                    "SELECT COUNT(*), MAX(store_id), "
+                    "SUM(CASE WHEN observed_at IS NULL THEN 1 ELSE 0 END) FROM messages"
+                ).fetchone()
+                rows = conn.execute(
+                    f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages ORDER BY store_id LIMIT ?",
+                    (bounded_limit,),
+                ).fetchall()
+                if owns_transaction:
+                    conn.commit()
+            except BaseException:
+                if owns_transaction:
+                    conn.rollback()
+                raise
         if not rows:
             return {
                 "rows": [],
@@ -758,11 +1043,10 @@ class MessageStore:
                 "truncated": False,
                 "observed_at_missing_rows": 0,
             }
-        message_column_count = _MESSAGE_SELECT_COLUMN_COUNT
-        total_rows = int(rows[0][message_column_count] or 0)
-        snapshot_max_store_id = int(rows[0][message_column_count + 1] or 0)
-        observed_at_missing_rows = int(rows[0][message_column_count + 2] or 0)
-        messages = [self._row_to_dict(row[:message_column_count]) for row in rows]
+        total_rows = int(totals[0] or 0)
+        snapshot_max_store_id = int(totals[1] or 0)
+        observed_at_missing_rows = int(totals[2] or 0)
+        messages = [self._row_to_dict(row) for row in rows]
         return {
             "rows": messages,
             "snapshot_max_store_id": snapshot_max_store_id,
@@ -975,15 +1259,42 @@ class MessageStore:
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    def find_session_tool_rows(self, session_id: str, tool_call_id: str, *, conversation_id: str,
+                               tool_name: str) -> List[Dict[str, Any]]:
+        """#773: this session's tool rows for ``tool_call_id`` in store order, in a conversation
+        ``conversation_id`` owns (db_bootstrap.owned_conversation_clause: it, blank, and legacy
+        unnormalized values of either), whose tool name is compatible with ``tool_name`` (the same
+        name, or an empty name on either side). Every filter is in SQL, so other rows that reuse the id
+        never hide one."""
+        owned_clause, owned_args = owned_conversation_clause(self._conn, conversation_id)
+        rows = self._conn.execute(
+            f"""SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages
+               WHERE session_id = ? AND role = 'tool' AND tool_call_id = ? AND {owned_clause}
+                 AND (? = '' OR COALESCE(tool_name, '') IN ('', ?))
+               ORDER BY store_id""",
+            (session_id, tool_call_id, *owned_args, tool_name, tool_name),
+        ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def write_generation(self) -> tuple:
+        """A token that changes whenever a committed write may have changed rows this connection reads:
+        this connection's own writes (``total_changes``) and another connection's commits
+        (``PRAGMA data_version``)."""
+        return self._conn.total_changes, self._conn.execute("PRAGMA data_version").fetchone()[0]
+
     # -- #436 identity anchor: host-time lookup and message relations ---------
 
     def _ensure_identity_anchor_schema(self) -> None:
         """Additive, created on first anchored use: one non-unique index and ``message_relations``
         (no UNIQUE constraint beyond its primary key)."""
+        if getattr(self, "_read_only_ingest_thread", None) == threading.get_ident():
+            return  # Session-end fallback may read existing schema, never create it.
         if getattr(self, "_identity_anchor_schema_ready", False):
             return
+        if getattr(self, "_pending_relation_schema", False) and self._transaction_owner.owns_connection(self._conn):
+            return
         with self._write_lock:
-            self._conn.executescript("""
+            schema = """
                 CREATE INDEX IF NOT EXISTS idx_msg_conversation_observed ON messages(conversation_id, observed_at);
                 CREATE TABLE IF NOT EXISTS message_relations (
                     relation_id INTEGER PRIMARY KEY,
@@ -997,14 +1308,125 @@ class MessageStore:
                 CREATE INDEX IF NOT EXISTS idx_msg_relations_store ON message_relations(store_id, kind);
                 CREATE INDEX IF NOT EXISTS idx_msg_relations_related ON message_relations(related_store_id, kind);
                 CREATE INDEX IF NOT EXISTS idx_msg_relations_observed ON message_relations(kind, observed_at);
-            """)
-        self._identity_anchor_schema_ready = True
+            """
+            if self._transaction_owner.owns_connection(self._conn):
+                # executescript commits an open transaction before running DDL.
+                # Same schema, same owner; do not cache uncommitted creation.
+                for statement in schema.split(";"):
+                    if statement.strip():
+                        self._conn.execute(statement)
+                self._pending_relation_schema = True
+            else:
+                self._conn.executescript(schema)
+                self._identity_anchor_schema_ready = True
+                self._carried_relation_connections.add(self._conn)
 
-    # -- v0.26.0 host uid shadow bindings: a droppable side table, never read for a decision ----------
+    # -- #2055 ingest ledger: additive schema with shadow ingest and emission writers --
+
+    def _ingest_ledger_tables_exist(self) -> bool:
+        with self._write_lock:
+            if getattr(self, "_ingest_ledger_schema_ready", False):
+                return True
+            names = {row[0] for row in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?,?,?,?,?,?)",
+                _INGEST_LEDGER_TABLES,
+            )}
+            exists = set(_INGEST_LEDGER_TABLES) <= names
+            # A re-entrant read can see DDL that a failed commit will roll back.
+            if not self._conn.in_transaction:
+                self._ingest_ledger_schema_ready = exists
+            return exists
+
+    def _ensure_ingest_ledger_schema(self) -> None:
+        """Plain DDL inside ensure_ingest_ledger's owned transaction; never executescript."""
+        if getattr(self, "_ingest_ledger_schema_ready", False):
+            return
+        for sql in (
+            "CREATE TABLE IF NOT EXISTS ledger_meta (key TEXT PRIMARY KEY, value BLOB NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS occurrence_bindings ("
+            "occ_id INTEGER PRIMARY KEY AUTOINCREMENT, lineage TEXT NOT NULL, ordinal INTEGER, "
+            "store_id INTEGER, identity_digest BLOB NOT NULL, stamp TEXT, "
+            "disposition TEXT NOT NULL CHECK (disposition IN "
+            "('stored','migrated','ambiguous','composite_part','split_part')), "
+            "tag TEXT, key_rank INTEGER, view_seq INTEGER NOT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_occ_lineage_ordinal ON occurrence_bindings(lineage, ordinal) "
+            "WHERE disposition IN ('stored','migrated','ambiguous')",
+            "CREATE INDEX IF NOT EXISTS idx_occ_lineage_stamp_digest "
+            "ON occurrence_bindings(lineage, stamp, identity_digest)",
+            "CREATE INDEX IF NOT EXISTS idx_occ_lineage_digest ON occurrence_bindings(lineage, identity_digest)",
+            "CREATE INDEX IF NOT EXISTS idx_occ_store ON occurrence_bindings(store_id)",
+            "CREATE TABLE IF NOT EXISTS ledger_emissions ("
+            "emission_id INTEGER PRIMARY KEY AUTOINCREMENT, lineage TEXT NOT NULL, view_seq INTEGER NOT NULL, "
+            "output_index INTEGER NOT NULL, descriptor_digest BLOB NOT NULL, "
+            "kind TEXT NOT NULL CHECK (kind IN ('summary','carrier','scaffold','recovery','projection')), "
+            "source_store_ids TEXT NOT NULL DEFAULT '[]', "
+            "state TEXT NOT NULL CHECK (state IN ('proposed','adopted','refused')), "
+            "next_occ_id INTEGER, observed_stamp TEXT, recovered_store_id INTEGER, "
+            "UNIQUE (lineage, view_seq, output_index))",
+            "CREATE INDEX IF NOT EXISTS idx_emissions_lineage_digest ON ledger_emissions(lineage, descriptor_digest)",
+            "CREATE TABLE IF NOT EXISTS stamp_observations ("
+            "lineage TEXT NOT NULL, occ_id INTEGER NOT NULL, stamp TEXT NOT NULL, "
+            "kind TEXT NOT NULL CHECK (kind IN ('alt_stamp','carried_stamp')), view_seq INTEGER NOT NULL, "
+            "source TEXT NOT NULL DEFAULT 'ledger' CHECK (source IN ('ledger','legacy')), UNIQUE (occ_id, kind, stamp))",
+            "CREATE INDEX IF NOT EXISTS idx_stamp_obs_lineage_stamp ON stamp_observations(lineage, stamp)",
+            "CREATE TABLE IF NOT EXISTS ingest_views ("
+            "lineage TEXT NOT NULL, view_seq INTEGER NOT NULL, "
+            "kind TEXT NOT NULL CHECK (kind IN ('ingest','emission')), state TEXT, "
+            "entries BLOB NOT NULL, prefix_chain BLOB NOT NULL, PRIMARY KEY (lineage, kind, view_seq))",
+            "CREATE TABLE IF NOT EXISTS lineage_marks ("
+            "lineage TEXT PRIMARY KEY, max_store_id INTEGER, legacy_proof_digest BLOB, max_leaf_id INTEGER, "
+            "stamp_policy TEXT NOT NULL DEFAULT 'normal' CHECK (stamp_policy IN ('normal','stamp_unreliable')))",
+        ):
+            self._conn.execute(sql)
+        mark_migration_step_complete(self._conn, "ingest_ledger_v1")
+
+    def ensure_ingest_ledger(self) -> None:
+        """Idempotently create the ledger and its per-store metadata in one transaction."""
+        deleted = {}
+        with self._write_lock:
+            if self._conn.in_transaction or self._transaction_owner.owns(self._conn):
+                raise sqlite3.OperationalError("ingest ledger setup requires its own transaction")
+            with self.atomic(immediate=True):
+                if not self._ingest_ledger_tables_exist():
+                    self._ensure_ingest_ledger_schema()
+                if not self._conn.execute("SELECT 1 FROM ledger_meta WHERE key='digest_salt'").fetchone():
+                    counts = {table: self._conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                              for table in _INGEST_LEDGER_TABLES if table != "ledger_meta"}
+                    if any(counts.values()):
+                        for table in counts:
+                            self._conn.execute(f"DELETE FROM {table}")
+                        self._conn.execute("INSERT INTO ledger_meta(key,value) VALUES ('salt_epoch',1) "
+                                           "ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1")
+                        deleted = counts
+                self._conn.executemany("INSERT OR IGNORE INTO ledger_meta(key, value) VALUES (?, ?)", (
+                    ("digest_salt", secrets.token_bytes(32)), ("ledger_format", 1), ("view_seq", 0),
+                ))
+            self._ingest_ledger_schema_ready = True
+            if deleted:
+                logger.warning("ingest ledger salt_missing: cleared ledger rows %s", deleted)
+
+    def ingest_ledger_salt(self) -> bytes | None:
+        """Read the store salt without creating a pre-ledger store's schema."""
+        with self._write_lock:
+            if not self._ingest_ledger_tables_exist():
+                return None
+            row = self._conn.execute("SELECT value FROM ledger_meta WHERE key='digest_salt'").fetchone()
+            return bytes(row[0]) if row is not None else None
+
+    def ingest_ledger_state(self) -> str:
+        """A ledger without a salt is pre-ledger for migration purposes."""
+        with self._write_lock:
+            if not self._ingest_ledger_tables_exist():
+                return "absent"
+            return "ready" if self.ingest_ledger_salt() is not None else "salt_missing"
+
+    # -- Host uid shadow bindings: droppable; canonical evidence for #1124 exclusions / #1403 audits --
 
     def _host_uid_table_exists(self) -> bool:
         with self._write_lock:
             if getattr(self, "_host_uid_schema_ready", False):
+                return True
+            if getattr(self, "_pending_host_uid_schema", False) and self._transaction_owner.owns_connection(self._conn):
                 return True
             exists = bool(self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='host_uid_bindings'").fetchone())
@@ -1016,6 +1438,8 @@ class MessageStore:
     def _ensure_host_uid_schema(self) -> None:
         """On the first binding, NAMED step ``host_uid_bindings_v1``: no SCHEMA_VERSION bump, ``messages`` untouched."""
         if getattr(self, "_host_uid_schema_ready", False):
+            return
+        if getattr(self, "_pending_host_uid_schema", False) and self._transaction_owner.owns_connection(self._conn):
             return
         def create(conn) -> None:  # plain ``execute`` in the write's own transaction (executescript would commit)
             for sql in (
@@ -1031,7 +1455,10 @@ class MessageStore:
             mark_migration_step_complete(conn, "host_uid_bindings_v1")
 
         self._host_uid_write(create)
-        self._host_uid_schema_ready = True
+        # Uncommitted DDL must not survive rollback as a positive cache entry.
+        self._host_uid_schema_ready = not self._transaction_owner.owns_connection(self._conn)
+        if not self._host_uid_schema_ready:
+            self._pending_host_uid_schema = True
 
     def host_uid_bindings_for(self, lineage_key: str, uids, kinds=("canonical", "version")) -> dict[str, list[tuple[int, str]]]:
         """``{uid: [(store_id, kind), ...]}`` of the ``kinds`` bindings (canonical and version: never ``engine``)."""
@@ -1048,14 +1475,17 @@ class MessageStore:
                 out.setdefault(str(uid), []).append((int(store_id), str(kind)))
         return out
 
-    def host_uid_uids_of_stores(self, lineage_key: str, store_ids) -> dict[int, set[str]]:
-        """``{store_id: {uid, ...}}``: the canonical and version bindings of ``store_ids`` in a lineage."""
+    def host_uid_uids_of_stores(self, lineage_key: str, store_ids, kinds=("canonical", "version"),
+                                *, require_disagree: bool = False) -> dict[int, set[str]]:
+        """``{store_id: {uid, ...}}`` in a lineage; #1124 requests canonical twins, all bindings for copies."""
         ids, out = sorted({int(sid) for sid in store_ids}), {}
         for start in range(0, len(ids) if self._host_uid_table_exists() else 0, 500):
             chunk = ids[start:start + 500]
             for store_id, uid in self._conn.execute(
-                f"SELECT store_id, uid FROM host_uid_bindings WHERE store_id IN ({','.join('?' * len(chunk))}) "
-                "AND lineage_key = ? AND kind IN ('canonical', 'version')", [*chunk, lineage_key]):
+                f"SELECT store_id, uid FROM host_uid_bindings INDEXED BY idx_host_uid_store "
+                f"WHERE store_id IN ({','.join('?' * len(chunk))}) "
+                f"AND lineage_key = ? AND kind IN ({','.join('?' * len(kinds))}) "
+                "AND (? = 0 OR disagree_seen = 1)", [*chunk, lineage_key, *kinds, int(require_disagree)]):
                 out.setdefault(int(store_id), set()).add(str(uid))
         return out
 
@@ -1090,26 +1520,84 @@ class MessageStore:
              for store_id, uid, kind, proof_kind in rows]))
 
     def _host_uid_write(self, write: Callable[[sqlite3.Connection], Any]) -> None:
-        """One shadow write in its OWN transaction. Skipped (raised, so the caller counts one error) when the
-        connection is already in a transaction: someone else's work is never committed or rolled back. Any
-        failure, at commit included, rolls it back, so the connection is never left in a transaction."""
+        """Join the explicit owner, otherwise retain the standalone shadow boundary.
+
+        An unowned open transaction is still refused: never commit or roll back
+        another caller's work.
+        """
         conn = self._conn
         with self._write_lock:
-            if conn.in_transaction:
+            if conn.in_transaction and not self._transaction_owner.owns_connection(conn):
                 raise sqlite3.OperationalError("host-uid shadow write skipped: the connection is in a transaction")
-            conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self.atomic(immediate=True):
                 write(conn)
-                conn.commit()
-            except BaseException:
-                conn.rollback()
-                raise
 
     def count_host_uid_bindings(self, kinds=("canonical", "version", "alias_candidate")) -> Optional[int]:
         kinds = tuple(kinds)
         return int(self._conn.execute(f"SELECT COUNT(*) FROM host_uid_bindings WHERE kind IN "
                                       f"({','.join('?' * len(kinds))})", kinds).fetchone()[0]) \
             if self._host_uid_table_exists() else None
+
+    # -- #1931 delegated-child lineage: additive, created on the first link --
+
+    def _session_lineage_table_exists(self) -> bool:
+        with self._write_lock:
+            if getattr(self, "_session_lineage_schema_ready", False):
+                return True
+            exists = bool(self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_lineage'").fetchone())
+            # A re-entrant read can see DDL that a failed commit will roll back.
+            if not self._conn.in_transaction:
+                self._session_lineage_schema_ready = exists
+            return exists
+
+    def record_session_lineage(self, child_session_id: str, parent_session_id: str, *, source: str,
+                               child_subagent_id: str = "", parent_subagent_id: str = "",
+                               child_role: str = "") -> None:
+        """INSERT OR IGNORE in its own transaction, so the first link wins. The table is the NAMED step
+        ``session_lineage_v1``: no SCHEMA_VERSION bump, no existing table touched."""
+        conn = self._conn
+        with self._write_lock:
+            if conn.in_transaction:
+                raise sqlite3.OperationalError("session lineage write skipped: the connection is in a transaction")
+            with self.atomic(immediate=True):
+                if not getattr(self, "_session_lineage_schema_ready", False):
+                    conn.execute(
+                        "CREATE TABLE IF NOT EXISTS session_lineage (child_session_id TEXT PRIMARY KEY, "
+                        "parent_session_id TEXT NOT NULL, child_subagent_id TEXT, parent_subagent_id TEXT, "
+                        "child_role TEXT, source TEXT NOT NULL, created_at REAL)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_session_lineage_parent "
+                                 "ON session_lineage(parent_session_id)")
+                    mark_migration_step_complete(conn, "session_lineage_v1")
+                conn.execute(
+                    "INSERT OR IGNORE INTO session_lineage(child_session_id, parent_session_id, child_subagent_id, "
+                    "parent_subagent_id, child_role, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (child_session_id, parent_session_id, child_subagent_id or None, parent_subagent_id or None,
+                     child_role or None, source, time.time()))
+            self._session_lineage_schema_ready = True
+
+    def session_lineage_parents(self, session_ids: Iterable[str]) -> dict[str, str]:
+        """``{child_session_id: parent_session_id}`` for the ids that are recorded children."""
+        ids, out = sorted({str(sid) for sid in session_ids if sid}), {}
+        for start in range(0, len(ids) if ids and self._session_lineage_table_exists() else 0, 500):
+            chunk = ids[start:start + 500]
+            out.update((str(child), str(parent)) for child, parent in self._conn.execute(
+                f"SELECT child_session_id, parent_session_id FROM session_lineage WHERE child_session_id IN "
+                f"({','.join('?' * len(chunk))})", chunk))
+        return out
+
+    def session_lineage_descendants(self, session_id: str, limit: int = 64) -> list[str]:
+        """Children of ``session_id`` and their children (at most 8 levels and ``limit`` ids), newest link first."""
+        if not session_id or not self._session_lineage_table_exists():
+            return []
+        rows = self._conn.execute(
+            "WITH RECURSIVE tree(id, depth, created_at) AS ("
+            "SELECT child_session_id, 1, created_at FROM session_lineage WHERE parent_session_id = ? "
+            "UNION SELECT link.child_session_id, tree.depth + 1, link.created_at FROM session_lineage AS link "
+            "JOIN tree ON link.parent_session_id = tree.id WHERE tree.depth < 8) "
+            "SELECT id FROM tree WHERE id != ? GROUP BY id ORDER BY MAX(created_at) DESC LIMIT ?",
+            (session_id, session_id, int(limit))).fetchall()
+        return [str(row[0]) for row in rows]
 
     def find_rows_by_observed_at(
         self, conversation_id: str, session_ids: List[str], observed_ats: List[float],
@@ -1119,9 +1607,10 @@ class MessageStore:
         (indexed; bounded by the distinct stamps asked for)."""
         values, sessions = sorted(set(observed_ats)), set(session_ids)
         if not values or not sessions:
-            return []
+            return _ObservedAtRows([], {})
         self._ensure_identity_anchor_schema()
         found: dict[tuple[int, float], Dict[str, Any]] = {}
+        canonical_stamps = {}
         for start in range(0, len(values), 500):
             chunk = values[start:start + 500]
             marks = ",".join("?" * len(chunk))
@@ -1129,20 +1618,23 @@ class MessageStore:
                 f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE conversation_id IN (?, '') AND observed_at IN ({marks})",
                 [_normalize_conversation_id_value(conversation_id), *chunk],
             ).fetchall()
-            aliased = self._conn.execute(
-                f"SELECT store_id, observed_at FROM message_relations WHERE kind = 'alt_stamp' AND observed_at IN ({marks})",
-                chunk,
+            aliased = self._conn.execute(  # an alias names a row of exactly this conversation ('' is not a wildcard)
+                "SELECT r.store_id, r.observed_at FROM message_relations r JOIN messages m ON m.store_id = r.store_id "
+                f"WHERE r.kind = 'alt_stamp' AND r.observed_at IN ({marks}) AND m.conversation_id = ?",
+                [*chunk, _normalize_conversation_id_value(conversation_id)],
             ).fetchall()
             for r in rows:
                 row = self._row_to_dict(r)
                 if str(row.get("session_id") or "") in sessions:
+                    canonical_stamps[int(row["store_id"])] = row.get("observed_at")
                     found[(int(row["store_id"]), float(row["observed_at"]))] = row
             batch = self.get_batch(sorted({int(store_id) for store_id, _stamp in aliased}))
             for store_id, stamp in aliased:  # the one occurrence an H1 unstable stamp was proven for (R5)
                 row = batch.get(int(store_id))
                 if row is not None and str(row.get("session_id") or "") in sessions:
+                    canonical_stamps[int(store_id)] = row.get("observed_at")
                     found[(int(store_id), float(stamp))] = {**row, "observed_at": float(stamp)}
-        return [found[key] for key in sorted(found)]
+        return _ObservedAtRows([found[key] for key in sorted(found)], canonical_stamps)
 
     def add_message_relations(self, groups: List[List[tuple]]) -> int:
         """Append relation GROUPS; each group is ``[(store_id, kind, related_store_id, ordinal,
@@ -1173,8 +1665,57 @@ class MessageStore:
                     [(int(s), k, r, o, ob, created_at) for s, k, r, o, ob in group],
                 )
                 added += len(group)
-            self._conn.commit()
+            self._commit()
         return added
+
+    def get_carried_stamp_ids(self, store_ids: List[int], *, connection=None, session_ids=None, batched=False) -> set[int]:
+        """Read carried-time provenance without creating schema or changing rows.
+
+        A caller's read-only connection keeps recall's existing deadline policy.
+        Stores predating the optional relation table have no carried markers.
+        """
+        ids = sorted({int(i) for i in store_ids})
+        conn = connection if connection is not None else self._conn
+        if batched:
+            known = getattr(self, '_memory_relation_connections', {})
+            self._memory_relation_connections = known
+            available = (conn in self._carried_relation_connections or known.get(conn, False)
+                         or conn is self._conn and getattr(self, "_pending_relation_schema", False)
+                         and self._transaction_owner.owns_connection(conn))
+            if not available and conn not in known:
+                available = bool(conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
+                ).fetchone())
+                if not available or not conn.in_transaction:
+                    known[conn] = available
+            relation = ('message_relations' if available
+                        else '(SELECT NULL AS store_id, NULL AS kind)')
+            return {int(r[0]) for r in conn.execute(
+                f"SELECT store_id FROM {relation} WHERE kind='carried_stamp' "
+                "AND store_id IN (SELECT value FROM json_each(?))", (json.dumps(ids),))}
+        if not (ids or session_ids):
+            return set()
+        if conn not in self._carried_relation_connections:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
+            ).fetchone():
+                return set()
+            if conn is self._conn and not conn.in_transaction:
+                self._carried_relation_connections.add(conn)
+        if session_ids:
+            # Collect the entire candidate ID set in SQL before session formatting,
+            # including neighbors later rejected by the payload budget.
+            return {int(row[0]) for row in conn.execute(
+                "SELECT store_id FROM message_relations WHERE kind = 'carried_stamp' "
+                "AND store_id IN (SELECT store_id FROM messages WHERE session_id IN ("
+                + ",".join("?" for _ in session_ids) + "))", session_ids)}
+        found: set[int] = set()
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            found.update(int(row[0]) for row in conn.execute(
+                "SELECT store_id FROM message_relations WHERE kind = 'carried_stamp' "
+                f"AND store_id IN ({','.join('?' * len(chunk))})", chunk))
+        return found
 
     def get_message_relations(self, store_ids: List[int], kind: str, *, related: bool = False) -> List[Dict[str, Any]]:
         """Relation rows of ``kind`` whose ``store_id`` (or ``related_store_id``) is in ``store_ids``."""
@@ -1200,8 +1741,32 @@ class MessageStore:
                 "WHERE store_id = ? AND observed_at IS NULL",
                 (float(observed_at), int(store_id)),
             )
-            self._conn.commit()
+            self._commit()
             return cur.rowcount > 0
+
+    def backfill_observed_at_many(self, pairs) -> int:
+        """R5: batch proven ``(store_id, stamp)`` backfills, never overwriting a value."""
+        rows = [(float(stamp), int(store_id)) for store_id, stamp in pairs]
+        if not rows:  # no commit: an empty pass must not commit a caller's open transaction (the per-row loop did not)
+            return 0
+        def write():
+            return self._conn.executemany(
+                "UPDATE messages SET observed_at = ?, observed_at_source = 'host_message_timestamp' "
+                "WHERE store_id = ? AND observed_at IS NULL",
+                rows,
+            ).rowcount
+        with self._write_lock:
+            if self._transaction_owner.owns_connection(self._conn):
+                return write()
+            with self._conn:
+                return write()
+
+    def has_session_messages(self, session_id: str) -> bool:
+        """Whether a session contains any messages, without counting them."""
+        return bool(self._conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = ?)",
+            (session_id,),
+        ).fetchone()[0])
 
     def get_session_count(self, session_id: str) -> int:
         """Count messages in a session."""
@@ -1292,9 +1857,9 @@ class MessageStore:
         return self._conn.execute(
             """
             WITH session_ids AS (
-                SELECT session_id FROM messages
+                SELECT session_id FROM messages WHERE session_id = ?
                 UNION
-                SELECT session_id FROM summary_nodes
+                SELECT session_id FROM summary_nodes WHERE session_id = ?
             ),
             message_stats AS (
                 SELECT session_id,
@@ -1302,7 +1867,7 @@ class MessageStore:
                        COALESCE(SUM(token_estimate), 0) AS token_total,
                        MIN(timestamp) AS first_message_at,
                        MAX(timestamp) AS last_message_at
-                FROM messages
+                FROM messages WHERE session_id = ?
                 GROUP BY session_id
             ),
             node_stats AS (
@@ -1311,7 +1876,7 @@ class MessageStore:
                        COALESCE(SUM(token_count), 0) AS node_token_total,
                        MIN(COALESCE(earliest_at, created_at)) AS first_node_at,
                        MAX(COALESCE(latest_at, created_at)) AS last_node_at
-                FROM summary_nodes
+                FROM summary_nodes WHERE session_id = ?
                 GROUP BY session_id
             )
             SELECT s.session_id,
@@ -1329,7 +1894,7 @@ class MessageStore:
             WHERE s.session_id = ?
             ORDER BY s.session_id
             """,
-            (session_id,),
+            (session_id,) * 5,
         ).fetchall()
 
     def get_source_normalization_plan(self) -> Dict[str, Any]:
@@ -1357,7 +1922,7 @@ class MessageStore:
         """Normalize legacy NULL/blank source rows to the explicit unknown bucket."""
         stats_before = self.get_source_stats()
         blank_clause = _legacy_blank_source_clause("source")
-        with self._write_lock, self._conn:
+        with self.atomic():
             cur = self._conn.execute(
                 f"UPDATE messages SET source = ? WHERE {blank_clause}",
                 (_UNKNOWN_SOURCE,),
@@ -1457,8 +2022,87 @@ class MessageStore:
                 )
                 wrote = True
             if wrote:
-                conn.commit()
+                self._commit()
         return wrote
+
+    def _commit(self) -> None:
+        """Commit a standalone helper; an enclosing atomic block owns its commit."""
+        self._transaction_owner.commit(self._conn)
+
+    def ingest_atomic(self, *, admission_retry=False):
+        """End only an unowned dangling transaction before reserving foreground ingest."""
+        return self._ingest_atomic(admission_retry=admission_retry)
+
+    @contextmanager
+    def _ingest_atomic(self, *, admission_retry=False):
+        with self._write_lock:
+            if self._transaction_owner.owns(self._conn):
+                raise _SqliteSavepointError("Foreground ingest cannot join an enclosing transaction")
+            if self._conn.in_transaction and not self._transaction_owner.owns_connection(self._conn):
+                self._conn.commit()  # Preserve standalone writes, and end stale read snapshots.
+                logger.debug("LCM ingest committed an unowned transaction before BEGIN IMMEDIATE")
+            with ExitStack() as owner:
+                # An ordinary BEGIN wait already spent the configured budget.
+                # Its retry is an immediate recheck, not another full timeout.
+                trace = getattr(self._conn, "_lcm_trace", None)
+                if trace is not None:
+                    trace.ingest_admission = True
+                try:
+                    with (_temporary_sqlite_busy_timeout([self._conn], 0) if admission_retry else nullcontext()):
+                        owner.enter_context(self.atomic(immediate=True))
+                finally:
+                    if trace is not None:
+                        trace.ingest_admission = False
+                previous = getattr(self, "_foreground_ingest_owner", False)
+                self._foreground_ingest_owner = True
+                try:
+                    yield
+                    if not self._conn.in_transaction:
+                        raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT")
+                finally:
+                    self._foreground_ingest_owner = previous
+
+    def atomic(self, *, immediate: bool = False) -> AbstractContextManager[None]:
+        """Own a transaction under the existing write lock, joining nested entries.
+
+        By default the first write opens the transaction. Explicit owners use
+        ``immediate=True`` to begin before reading. Simple write helpers defer
+        their commits here. The ingest INSERT delegates retries to its owner.
+        Schema scripts, telemetry,
+        ``update_metadata_json`` and explicit commit/rollback operations retain
+        their own boundaries and must not be grouped through this primitive.
+        """
+        conn = self._conn
+        if conn is None:
+            raise RuntimeError("MessageStore connection is closed")
+        @contextmanager
+        def marked():
+            with self._write_lock:
+                try:
+                    with self._transaction_owner.atomic(conn, immediate=immediate):
+                        yield
+                except BaseException:
+                    if not conn.in_transaction:
+                        self._manual_chunk_backlog_pending = False
+                        self._pending_relation_schema = self._pending_host_uid_schema = False
+                    raise
+                if not self._transaction_owner.owns_connection(conn):
+                    self._publish_ingest_schemas()
+                if self._manual_chunk_backlog_pending:
+                    self._mark_manual_chunk_backlog()
+        return marked()
+
+    def _publish_ingest_schemas(self):
+        # Savepoint rollback restores these flags; an owner rollback clears them.
+        if getattr(self, "_pending_relation_schema", False):
+            self._pending_relation_schema = False
+            self._identity_anchor_schema_ready = True
+            self._carried_relation_connections.add(self._conn)
+            getattr(self, "_memory_relation_connections", {}).pop(self._conn, None)
+        if getattr(self, "_pending_host_uid_schema", False):
+            self._pending_host_uid_schema = False
+            self._host_uid_schema_ready = True
+
 
     def update_metadata_json(self, key: str, update: Any) -> Any:
         """Atomic read-modify-write of one metadata JSON value: ``update(current)`` (None when absent) runs
@@ -1680,7 +2324,9 @@ class MessageStore:
                     exclude_session_ids: Collection[str] | None = None,
                     allow_operators: bool = False,
                     agent_operators: bool = False,
-                    stemmed: bool = False) -> List[Dict[str, Any]]:
+                    stemmed: bool = False,
+                    matching_names: Collection[str] | None = None,
+                    _include_like_excerpt: bool = False, _memory=None) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
         Retrieval contract:
@@ -1719,6 +2365,8 @@ class MessageStore:
                 time_from=time_from,
                 time_to=time_to,
                 exclude_session_ids=exclude_session_ids,
+                **({"matching_names": matching_names} if matching_names is not None else {}),
+                _include_excerpt=_include_like_excerpt, _memory=_memory,
             )
 
         order_by = _build_search_order_by(
@@ -1726,6 +2374,8 @@ class MessageStore:
             "m.timestamp",
             _MESSAGE_ROLE_BIAS_SQL,
         )
+        key_order = order_by.replace(_MESSAGE_ROLE_BIAS_SQL, "key_role").replace(
+            "m.timestamp", "key_timestamp").replace("rank", "search_rank")
         fetch_limit = compute_search_fetch_limit(limit, terms, phrases)
         candidate_cap = compute_search_candidate_cap(limit)
         apply_directness_adjustment = should_apply_directness_rank_adjustment(terms, phrases)
@@ -1742,6 +2392,10 @@ class MessageStore:
                 if session_id is not None:
                     where.append("m.session_id = ?")
                     args.append(session_id)
+                name_clause, name_args = _matching_names_filter(matching_names, "m.")
+                if name_clause:
+                    where.append(name_clause)
+                    args.extend(name_args)
                 if exclude_session_ids:
                     where.append(
                         "m.session_id NOT IN (SELECT value FROM json_each(?))"
@@ -1763,21 +2417,41 @@ class MessageStore:
                     where.append("m.timestamp <= ?")
                     args.append(time_to)
                 args.extend([fetch_limit, offset])
-                rows = self._conn.execute(
-                    f"""SELECT m.store_id, m.session_id, m.source, m.role, m.content, m.tool_call_id,
+                rows = _fetch_ranked_search_rows(
+                    self._conn,
+                    f"""WITH ranked_keys AS MATERIALIZED (
+                           SELECT fts.rowid AS key_id, rank AS search_rank,
+                                  m.timestamp AS key_timestamp, {_MESSAGE_ROLE_BIAS_SQL} AS key_role
+                           FROM {fts_table} fts
+                           JOIN messages m ON m.store_id = fts.rowid
+                           WHERE {' AND '.join(where)}
+                           ORDER BY {order_by} LIMIT ? OFFSET ?
+                       ), numbered_keys AS (
+                           SELECT row_number() OVER (ORDER BY {key_order}, key_id) AS ordinal,
+                                  * FROM ranked_keys
+                       )
+                       SELECT keys.ordinal, m.store_id, m.session_id, m.source, m.role, m.content, m.tool_call_id,
                               m.tool_calls, m.tool_name, m.timestamp, m.token_estimate, m.pinned, m.conversation_id,
                               m.ingested_at, m.observed_at, m.observed_at_source,
-                              rank as search_rank,
+                              keys.search_rank,
                               snippet({fts_table}, 0, '>>>', '<<<', '...', 40) as snippet
-                       FROM {fts_table} fts
-                       JOIN messages m ON m.store_id = fts.rowid
-                       WHERE {' AND '.join(where)}
-                       ORDER BY {order_by} LIMIT ? OFFSET ?""",
-                    args,
-                ).fetchall()
+                       FROM numbered_keys keys
+                       CROSS JOIN {fts_table} fts
+                       CROSS JOIN messages m
+                       WHERE fts.rowid = keys.key_id AND m.store_id = keys.key_id
+                         AND {fts_table} MATCH ?
+                       ORDER BY keys.ordinal""",
+                    [*args, safe_query],
+                )
+                if _memory is not None and offset == 0:
+                    _memory['rows'] = [dict(zip(('store_id', 'session_id', 'timestamp', 'observed_at'), r)) for r in self._conn.execute(
+                        f"SELECT m.store_id,m.session_id,m.timestamp,m.observed_at FROM {fts_table} fts "
+                        f"JOIN messages m ON m.store_id=fts.rowid WHERE {' AND '.join(where)}", args[:-2])]
                 self._last_fts_index = "stem" if fts_table == "messages_fts_stem" else "plain"
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
+                if getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT:
+                    raise
                 if fts_table == "messages_fts_stem":
                     fts_table = "messages_fts"
                     offset = scanned_rows = 0
@@ -1801,6 +2475,8 @@ class MessageStore:
                     time_from=time_from,
                     time_to=time_to,
                     exclude_session_ids=exclude_session_ids,
+                    **({"matching_names": matching_names} if matching_names is not None else {}),
+                    _include_excerpt=_include_like_excerpt, _memory=_memory,
                 )
 
             raw_primary_values: list[float] = []
@@ -1842,9 +2518,13 @@ class MessageStore:
                      role: str | None = None,
                      time_from: float | None = None,
                      time_to: float | None = None,
-                     exclude_session_ids: Collection[str] | None = None) -> List[Dict[str, Any]]:
+                     exclude_session_ids: Collection[str] | None = None, *,
+                     matching_names: Collection[str] | None = None,
+                     _include_excerpt: bool = False, _memory=None) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
+        if _memory is not None:
+            _memory['like'] = True
         safe_query = sanitize_like_query(query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
@@ -1856,6 +2536,10 @@ class MessageStore:
         if session_id is not None:
             where.append("session_id = ?")
             args.append(session_id)
+        name_clause, name_args = _matching_names_filter(matching_names, "")
+        if name_clause:
+            where.append(name_clause)
+            args.extend(name_args)
         if exclude_session_ids:
             where.append("session_id NOT IN (SELECT value FROM json_each(?))")
             args.append(json.dumps(list(exclude_session_ids)))
@@ -1967,7 +2651,12 @@ class MessageStore:
                 if score <= 0:
                     continue
                 result["search_rank"] = -float(score)
-                result["snippet"] = build_snippet(content, terms)
+                snippet, start, end = build_snippet_with_span(content, terms)
+                result["snippet"] = snippet
+                if _include_excerpt:
+                    result["_like_excerpt"] = {
+                        "snippet": content[start:end], "content_offset": start,
+                    }
                 result["_fallback_score"] = float(score)
                 result["_directness_score"] = _message_directness_score(result.get("role"), content, terms, phrases)
                 results.append(result)
@@ -2031,14 +2720,16 @@ class MessageStore:
                 f"{role_bias} ASC, timestamp DESC, store_id DESC"
             )
             candidate_cap = compute_search_candidate_cap(limit)
+            sql = f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE {' AND '.join(where)}"
             rows = self._conn.execute(
-                f"""SELECT {_MESSAGE_SELECT_COLUMNS}
-                    FROM messages
-                    WHERE {' AND '.join(where)}
-                    {order_by}
-                    LIMIT ? OFFSET ?""",
-                [*base_args, *order_args, *exact_args, candidate_cap, 0],
-            ).fetchall()
+                f"{sql} {order_by} LIMIT ? OFFSET ?",
+                [*base_args, *order_args, *exact_args, candidate_cap, 0]).fetchall()
+            if _memory is not None:
+                for r in self._conn.execute(
+                        f"SELECT store_id,session_id,timestamp,observed_at,content FROM messages WHERE {' AND '.join(where)}", base_args):
+                    score = sum(min(count_term_matches(r[4], t), 1) if collapse_risky_repeats else count_term_matches(r[4], t) for t in terms)
+                    if score > 0:
+                        _memory['rows'].append(dict(zip(('store_id', 'session_id', 'timestamp', 'observed_at'), r)))
             add_rows(rows)
 
         results.sort(key=lambda result: _fallback_result_sort_key(result, sort))

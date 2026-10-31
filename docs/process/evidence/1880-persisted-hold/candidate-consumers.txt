@@ -1,0 +1,1988 @@
+compaction.py:75:    "condensation_no_progress",
+compaction.py:238:        self._no_progress_observed_tokens = int(tokens or 0)
+compaction.py:243:        return tokens >= self.threshold_tokens and not self._sweep_budget_hold_applies(tokens, managed_scope=True)
+compaction.py:269:        self._no_progress_observed_tokens = rough
+compaction.py:307:                replay_messages = self._ingest_messages(messages)
+compaction.py:317:                self._record_ingest_failure("preflight", e)
+compaction.py:368:                and self._sweep_budget_hold_applies(max(rough, replay_rough, self.last_prompt_tokens or 0))
+compaction.py:435:            if self._sweep_budget_hold_applies(max(rough, self.last_prompt_tokens or 0)):
+compaction.py:730:            self._no_progress_candidate = False
+compaction.py:731:            self._no_progress_proof_complete = False
+compaction.py:738:            elif (not force and self._no_progress_hold is not None
+compaction.py:739:                  and (self._no_progress_hold[1] != "no_progress"
+compaction.py:740:                       or not getattr(self, "_no_progress_hold_persisted", False))) and self._no_progress_hold_blocks(
+compaction.py:785:                    self._start_no_progress_hold("hidden_only")
+compaction.py:788:            pending_no_progress = (self._no_progress_candidate and not bypass_cooldown
+compaction.py:799:            if pending_no_progress:
+compaction.py:801:                self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress",
+compaction.py:802:                                             persist=self._no_progress_proof_complete)
+compaction.py:1787:        self._no_progress_observed_tokens = int(state.observed_prompt_tokens or 0)
+compaction.py:1821:            state.working_messages = self._ingest_messages(messages)
+compaction.py:1826:                and self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
+compaction.py:1827:                and self._no_progress_hold[1] == "no_progress"):
+compaction.py:1858:                or self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
+compaction.py:1868:                    and self._sweep_budget_hold_applies(state.observed_prompt_tokens))
+compaction.py:1929:        self._no_progress_candidate = bool(
+compaction.py:1983:        if self._no_progress_candidate and not recovery_attempt:
+compaction.py:2333:                self._start_sweep_budget_hold(seconds_left, turn_paced=(
+compaction.py:2334:                    self._sweep_budget_hold_turn_paced
+compaction.py:2335:                    and self._sweep_budget_hold_active()
+compaction.py:2350:                self._sweep_budget_hold_turn_paced = False
+compaction.py:2355:                    self._no_progress_candidate = False  # let the next automatic pass try the fallback
+compaction.py:2362:                        self._no_progress_candidate = False
+compaction.py:2363:                    self._start_sweep_budget_hold(turn_paced=first_hang)
+compaction.py:2384:                    self._start_sweep_budget_hold()
+compaction.py:2436:                # _ingest_messages() already advanced the cursor to the original
+compaction.py:2490:            self._no_progress_proof_complete = bool(
+compaction.py:2887:        self._sweep_budget_hold_until = 0.0  # #608: a stored leaf ends the hold
+compaction.py:2888:        self._hung_summary_strike, self._sweep_budget_hold_turn_paced = None, False
+compaction.py:2889:        self._no_progress_hold, self._no_progress_candidate = None, False  # #651: hidden-only leaves too
+compaction.py:2890:        self._clear_persisted_no_progress_hold()
+engine.py:1381:        self._sweep_budget_hold_until: float = 0.0
+engine.py:1382:        self._sweep_budget_hold_conversation = ""
+engine.py:1383:        self._sweep_budget_hold_turn_paced = False
+engine.py:1387:        self._no_progress_hold: Optional[tuple[float, str]] = None
+engine.py:1394:        self._no_progress_candidate = False  # set by _compress_impl for compress()
+engine.py:1756:        self._reset_session_scoped_runtime_state()
+engine.py:2365:    def _start_sweep_budget_hold(self, seconds: Optional[float] = None, *, turn_paced: bool = False) -> None:
+engine.py:2367:        self._sweep_budget_hold_until = time.monotonic() + hold
+engine.py:2368:        self._sweep_budget_hold_conversation = self._hold_conversation_key()  # #618
+engine.py:2369:        if turn_paced and not self._sweep_budget_hold_turn_paced:
+engine.py:2372:        self._sweep_budget_hold_turn_paced = turn_paced
+engine.py:2440:    def _sweep_budget_hold_active(self) -> bool:
+engine.py:2442:        if self._sweep_budget_hold_until <= 0:
+engine.py:2444:        if self._sweep_budget_hold_conversation != self._hold_conversation_key():
+engine.py:2446:        remaining = self._sweep_budget_hold_until - time.monotonic()
+engine.py:2450:        self._sweep_budget_hold_until = 0.0
+engine.py:2453:    def _start_no_progress_hold(self, reason: str, *, persist: bool = False) -> None:
+engine.py:2456:        self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
+engine.py:2457:        self._no_progress_hold_persisted = bool(reason == "no_progress" and persist)
+engine.py:2458:        if self._no_progress_hold_persisted:
+engine.py:2459:            self._persist_no_progress_hold()
+engine.py:2466:    def _no_progress_hold_active(self, *, managed_scope: bool = False) -> bool:
+engine.py:2470:        if self._no_progress_hold is None or (
+engine.py:2471:                self._no_progress_hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)):
+engine.py:2472:            return self._persisted_no_progress_hold_active(managed_scope=True)
+engine.py:2473:        if time.monotonic() < self._no_progress_hold[0]:
+engine.py:2475:        self._no_progress_hold = None
+engine.py:2478:    def _no_progress_metadata_warning(self) -> None:
+engine.py:2480:        if not getattr(self, "_no_progress_metadata_warned", False):
+engine.py:2481:            self._no_progress_metadata_warned = True
+engine.py:2484:    def _observe_no_progress_replay(self, original, active) -> None:
+engine.py:2491:        self._no_progress_replay = None
+engine.py:2492:        if getattr(self, "_no_progress_ingest_generation", None) != self._ingest_failure_count:
+engine.py:2496:            public = self._no_progress_public_rows
+engine.py:2501:            self._no_progress_replay = (self._session_id, self._conversation_id, digest)
+engine.py:2503:            self._no_progress_metadata_warning()
+engine.py:2505:    def _no_progress_fingerprint(self, *, managed_scope: bool = False) -> Optional[str]:
+engine.py:2506:        replay = getattr(self, "_no_progress_replay", None)
+engine.py:2507:        observed = getattr(self, "_no_progress_observed_tokens", None)
+engine.py:2553:            bound_store = getattr(self, "_no_progress_bound_store", None)
+engine.py:2556:                self._no_progress_bound_store = bound_store
+engine.py:2566:            self._no_progress_metadata_warning()
+engine.py:2569:    def _persisted_no_progress_hold_active(self, *, managed_scope: bool = False) -> bool:
+engine.py:2572:        self._no_progress_hold = None
+engine.py:2574:            record = self._store.read_metadata_json(f"compaction_no_progress:v1:{self._session_id}")
+engine.py:2591:            fingerprint = self._no_progress_fingerprint(managed_scope=True)
+engine.py:2601:            observed = getattr(self, "_no_progress_deadline", None)
+engine.py:2605:            self._no_progress_deadline = (identity, deadline)
+engine.py:2608:            self._no_progress_hold = (deadline, "no_progress")
+engine.py:2609:            self._no_progress_hold_persisted = True
+engine.py:2612:            self._no_progress_metadata_warning()
+engine.py:2615:    def _persist_no_progress_hold(self) -> None:
+engine.py:2616:        fingerprint = self._no_progress_fingerprint()
+engine.py:2617:        self._no_progress_hold = None
+engine.py:2620:        if self._persisted_no_progress_hold_active():
+engine.py:2626:            self._store.write_metadata_json([f"compaction_no_progress:v1:{self._session_id}"], json.dumps(record))
+engine.py:2628:            self._no_progress_deadline = ((fingerprint, now, record["expires_at"]), deadline)
+engine.py:2629:            self._no_progress_hold = (deadline, "no_progress")
+engine.py:2631:            self._no_progress_metadata_warning()
+engine.py:2633:    def _clear_persisted_no_progress_hold(self) -> None:
+engine.py:2635:            key = f"compaction_no_progress:v1:{self._session_id}"
+engine.py:2639:            self._no_progress_metadata_warning()
+engine.py:2641:    def _no_progress_hold_status(self) -> Optional[dict]:
+engine.py:2642:        hold = self._no_progress_hold
+engine.py:2646:            hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False))
+engine.py:2647:        if not self._no_progress_hold_active(managed_scope=local_only):
+engine.py:2649:        until, reason = self._no_progress_hold
+engine.py:2669:        self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
+engine.py:2690:            if (self._sweep_budget_hold_turn_paced and self._hung_summary_strike is not None
+engine.py:2692:                    and self._sweep_budget_hold_conversation == self._hold_conversation_key()
+engine.py:2693:                    and self._sweep_budget_hold_active()
+engine.py:2696:                self._sweep_budget_hold_until, self._sweep_budget_hold_turn_paced = 0.0, False
+engine.py:2699:            hold = self._no_progress_hold
+engine.py:2702:                self._no_progress_hold = None
+engine.py:2715:        return self._no_progress_hold_blocks(tokens) or self._sweep_budget_hold_blocks(tokens)
+engine.py:2717:    def _no_progress_hold_blocks(self, tokens: int) -> bool:
+engine.py:2722:        self._no_progress_observed_tokens = int(tokens or 0)
+engine.py:2723:        if not self._no_progress_hold_active(managed_scope=True):
+engine.py:2727:        return self._sweep_budget_hold_applies(tokens, managed_scope=True)
+engine.py:2729:    def _sweep_budget_hold_blocks(self, tokens: int) -> bool:
+engine.py:2730:        """#625: the #608 hold at the host gate, with the exemptions of ``_no_progress_hold_blocks``."""
+engine.py:2731:        if self._bypasses_lcm_context_management() or not self._sweep_budget_hold_active():
+engine.py:2735:        return self._sweep_budget_hold_applies(tokens)
+engine.py:2740:        status = self._no_progress_hold_status()
+engine.py:2743:        return "cooldown:lcm_sweep_budget" if self._sweep_budget_hold_active() else None
+engine.py:2762:            and self._sweep_budget_hold_active())
+engine.py:2764:    def _sweep_budget_hold_applies(self, tokens: Optional[int], *, managed_scope: bool = False) -> bool:
+engine.py:2770:        self._no_progress_observed_tokens = None if tokens is None else int(tokens)
+engine.py:2771:        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active(managed_scope=True):
+engine.py:2782:        if getattr(self, "_no_progress_ingest_generation", None) == self._ingest_failure_count:
+engine.py:2785:            self._no_progress_replay = None
+engine.py:2787:    def _record_ingest_failure(self, where: str, error: Exception) -> None:
+engine.py:2794:        self._no_progress_replay = None
+engine.py:3064:        Uses the same _ingest_messages cursor as compress(), so if
+engine.py:3081:                self._ingest_messages(messages)
+engine.py:3089:                self._record_ingest_failure("per-turn ingest()", e)
+engine.py:4678:            self._reset_session_scoped_runtime_state()
+engine.py:5089:                    self._reset_session_scoped_runtime_state()
+engine.py:5150:            self._reset_session_scoped_runtime_state()
+engine.py:5523:                    self._ingest_messages(
+engine.py:5628:        self._reset_session_scoped_runtime_state()
+engine.py:5889:                    self._ingest_messages(messages)
+engine.py:5893:                    self._record_ingest_failure("tool-call ingest", e)
+engine.py:5987:            "no_progress_hold": self._no_progress_hold_status(),
+engine.py:6381:        self._no_progress_public_rows = public_rows
+engine.py:6398:    def _remember_active_replay_messages(
+engine.py:6420:        self._observe_no_progress_replay(original_messages, active_replay_messages)
+engine.py:6447:            if id(row) not in self._no_progress_public_rows:
+engine.py:6448:                self._no_progress_public_rows[id(row)] = {
+engine.py:6454:    def _cached_active_replay_messages(
+engine.py:6473:                self._observe_no_progress_replay(original_messages, current)
+engine.py:6990:    def _ingest_messages(
+engine.py:7008:        self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
+engine.py:7009:        self._no_progress_ingest_generation = self._ingest_failure_count
+engine.py:7296:                    self._record_ingest_failure("identity-anchor pre-match", exc)
+engine.py:7359:            result = self._remember_active_replay_messages(messages, active)
+engine.py:7373:            cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
+engine.py:8843:            self._no_progress_candidate = False  # #909/#651: a stored condensation is progress
+engine.py:8844:            self._clear_persisted_no_progress_hold()
+engine.py:8854:                return passes, "condensation_no_progress"
+engine.py:10176:        (output of ``_ingest_messages``), not raw messages.  ``working_messages``
+level3_repair.py:219:                conn.execute("DELETE FROM metadata WHERE key = ?", (f"compaction_no_progress:v1:{session_id}",))
+reset_state.py:49:    def _reset_session_scoped_runtime_state(self) -> None:
+reset_state.py:71:        self._no_progress_hold, self._no_progress_candidate = None, False
+reset_state.py:72:        self._no_progress_replay = None  # Reload the scoped durable hold only after current ingest proof.
+reset_state.py:73:        self._no_progress_observed_tokens = self._no_progress_ingest_generation = None
+reset_state.py:74:        self._no_progress_hold_persisted = False
+reset_state.py:77:        self._sweep_budget_hold_until, self._sweep_budget_hold_conversation = 0.0, ""
+reset_state.py:78:        self._hung_summary_strike, self._sweep_budget_hold_turn_paced = None, False
+tests/behaviour/compress_trace_harness.py:453:    "_ingest_messages",
+tests/behaviour/compress_trace_harness.py:487:    "_no_progress_candidate",
+tests/behaviour/compress_trace_harness.py:488:    "_no_progress_hold",
+tests/behaviour/compress_trace_harness.py:489:    "_no_progress_hold_blocks",
+tests/behaviour/compress_trace_harness.py:490:    "_no_progress_hold_persisted",
+tests/behaviour/compress_trace_harness.py:491:    "_no_progress_ingest_generation",
+tests/behaviour/compress_trace_harness.py:492:    "_no_progress_observed_tokens",
+tests/behaviour/compress_trace_harness.py:493:    "_no_progress_proof_complete",
+tests/behaviour/compress_trace_harness.py:494:    "_no_progress_public_rows",
+tests/behaviour/compress_trace_harness.py:518:    "_start_sweep_budget_hold",
+tests/behaviour/compress_trace_harness.py:537:    "_sweep_budget_hold_applies",
+tests/behaviour/compress_trace_harness.py:538:    "_sweep_budget_hold_turn_paced",
+tests/behaviour/compress_trace_harness.py:539:    "_sweep_budget_hold_until",
+tests/behaviour/compress_trace_harness.py:586:            identity_keys = path.endswith(("store_ids_by_message_id", "_compress_occurrences", "_no_progress_public_rows"))
+tests/behaviour/compress_trace_harness.py:1493:                                assert engine._sweep_budget_hold_turn_paced == (not repeated and not overflow and not fallback)
+tests/behaviour/compress_trace_harness.py:1495:                                    "strike": engine._hung_summary_strike, "turn_paced": engine._sweep_budget_hold_turn_paced,
+tests/behaviour/compress_trace_harness.py:1496:                                    "hold_until": engine._sweep_budget_hold_until})))
+tests/behaviour/compress_trace_harness.py:1500:                                assert engine._sweep_budget_hold_until == 0
+tests/behaviour/ingest_trace_harness.py:54:# FROZEN inventory, never generated from _ingest_messages at observation time.
+tests/behaviour/ingest_trace_harness.py:56:    "_no_progress_replay", "_no_progress_public_rows", "_no_progress_metadata_warned", "_no_progress_hold_persisted",
+tests/behaviour/ingest_trace_harness.py:57:    "_no_progress_ingest_generation", "_no_progress_observed_tokens", "_ingest_replay_redaction_changes",
+tests/behaviour/ingest_trace_harness.py:191:    pending, visited, attributes = ["_ingest_messages"], set(), set()
+tests/behaviour/ingest_trace_harness.py:277:        if path == "_no_progress_replay" and isinstance(value, tuple) and len(value) == 3:
+tests/behaviour/ingest_trace_harness.py:283:        if path == "_no_progress_public_rows" and isinstance(value, dict):
+tests/behaviour/ingest_trace_harness.py:467:        engine._ingest_messages(original)
+tests/behaviour/ingest_trace_harness.py:560:            active = engine._ingest_messages(incoming)
+tests/behaviour/ingest_trace_harness.py:931:                        result = engine._ingest_messages(incoming,
+tests/behaviour/ingest_trace_harness.py:957:                    result = engine._ingest_messages(incoming)
+tests/behaviour/ingest_trace_harness.py:968:                    emit("cold-return", engine._ingest_messages(incoming))
+tests/behaviour/test_child_isolation.py:20:_last_stub_first_exit _no_progress_candidate _objective_only_noop _pending_emission_candidates
+tests/behaviour/test_child_isolation.py:244:            monkeypatch.setattr(engine, "_ingest_messages", fail_ingest)
+tests/behaviour/test_child_isolation.py:263:            engine._reset_session_scoped_runtime_state()
+tests/behaviour/test_child_isolation.py:369:                        engine._ingest_messages([message])
+tests/behaviour/test_gap_engine_contracts.py:62:        # The authority inventory requires scoped writes at _ingest_messages.
+tests/behaviour/test_ingest_trace.py:32:            stage, marker, data = payload.partition("attr _no_progress_public_rows ")
+tests/behaviour/test_ingest_trace.py:46:    assert "_ingest_messages" in methods
+tests/behaviour/test_ingest_trace.py:53:        " def _ingest_messages(self): return self._moved_phase()\n"
+tests/behaviour/test_ingest_trace.py:58:    assert reachable == {"_ingest_messages", "_moved_phase", "_helper"}
+tests/behaviour/test_ingest_trace.py:90:    replay = canonical.value(("S", "C", "sandbox-digest-a"), "_no_progress_replay")
+tests/behaviour/test_ingest_trace.py:91:    assert replay == canonical.value(("S", "C", "sandbox-digest-a"), "_no_progress_replay")
+tests/behaviour/test_ingest_trace.py:92:    assert replay != canonical.value(("S", "C", "sandbox-digest-b"), "_no_progress_replay")
+tests/behaviour/test_ingest_trace.py:93:    assert canonical.value({id(first): first}, "_no_progress_public_rows") == {
+tests/behaviour/test_ingest_trace.py:104:        engine._ingest_messages(first)
+tests/behaviour/test_ingest_trace.py:109:        engine._ingest_messages([*first, missing])
+tests/behaviour/test_ingest_trace.py:159:        assert set(engine._no_progress_public_rows) == {second}
+tests/behaviour/test_ingest_trace.py:189:        engine._ingest_messages(incoming)
+tests/behaviour/test_ingest_trace.py:235:        old._ingest_messages([{"role": "user", "content": "before reopen"}])
+tests/behaviour/test_ingest_trace.py:237:        fresh._ingest_messages([{"role": "user", "content": "after reopen"}])
+tests/behaviour/test_ingest_trace.py:250:        fresh._ingest_messages([{"role": "user", "content": "cold-phase row"}])
+tests/behaviour/test_ingest_trace_observation.py:72:    original = engine_type._ingest_messages
+tests/behaviour/test_ingest_trace_observation.py:102:    monkeypatch.setattr(engine_type, "_ingest_messages", lose_owner)
+tests/behaviour/test_ingest_trace_observation.py:116:    original = harness.engine_module.LCMEngine._ingest_messages
+tests/behaviour/test_ingest_trace_observation.py:134:    monkeypatch.setattr(harness.engine_module.LCMEngine, "_ingest_messages", extra_read)
+tests/behaviour/test_ingest_trace_observation.py:147:    ingest = engine_type._ingest_messages
+tests/behaviour/test_ingest_trace_observation.py:173:    monkeypatch.setattr(engine_type, "_ingest_messages", ingest_observed)
+tests/behaviour/test_ingest_trace_observation.py:187:        if frame.f_code.co_name != "_ingest_messages":
+tests/behaviour/test_rebind_equivalence.py:59:    assert engine._no_progress_hold_active()
+tests/differential/driver.py:292:                record = engine._store.read_metadata_json("compaction_no_progress:v1:S")
+tests/differential/driver.py:296:                                  hold=engine._no_progress_hold, record=record,
+tests/differential/driver.py:297:                                  fingerprint=engine._no_progress_fingerprint(),
+tests/differential/driver.py:323:                                  complete=getattr(engine, "_no_progress_proof_complete", False),
+tests/fixtures/assembly_trace.json:1336:"store.read_metadata_json call {\"key\":\"compaction_no_progress:v1:S\"}",
+tests/fixtures/assembly_trace.json:1337:"sql conn=1 \"SELECT value FROM metadata WHERE key = 'compaction_no_progress:v1:S'\"",
+tests/fixtures/compress_trace.json:82:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:83:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:84:"attr _no_progress_proof_complete=true",
+tests/fixtures/compress_trace.json:85:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:168:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:169:"attr _no_progress_observed_tokens=1",
+tests/fixtures/compress_trace.json:170:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:253:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:254:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:255:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:350:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:351:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:352:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:353:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:362:"attr _sweep_budget_hold_turn_paced=true",
+tests/fixtures/compress_trace.json:363:"attr _sweep_budget_hold_until=1715.0",
+tests/fixtures/compress_trace.json:479:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:480:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:481:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:701:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:702:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:703:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:823:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:824:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:825:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:930:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:931:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:932:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:933:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:1050:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:1051:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:1052:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:1145:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:1146:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:1147:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:1148:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:1149:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:1158:"attr _sweep_budget_hold_until=1721.0",
+tests/fixtures/compress_trace.json:1241:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:1242:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:1243:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:1244:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:1245:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:1249:"attr _sweep_budget_hold_until=1721.0",
+tests/fixtures/compress_trace.json:1332:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:1333:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:1334:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:1335:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:1336:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:1340:"attr _sweep_budget_hold_until=1721.0",
+tests/fixtures/compress_trace.json:1424:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:1425:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:1426:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:1427:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:1428:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:1432:"attr _sweep_budget_hold_until=1721.0",
+tests/fixtures/compress_trace.json:1464:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:1465:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:1466:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:1467:"attr _no_progress_public_rows=sha12/len=fea0bda0dcc3/2625",
+tests/fixtures/compress_trace.json:1470:"attr _sweep_budget_hold_until=1721.0",
+tests/fixtures/compress_trace.json:1631:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:1632:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:1633:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:1738:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:1739:"attr _no_progress_observed_tokens=190000",
+tests/fixtures/compress_trace.json:1740:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:1859:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:1860:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:1861:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:1939:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:2011:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:2102:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:2103:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:2104:"attr _no_progress_proof_complete=true",
+tests/fixtures/compress_trace.json:2105:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:2191:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:2192:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:2193:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:2194:"attr _no_progress_proof_complete=true",
+tests/fixtures/compress_trace.json:2195:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:2292:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:2293:"attr _no_progress_observed_tokens=250000",
+tests/fixtures/compress_trace.json:2294:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:2420:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:2421:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:2422:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:2567:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:2568:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:2569:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:2666:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:2667:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:2668:"attr _no_progress_public_rows=sha12/len=8c9556d555c0/7943",
+tests/fixtures/compress_trace.json:2773:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:2774:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:2775:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:2890:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:2891:"attr _no_progress_observed_tokens=250",
+tests/fixtures/compress_trace.json:2892:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:3027:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:3028:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:3029:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:3146:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:3147:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:3148:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:3248:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:3249:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:3250:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:3251:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:3365:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:3366:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:3367:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:3499:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:3500:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:3501:"attr _no_progress_public_rows=sha12/len=6295cc03508a/29379",
+tests/fixtures/compress_trace.json:3626:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:3627:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:3628:"attr _no_progress_public_rows=sha12/len=89f408cf8108/34823",
+tests/fixtures/compress_trace.json:3786:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:3787:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:3788:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:3910:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:3911:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:3912:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:4034:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:4035:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:4036:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:4155:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:4156:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:4157:"attr _no_progress_public_rows=sha12/len=89f408cf8108/34823",
+tests/fixtures/compress_trace.json:4329:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:4330:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:4331:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:4433:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:4595:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:4596:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:4597:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:4698:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:4699:"attr _no_progress_observed_tokens=250000",
+tests/fixtures/compress_trace.json:4700:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:4764:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:4765:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:4766:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:4767:"attr _no_progress_proof_complete=true",
+tests/fixtures/compress_trace.json:4768:"attr _no_progress_public_rows=sha12/len=a2c451b6e4ef/2695",
+tests/fixtures/compress_trace.json:4880:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:4881:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:4882:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:4980:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:5041:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:5042:"attr _no_progress_public_rows=sha12/len=fea0bda0dcc3/2625",
+tests/fixtures/compress_trace.json:5132:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:5133:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:5134:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:5229:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:5230:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:5231:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:5232:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:5346:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:5347:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:5348:"attr _no_progress_public_rows=sha12/len=f7fce5332845/21100",
+tests/fixtures/compress_trace.json:5453:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:5454:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:5455:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:5690:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:5691:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:5692:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:5693:"attr _no_progress_public_rows=sha12/len=a1311241116e/3987",
+tests/fixtures/compress_trace.json:5813:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:5814:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:5815:"attr _no_progress_public_rows=sha12/len=df8ca8864073/19969",
+tests/fixtures/compress_trace.json:5876:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:5877:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:5878:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:5879:"attr _no_progress_public_rows=sha12/len=919971a2eae2/3917",
+tests/fixtures/compress_trace.json:5960:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:5961:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:5962:"attr _no_progress_public_rows=sha12/len=60335ba7db71/19818",
+tests/fixtures/compress_trace.json:6044:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:6045:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:6046:"attr _no_progress_public_rows=sha12/len=7ff2c26bfb63/21063",
+tests/fixtures/compress_trace.json:6160:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:6161:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:6162:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:6277:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:6278:"attr _no_progress_observed_tokens=5147",
+tests/fixtures/compress_trace.json:6279:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:6393:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:6394:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:6395:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:6521:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:6522:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:6523:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:6532:"attr _sweep_budget_hold_turn_paced=true",
+tests/fixtures/compress_trace.json:6533:"attr _sweep_budget_hold_until=1715.0",
+tests/fixtures/compress_trace.json:6651:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:6652:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:6653:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:6751:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:6752:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:6753:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:6819:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:6820:"attr _no_progress_public_rows=sha12/len=cb15f9066fad/2807",
+tests/fixtures/compress_trace.json:6923:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:6924:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:6925:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:6926:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:7018:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:7019:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:7020:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:7021:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:7030:"attr _sweep_budget_hold_until=1300.0",
+tests/fixtures/compress_trace.json:7115:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:7116:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:7117:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:7215:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:7331:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:7332:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:7508:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:7509:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:7510:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:7596:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:7597:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:7598:"attr _no_progress_public_rows=sha12/len=3dace5636f07/21060",
+tests/fixtures/compress_trace.json:7680:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:7681:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:7682:"attr _no_progress_public_rows=sha12/len=0eb6c51937f2/21061",
+tests/fixtures/compress_trace.json:7764:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:7765:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:7766:"attr _no_progress_public_rows=sha12/len=2195a3eb990d/21061",
+tests/fixtures/compress_trace.json:7872:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:7873:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:7874:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:7979:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:7980:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:7981:"attr _no_progress_public_rows=sha12/len=1888ae9f3932/21000",
+tests/fixtures/compress_trace.json:8047:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:8048:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:8049:"attr _no_progress_proof_complete=true",
+tests/fixtures/compress_trace.json:8050:"attr _no_progress_public_rows=sha12/len=34265d18e897/13836",
+tests/fixtures/compress_trace.json:8121:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:8122:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:8123:"attr _no_progress_public_rows=sha12/len=34265d18e897/13836",
+tests/fixtures/compress_trace.json:8189:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:8190:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:8191:"attr _no_progress_proof_complete=true",
+tests/fixtures/compress_trace.json:8192:"attr _no_progress_public_rows=sha12/len=34265d18e897/13836",
+tests/fixtures/compress_trace.json:8316:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:8317:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:8318:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:8401:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:8402:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:8403:"attr _no_progress_public_rows=sha12/len=aa52b734deab/20006",
+tests/fixtures/compress_trace.json:8562:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:8563:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:8564:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:8696:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:8697:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:8698:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:8800:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:8801:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:8802:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:8803:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:8812:"attr _sweep_budget_hold_until=1300.0",
+tests/fixtures/compress_trace.json:8907:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:8908:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:8909:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:9007:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:9008:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:9009:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:9104:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:9181:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:9273:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:9274:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:9275:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:9355:"attr _no_progress_observed_tokens=190000",
+tests/fixtures/compress_trace.json:9457:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:9458:"attr _no_progress_observed_tokens=60000",
+tests/fixtures/compress_trace.json:9459:"attr _no_progress_public_rows=sha12/len=32d8c2ba7577/5319",
+tests/fixtures/compress_trace.json:9595:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:9596:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:9597:"attr _no_progress_public_rows=sha12/len=89f408cf8108/34823",
+tests/fixtures/compress_trace.json:9721:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:9722:"attr _no_progress_public_rows=sha12/len=fea0bda0dcc3/2625",
+tests/fixtures/compress_trace.json:9824:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:9825:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:9826:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:9935:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:10013:"attr _no_progress_observed_tokens=130001",
+tests/fixtures/compress_trace.json:10076:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:10077:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:10160:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:10223:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:10224:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:10287:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:10288:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:10404:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:10488:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:10638:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:10639:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:10640:"attr _no_progress_public_rows=sha12/len=f6fdd82b714f/16469",
+tests/fixtures/compress_trace.json:10824:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:10825:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:10826:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:10872:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:10873:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:11017:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:11018:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:11019:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:11093:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:11094:"attr _no_progress_proof_complete=true",
+tests/fixtures/compress_trace.json:11095:"attr _no_progress_public_rows=sha12/len=43639987ef45/21000",
+tests/fixtures/compress_trace.json:11185:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:11186:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:11187:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:11188:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:11197:"attr _sweep_budget_hold_until=1300.0",
+tests/fixtures/compress_trace.json:11333:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:11334:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:11335:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:11336:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:11345:"attr _sweep_budget_hold_until=1300.0",
+tests/fixtures/compress_trace.json:11400:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:11401:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:11402:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:11403:"attr _no_progress_public_rows=sha12/len=a2c451b6e4ef/2695",
+tests/fixtures/compress_trace.json:11407:"attr _sweep_budget_hold_until=1300.0",
+tests/fixtures/compress_trace.json:11508:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:11509:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:11510:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:11620:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:11621:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:11622:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:11667:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:11668:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:11669:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:11670:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:11671:"attr _no_progress_public_rows=sha12/len=d6453683c669/1491",
+tests/fixtures/compress_trace.json:11732:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:11733:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:11734:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:11735:"attr _no_progress_proof_complete=true",
+tests/fixtures/compress_trace.json:11736:"attr _no_progress_public_rows=sha12/len=34265d18e897/13836",
+tests/fixtures/compress_trace.json:11794:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:11795:"attr _no_progress_public_rows=sha12/len=fea0bda0dcc3/2625",
+tests/fixtures/compress_trace.json:11877:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:11985:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:12038:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:12039:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:12040:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:12048:"attr _sweep_budget_hold_until=1300.0",
+tests/fixtures/compress_trace.json:12103:"attr _no_progress_observed_tokens=250000",
+tests/fixtures/compress_trace.json:12184:"attr _no_progress_observed_tokens=150000",
+tests/fixtures/compress_trace.json:12334:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:12335:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:12336:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:12449:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:12450:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:12543:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:12544:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:12545:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:12546:"attr _no_progress_proof_complete=true",
+tests/fixtures/compress_trace.json:12547:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:12646:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:12647:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:12648:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:12936:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:12937:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:12938:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:12939:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:12948:"attr _sweep_budget_hold_turn_paced=true",
+tests/fixtures/compress_trace.json:12949:"attr _sweep_budget_hold_until=1715.0",
+tests/fixtures/compress_trace.json:13042:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:13043:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:13044:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:13045:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:13129:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:13130:"attr _no_progress_observed_tokens=250000",
+tests/fixtures/compress_trace.json:13131:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:13215:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:13216:"attr _no_progress_observed_tokens=250000",
+tests/fixtures/compress_trace.json:13217:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:13264:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:13266:"attr _sweep_budget_hold_turn_paced=false",
+tests/fixtures/compress_trace.json:13267:"attr _sweep_budget_hold_until=2131.0",
+tests/fixtures/compress_trace.json:13337:"attr _no_progress_observed_tokens=250000",
+tests/fixtures/compress_trace.json:13339:"attr _sweep_budget_hold_turn_paced=false",
+tests/fixtures/compress_trace.json:13369:"attr _no_progress_observed_tokens=250000",
+tests/fixtures/compress_trace.json:13424:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:13425:"attr _no_progress_observed_tokens=250000",
+tests/fixtures/compress_trace.json:13426:"attr _no_progress_public_rows=sha12/len=a2c451b6e4ef/2695",
+tests/fixtures/compress_trace.json:13482:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:13483:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:13484:"attr _no_progress_proof_complete=true",
+tests/fixtures/compress_trace.json:13485:"attr _no_progress_public_rows=sha12/len=3dace5636f07/21060",
+tests/fixtures/compress_trace.json:13579:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:13580:"attr _no_progress_proof_complete=true",
+tests/fixtures/compress_trace.json:13581:"attr _no_progress_public_rows=sha12/len=1ceddb0c481c/21519",
+tests/fixtures/compress_trace.json:13692:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:13693:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:13694:"attr _no_progress_public_rows=sha12/len=d778395b3217/21120",
+tests/fixtures/compress_trace.json:13759:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:13760:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:13761:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:13762:"attr _no_progress_public_rows=sha12/len=3dace5636f07/21060",
+tests/fixtures/compress_trace.json:13770:"attr _sweep_budget_hold_until=1300.0",
+tests/fixtures/compress_trace.json:13887:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:13888:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:13889:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:13945:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:13946:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:14061:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:14062:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:14063:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:14122:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:14123:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:14124:"attr _no_progress_proof_complete=true",
+tests/fixtures/compress_trace.json:14125:"attr _no_progress_public_rows=sha12/len=cfd1777acbed/20979",
+tests/fixtures/compress_trace.json:14224:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:14225:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:14226:"attr _no_progress_observed_tokens=12001",
+tests/fixtures/compress_trace.json:14227:"attr _no_progress_public_rows=sha12/len=6295cc03508a/29379",
+tests/fixtures/compress_trace.json:14314:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:14315:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:14316:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:14317:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:14318:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:14322:"attr _sweep_budget_hold_until=1721.0",
+tests/fixtures/compress_trace.json:14468:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:14469:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:14470:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:14620:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:14621:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:14622:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:14946:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:14947:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:14948:"attr _no_progress_public_rows=sha12/len=4790fbb03dac/105163",
+tests/fixtures/compress_trace.json:15118:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:15119:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:15120:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:15227:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:15228:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:15229:"attr _no_progress_observed_tokens=12001",
+tests/fixtures/compress_trace.json:15230:"attr _no_progress_public_rows=sha12/len=6295cc03508a/29379",
+tests/fixtures/compress_trace.json:15290:"attr _no_progress_candidate=true",
+tests/fixtures/compress_trace.json:15291:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:15292:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:15293:"attr _no_progress_proof_complete=true",
+tests/fixtures/compress_trace.json:15294:"attr _no_progress_public_rows=sha12/len=a2c451b6e4ef/2695",
+tests/fixtures/compress_trace.json:15420:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:15421:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:15422:"attr _no_progress_public_rows=sha12/len=89f408cf8108/34823",
+tests/fixtures/compress_trace.json:15540:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:15541:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:15542:"attr _no_progress_public_rows=sha12/len=89f408cf8108/34823",
+tests/fixtures/compress_trace.json:15651:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:15652:"attr _no_progress_proof_complete=false",
+tests/fixtures/compress_trace.json:15769:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:15770:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:15771:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/compress_trace.json:15886:"attr _no_progress_ingest_generation=0",
+tests/fixtures/compress_trace.json:15887:"attr _no_progress_observed_tokens=3000",
+tests/fixtures/compress_trace.json:15888:"attr _no_progress_public_rows=sha12/len=f563b1cb38d1/21071",
+tests/fixtures/ingest_trace.json:76:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:77:"attr _no_progress_public_rows sha12/len=75460b744a6e/111",
+tests/fixtures/ingest_trace.json:78:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:182:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:183:"attr _no_progress_public_rows {}",
+tests/fixtures/ingest_trace.json:184:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:265:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:266:"attr _no_progress_public_rows {\"retained-message-1\":{\"content\":\"fresh\",\"role\":\"user\"}}",
+tests/fixtures/ingest_trace.json:267:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:374:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:375:"attr _no_progress_replay null",
+tests/fixtures/ingest_trace.json:396:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:397:"attr _no_progress_replay null",
+tests/fixtures/ingest_trace.json:418:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:419:"attr _no_progress_replay null",
+tests/fixtures/ingest_trace.json:439:"attr _no_progress_public_rows sha12/len=e43c8a3f2cd9/279",
+tests/fixtures/ingest_trace.json:659:"attr _no_progress_public_rows sha12/len=58739e4dd7cf/462",
+tests/fixtures/ingest_trace.json:660:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:895:"attr _no_progress_public_rows sha12/len=04f505ab8d22/312",
+tests/fixtures/ingest_trace.json:896:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:1043:"attr _no_progress_public_rows sha12/len=e43c8a3f2cd9/279",
+tests/fixtures/ingest_trace.json:1302:"attr _no_progress_public_rows sha12/len=b9d93b64539d/417",
+tests/fixtures/ingest_trace.json:1303:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:1603:"attr _no_progress_public_rows sha12/len=204c4bcd14d2/212",
+tests/fixtures/ingest_trace.json:1604:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:2044:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:2045:"attr _no_progress_public_rows sha12/len=32c593751b88/433",
+tests/fixtures/ingest_trace.json:2046:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:2370:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:2371:"attr _no_progress_public_rows sha12/len=ddb08f019fb6/716",
+tests/fixtures/ingest_trace.json:2372:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:2757:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:2758:"attr _no_progress_public_rows sha12/len=514ba294a2b8/1297",
+tests/fixtures/ingest_trace.json:2759:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:3011:"attr _no_progress_public_rows sha12/len=c7aaa0d12d45/279",
+tests/fixtures/ingest_trace.json:3244:"attr _no_progress_public_rows sha12/len=331a451816db/279",
+tests/fixtures/ingest_trace.json:3245:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:3384:"attr _no_progress_public_rows sha12/len=e43c8a3f2cd9/279",
+tests/fixtures/ingest_trace.json:3611:"attr _no_progress_public_rows sha12/len=e43c8a3f2cd9/279",
+tests/fixtures/ingest_trace.json:3612:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:3823:"attr _no_progress_public_rows sha12/len=04f505ab8d22/312",
+tests/fixtures/ingest_trace.json:3824:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:4011:"attr _no_progress_public_rows sha12/len=61a06bb99ea0/347",
+tests/fixtures/ingest_trace.json:4012:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:4201:"attr _no_progress_public_rows sha12/len=c7aaa0d12d45/279",
+tests/fixtures/ingest_trace.json:4518:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:4519:"attr _no_progress_public_rows sha12/len=16b97ee2d83e/275",
+tests/fixtures/ingest_trace.json:4520:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:4895:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:4896:"attr _no_progress_public_rows sha12/len=8222ec385b50/334",
+tests/fixtures/ingest_trace.json:4897:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:5224:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:5225:"attr _no_progress_public_rows sha12/len=16b97ee2d83e/275",
+tests/fixtures/ingest_trace.json:5226:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:5550:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:5551:"attr _no_progress_public_rows sha12/len=4d6a9e200869/308",
+tests/fixtures/ingest_trace.json:5552:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:5977:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:5978:"attr _no_progress_public_rows sha12/len=16b97ee2d83e/275",
+tests/fixtures/ingest_trace.json:5979:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:6481:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:6482:"attr _no_progress_public_rows sha12/len=16b97ee2d83e/275",
+tests/fixtures/ingest_trace.json:6483:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:7073:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:7074:"attr _no_progress_public_rows sha12/len=8222ec385b50/334",
+tests/fixtures/ingest_trace.json:7075:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:7622:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:7623:"attr _no_progress_public_rows sha12/len=16b97ee2d83e/275",
+tests/fixtures/ingest_trace.json:7624:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:8150:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:8151:"attr _no_progress_public_rows sha12/len=4d6a9e200869/308",
+tests/fixtures/ingest_trace.json:8152:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:8680:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:8681:"attr _no_progress_public_rows sha12/len=16b97ee2d83e/275",
+tests/fixtures/ingest_trace.json:8682:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:9272:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:9273:"attr _no_progress_public_rows sha12/len=8222ec385b50/334",
+tests/fixtures/ingest_trace.json:9274:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:9821:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:9822:"attr _no_progress_public_rows sha12/len=16b97ee2d83e/275",
+tests/fixtures/ingest_trace.json:9823:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:10349:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:10350:"attr _no_progress_public_rows sha12/len=4d6a9e200869/308",
+tests/fixtures/ingest_trace.json:10351:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:10879:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:10880:"attr _no_progress_public_rows sha12/len=16b97ee2d83e/275",
+tests/fixtures/ingest_trace.json:10881:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:11471:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:11472:"attr _no_progress_public_rows sha12/len=8222ec385b50/334",
+tests/fixtures/ingest_trace.json:11473:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:12020:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:12021:"attr _no_progress_public_rows sha12/len=16b97ee2d83e/275",
+tests/fixtures/ingest_trace.json:12022:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:12548:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:12549:"attr _no_progress_public_rows sha12/len=4d6a9e200869/308",
+tests/fixtures/ingest_trace.json:12550:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:12946:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:12947:"attr _no_progress_public_rows sha12/len=015c1592fdf1/649",
+tests/fixtures/ingest_trace.json:12948:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:13284:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:13285:"attr _no_progress_public_rows sha12/len=a45d6871cbc1/507",
+tests/fixtures/ingest_trace.json:13286:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:13795:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:13796:"attr _no_progress_public_rows sha12/len=8792c0d605f8/420",
+tests/fixtures/ingest_trace.json:13797:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:14468:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:14469:"attr _no_progress_public_rows sha12/len=271cdc1bb2f3/480",
+tests/fixtures/ingest_trace.json:14470:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:15128:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:15129:"attr _no_progress_public_rows sha12/len=dfe2e18126c1/420",
+tests/fixtures/ingest_trace.json:15130:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:15602:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:15603:"attr _no_progress_public_rows {\"retained-message-1\":{\"content\":\"new request\",\"role\":\"user\"}}",
+tests/fixtures/ingest_trace.json:15604:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:16010:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:16011:"attr _no_progress_public_rows sha12/len=6a078d7bd1aa/283",
+tests/fixtures/ingest_trace.json:16012:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:16622:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:16623:"attr _no_progress_public_rows sha12/len=381c5b10a308/488",
+tests/fixtures/ingest_trace.json:16624:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:17139:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:17140:"attr _no_progress_public_rows sha12/len=bb97e143378e/138",
+tests/fixtures/ingest_trace.json:17141:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:17375:"attr _no_progress_public_rows sha12/len=4b12108657ef/424",
+tests/fixtures/ingest_trace.json:17871:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:17872:"attr _no_progress_public_rows sha12/len=a08f6ffa23a3/462",
+tests/fixtures/ingest_trace.json:17873:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:18198:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:18199:"attr _no_progress_public_rows sha12/len=b0a06f39e2d9/521",
+tests/fixtures/ingest_trace.json:18200:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:18506:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:18507:"attr _no_progress_public_rows sha12/len=152287e17d98/462",
+tests/fixtures/ingest_trace.json:18508:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:18761:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:18762:"attr _no_progress_public_rows {\"retained-message-1\":{\"content\":\"new request\",\"role\":\"user\"}}",
+tests/fixtures/ingest_trace.json:18763:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:18981:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:18982:"attr _no_progress_public_rows sha12/len=3ebceea9c445/138",
+tests/fixtures/ingest_trace.json:18983:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:19268:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:19269:"attr _no_progress_public_rows sha12/len=35665e1e5d91/529",
+tests/fixtures/ingest_trace.json:19270:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:19565:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:19566:"attr _no_progress_public_rows sha12/len=2cfe55df7392/325",
+tests/fixtures/ingest_trace.json:19567:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:19702:"attr _no_progress_public_rows sha12/len=deb4d806419a/466",
+tests/fixtures/ingest_trace.json:19905:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:19906:"attr _no_progress_public_rows sha12/len=c6f5383450d7/154",
+tests/fixtures/ingest_trace.json:19907:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:20058:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:20059:"attr _no_progress_public_rows sha12/len=4e01c1bc606a/307",
+tests/fixtures/ingest_trace.json:20060:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:20213:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:20214:"attr _no_progress_public_rows sha12/len=df47af66dba3/144",
+tests/fixtures/ingest_trace.json:20215:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:20366:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:20367:"attr _no_progress_public_rows sha12/len=fc2c69579803/287",
+tests/fixtures/ingest_trace.json:20368:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:20525:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:20526:"attr _no_progress_public_rows sha12/len=3d16152aeaac/144",
+tests/fixtures/ingest_trace.json:20527:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:20685:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:20686:"attr _no_progress_public_rows sha12/len=f9a06b51d6e3/287",
+tests/fixtures/ingest_trace.json:20687:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:20919:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:20920:"attr _no_progress_public_rows sha12/len=015c1592fdf1/649",
+tests/fixtures/ingest_trace.json:20921:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:21249:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:21250:"attr _no_progress_public_rows sha12/len=cfc1aff4bd08/217",
+tests/fixtures/ingest_trace.json:21251:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:21577:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:21578:"attr _no_progress_public_rows sha12/len=ddb08f019fb6/716",
+tests/fixtures/ingest_trace.json:21579:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:21893:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:21894:"attr _no_progress_public_rows sha12/len=cfc1aff4bd08/217",
+tests/fixtures/ingest_trace.json:21895:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:22194:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:22195:"attr _no_progress_public_rows sha12/len=015c1592fdf1/649",
+tests/fixtures/ingest_trace.json:22196:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:22544:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:22545:"attr _no_progress_public_rows sha12/len=5ac9ad50ec03/333",
+tests/fixtures/ingest_trace.json:22546:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:22851:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:22852:"attr _no_progress_public_rows sha12/len=015c1592fdf1/649",
+tests/fixtures/ingest_trace.json:22853:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:23181:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:23182:"attr _no_progress_public_rows sha12/len=cfc1aff4bd08/217",
+tests/fixtures/ingest_trace.json:23183:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:23504:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:23505:"attr _no_progress_public_rows sha12/len=ddb08f019fb6/716",
+tests/fixtures/ingest_trace.json:23506:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:23849:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:23850:"attr _no_progress_public_rows sha12/len=cfc1aff4bd08/217",
+tests/fixtures/ingest_trace.json:23851:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:24153:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:24154:"attr _no_progress_public_rows sha12/len=015c1592fdf1/649",
+tests/fixtures/ingest_trace.json:24155:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:24503:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:24504:"attr _no_progress_public_rows sha12/len=5ac9ad50ec03/333",
+tests/fixtures/ingest_trace.json:24505:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:24800:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:24801:"attr _no_progress_public_rows sha12/len=015c1592fdf1/649",
+tests/fixtures/ingest_trace.json:24802:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:25100:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:25101:"attr _no_progress_public_rows sha12/len=cfc1aff4bd08/217",
+tests/fixtures/ingest_trace.json:25102:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:25384:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:25385:"attr _no_progress_public_rows sha12/len=ddb08f019fb6/716",
+tests/fixtures/ingest_trace.json:25386:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:25693:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:25694:"attr _no_progress_public_rows sha12/len=cfc1aff4bd08/217",
+tests/fixtures/ingest_trace.json:25695:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:25987:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:25988:"attr _no_progress_public_rows sha12/len=015c1592fdf1/649",
+tests/fixtures/ingest_trace.json:25989:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:26322:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:26323:"attr _no_progress_public_rows sha12/len=5ac9ad50ec03/333",
+tests/fixtures/ingest_trace.json:26324:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:26625:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:26626:"attr _no_progress_public_rows sha12/len=015c1592fdf1/649",
+tests/fixtures/ingest_trace.json:26627:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:26928:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:26929:"attr _no_progress_public_rows sha12/len=cfc1aff4bd08/217",
+tests/fixtures/ingest_trace.json:26930:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:27207:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:27208:"attr _no_progress_public_rows sha12/len=ddb08f019fb6/716",
+tests/fixtures/ingest_trace.json:27209:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:27545:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:27546:"attr _no_progress_public_rows sha12/len=cfc1aff4bd08/217",
+tests/fixtures/ingest_trace.json:27547:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:27842:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:27843:"attr _no_progress_public_rows sha12/len=015c1592fdf1/649",
+tests/fixtures/ingest_trace.json:27844:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:28185:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:28186:"attr _no_progress_public_rows sha12/len=5ac9ad50ec03/333",
+tests/fixtures/ingest_trace.json:28187:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:28482:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:28483:"attr _no_progress_public_rows sha12/len=015c1592fdf1/649",
+tests/fixtures/ingest_trace.json:28484:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:28782:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:28783:"attr _no_progress_public_rows sha12/len=cfc1aff4bd08/217",
+tests/fixtures/ingest_trace.json:28784:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:29066:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:29067:"attr _no_progress_public_rows sha12/len=ddb08f019fb6/716",
+tests/fixtures/ingest_trace.json:29068:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:29375:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:29376:"attr _no_progress_public_rows sha12/len=cfc1aff4bd08/217",
+tests/fixtures/ingest_trace.json:29377:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:29669:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:29670:"attr _no_progress_public_rows sha12/len=015c1592fdf1/649",
+tests/fixtures/ingest_trace.json:29671:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:30004:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:30005:"attr _no_progress_public_rows sha12/len=5ac9ad50ec03/333",
+tests/fixtures/ingest_trace.json:30006:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:30307:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:30308:"attr _no_progress_public_rows sha12/len=015c1592fdf1/649",
+tests/fixtures/ingest_trace.json:30309:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:30610:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:30611:"attr _no_progress_public_rows sha12/len=cfc1aff4bd08/217",
+tests/fixtures/ingest_trace.json:30612:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:30889:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:30890:"attr _no_progress_public_rows sha12/len=ddb08f019fb6/716",
+tests/fixtures/ingest_trace.json:30891:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:31227:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:31228:"attr _no_progress_public_rows sha12/len=cfc1aff4bd08/217",
+tests/fixtures/ingest_trace.json:31229:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:31524:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:31525:"attr _no_progress_public_rows sha12/len=015c1592fdf1/649",
+tests/fixtures/ingest_trace.json:31526:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:31867:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:31868:"attr _no_progress_public_rows sha12/len=5ac9ad50ec03/333",
+tests/fixtures/ingest_trace.json:31869:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:32041:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:32351:"attr _no_progress_public_rows sha12/len=696c807050ad/274",
+tests/fixtures/ingest_trace.json:32352:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:32491:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:32653:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:32864:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:33075:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:33331:"attr _no_progress_public_rows {\"retained-message-13\":{\"content\":\"left\\n\\nright\",\"role\":\"user\"}}",
+tests/fixtures/ingest_trace.json:33332:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:33489:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:33490:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:33718:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:33719:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:33931:"attr _no_progress_public_rows sha12/len=3e70854c3a03/312",
+tests/fixtures/ingest_trace.json:33932:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:34194:"attr _no_progress_public_rows sha12/len=298dbe8acfb3/207",
+tests/fixtures/ingest_trace.json:34195:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:34415:"attr _no_progress_public_rows {\"retained-message-15\":{\"content\":\"row 0: العربية 🪷\",\"role\":\"user\"}}",
+tests/fixtures/ingest_trace.json:34416:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:34570:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:34776:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:35086:"attr _no_progress_public_rows sha12/len=696c807050ad/274",
+tests/fixtures/ingest_trace.json:35087:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:35226:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:35388:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:35599:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:35810:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:36100:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:36356:"attr _no_progress_public_rows {\"retained-message-13\":{\"content\":\"left\\n\\nright\",\"role\":\"user\"}}",
+tests/fixtures/ingest_trace.json:36357:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:36514:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:36515:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:36743:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:36744:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:36956:"attr _no_progress_public_rows sha12/len=3e70854c3a03/312",
+tests/fixtures/ingest_trace.json:36957:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:37202:"attr _no_progress_public_rows sha12/len=3d210562fea1/466",
+tests/fixtures/ingest_trace.json:37203:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:37484:"attr _no_progress_public_rows sha12/len=3d210562fea1/466",
+tests/fixtures/ingest_trace.json:37485:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:37728:"attr _no_progress_public_rows sha12/len=298dbe8acfb3/207",
+tests/fixtures/ingest_trace.json:37729:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:37949:"attr _no_progress_public_rows {\"retained-message-15\":{\"content\":\"row 0: العربية 🪷\",\"role\":\"user\"}}",
+tests/fixtures/ingest_trace.json:37950:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:38104:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:38310:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:38620:"attr _no_progress_public_rows sha12/len=696c807050ad/274",
+tests/fixtures/ingest_trace.json:38621:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:38760:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:38922:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:39133:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:39368:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:39624:"attr _no_progress_public_rows {\"retained-message-13\":{\"content\":\"left\\n\\nright\",\"role\":\"user\"}}",
+tests/fixtures/ingest_trace.json:39625:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:39782:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:39783:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:40011:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:40012:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:40224:"attr _no_progress_public_rows sha12/len=3e70854c3a03/312",
+tests/fixtures/ingest_trace.json:40225:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:40487:"attr _no_progress_public_rows sha12/len=298dbe8acfb3/207",
+tests/fixtures/ingest_trace.json:40488:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:40708:"attr _no_progress_public_rows {\"retained-message-15\":{\"content\":\"row 0: العربية 🪷\",\"role\":\"user\"}}",
+tests/fixtures/ingest_trace.json:40709:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:40863:"attr _no_progress_public_rows sha12/len=aa2004341bf6/279",
+tests/fixtures/ingest_trace.json:41159:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:41160:"attr _no_progress_public_rows sha12/len=e964411e1137/2833",
+tests/fixtures/ingest_trace.json:41161:"attr _no_progress_replay null",
+tests/fixtures/ingest_trace.json:41705:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:41706:"attr _no_progress_public_rows sha12/len=fb4349669086/110055",
+tests/fixtures/ingest_trace.json:41707:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:41869:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:41870:"attr _no_progress_public_rows sha12/len=ca515cbf4055/566",
+tests/fixtures/ingest_trace.json:41871:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:41993:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:41994:"attr _no_progress_replay null",
+tests/fixtures/ingest_trace.json:42300:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:42301:"attr _no_progress_public_rows sha12/len=d5dbe0a9b15f/473",
+tests/fixtures/ingest_trace.json:42302:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:42579:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:42580:"attr _no_progress_public_rows sha12/len=9e2780aca1e3/151",
+tests/fixtures/ingest_trace.json:42581:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:42917:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:42918:"attr _no_progress_public_rows sha12/len=4792b0eacf26/684",
+tests/fixtures/ingest_trace.json:42919:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:43345:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:43346:"attr _no_progress_public_rows sha12/len=9c19d2134ba8/286",
+tests/fixtures/ingest_trace.json:43347:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:43648:"attr _no_progress_public_rows sha12/len=f018de78ac2a/934",
+tests/fixtures/ingest_trace.json:43649:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:43862:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:43863:"attr _no_progress_replay null",
+tests/fixtures/ingest_trace.json:44327:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:44328:"attr _no_progress_public_rows sha12/len=9e45a4930099/514",
+tests/fixtures/ingest_trace.json:44329:"attr _no_progress_replay null",
+tests/fixtures/ingest_trace.json:44941:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:44942:"attr _no_progress_public_rows sha12/len=d29fee0c8356/278",
+tests/fixtures/ingest_trace.json:44943:"attr _no_progress_replay null",
+tests/fixtures/ingest_trace.json:45468:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:45469:"attr _no_progress_public_rows sha12/len=4e14372dc517/117",
+tests/fixtures/ingest_trace.json:45470:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:45669:"attr _no_progress_public_rows sha12/len=b4791a18cd9b/9994",
+tests/fixtures/ingest_trace.json:45670:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:46010:"attr _no_progress_public_rows sha12/len=9ac6012217ff/9923",
+tests/fixtures/ingest_trace.json:46011:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:46459:"attr _no_progress_public_rows sha12/len=122de078e7b1/10007",
+tests/fixtures/ingest_trace.json:46460:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:46827:"attr _no_progress_public_rows sha12/len=b4791a18cd9b/9994",
+tests/fixtures/ingest_trace.json:46828:"attr _no_progress_replay [\"child\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:47064:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:47065:"attr _no_progress_replay null",
+tests/fixtures/ingest_trace.json:47392:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:47393:"attr _no_progress_replay null",
+tests/fixtures/ingest_trace.json:47670:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:47671:"attr _no_progress_replay null",
+tests/fixtures/ingest_trace.json:48000:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:48001:"attr _no_progress_public_rows sha12/len=16b97ee2d83e/275",
+tests/fixtures/ingest_trace.json:48002:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:48191:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:48192:"attr _no_progress_replay null",
+tests/fixtures/ingest_trace.json:48503:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:48504:"attr _no_progress_replay null",
+tests/fixtures/ingest_trace.json:48767:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:48768:"attr _no_progress_replay null",
+tests/fixtures/ingest_trace.json:48922:"attr _no_progress_public_rows sha12/len=4ce36a74f860/279",
+tests/fixtures/ingest_trace.json:48923:"attr _no_progress_replay null",
+tests/fixtures/ingest_trace.json:49174:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:49175:"attr _no_progress_public_rows {\"retained-message-1\":{\"content\":\"fresh\",\"role\":\"user\"}}",
+tests/fixtures/ingest_trace.json:49176:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:49436:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:49437:"attr _no_progress_public_rows sha12/len=450d22084d52/182",
+tests/fixtures/ingest_trace.json:49438:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:49636:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:49637:"attr _no_progress_public_rows {\"retained-message-1\":{\"content\":\"fresh\",\"role\":\"user\"}}",
+tests/fixtures/ingest_trace.json:49638:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:49991:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:49992:"attr _no_progress_public_rows sha12/len=f0deabbf0c95/3001",
+tests/fixtures/ingest_trace.json:49993:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:50292:"attr _no_progress_public_rows sha12/len=3bed63d3f6cc/697",
+tests/fixtures/ingest_trace.json:50293:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:50462:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:50463:"attr _no_progress_public_rows sha12/len=88b5fc86ba4c/643",
+tests/fixtures/ingest_trace.json:50464:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:50624:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:50625:"attr _no_progress_public_rows sha12/len=7cd84ab5b051/2342",
+tests/fixtures/ingest_trace.json:50626:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:50779:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:50780:"attr _no_progress_public_rows sha12/len=74db3e5fbb4a/322",
+tests/fixtures/ingest_trace.json:50781:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:50914:"attr _no_progress_public_rows sha12/len=67fa46acdf29/376",
+tests/fixtures/ingest_trace.json:50915:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:51185:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:51186:"attr _no_progress_public_rows sha12/len=cd472d66e54c/404",
+tests/fixtures/ingest_trace.json:51187:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:51532:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:51533:"attr _no_progress_public_rows sha12/len=d84cc01db89f/454",
+tests/fixtures/ingest_trace.json:51534:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:51860:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:51861:"attr _no_progress_public_rows sha12/len=215a508eabb0/395",
+tests/fixtures/ingest_trace.json:51862:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:52125:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:52126:"attr _no_progress_public_rows {\"retained-message-1\":{\"content\":\"new request\",\"role\":\"user\"}}",
+tests/fixtures/ingest_trace.json:52127:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:52345:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:52346:"attr _no_progress_public_rows sha12/len=64b9b3256adf/231",
+tests/fixtures/ingest_trace.json:52347:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:52642:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:52643:"attr _no_progress_public_rows sha12/len=fb01cf77813d/462",
+tests/fixtures/ingest_trace.json:52644:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:52946:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:52947:"attr _no_progress_public_rows sha12/len=e75535bf93ce/165",
+tests/fixtures/ingest_trace.json:52948:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:53080:"attr _no_progress_public_rows sha12/len=6e58dcf1bf76/399",
+tests/fixtures/ingest_trace.json:53393:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:53394:"attr _no_progress_public_rows sha12/len=0e97f6ce528c/275",
+tests/fixtures/ingest_trace.json:53395:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:53746:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:53747:"attr _no_progress_public_rows sha12/len=8222ec385b50/334",
+tests/fixtures/ingest_trace.json:53748:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:54075:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:54076:"attr _no_progress_public_rows sha12/len=16b97ee2d83e/275",
+tests/fixtures/ingest_trace.json:54077:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:54340:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:54341:"attr _no_progress_public_rows {\"retained-message-1\":{\"content\":\"new request\",\"role\":\"user\"}}",
+tests/fixtures/ingest_trace.json:54342:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:54560:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:54561:"attr _no_progress_public_rows sha12/len=3ebceea9c445/138",
+tests/fixtures/ingest_trace.json:54562:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:54873:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:54874:"attr _no_progress_public_rows sha12/len=73b0ba3b60fe/342",
+tests/fixtures/ingest_trace.json:54875:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:55160:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:55161:"attr _no_progress_public_rows sha12/len=bb97e143378e/138",
+tests/fixtures/ingest_trace.json:55162:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:55283:"attr _no_progress_public_rows sha12/len=e43c8a3f2cd9/279",
+tests/fixtures/ingest_trace.json:55529:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:55530:"attr _no_progress_public_rows sha12/len=9a50fb883252/85",
+tests/fixtures/ingest_trace.json:55531:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:55759:"attr _no_progress_public_rows sha12/len=9c04c8307528/387",
+tests/fixtures/ingest_trace.json:55760:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-1>\"]",
+tests/fixtures/ingest_trace.json:55926:"attr _no_progress_public_rows sha12/len=9c04c8307528/387",
+tests/fixtures/ingest_trace.json:56265:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:56266:"attr _no_progress_public_rows sha12/len=0e97f6ce528c/275",
+tests/fixtures/ingest_trace.json:56267:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:56618:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:56619:"attr _no_progress_public_rows sha12/len=b39b8aeaec33/336",
+tests/fixtures/ingest_trace.json:56620:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:56947:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:56948:"attr _no_progress_public_rows sha12/len=86e073d4ee92/277",
+tests/fixtures/ingest_trace.json:56949:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:57212:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:57213:"attr _no_progress_public_rows {\"retained-message-1\":{\"content\":\"new request\",\"role\":\"user\"}}",
+tests/fixtures/ingest_trace.json:57214:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:57432:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:57433:"attr _no_progress_public_rows sha12/len=aacb3b0967a4/140",
+tests/fixtures/ingest_trace.json:57434:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:57745:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:57746:"attr _no_progress_public_rows sha12/len=cb5bee4e390a/338",
+tests/fixtures/ingest_trace.json:57747:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:58025:"attr _no_progress_ingest_generation 0",
+tests/fixtures/ingest_trace.json:58026:"attr _no_progress_public_rows sha12/len=bb97e143378e/138",
+tests/fixtures/ingest_trace.json:58027:"attr _no_progress_replay [\"S\",\"trace-conversation\",\"<replay-digest-0>\"]",
+tests/fixtures/ingest_trace.json:58148:"attr _no_progress_public_rows sha12/len=7a9104a48ae3/281",
+tests/fixtures/issue_1880_preflight_cost/measurement-source.txt:52:        engine._ingest_messages(view)
+tests/fixtures/issue_1880_preflight_cost/measurement-source.txt:62:                for method in ("_ingest_messages", "_build_ingest_replay"):
+tests/fixtures/issue_1880_preflight_cost_final/measurement-source.txt:52:        engine._ingest_messages(view)
+tests/fixtures/issue_1880_preflight_cost_final/measurement-source.txt:62:                for method in ("_ingest_messages", "_build_ingest_replay"):
+tests/invariants/test_identity_seeds.py:359:def test_rotation_no_progress_fires_no_hooks(marker_only):
+tests/invariants/test_issue_1353_fault_cache_consistency.py:344:            e._ingest_messages(deepcopy(rewritten))
+tests/invariants/test_issue_1353_fault_cache_consistency.py:345:        out_same = e._ingest_messages(deepcopy(host))  # reverted, same length
+tests/invariants/test_issue_1353_fault_cache_consistency.py:346:        out_tail = e._ingest_messages(deepcopy(host) + [_m("user", "u four", 21.0)])
+tests/invariants/test_issue_1353_fault_cache_consistency.py:381:            e._ingest_messages(deepcopy(rew))
+tests/invariants/test_issue_1353_fault_cache_consistency.py:384:        out = e._ingest_messages(nxt)
+tests/invariants/test_issue_1353_placeholder_provenance.py:51:        e._ingest_messages(
+tests/invariants/test_issue_1353_prematch_fault_prefix.py:104:            assert e._no_progress_replay is None
+tests/invariants/test_issue_1353_prematch_fault_prefix.py:111:        assert e._no_progress_replay is not None
+tests/invariants/test_issue_1385_salvage_provenance.py:33:    first._ingest_messages(original)
+tests/invariants/test_issue_1385_salvage_provenance.py:59:    engine._ingest_messages(host)
+tests/invariants/test_issue_1385_salvage_provenance.py:66:    engine._ingest_messages(copy.deepcopy(host))
+tests/invariants/test_issue_1385_salvage_provenance.py:134:    engine._ingest_messages(host)
+tests/invariants/test_issue_1385_salvage_provenance.py:158:    first._ingest_messages(view)
+tests/invariants/test_issue_1385_salvage_provenance.py:168:    engine._ingest_messages(host)
+tests/invariants/test_issue_1628_rewind_rescan.py:141:    engine._ingest_messages(host)
+tests/invariants/test_issue_1628_rewind_rescan.py:146:    active = engine._ingest_messages(host)
+tests/invariants/test_issue_1628_rewind_rescan.py:151:    active = engine._ingest_messages(host)
+tests/invariants/test_issue_1628_rewind_rescan.py:186:    active = engine._ingest_messages(host)
+tests/invariants/test_issue_1628_rewind_rescan.py:258:    engine._ingest_messages(host)
+tests/invariants/test_issue_1628_rewind_rescan.py:278:    engine._ingest_messages(host)
+tests/invariants/test_issue_1822_masked_replay.py:36:        engine._ingest_messages(messages)
+tests/invariants/test_issue_1822_masked_replay.py:66:        engine._ingest_messages(messages)
+tests/invariants/test_issue_1822_masked_replay.py:69:        engine._ingest_messages(messages)
+tests/invariants/test_issue_1822_masked_replay.py:85:    engine._ingest_messages([{"role": "user", "content": "A", "timestamp": 100.0},
+tests/invariants/test_issue_1822_masked_replay.py:99:    engine._ingest_messages([
+tests/invariants/test_retry_r3.py:43:    machine.engine._ingest_messages(host)
+tests/invariants/test_retry_r3.py:45:    machine.engine._ingest_messages(deepcopy(host))
+tests/invariants/test_retry_r3.py:63:    machine.engine._ingest_messages(host)
+tests/invariants/test_retry_r3.py:65:    machine.engine._ingest_messages(deepcopy(host))
+tests/invariants/test_retry_r3.py:82:    machine.engine._ingest_messages(host)
+tests/invariants/test_retry_r3.py:97:    machine.engine._ingest_messages(host)
+tests/invariants/test_retry_r3.py:99:    machine.engine._ingest_messages(deepcopy(host))
+tests/legacy_native_state.py:330:        working = self._ingest_messages(messages)
+tests/test_active_tool_stubbing.py:396:    monkeypatch.setattr(engine, "_ingest_messages", ingest)
+tests/test_active_tool_stubbing.py:413:    monkeypatch.setattr(engine, "_ingest_messages", ingest)
+tests/test_active_tool_stubbing.py:438:    monkeypatch.setattr(engine, "_ingest_messages", lambda _messages: replay_messages)
+tests/test_active_tool_stubbing.py:554:    cached = engine._cached_active_replay_messages(messages)
+tests/test_adaptive_retrieval.py:460:def test_no_progress_terminates_and_incomplete_finish_falls_back(tmp_path):
+tests/test_auto_focus_topic.py:220:        _ingest_messages -> _redact_active_replay_messages, so the derived
+tests/test_auto_focus_topic.py:226:            # Note: In production, these go through _ingest_messages which calls
+tests/test_auto_focus_topic.py:260:    def test_ingest_messages_redacts_before_focus_derivation(self, tmp_path):
+tests/test_auto_focus_topic.py:261:        """Integration test: _ingest_messages returns redacted messages that
+tests/test_auto_focus_topic.py:284:            working_messages = engine._ingest_messages(raw_messages)
+tests/test_c1_s3a_emission_channels.py:80:    working = engine._ingest_messages(rows)
+tests/test_evidence_compiler.py:660:def test_no_progress_retrieval_stops_and_trace_is_secret_safe(tmp_path):
+tests/test_evidence_contract.py:1155:def test_second_targeted_query_may_close_a_named_slot_after_no_progress(tmp_path):
+tests/test_fresh_tail_pressure_yield.py:356:        engine._reset_session_scoped_runtime_state()
+tests/test_fresh_tail_pressure_yield.py:560:                engine._reset_session_scoped_runtime_state()
+tests/test_frontier_state.py:256:            instance._reset_session_scoped_runtime_state()
+tests/test_frontier_state.py:292:    for name in ("_reset_compaction_progress", "_reset_session_scoped_runtime_state", "_apply_survival_fit"):
+tests/test_host_uid_emit_carry.py:222:    engine._ingest_messages(initial)
+tests/test_host_uid_emit_carry.py:230:    out = engine._ingest_messages(host)
+tests/test_host_uid_emit_carry.py:249:    engine._remember_active_replay_messages(source, cached)
+tests/test_host_uid_emit_carry.py:253:    out = engine._cached_active_replay_messages(host)
+tests/test_host_uid_emit_carry.py:272:    engine._remember_active_replay_messages(source, cached)
+tests/test_host_uid_emit_carry.py:273:    assert engine._cached_active_replay_messages(copy.deepcopy(source)) == [expected]
+tests/test_host_uid_emit_carry.py:304:    engine._ingest_messages(original)
+tests/test_host_uid_emit_carry.py:308:    out = engine._ingest_messages(retry)
+tests/test_host_uid_emit_carry.py:312:    engine._ingest_messages(copy.deepcopy(retry))
+tests/test_host_uid_emit_carry.py:322:    assert engine._cached_active_replay_messages(host) == cached  # Historical zip behavior, no sync/count.
+tests/test_host_uid_emit_carry.py:365:        shadow._ingest_messages(copy.deepcopy(rows))
+tests/test_host_uid_emit_carry.py:366:        base._ingest_messages(copy.deepcopy(rows))
+tests/test_host_uid_emit_carry.py:443:        second._ingest_messages(persisted)
+tests/test_host_uid_emit_carry.py:475:        second._ingest_messages(persisted)
+tests/test_host_uid_emit_carry.py:559:        first._ingest_messages(copy.deepcopy(host))
+tests/test_host_uid_emit_carry.py:617:        first._ingest_messages(copy.deepcopy(host))
+tests/test_host_uid_emit_carry.py:657:        first._ingest_messages(copy.deepcopy(host))
+tests/test_host_uid_emit_carry.py:710:        first._ingest_messages(copy.deepcopy(host))
+tests/test_host_uid_engine_uids.py:576:            second._ingest_messages(persisted)
+tests/test_host_uid_engine_uids.py:667:        second._ingest_messages(persisted)
+tests/test_host_uid_shadow.py:155:        returned = engine._ingest_messages([dict(m) for m in messages])
+tests/test_host_uid_shadow.py:791:        returned = engine._ingest_messages([_RaisingUidDict(m) for m in _UID_LIST])
+tests/test_ingest_protection.py:126:    engine._ingest_messages([{"role": "user", "content": "hello"}])
+tests/test_ingest_protection.py:153:    engine._ingest_messages([{"role": "user", "content": f"api_key={secret}"}])
+tests/test_ingest_protection.py:183:    engine._ingest_messages([
+tests/test_ingest_protection.py:224:    engine._ingest_messages([{"role": "user", "content": content}])
+tests/test_ingest_protection.py:300:    no_session_active = no_session_engine._ingest_messages(deepcopy(messages))
+tests/test_ingest_protection.py:360:    engine._ingest_messages([
+tests/test_ingest_protection.py:737:    engine._ingest_messages([{"role": "user", "content": "see image " + DATA_URI}])
+tests/test_ingest_protection.py:786:    engine._ingest_messages([{"role": "user", "content": "see image " + DATA_URI}])
+tests/test_ingest_protection.py:812:    engine._ingest_messages([{"role": "user", "content": DATA_URI + " please analyze this"}])
+tests/test_ingest_protection.py:827:    engine._ingest_messages([{"role": "user", "content": bare_data_uri}])
+tests/test_ingest_protection.py:842:    engine._ingest_messages([{"role": "user", "content": "image " + data_uri}])
+tests/test_ingest_protection.py:869:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:883:    engine._ingest_messages([{"role": "user", "content": GENERIC_BASE64}])
+tests/test_ingest_protection.py:898:    engine._ingest_messages([{"role": "user", "content": f"prefix {GENERIC_BASE64URL} suffix"}])
+tests/test_ingest_protection.py:929:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:947:    engine._ingest_messages([{"role": "user", "content": f"prefix {GENERIC_BASE64} suffix"}])
+tests/test_ingest_protection.py:966:    engine._ingest_messages([{"role": "user", "content": f"image {DATA_URI} blob {GENERIC_BASE64} done"}])
+tests/test_ingest_protection.py:986:    engine._ingest_messages([{"role": "user", "content": repeated_text}])
+tests/test_ingest_protection.py:1002:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1022:    active = engine._ingest_messages([deepcopy(message)])
+tests/test_ingest_protection.py:1041:    active = engine._ingest_messages([deepcopy(message)])
+tests/test_ingest_protection.py:1107:    engine._ingest_messages([{"role": "user", "content": original}])
+tests/test_ingest_protection.py:1147:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1152:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1176:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1181:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1202:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1212:    replay_engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1227:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1237:    replay_engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1262:    engine._ingest_messages(messages(payload_a))
+tests/test_ingest_protection.py:1267:    replay_engine._ingest_messages(messages(payload_b))
+tests/test_ingest_protection.py:1321:    engine._ingest_messages(messages(arguments_a))
+tests/test_ingest_protection.py:1326:    engine._ingest_messages(messages(arguments_b))
+tests/test_ingest_protection.py:1379:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1395:    engine._ingest_messages([{"role": "tool", "tool_call_id": "call_media", "content": "tool saw " + DATA_URI}])
+tests/test_ingest_protection.py:1422:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1457:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1490:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1518:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1559:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1592:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1619:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1654:    engine._ingest_messages([message])
+tests/test_ingest_protection.py:1696:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1701:    engine._ingest_messages(original_messages)
+tests/test_ingest_protection.py:1722:        engine._ingest_messages([
+tests/test_ingest_protection.py:1767:    engine._ingest_messages(messages)
+tests/test_ingest_protection.py:1785:    replay_engine._ingest_messages(messages)
+tests/test_ingest_protection.py:1794:    engine._ingest_messages([
+tests/test_ingest_protection.py:2102:    engine._ingest_messages([{"role": "user", "content": DATA_URI}])
+tests/test_ingest_protection.py:3572:    engine._ingest_messages([{"role": "assistant", "content": broken}])
+tests/test_ingest_protection.py:3925:    engine._ingest_messages(messages)
+tests/test_ingest_protection.py:3927:    engine._ingest_messages(messages + [{"role": "user", "content": "new message"}])
+tests/test_ingest_protection.py:3938:    engine._ingest_messages([
+tests/test_ingest_protection.py:4897:    engine._ingest_messages([{"role": "assistant", "content": report}])
+tests/test_ingest_protection.py:4954:    engine._ingest_messages([{"role": "user", "content": f"attachment:\n{wrapped}\nend"}])
+tests/test_ingest_protection.py:4966:    engine._ingest_messages([{"role": "user", "content": f"attachment:\r\n{wrapped}\r\nend"}])
+tests/test_ingest_protection.py:4981:    engine._ingest_messages([{"role": "user", "content": f"attachment:\n{wrapped}\nend"}])
+tests/test_issue_1096_turn_end_probe.py:42:        assert engine._sweep_budget_hold_active()
+tests/test_issue_1096_turn_end_probe.py:43:        assert engine._sweep_budget_hold_turn_paced
+tests/test_issue_1096_turn_end_probe.py:44:        assert not engine._no_progress_hold_active()
+tests/test_issue_1096_turn_end_probe.py:71:    assert not engine._sweep_budget_hold_active() and not engine._no_progress_hold_active()
+tests/test_issue_1096_turn_end_probe.py:77:    assert not engine._sweep_budget_hold_turn_paced
+tests/test_issue_1096_turn_end_probe.py:78:    assert not engine._sweep_budget_hold_active() and not engine._no_progress_hold_active()
+tests/test_issue_1096_turn_end_probe.py:90:    assert not engine._sweep_budget_hold_turn_paced
+tests/test_issue_1096_turn_end_probe.py:91:    assert engine._sweep_budget_hold_active() and engine._no_progress_hold_active()
+tests/test_issue_1096_turn_end_probe.py:92:    until, no_progress = engine._sweep_budget_hold_until, engine._no_progress_hold
+tests/test_issue_1096_turn_end_probe.py:94:    assert engine._sweep_budget_hold_until == until and engine._no_progress_hold == no_progress
+tests/test_issue_1096_turn_end_probe.py:98:    assert not engine._sweep_budget_hold_active() and not engine._no_progress_hold_active()
+tests/test_issue_1096_turn_end_probe.py:101:    assert len(calls) == 3 and not engine._sweep_budget_hold_turn_paced
+tests/test_issue_1096_turn_end_probe.py:102:    assert engine._sweep_budget_hold_active() and engine._no_progress_hold_active()
+tests/test_issue_1096_turn_end_probe.py:109:        assert engine._sweep_budget_hold_active() and engine._sweep_budget_hold_turn_paced
+tests/test_issue_1096_turn_end_probe.py:114:        assert engine._sweep_budget_hold_active() and engine._sweep_budget_hold_turn_paced
+tests/test_issue_1096_turn_end_probe.py:120:    assert not engine._sweep_budget_hold_active()
+tests/test_issue_1096_turn_end_probe.py:139:    assert not engine._sweep_budget_hold_turn_paced
+tests/test_issue_1096_turn_end_probe.py:143:        assert engine._sweep_budget_hold_active() and not engine._sweep_budget_hold_turn_paced
+tests/test_issue_1096_turn_end_probe.py:144:        until = engine._sweep_budget_hold_until
+tests/test_issue_1096_turn_end_probe.py:147:    assert engine._sweep_budget_hold_active() and engine._sweep_budget_hold_until == until
+tests/test_issue_1096_turn_end_probe.py:156:    assert engine._sweep_budget_hold_until - armed == pytest.approx(600, abs=1)
+tests/test_issue_1096_turn_end_probe.py:165:    assert len(calls) == 2 and engine._no_progress_hold_active()
+tests/test_issue_1096_turn_end_probe.py:166:    assert not engine._sweep_budget_hold_turn_paced  # no turn end did not erase strike 1
+tests/test_issue_1096_turn_end_probe.py:173:    assert len(calls) == 1 and engine._sweep_budget_hold_turn_paced
+tests/test_issue_1096_turn_end_probe.py:175:    assert not engine._sweep_budget_hold_active()
+tests/test_issue_1096_turn_end_probe.py:201:    assert not engine._sweep_budget_hold_turn_paced  # #1369: every repeat hang disarms turn-end release
+tests/test_issue_1096_turn_end_probe.py:217:    until = engine._sweep_budget_hold_until
+tests/test_issue_1096_turn_end_probe.py:224:    assert engine._sweep_budget_hold_until == until and engine._sweep_budget_hold_turn_paced
+tests/test_issue_1096_turn_end_probe.py:234:    assert not engine._sweep_budget_hold_active()
+tests/test_issue_1096_turn_end_probe.py:245:        assert not engine._sweep_budget_hold_active() and not engine._no_progress_hold_active()
+tests/test_issue_1096_turn_end_probe.py:267:    assert engine._hung_summary_strike is None and not engine._sweep_budget_hold_turn_paced
+tests/test_issue_1096_turn_end_probe.py:268:    assert engine._sweep_budget_hold_active() and engine._no_progress_hold_active()
+tests/test_issue_1096_turn_end_probe.py:269:    until, no_progress = engine._sweep_budget_hold_until, engine._no_progress_hold
+tests/test_issue_1096_turn_end_probe.py:271:    assert engine._sweep_budget_hold_until == until and engine._no_progress_hold == no_progress
+tests/test_issue_1124_copy_exclusion.py:391:    assert engine._no_progress_hold is None
+tests/test_issue_1127_pre_leaf_diagnostic.py:150:    original = engine._ingest_messages
+tests/test_issue_1127_pre_leaf_diagnostic.py:168:        engine._ingest_messages = background_write_then_ingest
+tests/test_issue_1137_hung_route_circuit.py:228:        assert engine._sweep_budget_hold_active() is not retry
+tests/test_issue_1137_hung_route_circuit.py:229:        assert engine._no_progress_hold_active() is (failure != "hang")
+tests/test_issue_1137_hung_route_circuit.py:271:        assert not engine._sweep_budget_hold_active()
+tests/test_issue_1137_hung_route_circuit.py:272:        assert not engine._no_progress_hold_active()
+tests/test_issue_1141_unattributed_leaf.py:63:    assert engine._no_progress_hold_active()
+tests/test_issue_1141_unattributed_leaf.py:64:    assert engine._no_progress_hold[1] == "no_progress"
+tests/test_issue_1141_unattributed_leaf.py:65:    assert engine._store.read_metadata_json(f"compaction_no_progress:v1:{engine._session_id}") is None
+tests/test_issue_1141_unattributed_leaf.py:77:        engine._clear_persisted_no_progress_hold()
+tests/test_issue_1141_unattributed_leaf.py:78:        engine._no_progress_hold = None  # exercise another pass after the hold expires
+tests/test_issue_1141_unattributed_leaf.py:101:    engine._ingest_messages(history)
+tests/test_issue_1141_unattributed_leaf.py:155:    engine._ingest_messages(history)
+tests/test_issue_1141_unattributed_leaf.py:179:        engine._clear_persisted_no_progress_hold()
+tests/test_issue_1141_unattributed_leaf.py:180:        engine._no_progress_hold = None  # exercise another pass after the hold expires
+tests/test_issue_1141_unattributed_leaf.py:200:    engine._ingest_messages(history)
+tests/test_issue_1147_review_guards.py:41:        engine._ingest_messages([suffix, *tail])
+tests/test_issue_1160_session_end_flush.py:121:    monkeypatch.setattr(engine, "_ingest_messages", interrupted)
+tests/test_issue_1162_keep_reply.py:217:            engine._no_progress_hold = None
+tests/test_issue_1162_keep_reply.py:299:    engine._no_progress_hold = None
+tests/test_issue_1162_keep_reply.py:312:    engine._no_progress_hold = None
+tests/test_issue_1162_keep_reply.py:544:            engine._no_progress_hold = None
+tests/test_issue_1162_retained_escape.py:94:        engine._clear_persisted_no_progress_hold()
+tests/test_issue_1162_retained_escape.py:95:        engine._no_progress_hold = None
+tests/test_issue_1162_retained_escape.py:135:    engine._clear_persisted_no_progress_hold()
+tests/test_issue_1162_retained_escape.py:136:    engine._no_progress_hold = None
+tests/test_issue_1162_retained_escape.py:270:    engine._clear_persisted_no_progress_hold()
+tests/test_issue_1162_retained_escape.py:271:    engine._no_progress_hold = None
+tests/test_issue_1162_retained_escape.py:312:        assert _streak(engine) == 1 and engine._no_progress_hold is not None
+tests/test_issue_1162_retained_escape.py:317:        engine._clear_persisted_no_progress_hold()
+tests/test_issue_1162_retained_escape.py:318:        engine._no_progress_hold = None
+tests/test_issue_1162_truthful_warning.py:33:        engine._no_progress_hold = None
+tests/test_issue_1162_truthful_warning.py:222:        engine._no_progress_hold = None
+tests/test_issue_1162_truthful_warning.py:223:        engine._sweep_budget_hold_until = 0
+tests/test_issue_1306_cli_new.py:409:        monkeypatch.setattr(engine, "_ingest_messages", fail_ingest)
+tests/test_issue_1369_first_hang_gaps.py:20:    strike, until = engine._hung_summary_strike, engine._sweep_budget_hold_until
+tests/test_issue_1369_first_hang_gaps.py:21:    assert strike == ("conv", "m1") and engine._sweep_budget_hold_turn_paced
+tests/test_issue_1369_first_hang_gaps.py:23:    assert engine._sweep_budget_hold_active() and engine._summary_circuit_breaker.allows("m1")
+tests/test_issue_1369_first_hang_gaps.py:28:    assert engine._sweep_budget_hold_until == until  # forced passes do not start another hold
+tests/test_issue_1369_first_hang_gaps.py:29:    assert not engine._sweep_budget_hold_turn_paced
+tests/test_issue_1369_first_hang_gaps.py:30:    assert engine._sweep_budget_hold_active()
+tests/test_issue_1369_first_hang_gaps.py:68:        assert engine._sweep_budget_hold_turn_paced and engine._sweep_budget_hold_active()
+tests/test_issue_1369_first_hang_gaps.py:86:        assert not engine._sweep_budget_hold_turn_paced and not breaker.allows("m1")
+tests/test_issue_1762_followups.py:102:                assert engine._no_progress_hold_active()
+tests/test_issue_1762_followups.py:103:                offset[0] += engine._no_progress_hold[0] - clock.monotonic() + 1
+tests/test_issue_1762_followups.py:104:                assert not engine._no_progress_hold_active()
+tests/test_issue_1880_defer_size_cleanup.py:83:    monkeypatch.setattr(engine, "_ingest_messages", ingest)
+tests/test_issue_1880_defer_size_cleanup.py:99:        monkeypatch.setattr(engine, "_ingest_messages", lambda _: replay)
+tests/test_issue_1880_defer_size_cleanup.py:117:    monkeypatch.setattr(engine, "_ingest_messages", lambda _: replay)
+tests/test_issue_1880_defer_size_cleanup.py:129:    immediate._ingest_messages(view)
+tests/test_issue_1880_defer_size_cleanup.py:165:    monkeypatch.setattr(engine, "_ingest_messages", ingest)
+tests/test_issue_1880_persisted_hold.py:17:KEY = "compaction_no_progress:v1:S"
+tests/test_issue_1880_persisted_hold.py:46:    engine._no_progress_hold = None
+tests/test_issue_1880_persisted_hold.py:52:    assert engine._no_progress_hold[1] == "no_progress"
+tests/test_issue_1880_persisted_hold.py:63:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:70:        fingerprint = Mock(wraps=engine._no_progress_fingerprint)
+tests/test_issue_1880_persisted_hold.py:73:        monkeypatch.setattr(engine, "_no_progress_fingerprint", fingerprint)
+tests/test_issue_1880_persisted_hold.py:86:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:88:        state = (engine._no_progress_hold, engine._no_progress_deadline, engine._no_progress_observed_tokens)
+tests/test_issue_1880_persisted_hold.py:93:        assert engine._no_progress_fingerprint() is None
+tests/test_issue_1880_persisted_hold.py:94:        assert not engine._persisted_no_progress_hold_active()
+tests/test_issue_1880_persisted_hold.py:95:        assert not engine._no_progress_hold_active()
+tests/test_issue_1880_persisted_hold.py:96:        assert not engine._sweep_budget_hold_applies(10_001)
+tests/test_issue_1880_persisted_hold.py:98:        assert (engine._no_progress_hold, engine._no_progress_deadline, engine._no_progress_observed_tokens) == state
+tests/test_issue_1880_persisted_hold.py:115:            engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:122:            assert engine._compression_block_reason() == "cooldown:lcm_no_progress"
+tests/test_issue_1880_persisted_hold.py:149:            engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:168:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:173:            engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:181:            engine._remember_active_replay_messages(list(reversed(view)), list(reversed(view)))
+tests/test_issue_1880_persisted_hold.py:209:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:223:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:228:        assert not engine._no_progress_hold_blocks(engine._survival_ceiling())
+tests/test_issue_1880_persisted_hold.py:240:        engine._no_progress_hold = None
+tests/test_issue_1880_persisted_hold.py:261:        assert engine._no_progress_hold[1] == "no_progress"
+tests/test_issue_1880_persisted_hold.py:279:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:287:            patch.setattr(engine, "_ingest_messages", Mock(side_effect=RuntimeError("synthetic ingest failure")))
+tests/test_issue_1880_persisted_hold.py:301:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:324:        fingerprint = engine._no_progress_fingerprint()
+tests/test_issue_1880_persisted_hold.py:327:        assert engine._no_progress_fingerprint() != fingerprint
+tests/test_issue_1880_persisted_hold.py:330:        assert engine._no_progress_fingerprint() == fingerprint
+tests/test_issue_1880_persisted_hold.py:332:        engine._no_progress_bound_store = (object(), original_path, "synthetic-old-store")
+tests/test_issue_1880_persisted_hold.py:333:        assert engine._no_progress_fingerprint() == fingerprint
+tests/test_issue_1880_persisted_hold.py:346:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:368:        engine._record_ingest_failure("synthetic", RuntimeError("synthetic failure"))
+tests/test_issue_1880_persisted_hold.py:382:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:398:        assert engine._no_progress_fingerprint() is None  # Explicitly unobserved pressure is unknown.
+tests/test_issue_1880_persisted_hold.py:424:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:441:        engine._ingest_messages(view)
+tests/test_issue_1880_persisted_hold.py:442:        engine._clear_persisted_no_progress_hold()
+tests/test_issue_1880_persisted_hold.py:443:        engine._no_progress_hold = None
+tests/test_issue_1880_persisted_hold.py:465:        assert engine._no_progress_replay is None
+tests/test_issue_1880_persisted_hold.py:466:        assert engine._no_progress_fingerprint() is None
+tests/test_issue_1880_persisted_hold.py:472:        assert engine._no_progress_replay is not None
+tests/test_issue_1880_persisted_hold.py:473:        assert engine._no_progress_fingerprint() is not None
+tests/test_issue_1880_persisted_hold.py:495:        replay = engine._ingest_messages(host)
+tests/test_issue_1880_persisted_hold.py:498:        assert engine._no_progress_replay is not None
+tests/test_issue_1880_persisted_hold.py:500:        assert engine._no_progress_public_rows[id(active)]["content"] == CLEARED
+tests/test_issue_255_post_compaction_ingest.py:204:            restarted._ingest_messages(snapshot)
+tests/test_issue_255_post_compaction_ingest.py:241:            restarted._ingest_messages(snapshot)
+tests/test_issue_255_post_compaction_ingest.py:286:            restarted._ingest_messages(snapshot)
+tests/test_issue_255_post_compaction_ingest.py:315:            restarted._ingest_messages(snapshot)
+tests/test_issue_3_atomic_provenance.py:33:        engine._ingest_messages([_literal_scaffold()])
+tests/test_issue_3_atomic_provenance.py:64:            engine._ingest_messages([_literal_scaffold()])
+tests/test_issue_3_atomic_provenance.py:126:        engine._ingest_messages([_literal_scaffold()])
+tests/test_issue_488_consumer_switch.py:85:        engine._remember_active_replay_messages(authored, [dict(m) for m in authored])
+tests/test_issue_488_consumer_switch.py:86:        assert engine._cached_active_replay_messages([dict(m) for m in authored]) is not None
+tests/test_issue_488_consumer_switch.py:87:        assert engine._cached_active_replay_messages(plain) is None
+tests/test_issue_488_emission_descriptors.py:667:            engine._ingest_messages(messages)
+tests/test_issue_488_emission_descriptors.py:687:        engine._remember_active_replay_messages([generated], [generated])
+tests/test_issue_488_emission_descriptors.py:691:            returned = engine._ingest_messages([generated])
+tests/test_issue_488_emission_descriptors.py:721:        returned = engine._remember_active_replay_messages(active, active)
+tests/test_issue_488_emission_descriptors.py:731:        engine._remember_active_replay_messages([replacement], [replacement])
+tests/test_issue_488_emission_descriptors.py:753:        engine._remember_active_replay_messages(active, active)
+tests/test_issue_4_restart_safe_fail_open.py:97:        restarted._ingest_messages(result)
+tests/test_issue_4_restart_safe_fail_open.py:177:        restarted._ingest_messages(result)
+tests/test_issue_529_overflow_followups.py:203:        first._ingest_messages(
+tests/test_issue_529_overflow_followups.py:216:        replay._ingest_messages(
+tests/test_issue_529_overflow_followups.py:238:        first._ingest_messages(
+tests/test_issue_529_overflow_followups.py:251:        replay._ingest_messages(
+tests/test_issue_534_recovery_descriptors.py:95:    engine._ingest_messages(pre)
+tests/test_issue_534_recovery_descriptors.py:98:        engine._ingest_messages([dict(SYSTEM), retained_row, dict(ORPHAN)])
+tests/test_issue_581_582_store_complete_survival.py:1062:        monkeypatch.setattr(engine, "_ingest_messages", failing)
+tests/test_issue_597_progress_hold.py:43:        assert engine._no_progress_hold_status()["reason"] == "host_rejected_progress"
+tests/test_issue_597_progress_hold.py:57:    assert engine._no_progress_hold_status()["reason"] == "host_rejected"
+tests/test_issue_597_progress_hold.py:67:    assert engine._no_progress_hold_status()["reason"] == "host_rejected"
+tests/test_issue_597_progress_hold.py:77:    assert engine._no_progress_hold_status()["reason"] == "host_rejected_progress"
+tests/test_issue_597_progress_hold.py:90:        assert engine._no_progress_hold is not None
+tests/test_issue_597_progress_hold.py:94:    assert engine._no_progress_hold is None
+tests/test_issue_597_progress_hold.py:102:    assert engine._no_progress_hold == (610.0, "host_rejected_progress")
+tests/test_issue_597_progress_hold.py:106:    assert not engine._automatic_compression_blocked() and engine._no_progress_hold is None
+tests/test_issue_597_progress_hold.py:114:        assert engine._no_progress_hold is None
+tests/test_issue_597_progress_hold.py:121:    engine._start_no_progress_hold(reason)
+tests/test_issue_597_progress_hold.py:122:    engine._start_sweep_budget_hold()
+tests/test_issue_597_progress_hold.py:123:    held, sweep = engine._no_progress_hold, engine._sweep_budget_hold_until
+tests/test_issue_597_progress_hold.py:125:    assert engine._no_progress_hold == held and engine._sweep_budget_hold_until == sweep
+tests/test_issue_597_progress_hold.py:142:    assert engine._no_progress_hold_status()["reason"] == "host_rejected_progress"
+tests/test_issue_597_progress_hold.py:146:    engine._start_no_progress_hold("host_rejected_progress")
+tests/test_issue_597_progress_hold.py:149:    assert engine._no_progress_hold is None
+tests/test_issue_605_foreground_budget.py:356:        assert engine._no_progress_hold is None and not engine._no_progress_hold_active()
+tests/test_issue_605_foreground_budget.py:381:        assert telemetry["pre_leaf_condensation_stop_reason"] == "condensation_no_progress"
+tests/test_issue_605_foreground_budget.py:383:        assert engine._no_progress_hold is None
+tests/test_issue_605_foreground_budget.py:403:        assert _leaves(engine) == [] and engine._sweep_budget_hold_until > time.monotonic()
+tests/test_issue_605_sweep_off_forced_f2.py:244:        assert engine._sweep_budget_hold_until > time.monotonic()  # the #608 hold ends at its time
+tests/test_issue_605_sweep_off_forced_f2.py:285:        assert engine._sweep_budget_hold_until == 0.0  # forced overflow is never held
+tests/test_issue_608_sweep_budget_stop.py:144:        assert engine._store.read_metadata_json("compaction_no_progress:v1:S") is None
+tests/test_issue_608_sweep_budget_stop.py:145:        assert engine._sweep_budget_hold_active()  # Its original process-local pacing remains.
+tests/test_issue_608_sweep_budget_stop.py:331:        assert engine._sweep_budget_hold_until > time.monotonic()
+tests/test_issue_608_sweep_budget_stop.py:337:        engine._start_sweep_budget_hold()
+tests/test_issue_608_sweep_budget_stop.py:344:        assert engine._sweep_budget_hold_until == 0.0
+tests/test_issue_608_sweep_budget_stop.py:377:    engine._start_sweep_budget_hold()  # #618: armed for the bound conversation, on the monotonic clock
+tests/test_issue_608_sweep_budget_stop.py:411:    original = engine._ingest_messages
+tests/test_issue_608_sweep_budget_stop.py:419:    monkeypatch.setattr(engine, "_ingest_messages", ingest_with_a_diff)
+tests/test_issue_608_sweep_budget_stop.py:453:        assert engine._sweep_budget_hold_active() and engine._last_compression_noop_reason.startswith(
+tests/test_issue_608_sweep_budget_stop.py:728:        assert engine._sweep_budget_hold_until == 0.0
+tests/test_issue_618_625_hold_followups.py:127:    assert engine._sweep_budget_hold_active()
+tests/test_issue_618_625_hold_followups.py:141:        assert engine._sweep_budget_hold_until == 0.0  # the reset cleared it
+tests/test_issue_618_625_hold_followups.py:153:        assert engine._sweep_budget_hold_until > 0.0  # not reset on this path
+tests/test_issue_618_625_hold_followups.py:154:        assert engine._sweep_budget_hold_active() is False
+tests/test_issue_618_625_hold_followups.py:163:        engine._reset_session_scoped_runtime_state()
+tests/test_issue_618_625_hold_followups.py:164:        assert engine._sweep_budget_hold_until == 0.0 and not engine._sweep_budget_hold_active()
+tests/test_issue_618_625_hold_followups.py:165:        engine._start_sweep_budget_hold()
+tests/test_issue_618_625_hold_followups.py:167:        assert engine._sweep_budget_hold_until == 0.0 and not engine._sweep_budget_hold_active()
+tests/test_issue_618_625_hold_followups.py:179:        engine._start_sweep_budget_hold()
+tests/test_issue_618_625_hold_followups.py:184:        engine._start_sweep_budget_hold()
+tests/test_issue_618_625_hold_followups.py:189:        assert engine._sweep_budget_hold_active() and engine._no_progress_hold_active()
+tests/test_issue_618_625_hold_followups.py:193:        assert engine._sweep_budget_hold_active() and engine._no_progress_hold_active()
+tests/test_issue_618_625_hold_followups.py:195:        assert not engine._sweep_budget_hold_active() and not engine._no_progress_hold_active()
+tests/test_issue_618_625_hold_followups.py:219:        engine._start_sweep_budget_hold()
+tests/test_issue_618_625_hold_followups.py:269:        engine._start_sweep_budget_hold()
+tests/test_issue_618_625_hold_followups.py:283:        engine._no_progress_hold = None  # the #651 hold the same stop armed: only the #608 hold is left
+tests/test_issue_618_625_hold_followups.py:298:        engine._start_sweep_budget_hold()
+tests/test_issue_618_625_hold_followups.py:316:def test_item4_the_no_progress_reason_keeps_its_name(tmp_path):
+tests/test_issue_618_625_hold_followups.py:319:        engine._start_sweep_budget_hold()
+tests/test_issue_618_625_hold_followups.py:497:        assert engine._sweep_budget_hold_active()
+tests/test_issue_628_summary_circuit.py:215:        assert time.monotonic() < engine._sweep_budget_hold_until <= time.monotonic() + cooldown
+tests/test_issue_628_summary_circuit.py:330:        assert engine._sweep_budget_hold_active()
+tests/test_issue_628_summary_circuit.py:362:        assert engine._sweep_budget_hold_until == 0.0  # a stored leaf: no hold
+tests/test_issue_628_summary_circuit.py:454:        assert engine._sweep_budget_hold_until == 0.0 and _count(caplog, STOP_LINE) == 0
+tests/test_issue_651_below_threshold_cleanup_only.py:111:        assert engine._no_progress_hold is None  # cleanup-only is not a threshold pass
+tests/test_issue_651_below_threshold_cleanup_only.py:165:def test_t3_a_no_progress_threshold_pass_arms_the_hold(tmp_path, summaries):
+tests/test_issue_651_below_threshold_cleanup_only.py:176:        assert engine._compression_block_reason() == "cooldown:lcm_no_progress"  # host: transient, never exhausts
+tests/test_issue_651_below_threshold_cleanup_only.py:192:        assert engine.get_status()["no_progress_hold"] is None and engine._no_progress_hold is None
+tests/test_issue_651_below_threshold_cleanup_only.py:229:        assert engine._no_progress_hold is None
+tests/test_issue_651_below_threshold_cleanup_only.py:242:        assert _leaves(engine) >= 1 and engine._no_progress_hold is None and _host_gate(engine) is False
+tests/test_issue_651_below_threshold_cleanup_only.py:313:    record = engine._store.read_metadata_json("compaction_no_progress:v1:S")
+tests/test_issue_651_below_threshold_cleanup_only.py:321:        assert engine._store.read_metadata_json("compaction_no_progress:v1:S") == record
+tests/test_issue_651_below_threshold_cleanup_only.py:357:        assert engine._no_progress_hold_blocks(rough + 200) is True  # the one predicate the gate also uses
+tests/test_issue_651_below_threshold_cleanup_only.py:369:        assert engine._no_progress_hold_blocks(ceiling) is False
+tests/test_issue_652_653_no_fragments_bounded_prefix.py:137:        assert engine._sweep_budget_hold_until == 0.0  # no #608 hold
+tests/test_issue_665_bypass_hold.py:63:        assert engine._no_progress_hold_active() is False
+tests/test_issue_665_bypass_hold.py:78:        assert engine._no_progress_hold_active() is True
+tests/test_issue_667_level3_repair.py:189:def _seed_no_progress_holds(engine):
+tests/test_issue_667_level3_repair.py:195:        engine._store.write_metadata_json([f"compaction_no_progress:v1:{session}"], json.dumps(record))
+tests/test_issue_667_level3_repair.py:199:def _read_no_progress_holds(engine):
+tests/test_issue_667_level3_repair.py:200:    return {session: engine._store.read_metadata_json(f"compaction_no_progress:v1:{session}")
+tests/test_issue_667_level3_repair.py:206:    holds = _seed_no_progress_holds(engine)
+tests/test_issue_667_level3_repair.py:218:    assert _read_no_progress_holds(engine) == {"s1": None, "s2": holds["s2"]}
+tests/test_issue_667_level3_repair.py:271:    holds = _seed_no_progress_holds(engine)
+tests/test_issue_667_level3_repair.py:280:    assert _read_no_progress_holds(engine) == holds
+tests/test_issue_667_level3_repair.py:286:    holds = _seed_no_progress_holds(engine)
+tests/test_issue_667_level3_repair.py:301:    assert _read_no_progress_holds(engine) == holds
+tests/test_issue_667_level3_repair.py:307:    holds = _seed_no_progress_holds(engine)
+tests/test_issue_667_level3_repair.py:315:                            ("compaction_no_progress:v1:s1",)).fetchone() is None
+tests/test_issue_667_level3_repair.py:325:    assert _read_no_progress_holds(engine) == holds
+tests/test_issue_667_level3_repair.py:330:    holds = _seed_no_progress_holds(engine)
+tests/test_issue_667_level3_repair.py:348:    assert _read_no_progress_holds(engine) == holds
+tests/test_issue_671_stub_first_exit.py:115:    replay = engine._ingest_messages(messages)
+tests/test_issue_671_stub_first_exit.py:308:    working = engine._ingest_messages(view)
+tests/test_issue_671_stub_first_exit.py:405:    cold._ingest_messages(copy.deepcopy(out) + [{"role": "user", "content": "fresh-new-question"}])
+tests/test_issue_671_stub_first_exit.py:464:    working = engine._ingest_messages(view)
+tests/test_issue_677_host_count_decides.py:104:        assert engine._no_progress_hold is None  # cleanup-only is not a threshold pass
+tests/test_issue_677_host_count_decides.py:139:        assert engine._no_progress_hold is not None  # no leaf: the hold still runs
+tests/test_issue_677_host_count_decides.py:246:        assert engine._no_progress_hold_active() is True
+tests/test_issue_677_host_count_decides.py:247:        assert engine._no_progress_hold_blocks(ceiling) is False
+tests/test_issue_684_recovery_clears_cooldown_handoff.py:63:    real_ingest = engine._ingest_messages
+tests/test_issue_684_recovery_clears_cooldown_handoff.py:66:        patch.setattr(engine, "_ingest_messages", lambda messages: [
+tests/test_issue_738_exit_fit_coverage.py:183:            engine._start_sweep_budget_hold()
+tests/test_issue_738_exit_fit_coverage.py:215:            engine._start_sweep_budget_hold()  # rc4: this unchanged fit-only pin belongs to #608 only
+tests/test_issue_738_exit_fit_coverage.py:338:        assert engine._no_progress_hold_blocks(observed)
+tests/test_issue_738_exit_fit_coverage.py:371:        engine._start_sweep_budget_hold()  # rc4: #651 no longer suppresses native recovery at the ceiling
+tests/test_issue_738_exit_fit_coverage.py:401:        engine._start_sweep_budget_hold()  # rc4: the zero-call budget is a #608 invariant only
+tests/test_issue_738_exit_fit_coverage.py:477:        assert engine._no_progress_hold_blocks(observed)
+tests/test_issue_772_replay_keeps_host_stubs.py:67:    replay = engine._ingest_messages(host)
+tests/test_issue_772_replay_keeps_host_stubs.py:88:    engine._ingest_messages(host)
+tests/test_issue_772_replay_keeps_host_stubs.py:89:    replay = engine._ingest_messages(copy.deepcopy(host))  # the no-new-rows path
+tests/test_issue_772_replay_keeps_host_stubs.py:98:    replay = engine._ingest_messages(host)
+tests/test_issue_772_replay_keeps_host_stubs.py:99:    fresh = engine._ingest_messages(copy.deepcopy(host))
+tests/test_issue_772_replay_keeps_host_stubs.py:103:    assert replay == fresh  # the stub row is what _ingest_messages produces for that host row
+tests/test_issue_772_replay_keeps_host_stubs.py:112:    replays = [engine._ingest_messages(turn1)]
+tests/test_issue_772_replay_keeps_host_stubs.py:114:    replays.append(engine._ingest_messages(turn2))
+tests/test_issue_772_replay_keeps_host_stubs.py:115:    replays.append(engine._ingest_messages(copy.deepcopy(turn2)))  # no new rows
+tests/test_issue_772_replay_keeps_host_stubs.py:119:    replays.append(engine._ingest_messages(host))
+tests/test_issue_772_replay_keeps_host_stubs.py:120:    replays.append(engine._ingest_messages(copy.deepcopy(host)))  # no new rows
+tests/test_issue_772_replay_keeps_host_stubs.py:131:    engine._ingest_messages(host)
+tests/test_issue_772_replay_keeps_host_stubs.py:139:    engine._ingest_messages(nxt)
+tests/test_issue_772_replay_keeps_host_stubs.py:152:    replay = engine._ingest_messages(host)
+tests/test_issue_772_replay_keeps_host_stubs.py:162:    replay = engine._ingest_messages(host)
+tests/test_issue_772_replay_keeps_host_stubs.py:163:    again = engine._ingest_messages(copy.deepcopy(host))
+tests/test_issue_773_hermes_pruned_tool_replay.py:102:    replay = engine._ingest_messages(host)
+tests/test_issue_773_hermes_pruned_tool_replay.py:113:    assert engine._ingest_messages(copy.deepcopy(host)) == replay  # the no-new-rows path: the same view
+tests/test_issue_773_hermes_pruned_tool_replay.py:123:    engine._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:128:    replay = engine._ingest_messages(host)
+tests/test_issue_773_hermes_pruned_tool_replay.py:149:            engine._ingest_messages(host)
+tests/test_issue_773_hermes_pruned_tool_replay.py:167:    engine._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:182:    first._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:195:    engine._ingest_messages(view + [{"role": "user", "content": "again"}, call, tool])
+tests/test_issue_773_hermes_pruned_tool_replay.py:207:    other._ingest_messages(host)
+tests/test_issue_773_hermes_pruned_tool_replay.py:224:    engine._ingest_messages(view[:index] + [changed] + view[index + 1:] + [{"role": "user", "content": "again"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:263:            engine._ingest_messages(host)
+tests/test_issue_773_hermes_pruned_tool_replay.py:289:    first._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:294:        legacy._ingest_messages(copy.deepcopy(host))
+tests/test_issue_773_hermes_pruned_tool_replay.py:299:    engine._ingest_messages(copy.deepcopy(host) + [{"role": "user", "content": "follow-up"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:318:    engine._ingest_messages(copy.deepcopy(tail))
+tests/test_issue_773_hermes_pruned_tool_replay.py:352:    first._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:358:    engine._ingest_messages(host + [{"role": "user", "content": "again"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:371:    first._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:379:    replay = engine._ingest_messages(host + [{"role": "user", "content": "again"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:424:    replay = engine._ingest_messages(host)
+tests/test_issue_773_hermes_pruned_tool_replay.py:465:    first._ingest_messages([SYSTEM, {"role": "user", "content": "u1"}, _call("X", content=caller),
+tests/test_issue_773_hermes_pruned_tool_replay.py:471:    engine._ingest_messages([_call("X", content=caller), _result("X", CLEARED), {"role": "assistant", "content": "done"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:491:    engine._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:506:    engine._ingest_messages(host + [{"role": "user", "content": "u5"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:538:    engine._ingest_messages([SYSTEM, {"role": "user", "content": "u1"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:543:        engine._ingest_messages([SYSTEM, {"role": "user", "content": "u1"}, *rows])
+tests/test_issue_773_hermes_pruned_tool_replay.py:567:    first._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:579:    replay = engine._ingest_messages(host + [{"role": "user", "content": "again"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:599:    first._ingest_messages(stored_view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:603:    engine._ingest_messages(stored_view + [{"role": "user", "content": "u3"}, _call("X", content=caller),
+tests/test_issue_773_hermes_pruned_tool_replay.py:628:    first._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:633:    engine._ingest_messages(host + [{"role": "user", "content": "u3"}])
+tests/test_issue_773_hermes_pruned_tool_replay.py:645:    first._ingest_messages([SYSTEM, {"role": "user", "content": "u1"}, _call("A"), _result("A", a),
+tests/test_issue_773_hermes_pruned_tool_replay.py:651:    engine._ingest_messages([_call("A"), _result("A", a), {"role": "assistant", "content": "new"},
+tests/test_issue_773_hermes_pruned_tool_replay.py:664:    first._ingest_messages([SYSTEM, {"role": "user", "content": "u1"}, _call("X"), _result("X", x),
+tests/test_issue_773_hermes_pruned_tool_replay.py:676:    engine._ingest_messages(host)
+tests/test_issue_773_hermes_pruned_tool_replay.py:693:    first._ingest_messages([SYSTEM, {"role": "user", "content": "u1"}, _call("X"), _result("X", x),
+tests/test_issue_773_hermes_pruned_tool_replay.py:698:    engine._ingest_messages([_call("A"), _result("A", a), {"role": "assistant", "content": "new"},
+tests/test_issue_773_hermes_pruned_tool_replay.py:755:    engine._ingest_messages(view)
+tests/test_issue_773_hermes_pruned_tool_replay.py:766:    engine._ingest_messages(view + [{"role": "user", "content": "u3"}])
+tests/test_issue_904_hidden_only_no_growth.py:53:    instance._ingest_messages(history)
+tests/test_issue_904_hidden_only_no_growth.py:98:    instance._ingest_messages(history)
+tests/test_issue_904_hidden_only_no_growth.py:137:    assert instance._no_progress_hold is None
+tests/test_issue_904_hidden_only_no_growth.py:138:    assert not instance._no_progress_hold_active()
+tests/test_issue_904_hidden_only_no_growth.py:151:        assert instance._no_progress_hold[1] == "hidden_only"
+tests/test_issue_904_hidden_only_no_growth.py:155:            assert instance._no_progress_hold[1] == "hidden_only"
+tests/test_issue_904_hidden_only_no_growth.py:159:        assert instance._no_progress_hold is None
+tests/test_issue_904_hidden_only_no_growth.py:172:    assert instance._no_progress_hold is None
+tests/test_issue_904_hidden_only_no_growth.py:209:    assert instance._no_progress_hold is None
+tests/test_issue_906_survival_uncovered_count.py:57:        engine._start_sweep_budget_hold()
+tests/test_issue_909_condensation_starves_leaf.py:111:    assert not engine._sweep_budget_hold_active()
+tests/test_issue_909_condensation_starves_leaf.py:112:    assert not engine._no_progress_hold_active()
+tests/test_issue_909_condensation_starves_leaf.py:156:    assert not engine._sweep_budget_hold_active()
+tests/test_issue_909_condensation_starves_leaf.py:157:    assert not engine._no_progress_hold_active()
+tests/test_issue_909_condensation_starves_leaf.py:207:        engine._start_sweep_budget_hold()
+tests/test_issue_909_condensation_starves_leaf.py:209:        engine._start_no_progress_hold("no_progress")
+tests/test_issue_922_no_self_defeating_leaf.py:213:        local_state = (instance._no_progress_hold, instance._no_progress_observed_tokens)
+tests/test_issue_922_no_self_defeating_leaf.py:217:            assert not instance._no_progress_hold_active()
+tests/test_issue_922_no_self_defeating_leaf.py:218:            assert not instance._persisted_no_progress_hold_active()
+tests/test_issue_922_no_self_defeating_leaf.py:219:            assert not instance._sweep_budget_hold_applies(instance.threshold_tokens)
+tests/test_issue_922_no_self_defeating_leaf.py:220:            assert not instance._no_progress_hold_blocks(instance.threshold_tokens)
+tests/test_issue_922_no_self_defeating_leaf.py:222:        assert (instance._no_progress_hold, instance._no_progress_observed_tokens) == local_state
+tests/test_issue_922_no_self_defeating_leaf.py:228:    assert instance._no_progress_hold is None
+tests/test_issue_922_no_self_defeating_leaf.py:242:    assert instance._no_progress_hold is None
+tests/test_issue_922_no_self_defeating_leaf.py:260:def test_all_rows_in_tail_keeps_no_progress_hold(engine):
+tests/test_issue_922_no_self_defeating_leaf.py:283:    assert instance._no_progress_hold == (610.0, "objective_only")
+tests/test_issue_922_no_self_defeating_leaf.py:288:    assert instance._no_progress_hold is None
+tests/test_issue_922_no_self_defeating_leaf.py:292:    instance._reset_session_scoped_runtime_state()
+tests/test_lcm_core.py:4893:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:4910:        replay._ingest_messages(assembled + [{"role": "user", "content": "new user after restart"}])
+tests/test_lcm_core.py:4941:        engine._ingest_messages(persisted_messages)
+tests/test_lcm_core.py:4949:        replay._ingest_messages(
+tests/test_lcm_core.py:4982:        engine._ingest_messages(persisted_messages)
+tests/test_lcm_core.py:4990:        replay._ingest_messages(
+tests/test_lcm_core.py:5017:        engine._ingest_messages([
+tests/test_lcm_core.py:5041:        replay._ingest_messages([
+tests/test_lcm_core.py:5068:        engine._ingest_messages([
+tests/test_lcm_core.py:5088:        replay._ingest_messages([
+tests/test_lcm_core.py:5129:        engine._ingest_messages([
+tests/test_lcm_core.py:5149:        replay._ingest_messages([
+tests/test_lcm_core.py:5197:        engine._ingest_messages([
+tests/test_lcm_core.py:5230:        replay._ingest_messages([
+tests/test_lcm_core.py:5279:        engine._ingest_messages([
+tests/test_lcm_core.py:5320:        replay._ingest_messages([
+tests/test_lcm_core.py:5364:        engine._ingest_messages([
+tests/test_lcm_core.py:5404:        replay._ingest_messages([
+tests/test_lcm_core.py:5478:        engine._ingest_messages([
+tests/test_lcm_core.py:5503:        replay._ingest_messages([
+tests/test_lcm_core.py:5539:        engine._ingest_messages([
+tests/test_lcm_core.py:5552:        replay._ingest_messages(
+tests/test_lcm_core.py:5581:        engine._ingest_messages([
+tests/test_lcm_core.py:5595:        replay._ingest_messages([
+tests/test_lcm_core.py:5625:        engine._ingest_messages([
+tests/test_lcm_core.py:5638:        replay._ingest_messages(replayed_window + [{"role": "user", "content": "repeat me"}])
+tests/test_lcm_core.py:5657:        engine._ingest_messages([
+tests/test_lcm_core.py:5671:        replay._ingest_messages([
+tests/test_lcm_core.py:5694:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:5729:        replay_no_delta._ingest_messages(assembled)
+tests/test_lcm_core.py:5735:        replay._ingest_messages(assembled + [{"role": "user", "content": "new user after restart"}])
+tests/test_lcm_core.py:5747:        engine._ingest_messages(persisted_messages)
+tests/test_lcm_core.py:5755:        replay._ingest_messages([
+tests/test_lcm_core.py:5841:        engine._ingest_messages([
+tests/test_lcm_core.py:5885:        engine._ingest_messages([
+tests/test_lcm_core.py:5911:        engine._ingest_messages([
+tests/test_lcm_core.py:5942:        engine._ingest_messages([
+tests/test_lcm_core.py:5985:        active_messages = engine._ingest_messages(messages)
+tests/test_lcm_core.py:6035:        replay_with_redaction_disabled._ingest_messages(messages)
+tests/test_lcm_core.py:6042:        replay_from_active._ingest_messages(active_messages)
+tests/test_lcm_core.py:6073:        active_messages = engine._ingest_messages(messages)
+tests/test_lcm_core.py:6099:        replay_live_file._ingest_messages(messages)
+tests/test_lcm_core.py:6106:        replay._ingest_messages(active_messages)
+tests/test_lcm_core.py:6134:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6141:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:6172:        engine._ingest_messages(original_messages)
+tests/test_lcm_core.py:6183:        replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:6213:        engine._ingest_messages(original_messages)
+tests/test_lcm_core.py:6235:        replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:6248:        replay_after_cleanup._ingest_messages(original_messages + retry_messages)
+tests/test_lcm_core.py:6276:        engine._ingest_messages(original_messages)
+tests/test_lcm_core.py:6308:        replay._ingest_messages(original_messages + retry_messages)
+tests/test_lcm_core.py:6330:        replay_again._ingest_messages(original_messages + retry_messages)
+tests/test_lcm_core.py:6337:        replay_after_cleanup._ingest_messages(original_messages + retry_messages)
+tests/test_lcm_core.py:6361:        engine._ingest_messages([
+tests/test_lcm_core.py:6386:        replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:6421:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6436:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:6477:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6486:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:6495:        replay_again._ingest_messages(messages)
+tests/test_lcm_core.py:6501:        replay_third._ingest_messages(messages)
+tests/test_lcm_core.py:6541:        engine._ingest_messages(original_messages)
+tests/test_lcm_core.py:6554:        active_retry_messages = replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:6617:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6623:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:6653:        engine._ingest_messages(old_messages)
+tests/test_lcm_core.py:6679:        replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:6709:        engine._ingest_messages(old_messages)
+tests/test_lcm_core.py:6736:        replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:6766:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6793:        replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:6816:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6822:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:6856:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6862:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:6901:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:6919:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:6956:        engine._ingest_messages(old_messages)
+tests/test_lcm_core.py:6967:        replay._ingest_messages(retry_messages)
+tests/test_lcm_core.py:7032:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:7040:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:7072:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:7082:        replay_with_file._ingest_messages(messages)
+tests/test_lcm_core.py:7091:        replay_enabled_with_file._ingest_messages(messages)
+tests/test_lcm_core.py:7099:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:7131:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:7140:        replay_with_file._ingest_messages(messages)
+tests/test_lcm_core.py:7147:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:7189:        engine._ingest_messages(original_messages)
+tests/test_lcm_core.py:7195:        replay_same._ingest_messages(original_messages)
+tests/test_lcm_core.py:7208:        replay_retry._ingest_messages(retry_messages)
+tests/test_lcm_core.py:7235:        engine._ingest_messages([
+tests/test_lcm_core.py:7270:        engine._ingest_messages([
+tests/test_lcm_core.py:7285:        engine._ingest_messages([
+tests/test_lcm_core.py:7319:        engine._ingest_messages([
+tests/test_lcm_core.py:7342:        engine._ingest_messages([
+tests/test_lcm_core.py:7369:        engine._ingest_messages([
+tests/test_lcm_core.py:7404:        engine._ingest_messages([
+tests/test_lcm_core.py:7438:        engine._ingest_messages([
+tests/test_lcm_core.py:7465:        engine._ingest_messages([
+tests/test_lcm_core.py:7482:        engine._ingest_messages([
+tests/test_lcm_core.py:7500:        engine._ingest_messages([
+tests/test_lcm_core.py:7520:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:7528:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:7557:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:7588:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:7600:        engine._ingest_messages(messages)
+tests/test_lcm_core.py:7612:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:7635:        raw_engine._ingest_messages(messages)
+tests/test_lcm_core.py:7647:        replay._ingest_messages(messages)
+tests/test_lcm_core.py:7663:        engine._ingest_messages([{"role": "user", "content": content}])
+tests/test_lcm_core.py:7691:        engine._ingest_messages([{"role": "user", "content": content}])
+tests/test_lcm_core.py:7738:        replay._ingest_messages(active_context)
+tests/test_lcm_core.py:7744:        replay_with_delta._ingest_messages(active_context + [{"role": "user", "content": "followup"}])
+tests/test_lcm_core.py:7771:        engine._ingest_messages([{"role": injected_role, "content": content}])
+tests/test_lcm_engine.py:547:        engine._ingest_messages([{"role": "user", "content": "message from profile a"}])
+tests/test_lcm_engine.py:559:        engine._ingest_messages([{"role": "user", "content": "message from profile b"}])
+tests/test_lcm_engine.py:652:        engine._ingest_messages([{"role": "assistant", "content": "profile-a " + "A" * 32}])
+tests/test_lcm_engine.py:662:        engine._ingest_messages([{"role": "assistant", "content": "profile-b " + "B" * 32}])
+tests/test_lcm_engine.py:739:    monkeypatch.setattr(engine, "_ingest_messages", fail_ingest)
+tests/test_lcm_engine.py:1481:    engine._ingest_messages([{"role": "user", "content": "Cronjob Response: heartbeat"}])
+tests/test_lcm_engine.py:2318:            monkeypatch.setattr(instance, "_ingest_messages", lambda _messages: _messages[:-1])
+tests/test_lcm_engine.py:4244:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4266:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4295:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4322:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4398:        after_restart._ingest_messages(replay_with_new_message)
+tests/test_lcm_engine.py:4550:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4567:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4597:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4618:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4645:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4662:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4690:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4703:        after_restart._ingest_messages(list(persisted_messages))
+tests/test_lcm_engine.py:4728:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4742:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4763:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4777:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4798:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4815:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4840:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4860:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4885:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4906:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4937:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:4956:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:4994:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5014:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:5046:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5063:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:5090:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5109:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:5130:        before_restart._ingest_messages([
+tests/test_lcm_engine.py:5151:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:5177:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5192:            after_restart._ingest_messages(stale_runtime_snapshot)
+tests/test_lcm_engine.py:5233:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5253:        after_restart._ingest_messages(stale_runtime_snapshot)
+tests/test_lcm_engine.py:5280:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5294:        after_restart._ingest_messages(delta)
+tests/test_lcm_engine.py:5322:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5340:        after_restart._ingest_messages(delta)
+tests/test_lcm_engine.py:5373:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5393:        after_restart._ingest_messages(delta)
+tests/test_lcm_engine.py:5428:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5447:        after_restart._ingest_messages(delta)
+tests/test_lcm_engine.py:5479:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5504:        after_restart._ingest_messages(replay_with_new_rows)
+tests/test_lcm_engine.py:5538:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5563:        after_restart._ingest_messages(stale_replay)
+tests/test_lcm_engine.py:5592:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5610:        after_restart._ingest_messages([{"role": "user", "content": "real singleton tail"}])
+tests/test_lcm_engine.py:5640:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5654:        after_restart._ingest_messages(repeated_prefix_delta)
+tests/test_lcm_engine.py:5687:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5709:        after_restart._ingest_messages(ambiguous_delta)
+tests/test_lcm_engine.py:5739:        before_restart._ingest_messages(persisted_messages)
+tests/test_lcm_engine.py:5751:        after_restart._ingest_messages([{"role": "user", "content": "status delta"}])
+tests/test_lcm_engine.py:5768:        engine._ingest_messages = boom
+tests/test_lcm_engine.py:5783:        del engine._ingest_messages
+tests/test_lcm_engine.py:5796:        engine._ingest_messages = boom
+tests/test_lcm_engine.py:5809:        engine._ingest_messages = boom
+tests/test_lcm_engine.py:6058:        # foreground store via _ingest_messages.
+tests/test_lcm_engine.py:6372:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:6387:        active_replay = engine._ingest_messages(messages)
+tests/test_lcm_engine.py:6617:        first_replay = engine._ingest_messages([ignored])
+tests/test_lcm_engine.py:6621:        appended_replay = engine._ingest_messages(
+tests/test_lcm_engine.py:6723:            second._ingest_messages(first_result)
+tests/test_lcm_engine.py:6758:            second._ingest_messages([{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:6794:            second._ingest_messages([{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:6829:            second._ingest_messages(
+tests/test_lcm_engine.py:6865:        engine._ingest_messages(first_result + [{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:6883:        engine._ingest_messages([quoted_placeholder])
+tests/test_lcm_engine.py:7222:            second._ingest_messages(first_result)
+tests/test_lcm_engine.py:7287:            second._ingest_messages(first_result + [{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:7353:            second._ingest_messages(first_result + [{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:7400:            second._ingest_messages(
+tests/test_lcm_engine.py:7439:            engine._remember_active_replay_messages(
+tests/test_lcm_engine.py:7454:            engine._ingest_messages(active)
+tests/test_lcm_engine.py:7514:            second._ingest_messages([{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:7539:            engine._ingest_messages(
+tests/test_lcm_engine.py:7589:            engine._ingest_messages(
+tests/test_lcm_engine.py:7621:            engine._ingest_messages(
+tests/test_lcm_engine.py:7652:            engine._ingest_messages(
+tests/test_lcm_engine.py:7683:            engine._ingest_messages(
+tests/test_lcm_engine.py:7722:            engine._ingest_messages(
+tests/test_lcm_engine.py:7752:            engine._ingest_messages(
+tests/test_lcm_engine.py:7791:            second._ingest_messages(
+tests/test_lcm_engine.py:7826:            engine._ingest_messages([{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:7856:            engine._ingest_messages([{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:7898:        engine._ingest_messages(result + [{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:7925:            engine._ingest_messages([])
+tests/test_lcm_engine.py:7971:            engine._ingest_messages(first_result)
+tests/test_lcm_engine.py:8028:            second._ingest_messages(first_result)
+tests/test_lcm_engine.py:8055:        first_result = first._ingest_messages(
+tests/test_lcm_engine.py:8058:        first_result = first._ingest_messages(
+tests/test_lcm_engine.py:8084:            second._ingest_messages(first_result)
+tests/test_lcm_engine.py:9069:        engine._ingest_messages(
+tests/test_lcm_engine.py:10067:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10232:        engine._ingest_messages([{"role": "user", "content": placeholder}])
+tests/test_lcm_engine.py:10266:        engine._ingest_messages([{"role": "assistant", "content": placeholder}])
+tests/test_lcm_engine.py:10402:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10416:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10429:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10448:        engine._ingest_messages([multimodal])
+tests/test_lcm_engine.py:10474:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10487:        engine._ingest_messages([multimodal])
+tests/test_lcm_engine.py:10500:        engine._ingest_messages([multimodal])
+tests/test_lcm_engine.py:10514:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10528:        engine._ingest_messages([
+tests/test_lcm_engine.py:10545:        engine._ingest_messages([
+tests/test_lcm_engine.py:10555:        engine._ingest_messages([
+tests/test_lcm_engine.py:10576:        engine._ingest_messages([
+tests/test_lcm_engine.py:10591:        engine._ingest_messages([
+tests/test_lcm_engine.py:10627:        engine._ingest_messages([
+tests/test_lcm_engine.py:10647:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10653:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10676:        before_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:10688:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:10710:        before_filter._ingest_messages(active_context)
+tests/test_lcm_engine.py:10726:        after_filter_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:10754:        before_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:10771:        after_restart._ingest_messages(active_context)
+tests/test_lcm_engine.py:10788:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10797:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:10798:        engine._ingest_messages(messages)  # same messages again
+tests/test_lcm_engine.py:12001:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:12926:            engine._ingest_messages(compressed)
+tests/test_lcm_engine.py:12961:            engine._ingest_messages(compressed2)
+tests/test_lcm_engine.py:13146:            fresh._ingest_messages([dict(scaffold), dict(retry)])
+tests/test_lcm_engine.py:13168:            seed._ingest_messages(visible)
+tests/test_lcm_engine.py:13177:            fresh._ingest_messages([dict(scaffold), dict(retry)])
+tests/test_lcm_engine.py:13193:            engine._ingest_messages([dict(b_marker)])
+tests/test_lcm_engine.py:13267:            original_ingest = engine._ingest_messages
+tests/test_lcm_engine.py:13278:            monkeypatch.setattr(engine, "_ingest_messages", pause_a_before_reconcile)
+tests/test_lcm_engine.py:13704:        monkeypatch.setattr(engine, "_ingest_messages", locked_ingest)
+tests/test_lcm_engine.py:13717:        monkeypatch.setattr(engine, "_ingest_messages", interrupted_ingest)
+tests/test_lcm_engine.py:13789:        monkeypatch.setattr(engine, "_ingest_messages", broken_ingest)
+tests/test_lcm_engine.py:14138:        replay = engine._ingest_messages(fresh_messages)
+tests/test_lcm_engine.py:14190:        monkeypatch.setattr(engine, "_ingest_messages", replay_diff)
+tests/test_lcm_engine.py:21707:            engine_a._ingest_messages([{"role": "user", "content": "first persisted message"}])
+tests/test_lcm_engine.py:26624:        engine._ingest_messages(messages)
+tests/test_lcm_engine.py:26680:        engine._ingest_messages([
+tests/test_native_publication_fallback.py:136:    candidate._ingest_messages(compressed + new_turns)
+tests/test_native_publication_fallback.py:159:    candidate._ingest_messages(messages + new_turns)
+tests/test_native_publication_fallback.py:192:    candidate._ingest_messages(messages + new_turns)
+tests/test_native_publication_fallback.py:223:        second._ingest_messages(recovered + new_turns)
+tests/test_native_publication_fallback.py:257:    candidate._ingest_messages(compressed + new_turns)
+tests/test_native_publication_fallback.py:335:        resumed._ingest_messages(recovered + new_turns)
+tests/test_native_publication_fallback.py:386:        engine._ingest_messages(changed)
+tests/test_native_publication_fallback.py:405:    candidate._ingest_messages(recovered + [{"role": "user", "content": forged}])
+tests/test_native_publication_fallback.py:613:    candidate._ingest_messages([lossy])
+tests/test_o2_native_recovery_removed.py:93:        monkeypatch.setattr(engine, "_ingest_messages", lambda _rows: replay)
+tests/test_o2_native_recovery_removed.py:130:            replay = engine._ingest_messages(rows)
+tests/test_rc4_no_progress_hold_ceiling_sweeps.py:45:    assert engine._no_progress_hold_active() and not engine._sweep_budget_hold_active()
+tests/test_reconcile_fork_guard.py:84:            engine._ingest_messages(original)
+tests/test_reconcile_fork_guard.py:93:                replay_engine._ingest_messages(replay_msgs)
+tests/test_reconcile_fork_guard.py:119:            engine._ingest_messages(original)
+tests/test_reconcile_fork_guard.py:130:                replay_engine._ingest_messages(delta)
+tests/test_reconcile_fork_guard.py:151:            engine._ingest_messages(original)
+tests/test_reconcile_fork_guard.py:159:                replay_engine._ingest_messages(divergent)
+tests/test_reconcile_fork_guard.py:177:            engine._ingest_messages(original)
+tests/test_reconcile_fork_guard.py:184:                replay_engine._ingest_messages(divergent)
+tests/test_reconcile_fork_guard.py:205:            engine._ingest_messages(original)
+tests/test_reconcile_fork_guard.py:213:                replay_engine._ingest_messages(delta)
+tests/test_reconcile_fork_guard.py:235:                replay_engine._ingest_messages(msgs)
+tests/test_reconcile_fork_guard.py:251:            engine._ingest_messages(original)
+tests/test_reconcile_fork_guard.py:263:                fork_engine._ingest_messages(fork_msgs)
+tests/test_reconcile_model_switch.py:158:            engine._ingest_messages(original)
+tests/test_reconcile_model_switch.py:172:                switch_engine._ingest_messages(with_switch)
+tests/test_reconcile_model_switch.py:187:                replay_engine._ingest_messages(after_switch)
+tests/test_reconcile_model_switch.py:221:            engine._ingest_messages(msgs)
+tests/test_reconcile_model_switch.py:235:                replay._ingest_messages(incoming)
+tests/test_reconcile_oob_message_block.py:83:    engine._ingest_messages(
+tests/test_reconcile_oob_message_block.py:340:            engine._ingest_messages(turn1)
+tests/test_reconcile_oob_message_block.py:353:            engine._ingest_messages(turn2)
+tests/test_reconcile_oob_message_block.py:382:            engine._ingest_messages(turn1)
+tests/test_reconcile_oob_message_block.py:393:            engine._ingest_messages(turn2)
+tests/test_reconcile_oob_message_block.py:432:            engine._ingest_messages(turn1)
+tests/test_reconcile_oob_message_block.py:445:            engine._ingest_messages(turn2)
+tests/test_reconcile_oob_message_block.py:461:            engine._ingest_messages(replay)
+tests/test_reconcile_oob_message_block.py:499:            engine._ingest_messages(turn1)
+tests/test_reconcile_oob_message_block.py:512:            engine._ingest_messages(replay)
+tests/test_reconcile_oob_message_block.py:549:            engine._ingest_messages(turn1)
+tests/test_reconcile_oob_message_block.py:562:            engine._ingest_messages(turn2)
+tests/test_reconcile_oob_message_block.py:578:            engine._ingest_messages(replay)
+tests/test_reconcile_oob_message_block.py:612:            engine._ingest_messages(enriched)
+tests/test_reconcile_oob_message_block.py:618:            engine._ingest_messages(replay)
+tests/test_reconcile_oob_message_block.py:644:            engine._ingest_messages(enriched)
+tests/test_reconcile_oob_message_block.py:650:            engine._ingest_messages(replay)
+tests/test_reconcile_todo_annotation.py:195:            engine._ingest_messages(original_messages)
+tests/test_reconcile_todo_annotation.py:213:                replay_engine._ingest_messages(replay_messages)
+tests/test_reconcile_todo_annotation.py:246:            engine._ingest_messages(original_messages)
+tests/test_reconcile_todo_annotation.py:258:                replay_engine._ingest_messages(replay_messages)
+tests/test_reconcile_tool_scaffold_excerpt.py:100:            engine._ingest_messages(turn1)
+tests/test_reconcile_tool_scaffold_excerpt.py:106:            engine._ingest_messages(turn2)
+tests/test_selective_session_bundle.py:260:def test_invalid_date_error_and_no_progress_fail_to_unchanged_baseline(tmp_path):
+tests/test_tool_registry_characterization.py:127:        monkeypatch.setattr(engine, "_ingest_messages", lambda messages: ingested.extend(messages))

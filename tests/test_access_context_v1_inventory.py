@@ -30,7 +30,7 @@ def test_tool_coverage_is_exact_both_ways() -> None:
     manifest_tools = parse_manifest_tools(REPO_ROOT / "plugin.yaml")
     inventory_tools = {entry.entry_point for entry in entries if entry.entry_point.startswith("lcm_")}
     assert inventory_tools == manifest_tools
-    assert len(inventory_tools) == 15
+    assert len(inventory_tools) == 16
 
 
 def test_inventory_categories_paths_and_closed_vocabularies() -> None:

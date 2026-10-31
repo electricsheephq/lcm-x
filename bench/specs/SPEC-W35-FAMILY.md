@@ -8,7 +8,7 @@ Ground truth confirmed. The W3B-ARME artifact settles the central dispute in all
 
 **Author:** program architect (Opus) · **Date:** 2026-07-24 · **Status:** predeclared, pre-build
 **Inputs synthesized:** reader-contract proposal (M1–M4) · W3.5-QD retrieval proposal (QD1–QD4) · C4 precision-rerank proposal (tier0/tier1/guardrail) + all three adversarial critiques
-**Ground-truth files read for this spec:** `PROGRAM-ARCHITECTURE.md` §6b/§6c/§6d · `artifacts/W3B-ARME-UNKNOWNS-REDUCIBILITY.md` (both at `/Volumes/LEXAR/Codex/session-notes/2026-07-23/hermes-benchprog-h1/`)
+**Ground-truth files read for this spec:** `PROGRAM-ARCHITECTURE.md` §6b/§6c/§6d · `artifacts/W3B-ARME-UNKNOWNS-REDUCIBILITY.md` (both at local run `2026-07-23/hermes-benchprog-h1` (raw data kept locally; not published))
 
 ---
 
@@ -106,7 +106,7 @@ Additive, upstream, zero-LLM-call. Deliberately **narrowed** per both QD critiqu
    - **Delivered-token cost per item / total context tokens.** Non-negotiable because M1 says this reader is *compactness-bound*; every RC/label mechanism adds bytes to an already ~19–25K-token context that itself drives the F-class loop. A scaffold that improves selection but bloats the context can net-regress.
    - **LAFS query-latency / completion-token spend** — the axis RC-M2 is scored on, and the guardrail C5/QD3 protect (must stay on the fast side of the Pareto frontier; no LLM in the retrieval path).
 4. **Ablation matrix (compose-and-measure, never auto-promote):** each knob measured (a) alone on the frozen baseline, (b) composed, (c) leave-one-out from the full composed set. A component is **kept only if the leave-one-out shows it improves the composed net.** This is the operational form of the arm G lesson.
-5. **Order of spend (§6d — deterministic before expensive):** golden-451 byte-identical off-proof → provider-free replay-grid deltas (pool / Delivered-Recall@16 / preservation-retained-vs-disturbed / residual-8 per-case) → C5 zero-generation smoke test → only then the 60q official LLM slice. Snapshot raw outputs to session-notes `artifacts/` *before* any subsequent run (volatile-score rule).
+5. **Order of spend (§6d — deterministic before expensive):** golden-451 byte-identical off-proof → provider-free replay-grid deltas (pool / Delivered-Recall@16 / preservation-retained-vs-disturbed / residual-8 per-case) → C5 zero-generation smoke test → only then the 60q official LLM slice. Snapshot raw outputs to the local run artifact directory *before* any subsequent run (volatile-score rule).
 
 ---
 

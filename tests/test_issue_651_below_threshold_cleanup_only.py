@@ -195,6 +195,7 @@ def test_t3_the_hold_expires_by_time(tmp_path, summaries, monkeypatch):
 
 
 def test_t3_the_hold_survives_a_following_turn_that_stores_new_rows(tmp_path, summaries):
+    # v0.29.1 #1880: restores the v0.28.1 local hold floor
     engine, view, rough = _stuck_engine(tmp_path)
     try:
         engine.compress(view, current_tokens=rough)
@@ -272,6 +273,7 @@ def test_t3_manual_forced_overflow_and_recovery_are_never_blocked_while_it_holds
 # -- T4. the survival ceiling --------------------------------------------------------------------------------
 
 def test_t4_the_hold_does_not_apply_at_the_survival_ceiling(tmp_path, summaries):
+    # v0.29.1 #1880: restores the v0.28.1 local hold floor
     engine, view, rough = _stuck_engine(tmp_path)
     try:
         engine.compress(view, current_tokens=rough)
@@ -281,6 +283,8 @@ def test_t4_the_hold_does_not_apply_at_the_survival_ceiling(tmp_path, summaries)
         assert _host_gate(engine) is False  # the gate saw the ceiling observation
         engine.last_prompt_tokens = ceiling - 1
         assert engine.should_compress(ceiling - 1) is False and _host_gate(engine) is True
+        engine.last_prompt_tokens = rough
+        assert engine.should_compress(rough) is False and _host_gate(engine) is True
     finally:
         engine.shutdown()
 
@@ -307,6 +311,7 @@ def _review_trace_engine(tmp_path):
 
 def test_f1_auxiliary_forced_overflow_is_not_blocked_by_the_foreground_hold(tmp_path, summaries):
     engine, view = _review_trace_engine(tmp_path)
+    record = engine._store.read_metadata_json("compaction_no_progress:v1:S")
     try:
         assert engine.should_compress(95_000) is True  # over the 90k cap and the 85k survival ceiling
         assert _host_gate(engine) is False  # the host proceeds to compress()
@@ -314,7 +319,9 @@ def test_f1_auxiliary_forced_overflow_is_not_blocked_by_the_foreground_hold(tmp_
                *[row for i in range(40) for row in _turn(f"A{i}", 10.0 * (i + 1))]]
         result = engine.compress(big, current_tokens=95_000)
         assert count_messages_tokens(result) < count_messages_tokens(big)  # the bypass path bounded it
-        assert engine.get_status()["no_progress_hold"] is not None  # the foreground hold itself is untouched
+        assert engine._store.read_metadata_json("compaction_no_progress:v1:S") == record
+        engine._clear_thread_context_stateless("aux-1")
+        assert engine.should_compress(40_000) is False  # the foreground proof itself is untouched
     finally:
         engine.shutdown()
 

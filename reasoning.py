@@ -85,11 +85,11 @@ _MONTHS.update({
 })
 
 
-def resolve_occurrence_time(text: Any, *, observed_at: Any, session_date: Any = None):
+def resolve_occurrence_time(text: Any, *, observed_at: Any, session_date: Any = None, withhold_mixed: bool = True):
     """Lazy import keeps plugin bootstrap order independent of this optional parser."""
     from .occurrence_time import resolve_occurrence_time as _resolve
 
-    return _resolve(text, observed_at=observed_at, session_date=session_date)
+    return _resolve(text, observed_at=observed_at, session_date=session_date, withhold_mixed=withhold_mixed)
 
 
 @dataclass(frozen=True)
@@ -730,6 +730,7 @@ def _ground_one(
     assertions: AssertionStore | None,
     as_of: float | None,
     session_dates: Mapping[str, Any] | None,
+    withhold_mixed: bool = True,
 ) -> tuple[GroundedEvidence | None, str | None]:
     if not isinstance(raw, dict):
         return None, "each operand must be an object"
@@ -871,6 +872,7 @@ def _ground_one(
             quote,
             observed_at=source_observed_at or 0.0,
             session_date=(source_session_day.isoformat() if source_session_day else None),
+            withhold_mixed=withhold_mixed,
         )
         if resolved.get("reason") == "relative_expression_without_session_date":
             return None, "relative occurrence requires a trusted source observation date"
@@ -969,6 +971,7 @@ def ground_evidence(
     assertions: AssertionStore | None,
     as_of: float | None = None,
     session_dates: Mapping[str, Any] | None = None,
+    withhold_mixed: bool = True,
 ) -> GroundingDecision:
     if not isinstance(raw_operands, list):
         return GroundingDecision("fallback", reason="operands must be an array")
@@ -984,6 +987,7 @@ def ground_evidence(
             assertions=assertions,
             as_of=as_of,
             session_dates=session_dates,
+            withhold_mixed=withhold_mixed,
         )
         if error:
             return GroundingDecision("fallback", reason=f"operands[{index}]: {error}")

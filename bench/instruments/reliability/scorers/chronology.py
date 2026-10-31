@@ -18,7 +18,7 @@ def report(stored_rows, group) -> dict:
         if not tags:
             continue
         checked += 1
-        for prefix in {p for p, _n in tags}:
+        for prefix in sorted({p for p, _n in tags}):
             nums = [int(n) for p, n in tags if p == prefix]
             key = (group(session_id), prefix)
             top = high.get(key)

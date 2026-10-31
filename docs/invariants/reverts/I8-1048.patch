@@ -1,0 +1,12 @@
+--- a/engine.py
++++ b/engine.py
+@@ -8012,9 +8012,6 @@
+                             unmatched_results[call_id] -= 1
+                         else:
+                             missing_ids.append(call_id)
+-                    if missing_ids:
+-                        msg_tokens += count_messages_tokens(
+-                            [self._missing_tool_result_stub(call_id) for call_id in missing_ids])
+                 if used + tail_token_total + pending_tokens + msg_tokens > assembly_cap:
+                     if own_results_start is not None and own_results_start < len(kept_tail_reversed):
+                         # The turn is rejected: its kept results would be orphans the final

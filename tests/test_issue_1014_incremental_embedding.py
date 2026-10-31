@@ -247,7 +247,7 @@ def test_1063_b_uncached_warns_once_retries_and_preserves_ingest(
 ):
     calls, state = local_fastembed
     state["cached"] = False
-    monkeypatch.setattr(maintenance_mod, "_FAILURE_WARNED", False)
+    monkeypatch.setattr(maintenance_mod, "_FAILURE_WARNED", {})
     engine = _local_engine(tmp_path, home)
     try:
         with caplog.at_level(logging.DEBUG, logger=maintenance_mod.__name__):
@@ -258,7 +258,8 @@ def test_1063_b_uncached_warns_once_retries_and_preserves_ingest(
             _drain(engine)
         last, _ = maintenance_mod.incremental_embedding_state(engine._config.database_path)
         print(f"B: outcome={last[1]}; construct_allow_download={calls}")
-        assert last[1] == "auto_register_unavailable"
+        assert last[1].startswith("auto_register_unavailable:")
+        assert "offline fake model is not cached" in last[1]
         assert calls == [False, False]
         assert _profiles(engine) == []
         assert [r.levelno for r in caplog.records if r.name == maintenance_mod.__name__] == [
@@ -577,7 +578,7 @@ def test_c_unavailable_provider_never_raises_counts_and_recovers(
     tmp_path, home, providers, monkeypatch, caplog, failure
 ):
     engine = _make_engine(tmp_path, home)
-    monkeypatch.setattr(maintenance_mod, "_FAILURE_WARNED", False)
+    monkeypatch.setattr(maintenance_mod, "_FAILURE_WARNED", {})
     down = {"value": True}
     real_probe = provider_mod.probe_provider_availability
     real_resolve = command_mod.resolve_provider
@@ -752,7 +753,9 @@ def test_embedding_worker_is_named_for_embeddings_not_rollups(caplog):
         assert started.wait(5)  # the first job is active, so the queue is empty
         assert scheduler.schedule(("db-2", "embeddings"), lambda: None)
         with caplog.at_level(logging.WARNING, logger=lcm_engine.__name__):
-            assert not scheduler.schedule(("db-3", "embeddings"), lambda: None)
+            # #1586 retains bounded overflow for automatic re-admission.
+            assert scheduler.schedule(("db-3", "embeddings"), lambda: None)
+            assert not scheduler.schedule(("db-4", "embeddings"), lambda: None)
         full = [r.getMessage() for r in caplog.records if "queue is full" in r.getMessage()]
         assert full and full[0].startswith("LCM incremental embedding maintenance queue is full")
         assert scheduler._worker.name == "lcm-embedding-maintenance"
@@ -979,7 +982,7 @@ def test_1063_g_registration_provider_released_before_backfill(
             engine._config.database_path, engine._config,
         )
         print(f"G: registration provider alive at backfill={alive_at_backfill}")
-        assert refs and alive_at_backfill == [[False]]
+        assert refs and alive_at_backfill == [[False], [False]]  # normal pass + LOCAL retry
     finally:
         engine._close_storage()
 
@@ -1049,7 +1052,18 @@ def test_automatic_chunks_take_new_messages_before_history_and_history_newest_fi
 
 
 def test_status_chunk_backlog_reads_a_bounded_frontier(tmp_path, home, providers, monkeypatch):
-    engine = _make_engine(tmp_path, home)
+    from tests.harness import make_engine
+
+    engine = make_engine(
+        tmp_path, fresh_tail_count=4, leaf_chunk_tokens=1, embeddings_enabled=True,
+        embedding_provider="ollama", embedding_model="model-a",
+    )
+    store = VectorStore(engine._config.database_path, config=engine._config)
+    try:
+        store.register_profile("model-a", "ollama", 2)
+        store.register_profile("model-a", "ollama", 2, task="chunk")
+    finally:
+        store.close()
     calls = []
     real_chunk_message = command_mod.chunk_message
     monkeypatch.setattr(
@@ -1064,11 +1078,11 @@ def test_status_chunk_backlog_reads_a_bounded_frontier(tmp_path, home, providers
         calls.clear()
         status = handle_lcm_command("status", engine)
 
-        assert "embedding_backlog_chunks: 50+" in status
+        assert "embedding_backlog_chunks: 50+" in status.splitlines()
         assert len(calls) == 50  # the newest 50 messages, not the store
 
         monkeypatch.setattr(command_mod, "_STATUS_CHUNK_SCAN_MESSAGES", 1_000)
-        assert "embedding_backlog_chunks: 120" in handle_lcm_command("status", engine)
+        assert "embedding_backlog_chunks: 120" in handle_lcm_command("status", engine).splitlines()
     finally:
         engine.shutdown()
 
@@ -1140,3 +1154,42 @@ def test_a_long_run_of_tool_rows_does_not_stall_the_history_walk(tmp_path, home,
         assert {row[0] for row in _rows(engine, "SELECT store_id FROM lcm_chunk_meta")} == users
     finally:
         engine.shutdown()
+
+
+def test_1110_retries_only_fastembed_uncertain_rows(tmp_path, home, providers, monkeypatch):
+    monkeypatch.setattr(provider_mod, "probe_provider_availability",
+                        lambda _config: {"available": True, "detail": "offline fake"})
+    results = {}
+    for provider in ("voyage", "ollama", "fastembed"):
+        path = tmp_path / provider
+        path.mkdir()
+        engine = _make_engine(path, home, provider=provider)
+        try:
+            engine._store.append(SESSION, {"role": "user", "content": FILLER})
+            leaf = str(engine._dag.add_node(SummaryNode(
+                session_id=SESSION, depth=0, summary="uncertain summary",
+                created_at=1.0, latest_at=1.0,
+            )))
+            store = VectorStore(engine._config.database_path, config=engine._config)
+            try:
+                store.ensure_chunk_schema()
+                conn = store.connection
+                command_mod._ensure_inflight_table(conn)
+                for task, identity in conn.execute(
+                    "SELECT task, identity_hash FROM lcm_embedding_profile WHERE active = 1"
+                ).fetchall():
+                    embedded_id = "1:0" if task == "chunk" else leaf
+                    conn.execute(
+                        "INSERT INTO lcm_embedding_backfill_inflight "
+                        "(embedded_id, identity_hash, state, updated_at) VALUES (?, ?, 'uncertain', 1)",
+                        (embedded_id, identity),
+                    )
+                conn.commit()
+            finally:
+                store.close()
+            maintenance_mod.run_incremental_embedding_pass(engine._config.database_path, engine._config)
+            results[provider] = (_chunk_vector_count(engine), _summary_vector_ids(engine), _inflight_count(engine))
+        finally:
+            engine.shutdown()
+    assert results["voyage"] == results["ollama"] == (0, [], 2)
+    assert results["fastembed"] == (1, [leaf], 0)

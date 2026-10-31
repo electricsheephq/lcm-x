@@ -1217,6 +1217,8 @@ def _process_import_candidates(
                 dry_run=False,
             )
         conn.commit()
+        if imported:
+            store._mark_manual_chunk_backlog()
     except Exception:
         conn.rollback()
         raise

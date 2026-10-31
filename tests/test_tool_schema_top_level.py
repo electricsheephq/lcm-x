@@ -45,6 +45,7 @@ def exposed_tool_schemas(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setenv("LCM_DATABASE_PATH", str(hermes_home / "lcm.db"))
     # Validate every declared schema, including the opt-in tools.
+    monkeypatch.setenv("LCM_ENTITIES_ENABLED", "true")
     monkeypatch.setenv("LCM_ASSERTIONS_ENABLED", "true")
     monkeypatch.setenv("LCM_ADAPTIVE_RETRIEVAL_ENABLED", "true")
 

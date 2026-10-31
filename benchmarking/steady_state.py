@@ -86,6 +86,7 @@ def _build_engine(case: SteadyStateCase, run_dir: Path):
     hermes_home.mkdir(parents=True, exist_ok=True)
 
     config = LCMConfig(
+        embeddings_enabled=False,  # Isolate ingest/preflight from background model work.
         database_path=str(db_path),
         # A large fresh tail + very high context length keep both the preflight
         # threshold and force-overflow recovery from ever firing.

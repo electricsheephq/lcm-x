@@ -41,7 +41,8 @@ from .db_bootstrap import (
     verify_embedding_schema,
 )
 from .lifecycle_state import LifecycleStateStore
-from .store import MessageStore, build_message_fts_spec, build_message_stem_fts_spec
+from .sqlite_session import TransactionOwner
+from .store import MessageStore, _database_identity, build_message_fts_spec, build_message_stem_fts_spec
 from .vector_store import VectorStore
 
 # Oldest stamp the read path understands (the v5 core: conversation_id/origin columns).
@@ -264,11 +265,15 @@ class ReadOnlyMessageStore(_CloseWithoutCheckpoint, MessageStore):
     def __init__(self, db_path: str | Path, conn: sqlite3.Connection, *, config: LCMConfig,
                  hermes_home: str, stem_usable: bool, fts_usable: bool = True) -> None:
         self.db_path = Path(db_path)
+        self.db_identity = _database_identity(self.db_path, self)
         self._ingest_protection_config = config
         self._hermes_home = hermes_home
         self._context_window_tokens = {}
         self._conn = conn
+        self._carried_relation_connections = set()
         self._write_lock = threading.RLock()
+        self._transaction_owner = TransactionOwner(self._write_lock)
+        self._manual_chunk_backlog_pending = False
         self._stem_usable = bool(stem_usable)
         self._fts_usable = bool(fts_usable)
         self._last_fts_index = "plain"
@@ -278,12 +283,15 @@ class ReadOnlyMessageStore(_CloseWithoutCheckpoint, MessageStore):
                     conversation_id: str | None = None, role: str | None = None,
                     time_from: float | None = None, time_to: float | None = None,
                     exclude_session_ids: Any = None, allow_operators: bool = False,
-                    agent_operators: bool = False, stemmed: bool = False) -> list[dict[str, Any]]:
+                    agent_operators: bool = False, stemmed: bool = False,
+                    matching_names: Any = None, _include_like_excerpt: bool = False,
+                    _memory: Any = None) -> list[dict[str, Any]]:
         if self._fts_usable:
             return super()._search_fts(
                 query, session_id, limit, sort, source, conversation_id, role, time_from, time_to,
                 exclude_session_ids, allow_operators=allow_operators,
-                agent_operators=agent_operators, stemmed=stemmed,
+                agent_operators=agent_operators, stemmed=stemmed, matching_names=matching_names,
+                _include_like_excerpt=_include_like_excerpt, _memory=_memory,
             )
         # A structurally stale index cannot be repaired from here; LIKE answers instead.
         self._last_fts_index = "plain"
@@ -291,6 +299,8 @@ class ReadOnlyMessageStore(_CloseWithoutCheckpoint, MessageStore):
             query, session_id=session_id, limit=limit, sort=sort, source=source,
             conversation_id=conversation_id, role=role, time_from=time_from, time_to=time_to,
             exclude_session_ids=exclude_session_ids,
+            **({"matching_names": matching_names} if matching_names is not None else {}),
+            _include_excerpt=_include_like_excerpt, _memory=_memory,
         )
 
 

@@ -282,7 +282,7 @@ def _automatic_candidate(
 
     # Preserve caller facets only when present; the evidence pack revalidates
     # every value against the exact source span.
-    for key in ("value", "unit", "key", "label"):
+    for key in ("value", "unit", "key", "label", "duplicate_store_ids"):
         if raw.get(key) is not None:
             candidate[key] = raw[key]
 

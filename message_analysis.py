@@ -32,6 +32,12 @@ _SYNTHETIC_ASSISTANT_NOISE = {
 }
 
 
+
+def _hide_keys() -> frozenset:
+    """Lazy (engine imports this module): the display keys that hide a row from host history."""
+    from .engine import _model_only_display_metadata_keys
+    return _model_only_display_metadata_keys()
+
 def _tool_call_id(tool_call: Any) -> str:
     if not isinstance(tool_call, dict):
         return ""
@@ -112,6 +118,8 @@ def _is_codex_interim(msg: Dict[str, Any]) -> bool:
 
 def _merge_adjacent_assistant_messages(
     messages: List[Dict[str, Any]],
+    *,
+    generated_rows: List[Dict[str, Any]] | None = None,
 ) -> List[Dict[str, Any]]:
     """Merge consecutive assistant messages into one (alternation repair).
 
@@ -130,6 +138,7 @@ def _merge_adjacent_assistant_messages(
     DAG are untouched, so recovery granularity is preserved.
     """
     collapsed: List[Dict[str, Any]] = []
+    generated_ids = {id(row) for row in generated_rows or []}
     for msg in messages:
         if (
             collapsed
@@ -148,6 +157,16 @@ def _merge_adjacent_assistant_messages(
             and isinstance(msg.get("content"), str)
         ):
             prev = dict(collapsed[-1])
+            generated = id(collapsed[-1]) in generated_ids and id(msg) in generated_ids
+            generated_ids.discard(id(collapsed[-1]))
+            if generated:
+                generated_ids.add(id(prev))
+            elif (hide_keys := _hide_keys()) & set(prev.get("display_metadata") or {}):
+                metadata = {key: value for key, value in prev["display_metadata"].items() if key not in hide_keys}
+                if metadata:
+                    prev["display_metadata"] = metadata
+                else:
+                    prev.pop("display_metadata", None)
             prev_calls = list(prev.get("tool_calls") or [])
             new_calls = list(msg.get("tool_calls") or [])
             if host_message_uid_mode() != "off" and host_uid_capable():
@@ -172,4 +191,6 @@ def _merge_adjacent_assistant_messages(
             collapsed[-1] = prev
             continue
         collapsed.append(msg)
+    if generated_rows is not None:
+        generated_rows[:] = [row for row in collapsed if id(row) in generated_ids]
     return collapsed

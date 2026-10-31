@@ -31,7 +31,7 @@ def test_defaults_match_the_deployed_configuration():
     assert config.large_output_externalization_enabled is True
     assert config.large_output_active_replay_stubbing_enabled is True
     assert config.large_output_active_replay_stub_threshold_tokens == 10_000  # the deployed first-sight value
-    assert config.embeddings_enabled is False
+    assert config.embeddings_enabled is True
     assert config.survival_fit is True
     assert config.survival_reserve == 0.15
     assert config.large_output_externalization_threshold_chars == 12_000

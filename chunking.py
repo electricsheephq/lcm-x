@@ -11,6 +11,8 @@ maps straight back to ``lcm_expand(store_id=..., content_offset=char_start)``.
 The chunk_index is the message's natural window position, so a given physical
 span keeps a stable index regardless of which policy selected it — the head
 chunk is always index 0, an error chunk keeps the window index it fell on.
+Conversational policies embed every non-empty user/assistant turn, including
+short turns that carry facts.
 """
 
 from __future__ import annotations
@@ -25,9 +27,9 @@ from .tokens import count_tokens
 # The turn-alignment target: a message at or below this token estimate is a
 # single chunk; larger messages split at sentence boundaries near this size.
 _CHUNK_TARGET_TOKENS = 600
-# ``conversational`` skips pure-acknowledgment turns; keep it simple and skip
-# anything below this token estimate unconditionally, embed the rest.
-_MIN_CONVERSATIONAL_TOKENS = 40
+# Revision 1 skipped conversational turns below 40 tokens; revision 2 keeps
+# every non-empty turn. Stores use this exported revision to fill old gaps.
+CHUNK_POLICY_REVISION = 2
 # ``full`` bounds a single message at voyage-context-4's per-chunk cap; a message
 # larger than this is reduced to head + error chunks rather than fully windowed.
 _FULL_PER_MESSAGE_TOKEN_CAP = 32_000
@@ -207,8 +209,8 @@ def chunk_message(
 ) -> list[Chunk]:
     """Chunk one message under the given content policy.
 
-    ``conversational`` (default): user + assistant turns, skipping turns below
-    the acknowledgment threshold, otherwise fully windowed.
+    ``conversational`` (default): every non-empty user + assistant turn,
+    fully windowed regardless of length.
     ``heads``: conversational PLUS every tool result's head chunk and up to 3
     error-signature chunks.
     ``full``: every role fully windowed, with giant messages (> the per-chunk
@@ -224,14 +226,12 @@ def chunk_message(
     total_tokens = count_tokens(text)
 
     if policy == "conversational":
-        if not is_conversational_role or total_tokens < _MIN_CONVERSATIONAL_TOKENS:
+        if not is_conversational_role:
             return []
         return _full_chunks(store_id, text)
 
     if policy == "heads":
         if is_conversational_role:
-            if total_tokens < _MIN_CONVERSATIONAL_TOKENS:
-                return []
             return _full_chunks(store_id, text)
         if is_tool_role:
             return _head_and_error_chunks(store_id, text)

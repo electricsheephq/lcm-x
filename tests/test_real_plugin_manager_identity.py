@@ -76,6 +76,7 @@ def _run(tmp_path, *, plugin_dir: str, enabled: list[str], engine: str) -> dict:
         "HERMES_HOME": str(home),
         "PROBE_ENGINE": engine,
         "PYTHONDONTWRITEBYTECODE": "1",
+        "HERMES_DISABLE_LAZY_INSTALLS": "1",
     }
     completed = subprocess.run(
         [python, "-c", _PROBE],
@@ -199,6 +200,7 @@ def _run_turns(tmp_path, *, enabled: list[str], engine: str) -> dict:
             "HERMES_HOME": str(home),
             "PROBE_ENGINE": engine,
             "PYTHONDONTWRITEBYTECODE": "1",
+            "HERMES_DISABLE_LAZY_INSTALLS": "1",
         },
         capture_output=True,
         text=True,
@@ -250,6 +252,7 @@ def test_same_checkout_legacy_link_with_both_names_is_one_copy(tmp_path):
             "HERMES_HOME": str(home),
             "PROBE_ENGINE": "lcm-x",
             "PYTHONDONTWRITEBYTECODE": "1",
+            "HERMES_DISABLE_LAZY_INSTALLS": "1",
         },
         capture_output=True,
         text=True,

@@ -1,0 +1,74 @@
+# lcm-x only. On a new issue from someone outside the project: label it triage-pending when it has no
+# labels (CLI/API filings skip the form's labels), add agent-drafted when the report-a-problem skill's
+# footer is present, and post ONE comment asking for versions when the body has none. Deterministic, no
+# model calls, no stale bot. The issue body is read from the event payload, never interpolated into a
+# shell.
+name: Issue intake
+
+on:
+  issues:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  intake:
+    if: >-
+      github.event.issue.user.type != 'Bot' &&
+      !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const body = issue.body || '';
+            const repo = context.repo;
+            const number = issue.number;
+            const labels = (issue.labels || []).map((l) => l.name);
+
+            const add = [];
+            if (labels.length === 0) add.push('triage-pending');
+            if (/Agent-drafted with Hermes/i.test(body) && !labels.includes('agent-drafted')) add.push('agent-drafted');
+            if (add.length) await github.rest.issues.addLabels({ ...repo, issue_number: number, labels: add });
+
+            // Skip the reminder only when BOTH are present: a plugin version (semver or commit sha) AND a Hermes
+            // version. A form issue is judged field by field, so a Hermes version cannot stand in for the plugin
+            // version; an empty, "_No response_" or "unknown" field counts as missing. Only an issue without the
+            // form's headings (CLI/API filings) falls back to the whole body. A rare needless reminder is acceptable.
+            const field = (name) => {
+              const m = body.match(new RegExp('^###[ \\t]+' + name + '[ \\t]*\\r?\\n([\\s\\S]*?)(?=^###[ \\t]|(?![\\s\\S]))', 'm'));
+              if (!m) return null;
+              const value = m[1].trim();
+              return /^(_no response_|unknown|n\/a|none|-)?$/i.test(value) ? '' : value;
+            };
+            const versionRe = /\bv?\d+\.\d+\.\d+\b|\b[0-9a-f]{7,40}\b/;
+            const pluginField = field('Plugin version');
+            const hermesField = field('Hermes version');
+            const hasPlugin = pluginField !== null ? versionRe.test(pluginField) : versionRe.test(body);
+            const hasHermes = hermesField !== null
+              ? /\d+\.\d+/.test(hermesField)
+              : /\bhermes(?: agent)?\s+v?\d+\.\d+/i.test(body);
+            if (hasPlugin && hasHermes) return;
+
+            const marker = '<!-- lcm-x-issue-intake -->';
+            const existing = await github.paginate(github.rest.issues.listComments, { ...repo, issue_number: number, per_page: 100 });
+            if (existing.some((c) => (c.body || '').includes(marker))) return;
+
+            await github.rest.issues.createComment({
+              ...repo,
+              issue_number: number,
+              body: [
+                marker,
+                'Thanks for the report. To help us reproduce it, could you add:',
+                '',
+                '- `hermes --version`',
+                '- the `hermes-lcm-x` entry from `hermes plugins list --json` (version and source)',
+                '- the output of `/lcm status` (or ask your agent to run the `lcm_status` tool)',
+                '',
+                'Leave out tokens, keys and private message text. Your Hermes agent can also draft the full report: ask it to "report a problem with LCM-X".',
+              ].join('\n'),
+            });

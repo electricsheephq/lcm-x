@@ -59,6 +59,7 @@ def _run_policy(
     from hermes_lcm.tokens import count_messages_tokens
 
     config = LCMConfig(
+        embeddings_enabled=False,  # Time compaction policy without background model work.
         fresh_tail_count=fresh_tail_messages,
         leaf_chunk_tokens=leaf_chunk_tokens,
         dynamic_leaf_chunk_enabled=True,

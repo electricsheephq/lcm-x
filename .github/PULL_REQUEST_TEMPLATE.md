@@ -67,6 +67,7 @@
 - [ ] Current `headRefOid` is recorded.
 - [ ] Required exact-head CI is green.
 - [ ] At least one independent review covers the current head; when the `scripts/maintainer_gate.py` risk hint names a risk, an acceptance review and a distinct adversarial review from a different model than the author. Record pointers with the author and reviewer models, or `REVIEW_SKIPPED: <lane> — <reason>`.
+- [ ] When the hint names `turn-path`, the PR body carries the advisory `turn_path_probe_packet`: consumer enumeration, previous-GA differential row (`tests/differential`, opt-in), and sibling shapes; no extra reviewers, PR-size cap, or blocker.
 - [ ] Every review thread is resolved; each bot thread got a disposition reply before it was resolved.
 - [ ] The accepted issue, PR head, checks, reviews, threads, and authorization were deterministically re-fetched immediately before any authorized GitHub write.
 - [ ] Merge method is merge commit; do not squash or rebase.

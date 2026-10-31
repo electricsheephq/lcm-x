@@ -24,6 +24,9 @@ This ledger records two things:
 - which rules are dead code today.
 
 The per-rule table is in [identity-ledger-inventory.md](identity-ledger-inventory.md).
+The behavior-neutral legacy snapshot digest optimization (#1090) is documented in
+[replay-prefix-hashing.md](replay-prefix-hashing.md); it preserves the version-1
+proof bytes and does not remove or demote any identity rule.
 
 ## Decisions
 
@@ -139,6 +142,8 @@ content decision:
 - the `host_uid_*` counters in `/lcm doctor`;
 - the proof kinds `stored_new`, `version_new` and `anchor_replay`.
 
+A session-end pass deferred under contention is absent from the durable host-uid tally because `_retry_pending_session_tails` does not recount uids; this affects counters only, never stored rows.
+
 `on` mode changes which answer is applied. The counters keep running, so a disagreement stays visible.
 
 **What `on` mode saves, and what it does not.**
@@ -243,6 +248,47 @@ repeats the grep at its own base. Rows not marked otherwise are **dead** or **un
 | Tool-segment dedupe | R078 R079 R233 | 3 | |
 | Row-ownership predicate | R242 R423 R447 | 3 | |
 | Host stamp and `alt_stamp` identity | R090 R201 R236 | 3 | |
+
+## Store-time carried-stamp provenance (#1501 / #1504)
+
+Alongside the persisted `composite` (R235) and `alt_stamp` (R236) relations, R461 records
+`(R, carried_stamp, P, None, s)` in the existing `message_relations` table, without DDL.
+Only a newly stored non-UID user row R with its own non-NULL stamp s qualifies. The adjacent
+stored row P must be a user at s in the current session or verified compression chain, absent
+from the incoming list in the occurrence-matching identity form. Incoming index i - 1 must
+match P's stored predecessor Q by identity and Q's own stamp. No Q means no marker.
+The verified chain is necessary because the rotation path stores P in the parent and R in the child.
+
+The carried-stamp reader requires the exact R-to-P relation at s as well as every existing
+adjacency, distinct-content, forward-stamp, lineage and single-consumption guard. This relation
+neither absorbs P nor grants summary coverage. NULL predecessors cannot supply this signature;
+canonical UID binding still serves its existing identity/backfill purpose. Stores written before
+this marker existed retain the safe duplicate fallback; relations are never inferred at read time.
+
+### Retained duplicate scope
+
+Two shapes remain accepted duplicates, with no automatic deduplication
+([#1501 ruling](https://github.com/electricsheephq/lcm-x/issues/1501#issuecomment-6322150066)):
+
+- **Legacy carried stamps.** Rows stored before the marker existed have no positive
+  evidence of the host's merge. A replay can store the turn again. The duplicate is retained
+  rather than risk losing a genuine resend
+  ([#1504](https://github.com/electricsheephq/lcm-x/pull/1504#issuecomment-6244989492)).
+- **Host-mirrored occurrences.** After ACP crash recovery, the host's own transcript can
+  contain both copies of a user message. LCM-X retains both rather than infer that one is
+  disposable and risk losing a real occurrence
+  ([#1501 evidence](https://github.com/electricsheephq/lcm-x/issues/1501#issuecomment-6267963824),
+  [ruling](https://github.com/electricsheephq/lcm-x/issues/1501#issuecomment-6322150066)).
+
+The genuine resend counterexample in #1504 explains this choice: two consecutive user turns
+can share a second-resolution stamp when the first is multimodal and the host does not merge
+them. An undo and resend then made the earlier adjacency rule lose the resent occurrence and
+its time, even though its bytes survived in an older row
+([#1504 counterexample](https://github.com/electricsheephq/lcm-x/pull/1504#issuecomment-6244237007)).
+
+Revisit only when an independently verified historical witness separates genuine resends from
+the legacy carried-stamp shape. Strict exactly-once remains unmet for these two shapes
+([#1501 ruling](https://github.com/electricsheephq/lcm-x/issues/1501#issuecomment-6322150066)).
 
 ## Contradictions resolved
 

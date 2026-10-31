@@ -111,6 +111,31 @@ def test_t3_min_above_max_resets_min_above_the_default_cap(monkeypatch):
     assert (c.leaf_target_min_tokens, c.leaf_target_max_tokens) == (2000, 2000)
 
 
+def test_control_defaults_and_ratio_with_max_do_not_warn(monkeypatch):
+    assert LCMConfig.from_env().config_source_warnings == []
+    monkeypatch.setenv("LCM_LEAF_TARGET_RATIO", "0.3")
+    monkeypatch.setenv("LCM_LEAF_TARGET_MAX_TOKENS", "12000")
+    assert LCMConfig.from_env().config_source_warnings == []
+
+
+def test_ratio_only_warns_about_the_pinned_maximum(monkeypatch):
+    monkeypatch.setenv("LCM_LEAF_TARGET_RATIO", "0.3")
+    config = LCMConfig.from_env()
+    assert config.leaf_target_ratio == 0.3
+    assert config.config_sources["leaf_target_ratio"] == "env:LCM_LEAF_TARGET_RATIO"
+    assert LCMEngine._leaf_target_tokens(SimpleNamespace(_config=config), 20_000) == 2000
+    assert any("LCM_LEAF_TARGET_RATIO" in warning and "LCM_LEAF_TARGET_MAX_TOKENS" in warning
+               for warning in config.config_source_warnings)
+
+
+def test_min_only_warning_names_the_maximum_to_set(monkeypatch):
+    monkeypatch.setenv("LCM_LEAF_TARGET_MIN_TOKENS", "3000")
+    config = LCMConfig.from_env()
+    assert config.leaf_target_min_tokens == 2000
+    assert any("LCM_LEAF_TARGET_MIN_TOKENS" in warning and "LCM_LEAF_TARGET_MAX_TOKENS" in warning
+               for warning in config.config_source_warnings)
+
+
 # -- T4: max_tokens follows the target -------------------------------------------------------------------------
 
 def test_t4_l1_max_tokens_is_twice_the_configured_target(tmp_path, monkeypatch):

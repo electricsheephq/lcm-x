@@ -323,8 +323,15 @@ def test_cjk_arrival_turn_in_a_64k_window_carries_the_stub_not_an_over_cap_notic
     engine.ingest(history)
     history.append({"role": "user", "content": big})
 
-    if engine.should_compress_preflight(history):
-        history = engine.compress(history, current_tokens=count_messages_tokens(history))
+    rough = count_messages_tokens(history)
+    requested = engine.should_compress_preflight(history)
+    assert requested is (rough >= engine.threshold_tokens)
+    if not requested:
+        # #1880: the below-threshold 40k-char arm keeps the original until a
+        # real boundary; ingest still stores the stub and direct compress adopts it.
+        assert history[-1]["content"] == big
+        assert _stored(engine)[-1]["content"].startswith("[Externalized payload: kind=raw_payload;")
+    history = engine.compress(history, current_tokens=rough)
     users = [m for m in history if m.get("role") == "user"]
     assert users[-1]["content"].startswith("[Externalized payload: kind=raw_payload; role=user;")
     assert 'preview="' + HEAD in users[-1]["content"] and "lcm_expand(externalized_ref=" in users[-1]["content"]
@@ -360,7 +367,8 @@ def test_d_base64_data_uri_user_message_is_still_externalized_as_media(tmp_path)
 
     [row] = [r for r in _stored(engine) if r["role"] == "user"]
     assert row["content"].startswith("[Externalized payload: kind=media_payload; role=user;")
-    assert "preview=" not in row["content"]
+    assert 'preview="Please inspect the screenshot.' in row["content"]
+    assert "data:image" not in row["content"]
     payloads = [json.loads(p.read_text()) for p in _payload_files(tmp_path)]
     assert [p["kind"] for p in payloads] == ["media_payload"]
     assert payloads[0]["content"] == content

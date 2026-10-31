@@ -937,3 +937,25 @@ def test_prewarm_cli_passes_shard_coverage_to_the_report(tmp_path, monkeypatch):
         "coverage": {"selected": 1, "prepared": 2},
         "questions": ["question:q1"],
     }
+
+
+def test_cache_file_is_stable_once_a_call_returns(tmp_path, monkeypatch):
+    """REGRESSION (#1215 CI): every cache call closes its connection, so the WAL is checkpointed when the call
+    returns, not later when the garbage collector finalizes a leaked connection."""
+    import gc
+
+    monkeypatch.setattr(
+        lme,
+        "iter_ingest_embedding_request_units",
+        lambda _question: iter(["ordinary document"]),
+    )
+    cache_path = tmp_path / "stable-cache.sqlite3"
+    gc.disable()
+    try:
+        cached = lme.ContentHashEmbeddingCache(_CountingProvider("voyage-context-4"), cache_path)
+        lme.prewarm_embedding_cache([_question("q-stable")], cached)
+        before = cache_path.read_bytes()
+    finally:
+        gc.enable()
+    gc.collect()
+    assert cache_path.read_bytes() == before

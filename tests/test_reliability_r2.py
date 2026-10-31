@@ -3,6 +3,7 @@ guard, chronology and the process-cell plumbing. No Hermes: the ACP peer is a ti
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import os
 import signal
@@ -132,8 +133,18 @@ def test_anthropic_messages_json_and_sse_and_tool_result_normalisation(provider)
                      "message_delta", "message_stop"]
 
 
-def test_fault_hooks_http_error_hold_until_killed_and_slow(tmp_path):
+def test_fault_hooks_http_error_hold_until_killed_and_slow(tmp_path, monkeypatch):
     fired = []
+    holds = []
+    real_hold = FP.FakeProvider.hold
+
+    def hold(handler, seconds):
+        if seconds == 0.3:
+            holds.append(seconds)
+            return False
+        return real_hold(handler, seconds)
+
+    monkeypatch.setattr(FP.FakeProvider, "hold", staticmethod(hold))
     replies = iter([{"status": 500}, {"hold_until_killed": True, "on_hold": lambda: fired.append("held")},
                     {"hold": 0.3, "content": "late"}])
     p = FP.FakeProvider(tmp_path / "req.jsonl", main=lambda m: next(replies), hold_cap=10).start()
@@ -145,9 +156,8 @@ def test_fault_hooks_http_error_hold_until_killed_and_slow(tmp_path):
                      b"Content-Length: " + str(len(raw)).encode() + b"\r\n\r\n" + raw)
         assert p.in_flight.wait(5) and fired == ["held"]
         sock.close()  # the "host" dies while its request is held
-        started = time.monotonic()
         assert post(p, "/v1/chat/completions", {"model": "rel/main", "messages": MSGS})[1]["choices"][0]["message"]["content"] == "late"
-        assert time.monotonic() - started >= 0.3
+        assert holds == [0.3]
         for _ in range(50):
             log = [json.loads(x) for x in p.log_path.read_text().splitlines()]
             if any(r.get("phase") == "client_closed" for r in log):
@@ -284,15 +294,91 @@ def test_accounting_matches_requests_to_scripted_steps(tmp_path):
     assert not PC.accounting(tmp_path, [events[0], rotation_kill])["ok"]
 
 
+@pytest.mark.parametrize("intervals,kills,unexpected", [
+    ([(10, 30)], [20], []),  # its own in-flight truncation
+    ([(2_000_000_030, 2_000_000_040)], [20], [1]),  # request started well after the kill
+    ([(25, 40)], [20], []),  # its handler thread stamped the start just after the kill
+    ([(10, 15)], [20], [1]),  # client had already disconnected
+    ([(10, 30), (40, 60)], [20, 50], []),
+    ([(10, 30), (10, 30)], [20], [2]),  # one kill cannot license two requests
+    ([(1, 5), (10, 30)], [20], [1]),  # unrelated first record cannot steal the match
+    ([(10, 60), (10, 30)], [20, 50], []),  # earliest-ending interval gets the first kill
+    ([(10, 30)], [], [1]),
+    ([(None, None)], [20], [1]),  # old logs do not establish a match
+    ([(10, 30)], [None], [1]),
+])
+def test_accounting_correlates_truncated_requests_with_crashes(tmp_path, intervals, kills, unexpected):
+    for rid, (start, end) in enumerate(intervals, 1):
+        PC.append(tmp_path / "provider-requests.jsonl", {
+            "rid": rid, "method": "POST", "path": "/v1/chat/completions", "role": None,
+            "truncated": [1, 100], "receive_start_ns": start, "receive_end_ns": end,
+        })
+    events = [{"phase": "A", "event": "crash", "kill_monotonic_ns": kill} for kill in kills]
+    acct = PC.accounting(tmp_path, events)
+    assert acct["ok"] is (not unexpected)
+    assert acct["truncated_requests"] == list(range(1, len(intervals) + 1))
+    assert acct["unexpected_requests"] == [{"rid": rid, "route": "truncated"} for rid in unexpected]
+
+
+def test_provider_records_the_truncated_body_receive_interval(tmp_path, monkeypatch):
+    handlers = []
+
+    def server(_address, handler):
+        handlers.append(handler)
+        return types.SimpleNamespace(server_address=("127.0.0.1", 0), serve_forever=lambda: None)
+
+    monkeypatch.setattr(FP, "ThreadingHTTPServer", server)
+    clock = iter([10, 30])
+    monkeypatch.setattr(FP.time, "monotonic_ns", lambda: next(clock))
+    provider = FP.FakeProvider(tmp_path / "provider-requests.jsonl")
+    handler = handlers[0].__new__(handlers[0])
+    handler.path = "/v1/chat/completions"
+    handler.headers = {"Content-Length": "100"}
+    handler.rfile = io.BytesIO(b"{")
+    handler.do_POST()
+    record, = PC.read_jsonl(provider.log_path)
+    assert record["truncated"] == [1, 100]
+    assert (record["receive_start_ns"], record["receive_end_ns"]) == (10, 30)
+    assert PC.accounting(tmp_path, [{"event": "crash", "kill_monotonic_ns": 20}])["ok"]
+
+
+def test_compaction_crash_records_the_signal_time_and_original_phase(monkeypatch):
+    fired, records = set(), []
+    run = types.SimpleNamespace(fired=fired, phase="A")
+    kind = "crash_after_compaction_before_reply"
+
+    def kill():
+        assert kind in fired  # ProcessGone can now be classified as an injected crash
+        assert records, "the crash is recorded before the signal, while the phase is still A"
+        run.phase = "B"
+
+    def fire(*args, **kwargs):
+        fired.add(args[0])
+        records.append((args, kwargs))
+
+    run.proc = types.SimpleNamespace(kill=kill)
+    run.fire = fire
+    monkeypatch.setattr(PC.time, "monotonic_ns", lambda: 20)
+    PC.ProcessCell.crash(run, 7)
+    assert records == [((kind, 7), {"phase": "A", "kill_monotonic_ns": 20})]
+
+
 def test_rotation_killer_skips_a_lost_race_and_kills_on_the_next_empty_child(tmp_path, monkeypatch):
     states = iter([("S1", 5), ("S2", 3), ("S3", 0)])  # baseline, child already has rows (lost race), empty child
     monkeypatch.setattr(AD, "rotation_probe", lambda *_: next(states))
+    monkeypatch.setattr(AD.time, "monotonic_ns", lambda: 20)
     killed, fired = [], []
-    killer = AD.RotationKiller(types.SimpleNamespace(kill=lambda: killed.append(1)), tmp_path / "lcm.db", "c", fired.append)
+
+    def on_kill(event):
+        assert killed  # record the event after the actual signal, not before log I/O
+        fired.append(event)
+
+    killer = AD.RotationKiller(types.SimpleNamespace(kill=lambda: killed.append(1)), tmp_path / "lcm.db", "c", on_kill)
     killer.check(kill=True)
     assert killer.event is None and killer.baseline == "S2" and not killed
     killer.check(kill=True)
     assert killed and fired[0]["child_session_id"] == "S3" and fired[0]["missed_rotations"] == 1 and fired[0]["killed"]
+    assert fired[0]["kill_monotonic_ns"] == 20
 
 
 def test_plugins_root_symlink_or_escape_is_refused_before_any_cache_write(tmp_path):
@@ -510,7 +596,7 @@ def test_ci_gate_requires_a_complete_result_set():
         assert len(problems) == 1 and problems[0].startswith("INCOMPLETE h"), problems
 
 
-def test_process_phase_deadline_is_an_error_with_its_cause(tmp_path):
+def test_process_phase_deadline_is_an_error_with_its_cause(tmp_path, monkeypatch, latency_check):
     """R2a.3 item 7: run_matrix --timeout was unused for process cells; a host that never answers a prompt now
     ERRORs at the phase deadline instead of waiting out the per-request timeout."""
     silent = PEER.replace('if m["method"] == "session/prompt":', 'if m["method"] == "session/prompt":\n        continue')
@@ -518,13 +604,32 @@ def test_process_phase_deadline_is_an_error_with_its_cause(tmp_path):
     run = PC.ProcessCell(cell, tmp_path, {"src": str(tmp_path)}, "acp-process", 300.0, phase_timeout=1.5)
     run.work.mkdir(parents=True)
     run.argv, run.env = lambda: [sys.executable, "-c", silent], lambda: {"PATH": "/usr/bin:/bin"}  # no observer: tmp_path may be /tmp
-    started = time.monotonic()
+    timeouts = []
+    if not latency_check:
+        now = [0.0]
+        monkeypatch.setattr(PC, "time", types.SimpleNamespace(monotonic=lambda: now[0]))
+        # Host startup must not spend real selector time against a logical clock.
+        monkeypatch.setattr(AD.AcpProcess, "initialize", lambda _proc, _timeout: None)
+        monkeypatch.setattr(AD.AcpProcess, "new_session", lambda _proc, _cwd, _timeout: "test-session")
+
+        def timed_out_prompt(_proc, _sid, _text, timeout):
+            timeouts.append(timeout)
+            assert timeout == 1.5  # phase budget, never the 300 s request timeout
+            now[0] += timeout
+            raise AD.DriverError("ACP response timeout")
+
+        monkeypatch.setattr(AD.AcpProcess, "prompt", timed_out_prompt)
+    started = time.monotonic() if latency_check else None
     try:
         last = run.run_phase(1)
     finally:
         run.proxy.stop()
         run.provider.server.server_close()
-    assert time.monotonic() - started < 15
+    if latency_check:
+        assert time.monotonic() - started < 15
+    else:
+        assert timeouts == [1.5]
+        assert "ACP response timeout" in last["reason"]
     assert last["exit"] == "error" and "PhaseDeadline" in last["reason"] and "1.5s deadline" in last["reason"], last
 
 
@@ -928,3 +1033,21 @@ def test_p8_controls_must_be_scorable_on_the_uid_host():
             rows = [{**r, "host": host} for r in full_set(transport, **unsupported)]
             problems = ci.gate(rows, set())
             assert bool(problems) is gates, (host, transport, problems)
+
+
+def test_provider_hold_waits_until_its_logical_deadline(monkeypatch):
+    from types import SimpleNamespace
+
+    now = [0.0]
+    waits = []
+
+    def select(_read, _write, _error, timeout):
+        waits.append(timeout)
+        now[0] += timeout
+        return [], [], []
+
+    monkeypatch.setattr(FP, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(FP, "select", SimpleNamespace(select=select))
+    assert FP.FakeProvider.hold(SimpleNamespace(connection=object()), 0.3) is False
+    assert now[0] == 0.3
+    assert waits == [0.2, 0.3 - 0.2]

@@ -1,5 +1,7 @@
 # F44 — #171 gate CLOSED: PASS under the standing F41 GRAY acceptance (execution #6). 263.6ms @19,829 (24× vs F34) with the full correctness batch intact. Six executions, five root causes, zero unexplained numbers.
 
+The instrument's results directory is external data and is not part of this repository.
+
 **Run:** gate171-v6 on 56fd7b4, spec v2 unchanged (sixth execution), pins/stores/probes verified (one
 DECLARED deviation, §3), zero LLM. Artifacts: hermes-r3-1/artifacts/gate171-v6-run/.
 

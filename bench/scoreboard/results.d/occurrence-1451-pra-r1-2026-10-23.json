@@ -1,0 +1,33 @@
+{
+  "id": "occurrence-1451-pra-r1-2026-10-23",
+  "run_id": "occurrence-1451-pra-r1-20261023",
+  "t2_tag": "lcm-x/occurrence-1451-pra-r1-20261023",
+  "benchmark": "#1451 PR-A r1 snapshot and positional proof acceptance",
+  "metric": "new_or_increased_loss_cells",
+  "value": 0,
+  "display": "0/1296 new loss; error cells0; changed vs r0=0",
+  "tier": "P",
+  "date": "2026-10-23",
+  "system_commit": "f1df74ca5a051e33fca221fee06a5ba9c12b4f25",
+  "harness_commit": "Inherited occurrence runner; independent per-checkpoint raw row-multiset scorer",
+  "judge": "deterministic; no model judge",
+  "reader": "synthetic SQLite host histories",
+  "retrieval_config": "Same1296 reachable cells as r0, everycheckpoint; 96 separate fired faults; actual v0.28.1 upgrade340/351",
+  "dataset_exposure": "Synthetic only; no customer data or provider calls",
+  "breakdown": "https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/CHANGED-CELLS-base.md",
+  "variance": "One full matrix rerun; 200 paired AB/BA cost samples; paired median delta -0.372313ms vs allowed +0.2273625ms",
+  "failclose": "0 new loss-row multisets or duplicate/restart-growth rises; errors0; all96 atomic failures unavailable to durable reader",
+  "evidence": [
+    "https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/RESULT.md",
+    "https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/RESULT-MANIFEST.json",
+    "https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/SUMMARY.json",
+    "https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/CONSUMERS.md",
+    "https://github.com/electricsheephq/lcm-x/blob/ec867e9fc752c1d968fbec53f65f4441c3eb9b7d/bench/results/occurrence-1451-pra-r1-20261023/CHANGED-CELLS-r0.md"
+  ],
+  "caveats": [
+    "Advisory; full final-head remote CI recorded separately in PR. No merge/release/runtime/customer proof.",
+    "594 inherited loss cells remain; supplied BASE matrix5df5a3c differs from implementationBASE10407e12; no fresh10407 matrix claimed.",
+    "Focused census606 valid publications,0 rejects across8 affected files, including all6 original counterexamples; not a full-corpus census.",
+    "Public summary; full raw and re-score inputs retained; T2 unpublished; no result disposal."
+  ]
+}

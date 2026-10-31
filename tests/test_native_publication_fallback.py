@@ -20,6 +20,13 @@ from hermes_lcm.reconcile import (
 from tests.legacy_native_state import install_legacy_writer, legacy_commit_proof
 
 
+@pytest.fixture(autouse=True)
+def historical_proof_payload_writer(monkeypatch):
+    from hermes_lcm.compaction import CompactionMixin
+    monkeypatch.setattr(LCMEngine, "_write_compress_commit_proof_payload",
+                        CompactionMixin._write_compress_commit_proof_payload)
+
+
 @pytest.fixture
 def candidate(tmp_path, monkeypatch):
     cfg = LCMConfig(
@@ -282,7 +289,8 @@ def _native_commit(engine, messages, *, in_place):
 
 
 @pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
-def test_native_recovery_restart_before_first_ingest_keeps_every_new_turn(tmp_path, monkeypatch, in_place):
+@pytest.mark.parametrize("fail_probe", [False, True], ids=["working-probe", "failed-native-probe"])
+def test_native_recovery_restart_before_first_ingest_keeps_every_new_turn(tmp_path, monkeypatch, in_place, fail_probe):
     """#484 round 2 item 18: a restart between the native compression boundary and
     the first ingest; an empty rotation child must still reconcile against its
     carried native replay proof instead of storing the recovered snapshot again."""
@@ -295,6 +303,30 @@ def test_native_recovery_restart_before_first_ingest_keeps_every_new_turn(tmp_pa
         engine.shutdown()
     resumed = _native_engine(tmp_path, session_id=child)
     try:
+        if fail_probe:
+            # Isolate the third scheduled read; this recovery proof is carried
+            # independently of a compaction commit proof on the empty child.
+            assert resumed._load_native_recovery_replay_snapshot_digests()
+            monkeypatch.setattr(resumed, "_durable_commit_proof_payload", lambda *args: None)
+            assert resumed._durable_commit_proof_payload() is None
+            reached = []
+            schedule = resumed._schedule_ingest_cursor_reconciliation
+
+            def fail_native_read(*args, **kwargs):
+                reached.append(True)
+                raise RuntimeError("injected native recovery probe failure")
+
+            def schedule_with_fault():
+                with monkeypatch.context() as patch:
+                    patch.setattr(resumed, "_load_native_recovery_replay_snapshot_digests", fail_native_read)
+                    schedule()
+
+            with monkeypatch.context() as patch:
+                patch.setattr(resumed, "_schedule_ingest_cursor_reconciliation", schedule_with_fault)
+                resumed.on_session_start(child, conversation_id="conversation")
+            # An in-place session has durable rows and short-circuits the
+            # native read; the empty rotation child must actually reach it.
+            assert reached == ([] if in_place else [True])
         before = resumed._store._conn.execute("SELECT session_id, role, content FROM messages ORDER BY store_id").fetchall()
         new_turns = [
             {"role": "user", "content": "After the restart: keep JADE-204."},

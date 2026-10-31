@@ -106,15 +106,15 @@ def test_builtin_policies_include_baseline_codex_policy_and_pressure_smoke():
     assert policies["baseline_272k"].fresh_tail_count == 64
     assert policies["codex_gpt_long_context"].context_length == 272_000
     assert policies["codex_gpt_long_context"].fresh_tail_count == 24
-    assert policies["codex_gpt_long_context"].leaf_chunk_tokens == 8_000
-    assert policies["codex_gpt_long_context"].target_after_compaction == 0.55
-    assert policies["codex_gpt_long_context"].policy_version == "1"
+    assert policies["codex_gpt_long_context"].leaf_chunk_tokens == 24_000
+    assert policies["codex_gpt_long_context"].target_after_compaction is None
+    assert policies["codex_gpt_long_context"].policy_version == "2"
     assert policies["codex_spark_context"].context_length == 128_000
     assert policies["codex_spark_context"].context_threshold == 0.75
     assert policies["codex_spark_context"].fresh_tail_count == 16
-    assert policies["codex_spark_context"].leaf_chunk_tokens == 8_000
-    assert policies["codex_spark_context"].target_after_compaction == 0.55
-    assert policies["codex_spark_context"].policy_version == "1"
+    assert policies["codex_spark_context"].leaf_chunk_tokens == 24_000
+    assert policies["codex_spark_context"].target_after_compaction is None
+    assert policies["codex_spark_context"].policy_version == "2"
     assert policies["pressure_smoke"].context_length < 1_000
     assert policies["pressure_smoke"].policy_version == "1"
 

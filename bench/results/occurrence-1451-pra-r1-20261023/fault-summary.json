@@ -1,0 +1,9 @@
+{
+  "runs": 132,
+  "fired_faults": 96,
+  "keys_unchanged": 96,
+  "one_warning_after_rollback": 96,
+  "not_durable_and_snapshot_absent": 96,
+  "durable_reader_unavailable": 96,
+  "escaped_exceptions": 0
+}

@@ -1,0 +1,328 @@
+{
+  "claim_class": "advisory",
+  "environment": "2-vCPU floor surrogate",
+  "source_comment": "https://github.com/electricsheephq/lcm-x/issues/1586#issuecomment-6359031801",
+  "note": "Imported public-safe fields from existing probe summaries; no new benchmark. CPU is measured; gated hours are projections, not completed catch-up. Raw baseline labels determine upgrade/empty order.",
+  "cells": [
+    {
+      "run_id": "39888055698",
+      "run_url": "https://github.com/electricsheephq/lcm-x/actions/runs/39888055698",
+      "system_commit": "7f82e84b25d00fe8a5abcb38590c2b129abe4a8f",
+      "idle_multiplier": 1.0,
+      "coverage": {
+        "bar_hours": 72,
+        "baseline": "empty",
+        "calibration_s": 0.5805319299997791,
+        "implied_hours": 68.3451936607668,
+        "implied_hours_gated": 68.3451936607668,
+        "implied_hours_normalized": 67.3407417469242,
+        "label": "floor surrogate",
+        "measured_seconds": 7249.402029674999,
+        "reason": null,
+        "reference_calibration_s": 0.572,
+        "shape": "mixed",
+        "state": "PASS",
+        "sustained_rows_s": 1.0160838052363097,
+        "validity": "at least two hours, backlog present throughout, declared corpus size"
+      },
+      "cpu": {
+        "mean_cores": 0.501016785797052,
+        "p95_rolling60_cores": 0.5716703038661619,
+        "peak1s_cores": 1.030017653472761,
+        "seconds": 7212.677720162999
+      },
+      "cpu_limits": [
+        0.6,
+        0.75
+      ],
+      "rows": 250000,
+      "coverage_fraction": 0.03085460798663805,
+      "catchup_state": "INCOMPLETE",
+      "stop_reason": "max_wall",
+      "source_sha256": {
+        "pair_summary": "a6239a8e900eabc173323af36afbf13f83368ef6fbd2fb3d13da3878ae68e504",
+        "catchup_summary": "84c9e7bd005b2407a250b4a7d306a63303e8b9c48d6108aa7f8bf3d58d106070"
+      }
+    },
+    {
+      "run_id": "39888055698",
+      "run_url": "https://github.com/electricsheephq/lcm-x/actions/runs/39888055698",
+      "system_commit": "7f82e84b25d00fe8a5abcb38590c2b129abe4a8f",
+      "idle_multiplier": 1.0,
+      "coverage": {
+        "bar_hours": 72,
+        "baseline": "upgrade",
+        "calibration_s": 0.5714122360000147,
+        "implied_hours": 75.51793770207989,
+        "implied_hours_gated": 75.5956166916744,
+        "implied_hours_normalized": 75.5956166916744,
+        "label": "floor surrogate",
+        "measured_seconds": 7245.734672289,
+        "reason": null,
+        "reference_calibration_s": 0.572,
+        "shape": "mixed",
+        "state": "FAIL",
+        "sustained_rows_s": 0.919575488387997,
+        "validity": "at least two hours, backlog present throughout, declared corpus size"
+      },
+      "cpu": {
+        "mean_cores": 0.5012747898651928,
+        "p95_rolling60_cores": 0.5685001123641438,
+        "peak1s_cores": 1.115652656115358,
+        "seconds": 7209.997536424999
+      },
+      "cpu_limits": [
+        0.6,
+        0.75
+      ],
+      "rows": 250000,
+      "coverage_fraction": 0.2173367811757382,
+      "catchup_state": "INCOMPLETE",
+      "stop_reason": "max_wall",
+      "source_sha256": {
+        "pair_summary": "a6239a8e900eabc173323af36afbf13f83368ef6fbd2fb3d13da3878ae68e504",
+        "catchup_summary": "3b325346ea667bcc6ed908513863266a13f8f16d2e0f3ab955de9988b5e12e8f"
+      }
+    },
+    {
+      "run_id": "39888063665",
+      "run_url": "https://github.com/electricsheephq/lcm-x/actions/runs/39888063665",
+      "system_commit": "7f82e84b25d00fe8a5abcb38590c2b129abe4a8f",
+      "idle_multiplier": 1.0,
+      "coverage": {
+        "bar_hours": 72,
+        "baseline": "empty",
+        "calibration_s": 0.5598467139999741,
+        "implied_hours": 32.17805907968287,
+        "implied_hours_gated": 32.87658806117321,
+        "implied_hours_normalized": 32.87658806117321,
+        "label": "floor surrogate",
+        "measured_seconds": 7221.065366848001,
+        "reason": null,
+        "reference_calibration_s": 0.572,
+        "shape": "short",
+        "state": "PASS",
+        "sustained_rows_s": 2.158130304642627,
+        "validity": "at least two hours, backlog present throughout, declared corpus size"
+      },
+      "cpu": {
+        "mean_cores": 0.500419583099139,
+        "p95_rolling60_cores": 0.5183333664058093,
+        "peak1s_cores": 1.0844968292893589,
+        "seconds": 7210.541291363001
+      },
+      "cpu_limits": [
+        0.6,
+        0.75
+      ],
+      "rows": 250000,
+      "coverage_fraction": 0.06420758483033932,
+      "catchup_state": "INCOMPLETE",
+      "stop_reason": "max_wall",
+      "source_sha256": {
+        "pair_summary": "84df716cb9d3e2b16611338408be59b42ac683628c45c3439aefdd0e5e56459d",
+        "catchup_summary": "db5a2fc8b1e46e3e156b1a7dd9e422374041cdb4c647f1d5859326faa84a6c33"
+      }
+    },
+    {
+      "run_id": "39888063665",
+      "run_url": "https://github.com/electricsheephq/lcm-x/actions/runs/39888063665",
+      "system_commit": "7f82e84b25d00fe8a5abcb38590c2b129abe4a8f",
+      "idle_multiplier": 1.0,
+      "coverage": {
+        "bar_hours": 72,
+        "baseline": "upgrade",
+        "calibration_s": 0.5678186619998087,
+        "implied_hours": 32.58844109786469,
+        "implied_hours_gated": 32.828417865534824,
+        "implied_hours_normalized": 32.828417865534824,
+        "label": "floor surrogate",
+        "measured_seconds": 7223.058509447999,
+        "reason": null,
+        "reference_calibration_s": 0.572,
+        "shape": "short",
+        "state": "PASS",
+        "sustained_rows_s": 2.1309532492180088,
+        "validity": "at least two hours, backlog present throughout, declared corpus size"
+      },
+      "cpu": {
+        "mean_cores": 0.500616986431042,
+        "p95_rolling60_cores": 0.5146666666666685,
+        "peak1s_cores": 1.0823047802746555,
+        "seconds": 7212.15430945
+      },
+      "cpu_limits": [
+        0.6,
+        0.75
+      ],
+      "rows": 250000,
+      "coverage_fraction": 0.3128973932202172,
+      "catchup_state": "INCOMPLETE",
+      "stop_reason": "max_wall",
+      "source_sha256": {
+        "pair_summary": "84df716cb9d3e2b16611338408be59b42ac683628c45c3439aefdd0e5e56459d",
+        "catchup_summary": "6e49f6bdc0ea812bc59aad5bb3932451b459abd786e88a26769d769d3808c3db"
+      }
+    },
+    {
+      "run_id": "39888076007",
+      "run_url": "https://github.com/electricsheephq/lcm-x/actions/runs/39888076007",
+      "system_commit": "777f6756c3dd7f9976a45b4040d1f6697f0f5474",
+      "idle_multiplier": 0.82,
+      "coverage": {
+        "bar_hours": 72,
+        "baseline": "empty",
+        "calibration_s": 0.5691209369997523,
+        "implied_hours": 64.13426858748815,
+        "implied_hours_gated": 64.45871034974626,
+        "implied_hours_normalized": 64.45871034974626,
+        "label": "floor surrogate",
+        "measured_seconds": 7248.814187662001,
+        "reason": null,
+        "reference_calibration_s": 0.572,
+        "shape": "mixed",
+        "state": "PASS",
+        "sustained_rows_s": 1.0827977924112826,
+        "validity": "at least two hours, backlog present throughout, declared corpus size"
+      },
+      "cpu": {
+        "mean_cores": 0.5505486880915895,
+        "p95_rolling60_cores": 0.6336526290227705,
+        "peak1s_cores": 1.016199528463455,
+        "seconds": 7212.545214954
+      },
+      "cpu_limits": [
+        0.6,
+        0.75
+      ],
+      "rows": 250000,
+      "coverage_fraction": 0.03302472738810416,
+      "catchup_state": "INCOMPLETE",
+      "stop_reason": "max_wall",
+      "source_sha256": {
+        "pair_summary": "b5a3aecb55e6cacecf847a232ebad1e6e7b7b32a498694c9c645d8d21ea856cb",
+        "catchup_summary": "4939db53871b2d484dd3d5c122741f827eaa24c01c49b70a21a516642775ae31"
+      }
+    },
+    {
+      "run_id": "39888076007",
+      "run_url": "https://github.com/electricsheephq/lcm-x/actions/runs/39888076007",
+      "system_commit": "777f6756c3dd7f9976a45b4040d1f6697f0f5474",
+      "idle_multiplier": 0.82,
+      "coverage": {
+        "bar_hours": 72,
+        "baseline": "upgrade",
+        "calibration_s": 0.5606110889999627,
+        "implied_hours": 66.54614550154933,
+        "implied_hours_gated": 67.89804192918622,
+        "implied_hours_normalized": 67.89804192918622,
+        "label": "floor surrogate",
+        "measured_seconds": 7258.853551309,
+        "reason": null,
+        "reference_calibration_s": 0.572,
+        "shape": "mixed",
+        "state": "PASS",
+        "sustained_rows_s": 1.0435532204164648,
+        "validity": "at least two hours, backlog present throughout, declared corpus size"
+      },
+      "cpu": {
+        "mean_cores": 0.5501075768303986,
+        "p95_rolling60_cores": 0.6296648285766013,
+        "peak1s_cores": 1.1170469914799843,
+        "seconds": 7221.044709107
+      },
+      "cpu_limits": [
+        0.6,
+        0.75
+      ],
+      "rows": 250000,
+      "coverage_fraction": 0.22114377383111558,
+      "catchup_state": "INCOMPLETE",
+      "stop_reason": "max_wall",
+      "source_sha256": {
+        "pair_summary": "b5a3aecb55e6cacecf847a232ebad1e6e7b7b32a498694c9c645d8d21ea856cb",
+        "catchup_summary": "40815019bf616c725696890830ff72f73e14d79824b485e4ee83a38cb2a1a70b"
+      }
+    },
+    {
+      "run_id": "39888085612",
+      "run_url": "https://github.com/electricsheephq/lcm-x/actions/runs/39888085612",
+      "system_commit": "777f6756c3dd7f9976a45b4040d1f6697f0f5474",
+      "idle_multiplier": 0.82,
+      "coverage": {
+        "bar_hours": 72,
+        "baseline": "empty",
+        "calibration_s": 0.5721316000000343,
+        "implied_hours": 30.467658629603733,
+        "implied_hours_gated": 30.467658629603733,
+        "implied_hours_normalized": 30.460650549860013,
+        "label": "floor surrogate",
+        "measured_seconds": 7216.301507612,
+        "reason": null,
+        "reference_calibration_s": 0.572,
+        "shape": "short",
+        "state": "PASS",
+        "sustained_rows_s": 2.279283921639096,
+        "validity": "at least two hours, backlog present throughout, declared corpus size"
+      },
+      "cpu": {
+        "mean_cores": 0.5502004612561457,
+        "p95_rolling60_cores": 0.583333813843334,
+        "peak1s_cores": 1.024774392534464,
+        "seconds": 7211.753314312
+      },
+      "cpu_limits": [
+        0.6,
+        0.75
+      ],
+      "rows": 250000,
+      "coverage_fraction": 0.06765668662674651,
+      "catchup_state": "INCOMPLETE",
+      "stop_reason": "max_wall",
+      "source_sha256": {
+        "pair_summary": "4dc2e230bb9f6d5e7648344ff586ba13fcb79fb709f41732cf929cc45a510211",
+        "catchup_summary": "f76ebc9f5a703f6583059d4760a3e9a117bab89357468c0b20207d0c2b0e6754"
+      }
+    },
+    {
+      "run_id": "39888085612",
+      "run_url": "https://github.com/electricsheephq/lcm-x/actions/runs/39888085612",
+      "system_commit": "777f6756c3dd7f9976a45b4040d1f6697f0f5474",
+      "idle_multiplier": 0.82,
+      "coverage": {
+        "bar_hours": 72,
+        "baseline": "upgrade",
+        "calibration_s": 0.5728520100001333,
+        "implied_hours": 30.687790814350997,
+        "implied_hours_gated": 30.687790814350997,
+        "implied_hours_normalized": 30.642148477064236,
+        "label": "floor surrogate",
+        "measured_seconds": 7211.876343698999,
+        "reason": null,
+        "reference_calibration_s": 0.572,
+        "shape": "short",
+        "state": "PASS",
+        "sustained_rows_s": 2.2629339747704837,
+        "validity": "at least two hours, backlog present throughout, declared corpus size"
+      },
+      "cpu": {
+        "mean_cores": 0.550377564195467,
+        "p95_rolling60_cores": 0.5823331969374562,
+        "peak1s_cores": 1.1348175172984893,
+        "seconds": 7205.998678012001
+      },
+      "cpu_limits": [
+        0.6,
+        0.75
+      ],
+      "rows": 250000,
+      "coverage_fraction": 0.3166014073657195,
+      "catchup_state": "INCOMPLETE",
+      "stop_reason": "max_wall",
+      "source_sha256": {
+        "pair_summary": "4dc2e230bb9f6d5e7648344ff586ba13fcb79fb709f41732cf929cc45a510211",
+        "catchup_summary": "d98a698e070123361b433ca365839d8ba0669dc334537cd6153101b46e37659f"
+      }
+    }
+  ]
+}

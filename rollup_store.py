@@ -23,6 +23,7 @@ from .db_bootstrap import (
     run_versioned_migrations,
     verify_temporal_rollup_schema,
 )
+from .sqlite_session import ConnectionPolicy, open_connection
 from .sqlite_util import _is_sqlite_locked_error
 
 logger = logging.getLogger(__name__)
@@ -60,14 +61,14 @@ class RollupStore:
         self._init_db()
 
     def _init_db(self) -> None:
-        self._conn = sqlite3.connect(
-            str(self.db_path),
-            timeout=5.0,
-            check_same_thread=False,
-        )
-        refuse_schema_version_too_new(self._conn)
-        configure_connection(self._conn)
-        self._conn.row_factory = sqlite3.Row
+        open_connection(ConnectionPolicy(
+            database=str(self.db_path),
+            connect_kwargs=(("timeout", 5.0), ("check_same_thread", False)),
+            before_row_factory=(refuse_schema_version_too_new, configure_connection),
+            row_factory=sqlite3.Row,
+            on_open=lambda conn: setattr(self, "_conn", conn),
+            on_setup_error=None,
+        ))
         run_versioned_migrations(self._conn)
         # The rollup tables are a lazy, opt-in feature: they are NOT part of the
         # core numeric schema_version (see db_bootstrap.run_versioned_migrations).

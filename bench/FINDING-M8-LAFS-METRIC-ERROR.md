@@ -1,7 +1,7 @@
 # M8 — THE PROGRAM HAS BEEN OPTIMIZING THE WRONG OBJECTIVE (LAFS is accuracy × latency, and latency was never targeted)
 
 _Found 2026-07-25 by the fresh-eyes audit workflow, then independently re-verified by the orchestrator (Opus 5)
-by executing the benchmark's OWN scorer: `/Volumes/LEXAR/hermes-work/lme-v2-official/leaderboard/compute_lafs.py`,
+by executing the benchmark's OWN scorer: `leaderboard/compute_lafs.py`,
 `fixed_frontier_points["small"]`, T_MIN=1.0, T_MAX=200.0. Every number below is computed, not estimated._
 
 ## The finding

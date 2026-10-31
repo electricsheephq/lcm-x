@@ -3,13 +3,13 @@
 JSON tool protocol over the PUBLIC LCM tools, dispatched through `LCMEngine.handle_tool_call` -> tools.py on a clone."""
 from __future__ import annotations
 
-import json, re, shutil, subprocess, sys, time, urllib.error, urllib.request, uuid  # noqa: E401
+import json, re, shutil, sys, time, urllib.error, urllib.request, uuid  # noqa: E401
 from pathlib import Path
 
 READER_TIMEOUT_S, RUNAWAY_GUARD = 600, 20
 PUBLIC_TOOLS = ("lcm_grep", "lcm_expand_query", "lcm_describe", "lcm_recall")
 # Windows for the C0 UNAVAILABLE rule only (plugin token counter, minus an answer reserve). glm = ASSUMPTION.
-READER_WINDOW, ANSWER_RESERVE = {"astra-low": 272_000, "glm": 200_000}, 16_000
+READER_WINDOW, ANSWER_RESERVE = {"astra-low": 272_000, "sol-low": 272_000, "glm": 200_000}, 16_000
 
 def flatten(system: str, view: list[dict]) -> str:
     """Role-labelled text of the assembled context (codex reader; GLM fallback when the API rejects a row shape)."""
@@ -32,14 +32,14 @@ class GLMReader:
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "harness"))
         from lanes import glm  # GLM_API_KEY from the environment only
         self._glm, self._k = glm, glm._key()
-        self.readback = {"model": None, "effort": "n/a (glm-5.3 lane sends no effort input)"}
+        self.readback = {"model": None, "effort": "thinking disabled (the reader sends thinking: disabled; with thinking on, reasoning can fill max_tokens and leave no answer)"}
 
     def _post(self, msgs):
         self.request_prompt = json.dumps(msgs, ensure_ascii=True)
         req = urllib.request.Request(self._glm.URL, method="POST", data=json.dumps(
-            {"model": self._glm.MODEL, "messages": msgs, "max_tokens": 8192}).encode(),
+            {"model": self._glm.MODEL, "messages": msgs, "max_tokens": 8192, "thinking": {"type": "disabled"}}).encode(),
             headers={"Content-Type": "application/json", "Authorization": "Bearer " + self._k})
-        with urllib.request.urlopen(req, timeout=READER_TIMEOUT_S) as r:
+        with self._glm._open(req, READER_TIMEOUT_S, self.readback) as r:
             data = json.loads(r.read().decode())
         self.readback["model"] = data.get("model")
         if self.readback["model"] != self._glm.MODEL:
@@ -48,6 +48,7 @@ class GLMReader:
         return (data["choices"][0]["message"].get("content") or ""), data.get("usage")
 
     def ask(self, system, view, turns, replies):
+        retries_before = self.readback.get("throttle_retries_total", 0)
         native = ([{"role": "system", "content": system}] if system else []) + [
             {**{k: m[k] for k in ("role", "tool_call_id", "tool_calls") if k in m},
              "content": m["content"] if isinstance(m.get("content"), str) else json.dumps(m.get("content") or "")}
@@ -60,7 +61,8 @@ class GLMReader:
                 raise
             text, usage = self._post([{"role": "user", "content": flatten(system, view)}] + _convo(turns, replies))
             fmt = "flattened (native rejected: HTTP 400)"
-        return text, {"context_format": fmt, "usage": usage}
+        return text, {"context_format": fmt, "usage": usage,
+                      "throttle_retries": self.readback.get("throttle_retries_total", 0) - retries_before}
 
 class AstraLowReader:
     MODEL, EFFORT = "gpt-6-astra", "low"
@@ -75,10 +77,11 @@ class AstraLowReader:
         prompt, out = base / "prompt.txt", base / "last.txt"
         self.request_prompt = "Answer from the conversation below only; use no shell or file tools.\n\n" + flatten(system, view) + convo
         prompt.write_text(self.request_prompt)
-        cmd = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "-m", self.MODEL,
+        cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "-m", self.MODEL,
                "-c", f"model_reasoning_effort={self.EFFORT}", "--output-last-message", str(out), "-"]
         with prompt.open() as stdin:
-            p = subprocess.run(cmd, cwd=work, stdin=stdin, capture_output=True, text=True, timeout=READER_TIMEOUT_S)
+            from . import c1_budget
+            p = c1_budget.run(cmd, cwd=work, stdin=stdin, capture_output=True, text=True, timeout=READER_TIMEOUT_S)
         for key, pat in (("model", r"^model:\s*(\S+)"), ("effort", r"^reasoning effort:\s*(\S+)")):
             m = re.search(pat, (p.stderr or "") + (p.stdout or ""), re.M)
             self.readback[key] = m.group(1) if m else "UNREAD"
@@ -89,7 +92,13 @@ class AstraLowReader:
             raise RuntimeError(f"codex reader exit {p.returncode}")
         text = out.read_text() if out.exists() else ""
         shutil.rmtree(base, ignore_errors=True)
-        return text, {"context_format": "flattened (codex exec)"}
+        return text, {"context_format": "flattened (codex exec)",
+                      "usage": dict(prompt_tokens=(len(self.request_prompt) + 3) // 4,
+                                    completion_tokens=(len(text) + 3) // 4, estimated=True)}
+
+
+class SolLowReader(AstraLowReader):
+    MODEL, EFFORT = "gpt-6.1-sol", "low"
 
 def parse_json_obj(text: str):
     t = re.sub(r"^```(?:json)?|```$", "", (text or "").strip(), flags=re.M).strip()
@@ -109,7 +118,10 @@ def answer(reader, system, view, batch_prompt, tools_engine=None, schemas=None, 
     def ask(turns, replies):
         reader.request_prompt = flatten(system, view) + "\n" + json.dumps(_convo(turns, replies), ensure_ascii=False)
         try:
-            return reader.ask(system, view, turns, replies)
+            text, info = reader.ask(system, view, turns, replies)
+            if "throttle_retries" in info:
+                info["usage"] = dict(info.get("usage") or {}, throttle_retries=info["throttle_retries"])
+            return text, info
         except Exception as exc:
             meta["reader_calls"].append(dict(prompt_tokens=count_tokens(reader.request_prompt), completion_tokens=0, estimated=True))
             exc.reader_calls = list(meta["reader_calls"])
