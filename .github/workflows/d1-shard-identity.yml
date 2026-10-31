@@ -1,0 +1,71 @@
+name: D1 shard identity
+
+# Real-FastEmbed proof that the D1 call-index build partition reproduces the serial
+# cache byte for byte on GitHub runners. It does not prove identity on the release Mac.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths: &identity-paths
+      - benchmarking/d1_cache.py
+      - benchmarking/longmemeval.py
+      - scripts/lcm_d1_local.py
+      - bench/tools/d1-shard-check/**
+      - .github/workflows/d1-shard-identity.yml
+  push:
+    branches: [main]
+    paths: *identity-paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: d1-shard-identity-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  identity:
+    name: d1-shard-identity (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    env:
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Install the release kit's embedding runtime
+        run: python -m pip install fastembed==0.8.0 onnxruntime==1.29.0 tokenizers==0.23.1
+
+      - name: Stage the official model before any build
+        run: |
+          python -c 'from fastembed import TextEmbedding; TextEmbedding("BAAI/bge-small-en-v1.5", cache_dir="model-cache", threads=1)'
+          chmod -R a-w model-cache
+          mkdir -p evidence
+          python -m pip freeze > evidence/pip-freeze.txt
+
+      - name: Serial vs call-index P=4, key-hash P=4 negative control
+        run: |
+          python bench/tools/d1-shard-check/ci_identity.py check --model-cache "$GITHUB_WORKSPACE/model-cache" \
+            --work "$RUNNER_TEMP/d1-identity" --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Collect evidence
+        if: always()
+        run: |
+          cp "$RUNNER_TEMP"/d1-identity/*.json "$RUNNER_TEMP"/d1-identity/*.jsonl evidence/ 2>/dev/null || true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: d1-shard-identity-${{ matrix.os }}
+          path: evidence/

@@ -12,12 +12,18 @@ Older product defaults are retained; the receipt reports effective thread use.
 Each role's sealed SQLite cache and hash manifest live in --output. Per-question
 embedding wall time (including cache reads and queries), hits/misses and
 corruptions live in embedding-metrics.jsonl; d1-receipt.json aggregates each arm.
+A partitioned role is sealed only after its partition_proof passes: a plan log
+equal to the parts' dispatch logs, merged entries equal to the plan's units, a
+seeded re-embed of sampled calls with no byte mismatch, and no A-prime dispatch.
 """
 import argparse
+import hashlib
+import importlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import random
 import runpy
 import signal
 import subprocess
@@ -27,6 +33,59 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+VERIFY_CALLS = 16
+# Product modules between the harness and FastEmbed: the provider and its thread cap
+# (embedding_provider.py), and the model resolver plus encode-thread wrapper (config.py).
+EMBEDDING_PATH_MODULES = ("embedding_provider.py", "config.py")
+EMBEDDING_RUNTIME = ("fastembed", "onnxruntime", "tokenizers")
+# Only the plan and verify children may see these; build partitions are popped beside them.
+PROOF_ENV = ("LCM_D1_VERIFY_CALLS", "LCM_D1_VERIFY_AGAINST", "LCM_D1_VERIFY_LOG")
+
+
+class PartitionProofError(Exception):
+    pass
+
+
+def verify_sample(calls, workers, k=VERIFY_CALLS, seed=0):
+    """The first and last call each part owns, then seeded random calls, up to k."""
+    calls = sorted(set(calls))
+    chosen = {owned[i] for part in range(workers) for owned in [[c for c in calls if c % workers == part]] if owned for i in (0, -1)}
+    rest = [call for call in calls if call not in chosen]
+    chosen.update(random.Random(seed).sample(rest, min(len(rest), max(0, k - len(chosen)))))
+    return sorted(chosen)
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def model_files_sha256(env):
+    """Hash the staged bge-small snapshot files (relative path and content); None if none are staged."""
+    root = Path(env.get("LCM_LONGMEMEVAL_FASTEMBED_CACHE") or env.get("FASTEMBED_CACHE_PATH") or Path.home() / ".cache" / "fastembed")
+    files = {}
+    for model in sorted(root.glob("*bge-small-en-v1.5*")):
+        base = model / "snapshots" if (model / "snapshots").is_dir() else model
+        files.update((str(path.relative_to(root)), file_sha256(path)) for path in sorted(base.rglob("*")) if path.is_file())
+    return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest() if files else None
+
+
+def embedding_path_fingerprint(product, reports, model_files):
+    from importlib.metadata import PackageNotFoundError, version
+
+    def dist(name):
+        try:
+            return version(name)
+        except PackageNotFoundError:
+            return None
+
+    path = {"modules": {name: file_sha256(Path(product) / name) if (Path(product) / name).is_file() else None for name in EMBEDDING_PATH_MODULES},
+            "runtime": {**{name: dist(name) for name in EMBEDDING_RUNTIME}, "model_files_sha256": model_files},
+            "effective_ort_threads": sorted({report.get("effective_intra_op_threads") for report in reports}, key=str)}
+    return {**path, "sha256": hashlib.sha256(json.dumps(path, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
 
 
 def pin(tree):
@@ -162,10 +221,13 @@ def _main(argv, interrupt):
                HF_HUB_OFFLINE="1", PYTHONDONTWRITEBYTECODE="1")
     env.pop("LCM_D1_BUILD_PARTITION", None)  # Only parallel build workers get a partition.
     env.pop("LCM_D1_DISPATCH_LOG", None)
+    for name in PROOF_ENV:
+        env.pop(name, None)
+    build_env = {"LCM_D1_ORT_THREADS": str(build_threads_requested), "OMP_NUM_THREADS": str(build_threads_requested), "PYTHONHASHSEED": "0"}
     common = ["--dataset-label", "m", "--provider", "fastembed", "--model", "BAAI/bge-small-en-v1.5"]
     started = time.monotonic()
 
-    def invoke(role, name, command, mode, part=None):
+    def invoke(role, name, command, mode, part=None, scratch=None):
         if interrupt[0]:
             return {"exit_code": 128 + interrupt[0], "timed_out": False}
         scratch = args.scratch.resolve() / role / name
@@ -175,21 +237,24 @@ def _main(argv, interrupt):
                          LCM_D1_THREAD_REPORT=str(args.output.resolve() / f"{role}-{name}-threads.json"),
                          LCM_D1_CACHE_MODE=mode, HERMES_HOME=str(scratch / "home"), TMPDIR=str(scratch))
         if mode == "build":
-            child_env["LCM_D1_DISPATCH_LOG"] = str(args.output.resolve() / f"{role}-{name}-dispatch.jsonl")
-        if name == "preembed":
-            child_env.update(LCM_D1_ORT_THREADS=str(build_threads_requested), OMP_NUM_THREADS=str(build_threads_requested))
-        if part is not None:
+            child_env.update(LCM_D1_DISPATCH_LOG=str(args.output.resolve() / f"{role}-{name}-dispatch.jsonl"), PYTHONHASHSEED="0")
+        if name == "preembed" or part is not None or scratch is not None:
             # Matching serial threads keeps ORT arithmetic the same; 1 thread needs measured byte-identity proof.
+            child_env.update(build_env)
+        if part is not None:
             child_env.update(LCM_LONGMEMEVAL_EMBED_CACHE=str(caches[role].parent / "parts" / f"part-{part}.sqlite"),
-                             LCM_D1_BUILD_PARTITION=f"{part}/{args.build_workers}",
-                             LCM_D1_ORT_THREADS=str(build_threads_requested), OMP_NUM_THREADS=str(build_threads_requested))
+                             LCM_D1_BUILD_PARTITION=f"{part}/{args.build_workers}")
+        if scratch is not None:
+            # Plan and verify children write only their own scratch DB, never the merge target.
+            label, extra = scratch
+            child_env.update(extra, LCM_LONGMEMEVAL_EMBED_CACHE=str(caches[role].parent / "parts" / f"{label}.sqlite"))
         with (args.output / f"{role}-{name}.log").open("w") as log:
             return run_child([sys.executable, str(Path(__file__).resolve()), "--worker", products[role], pins[role], instrument, *command], cwd=products[role], env=child_env, stdout=log, stderr=subprocess.STDOUT, timeout=args.worker_timeout, interrupt=interrupt)
 
     # Enumerate the product's actual chunk/summary units in each tree, including
     # the placebo corpus. Only this pre-embed phase is allowed to write the cache.
     from benchmarking.d1_cache import merge, seal
-    manifests, role_threads, build_threads, preembed = {}, {}, {}, []
+    manifests, role_threads, build_threads, preembed, partition_proof = {}, {}, {}, [], {}
     if args.build_workers == 1:
         for role in products:
             if interrupt[0]:
@@ -210,34 +275,78 @@ def _main(argv, interrupt):
                 continue
             manifests[role] = seal(caches[role])
     else:
+        compare = importlib.import_module("bench.tools.d1-shard-check.compare_d1_caches")
         for role in products:
             (caches[role].parent / "parts").mkdir(parents=True)
+        out = args.output.resolve()
+        command = ["prewarm-cache", "--prepared-dir", str(args.prepared_dir.resolve()), "--shards-manifest", str(args.prepared_dir.resolve()), *common]
 
         def build(task):
             role, part = task
-            command = ["prewarm-cache", "--prepared-dir", str(args.prepared_dir.resolve()), "--shards-manifest", str(args.prepared_dir.resolve()), *common]
             began = time.monotonic()
+            if part is None:
+                result = invoke(role, "preembed-plan", command, "build", scratch=("plan", {"LCM_D1_BUILD_PARTITION": "plan"}))
+                return {"role": role, "part": None, "arm": "preembed-plan", **result, "elapsed_s": time.monotonic() - began}
             result = invoke(role, f"preembed-part-{part}", command, "build", part=part)
             return {"role": role, "part": part, "arm": "preembed", **result, "elapsed_s": time.monotonic() - began}
 
-        builds = run_pool([(role, part) for role in products for part in range(args.build_workers)], 2 * args.build_workers, build)
-        preembed = builds
+        # One plan worker per role runs beside the parts; it enumerates only and embeds nothing.
+        tasks = [(role, part) for role in products for part in range(args.build_workers)] + [(role, None) for role in products]
+        preembed = run_pool(tasks, 2 * args.build_workers + 2, build)
         merged_entries, duplicate_keys = {}, {}
         for role in products:
             rows = [row for row in preembed if row["role"] == role]
+            proof = partition_proof[role] = {"workers": args.build_workers, "build_threads": build_threads_requested, "env": dict(build_env),
+                                             "plan_calls": None, "plan_units": None, "dispatch_compare": None, "verify_calls": None,
+                                             "verify_mismatches": None, "merged_entries": None, "aprime_dispatches": None,
+                                             "sealed": False, "failure": None}
             if interrupt[0] or any(row["exit_code"] for row in rows):
+                proof["failure"] = "interrupted" if interrupt[0] else "a part or plan worker failed"
                 continue
-            build_threads[role] = [json.loads((args.output / f"{role}-{row['arm']}-part-{row['part']}-threads.json").read_text()) for row in rows]
-            parts = [caches[role].parent / "parts" / f"part-{part}.sqlite" for part in range(args.build_workers)]
-            merged_entries[role], duplicate_keys[role] = merge(parts, caches[role])
-            command = ["prewarm-cache", "--prepared-dir", str(args.aprime_dir.resolve()), "--shards-manifest", str(args.aprime_dir.resolve()), *common]
-            began = time.monotonic()
-            result = invoke(role, "preembed-aa", command, "build")
-            preembed.append({"role": role, "part": None, "arm": "preembed-aa", **result, "elapsed_s": time.monotonic() - began})
-            if result["exit_code"] or interrupt[0]:
-                continue
-            role_threads[role] = json.loads((args.output / f"{role}-preembed-aa-threads.json").read_text())
-            manifests[role] = seal(caches[role])
+            try:
+                build_threads[role] = [json.loads((out / f"{role}-preembed-part-{row['part']}-threads.json").read_text()) for row in rows if row["arm"] == "preembed"]
+                parts = [caches[role].parent / "parts" / f"part-{part}.sqlite" for part in range(args.build_workers)]
+                merged_entries[role], duplicate_keys[role] = merge(parts, caches[role])
+                proof["merged_entries"] = merged_entries[role]
+                plan_log = out / f"{role}-preembed-plan-dispatch.jsonl"
+                plan = compare.jsonl(plan_log)
+                proof.update(plan_calls=len(plan), plan_units=sum(row["sent"] for row in plan))
+                part_logs = [path for part in range(args.build_workers) for path in [out / f"{role}-preembed-part-{part}-dispatch.jsonl"] if path.exists()]
+                found, equal = compare.dispatch(plan_log, *part_logs)
+                proof["dispatch_compare"] = {"exit": int(not equal), "only_serial": found["only_serial"], "only_parts": found["only_parts"],
+                                             "count_mismatch": found["count_mismatches"], "hash_mismatch": found["hash_mismatches"],
+                                             "duplicate_plan_calls": found["duplicate_serial_calls"], "duplicate_part_calls": found["duplicate_part_calls"]}
+                if not equal:
+                    raise PartitionProofError("the parts' dispatch logs differ from the plan log")
+                if not plan or merged_entries[role] != proof["plan_units"]:
+                    raise PartitionProofError("merged entries differ from the plan's unique units")
+                proof["verify_calls"] = verify_sample([row["call"] for row in plan], args.build_workers)
+                verify_log = out / f"{role}-preembed-verify-verify.jsonl"
+                began = time.monotonic()
+                result = invoke(role, "preembed-verify", command, "build", scratch=("verify", {
+                    "LCM_D1_VERIFY_CALLS": json.dumps(proof["verify_calls"]), "LCM_D1_VERIFY_AGAINST": str(caches[role]), "LCM_D1_VERIFY_LOG": str(verify_log)}))
+                preembed.append({"role": role, "part": None, "arm": "preembed-verify", **result, "elapsed_s": time.monotonic() - began})
+                if result["exit_code"] or interrupt[0]:
+                    raise PartitionProofError("the verify worker failed")
+                verified = compare.jsonl(verify_log)
+                proof["verify_mismatches"] = sum(row["mismatches"] for row in verified)
+                if sorted(row["call"] for row in verified) != proof["verify_calls"] or proof["verify_mismatches"]:
+                    raise PartitionProofError("the verify re-embed differs from the merged cache")
+                command_aa = ["prewarm-cache", "--prepared-dir", str(args.aprime_dir.resolve()), "--shards-manifest", str(args.aprime_dir.resolve()), *common]
+                began = time.monotonic()
+                result = invoke(role, "preembed-aa", command_aa, "build")
+                preembed.append({"role": role, "part": None, "arm": "preembed-aa", **result, "elapsed_s": time.monotonic() - began})
+                if result["exit_code"] or interrupt[0]:
+                    raise PartitionProofError("the A-prime pre-embed failed")
+                role_threads[role] = json.loads((out / f"{role}-preembed-aa-threads.json").read_text())
+                aa_log = out / f"{role}-preembed-aa-dispatch.jsonl"
+                proof["aprime_dispatches"] = len(aa_log.read_text().splitlines()) if aa_log.exists() else 0
+                if proof["aprime_dispatches"]:
+                    raise PartitionProofError("the A-prime pre-embed sent units the merged cache lacks")
+                manifests[role] = seal(caches[role])
+                proof["sealed"] = True
+            except Exception as exc:
+                proof["failure"] = str(exc) if isinstance(exc, PartitionProofError) else f"{type(exc).__name__}: {exc}"
     tasks = [(role, path.parent.name, path.parent) for role in products for path in shards]
     tasks += [(role, name, args.aprime_dir) for role in products for name in ("aa-A", "aa-Aprime")]
 
@@ -272,13 +381,22 @@ def _main(argv, interrupt):
     build_ok = not built or build_concurrency * max((n for n in built if n is not None), default=1) <= args.thread_budget
     budget_ok = shard_ok and build_ok
     arms = run_pool([task for task in tasks if task[0] in manifests], args.jobs, launch) if budget_ok and not interrupt[0] else []
+    embedding_path = {}
+    try:
+        model_files = model_files_sha256(env)
+        for role in products:
+            embedding_path[role] = embedding_path_fingerprint(products[role], build_threads.get(role, []), model_files)
+    except Exception as exc:
+        embedding_path = {role: {"error": f"{type(exc).__name__}: {exc}", "sha256": None} for role in products}
+    for role, proof in partition_proof.items():
+        proof.update(embedding_path_fingerprint=embedding_path[role]["sha256"], runtime=embedding_path[role].get("runtime"))
     receipt = {"instrument_sha": instrument, "products": pins, "jobs": args.jobs,
                # A clean A-prime arm that found every unit cached never creates its log: that is 0, not unknown.
                "aprime_dispatches": {role: (len(path.read_text().splitlines()) if path.exists() else 0)
                                      if not interrupt[0] and any(row["role"] == role and row["arm"] == "preembed-aa" and not row["exit_code"] and not row["timed_out"] for row in preembed)
                                      else None
                                      for role in products for path in [args.output / f"{role}-preembed-aa-dispatch.jsonl"]},
-               "cache_manifests": manifests, "role_threads": role_threads,
+               "cache_manifests": manifests, "role_threads": role_threads, "embedding_path": embedding_path,
                "thread_budget_ok": budget_ok, "build_thread_budget_ok": build_ok, "shard_thread_budget_ok": shard_ok,
                "thread_budget_fully_known": len(effective) == 2 and None not in effective,
                "worker_timeout": args.worker_timeout, "preembed": preembed, "interrupted": bool(interrupt[0]),
@@ -287,11 +405,12 @@ def _main(argv, interrupt):
                "wall_seconds": time.monotonic() - started, "arms": arms,
                "not_proven": "Eight-hour acceptance requires the complete quiet-window run; recall equivalence is a separate gate."}
     if args.build_workers > 1:
-        receipt.update(build_workers=args.build_workers, build_threads_requested=build_threads_requested, merged_entries=merged_entries, duplicate_keys=duplicate_keys, build_threads=build_threads)
+        receipt.update(build_workers=args.build_workers, build_threads_requested=build_threads_requested, merged_entries=merged_entries, duplicate_keys=duplicate_keys, build_threads=build_threads, partition_proof=partition_proof)
     elif args.build_threads is not None:
         receipt["build_threads_requested"] = build_threads_requested
     (args.output / "d1-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    return 128 + interrupt[0] if interrupt[0] else int(not budget_ok or any(row["exit_code"] for row in preembed) or any(arm["exit_code"] or arm["parse_error"] for arm in arms))
+    return 128 + interrupt[0] if interrupt[0] else int(not budget_ok or any(row["exit_code"] for row in preembed) or any(proof["failure"] for proof in partition_proof.values())
+                                                         or any(arm["exit_code"] or arm["parse_error"] for arm in arms))
 
 
 if __name__ == "__main__":
