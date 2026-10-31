@@ -3057,12 +3057,18 @@ class ReconcileMixin:
         messages: List[Dict[str, Any]],
         *,
         allow_session_end_replay_proof: bool = False,
+        session_counts: Optional[list] = None,
     ) -> int:
-        """Infer the in-memory cursor for an existing session after process restart."""
+        """Infer the in-memory cursor for an existing session after process restart.
+
+        ``session_counts`` (#1286), when given, receives the session's stored row count at this bind.
+        """
         if not self._session_id or not messages:
             return 0
 
         session_count = self._store.get_session_count(self._session_id)
+        if session_counts is not None:
+            session_counts.append(session_count)
         run = _StoreCursorRun(
             messages=messages, session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
