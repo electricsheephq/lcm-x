@@ -1,4 +1,5 @@
-"""#1286: a cleanup-only compress() the host commits leaves a durable proof, so a restart stores nothing again.
+"""#1286: a list the host commits in place of its own leaves a durable proof of that list, so a restart stores
+nothing again.
 
 An automatic below-threshold pass ends ``sanitized`` and hands the host a rewritten list: the replay view's
 externalized stub for an oversized payload, or an assistant row with its reasoning block stripped. Hermes commits
@@ -7,12 +8,17 @@ the proof of that list stayed process-local, or was never built when the replay 
 swap), so a gateway restart left the cold bind no proof of the committed list: reconcile fell to cursor 0 and
 the unstamped rows already stored were stored again.
 
-Each variant: turns, the automatic cleanup pass, Hermes's in-place commit, a warm turn, then a restart whose
-first ingest carries the next turn. Only the two new turns' rows may be stored. The controls run the same flow
-without the cleanup pass, and with a cleanup pass the host never commits (its proof must not become durable).
+The field chain had one more step: a later warm turn found a row the host had changed before the cursor and
+stored it at the store tail, out of host order. The durable proof's in-order walk of the rows stored after it
+then failed at the cold bind, so the proof is re-keyed to the host's list after such a store.
+
+Each test runs turns, the automatic cleanup pass, Hermes's in-place commit, warm turns, then a restart whose
+first ingest carries the next turn; only the new rows may be stored. The controls run without the cleanup pass,
+with a cleanup pass the host never commits, and with a crash before the re-key.
 """
 from __future__ import annotations
 
+import re
 from collections import Counter
 from copy import deepcopy
 
@@ -23,6 +29,7 @@ import hermes_lcm.survival_fit as survival_fit
 import hermes_lcm.tokens as tokens
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER
 from hermes_lcm.tokens import count_messages_tokens
 
 SID, CID = "cleanup-rewrite-proof", "cleanup-rewrite-proof-conv"
@@ -30,6 +37,7 @@ PAD = " alpha beta gamma delta" * 30
 # Above the 100k non-tool floor (#1016): ingest externalizes it and the replay view swaps in the stub.
 RAW = ("r " * 30_000) + "RAW_NEEDLE " + ("r " * 30_000)
 THINK = "<think>weigh the options before replying</think>"
+STEER = {"role": "user", "content": "steer: keep the answer short"}  # unstamped, as the host inserts it
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +54,12 @@ def _no_summaries(monkeypatch):
         raise AssertionError("a cleanup-only pass runs no summariser")
 
     monkeypatch.setattr(lcm_engine, "summarize_with_escalation", summarize)
+
+
+def _stub_summarizer(*args, **kwargs):
+    text = kwargs.get("text") if "text" in kwargs else (args[0] if args else "")
+    tags = sorted(set(re.findall(r"\[T(\d+)\]", text or "")))
+    return "Stub summary covers " + " ".join("T" + tag for tag in tags) + ".\nExpand for details about: stub", 1
 
 
 class Host:
@@ -69,11 +83,26 @@ class Host:
         self.engines.append(engine)
         return engine
 
+    def stamp(self):
+        self.clock += 1.0
+        return self.clock
+
     def turn(self, user=None, reply=None):
         i, self.n_turns = self.n_turns, self.n_turns + 1
-        self.clock += 1.0
-        self.live += [{"role": "user", "content": user or f"[T{i}] user turn{PAD}", "timestamp": self.clock},
+        self.live += [{"role": "user", "content": user or f"[T{i}] user turn{PAD}", "timestamp": self.stamp()},
                       {"role": "assistant", "content": reply or f"reply to T{i}{PAD}"}]
+        self.engine.ingest(self.live)
+
+    def tool_turn(self):
+        i, self.n_turns = self.n_turns, self.n_turns + 1
+        call = f"call_{i}"
+        self.live += [
+            {"role": "user", "content": f"[T{i}] look it up{PAD}", "timestamp": self.stamp()},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": call, "type": "function", "function": {"name": "search", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": call, "content": f"tool output {i}:" + " result" * 60},
+            {"role": "assistant", "content": f"reply to T{i}{PAD}"},
+        ]
         self.engine.ingest(self.live)
 
     def cleanup_pass(self, preflight):
@@ -94,6 +123,13 @@ class Host:
         assert result is not self.live and len(result) == len(before) and result != before
         return result, before
 
+    def compact(self):
+        """A forced compress() that publishes a summary, committed in place (an earlier compaction's proof)."""
+        before = deepcopy(self.live)
+        result = self.engine.compress(self.live, force=True)
+        assert self.engine._last_compression_status == "compacted"
+        self.commit_in_place(result, before)
+
     def commit_in_place(self, result, before):
         """Hermes's in-place order: end on the list compress() was given, adopt, then the compression boundary."""
         self.engine.on_session_end(SID, before)
@@ -105,13 +141,20 @@ class Host:
         self.engine.shutdown()
         self.engine = self.bind()
 
+    def rows(self):
+        """(role, content, tool_call_id, tool_calls) per stored row, in store order."""
+        return [tuple(row) for row in self.engine._store._conn.execute(
+            "SELECT role, content, tool_call_id, tool_calls FROM messages WHERE session_id = ? ORDER BY store_id",
+            (SID,)).fetchall()]
+
     def stored(self):
         return self.engine._store.get_session_count(SID)
 
+    def count(self, content):
+        return sum(1 for row in self.rows() if row[1] == content)
+
     def duplicated(self):
-        rows = self.engine._store._conn.execute(
-            "SELECT role, content FROM messages WHERE session_id = ?", (SID,)).fetchall()
-        return {key: n for key, n in Counter((row[0], row[1]) for row in rows).items() if n > 1}
+        return {key: n for key, n in Counter(self.rows()).items() if n > 1}
 
     def close(self):
         for engine in self.engines:
@@ -125,32 +168,41 @@ def host(tmp_path):
     host.close()
 
 
-def _turns(host, variant):
-    for i in range(6):
+def _turns(host, variant, n=6):
+    for i in range(n):
         if variant == "stub" and i == 2:
-            host.turn(user=f"[T{i}] {RAW}")
+            host.turn(user=f"[T{host.n_turns}] {RAW}")
         elif variant == "reasoning" and i == 2:
-            host.turn(reply=f"{THINK}reply to T{i}{PAD}")
+            host.turn(reply=f"{THINK}reply to T{host.n_turns}{PAD}")
         else:
             host.turn()
 
 
-@pytest.mark.parametrize("variant", ["stub", "reasoning"])
-def test_committed_cleanup_rewrite_survives_a_restart(host, variant):
-    _turns(host, variant)
+def _commit_cleanup(host, variant):
     result, before = host.cleanup_pass(preflight=variant == "reasoning")
     if variant == "stub":
         assert any(str(m.get("content")).startswith("[Externalized payload: kind=raw_payload;") for m in result)
     else:
         assert THINK not in str(result) and THINK in str(before)
     host.commit_in_place(result, before)
-    # The boundary proves the committed list: the cursor indexes it and its proof is durable.
-    assert host.engine._ingest_cursor_needs_reconcile is False
-    assert host.engine._ingest_cursor == len(result)
-    assert host.engine._durable_commit_proof_payload() is not None
+
+
+def _salvage(messages, keep=2):
+    """Hermes's compression salvage: tool outputs over 200 characters become the placeholder, except the newest
+    ``keep``; each row keeps its other keys."""
+    tools = [i for i, m in enumerate(messages) if m.get("role") == "tool" and len(str(m.get("content"))) > 200]
+    out = list(messages)
+    for i in tools[:-keep] if keep else tools:
+        out[i] = {**messages[i], "content": _HERMES_PRUNED_TOOL_PLACEHOLDER}
+    return out
+
+
+@pytest.mark.parametrize("variant", ["stub", "reasoning"])
+def test_committed_cleanup_rewrite_survives_a_restart(host, variant):
+    _turns(host, variant)
+    _commit_cleanup(host, variant)
     rows = host.stored()
     host.turn()
-    assert host.stored() == rows + 2
     host.restart()
     host.turn()  # the restarted engine's first ingest: the committed list, the warm turn and the next turn
     assert host.stored() == rows + 4
@@ -158,11 +210,21 @@ def test_committed_cleanup_rewrite_survives_a_restart(host, variant):
 
 
 @pytest.mark.parametrize("variant", ["stub", "reasoning"])
-def test_cleanup_rewrite_the_host_never_commits_stays_local(host, variant):
+def test_the_boundary_makes_a_committed_cleanup_proof_durable(host, variant):
     _turns(host, variant)
     result, before = host.cleanup_pass(preflight=variant == "reasoning")
-    assert host.engine._compress_commit_proof and host.engine._compress_commit_proof.get("cleanup_rewrite")
+    assert host.engine._compress_commit_proof.get("cleanup_rewrite") is True
     assert host.engine._durable_commit_proof_payload() is None  # durable only on the commit signal
+    host.commit_in_place(result, before)
+    assert host.engine._ingest_cursor_needs_reconcile is False
+    assert host.engine._ingest_cursor == len(result)
+    assert host.engine._durable_commit_proof_payload() is not None
+
+
+@pytest.mark.parametrize("variant", ["stub", "reasoning"])
+def test_a_cleanup_rewrite_the_host_never_commits_stays_local(host, variant):
+    _turns(host, variant)
+    host.cleanup_pass(preflight=variant == "reasoning")
     rows = host.stored()
     host.turn()  # the host kept its own list
     assert host.engine._durable_commit_proof_payload() is None
@@ -170,6 +232,165 @@ def test_cleanup_rewrite_the_host_never_commits_stays_local(host, variant):
     host.turn()
     assert host.stored() == rows + 4
     assert host.duplicated() == {}
+
+
+@pytest.mark.parametrize("variant", ["stub", "reasoning"])
+def test_a_cleanup_rewrite_after_a_published_compaction_survives_a_restart(host, variant, monkeypatch):
+    """The field order: an earlier published compaction left a durable proof that the committed cleanup list
+    makes stale."""
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _stub_summarizer)
+    _turns(host, None)
+    host.compact()
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", lambda *a, **k: pytest.fail("summariser called"))
+    _turns(host, variant)
+    _commit_cleanup(host, variant)
+    rows = host.stored()
+    host.turn()
+    host.restart()
+    host.turn()
+    assert host.stored() == rows + 4
+    assert host.duplicated() == {}
+
+
+def _change(host, change, *, insert_at, replace_at):
+    """The host changes its list before the cursor: an unstamped /steer row inserted, or a stamped user row
+    replaced by a new one (another stamp). Returns the changed row's content."""
+    if change == "insert":
+        host.live.insert(insert_at, dict(STEER))
+        return STEER["content"]
+    content = f"[edited] the user rewrote this turn{PAD}"
+    host.live[replace_at] = {"role": "user", "content": content, "timestamp": host.stamp()}
+    return content
+
+
+def _restart_stores_only_the_next_turn(host):
+    """A restart and one turn: the restarted engine's first ingest stores that turn's two rows and nothing again.
+    (Duplicates the warm path already made stay as they were: #633's displaced unstamped reply, #259's batch.)"""
+    rows, duplicated = host.stored(), host.duplicated()
+    host.restart()
+    host.turn()
+    assert host.stored() == rows + 2
+    assert host.duplicated() == duplicated
+
+
+@pytest.mark.parametrize("change", ["insert", "replace"])
+@pytest.mark.parametrize("variant", ["stub", "reasoning"])
+def test_a_row_changed_among_the_warm_turns_is_not_stored_again_after_a_restart(host, variant, change):
+    """The field chain: after the committed cleanup list, the host changes its list among the warm turns, and
+    the next turn stores the changed row at the store tail, out of host order."""
+    _turns(host, variant)
+    _commit_cleanup(host, variant)
+    host.turn()
+    host.turn()
+    changed = _change(host, change, insert_at=len(host.live) - 3, replace_at=len(host.live) - 4)
+    host.turn()
+    assert host.count(changed) == 1
+    _restart_stores_only_the_next_turn(host)
+    assert host.count(changed) == 1
+
+
+@pytest.mark.parametrize("change", ["insert", "replace"])
+def test_a_row_changed_after_a_published_compaction_is_not_stored_again_after_a_restart(host, change, monkeypatch):
+    """The whole field order: an earlier published compaction (its summary and carried rows head the list), the
+    committed cleanup list, warm turns, then a row the host changes among them. The re-key proves that list too."""
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _stub_summarizer)
+    _turns(host, None)
+    host.compact()
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", lambda *a, **k: pytest.fail("summariser called"))
+    _turns(host, "reasoning")
+    _commit_cleanup(host, "reasoning")
+    host.turn()
+    host.turn()
+    changed = _change(host, change, insert_at=len(host.live) - 3, replace_at=len(host.live) - 4)
+    host.turn()
+    assert host.count(changed) == 1
+    _restart_stores_only_the_next_turn(host)
+    assert host.count(changed) == 1
+
+
+@pytest.mark.parametrize("change", ["insert", "replace"])
+def test_a_row_changed_inside_the_committed_list_is_not_stored_again_after_a_restart(host, change):
+    """The first ingest after the commit no longer finds the committed list as the cursor's prefix and persists
+    the batch (#259); the restart after it must not persist it again."""
+    _turns(host, "reasoning")
+    _commit_cleanup(host, "reasoning")
+    changed = _change(host, change, insert_at=len(host.live) - 2, replace_at=len(host.live) - 4)
+    host.turn()
+    assert host.count(changed) == 1
+    _restart_stores_only_the_next_turn(host)
+    assert host.count(changed) == 1
+
+
+@pytest.mark.parametrize("variant", ["stub", "reasoning"])
+def test_a_reply_the_warm_path_never_stored_is_not_proven_away(host, variant):
+    """I1: a retry or an edit-resend replaces the stamped user row and its unstamped reply between two ingests.
+    The warm anchor stores the new user row out of host order but keeps the new reply as a positional replay, so
+    it is never stored warm (a gap that predates the re-key). No proof may claim that reply: the restart stores it
+    (with duplicates, as before the re-key), and a second restart stores only the next turn."""
+    _turns(host, variant)
+    _commit_cleanup(host, variant)
+    host.turn()
+    host.turn()
+    user, reply = f"[resent] the user resent this turn{PAD}", f"a new reply to the resent turn{PAD}"
+    host.live[-2:] = [{"role": "user", "content": user, "timestamp": host.stamp()},
+                      {"role": "assistant", "content": reply}]
+    proof = host.engine._durable_commit_proof_payload()
+    host.turn()
+    assert (host.count(user), host.count(reply)) == (1, 0)
+    assert host.engine._durable_commit_proof_payload() == proof  # not re-keyed over the unstored reply
+    host.restart()
+    host.turn()
+    assert host.count(reply) == 1
+    _restart_stores_only_the_next_turn(host)
+    assert host.count(reply) == 1
+
+
+def test_a_salvaged_commit_survives_a_restart(host):
+    """Hermes salvage commits the cleanup list with old tool outputs cleared; the placeholders alias their stored
+    rows (#773), warm and cold."""
+    for _ in range(3):
+        host.tool_turn()
+    _turns(host, "reasoning", n=3)
+    result, before = host.cleanup_pass(preflight=True)
+    host.commit_in_place(_salvage(result), before)
+    assert _HERMES_PRUNED_TOOL_PLACEHOLDER in str(host.live)
+    rows = host.stored()
+    host.turn()
+    host.restart()
+    host.turn()
+    assert host.stored() == rows + 4
+    assert host.duplicated() == {}
+
+
+def test_a_crash_before_the_re_key_duplicates_but_loses_nothing(host, monkeypatch):
+    """I1: the rows are stored before the proof is re-keyed; a crash in between (no re-key) may store rows again
+    after the restart, but every host row stays stored."""
+    _turns(host, "reasoning")
+    _commit_cleanup(host, "reasoning")
+    host.turn()
+    host.turn()
+    host.live.insert(len(host.live) - 3, dict(STEER))
+    monkeypatch.setattr(LCMEngine, "_rekey_durable_commit_proof", lambda self, messages: None, raising=False)
+    host.turn()
+    host.restart()
+    host.turn()
+    stored = {(row[0], row[1]) for row in host.rows()}
+    assert all((m["role"], m["content"]) in stored for m in host.live if m["role"] in ("user", "assistant"))
+
+
+def test_a_row_the_host_changes_after_the_restart_is_still_stored(host):
+    """Exactly-once, the other way: the re-keyed proof never hides a row that changed after it."""
+    _turns(host, "reasoning")
+    _commit_cleanup(host, "reasoning")
+    host.turn()
+    host.turn()
+    host.live.insert(len(host.live) - 3, dict(STEER))
+    host.turn()  # stores the inserted row out of host order: the proof is re-keyed to this list
+    host.restart()
+    edited = f"[T7] the user edited this turn{PAD}"
+    host.live[len(host.live) - 4] = {"role": "user", "content": edited, "timestamp": host.stamp()}
+    host.turn()
+    assert host.count(edited) == 1
 
 
 @pytest.mark.parametrize("variant", ["stub", "reasoning"])

@@ -7835,7 +7835,7 @@ class LCMEngine(
         """
         self._capture_host_rewrites(messages)
         n = len(messages)
-        cursor = min(max(self._ingest_cursor, 0), n)
+        cursor = entry_cursor = min(max(self._ingest_cursor, 0), n)
         new_prefix_occurrences = set()
         unchanged_prefix_occurrences = set()
         proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.
@@ -7979,6 +7979,7 @@ class LCMEngine(
             )
             self._ingest_cursor_needs_reconcile = False
         cursor = min(max(self._ingest_cursor, 0), n)
+        durable = None
         if reconciled_existing_session:
             try:
                 durable = self._durable_commit_proof_payload()
@@ -8331,6 +8332,26 @@ class LCMEngine(
         # (maintainer #388 P1).
         self._ingest_cursor = n
         self._persist_ingest_replay_evidence(active_replay_messages)
+        # #1286: a row stored out of host order (one the host changed or inserted before the proven end goes to the
+        # store tail) breaks the durable proof's in-order after-walk at the next cold bind: re-key it, after the
+        # store (I1). Warm: below the entry cursor. Reconciled with a durable proof: below its cursor, or anywhere
+        # when nothing proved the list (a persisted batch, which every later restart would otherwise repeat).
+        if not reconciled_existing_session:
+            proven_end = entry_cursor
+        elif durable is None:
+            proven_end = 0
+        elif proven_cursor is not None:
+            proven_end = proven_cursor
+        else:
+            proven_end = n if self._last_ingest_reconciliation.get("action") == "persisted batch" else 0
+        if unaudited_from is None and any(store_id and idx < proven_end for (idx, _msg), store_id
+                                          in zip(messages_to_store_with_index, store_ids)):
+            try:
+                with self._ingest_evidence():
+                    self._rekey_durable_commit_proof(messages)
+            except Exception as exc:
+                self._raise_ingest_busy(exc)
+                logger.warning("LCM durable commit proof re-key failed (%s)", type(exc).__name__)
         logger.debug("Ingested %d messages into LCM store", len(messages_to_store_with_index))
         # Most ``protected_messages`` changes are storage-only: inline media and
         # data/base64 substrings stay provider-usable in active replay. The
