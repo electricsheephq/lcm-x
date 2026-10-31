@@ -720,7 +720,6 @@ class CompactionMixin:
     ) -> List[Dict[str, Any]]:
         return select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens)
 
-    @_counted_compaction
     def _stop_pass_for_shutdown(self) -> None:
         """#2101: a pass that stops for shutdown leaves the state of an identity no-op."""
         self._compress_occurrences = None
@@ -728,6 +727,7 @@ class CompactionMixin:
         self._last_compression_noop_reason = "engine shutting down"
         self._ingest_cursor_needs_reconcile = True  # the pass may have moved the cursor for a result it drops
 
+    @_counted_compaction
     def compress(self, messages: List[Dict[str, Any]],
                  current_tokens: int = None,
                  focus_topic: Optional[str] = None,
