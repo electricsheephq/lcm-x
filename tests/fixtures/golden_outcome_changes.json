@@ -273,8 +273,8 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "placeholder-0-1-summary": {
-      "outcome_sha": "7d463cdef32f1c06e17fabd65b1c5c2e07ff8bd9331437f9bf48096cd423c06d",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "bd78516d7009fd547225a92bfa389f6513223f97257c365aa18115a8d0381a46",
+      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
     },
     "placeholder-0-2-all": {
       "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
@@ -297,8 +297,8 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "placeholder-0-2-summary": {
-      "outcome_sha": "7d463cdef32f1c06e17fabd65b1c5c2e07ff8bd9331437f9bf48096cd423c06d",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "bd78516d7009fd547225a92bfa389f6513223f97257c365aa18115a8d0381a46",
+      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
     },
     "placeholder-1-1-all": {
       "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
@@ -321,8 +321,8 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "placeholder-1-1-summary": {
-      "outcome_sha": "35d6c0ecc9cb34a545493799ac1c248fff46e4c31c3df4bf9e826fe54bf36de5",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "36222bba788399db205798aa2022e514c10ce9a82a86b7a3d1dd019e60f9b111",
+      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
     },
     "placeholder-1-2-all": {
       "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
@@ -345,8 +345,8 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "placeholder-1-2-summary": {
-      "outcome_sha": "7d463cdef32f1c06e17fabd65b1c5c2e07ff8bd9331437f9bf48096cd423c06d",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "bd78516d7009fd547225a92bfa389f6513223f97257c365aa18115a8d0381a46",
+      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
     },
     "placeholder-2-1-all": {
       "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
@@ -369,8 +369,8 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "placeholder-2-1-summary": {
-      "outcome_sha": "35d6c0ecc9cb34a545493799ac1c248fff46e4c31c3df4bf9e826fe54bf36de5",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "36222bba788399db205798aa2022e514c10ce9a82a86b7a3d1dd019e60f9b111",
+      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
     },
     "placeholder-2-2-all": {
       "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
@@ -393,8 +393,8 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "placeholder-2-2-summary": {
-      "outcome_sha": "7d463cdef32f1c06e17fabd65b1c5c2e07ff8bd9331437f9bf48096cd423c06d",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "bd78516d7009fd547225a92bfa389f6513223f97257c365aa18115a8d0381a46",
+      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
     },
     "proof-consumed-consulted": {
       "outcome_sha": "63f07512f4ecdc1b66088eadd07159856a02237704daf08ac6a7e42ac6d7d299",
@@ -613,8 +613,8 @@
       "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged. On main this failed ingest also committed an empty message_relations table and the ignored_active_replay_placeholder_hashes metadata key without its rows; now it stores nothing, and after the next ingest the stored tables match main"
     },
     "scaffold-metadata": {
-      "outcome_sha": "ac12f7e348a3b9bbde60aacd737522a1eadcc5e6041b2987240468e8ddc1a245",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "c4915ab52bf90ba8ba842e4f49ac72d1a85b728d86765871684544e9f0488ee8",
+      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
     },
     "sequence-compaction": {
       "outcome_sha": "a37af98893381354bb65922d9aa8dd335f0beb4a39aea6080a08ff925ba72389",
@@ -657,8 +657,8 @@
       "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
     },
     "sqlite-metadata": {
-      "outcome_sha": "cc3feb25e3656e751d76427225f8bba12188305726552b46ec168923a54a0b1f",
-      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
+      "outcome_sha": "f8feea0fd166723728c6791646603d085af912d3869b7775e90f587834846890",
+      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
     },
     "sqlite-prematch": {
       "outcome_sha": "2764e3094b9bbece23701d352a64b9d51a8f95782c9c9cdde93ea65d181f6566",
