@@ -550,8 +550,30 @@ classification. The registry lock never spans store or SQLite work. Salt changes
 drop stale entries. Claims exclude concurrent attempts; rollback (including a
 busy retry or interrupt) releases them; successful entries settle immediately after
 COMMIT, while callbacks count recovery. Only the originating engine with the
-same compress-call number receives the recovered handle; other retries leave
-the emission proposed and count it as unhandled.
+same compress-call number receives the recovered handle, provided the entry is
+neither superseded nor refused; other retries count it as unhandled.
+
+A host refusal or adoption before the retry is kept on the pending entry
+(`ledger.emission_signal_deferred`) and applied to its descriptors and emission
+view in the retry's savepoint. Refusal is sticky: adoption cannot overwrite it,
+and a refused entry never restores a handle. A signal arriving between the
+in-savepoint read and publication counts `ledger.emission_signal_late`; it does
+not reach the committed state, though a late refusal recorded on the entry
+still restores no handle.
+A later successful exit write supersedes older pending entries in that lineage.
+It marks them inside its write transaction, so a retry through any store on the
+same database, which reads the mark only inside its own write transaction, sees
+it; a write that does not commit restores the mark under its store's write lock.
+Their retries recover descriptors, including
+any signal, without an emission view, and count
+`ledger.emission_retry_superseded`. Other entries retry oldest first in
+registry order, so within one process emission views stay in emission order,
+unless an older entry's retry fails while a newer entry's retry succeeds.
+Narrow windows remain open and must close before P1d relies on emission
+views or states (#2112): a late refusal that never reaches the committed state,
+a refusal between the settle at COMMIT and publication, a refusal for an entry
+another engine recovered, an entry keyed by a provisional lineage, and that
+partial retry failure, after which the older entry's view is the newer one.
 
 Inside the ingest ledger savepoint, a stored row matching a still-pending
 descriptor in this store and lineage gains one `generated_unproven` relation.

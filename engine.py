@@ -7421,19 +7421,29 @@ class LCMEngine(
         finally:
             self._last_emission_write_ms = {"digest": (_perf_counter() - started) * 1000, "ledger": 0.0}
         started = _perf_counter()
+        superseded = []
         try:
-            with self._emission_owner(salt) as (conn, reason):
-                if conn is None:
-                    if reason == "in_transaction":
-                        self._mark_pending_emission(store_key, lineage, payload)
-                    return
-                persisted = conn.execute("SELECT value FROM ledger_meta WHERE key=?", (key,)).fetchone()
-                lineage = persisted[0] if persisted else lineage
-                seq = ingest_ledger.next_view_seq(conn)
-                ids = ingest_ledger.insert_emissions(conn, lineage, seq, rows)
-                for i, emission_id in zip(indices, ids):
-                    entries[i] = entries[i]._replace(ref=emission_id, is_descriptor=True)
-                ingest_ledger.write_view(conn, salt, lineage, "emission", "proposed", entries, view_seq=seq)
+            # Supersede older pending entries before COMMIT: a retry through any store on this database reads the
+            # mark only inside its own write transaction. A write that does not commit restores it, still under
+            # this store's write lock, so this store's retries never see a mark without the write.
+            with self._store._write_lock:
+                try:
+                    with self._emission_owner(salt) as (conn, reason):
+                        if conn is None:
+                            if reason == "in_transaction":
+                                self._mark_pending_emission(store_key, lineage, payload)
+                            return
+                        persisted = conn.execute("SELECT value FROM ledger_meta WHERE key=?", (key,)).fetchone()
+                        lineage = persisted[0] if persisted else lineage
+                        seq = ingest_ledger.next_view_seq(conn)
+                        ids = ingest_ledger.insert_emissions(conn, lineage, seq, rows)
+                        for i, emission_id in zip(indices, ids):
+                            entries[i] = entries[i]._replace(ref=emission_id, is_descriptor=True)
+                        ingest_ledger.write_view(conn, salt, lineage, "emission", "proposed", entries, view_seq=seq)
+                        superseded = ingest_ledger.note_emission_written(store_key, lineage)
+                except BaseException:
+                    ingest_ledger.restore_superseded(superseded)
+                    raise
             self._ledger_count("ledger.emissions_written", amount=len(ids))
             self._ledger_count("ledger.emission_views_written")
             self._emission_handle = ingest_ledger.EmissionHandle(lineage, seq, self._compress_calls, sid, conversation_key)
@@ -7476,10 +7486,14 @@ class LCMEngine(
                         entries = list(entry["entries"])
                         for i, emission_id in zip(entry["indices"], ids):
                             entries[i] = entries[i]._replace(ref=emission_id, is_descriptor=True)
-                        ingest_ledger.write_view(conn, salt, lineage, "emission", "proposed", entries, view_seq=seq)
+                        if not entry["superseded"]:
+                            ingest_ledger.write_view(conn, salt, lineage, "emission", "proposed", entries, view_seq=seq)
+                        signal = ingest_ledger.pending_emission_signal(entry)
+                        if signal is not None:
+                            ingest_ledger.set_emission_state(conn, lineage, seq, signal)
                     succeeded.append(entry)
-                    handles.append(ingest_ledger.EmissionHandle(lineage, seq, entry["compress_call"],
-                                                               entry["session_id"], entry["conversation_key"]))
+                    handles.append((ingest_ledger.EmissionHandle(lineage, seq, entry["compress_call"],
+                                                                entry["session_id"], entry["conversation_key"]), signal))
                 except Exception as exc:
                     if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction:
                         raise
@@ -7487,9 +7501,15 @@ class LCMEngine(
                     self._ledger_count("ledger.emission_retry_failed", exc)
 
             def publish():
-                for entry, handle in zip(succeeded, handles):
+                for entry, (handle, applied_signal) in zip(succeeded, handles):
                     self._ledger_count("ledger.emission_retry_ok")
-                    if entry["origin"]() is self and self._compress_calls == entry["compress_call"]:
+                    signal = ingest_ledger.pending_emission_signal(entry)
+                    if signal != applied_signal:
+                        self._ledger_count("ledger.emission_signal_late")
+                    if entry["superseded"]:
+                        self._ledger_count("ledger.emission_retry_superseded")
+                    if (entry["origin"]() is self and self._compress_calls == entry["compress_call"]
+                            and not entry["superseded"] and signal != "refused"):
                         self._emission_handle = handle
                     else:
                         self._ledger_count("ledger.emission_retry_unhandled")
@@ -7507,6 +7527,10 @@ class LCMEngine(
             handle = self._emission_handle
             if (handle is None or handle.compress_call != self._compress_calls or handle.session_id != session_id
                     or require_conversation and handle.conversation_key != self._hold_conversation_key()):
+                if ingest_ledger.record_pending_signal(self._store.db_identity, self, self._compress_calls,
+                        session_id, self._hold_conversation_key(), new_state, require_conversation):
+                    self._ledger_count("ledger.emission_signal_deferred")
+                    return
                 self._ledger_count("ledger.emission_signal_unmatched")
                 return
             salt = self._store.ingest_ledger_salt()
