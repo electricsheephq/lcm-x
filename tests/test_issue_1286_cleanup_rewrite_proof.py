@@ -719,6 +719,55 @@ def test_a_full_replay_cleanup_over_an_old_writers_duplicates_keeps_its_proof_du
     _restart_stores_only_the_next_turn(host)
 
 
+ANSWER = f"the same answer{PAD}"
+
+
+def _reasoned_then_plain_answer(host):
+    """Stored history: [system, U1, "<think>...</think>A", U2, "A"] (the same answer, once with its reasoning)."""
+    host.turn(user=f"[U1] first question{PAD}", reply=f"{THINK}{ANSWER}")
+    host.turn(user=f"[U2] second question{PAD}", reply=ANSWER)
+
+
+def _partial_list():
+    return [{"role": "system", "content": "system prompt"}, {"role": "user", "content": f"[U1] first question{PAD}"},
+            {"role": "assistant", "content": ANSWER}, {"role": "user", "content": f"[U2] second question{PAD}"},
+            {"role": "user", "content": f"[B] {RAW}"}]  # unstamped; one plain answer for two stored answers
+
+
+def test_one_plain_answer_does_not_cover_a_reasoned_and_a_plain_stored_answer(host):
+    """Round 7d (I1): the host's partial list carries one plain answer A where the session stores two answer rows,
+    "<think>...</think>A" and "A". The in-order map matches it to the reasoned row (cleanup equivalence); covering that
+    row's identity and its own output identity at once, it hid the missing second answer, the proof went durable and a
+    raw redelivery of the list was skipped. One occurrence covers one stored identity, so the proof stays local."""
+    _reasoned_then_plain_answer(host)
+    host.restart()
+    host.live = _partial_list()
+    host.engine.ingest(host.live)
+    rows = host.stored()
+    result, before = host.cleanup_pass(preflight=False)
+    host.commit_in_place(result, before)
+    durable = host.engine._durable_commit_proof_payload()
+    host.restart()
+    host.live = _partial_list()  # new raw occurrences
+    host.engine.ingest(host.live)
+    assert host.stored() == rows + 5  # the unstamped list is stored again whole, as on the base (I1)
+    assert durable is None
+
+
+def test_a_full_replay_of_a_reasoned_and_a_plain_answer_keeps_its_proof_durable(host):
+    """Round 7d control: the same stored answers, the host's whole list with the reasoning stripped by the cleanup
+    pass. Each answer has its own occurrence, so the proof goes durable and a restart stores only the next turn."""
+    _reasoned_then_plain_answer(host)
+    result, before = host.cleanup_pass(preflight=True)
+    assert THINK not in str(result) and THINK in str(before)
+    assert [m["content"] for m in result if m["role"] == "assistant"] == [ANSWER, ANSWER]
+    assert host.engine._compress_commit_proof.get("cleanup_rewrite") is True
+    host.commit_in_place(result, before)
+    assert host.engine._durable_commit_proof_payload() is not None
+    _restart_stores_only_the_next_turn(host)
+    assert host.duplicated() == {}
+
+
 @pytest.mark.parametrize("variant", ["stub", "reasoning"])
 def test_a_delta_only_bind_does_not_re_key_the_proof_to_the_delta(host, variant):
     """Round 7 (I1): a session holding rows with a durable proof, then a restart whose first delivery is only one new
