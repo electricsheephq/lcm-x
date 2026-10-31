@@ -15,7 +15,11 @@
 # non-interactive shells (agents, ssh) do not read from ~/.bashrc.
 set -euo pipefail
 # Resolve a relative PYTHON once, before any cd, so every check uses the same interpreter.
-case "${PYTHON:-}" in */*) PYTHON="$(cd "$(dirname "$PYTHON")" 2>/dev/null && pwd)/$(basename "$PYTHON")";; esac
+# Builtins only: no tool has been checked yet. A directory that does not exist leaves PYTHON
+# as given, so the venv check below names it.
+case "${PYTHON:-}" in
+  */*) if py_dir="$(CDPATH='' cd -- "${PYTHON%/*}/" 2>/dev/null && pwd)"; then PYTHON="$py_dir/${PYTHON##*/}"; fi ;;
+esac
 missing=0
 for tool in git curl unzip gcc sha256sum node; do
   if ! command -v "$tool" > /dev/null 2>&1; then

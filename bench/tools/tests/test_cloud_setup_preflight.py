@@ -43,3 +43,23 @@ def test_missing_venv_support_stops_before_work(tmp_path):
     assert result.returncode == 1
     assert result.stderr.splitlines() == [f"cloud_setup: missing prerequisite: {python} venv/ensurepip"]
     assert not (tmp_path / ".venv").exists()
+
+
+def test_relative_python_is_resolved_without_tools(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in ("git", "curl", "unzip", "gcc", "sha256sum", "node"):
+        (bin_dir / tool).symlink_to(sys.executable)
+    python = bin_dir / "python"
+    python.write_text('#!/bin/sh\nexit 1\n')
+    python.chmod(0o755)
+    # A relative PYTHON resolves against the starting directory; a missing directory stays as given.
+    for given, named in (("bin/python", str(python)), ("missing/python", "missing/python")):
+        result = subprocess.run(
+            [shutil.which("bash"), str(SCRIPT)], cwd=tmp_path,
+            env=dict(os.environ, PATH=str(bin_dir), PYTHON=given),
+            text=True, capture_output=True, timeout=30,
+        )
+        assert result.returncode == 1
+        assert result.stderr.splitlines() == [f"cloud_setup: missing prerequisite: {named} venv/ensurepip"]
+    assert not (tmp_path / ".venv").exists()
