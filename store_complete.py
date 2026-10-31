@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 from typing import NamedTuple, Optional
 
-from .config import host_message_uid_mode
+from .config import host_message_uid_mode, identity_anchor_enabled
 from .ingest_protection import quarantine_suspicious_assistant_messages
 from .message_analysis import _tool_call_id
 from .reconcile import _has_lossy_redacted_identity
@@ -178,8 +178,6 @@ class StoreCompleteMixin:
     def _store_complete_backlog(self, working, leading: int, copy_lookup_out=None) -> HiddenBacklog:
         """#581: no host raw chunk, but owned rows the view does not show wait above the frontier and
         below the first retained row: a hidden-only leaf is scheduled instead of a no-op."""
-        from .identity_anchor import identity_anchor_enabled
-
         self._last_hidden_backlog = HiddenBacklog(0, False)
         if not identity_anchor_enabled() or not self._session_id or not self._conversation_id:
             return self._last_hidden_backlog

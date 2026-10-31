@@ -371,7 +371,7 @@ checkout root. Credential entries list only variable names, never values.
 | `LCM_ENABLE_SLASH_COMMAND` | `__init__.py` | Optional slash-command registration | plugin registration |
 | `LCM_SENDER_CAPTURE` | `sender_capture.py` | Profile-aware pending sender capture; default `true`, `0` disables capture without removing columns or backfilling history | each call — pending association creation through the profile-aware boolean resolver |
 | `LCM_HERMES_BASE_DIR` | `config.py` (called by `engine.py`, `externalize.py`, `diagnostics.py`) | Storage containment boundary; process-wide, never read from a routed profile | each call — storage-directory resolution or state-database containment validation; `_get_allowed_hermes_base()` also reads it when called (tests only; no production caller) |
-| `LCM_IDENTITY_ANCHOR` | `identity_anchor.py` | Identity-anchor switch | each call — `identity_anchor_enabled()` checks during ingest, replay identity handling, and compaction |
+| `LCM_IDENTITY_ANCHOR` | `config.py` (called by `identity_anchor.py`, `reconcile.py`, `engine.py`, `store_complete.py`) | Identity-anchor switch | each call — `identity_anchor_enabled()` checks during ingest, replay identity handling, and compaction |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `db_bootstrap.py` | Startup integrity-check interval | database open — startup FTS validation, after structural checks pass |
 | `LCM_FTS_INTEGRITY_BACKGROUND` | `db_bootstrap.py` | Background integrity-check switch | database open — startup FTS validation, when a deep check is due |
 | `LCM_EMBEDDING_BACKFILL_LEASE_TTL_S` | `command.py` | Backfill claim lifetime | each call — each summary or chunk backfill apply run, before lease acquisition |

@@ -35,7 +35,7 @@ from .compaction_policy import (
     resolve_threshold,
     threshold_tokens,
 )
-from .config import LCMConfig, _disabled_tool_names, containment_base_dir, ingest_ledger_mode, lcm_env_get, profile_bound
+from .config import LCMConfig, _disabled_tool_names, containment_base_dir, identity_anchor_enabled, ingest_ledger_mode, lcm_env_get, profile_bound
 from .dag import SummaryDAG, SummaryNode
 from . import ingest_ledger, sender_capture
 from .diagnostics import _enforce_state_db_containment
@@ -156,7 +156,7 @@ from .compaction import CompactionMixin
 from . import leaf_prep
 from .compaction_request import CompactionRequest
 from .compress_run import CompressRun
-from .identity_anchor import IdentityAnchorMixin, _raw_remainder, identity_anchor_enabled
+from .identity_anchor import IdentityAnchorMixin, _raw_remainder
 from .host_uid import HostUidShadowMixin, _valid_uid
 from .host_uid_emit import carry_identity, identity_emit_enabled, record_absorbed_message, sync_cached_host_metadata
 from .store_complete import HiddenBacklog, StoreCompleteMixin
