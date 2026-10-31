@@ -55,14 +55,31 @@ class D1Cache(ContentHashEmbeddingCache):
     Before call n, the serial cache holds exactly the keys from calls 0..n-1.
     """
 
-    def __init__(self, provider, path, *, options, readonly=True):
+    def __init__(self, provider, path, *, options, readonly=True, env=None):
+        env = os.environ if env is None else env
         self.readonly = readonly
         self.partition = None
+        self.plan = False
+        self.verify_calls = None
         self._call_index = 0
         self._known = set()
-        self.dispatch_log = os.environ.get("LCM_D1_DISPATCH_LOG") if not readonly else None
-        partition = os.environ.get("LCM_D1_BUILD_PARTITION") if not readonly else None
-        if partition is not None:
+        self.dispatch_log = env.get("LCM_D1_DISPATCH_LOG") if not readonly else None
+        self.lookup_log = env.get("LCM_D1_LOOKUP_LOG") if not readonly else None
+        partition = env.get("LCM_D1_BUILD_PARTITION") if not readonly else None
+        verify = env.get("LCM_D1_VERIFY_CALLS") if not readonly else None
+        if verify is not None:
+            # Verify re-sends listed serial batches and compares them with a merged cache it never writes.
+            calls = json.loads(verify)
+            if partition is not None or not isinstance(calls, list) or not all(type(call) is int and call >= 0 for call in calls):
+                raise ValueError("D1 verify calls must be a JSON list of call indices, without a build partition")
+            self.verify_calls = set(calls)
+            self.verify_against, self.verify_log = env.get("LCM_D1_VERIFY_AGAINST"), env.get("LCM_D1_VERIFY_LOG")
+            if not self.verify_against or not self.verify_log:
+                raise ValueError("D1 verify mode requires LCM_D1_VERIFY_AGAINST and LCM_D1_VERIFY_LOG")
+        if partition == "plan":
+            # Plan logs every serial call without sending anything or writing a row.
+            self.plan = True
+        elif partition is not None:
             values = partition.split("/")
             if len(values) != 2 or not all(value.isdecimal() for value in values):
                 raise ValueError("D1 build partition must be i/P with 0 <= i < P")
@@ -135,32 +152,58 @@ class D1Cache(ContentHashEmbeddingCache):
             self.misses += sum(key not in found for key in keys)
             call = self._call_index
             self._call_index += 1
+            if self.lookup_log:
+                unique = dict.fromkeys(keys)
+                with Path(self.lookup_log).open("a") as log:
+                    log.write(json.dumps({"call": call, "keys": len(unique), "hits": sum(key in found for key in unique)}, separators=(",", ":")) + "\n")
             if self.partition is not None:
                 i, count = self.partition
                 # prewarm_embedding_cache.flush_batch discards these placeholder vectors.
                 found.update((key, [0.0] * self.dim) for key in keys
                              if key not in found and (call % count != i or key in self._known))
                 self._known.update(keys)
+            elif self.plan or self.verify_calls is not None:
+                # Nothing is written, so a key sent by an earlier call counts as the serial cache's row.
+                found.update((key, [0.0] * self.dim) for key in keys if key not in found and key in self._known)
+                self._known.update(keys)
+                if self.plan or call not in self.verify_calls:
+                    fresh = dict.fromkeys(key for key in keys if key not in found)
+                    if fresh and self.plan:
+                        self._log_dispatch(call, fresh)
+                    found.update((key, [0.0] * self.dim) for key in fresh)
             missing = dict((key, text) for key, text in zip(keys, texts) if key not in found)
             if missing:
                 self.provider_dispatches += 1
-                if self.dispatch_log:
-                    with Path(self.dispatch_log).open("a") as log:
-                        log.write(json.dumps({"call": call, "sent": len(missing), "keys_sha256": hashlib.sha256("\n".join(missing).encode()).hexdigest()}, separators=(",", ":")) + "\n")
+                self._log_dispatch(call, missing)
                 vectors = list(self._provider.embed_documents(list(missing.values())))
                 if len(vectors) != len(missing):
                     raise ValueError("D1 provider vector count mismatch")
+                rows = []
                 with closing(self._connect()) as db, db:
                     for key, vector in zip(missing, vectors):
                         dim, payload = self._encode_vector(vector)
                         if dim != self.dim:
                             raise ValueError("D1 provider dimension mismatch")
                         found[key] = list(vector)
-                        if not self.readonly:
-                            db.execute("INSERT OR REPLACE INTO entries VALUES (?,?,?,?)", (key, dim, payload, hashlib.sha256(key.encode() + payload).hexdigest()))
+                        rows.append((key, dim, payload, hashlib.sha256(key.encode() + payload).hexdigest()))
+                        if not self.readonly and self.verify_calls is None:
+                            db.execute("INSERT OR REPLACE INTO entries VALUES (?,?,?,?)", rows[-1])
+                if self.verify_calls is not None:
+                    self._verify(call, rows)
             return [found[key] for key in keys]
         finally:
             self.wall_ms += (time.perf_counter() - start) * 1000
+
+    def _log_dispatch(self, call, keys):
+        if self.dispatch_log:
+            with Path(self.dispatch_log).open("a") as log:
+                log.write(json.dumps({"call": call, "sent": len(keys), "keys_sha256": hashlib.sha256("\n".join(keys).encode()).hexdigest()}, separators=(",", ":")) + "\n")
+
+    def _verify(self, call, rows):
+        with closing(sqlite3.connect(Path(self.verify_against).resolve().as_uri() + "?mode=ro", uri=True)) as db:
+            mismatches = sum(db.execute("SELECT key, dim, payload, checksum FROM entries WHERE key=?", (row[0],)).fetchone() != row for row in rows)
+        with Path(self.verify_log).open("a") as log:
+            log.write(json.dumps({"call": call, "keys": len(rows), "mismatches": mismatches}, separators=(",", ":")) + "\n")
 
     def embed_query(self, text):
         start = time.perf_counter()
