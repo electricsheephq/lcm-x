@@ -6,6 +6,7 @@ Run under pytest in a subprocess, as occurrence_upgrade_probe.py does.
 """
 import hashlib
 import json
+import logging
 import os
 import re
 from copy import deepcopy
@@ -180,12 +181,29 @@ def test_phase(monkeypatch):
     for n in range(1, restart + 1):
         live += [{"role": "user", "content": f"P-S2 restart {n} user{PAD}", "timestamp": clock + n},
                  {"role": "assistant", "content": f"P-S2 restart {n} assistant{PAD}"}]
+    proof_log = []
+
+    class _ProofLog(logging.Handler):  # the bind's proof and reconciliation decisions (no row content)
+        def emit(self, record):
+            text = record.getMessage()
+            if "commit proof" in text or "identity-anchor" in text or "reconcil" in text:
+                proof_log.append(text[:300])
+
+    handler = _ProofLog(level=logging.INFO)
+    lcm_logger = logging.getLogger("hermes_lcm")
+    lcm_logger.addHandler(handler)
+    previous_level = lcm_logger.level
+    lcm_logger.setLevel(logging.INFO)
     engine = _bind()
     try:
         engine.ingest(live)
         rows = [_identity(*row) for row in engine._store._conn.execute(
             "SELECT role, content, tool_call_id, tool_calls FROM messages WHERE session_id = ? ORDER BY store_id",
             (SID,)).fetchall()]
+        reconciliation = {key: value for key, value in dict(getattr(engine, "_last_ingest_reconciliation", {}) or {}).items()
+                          if key in ("action", "reason", "cursor", "incoming", "session_count", "stored_tail_count")}
     finally:
         engine.shutdown()
-    OUT.write_text(json.dumps({"rows": rows}, indent=2))
+        lcm_logger.removeHandler(handler)
+        lcm_logger.setLevel(previous_level)
+    OUT.write_text(json.dumps({"rows": rows, "reconciliation": reconciliation, "proof_log": proof_log}, indent=2))

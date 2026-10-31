@@ -95,8 +95,12 @@ def test_stale_cleanup_proof_upgrade(tmp_path, old_tree, host_root, variant, cha
         run = subprocess.run(command, cwd=tree, env=env, capture_output=True, text=True, timeout=60)
         assert run.returncode == 0, f"{variant}/{change} {side} {action} restart {restart}:\n{run.stdout}{run.stderr}"
         if action == "read":
-            return [_freeze(row) for row in json.loads(result.read_text())["rows"]]
+            data = json.loads(result.read_text())
+            diagnostics.append({"side": side, "restart": restart, "reconciliation": data.get("reconciliation"),
+                                "proof_log": data.get("proof_log", [])})
+            return [_freeze(row) for row in data["rows"]]
 
+    diagnostics = []
     phase(base, "write", "base")
     saved = tmp_path / "old-writer.db"
     _save_database(home / "lcm.db", saved)
@@ -145,7 +149,8 @@ def test_stale_cleanup_proof_upgrade(tmp_path, old_tree, host_root, variant, cha
         receipt = {"variant": variant, "change": change, "redact": redact, "initial_count": len(initial),
                    "initial_identity_hashes": [_identity_hash(row) for row in initial], "sides": summary,
                    "checks": {"candidate_dup1_subset": subset, "candidate_dup2_empty": no_repeat,
-                              "base_dup2_nonempty": base_repeats, "rows_preserved": not preservation_errors}}
+                              "base_dup2_nonempty": base_repeats, "rows_preserved": not preservation_errors},
+                   "diagnostics": diagnostics}
         (directory / f"p-s2-{variant}-{change}-{redact}.json").write_text(json.dumps(receipt, indent=2) + "\n")
 
     cell = f"{variant}/{change}/redact-{redact}"
