@@ -227,7 +227,7 @@ def _main(argv, interrupt):
     common = ["--dataset-label", "m", "--provider", "fastembed", "--model", "BAAI/bge-small-en-v1.5"]
     started = time.monotonic()
 
-    def invoke(role, name, command, mode, part=None, scratch=None):
+    def invoke(role, name, command, mode, part=None, own_cache=None):
         if interrupt[0]:
             return {"exit_code": 128 + interrupt[0], "timed_out": False}
         scratch = args.scratch.resolve() / role / name
@@ -238,15 +238,15 @@ def _main(argv, interrupt):
                          LCM_D1_CACHE_MODE=mode, HERMES_HOME=str(scratch / "home"), TMPDIR=str(scratch))
         if mode == "build":
             child_env.update(LCM_D1_DISPATCH_LOG=str(args.output.resolve() / f"{role}-{name}-dispatch.jsonl"), PYTHONHASHSEED="0")
-        if name == "preembed" or part is not None or scratch is not None:
+        if name == "preembed" or part is not None or own_cache is not None:
             # Matching serial threads keeps ORT arithmetic the same; 1 thread needs measured byte-identity proof.
             child_env.update(build_env)
         if part is not None:
             child_env.update(LCM_LONGMEMEVAL_EMBED_CACHE=str(caches[role].parent / "parts" / f"part-{part}.sqlite"),
                              LCM_D1_BUILD_PARTITION=f"{part}/{args.build_workers}")
-        if scratch is not None:
+        if own_cache is not None:
             # Plan and verify children write only their own scratch DB, never the merge target.
-            label, extra = scratch
+            label, extra = own_cache
             child_env.update(extra, LCM_LONGMEMEVAL_EMBED_CACHE=str(caches[role].parent / "parts" / f"{label}.sqlite"))
         with (args.output / f"{role}-{name}.log").open("w") as log:
             return run_child([sys.executable, str(Path(__file__).resolve()), "--worker", products[role], pins[role], instrument, *command], cwd=products[role], env=child_env, stdout=log, stderr=subprocess.STDOUT, timeout=args.worker_timeout, interrupt=interrupt)
@@ -285,7 +285,7 @@ def _main(argv, interrupt):
             role, part = task
             began = time.monotonic()
             if part is None:
-                result = invoke(role, "preembed-plan", command, "build", scratch=("plan", {"LCM_D1_BUILD_PARTITION": "plan"}))
+                result = invoke(role, "preembed-plan", command, "build", own_cache=("plan", {"LCM_D1_BUILD_PARTITION": "plan"}))
                 return {"role": role, "part": None, "arm": "preembed-plan", **result, "elapsed_s": time.monotonic() - began}
             result = invoke(role, f"preembed-part-{part}", command, "build", part=part)
             return {"role": role, "part": part, "arm": "preembed", **result, "elapsed_s": time.monotonic() - began}
@@ -323,7 +323,7 @@ def _main(argv, interrupt):
                 proof["verify_calls"] = verify_sample([row["call"] for row in plan], args.build_workers)
                 verify_log = out / f"{role}-preembed-verify-verify.jsonl"
                 began = time.monotonic()
-                result = invoke(role, "preembed-verify", command, "build", scratch=("verify", {
+                result = invoke(role, "preembed-verify", command, "build", own_cache=("verify", {
                     "LCM_D1_VERIFY_CALLS": json.dumps(proof["verify_calls"]), "LCM_D1_VERIFY_AGAINST": str(caches[role]), "LCM_D1_VERIFY_LOG": str(verify_log)}))
                 preembed.append({"role": role, "part": None, "arm": "preembed-verify", **result, "elapsed_s": time.monotonic() - began})
                 if result["exit_code"] or interrupt[0]:
