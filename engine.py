@@ -4433,14 +4433,15 @@ class LCMEngine(
         proof = self._compress_commit_proof
         if (
             proof
-            and proof.get("stub_first")
+            and (proof.get("stub_first") or proof.get("cleanup_rewrite"))
             and proof.get("stub_first_compress_call") == self._compress_calls  # the call whose list was committed
             and proof.get("session_id") == session_id
             and proof.get("conversation_id") == self._conversation_id
             and not (proof.get("published") or proof.get("native") or proof.get("recovery") or proof.get("filtered"))
         ):
-            # #1116: Hermes fires this boundary only after it committed the compression, so the stub-first list
-            # compress() handed it is the host's now: its proof becomes durable, as the rotation re-key does.
+            # #1116, #1286: Hermes fires this boundary only after it committed the compression, so the stub-first
+            # or cleanup-only list compress() handed it is the host's now: its proof becomes durable, as the rotation
+            # re-key does.
             self._persist_compress_commit_proof(proof, last_store_id=proof.get("stub_first_last_store_id"))
             proof = self._compress_commit_proof
         cursor_proven = bool(
@@ -4814,7 +4815,8 @@ class LCMEngine(
                     )
             self._frontier_holder().transfer_to_child(commit_proof, "input", None)
             if (commit_proof.get("published") or commit_proof.get("native") or commit_proof.get("recovery")
-                    or commit_proof.get("filtered") or commit_proof.get("stub_first")):
+                    or commit_proof.get("filtered") or commit_proof.get("stub_first")
+                    or commit_proof.get("cleanup_rewrite")):
                 self._persist_compress_commit_proof(commit_proof)
         elif can_reassign:
             # No transferred commit proof (proof creation failed, an end that
