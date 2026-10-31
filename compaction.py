@@ -837,6 +837,10 @@ class CompactionMixin:
         except BaseException as exc:
             self._compress_occurrences = None
             if isinstance(exc, Exception) and self._compaction_is_closing():
+                try:  # #582: the gate keeps the connection open, so no partial write outlives the pass
+                    self._store.rollback_pending_write()
+                except Exception:
+                    logger.debug("LCM rollback after a closing compress exception failed", exc_info=True)
                 returned = messages
                 return messages
             self._last_compression_status = "error"
