@@ -135,6 +135,10 @@ def test_shutdown_waits_for_blocked_compress_and_preserves_rows(blocked_pass):
     assert race.compressed[0] is race.messages
     assert race.engine._stable_use_closed
     assert race.engine._compaction_inflight == 0
+    assert race.engine.last_compression_status == "noop"
+    assert race.engine.last_compression_noop_reason == "engine shutting down"
+    assert race.engine._compress_occurrences is None
+    assert race.engine._ingest_cursor_needs_reconcile
     assert all(service._conn is None for service in (
         race.engine._store, race.engine._dag, race.engine._lifecycle,
     ))
@@ -276,6 +280,8 @@ def test_closing_exception_rolls_back_the_open_store_write(tmp_path, monkeypatch
         assert engine._compaction_inflight == 0
         assert not engine._store._conn.in_transaction, "the partial write stayed open"
         assert engine._store._conn.execute("SELECT COUNT(*) FROM partial_2101").fetchone() == (0,)
+        assert engine.last_compression_status == "noop"
+        assert engine.last_compression_noop_reason == "engine shutting down"
     finally:
         engine.shutdown()
     _assert_durable_rows(engine, before)
