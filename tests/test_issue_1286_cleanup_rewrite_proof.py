@@ -768,6 +768,66 @@ def test_a_full_replay_of_a_reasoned_and_a_plain_answer_keeps_its_proof_durable(
     assert host.duplicated() == {}
 
 
+def _user(content):
+    return {"role": "user", "content": content}
+
+
+def _reply(content):
+    return {"role": "assistant", "content": content}
+
+
+_REPEATS = {  # stored turns, then the unstamped list the host delivers at both binds
+    # [sys, U1, A, U2, A]: one A for the two stored answers
+    "plain_repeat": ([(f"[U1] q{PAD}", ANSWER), (f"[U2] q{PAD}", ANSWER)],
+                     [_user(f"[U1] q{PAD}"), _reply(ANSWER), _user(f"[U2] q{PAD}")]),
+    # a reasoned answer, then a repeated turn twice: the list drops the second repeat
+    "mixed_repeat": ([(f"[U1] q{PAD}", f"{THINK}{ANSWER}"), (f"ok go on{PAD}", ANSWER), (f"ok go on{PAD}", ANSWER)],
+                     [_user(f"[U1] q{PAD}"), _reply(ANSWER), _user(f"ok go on{PAD}"), _reply(ANSWER)]),
+}
+
+
+def _repeated_turns_cleanup_then_redelivery(host, turns, listed):
+    for user, reply in turns:
+        host.turn(user=user, reply=reply)
+    host.restart()
+
+    def delivery():
+        return [{"role": "system", "content": "system prompt"}, *(dict(m) for m in listed), _user(f"[B] {RAW}")]
+
+    host.live = delivery()
+    host.engine.ingest(host.live)
+    rows = host.stored()
+    result, before = host.cleanup_pass(preflight=False)
+    host.commit_in_place(result, before)
+    durable = host.engine._durable_commit_proof_payload()
+    host.restart()
+    host.live = delivery()  # new raw occurrences
+    host.engine.ingest(host.live)
+    return rows, durable, len(delivery())
+
+
+@pytest.mark.xfail(strict=True, reason="#2124: coverage counts distinct identities, so a list short of a repeated turn still publishes")
+@pytest.mark.parametrize("shape", list(_REPEATS))
+def test_a_list_short_of_a_repeated_turn_does_not_cover_the_session(host, shape):
+    """Round 7e (I1): the host's partial list holds fewer occurrences of a repeated text than the session stores
+    (a turn dropped whose text repeats elsewhere). Every distinct identity has an occurrence, but a stored row does
+    not: counting identities, the proof went durable and a raw redelivery stored nothing. Every stored row after the
+    frontier would need its own occurrence (the base tail path's rule); 7d's rule keeps publishing it (#2124)."""
+    rows, durable, delivered = _repeated_turns_cleanup_then_redelivery(host, *_REPEATS[shape])
+    assert host.stored() == rows + delivered  # the unstamped list is stored again whole, as on the base (I1)
+    assert durable is None
+
+
+def test_a_list_with_every_repeated_turn_keeps_its_proof_durable(host):
+    """Round 7e control: the same repeated turns, the list carrying every one of them: each stored row has its own
+    occurrence, so the proof goes durable and the redelivery stores nothing again."""
+    turns = _REPEATS["mixed_repeat"][0]
+    listed = [m for user, reply in turns for m in (_user(user), _reply(reply.replace(THINK, "")))]
+    rows, durable, _delivered = _repeated_turns_cleanup_then_redelivery(host, turns, listed)
+    assert durable is not None
+    assert host.stored() == rows
+
+
 @pytest.mark.parametrize("variant", ["stub", "reasoning"])
 def test_a_delta_only_bind_does_not_re_key_the_proof_to_the_delta(host, variant):
     """Round 7 (I1): a session holding rows with a durable proof, then a restart whose first delivery is only one new
