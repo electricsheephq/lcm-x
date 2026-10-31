@@ -10,7 +10,7 @@ Tracker: #1993 (v0.30.0, "nothing lost"). Status: reviewed; ready for phase P1 (
 
 ## 1. Problem
 - `messages` has no identity key (store.py:429-447). Exactly-once is an in-memory decision made before the INSERT.
-- The cursor and the in-process proof live in memory only (frontier_state.py:7-16). A cold start rebuilds them by tail matching, and when that fails it re-stores whole batches ("persisted ambiguous delta", reconcile.py:3029-3038).
+- The cursor and the in-process proof live in memory only (frontier_state.py:7-16). A cold start rebuilds them by tail matching, and when that fails it re-stores whole batches ("persisted ambiguous delta", reconcile.py:3044-3053).
 - Decision evidence commits apart from the rows: before the INSERT (C1), after it (C2), and with the cursor advance (C3).
 - Unkeyed rows are decided by position. A replace or a merge counts as not-new, so the change is lost (#7).
 - The host uid is shadow only (#643).
@@ -35,7 +35,7 @@ Tracker: #1993 (v0.30.0, "nothing lost"). Status: reviewed; ready for phase P1 (
   - A **plausible candidate** for a row is an occurrence in the same lineage that a rank proposed for it and that a rule then rejected: the window, the order, a veto, a tie, the cost fallback, or a refused emission.
   - Every row stored while it had a plausible candidate carries `possible_replay_of` to that candidate.
   - Every changed-slot NEW carries `supersedes`; its target may be a generated entry.
-  - A NEW row with an LCM generated marker and no descriptor carries `generated_unproven` (§3.3).
+  - A stored NEW row with an LCM generated marker, whether or not a descriptor exists, carries `generated_unproven` (§3.3).
   - The doctor reports all three (§3.9).
   - A row with no candidate is plain NEW, so repeated ordinary content ("ok", "continue") gets no relation.
 - **E5 Ranked proof.**
@@ -196,11 +196,14 @@ The pieces:
   - A failure of this write is handled inside the exit function, not by the generic exception handler.
 - **If that write fails:**
   - Set a process-wide unproven mark. Each entry holds the store, the lineage, the emission descriptor, the output index and the row's digest. It lives at module level, so every engine instance and clone in the process sees it.
-  - Return the unrewritten list where it fits. If the list is over-window (#582), return the fit.
+  - Compress output is unchanged on a failed write, including the survival fit.
   - Every later ingest in the process first retries the emission write inside a SAVEPOINT, then classifies. The mark clears on success.
-  - While the mark holds, a generated row that comes back to the same store and lineage with a digest in the mark is stored NEW, with `generated_unproven` and `possible_replay_of` to its source rows.
-  - After a restart the mark is gone. The row still carries an LCM generated marker and has no descriptor, so it is stored NEW with `generated_unproven`. It also gets `possible_replay_of` when its digest matches a rendering of one of the lineage's DAG nodes. The row is visible, never silent (Astra 4, L5-1; this replaces r3.1's "plain NEW").
-  - P1 makes the marker universal: every generated kind carries one (the summary header, the carrier tag, the scaffold prefix). A user row that contains the marker text is flagged visibly, never lost.
+  - A row today's classifier stores NEW carries `generated_unproven` if its full-entry digest matches a still-pending descriptor in this store and lineage, or its stored bytes carry an LCM generated marker. This holds whether or not a descriptor exists: P1 has no rank-4 binding proof.
+  - After a restart the process mark is gone, but the stored-byte recognizer still flags these rows. It reads existing byte shapes; it adds no emitted bytes or carrier tag. A carrier's marker is its leading summary header.
+  - The shapes, in precedence order, are: leading summary header plus `[Expand for details:`, objective scaffold prefix, overflow recovery prefix, LCM's full recall header inside `<relevant-memories>`, an exact tool-result stub, survival projection text or bounded-call notice, then user-only summary/scaffold/recovery parts joined after `"\n\n"`. Leading checks use the first text part for structured content. System rows are excluded; the bare recall tag and arbitrary mid-row markers do not match.
+  - A user row carrying these marker bytes is stored and flagged, never lost. Stored NEW applies only where today's classifier stores: exact cursor evidence, DAG-verified scaffolds and verified recovery projections keep their existing skips.
+  - `possible_replay_of` is deferred to P1h or P2; P1c-2b does no DAG or descriptor lookup on ingest.
+  - Accepted gaps: ledger off, `ledger.write_failed` (the savepoint rolls the relation back), not-ready or read-only stores, session-end tail stores (P1e), and mid-row markers outside the joined rule.
 - **Adoption.** The emission becomes adopted on the host's boundary signal (engine.py:4444) or when an incoming view anchors on it.
   - A host refusal or rollback (#1116, `record_rejected_compaction`, engine.py:2686) sets it to refused. A refused emission is never a base and never adopted (L5-2), and the previous epoch stays current.
   - E7 is checked and logged at adoption.
@@ -426,10 +429,10 @@ These ship with the P2 flip:
     - the P1 tail rule (§3.5);
     - stamp observations;
     - the per-ingest counters (§3.2);
-    - the reliability scorer reads relations, so a visible surplus row is told apart from a silent one.
+    - the reliability scorer reads relations, so a visible surplus row is told apart from a silent one; `possible_replay_of` writes are deferred to P1h or P2.
   - **Behaviour:** today's classifier keeps deciding. Four fixes take effect at P1, because each one either stores more or skips only on exact evidence:
     1. atomic evidence (class A);
-    2. on a cold start, the anchored run at j = 0 on the durable cursor, or on the newest non-refused emission vector, becomes one more candidate in today's largest-cursor choice (reconcile.py:3085-3103). It never replaces tail matching, so rows stored by a tail retry or an S3 end, which write no vector, are still found (the class B restart family, and a crash between the compress() return and the next ingest);
+    2. on a cold start, the anchored run at j = 0 on the durable cursor, or on the newest non-refused emission vector, becomes one more candidate in today's largest-cursor choice (reconcile.py:3091-3125). It never replaces tail matching, so rows stored by a tail retry or an S3 end, which write no vector, are still found (the class B restart family, and a crash between the compress() return and the next ingest);
     3. the single exit write and its visible failure path (#2029's exit half, #606, the #534 residuals);
     4. the P1 tail rule (#1440 item 1).
   - It closes the [P1] children in §4.
@@ -556,11 +559,14 @@ the emission proposed and count it as unhandled.
 Inside the ingest ledger savepoint, a stored row matching a still-pending
 descriptor in this store and lineage gains one `generated_unproven` relation.
 Only entries successfully retried by this attempt are excluded; claims never
-hide pending entries.
+hide pending entries. Pending matching keeps the full-entry digest for composites.
+P1c-2b also flags every stored row whose protected storage payload carries an
+existing LCM generated marker (§3.3), independent of descriptors and pending
+state. The union is written once per stored row, before ordinal planning;
+`ledger.skipped_crossed` therefore retains relations and committed counters.
 Classification and compress output remain unchanged; rows today's classifier
-skips get no relation, and neither do rows whose ingest skips its ledger write:
-a crossed classification (`ledger.skipped_crossed`), a fail-open rollback
-(`ledger.write_failed`), or a store that is not ready, read-only or has a
-changed salt. Ledger-off behavior is unchanged. The mark is process-local and
-lost on restart: the restart path is P1c-2b. There is no universal generated
-marker yet.
+skips get no relation. A fail-open rollback (`ledger.write_failed`), ledger off,
+a store that is not ready, read-only or has a changed salt still skips relations.
+Session-end tail stores (P1e) and mid-row markers outside the joined rule remain
+accepted gaps. The process mark is lost on restart; the byte recognizer is not.
+`possible_replay_of` is deferred to P1h or P2.
