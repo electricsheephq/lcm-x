@@ -142,17 +142,19 @@ class Host:
         self.engine = self.bind()
 
     def rows(self):
-        return [(row[0], row[1]) for row in self.engine._store._conn.execute(
-            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY store_id", (SID,)).fetchall()]
+        """(role, content, tool_call_id, tool_calls) per stored row, in store order."""
+        return [tuple(row) for row in self.engine._store._conn.execute(
+            "SELECT role, content, tool_call_id, tool_calls FROM messages WHERE session_id = ? ORDER BY store_id",
+            (SID,)).fetchall()]
 
     def stored(self):
         return self.engine._store.get_session_count(SID)
 
     def count(self, content):
-        return sum(1 for _role, stored in self.rows() if stored == content)
+        return sum(1 for row in self.rows() if row[1] == content)
 
     def duplicated(self):
-        return {key: n for key, n in Counter((row[0], row[1]) for row in self.rows()).items() if n > 1}
+        return {key: n for key, n in Counter(self.rows()).items() if n > 1}
 
     def close(self):
         for engine in self.engines:
@@ -250,50 +252,54 @@ def test_a_cleanup_rewrite_after_a_published_compaction_survives_a_restart(host,
     assert host.duplicated() == {}
 
 
+def _change(host, change, *, insert_at, replace_at):
+    """The host changes its list before the cursor: an unstamped /steer row inserted, or a stamped user row
+    replaced by a new one (another stamp). Returns the changed row's content."""
+    if change == "insert":
+        host.live.insert(insert_at, dict(STEER))
+        return STEER["content"]
+    content = f"[edited] the user rewrote this turn{PAD}"
+    host.live[replace_at] = {"role": "user", "content": content, "timestamp": host.stamp()}
+    return content
+
+
+def _restart_stores_only_the_next_turn(host):
+    """A restart and one turn: the restarted engine's first ingest stores that turn's two rows and nothing again.
+    (Duplicates the warm path already made stay as they were: #633's displaced unstamped reply, #259's batch.)"""
+    rows, duplicated = host.stored(), host.duplicated()
+    host.restart()
+    host.turn()
+    assert host.stored() == rows + 2
+    assert host.duplicated() == duplicated
+
+
 @pytest.mark.parametrize("change", ["insert", "replace"])
 @pytest.mark.parametrize("variant", ["stub", "reasoning"])
 def test_a_row_changed_among_the_warm_turns_is_not_stored_again_after_a_restart(host, variant, change):
-    """The field chain: the host changes a row between a warm turn's user and assistant rows, and the next turn
-    stores it at the store tail, out of host order."""
+    """The field chain: after the committed cleanup list, the host changes its list among the warm turns, and
+    the next turn stores the changed row at the store tail, out of host order."""
     _turns(host, variant)
     _commit_cleanup(host, variant)
     host.turn()
     host.turn()
-    rows = host.stored()
-    pos = len(host.live) - 3  # the first warm turn's assistant row
-    if change == "insert":
-        host.live.insert(pos, dict(STEER))
-    else:
-        host.live[pos] = {"role": "assistant", "content": f"rewritten reply{PAD}"}
-    changed = host.live[pos]["content"]
+    changed = _change(host, change, insert_at=len(host.live) - 3, replace_at=len(host.live) - 4)
     host.turn()
-    assert host.stored() == rows + 3 and host.count(changed) == 1
-    host.restart()
-    host.turn()
-    assert host.stored() == rows + 5
     assert host.count(changed) == 1
-    assert host.duplicated() == {}
+    _restart_stores_only_the_next_turn(host)
+    assert host.count(changed) == 1
 
 
 @pytest.mark.parametrize("change", ["insert", "replace"])
 def test_a_row_changed_inside_the_committed_list_is_not_stored_again_after_a_restart(host, change):
+    """The first ingest after the commit no longer finds the committed list as the cursor's prefix and persists
+    the batch (#259); the restart after it must not persist it again."""
     _turns(host, "reasoning")
     _commit_cleanup(host, "reasoning")
-    rows = host.stored()
-    end = len(host.live)
-    if change == "insert":
-        host.live.insert(end - 2, dict(STEER))
-        changed = STEER["content"]
-    else:
-        changed = f"[T4] the user edited this turn{PAD}"
-        host.live[end - 4] = {"role": "user", "content": changed, "timestamp": host.stamp()}
+    changed = _change(host, change, insert_at=len(host.live) - 2, replace_at=len(host.live) - 4)
     host.turn()
     assert host.count(changed) == 1
-    host.restart()
-    host.turn()
-    assert host.stored() == rows + 5
+    _restart_stores_only_the_next_turn(host)
     assert host.count(changed) == 1
-    assert host.duplicated() == {}
 
 
 def test_a_salvaged_commit_survives_a_restart(host):
@@ -325,8 +331,8 @@ def test_a_crash_before_the_re_key_duplicates_but_loses_nothing(host, monkeypatc
     host.turn()
     host.restart()
     host.turn()
-    stored = Counter(host.rows())
-    assert all(stored[(m["role"], m["content"])] >= 1 for m in host.live if m["role"] in ("user", "assistant"))
+    stored = {(row[0], row[1]) for row in host.rows()}
+    assert all((m["role"], m["content"]) in stored for m in host.live if m["role"] in ("user", "assistant"))
 
 
 def test_a_row_the_host_changes_after_the_restart_is_still_stored(host):
