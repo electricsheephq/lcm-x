@@ -1078,17 +1078,28 @@ class CompactionMixin:
                 keys = [_host_row_key(m) for m, identity in zip(result, output_identities) if identity is not None]
                 if keys and None not in keys:
                     proof["filtered"], proof["filtered_row_keys"] = True, keys
+            remapped = dict(store_ids)  # the coverage guard maps the rows the in-order map missed into this copy
+            effective = [m for m, identity in zip(result, output_identities) if identity is not None]
             if (self._last_compression_status == "sanitized" and result is not messages
                     and not getattr(self, "_compress_dropped_ignored_rows", False) and not (
                         proof["published"] or proof["recovery"] or proof["stub_first"] or proof["filtered"])
-                    and not self._rekey_unstored_rows(result, occurrences, output_identities, dict(store_ids))):
+                    and not (len(effective) == 1 and not self._host_occurrence_known(effective[0]))
+                    and not self._rekey_unstored_rows(result, occurrences, output_identities, remapped)):
                 # #1286: a cleanup-only pass (replay stubs, stripped reasoning) hands the host a rewritten list too: a
                 # restart after the host commits it must not leave the cold rebind a stale proof. Absent unless true
                 # (traces dump it). A held pass's survival fit stays local: a durable claim of its carrier would
                 # bypass the anchor's retirement of that carrier (#1000). So does a list with a row no stored row
                 # holds (I1, the re-key's rule: the cold rebind's broken walk stores it), and an output that dropped
-                # ignored rows: #1013's host keys alone prove that one (same text is not identity).
+                # ignored rows: #1013's host keys alone prove that one (same text is not identity). Round 7: so does
+                # a list of one effective row no host stamp or uid witnesses: a stub's identity restores its payload,
+                # so a new message with the same text, delivered alone after a restart, would match it and be lost
+                # (the tail path's singleton rule stores it). A stamped or uid row stays durable: the proof's
+                # host-occurrence snapshot tells the two occurrences apart (_host_occurrence_changed).
                 proof["cleanup_rewrite"] = True
+                # Round 7: its carry is the re-key's (the rows the guard mapped again, the previous proof's parent
+                # ranges), or a compression child's committed cleanup drops the parent rows after an out-of-order row.
+                self._keep_recovered_and_inherited_carry(
+                    proof, result, remapped, carried_rows, self._durable_commit_proof_payload())
             self._last_emission_descriptors = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
@@ -1287,20 +1298,7 @@ class CompactionMixin:
                 logger.info("LCM durable commit proof not re-keyed: %d host rows have no stored occurrence; the "
                             "previous proof stays: session=%s", unstored, self._session_id)
                 return
-            recovered = {store_ids[id(m)] for m in messages if id(m) in store_ids} - carried_rows.keys()
-            # A compression child's inherited parent ranges stay above the compaction frontier: a parent row whose host
-            # row now maps to a copy in this session (or not at all) is still uncovered, and only a summary consumes it.
-            frontier = int(self._last_compacted_store_id or 0)
-            inherited = [(str(source), max(int(start), frontier), int(end))
-                         for source, start, end in previous.get("carry_ranges") or () if str(source) != str(self._session_id)]
-            if recovered or inherited:  # recovered: rows the re-map found (the parent rows after the out-of-order one)
-                if recovered:
-                    carried_rows.update(self._store.get_batch(sorted(recovered)))
-                proof["carry_ranges"] = self._coalesce_compression_carry_ranges([
-                    *((str(row["session_id"]), store_id - 1, store_id)
-                      for store_id, row in sorted(carried_rows.items()) if row.get("session_id")),
-                    *inherited,
-                ])
+            self._keep_recovered_and_inherited_carry(proof, messages, store_ids, carried_rows, previous)
             proof["output_sha256_v3"] = [_commit_proof_identity_digest(self._proof_replay_identity(m)) for m in messages]
             proof["effective_sha256_v3"] = [
                 digest for m, digest in zip(messages, proof["output_sha256_v3"])
@@ -1312,6 +1310,27 @@ class CompactionMixin:
                         self._session_id, len(messages))
         except Exception:
             logger.warning("LCM durable commit proof re-key failed; the previous proof stays", exc_info=True)
+
+    def _keep_recovered_and_inherited_carry(self, proof, messages, store_ids, carried_rows, previous) -> None:
+        """#1286: extend ``proof["carry_ranges"]`` (built from the in-order map's ``carried_rows``) with the rows the
+        coverage guard mapped again (``store_ids``, after ``_rekey_unstored_rows``) and ``previous``'s ranges for other
+        sessions. Shared by the re-key and a cleanup-only proof (round 7): a proof that proves those rows must carry
+        them, or a later compaction consumes their host rows without their store ids (I1, summary provenance)."""
+        recovered = {store_ids[id(m)] for m in messages if id(m) in store_ids} - carried_rows.keys()
+        # A compression child's inherited parent ranges stay above the compaction frontier: a parent row whose host
+        # row now maps to a copy in this session (or not at all) is still uncovered, and only a summary consumes it.
+        frontier = int(self._last_compacted_store_id or 0)
+        inherited = [(str(source), max(int(start), frontier), int(end))
+                     for source, start, end in (previous or {}).get("carry_ranges") or ()
+                     if str(source) != str(self._session_id)]
+        if recovered or inherited:  # recovered: rows the re-map found (the parent rows after the out-of-order one)
+            if recovered:
+                carried_rows.update(self._store.get_batch(sorted(recovered)))
+            proof["carry_ranges"] = self._coalesce_compression_carry_ranges([
+                *((str(row["session_id"]), store_id - 1, store_id)
+                  for store_id, row in sorted(carried_rows.items()) if row.get("session_id")),
+                *inherited,
+            ])
 
     def _rekey_unstored_rows(self, messages, occurrences, identities, store_ids) -> int:
         """#1286 (I1): how many rows the re-key would prove that no stored row holds.
