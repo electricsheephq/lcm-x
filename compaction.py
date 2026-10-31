@@ -1234,13 +1234,16 @@ class CompactionMixin:
         """#1286: re-key the bound durable proof to the host's list ``messages``, later rows from the store tail now.
 
         Called after an ingest stored a row out of host order (a row the host changed or inserted before the proven
-        end goes to the store tail): the old proof's after-walk no longer matches the host list, so a restart would
-        bind cold at cursor 0 and store the session again. The rows are stored first (I1): a failure here keeps the
-        old proof, which can duplicate but loses nothing. Built as compress() would build it for this list returned
-        unchanged; nothing process-local changes.
+        end goes to the store tail). When the old proof no longer proves the host list (its after-walk fails), a
+        restart would bind cold at cursor 0 and store the session again. A list it still proves (a #535 merge
+        behind the last output row, a carrier off its index) keeps it. The rows are stored first (I1): a failure
+        here keeps the old proof, which can duplicate but loses nothing. Built as compress() would build it for this
+        list returned unchanged; nothing process-local changes.
         """
         try:
             if self._durable_commit_proof_payload() is None:
+                return
+            if self._cursor_from_durable_commit_proof(messages) == len(messages):
                 return
             emission_binding = self._emission_binding()
             emissions: list = []
