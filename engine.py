@@ -668,8 +668,17 @@ def _quiesce_embedding_maintenance() -> bool:
 
 _SESSION_END_BUSY_TIMEOUT_MS = 50
 _SESSION_END_SHUTDOWN_TIMEOUT_MS = 5000
+_SHUTDOWN_COMPACTION_WAIT_MAX_S = 86400.0
 # Strong references keep an ended engine's only pending copy alive until drained.
 _PENDING_TAIL_ENGINES: set = set()
+
+
+def _shutdown_compaction_wait_s() -> float:
+    """#2101: seconds shutdown waits for in-flight compaction, read on each call."""
+    wait_s = _parse_float_env("LCM_SHUTDOWN_COMPACTION_WAIT_S", 10.0)
+    if not math.isfinite(wait_s) or wait_s < 0:
+        return 10.0
+    return min(wait_s, _SHUTDOWN_COMPACTION_WAIT_MAX_S)  # Condition.wait_for overflows near threading.TIMEOUT_MAX
 
 
 def _flush_pending_tails_at_exit() -> None:
@@ -10810,9 +10819,7 @@ class LCMEngine(
         with self._exclusive_lifecycle("shutdown"):
             if self._stable_use_closed:
                 return
-            wait_s = _parse_float_env("LCM_SHUTDOWN_COMPACTION_WAIT_S", 10.0)
-            if not math.isfinite(wait_s) or wait_s < 0:
-                wait_s = 10.0
+            wait_s = _shutdown_compaction_wait_s()
             with self._compaction_gate:
                 if not self._compaction_gate.wait_for(
                     lambda: self._compaction_inflight == 0, timeout=wait_s,
