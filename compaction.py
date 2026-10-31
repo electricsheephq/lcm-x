@@ -46,6 +46,7 @@ from .reconcile import (
     _commit_proof_identity_digest,
     _emission_identity,
     _finalize_emission_descriptors,
+    _has_lossy_redacted_identity,
     _host_row_key,
     _project_emitted_occurrences,
     _proof_user_identity,
@@ -1066,9 +1067,6 @@ class CompactionMixin:
             # #671: a stub-first exit hands the host a rewritten list (summary prefix re-emitted from the DAG, stubs);
             # once the host commits it, the durable proof must describe that list, or a cold rebind reads a stale one.
             proof["stub_first"] = bool(getattr(self, "_stub_first_exit_now", None))
-            # #1286: a cleanup-only pass (sanitized: replay stubs, stripped reasoning) hands the host a rewritten list
-            # too; a restart after the host commits it must not leave the cold rebind a stale proof.
-            proof["cleanup_rewrite"] = self._last_compression_status == "sanitized" and result is not messages
             # #1013: an output that dropped ignored rows with no leaf is still a rewrite the host
             # adopts; a cold rebind needs this proof to tell its replay from a new turn. Same text is
             # not identity (a gateway may send only a new turn), so the proof binds each row's host key
@@ -1080,6 +1078,12 @@ class CompactionMixin:
                 keys = [_host_row_key(m) for m, identity in zip(result, output_identities) if identity is not None]
                 if keys and None not in keys:
                     proof["filtered"], proof["filtered_row_keys"] = True, keys
+            if result is not messages and not (proof["published"] or proof["recovery"] or proof["stub_first"]
+                                               or proof["filtered"]):
+                # #1286: any other list the host adopts in place of its own (a cleanup-only pass: replay stubs,
+                # stripped reasoning; a held pass's survival fit) is a rewrite too: a restart after the host
+                # commits it must not leave the cold rebind a stale proof. Absent unless true (traces dump it).
+                proof["cleanup_rewrite"] = True
             self._last_emission_descriptors = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
@@ -1091,7 +1095,7 @@ class CompactionMixin:
                 self._identity_anchor_record_recovery(result, emissions)
             if proof["published"] or proof["native"] or proof["recovery"] or proof["filtered"]:
                 self._persist_compress_commit_proof(proof)
-            elif proof["stub_first"] or proof["cleanup_rewrite"]:
+            elif proof["stub_first"] or proof.get("cleanup_rewrite"):
                 # #1116, #1286: the host can still refuse or roll back the list, so the proof becomes durable only on
                 # its commit signal (the compression boundary), with the store tail of this compress().
                 proof["stub_first_last_store_id"] = self._commit_proof_last_store_id()
@@ -1221,6 +1225,65 @@ class CompactionMixin:
             proof["durable"] = False
             self._compress_commit_reason, self._compress_commit_publication = "publication_failed", "local"
             logger.warning("LCM occurrence-proof publication failed; proof not durable", exc_info=True)
+
+    def _rekey_durable_commit_proof(self, messages) -> None:
+        """#1286: re-key the bound durable proof to the host's list ``messages``, later rows from the store tail now.
+
+        Called after an ingest stored a row out of host order (a row the host changed or inserted before the proven
+        end goes to the store tail): the old proof's after-walk no longer matches the host list, so a restart would
+        bind cold at cursor 0 and store the session again. The rows are stored first (I1): a failure here keeps the
+        old proof, which can duplicate but loses nothing. Built as compress() would build it for this list returned
+        unchanged; nothing process-local changes.
+        """
+        reason, publication = self._compress_commit_reason, self._compress_commit_publication
+        try:
+            if self._durable_commit_proof_payload() is None:
+                return
+            emission_binding = self._emission_binding()
+            emissions: list = []
+            self._carry_prior_emissions(messages, messages, emissions, emission_binding)
+            occurrences, _v4 = self._replay_occurrences(messages, {"version": 4, **emission_binding, "emissions": emissions})
+            store_ids = self._get_store_id_map_for_messages(messages, occurrences)
+            carried_rows = self._store.get_batch(sorted({store_ids[id(m)] for m in messages if id(m) in store_ids}))
+            output = [self._proof_replay_identity(m, strip_carrier=False) for m in messages]
+            for item in emissions:
+                item["output_multiplicity"] = output.count(output[item["output_occurrence"]["index"]])
+            proof = {
+                "version": _COMPACTION_COMMIT_PROOF_VERSION,
+                **emission_binding,
+                "session_id": self._session_id,
+                "conversation_id": self._conversation_id,
+                "input": output,
+                "output": output,
+                "end_consumed": False,
+                "carry_ranges": self._coalesce_compression_carry_ranges(
+                    (str(row["session_id"]), store_id - 1, store_id)
+                    for store_id, row in sorted(carried_rows.items())
+                    if row.get("session_id")
+                ),
+                "emissions": emissions,
+                "native": False,
+            }
+            _projection, output_identities = self._occurrence_replay_identities(messages, {**proof, **emission_binding})
+            proof["output_effective"] = [
+                _proof_user_identity(identity) for identity in output_identities if identity is not None
+            ]
+            if any(_has_lossy_redacted_identity(identity) for identity in proof["output_effective"]):
+                return  # the reader proves nothing through such a row: the old proof stays
+            proof["output_sha256_v3"] = [_commit_proof_identity_digest(self._proof_replay_identity(m)) for m in messages]
+            proof["effective_sha256_v3"] = [
+                digest for m, digest in zip(messages, proof["output_sha256_v3"])
+                if not self._is_replayed_context_scaffold_message(m)
+            ]
+            self._prepare_compress_commit_proof(proof, messages)
+            self._persist_compress_commit_proof(proof)
+            if self._compress_commit_publication == "durable":
+                logger.info("LCM durable commit proof re-keyed after an out-of-order store: session=%s rows=%d",
+                            self._session_id, len(messages))
+        except Exception:
+            logger.warning("LCM durable commit proof re-key failed; the previous proof stays", exc_info=True)
+        finally:
+            self._compress_commit_reason, self._compress_commit_publication = reason, publication
 
     def _prepare_compress_commit_proof(self, proof, result) -> None:
         """Attach engine-specific evidence before the proof's publication point."""

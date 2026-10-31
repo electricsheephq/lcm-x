@@ -7149,7 +7149,7 @@ class LCMEngine(
         sender_capture.try_update(self)
         self._capture_host_rewrites(messages)
         n = len(messages)
-        cursor = min(max(self._ingest_cursor, 0), n)
+        cursor = entry_cursor = min(max(self._ingest_cursor, 0), n)
         new_prefix_occurrences = set()
         unchanged_prefix_occurrences = set()
         proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.
@@ -7591,6 +7591,12 @@ class LCMEngine(
         self._compression_boundary_active_placeholder_digest_budget = {}
         self._compression_boundary_active_placeholder_digest_ordinals = {}
         self._compression_boundary_stored_placeholder_digest_counts = {}
+        # #1286: a row stored below the end the durable proof proves (one the host changed or inserted before the
+        # cursor goes to the store tail) breaks that proof's in-order after-walk: re-key it, after the store (I1).
+        proven_end = entry_cursor if not reconciled_existing_session else n if proven_cursor is None else proven_cursor
+        if unaudited_from is None and any(store_id and idx < proven_end for (idx, _msg), store_id
+                                          in zip(messages_to_store_with_index, store_ids)):
+            self._rekey_durable_commit_proof(messages)
         logger.debug("Ingested %d messages into LCM store", len(messages_to_store_with_index))
         self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
         # Most ``protected_messages`` changes are storage-only: inline media and
