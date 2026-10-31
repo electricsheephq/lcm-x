@@ -3042,12 +3042,18 @@ class ReconcileMixin:
         messages: List[Dict[str, Any]],
         *,
         allow_session_end_replay_proof: bool = False,
+        session_counts: Optional[list] = None,
     ) -> int:
-        """Infer the in-memory cursor for an existing session after process restart."""
+        """Infer the in-memory cursor for an existing session after process restart.
+
+        ``session_counts`` (#1286), when given, receives the session's stored row count at this bind.
+        """
         if not self._session_id or not messages:
             return 0
 
         session_count = self._store.get_session_count(self._session_id)
+        if session_counts is not None:
+            session_counts.append(session_count)
         run = _StoreCursorRun(
             messages=messages, session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
@@ -3557,7 +3563,9 @@ class ReconcileMixin:
         """Return whether ``message`` is the unique active durable fold."""
         return bool(self._active_folded_tail_identity_overrides([message]))
 
-    def _get_store_id_map_for_messages(self, messages: List[Dict[str, Any]], occurrences=None) -> dict[int, int]:
+    def _get_store_id_map_for_messages(
+        self, messages: List[Dict[str, Any]], occurrences=None, *, exclude_store_ids=frozenset(),
+    ) -> dict[int, int]:
         """Map current raw message objects back to store_ids in stable order.
 
         Matching starts strictly after ``_last_compacted_store_id`` so repeated
@@ -3637,9 +3645,10 @@ class ReconcileMixin:
                     break
                 candidates.extend(page)
                 next_candidate_id = int(page[-1]["store_id"]) + 1
+        # #1286: the re-key's coverage guard passes the stored rows an earlier map already claimed.
         candidates = list({
             int(candidate["store_id"]): candidate for candidate in candidates
-            if int(candidate.get("store_id") or 0) > 0
+            if int(candidate.get("store_id") or 0) > 0 and int(candidate["store_id"]) not in exclude_store_ids
         }.values())
         candidates.sort(key=lambda candidate: int(candidate["store_id"]))
         self._load_host_rewrite_overrides(candidates)
