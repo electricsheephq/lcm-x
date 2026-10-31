@@ -1273,6 +1273,11 @@ class CompactionMixin:
             ]
             if any(_has_lossy_redacted_identity(identity) for identity in proof["output_effective"]):
                 return  # the reader proves nothing through such a row: the old proof stays
+            unstored = self._rekey_unstored_rows(messages, occurrences, output_identities, store_ids)
+            if unstored:
+                logger.info("LCM durable commit proof not re-keyed: %d host rows have no stored occurrence; the "
+                            "previous proof stays: session=%s", unstored, self._session_id)
+                return
             proof["output_sha256_v3"] = [_commit_proof_identity_digest(self._proof_replay_identity(m)) for m in messages]
             proof["effective_sha256_v3"] = [
                 digest for m, digest in zip(messages, proof["output_sha256_v3"])
@@ -1284,6 +1289,41 @@ class CompactionMixin:
                         self._session_id, len(messages))
         except Exception:
             logger.warning("LCM durable commit proof re-key failed; the previous proof stays", exc_info=True)
+
+    def _rekey_unstored_rows(self, messages, occurrences, identities, store_ids) -> int:
+        """#1286 (I1): how many rows the re-key would prove that no stored row holds.
+
+        Ingest can leave a host row unstored: an unstamped reply the host replaced below the cursor stays a
+        positional replay. A proof of that row hides it from every later cold bind, where the old proof's broken
+        walk stores it (with duplicates), so such a list is never re-keyed. Rows ingest never stores on purpose
+        (LCM's own scaffolds and placeholders, ignore-pattern matches) are not counted. The in-order map leaves the
+        rows after one stored out of host order unmapped (the case the re-key exists for), so unmapped rows are
+        mapped again on their own, each stored row claimed once.
+        """
+        claimed = set(store_ids.values())
+        pending = []
+        for idx, (message, identity) in enumerate(zip(messages, identities)):
+            if identity is None or id(message) in store_ids:
+                continue
+            text = text_content_for_pattern_matching(message.get("content")) or ""
+            if not (self._is_replayed_context_scaffold_message(message)
+                    or self._matches_ignore_message_patterns(message)
+                    or self._is_ignored_active_replay_placeholder(message, text)
+                    or self._is_volatile_ignored_quarantine_placeholder(message, text)):
+                pending.append(idx)
+        for _attempt in range(3):
+            if not pending:
+                break
+            mapped = self._get_store_id_map_for_messages(
+                [messages[idx] for idx in pending],
+                None if occurrences is None else [occurrences[idx] for idx in pending],
+            )
+            found = {idx: mapped[id(messages[idx])] for idx in pending if id(messages[idx]) in mapped}
+            if not found or claimed & set(found.values()):
+                break
+            claimed.update(found.values())
+            pending = [idx for idx in pending if idx not in found]
+        return len(pending)
 
     def _prepare_compress_commit_proof(self, proof, result) -> None:
         """Attach engine-specific evidence before the proof's publication point."""

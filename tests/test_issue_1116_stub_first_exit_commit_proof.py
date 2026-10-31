@@ -321,7 +321,8 @@ def test_stale_proof_from_an_earlier_version_is_retired_on_cold_rebind(stub_firs
 
 def test_a_retry_that_only_skips_a_stale_snapshot_keeps_todays_decision(stub_first_session, caplog, monkeypatch):
     """Only a retry that replays stored rows confirms the retirement. One the no-proof reading takes for a stale
-    no-overlap snapshot leaves today's decision (the batch persisted whole) and the durable proof in force."""
+    no-overlap snapshot leaves today's decision (the batch persisted whole), and the durable proof is re-keyed to
+    that list (#1286)."""
     host = stub_first_session("summary", stub_first=False)
     stale = leave_proof_stale(host, caplog)
     # the seam: only the retry (proof retired) finds no replayed tail and reads the list as a stale snapshot

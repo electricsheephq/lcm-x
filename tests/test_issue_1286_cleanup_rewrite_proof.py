@@ -302,6 +302,30 @@ def test_a_row_changed_inside_the_committed_list_is_not_stored_again_after_a_res
     assert host.count(changed) == 1
 
 
+@pytest.mark.parametrize("variant", ["stub", "reasoning"])
+def test_a_reply_the_warm_path_never_stored_is_not_proven_away(host, variant):
+    """I1: a retry or an edit-resend replaces the stamped user row and its unstamped reply between two ingests.
+    The warm anchor stores the new user row out of host order but keeps the new reply as a positional replay, so
+    it is never stored warm (a gap that predates the re-key). No proof may claim that reply: the restart stores it
+    (with duplicates, as before the re-key), and a second restart stores only the next turn."""
+    _turns(host, variant)
+    _commit_cleanup(host, variant)
+    host.turn()
+    host.turn()
+    user, reply = f"[resent] the user resent this turn{PAD}", f"a new reply to the resent turn{PAD}"
+    host.live[-2:] = [{"role": "user", "content": user, "timestamp": host.stamp()},
+                      {"role": "assistant", "content": reply}]
+    proof = host.engine._durable_commit_proof_payload()
+    host.turn()
+    assert (host.count(user), host.count(reply)) == (1, 0)
+    assert host.engine._durable_commit_proof_payload() == proof  # not re-keyed over the unstored reply
+    host.restart()
+    host.turn()
+    assert host.count(reply) == 1
+    _restart_stores_only_the_next_turn(host)
+    assert host.count(reply) == 1
+
+
 def test_a_salvaged_commit_survives_a_restart(host):
     """Hermes salvage commits the cleanup list with old tool outputs cleared; the placeholders alias their stored
     rows (#773), warm and cold."""
