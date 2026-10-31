@@ -634,6 +634,91 @@ def test_a_multi_row_cleanup_that_replays_the_session_keeps_its_proof_durable(ho
     assert host.duplicated() == {}
 
 
+def _delta_cleanup_then_redelivery(host, head):
+    """The round-7b delta behind ``head`` (rows every host list carries) at both cold binds. Returns (the stored rows
+    before the redelivery, the durable proof the committed cleanup left)."""
+    _turns(host, None, n=3)
+    host.restart()
+    host.live = [dict(m) for m in head] + _two_new_messages()
+    host.engine.ingest(host.live)
+    rows = host.stored()
+    result, before = host.cleanup_pass(preflight=False)
+    assert sum(str(m.get("content")).startswith("[Externalized payload: kind=raw_payload;") for m in result) == 2
+    host.commit_in_place(result, before)
+    durable = host.engine._durable_commit_proof_payload()
+    host.restart()
+    host.live = [dict(m) for m in head] + _two_new_messages()  # new messages with the same texts
+    host.engine.ingest(host.live)
+    return rows, durable
+
+
+def test_a_system_prefixed_delta_cleanup_proof_does_not_swallow_new_identical_messages(host):
+    """Round 7c (I1): the round-7b delta as a gateway delivers it, behind the original system prompt. That prompt maps
+    the session's first stored row, but the history rows between it and the delta are absent: the list does not cover
+    the session after the frontier, so its proof stays local and the redelivered texts are stored. Proven durable by
+    the first-row witness, it matched them and neither was stored."""
+    rows, durable = _delta_cleanup_then_redelivery(host, [{"role": "system", "content": "system prompt"}])
+    assert host.stored() == rows + 3  # the prompt's copy too, as at the first bind and on the base (I1)
+    assert durable is None
+
+
+def test_a_delta_behind_the_first_user_text_does_not_swallow_new_identical_messages(host):
+    """Round 7c control: the same delta behind the session's first user text (a narrower first-non-system-row witness
+    would accept it). The rest of the history is still absent, so the redelivered texts are stored."""
+    rows, durable = _delta_cleanup_then_redelivery(host, [{"role": "user", "content": f"[T0] user turn{PAD}"}])
+    assert host.stored() == rows + 3  # the unstamped copy of the first text too, as at the first bind (I1)
+    assert durable is None
+
+
+@pytest.mark.parametrize("compact", [False, True], ids=["frontier-0", "compacted-over-duplicates"])
+def test_a_full_replay_cleanup_over_an_old_writers_duplicates_keeps_its_proof_durable(host, monkeypatch, compact):
+    """Round 7c, the field shape: an old writer (no cleanup proof, no re-key) left #1286's duplicate copies in the
+    store; a compaction may have consumed some of them. The new writer's next cleanup over the host's full list maps
+    one copy of each stored identity, which covers the session, so its proof goes durable and the next restart stores
+    only the next turn. After a compaction over the copies, the proof may stay local; nothing grows either way."""
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _stub_summarizer)
+    _turns(host, None)
+    with monkeypatch.context() as old_writer:
+        prepare = LCMEngine._prepare_compress_commit_proof
+
+        def without_cleanup_proof(self, proof, result):
+            proof.pop("cleanup_rewrite", None)
+            return prepare(self, proof, result)
+
+        old_writer.setattr(LCMEngine, "_prepare_compress_commit_proof", without_cleanup_proof)
+        old_writer.setattr(LCMEngine, "_rekey_durable_commit_proof", lambda self, messages: None)
+        _turns(host, "stub")
+        _commit_cleanup(host, "stub")
+        host.turn()
+        host.turn()
+        _change(host, "insert", insert_at=len(host.live) - 3, replace_at=len(host.live) - 4)
+        host.turn()
+        for _ in range(2):
+            host.restart()
+            host.turn()
+    assert host.duplicated()
+    if compact:
+        host.compact()
+        frontier = int(host.engine._last_compacted_store_id or 0)
+        copies = [store_id for (store_id,) in host.engine._store._conn.execute(
+            "SELECT store_id FROM messages WHERE session_id = ? AND (role, content) IN (SELECT role, content FROM "
+            "messages WHERE session_id = ? GROUP BY role, content HAVING COUNT(*) > 1)", (SID, SID))]
+        assert min(copies) <= frontier < max(copies)  # the frontier sits above some copies, below others
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", lambda *a, **k: pytest.fail("summariser called"))
+    host.turn(user=f"[T{host.n_turns}] {RAW}")
+    result, before = host.cleanup_pass(preflight=False)
+    # RR (round 7c): old copies above a later frontier are not in the host list, so the proof stays local; no growth (I1: duplicates possible, never loss).
+    if not compact:
+        assert host.engine._compress_commit_proof.get("cleanup_rewrite") is True
+    host.commit_in_place(result, before)
+    if not compact:
+        assert host.engine._durable_commit_proof_payload() is not None
+    rows, duplicated = host.stored(), host.duplicated()
+    host.turn()
+    assert host.stored() == rows + 2 and host.duplicated() == duplicated  # the warm turn stores only its own rows
+    _restart_stores_only_the_next_turn(host)
+
+
 @pytest.mark.parametrize("variant", ["stub", "reasoning"])
 def test_a_delta_only_bind_does_not_re_key_the_proof_to_the_delta(host, variant):
     """Round 7 (I1): a session holding rows with a durable proof, then a restart whose first delivery is only one new

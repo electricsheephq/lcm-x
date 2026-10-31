@@ -1085,8 +1085,7 @@ class CompactionMixin:
                         proof["published"] or proof["recovery"] or proof["stub_first"] or proof["filtered"])
                     and not (len(effective) == 1 and not self._host_occurrence_known(effective[0]))
                     and not self._rekey_unstored_rows(result, occurrences, output_identities, remapped)
-                    and all(int(row["store_id"]) in remapped.values() for row in self._store.get_session_messages_after(
-                        self._session_id, after_store_id=int(self._last_compacted_store_id or 0), limit=1))):
+                    and self._covers_the_session_after_the_frontier(remapped, output_identities)):
                 # #1286: a cleanup-only pass (replay stubs, stripped reasoning) hands the host a rewritten list too: a
                 # restart after the host commits it must not leave the cold rebind a stale proof. Absent unless true
                 # (traces dump it). A held pass's survival fit stays local: a durable claim of its carrier would
@@ -1096,10 +1095,10 @@ class CompactionMixin:
                 # a list of one effective row no host stamp or uid witnesses: a stub's identity restores its payload,
                 # so a new message with the same text, delivered alone after a restart, would match it and be lost
                 # (the tail path's singleton rule stores it). A stamped or uid row stays durable: the proof's
-                # host-occurrence snapshot tells the two occurrences apart (_host_occurrence_changed). Round 7b: so does
-                # a list that does not replay this session from the compaction frontier (its first stored row after the
-                # frontier unmapped): a delta of new rows, whose new copies after a restart would match it (the tail
-                # path's rule: replay is proven only by covering the durable session).
+                # host-occurrence snapshot tells the two occurrences apart (_host_occurrence_changed). Round 7c: so does
+                # a list that does not cover this session after the compaction frontier (a stored identity it does not
+                # carry): a delta of new rows, even behind the system prompt every host list carries, whose new copies
+                # after a restart would match it (the tail path's rule: replay is proven only by covering the session).
                 proof["cleanup_rewrite"] = True
                 # Round 7: its carry is the re-key's (the rows the guard mapped again, the previous proof's parent
                 # ranges), or a compression child's committed cleanup drops the parent rows after an out-of-order row.
@@ -1336,6 +1335,28 @@ class CompactionMixin:
                   for store_id, row in sorted(carried_rows.items()) if row.get("session_id")),
                 *inherited,
             ])
+
+    def _covers_the_session_after_the_frontier(self, store_ids, identities) -> bool:
+        """#1286 (I1): whether a cleanup list covers this session's stored rows after the compaction frontier.
+
+        Every distinct replay identity among those rows (the reader's stored-row identity; rows the reader ignores,
+        ignore-pattern matches and LCM's own system and todo scaffolds, aside) must be one the list carries: an
+        effective output identity, or the identity of a stored row the list mapped (the in-order map admits a row's
+        cleanup form, a stripped reasoning block). Identities, not store ids: an old writer's duplicate copies share one
+        identity, and a full replay maps one copy of each. A session with no such row is covered.
+        """
+        carried = {_proof_user_identity(identity) for identity in identities if identity is not None}
+        mapped, uncovered, after = set(store_ids.values()), set(), int(self._last_compacted_store_id or 0)
+        while page := self._store.get_session_messages_after(self._session_id, after_store_id=after):
+            after = int(page[-1]["store_id"])
+            for row in page:
+                if self._matches_ignore_message_patterns(row, stored_row=True) or (
+                        self._is_replayed_context_scaffold_message(row)
+                        and (row.get("role") == "system" or self._is_preserved_todo_context_message(row))):
+                    continue
+                identity = _proof_user_identity(self._message_replay_identity(row, stored_row=True))
+                (carried if int(row["store_id"]) in mapped else uncovered).add(identity)
+        return uncovered <= carried
 
     def _rekey_unstored_rows(self, messages, occurrences, identities, store_ids) -> int:
         """#1286 (I1): how many rows the re-key would prove that no stored row holds.
