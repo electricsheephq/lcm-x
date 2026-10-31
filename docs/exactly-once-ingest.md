@@ -203,7 +203,8 @@ The pieces:
   - The shapes, in precedence order, are: leading summary header plus `[Expand for details:`, objective scaffold prefix, overflow recovery prefix, LCM's full recall header inside `<relevant-memories>`, an exact tool-result stub, survival projection text or bounded-call notice, then user-only summary/scaffold/recovery parts joined after `"\n\n"`. Leading checks use the first text part for structured content. System rows are excluded; the bare recall tag and arbitrary mid-row markers do not match.
   - A user row carrying these marker bytes is stored and flagged, never lost. Stored NEW applies only where today's classifier stores: exact cursor evidence, DAG-verified scaffolds and verified recovery projections keep their existing skips.
   - `possible_replay_of` is deferred to P1h or P2; P1c-2b does no DAG or descriptor lookup on ingest.
-  - Accepted gaps: ledger off, `ledger.write_failed` (the savepoint rolls the relation back), not-ready or read-only stores, session-end tail stores (P1e), and mid-row markers outside the joined rule.
+  - The recognizer reads the protected payload and the remainder it was protected from, so a generated row large enough for whole-row externalization is still flagged.
+  - Accepted gaps: ledger off, `ledger.write_failed` (the savepoint rolls the relation back), not-ready or read-only stores, session-end tail stores (P1e), mid-row markers outside the joined rule, and the externalized form of the over-cap tool-result stub (an `[Externalized payload: …]` reference, not a recognized shape).
 - **Adoption.** The emission becomes adopted on the host's boundary signal (engine.py:4444) or when an incoming view anchors on it.
   - A host refusal or rollback (#1116, `record_rejected_compaction`, engine.py:2686) sets it to refused. A refused emission is never a base and never adopted (L5-2), and the previous epoch stays current.
   - E7 is checked and logged at adoption.
@@ -560,13 +561,14 @@ Inside the ingest ledger savepoint, a stored row matching a still-pending
 descriptor in this store and lineage gains one `generated_unproven` relation.
 Only entries successfully retried by this attempt are excluded; claims never
 hide pending entries. Pending matching keeps the full-entry digest for composites.
-P1c-2b also flags every stored row whose protected storage payload carries an
+P1c-2b also flags every stored row whose protected storage payload, or the
+remainder it was protected from, carries an
 existing LCM generated marker (§3.3), independent of descriptors and pending
 state. The union is written once per stored row, before ordinal planning;
 `ledger.skipped_crossed` therefore retains relations and committed counters.
 Classification and compress output remain unchanged; rows today's classifier
 skips get no relation. A fail-open rollback (`ledger.write_failed`), ledger off,
 a store that is not ready, read-only or has a changed salt still skips relations.
-Session-end tail stores (P1e) and mid-row markers outside the joined rule remain
-accepted gaps. The process mark is lost on restart; the byte recognizer is not.
+Session-end tail stores (P1e), mid-row markers outside the joined rule and the
+externalized over-cap tool-result stub remain accepted gaps. The process mark is lost on restart; the byte recognizer is not.
 `possible_replay_of` is deferred to P1h or P2.

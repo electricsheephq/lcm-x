@@ -6756,7 +6756,7 @@ class LCMEngine(
         for call in calls if isinstance(calls, list) else ():
             function = call.get("function") if isinstance(call, dict) else None
             arguments = function.get("arguments") if isinstance(function, dict) else None
-            if not isinstance(arguments, str):
+            if not isinstance(arguments, str) or "lcm_survival_fit" not in arguments:
                 continue
             try:
                 notice = json.loads(arguments)
@@ -6768,7 +6768,7 @@ class LCMEngine(
         if role == "user" and isinstance(content, str):
             for header in header_re.finditer(content):
                 if (header.start() >= 2 and content[header.start()-2:header.start()] == "\n\n"
-                        and "[Expand for details:" in content[header.end():]):
+                        and content.find("[Expand for details:", header.end()) != -1):
                     return "summary_joined"
             for kind, prefix in (("scaffold_joined", _PRESERVED_OBJECTIVE_CONTEXT_PREFIX),
                                  ("recovery_joined", "[LCM overflow recovery] ")):
@@ -8269,10 +8269,11 @@ class LCMEngine(
         stored_at = {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index, store_ids)}
         if getattr(self, "_ingest_ledger_attempt", None) is not None:
             self._ingest_ledger_attempt["stored"] = stored_at
+            # The remainder too: whole-row externalization replaces a large generated row's marker bytes.
             self._ingest_ledger_attempt["stored_markers"] = {
-                idx: kind for (idx, _msg), protected, _sid in zip(
+                idx: kind for (idx, msg), protected, _sid in zip(
                     messages_to_store_with_index, protected_messages, store_ids)
-                if (kind := self._lcm_generated_marker(protected)) is not None}
+                if (kind := self._lcm_generated_marker(protected) or self._lcm_generated_marker(msg)) is not None}
         if anchor_plan is not None:
             try:
                 with self._ingest_evidence():

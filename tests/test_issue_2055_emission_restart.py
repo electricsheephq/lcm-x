@@ -264,7 +264,8 @@ def _extended_exit(root, patch, path, measure, caplog, restart):
             durable = engine._durable_commit_proof_payload()
             result, _before = stub_first_result(host, caplog)
             assert engine.last_compression_status == "sanitized"
-            assert engine._compress_commit_proof["stub_first"]
+            # A process-local proof may or may not exist here (the carrier head can leave none); the restart drops
+            # it either way. What matters is that nothing became durable before the boundary.
             assert engine._durable_commit_proof_payload() == durable
             # Do not call adopt, rotate, end or on_session_start(compression).
             factory = host._bind
@@ -279,7 +280,7 @@ def _extended_exit(root, patch, path, measure, caplog, restart):
         engine.ingest(deepcopy(result))
         final = _scripted_rows(engine)
         assert not (scripted - final), "every scripted host row remains stored"
-        _assert_visible(engine._store._conn, {text for _role, text in scripted})
+        _assert_visible(engine._store._conn, {text for _role, text in scripted}, require_generated=True)
     finally:
         engine.shutdown()
 
@@ -343,6 +344,9 @@ def _forced_output(engine, variant, compressed):
         return [summary]
     if variant == "carrier":
         return _host_merge_consecutive_users([summary, {"role": "user", "content": "carrier host text"}])
+    if variant == "large-carrier":
+        # Over the whole-row floor (100k chars at a 200k window): the stored payload is an externalized stub.
+        return _host_merge_consecutive_users([summary, {"role": "user", "content": "large host text " * 7_000}])
     if variant == "objective-first":
         return [{"role": "user", "content": OBJECTIVE + "\ncurrent ask\n\n" + summary["content"]}]
     if variant in {"recall", "structured-list", "structured-dict"}:
@@ -389,9 +393,13 @@ def _forced_output(engine, variant, compressed):
     raise AssertionError(variant)
 
 
-@pytest.mark.parametrize("variant", ["summary", "carrier", "objective-first", "recall", "recovery", "stub",
-                                     "joined-summary", "successful-descriptor", "structured-list", "structured-dict",
-                                     "tool-call-projection", "joined-recovery"])
+_HOST_TEXT = {"carrier": "carrier host text", "joined-summary": "older host text", "recall": "recall host text",
+              "structured-list": "structured host text", "structured-dict": "structured host text"}
+
+
+@pytest.mark.parametrize("variant", ["summary", "carrier", "large-carrier", "objective-first", "recall", "recovery",
+                                     "stub", "joined-summary", "successful-descriptor", "structured-list",
+                                     "structured-dict", "tool-call-projection", "joined-recovery"])
 def test_forced_restore_in_empty_child(tmp_path, monkeypatch, variant):
     engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     try:
@@ -418,9 +426,18 @@ def test_forced_restore_in_empty_child(tmp_path, monkeypatch, variant):
         conn = cold._store._conn
         assert not (scripted - _scripted_rows(cold)), "0 loss of scripted host rows"
         assert _turn(13)[1]["content"] in {row[3] for row in _rows(conn)}
-        generated = _assert_visible(conn, {text for _role, text in scripted}, require_generated=True)
-        child_ids = {row[0] for row in _rows(conn) if row[1] == "S1"}
-        assert child_ids.intersection(generated), "the forced child re-store must not pass vacuously"
+        child = [row for row in _rows(conn) if row[1] == "S1"]
+        if variant in _HOST_TEXT:
+            assert any(_HOST_TEXT[variant] in (row[3] or "") for row in child), "the host text is stored in S1"
+        if variant == "large-carrier":
+            # The stored bytes no longer show the summary, so the oracle cannot see it: check the stub directly.
+            relations = _relations(conn)
+            stubs = [row[0] for row in child if (row[3] or "").startswith("[Externalized payload")]
+            assert stubs and all(relations[sid] == 1 for sid in stubs), (stubs, relations)
+            _assert_visible(conn, {text for _role, text in scripted})
+        else:
+            generated = _assert_visible(conn, {text for _role, text in scripted}, require_generated=True)
+            assert {row[0] for row in child}.intersection(generated), "the forced child re-store must not pass vacuously"
     finally:
         cold.shutdown()
 
