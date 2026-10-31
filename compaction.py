@@ -1078,11 +1078,12 @@ class CompactionMixin:
                 keys = [_host_row_key(m) for m, identity in zip(result, output_identities) if identity is not None]
                 if keys and None not in keys:
                     proof["filtered"], proof["filtered_row_keys"] = True, keys
-            if result is not messages and not (proof["published"] or proof["recovery"] or proof["stub_first"]
-                                               or proof["filtered"]):
-                # #1286: any other list the host adopts in place of its own (a cleanup-only pass: replay stubs,
-                # stripped reasoning; a held pass's survival fit) is a rewrite too: a restart after the host
-                # commits it must not leave the cold rebind a stale proof. Absent unless true (traces dump it).
+            if self._last_compression_status == "sanitized" and result is not messages and not (
+                    proof["published"] or proof["recovery"] or proof["stub_first"] or proof["filtered"]):
+                # #1286: a cleanup-only pass (replay stubs, stripped reasoning) hands the host a rewritten list too: a
+                # restart after the host commits it must not leave the cold rebind a stale proof. Absent unless true
+                # (traces dump it). A held pass's survival fit stays local: a durable claim of its carrier would
+                # bypass the anchor's retirement of that carrier (#1000).
                 proof["cleanup_rewrite"] = True
             self._last_emission_descriptors = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
