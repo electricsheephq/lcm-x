@@ -523,13 +523,20 @@ def test_a_re_key_in_a_compression_child_keeps_the_parent_rows_it_carries(host, 
     result = host.engine.compress(host.live, force=True)
     assert host.engine._last_compression_status == "compacted"
     kept = {m.get("content") for m in result}
-    parent = {(role, content): store_id for store_id, role, content in host.engine._store._conn.execute(
-        "SELECT store_id, role, content FROM messages WHERE session_id = ?", (SID,)).fetchall()}
+    # A parent row's copies: the warm path re-stores a displaced stamped user in the child (a duplicate, I1), and
+    # the summary may source either copy; a row with no copy among the sources lost its provenance.
+    copies: dict = {}
+    for store_id, session_id, role, content in host.engine._store._conn.execute(
+            "SELECT store_id, session_id, role, content FROM messages WHERE session_id IN (?, ?)", (SID, CHILD)):
+        copies.setdefault((role, content), set()).add(store_id)
+        if session_id == SID:
+            copies.setdefault(("parent", role, content), set()).add(store_id)
     sources = {store_id for session_id in (SID, CHILD) for node in host.engine._dag.get_session_nodes(session_id)
                if node.depth == 0 for store_id in node.source_ids}
-    consumed = [parent[(m["role"], m["content"])] for m in before
-                if m.get("content") not in kept and (m["role"], m.get("content")) in parent]
-    assert consumed and [store_id for store_id in consumed if store_id not in sources] == []
+    consumed = [(m["role"], m["content"]) for m in before  # the system prompt is never a summary source
+                if m["role"] != "system" and m.get("content") not in kept
+                and ("parent", m["role"], m.get("content")) in copies]
+    assert consumed and [key for key in consumed if not copies[key] & sources] == []
 
 
 @pytest.mark.parametrize("row", ["redacted-tool", "quarantined-reply"])

@@ -1260,7 +1260,8 @@ class CompactionMixin:
         rolls back a half-written proof and snapshot. Built as compress() would build it for this list returned
         unchanged; nothing process-local changes.
         """
-        if self._durable_commit_proof_payload() is None:
+        previous = self._durable_commit_proof_payload()
+        if previous is None:
             return
         if self._cursor_from_durable_commit_proof(messages) == len(messages):
             return
@@ -1301,13 +1302,19 @@ class CompactionMixin:
                         "previous proof stays: session=%s", unstored, self._session_id)
             return
         recovered = {store_ids[id(m)] for m in messages if id(m) in store_ids} - carried_rows.keys()
-        if recovered:  # rows the re-map found (a compression child's parent rows after the out-of-order one)
-            carried_rows.update(self._store.get_batch(sorted(recovered)))
-            proof["carry_ranges"] = self._coalesce_compression_carry_ranges(
-                (str(row["session_id"]), store_id - 1, store_id)
-                for store_id, row in sorted(carried_rows.items())
-                if row.get("session_id")
-            )
+        # A compression child's inherited parent ranges stay above the compaction frontier: a parent row whose host
+        # row now maps to a copy in this session (or not at all) is still uncovered, and only a summary consumes it.
+        frontier = int(self._last_compacted_store_id or 0)
+        inherited = [(str(source), max(int(start), frontier), int(end))
+                     for source, start, end in previous.get("carry_ranges") or () if str(source) != str(self._session_id)]
+        if recovered or inherited:  # recovered: rows the re-map found (the parent rows after the out-of-order one)
+            if recovered:
+                carried_rows.update(self._store.get_batch(sorted(recovered)))
+            proof["carry_ranges"] = self._coalesce_compression_carry_ranges([
+                *((str(row["session_id"]), store_id - 1, store_id)
+                  for store_id, row in sorted(carried_rows.items()) if row.get("session_id")),
+                *inherited,
+            ])
         proof["output_sha256_v3"] = [_commit_proof_identity_digest(self._proof_replay_identity(m)) for m in messages]
         proof["effective_sha256_v3"] = [
             digest for m, digest in zip(messages, proof["output_sha256_v3"])
