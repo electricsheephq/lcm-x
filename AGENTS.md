@@ -235,6 +235,8 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   these conditions by a reviewer from a different model than the classification's author,
   named in the Phase B receipt. The shape is disclosed at P2 with a tracked fix planned for
   the next patch release. If any condition fails, the normal P0/P1 rule applies and the rc
-  respins. A duplicate on any path without an injected fault still respins.
+  respins. A duplicate on any path without an injected fault still respins; the one recorded
+  exception is the spec's v0.29.1-only D5 rc3-window decision (#1286's upgrade-time
+  duplicate, probe P-S2).
 - Agents preparing a release produce the rc tag and receipts; the GA cut itself follows the
   maintainers-own-releases rule above, which the release-manager delegation meets.
