@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -53,14 +54,15 @@ def test_run_candidate(tmp_path):
     ruff.chmod(0o755)
     ruff_args = tmp_path / "ruff-args.txt"
     # bench-test installs PyYAML in CI's interpreter. Hide it without changing that install.
-    # A fixture-local yaml.py deliberately makes it visible for the rejection/leak probes.
+    # A fixture-local yaml.py or ruamel package deliberately makes it visible for the probes.
     site = tmp_path / "site"
     site.mkdir()
     (site / "sitecustomize.py").write_text(
         'import sys\nfrom pathlib import Path\n'
         'if not Path(__file__).with_name("yaml.py").exists():\n'
         '    sys.modules["yaml"] = None\n'
-        'sys.modules["ruamel"] = None\n'
+        'if not Path(__file__).with_name("ruamel").exists():\n'
+        '    sys.modules["ruamel"] = None\n'
     )
     env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"),
                GIT_CONFIG_NOSYSTEM="1", RUFF_ARGS=str(ruff_args),
@@ -192,6 +194,13 @@ def test_run_candidate(tmp_path):
     assert polluted.returncode == 2 and "YAML_IN_VENV" in polluted.stderr
     assert "green-focused: pytest_exit=" not in polluted.stdout
     (site / "yaml.py").unlink()
+    # An installed ruamel that fails to import counts as present; only a missing one is absent.
+    (site / "ruamel").mkdir()
+    (site / "ruamel" / "__init__.py").write_text("import lcmx_fixture_missing_dependency\n")
+    broken = run("brokenruamel", "--focused", "tests/", "--workers-focused", "1")
+    assert broken.returncode == 2 and "importable: ruamel.yaml (ModuleNotFoundError)" in broken.stderr
+    assert "YAML_IN_VENV" in broken.stderr and "green-focused: pytest_exit=" not in broken.stdout
+    shutil.rmtree(site / "ruamel")
     for label, yaml_patch, expected_code, reason in (
         ("yamlfailure", yaml_failure, 0, ""),
         ("yamlleak", yaml_leak, 2, "YAML_LEAKED"),

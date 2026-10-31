@@ -60,8 +60,10 @@ for name in ("yaml", "ruamel.yaml"):
         if importlib.util.find_spec(name) is not None:
             print(f"importable: {name}", file=sys.stderr)
             sys.exit(1)
-    except ImportError:
-        pass
+    except ModuleNotFoundError as exc:
+        if exc.name != name.rpartition(".")[0]:  # only a missing parent package means absent
+            print(f"importable: {name} ({type(exc).__name__})", file=sys.stderr)
+            sys.exit(1)
     except Exception as exc:  # a broken module still counts as present
         print(f"importable: {name} ({type(exc).__name__})", file=sys.stderr)
         sys.exit(1)

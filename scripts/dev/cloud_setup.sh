@@ -31,12 +31,17 @@ if ! "${PYTHON:-python3}" -c 'import venv, ensurepip' > /dev/null 2>&1; then
   echo "cloud_setup: missing prerequisite: ${PYTHON:-python3} venv/ensurepip" >&2
   missing=1
 fi
+# Exit 3 means too old; an interpreter that does not run at all is reported above.
+py_rc=0
+"${PYTHON:-python3}" -c 'import sys; sys.exit(3 if sys.version_info < (3, 11) else 0)' > /dev/null 2>&1 || py_rc=$?
+if [ "$py_rc" = 3 ]; then
+  echo "cloud_setup: missing prerequisite: ${PYTHON:-python3} >= 3.11" >&2
+  missing=1
+fi
 [ "$missing" = 0 ] || exit 1
 repo="$(git rev-parse --show-toplevel)"
 cd "$repo"
 
-"${PYTHON:-python3}" -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
-  || { echo "cloud_setup: Python >= 3.11 is required" >&2; exit 1; }
 want="$("${PYTHON:-python3}" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 # Reuse .venv only when it was made here, on the selected interpreter's Python version, without
 # the system site packages (a system PyYAML would stay importable). Otherwise recreate it; a

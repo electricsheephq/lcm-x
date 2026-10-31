@@ -63,3 +63,25 @@ def test_relative_python_is_resolved_without_tools(tmp_path):
         assert result.returncode == 1
         assert result.stderr.splitlines() == [f"cloud_setup: missing prerequisite: {named} venv/ensurepip"]
     assert not (tmp_path / ".venv").exists()
+
+
+def test_old_python_is_reported_with_missing_tools(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in ("git", "curl", "unzip", "gcc", "sha256sum"):
+        (bin_dir / tool).symlink_to(sys.executable)
+    python = bin_dir / "python"
+    # venv and ensurepip import; the version check reports a Python older than 3.11.
+    python.write_text('#!/bin/sh\ncase "$2" in *ensurepip*) exit 0;; esac\nexit 3\n')
+    python.chmod(0o755)
+    result = subprocess.run(
+        [shutil.which("bash"), str(SCRIPT)], cwd=tmp_path,
+        env=dict(os.environ, PATH=str(bin_dir), PYTHON=str(python)),
+        text=True, capture_output=True, timeout=30,
+    )
+    assert result.returncode == 1
+    assert result.stderr.splitlines() == [
+        "cloud_setup: missing prerequisite: node",
+        f"cloud_setup: missing prerequisite: {python} >= 3.11",
+    ]
+    assert not (tmp_path / ".venv").exists()

@@ -5,9 +5,9 @@ These are Python 3.11+ program-side tools. They use only the standard library.
 ## Run a candidate the way CI does
 
 Prepare a Linux host or container as a non-root user with `bash scripts/dev/cloud_setup.sh`.
-Setup checks for git, curl, unzip, gcc, sha256sum, node and the selected Python's venv/ensurepip
-support before doing any work. It lists every missing prerequisite and exits before creating
-or reusing `.venv`; Python 3.11 or newer is required.
+Setup checks for git, curl, unzip, gcc, sha256sum, node and a selected Python of 3.11 or newer
+with venv/ensurepip support, before doing any work. It lists every missing prerequisite and
+exits before creating or reusing `.venv`.
 Make a patch with `git -c diff.noprefix=false diff --binary BASE..HEAD > candidate.patch`, then run:
 
 ```bash
@@ -29,7 +29,7 @@ directory; its commands use paths relative to that directory. Test failures are 
 means every requested phase ran, and exit 2 reports a setup failure with its reason, such as
 `NO_ENV`, `NO_RUFF`, `APPLY_FAILED` or `NO_TEST_HUNKS`. An empty pytest phase is fatal with
 `NO_TESTS_RAN: <phase>`. `YAML_IN_VENV` means the shared interpreter already has a YAML
-library; rerun setup to remove it. `YAML_LEAKED` means a YAML library became importable by the
+library, even a broken one; rerun setup to remove it. `YAML_LEAKED` means a YAML library became importable by the
 shared interpreter after `green-yaml`; `STEP_FAILED` means the CI YAML step could not be read, and `YAML_STEP_SETUP_FAILED` means the
 step failed before pytest ran (for example its pip install).
 Nothing is deleted; the runner prints
