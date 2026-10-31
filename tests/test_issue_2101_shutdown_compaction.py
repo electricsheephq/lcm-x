@@ -252,6 +252,34 @@ def test_closing_and_closed_compress_are_identity_noops(tmp_path, monkeypatch):
         engine.shutdown()
 
 
+def test_closing_exception_rolls_back_the_open_store_write(tmp_path, monkeypatch):
+    """An error after closing begins still rolls back the store's open write (#582)."""
+    engine = _engine(tmp_path, monkeypatch)
+    messages = _messages()
+    engine.ingest(messages)
+    before = engine._store._conn.execute("SELECT * FROM messages ORDER BY store_id").fetchall()
+    engine._store._conn.execute("CREATE TEMP TABLE partial_2101 (value TEXT)")
+    assert not engine._store._conn.in_transaction
+    monkeypatch.setattr(engine, "_summarize_leaf_chunk_with_rescue", lambda chunk, **_kwargs: (
+        chunk, count_messages_tokens(chunk), "Earlier facts retained.", 1, 0))
+
+    def fail_inside_open_write(*_args, **_kwargs):
+        engine._store._conn.execute("INSERT INTO partial_2101 VALUES ('partial')")
+        assert engine._store._conn.in_transaction
+        with engine._compaction_gate:
+            engine._compaction_closing = True
+        raise RuntimeError("write failed after shutdown began")
+
+    monkeypatch.setattr(engine, "_record_compress_commit_proof", fail_inside_open_write)
+    try:
+        assert engine.compress(messages, force=True) is messages
+        assert engine._compaction_inflight == 0
+        assert not engine._store._conn.in_transaction, "the partial write stayed open"
+        assert engine._store._conn.execute("SELECT COUNT(*) FROM partial_2101").fetchone() == (0,)
+    finally:
+        engine.shutdown()
+    _assert_durable_rows(engine, before)
+
 def test_blocked_compress_does_not_take_stable_use_lease(blocked_pass):
     """T4: the pre_llm_call lease route and post-call ingest remain concurrent."""
     race = blocked_pass
