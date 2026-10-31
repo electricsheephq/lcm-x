@@ -64,15 +64,20 @@ def test_empty_store_registry_retry_does_not_touch_ledger(engines, monkeypatch, 
     engine = engines()
     if other_store_pending:
         fail_exit(engines("other"), monkeypatch)
-    for name in ("ingest_ledger_state", "ingest_ledger_salt"):
-        monkeypatch.setattr(engine._store, name, lambda: pytest.fail("unexpected store read"))
     statements, attempt, callbacks = [], {}, []
-    engine._store._conn.set_trace_callback(statements.append)
-    try:
-        engine._retry_pending_emissions(attempt, callbacks, object())
-    finally:
-        engine._store._conn.set_trace_callback(None)
+    with monkeypatch.context() as patch:
+        for name in ("ingest_ledger_state", "ingest_ledger_salt"):
+            patch.setattr(engine._store, name, lambda: pytest.fail("unexpected store read"))
+        engine._store._conn.set_trace_callback(statements.append)
+        try:
+            engine._retry_pending_emissions(attempt, callbacks, object())
+        finally:
+            engine._store._conn.set_trace_callback(None)
     assert attempt["retried_emissions"] == [] and callbacks == statements == []
+    monkeypatch.setattr(ledger, "pending_emission_digests", lambda *args: pytest.fail("unexpected pending lookup"))
+    monkeypatch.setattr(engine._store, "add_message_relations", lambda groups: pytest.fail("unexpected relation call"))
+    engine._ingest_messages(output())
+    assert count(engine, "views_written") == 1
 
 
 @pytest.mark.parametrize("site", ["insert_emissions", "write_view"])
@@ -361,13 +366,16 @@ def test_t10_two_threads_retry_once_even_before_first_callback(engines, monkeypa
 @pytest.mark.parametrize("error", [ValueError, KeyboardInterrupt])
 def test_ingest_ledger_savepoint_restores_relation_schema(engines, monkeypatch, error):
     engine = engines()
+    rows = fail_exit(engine, monkeypatch)
     store, callbacks = engine._store, []
+    store_id = store.append_batch("S", rows[:1])[0]
+    attempt = dict(engine._prepare_ingest_ledger(rows, {"ledger_digest_ms": 0.}),
+                   stored={0: store_id}, matched={}, remainders={}, observations=[])
     store._conn.execute("DROP TABLE IF EXISTS message_relations")
     store._identity_anchor_schema_ready = store._pending_relation_schema = False
-    attempt = dict(salt=SALT, resolved=None, lineage="S", entries=[], stamps=[],
-                   stored={}, matched={}, remainders={}, observations=[], chain=ledger.prefix_chain(SALT, []))
 
     def fail_after_schema(groups):
+        assert groups == [[(attempt["stored"][0], "generated_unproven", None, None, None)]]
         store._ensure_identity_anchor_schema()
         assert store._pending_relation_schema
         raise error("relation savepoint sentinel")

@@ -110,7 +110,7 @@ def settle_pending_emissions(token, completed=(), release=None):
 def pending_emission_digests(store_key, lineage, excluded=()):
     with _PENDING_EMISSIONS_LOCK:
         return {row["descriptor_digest"] for entry in _PENDING_EMISSIONS.get((store_key, lineage), ())
-                if entry["claim"] is None and not any(entry is e for e in excluded) for row in entry["rows"]}
+                if not any(entry is e for e in excluded) for row in entry["rows"]}
 
 
 class Placement(NamedTuple):

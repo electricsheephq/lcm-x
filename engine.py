@@ -7240,8 +7240,9 @@ class LCMEngine(
                     self._identity_anchor_observe_recovery()
                 with self._store.ingest_atomic(admission_retry=admission_retry):
                     held_at = _perf_counter()
-                    self._ingest_ledger_attempt = (dict(ledger_prepared, stored={}, matched={}, remainders={}, observations=[])
-                                                   if ledger_prepared is not None else None)
+                    emission_attempt = self._ingest_ledger_attempt = (
+                        dict(ledger_prepared, stored={}, matched={}, remainders={}, observations=[])
+                        if ledger_prepared is not None else None)
                     if self._ingest_ledger_attempt is not None:
                         self._retry_pending_emissions(self._ingest_ledger_attempt, after_commit, emission_claim)
                     active, finish = self._ingest_messages_transaction(
@@ -7251,6 +7252,9 @@ class LCMEngine(
                     if self._ingest_ledger_attempt is not None:
                         self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
                 emission_committed = True
+                if ledger_prepared is not None:
+                    ingest_ledger.settle_pending_emissions(
+                        emission_claim, completed=emission_attempt["retried_emissions"])
                 attribution["lock_hold_ms"] += (_perf_counter() - held_at) * 1000
             except BaseException as exc:
                 self._ingest_ledger_attempt = None
@@ -7305,7 +7309,7 @@ class LCMEngine(
                 self._frontier.needs_reconcile = True
                 raise  # The existing ingest/compress caller records the failure.
             finally:
-                # Keep successful claims until their after-COMMIT removal, even after unlocking SQLite.
+                # Release claims on uncommitted exits, including busy retries and interrupts.
                 if not emission_committed and ledger_prepared is not None:
                     ingest_ledger.settle_pending_emissions(emission_claim)
                 self.__dict__.pop("_ingest_ledger_attempt", None)
@@ -7483,7 +7487,6 @@ class LCMEngine(
                     self._ledger_count("ledger.emission_retry_failed", exc)
 
             def publish():
-                ingest_ledger.settle_pending_emissions(token, completed=succeeded)
                 for entry, handle in zip(succeeded, handles):
                     self._ledger_count("ledger.emission_retry_ok")
                     if entry["origin"]() is self and self._compress_calls == entry["compress_call"]:
@@ -7645,11 +7648,13 @@ class LCMEngine(
                     ingest_ledger.write_view(conn, attempt["salt"], lineage, "ingest", None, entries,
                                              view_seq=seq, precomputed_chain=attempt["chain"])
                     delta.update({"ledger.bindings_written": len(rows), "ledger.views_written": 1})
-                digests = ingest_ledger.pending_emission_digests((store.db_identity, attempt["salt"]),
-                                                               lineage, attempt.get("retried_emissions", ()))
-                groups = [[(sid, "generated_unproven", None, None, None)] for idx, sid in attempt["stored"].items()
-                          if attempt["entries"][idx].identity_digest in digests]
-                delta["ledger.generated_unproven_rows"] += store.add_message_relations(groups)
+                if ingest_ledger.has_pending(store.db_identity):
+                    digests = ingest_ledger.pending_emission_digests((store.db_identity, attempt["salt"]),
+                                                                   lineage, attempt.get("retried_emissions", ()))
+                    groups = [[(sid, "generated_unproven", None, None, None)] for idx, sid in attempt["stored"].items()
+                              if attempt["entries"][idx].identity_digest in digests]
+                    if groups:
+                        delta["ledger.generated_unproven_rows"] += store.add_message_relations(groups)
             for key, count in delta.items():
                 after_commit.append(lambda key=key, count=count: self._ledger_count(key, amount=count))
         except BaseException as exc:

@@ -548,14 +548,15 @@ The next ready foreground ingest of that store, from any engine, claims pending
 entries after BEGIN IMMEDIATE and retries each in its own savepoint before
 classification. The registry lock never spans store or SQLite work. Salt changes
 drop stale entries. Claims exclude concurrent attempts; rollback (including a
-busy retry or interrupt) releases them, while only an after-COMMIT callback removes
-successful entries and counts recovery. Only the originating engine with the
+busy retry or interrupt) releases them; successful entries settle immediately after
+COMMIT, while callbacks count recovery. Only the originating engine with the
 same compress-call number receives the recovered handle; other retries leave
 the emission proposed and count it as unhandled.
 
 Inside the ingest ledger savepoint, a stored row matching a still-pending
 descriptor in this store and lineage gains one `generated_unproven` relation.
-Successfully retried entries and entries claimed by another attempt are excluded.
+Only entries successfully retried by this attempt are excluded; claims never
+hide pending entries.
 Classification and compress output remain unchanged; rows today's classifier
 skips get no relation. Ledger-off
 behavior is unchanged. The mark is process-local and lost on restart: the
