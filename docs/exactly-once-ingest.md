@@ -560,15 +560,18 @@ and a refused entry never restores a handle. A signal arriving between the
 in-savepoint read and publication counts `ledger.emission_signal_late`; it does
 not reach the committed state, though a late refusal recorded on the entry
 still restores no handle.
-A later successful exit write supersedes older pending entries in that lineage,
-inside its own write transaction. Their retries recover descriptors, including
+A later successful exit write supersedes older pending entries in that lineage
+once it commits, while it still holds the store's write lock; a write that rolls
+back supersedes nothing. Their retries recover descriptors, including
 any signal, without an emission view, and count
 `ledger.emission_retry_superseded`. Other entries retry oldest first in
-registry order, so within one process emission views stay in emission order.
-Four narrow windows remain open and must close before P1d relies on emission
+registry order, so within one process emission views stay in emission order,
+unless an older entry's retry fails while a newer entry's retry succeeds.
+Narrow windows remain open and must close before P1d relies on emission
 views or states (#2112): a late refusal that never reaches the committed state,
 a refusal between the settle at COMMIT and publication, a refusal for an entry
-another engine recovered, and an entry keyed by a provisional lineage.
+another engine recovered, an entry keyed by a provisional lineage, and that
+partial retry failure, after which the older entry's view is the newer one.
 
 Inside the ingest ledger savepoint, a stored row matching a still-pending
 descriptor in this store and lineage gains one `generated_unproven` relation.

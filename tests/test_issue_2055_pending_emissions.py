@@ -1,5 +1,6 @@
 """P1c-2a: failed exit writes recover atomically and remain visible until then."""
 import copy
+from contextlib import contextmanager
 from pathlib import Path
 import shutil
 import sqlite3
@@ -499,6 +500,35 @@ def test_older_retries_keep_descriptors_without_evicting_current_view(engines, m
     assert emission_views(engine) == [current_view]
     assert engine._emission_handle is current_handle
     assert count(engine, "emission_retry_superseded") == 2
+
+
+def test_exit_write_that_rolls_back_supersedes_nothing(engines, monkeypatch):
+    engine = engines()
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger, "insert_emissions", failing)
+        engine._compress_calls += 1
+        emit(engine, output("older"))
+    assert len(pending(engine)) == 1
+    real_atomic, armed = engine._store.atomic, [True]
+
+    @contextmanager
+    def commit_fails(*, immediate=False):
+        with real_atomic(immediate=immediate):
+            yield
+            if armed[0] and immediate:
+                armed[0] = False
+                raise sqlite3.OperationalError("disk I/O error")  # raised inside the owner, so it rolls back
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "atomic", commit_fails)
+        engine._compress_calls += 1
+        emit(engine, output("newer"))
+    assert not armed[0] and emission_views(engine) == [] and len(pending(engine)) == 2
+    assert not any(entry["superseded"] for entry in pending(engine))
+    engine._ingest_messages(output("newer"))
+    assert [ledger.decode_entries(v["entries"])[0].identity_digest for v in emission_views(engine)] == [
+        ledger.identity_digest(SALT, output(label)[0]) for label in ("older", "newer")]
+    assert count(engine, "emission_retry_superseded") == 0
 
 
 def test_pending_retries_without_newer_exit_keep_registry_order(engines, monkeypatch):
