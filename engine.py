@@ -7268,11 +7268,13 @@ class LCMEngine(
         )
         reconciled_existing_session = self._ingest_cursor_needs_reconcile
         reconcile_messages = replay_messages
+        bind_session_counts: list = []
         if self._ingest_cursor_needs_reconcile:
             reconcile_messages = self._cold_reader_replay_messages(messages, replay_messages, ignored_original_messages)
             self._ingest_cursor = self._reconcile_ingest_cursor_from_store(
                 reconcile_messages,
                 allow_session_end_replay_proof=allow_session_end_replay_proof,
+                session_counts=bind_session_counts,
             )
             self._ingest_cursor_needs_reconcile = False
         cursor = min(max(self._ingest_cursor, 0), n)
@@ -7578,16 +7580,20 @@ class LCMEngine(
         # #1286: a row stored out of host order (one the host changed or inserted before the proven end goes to the
         # store tail) breaks the durable proof's in-order after-walk at the next cold bind: re-key it, after the
         # store (I1). Warm: below the entry cursor. Reconciled with a durable proof: below its cursor, or anywhere
-        # when it proved nothing, whatever the reconciliation action (a persisted batch, or an advanced cursor whose
-        # stores the anchor recognised): every later restart would otherwise repeat it.
+        # when it proved nothing after a persisted batch, or after any bind of a session that already held rows (an
+        # advanced cursor whose stores the anchor recognised): every later restart would otherwise repeat it. An
+        # empty rotation child's first bind keeps its own proof rules (#483, #519).
         if not reconciled_existing_session:
             proven_end = entry_cursor
         elif durable is None:
             proven_end = 0
         elif proven_cursor is not None:
             proven_end = proven_cursor
-        else:
+        elif (max(bind_session_counts, default=0) > 0
+              or self._last_ingest_reconciliation.get("action") == "persisted batch"):
             proven_end = n
+        else:
+            proven_end = 0
         if unaudited_from is None and any(store_id and idx < proven_end for (idx, _msg), store_id
                                           in zip(messages_to_store_with_index, store_ids)):
             # The list the next cold bind's reader compares with the proof, not the raw host rows (a redacted or
