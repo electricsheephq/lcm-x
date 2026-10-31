@@ -881,6 +881,8 @@ class CompactionMixin:
 
     def _compress_bypassed(self, messages, current_tokens, focus_topic, force):
         """Bypassed calls own a local budget; only child diagnostics are thread-local."""
+        if self._compaction_is_closing():
+            return messages
         context = self._thread_context
         state = self._bypass_compress_state()
         budget = context.foreground_budget = self._new_foreground_budget()
@@ -904,6 +906,9 @@ class CompactionMixin:
                 result = self._compress_lcm_bypassed_session(
                     messages, current_tokens=current_tokens, focus_topic=focus_topic, force=force,
                 )
+                if self._compaction_is_closing():
+                    returned = messages
+                    return messages
                 if (isinstance(result, list) and result is not messages and len(result) == len(messages)
                         and all(self._public_compression_row(left) == self._public_compression_row(right)
                                 for left, right in zip(result, messages))):
@@ -912,7 +917,10 @@ class CompactionMixin:
             logger.debug("LCM compaction emission descriptor count=%d", 0)
             returned = result
             return result
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, Exception) and self._compaction_is_closing():
+                returned = messages
+                return messages
             state["_last_compression_status"] = "error"
             state["_last_compression_noop_reason"] = ""
             raise
