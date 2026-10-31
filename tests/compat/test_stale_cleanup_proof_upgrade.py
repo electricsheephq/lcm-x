@@ -71,9 +71,10 @@ def _hashed_counts(counts):
             for row, count in sorted(counts.items(), key=lambda item: _identity_hash(item[0]))]
 
 
+@pytest.mark.parametrize("redact", ["off", "on"])
 @pytest.mark.parametrize("variant", ["stub", "reasoning"])
 @pytest.mark.parametrize("change", ["insert", "replace"])
-def test_stale_cleanup_proof_upgrade(tmp_path, old_tree, host_root, variant, change):
+def test_stale_cleanup_proof_upgrade(tmp_path, old_tree, host_root, variant, change, redact):
     base = old_tree("v0.29.0", {"v0.29.0": V0290})
     candidate = Path(__file__).resolve().parents[2]
     probe = tmp_path / "stale_cleanup_proof_upgrade_probe.py"
@@ -81,7 +82,7 @@ def test_stale_cleanup_proof_upgrade(tmp_path, old_tree, host_root, variant, cha
     home, result = tmp_path / "writer", tmp_path / "result.json"
     env = {key: value for key, value in os.environ.items() if not key.startswith("LCM_")}
     env.update(PYTHONDONTWRITEBYTECODE="1", P2S_HOME=str(home), P2S_OUT=str(result),
-               P2S_VARIANT=variant, P2S_CHANGE=change)
+               P2S_VARIANT=variant, P2S_CHANGE=change, P2S_REDACT=redact)
 
     def phase(tree, action, side, restart=0):
         env.update(PYTHONPATH=str(tree) + os.pathsep + str(host_root), P2S_PHASE=action,
@@ -141,13 +142,13 @@ def test_stale_cleanup_proof_upgrade(tmp_path, old_tree, host_root, variant, cha
     if result_dir := os.environ.get("P2S_RESULT_DIR"):
         directory = Path(result_dir)
         directory.mkdir(parents=True, exist_ok=True)
-        receipt = {"variant": variant, "change": change, "initial_count": len(initial),
+        receipt = {"variant": variant, "change": change, "redact": redact, "initial_count": len(initial),
                    "initial_identity_hashes": [_identity_hash(row) for row in initial], "sides": summary,
                    "checks": {"candidate_dup1_subset": subset, "candidate_dup2_empty": no_repeat,
                               "base_dup2_nonempty": base_repeats, "rows_preserved": not preservation_errors}}
-        (directory / f"p-s2-{variant}-{change}.json").write_text(json.dumps(receipt, indent=2) + "\n")
+        (directory / f"p-s2-{variant}-{change}-{redact}.json").write_text(json.dumps(receipt, indent=2) + "\n")
 
-    cell = f"{variant}/{change}"
+    cell = f"{variant}/{change}/redact-{redact}"
     assert subset, f"(a) {cell}: candidate dup1 is not a sub-multiset of base dup1"
     assert no_repeat, f"(b) {cell}: candidate dup2 is not empty"
     assert base_repeats, f"(c) {cell}: base did not repeat"

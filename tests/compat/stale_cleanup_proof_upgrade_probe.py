@@ -22,6 +22,10 @@ from hermes_lcm.tokens import count_messages_tokens
 
 HOME, OUT = Path(os.environ["P2S_HOME"]), Path(os.environ["P2S_OUT"])
 PHASE, VARIANT, CHANGE = (os.environ[key] for key in ("P2S_PHASE", "P2S_VARIANT", "P2S_CHANGE"))
+# on: sensitive-pattern redaction enabled and one warm user row carries a bearer token (the reference agent's
+# failing session held redacted rows in its live list), so stored rows differ from the host's raw rows.
+REDACT = os.environ.get("P2S_REDACT", "off")
+SECRET_USER = "[S] call the API with Authorization: Bearer p2sTestToken0123456789abcdef" + " alpha beta gamma delta" * 30
 SID, CID = "cleanup-rewrite-proof", "cleanup-rewrite-proof-conv"
 PAD = " alpha beta gamma delta" * 30
 RAW = ("r " * 30_000) + "RAW_NEEDLE " + ("r " * 30_000)
@@ -53,6 +57,7 @@ def _bind():
         large_output_externalization_path=str(HOME / "externalized"),
         fresh_tail_count=2, leaf_chunk_tokens=100, fresh_tail_pressure_yield_enabled=False,
         deferred_maintenance_enabled=True, critical_budget_pressure_ratio=0.5,
+        **({"sensitive_patterns_enabled": True} if REDACT == "on" else {}),
     ), hermes_home=str(HOME / "home"))
     engine.on_session_start(SID, platform="telegram", conversation_id=CID, context_length=200_000)
     return engine
@@ -143,6 +148,7 @@ def test_phase(monkeypatch):
     assert PHASE in ("write", "read")
     assert VARIANT in ("stub", "reasoning")
     assert CHANGE in ("insert", "replace")
+    assert REDACT in ("off", "on")
     if PHASE == "write":
         HOME.mkdir(parents=True)
         host = Host()
@@ -155,7 +161,7 @@ def test_phase(monkeypatch):
             _turns(host, VARIANT)
             _commit_cleanup(host, VARIANT)
             host.turn()
-            host.turn()
+            host.turn(user=SECRET_USER if REDACT == "on" else None)  # kept: the change below is before it
             changed = _change(host, CHANGE, insert_at=len(host.live) - 3, replace_at=len(host.live) - 4)
             host.turn()
             assert host.engine._store._conn.execute(
