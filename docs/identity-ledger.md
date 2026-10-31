@@ -230,6 +230,15 @@ repeats the grep at its own base. Rows not marked otherwise are **dead** or **un
 | R381 | `placeholder_ledger._subtract_placeholder_digest_counts` | no caller; the engine inlines the same arithmetic |
 | R460 | `placeholder_ledger._ignored_placeholder_metadata_key` (singular) | no caller |
 
+**Status after the dead-code refactor (grep repeated at `cf4d7c4b0`).** Deleted from this list: the ten rows whose
+code nothing calls (R017, R086, R087, R282, R283, R284, R285, R302, R381, R460), plus
+`sanitize._should_drop_active_assistant_message`, whose only caller was R086. Not deleted yet:
+- R306: a test still imports `reassign_externalized_payloads`.
+- R040, R133, R164, R168, R181, R232 and R258 change what runs or what is written. They go with the ingest-path work,
+  not in a refactor-only PR. R232 is now also a failure point in the ingest transaction tests (#2055).
+- R057's parameter is passed by the reconcile trace harness, which also drives older trees, so dropping it needs a
+  harness change.
+
 ## MERGE clusters
 
 | cluster | rules | size | condition |

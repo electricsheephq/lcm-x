@@ -1397,9 +1397,6 @@ class ReconcileMixin:
     # -- Session-end full-history proof (consumed ONLY by current-session
     #    full-history session-end ingest) --
 
-    def _session_end_replay_snapshot_metadata_key(self) -> str:
-        return self._replay_snapshot_metadata_key(_SESSION_END_REPLAY_METADATA_PREFIX)
-
     def _load_session_end_replay_snapshot_digests(self) -> list[str]:
         return self._load_replay_snapshot_digests(_SESSION_END_REPLAY_METADATA_PREFIX)
 

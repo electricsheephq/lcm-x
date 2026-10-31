@@ -261,13 +261,6 @@ class PrefixMatchingMixin:
             ),
         )
 
-    def _messages_match_fingerprint_prefix(
-        self,
-        fingerprints: list[str],
-        messages: List[Dict[str, Any]],
-    ) -> bool:
-        return self._matching_fingerprint_prefix_count(fingerprints, messages) > 0
-
     def _matching_fingerprint_prefix_count(
         self,
         fingerprints: list[str],
@@ -282,21 +275,6 @@ class PrefixMatchingMixin:
         if candidate == fingerprints[:compare_count]:
             return compare_count
         return 0
-
-    def _messages_match_lcm_bypass_prefix(
-        self,
-        session_id: str,
-        messages: List[Dict[str, Any]],
-    ) -> bool:
-        return self._matching_lcm_bypass_prefix_count(session_id, messages) > 0
-
-    def _matching_lcm_bypass_prefix_count(
-        self,
-        session_id: str,
-        messages: List[Dict[str, Any]],
-    ) -> int:
-        count, _truncated = self._matching_lcm_bypass_prefix_evidence(session_id, messages)
-        return count
 
     def _matching_lcm_bypass_prefix_evidence(
         self,
@@ -314,19 +292,6 @@ class PrefixMatchingMixin:
             elif count == best_count:
                 best_truncated = best_truncated or count_truncated
         return best_count, best_truncated
-
-    def _messages_match_lcm_normal_prefix(
-        self,
-        session_id: str,
-        messages: List[Dict[str, Any]],
-        *,
-        conversation_id: str | None = None,
-    ) -> bool:
-        return self._matching_lcm_normal_prefix_count(
-            session_id,
-            messages,
-            conversation_id=conversation_id,
-        ) > 0
 
     def _matching_lcm_normal_prefix_count(
         self,

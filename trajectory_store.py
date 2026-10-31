@@ -1211,13 +1211,6 @@ class TrajectoryStore:
                 self._conn.rollback()
                 raise
 
-    def set_embedding_provider(
-        self,
-        provider: TrajectoryEmbeddingProvider | None,
-    ) -> None:
-        """Replace the ephemeral provider without changing saved corpus state."""
-        self.embedding_provider = provider
-
     def _ensure_semantic_schema(self) -> None:
         self._require_writable()
         self._conn.executescript(
