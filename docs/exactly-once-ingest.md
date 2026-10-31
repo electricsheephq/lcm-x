@@ -204,7 +204,7 @@ The pieces:
   - A user row carrying these marker bytes is stored and flagged, never lost. Stored NEW applies only where today's classifier stores: exact cursor evidence, DAG-verified scaffolds and verified recovery projections keep their existing skips.
   - `possible_replay_of` is deferred to P1h or P2; P1c-2b does no DAG or descriptor lookup on ingest.
   - The recognizer reads the protected payload and the remainder it was protected from, so a generated row large enough for whole-row externalization is still flagged.
-  - Accepted gaps: ledger off, `ledger.write_failed` (the savepoint rolls the relation back), not-ready or read-only stores, session-end tail stores (P1e), mid-row markers outside the joined rule, and the externalized form of the over-cap tool-result stub (an `[Externalized payload: …]` reference, not a recognized shape).
+  - Accepted gaps: ledger off, `ledger.write_failed` (the savepoint rolls the relation back), not-ready or read-only stores, session-end tail stores (P1e), mid-row markers outside the joined rule, and the externalized form of the over-cap tool-result stub (an `[Externalized tool output: …]` reference, not a recognized shape).
 - **Adoption.** The emission becomes adopted on the host's boundary signal (engine.py:4444) or when an incoming view anchors on it.
   - A host refusal or rollback (#1116, `record_rejected_compaction`, engine.py:2686) sets it to refused. A refused emission is never a base and never adopted (L5-2), and the previous epoch stays current.
   - E7 is checked and logged at adoption.

@@ -280,7 +280,9 @@ def _extended_exit(root, patch, path, measure, caplog, restart):
         engine.ingest(deepcopy(result))
         final = _scripted_rows(engine)
         assert not (scripted - final), "every scripted host row remains stored"
-        _assert_visible(engine._store._conn, {text for _role, text in scripted}, require_generated=True)
+        # The stub-first list adds only its carrier head (matched, not stored) and externalized tool stubs.
+        _assert_visible(engine._store._conn, {text for _role, text in scripted},
+                        require_generated=path != "stub-before-boundary")
     finally:
         engine.shutdown()
 
