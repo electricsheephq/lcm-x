@@ -6766,9 +6766,10 @@ class LCMEngine(
             if isinstance(mark, str) and mark.startswith(survival_codec._PROJECTED_PREFIX):
                 return "projection"
         if role == "user" and isinstance(content, str):
+            last_expand = content.rfind("[Expand for details:")  # once, so the header scan stays linear
             for header in header_re.finditer(content):
                 if (header.start() >= 2 and content[header.start()-2:header.start()] == "\n\n"
-                        and content.find("[Expand for details:", header.end()) != -1):
+                        and last_expand >= header.end()):
                     return "summary_joined"
             for kind, prefix in (("scaffold_joined", _PRESERVED_OBJECTIVE_CONTEXT_PREFIX),
                                  ("recovery_joined", "[LCM overflow recovery] ")):
