@@ -1,6 +1,5 @@
 """P1c-2a: failed exit writes recover atomically and remain visible until then."""
 import copy
-import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -24,10 +23,10 @@ def isolated_marks(monkeypatch):
 
 
 def pending(engine):
-    path = os.path.realpath(engine._store.db_path)
+    identity = engine._store.db_identity
     with ledger._PENDING_EMISSIONS_LOCK:
         return [entry for (key, _lineage), entries in ledger._PENDING_EMISSIONS.items()
-                if key[0] == path for entry in entries]
+                if key[0] == identity for entry in entries]
 
 
 def output(label="generated"):
@@ -58,6 +57,22 @@ def stored_shape(engine):
 
 def unproven(engine):
     return [r for r in sql_rows(engine, "message_relations") if r["kind"] == "generated_unproven"]
+
+
+@pytest.mark.parametrize("other_store_pending", [False, True])
+def test_empty_store_registry_retry_does_not_touch_ledger(engines, monkeypatch, other_store_pending):
+    engine = engines()
+    if other_store_pending:
+        fail_exit(engines("other"), monkeypatch)
+    for name in ("ingest_ledger_state", "ingest_ledger_salt"):
+        monkeypatch.setattr(engine._store, name, lambda: pytest.fail("unexpected store read"))
+    statements, attempt, callbacks = [], {}, []
+    engine._store._conn.set_trace_callback(statements.append)
+    try:
+        engine._retry_pending_emissions(attempt, callbacks, object())
+    finally:
+        engine._store._conn.set_trace_callback(None)
+    assert attempt["retried_emissions"] == [] and callbacks == statements == []
 
 
 @pytest.mark.parametrize("site", ["insert_emissions", "write_view"])
@@ -210,6 +225,17 @@ def test_t6_copy_does_not_retry_and_changed_salt_drops(engines, monkeypatch, tmp
     assert count(engine, "emission_unproven_salt_changed") == 1
 
 
+def test_t6_pending_key_uses_identity_fixed_at_open(engines, monkeypatch):
+    engine = engines()
+    identity = engine._store.db_identity
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "db_path", engine._store.db_path.parent / "changed-after-open.db")
+        rows = fail_exit(engine, patch)
+        assert ledger.has_pending(identity)
+        engine._ingest_messages(rows)
+    assert pending(engine) == [] and count(engine, "emission_retry_ok") == 1
+
+
 @pytest.mark.parametrize("error", [ValueError, KeyboardInterrupt, "busy_snapshot"])
 def test_t7_owner_rollback_releases_claim_and_retries(engines, monkeypatch, error):
     engine = engines()
@@ -314,13 +340,15 @@ def test_t10_two_threads_retry_once_even_before_first_callback(engines, monkeypa
         try:
             assert committed.wait(5)
             peer._ingest_messages(copy.deepcopy(rows))
+            assert unproven(peer) == []
         finally:
             peer_done.set()
 
     monkeypatch.setattr(engine, "_finish_ingest_memory", delayed_callback)
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
-            first, other = pool.submit(engine._ingest_messages, copy.deepcopy(rows)), pool.submit(second)
+            # Leave the descriptor's row for the peer to store while the mark is claimed.
+            first, other = pool.submit(engine._ingest_messages, copy.deepcopy(rows[1:])), pool.submit(second)
             first.result(timeout=15)
             other.result(timeout=15)
         assert len(emissions(engine)) == len(emission_views(engine)) == 1
@@ -328,6 +356,34 @@ def test_t10_two_threads_retry_once_even_before_first_callback(engines, monkeypa
         assert pending(engine) == [] and overlap == [True]
     finally:
         peer.shutdown()
+
+
+@pytest.mark.parametrize("error", [ValueError, KeyboardInterrupt])
+def test_ingest_ledger_savepoint_restores_relation_schema(engines, monkeypatch, error):
+    engine = engines()
+    store, callbacks = engine._store, []
+    store._conn.execute("DROP TABLE IF EXISTS message_relations")
+    store._identity_anchor_schema_ready = store._pending_relation_schema = False
+    attempt = dict(salt=SALT, resolved=None, lineage="S", entries=[], stamps=[],
+                   stored={}, matched={}, remainders={}, observations=[], chain=ledger.prefix_chain(SALT, []))
+
+    def fail_after_schema(groups):
+        store._ensure_identity_anchor_schema()
+        assert store._pending_relation_schema
+        raise error("relation savepoint sentinel")
+
+    monkeypatch.setattr(store, "add_message_relations", fail_after_schema)
+    with store.ingest_atomic():
+        if error is KeyboardInterrupt:
+            with pytest.raises(error, match="relation savepoint sentinel"):
+                engine._write_ingest_ledger(attempt, callbacks, {"ledger_ms": 0.})
+        else:
+            engine._write_ingest_ledger(attempt, callbacks, {"ledger_ms": 0.})
+        assert not store._pending_relation_schema and callbacks == []
+        assert not store._conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone()
+        # A later writer in this same transaction must recreate the rolled-back schema.
+        store._ensure_identity_anchor_schema()
+        assert store._conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone()
 
 
 @pytest.mark.parametrize("error", ["busy", "savepoint", "lost_transaction"])

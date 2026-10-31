@@ -73,6 +73,12 @@ def mark_pending_emission(store_key, lineage, **payload):
     return dropped
 
 
+def has_pending(store_identity):
+    """Check this store without holding the registry lock across store work."""
+    with _PENDING_EMISSIONS_LOCK:
+        return any(key[0] == store_identity for key, _lineage in _PENDING_EMISSIONS)
+
+
 def claim_pending_emissions(store_key, token):
     claimed, dropped = [], 0
     with _PENDING_EMISSIONS_LOCK:
@@ -104,7 +110,7 @@ def settle_pending_emissions(token, completed=(), release=None):
 def pending_emission_digests(store_key, lineage, excluded=()):
     with _PENDING_EMISSIONS_LOCK:
         return {row["descriptor_digest"] for entry in _PENDING_EMISSIONS.get((store_key, lineage), ())
-                if not any(entry is e for e in excluded) for row in entry["rows"]}
+                if entry["claim"] is None and not any(entry is e for e in excluded) for row in entry["rows"]}
 
 
 class Placement(NamedTuple):

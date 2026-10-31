@@ -540,8 +540,9 @@ limits remain for P1c-2, P1d and P2; this slice does not repair them.
 An attempted exit write that fails, is busy, or skips an already-open transaction
 keeps its complete pre-ref payload in a process-wide locked registry. Preparation
 failures, not-ready stores, salt changes and no-descriptor exits do not mark.
-The key is `((realpath(db_path), salt), lineage)`; each key keeps the newest two
-payloads and counts an eviction. Copied files and re-keyed paths are distinct.
+The key is `((store.db_identity, salt), lineage)`; the identity is fixed at open
+and unique per `:memory:` store. Each key keeps the newest two payloads and
+counts an eviction. Copied files and re-keyed stores are distinct.
 
 The next ready foreground ingest of that store, from any engine, claims pending
 entries after BEGIN IMMEDIATE and retries each in its own savepoint before
@@ -554,7 +555,8 @@ the emission proposed and count it as unhandled.
 
 Inside the ingest ledger savepoint, a stored row matching a still-pending
 descriptor in this store and lineage gains one `generated_unproven` relation.
-Successfully retried entries are excluded. Classification and compress output
-remain unchanged; rows today's classifier skips get no relation. Ledger-off
+Successfully retried entries and entries claimed by another attempt are excluded.
+Classification and compress output remain unchanged; rows today's classifier
+skips get no relation. Ledger-off
 behavior is unchanged. The mark is process-local and lost on restart: the
 restart path is P1c-2b. There is no universal generated marker yet.

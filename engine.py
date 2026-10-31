@@ -7410,7 +7410,7 @@ class LCMEngine(
             conversation_key = self._hold_conversation_key()
             payload = dict(session_id=sid, rows=rows, indices=indices, entries=list(entries),
                            compress_call=self._compress_calls, conversation_key=conversation_key, origin=self)
-            store_key = (os.path.realpath(self._store.db_path), salt)
+            store_key = (self._store.db_identity, salt)
         except Exception as exc:
             self._ledger_count("ledger.emission_prepare_failed", exc, subject="compress output")
             return
@@ -7449,13 +7449,15 @@ class LCMEngine(
             self._ledger_count("ledger.emission_unproven_dropped")
 
     def _retry_pending_emissions(self, attempt, after_commit, token):
-        store, conn = self._store, self._store._conn
         succeeded = attempt["retried_emissions"] = []
+        if not ingest_ledger.has_pending(self._store.db_identity):
+            return
+        store, conn = self._store, self._store._conn
         try:
             if store.ingest_ledger_state() != "ready" or getattr(self, "_ingest_read_only", None) is not None:
                 return
             salt = store.ingest_ledger_salt()
-            claimed, dropped = ingest_ledger.claim_pending_emissions((os.path.realpath(store.db_path), salt), token)
+            claimed, dropped = ingest_ledger.claim_pending_emissions((store.db_identity, salt), token)
             if dropped:
                 self._ledger_count("ledger.emission_unproven_salt_changed", amount=dropped)
             handles = []
@@ -7569,6 +7571,7 @@ class LCMEngine(
             self._ledger_count("ledger.prepare_failed", exc)
             return
         started, delta = _perf_counter(), Counter()
+        pending_relation_schema = getattr(store, "_pending_relation_schema", False)
         try:
             with _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
                 key = "session_lineage:" + str(self._session_id)
@@ -7642,15 +7645,17 @@ class LCMEngine(
                     ingest_ledger.write_view(conn, attempt["salt"], lineage, "ingest", None, entries,
                                              view_seq=seq, precomputed_chain=attempt["chain"])
                     delta.update({"ledger.bindings_written": len(rows), "ledger.views_written": 1})
-                digests = ingest_ledger.pending_emission_digests((os.path.realpath(store.db_path), attempt["salt"]),
+                digests = ingest_ledger.pending_emission_digests((store.db_identity, attempt["salt"]),
                                                                lineage, attempt.get("retried_emissions", ()))
                 groups = [[(sid, "generated_unproven", None, None, None)] for idx, sid in attempt["stored"].items()
                           if attempt["entries"][idx].identity_digest in digests]
                 delta["ledger.generated_unproven_rows"] += store.add_message_relations(groups)
             for key, count in delta.items():
                 after_commit.append(lambda key=key, count=count: self._ledger_count(key, amount=count))
-        except Exception as exc:
-            if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction:
+        except BaseException as exc:
+            store._pending_relation_schema = pending_relation_schema
+            if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
+                    or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
                 raise
             self._ledger_count("ledger.write_failed", exc)
         finally:
