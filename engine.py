@@ -7434,10 +7434,10 @@ class LCMEngine(
                 for i, emission_id in zip(indices, ids):
                     entries[i] = entries[i]._replace(ref=emission_id, is_descriptor=True)
                 ingest_ledger.write_view(conn, salt, lineage, "emission", "proposed", entries, view_seq=seq)
+                ingest_ledger.note_emission_written(store_key, lineage)
             self._ledger_count("ledger.emissions_written", amount=len(ids))
             self._ledger_count("ledger.emission_views_written")
             self._emission_handle = ingest_ledger.EmissionHandle(lineage, seq, self._compress_calls, sid, conversation_key)
-            ingest_ledger.note_emission_written(store_key, lineage)
         except Exception as exc:
             self._mark_pending_emission(store_key, lineage, payload)
             self._ledger_count("ledger.emission_busy" if _is_ingest_busy_error(exc) else "ledger.emission_write_failed",

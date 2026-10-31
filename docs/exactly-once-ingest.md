@@ -557,13 +557,18 @@ A host refusal or adoption before the retry is kept on the pending entry
 (`ledger.emission_signal_deferred`) and applied to its descriptors and emission
 view in the retry's savepoint. Refusal is sticky: adoption cannot overwrite it,
 and a refused entry never restores a handle. A signal arriving between the
-in-savepoint read and publication counts `ledger.emission_signal_late`; it may
-not reach the committed state, but a late refusal still restores no handle.
-A later successful exit write supersedes older pending entries in that lineage.
-Their retries recover descriptors, including any signal, without an emission
-view, and count `ledger.emission_retry_superseded`. Other entries retry oldest
-first in registry order. P1d may therefore rely on the newest emission view
-being the newest successful or recovered-in-order emission.
+in-savepoint read and publication counts `ledger.emission_signal_late`; it does
+not reach the committed state, though a late refusal recorded on the entry
+still restores no handle.
+A later successful exit write supersedes older pending entries in that lineage,
+inside its own write transaction. Their retries recover descriptors, including
+any signal, without an emission view, and count
+`ledger.emission_retry_superseded`. Other entries retry oldest first in
+registry order, so within one process emission views stay in emission order.
+Four narrow windows remain open and must close before P1d relies on emission
+views or states (#2112): a late refusal that never reaches the committed state,
+a refusal between the settle at COMMIT and publication, a refusal for an entry
+another engine recovered, and an entry keyed by a provisional lineage.
 
 Inside the ingest ledger savepoint, a stored row matching a still-pending
 descriptor in this store and lineage gains one `generated_unproven` relation.
