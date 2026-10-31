@@ -36,6 +36,7 @@ class PrefixBudgetFacts:
     assembly_cap: int | None
     survival_fit: bool
     count_message_tokens: Callable[[dict], int]
+    per_node: bool = False
 
 
 @dataclass(frozen=True)
@@ -69,15 +70,21 @@ def select_prefix(parts: Sequence[str], budget_facts: PrefixBudgetFacts) -> Pref
         # Within a depth keep newest parts first; render in the original order.
         kept_indexes = []
         for index in sorted(range(len(summary_parts)), key=lambda i: (part_keys[i][0], -i)):
-            candidate = "\n\n---\n\n".join(
+            candidate_parts = [
                 strip_injected_context_blocks(summary_parts[i])
                 if part_keys[i] == (-1, None) and count_message_tokens({
                     "role": summary_role, "content": summary_parts[i],
                 }) > summary_budget else summary_parts[i]
-                for i in sorted(kept_indexes + [index]))
-            candidate_msg = {"role": summary_role, "content": candidate}
-            if count_message_tokens(candidate_msg) > summary_budget:
-                continue
+                for i in sorted(kept_indexes + [index])]
+            if budget_facts.per_node:
+                if sum(count_message_tokens({"role": summary_role, "content": p})
+                       for p in candidate_parts) > summary_budget:
+                    continue
+            else:
+                candidate_msg = {"role": summary_role,
+                                 "content": "\n\n---\n\n".join(candidate_parts)}
+                if count_message_tokens(candidate_msg) > summary_budget:
+                    continue
             kept_indexes.append(index)
         kept_indexes.sort()
     return PrefixSelection(tuple(kept_indexes), tuple(summary_parts[i] for i in kept_indexes))
