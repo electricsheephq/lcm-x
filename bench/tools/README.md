@@ -28,8 +28,9 @@ The runner prints each phase's exit and last lines and writes `summary.json` to 
 directory; its commands use paths relative to that directory. Test failures are recorded: exit 0
 means every requested phase ran, and exit 2 reports a setup failure with its reason, such as
 `NO_ENV`, `NO_RUFF`, `APPLY_FAILED` or `NO_TEST_HUNKS`. An empty pytest phase is fatal with
-`NO_TESTS_RAN: <phase>`. `YAML_IN_VENV` means the shared interpreter already has a YAML
-library, even a broken one; rerun setup to remove it. `YAML_LEAKED` means a YAML library became importable by the
+`NO_TESTS_RAN: <phase>`. `YAML_IN_VENV` means a YAML library, even a broken one, is already importable by the shared
+interpreter: from the venv (rerun setup to remove it), from `PYTHONPATH`, or from the candidate's
+own tree (remove it there). `YAML_LEAKED` means a YAML library became importable by the
 shared interpreter after `green-yaml`; `STEP_FAILED` means the CI YAML step could not be read, and `YAML_STEP_SETUP_FAILED` means the
 step failed before pytest ran (for example its pip install).
 Nothing is deleted; the runner prints
