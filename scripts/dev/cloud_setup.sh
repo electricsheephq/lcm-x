@@ -8,12 +8,24 @@
 # libraries from it, so run it in a sandbox checkout, not one whose .venv you manage. Its
 # environment file and SQLite build live inside that .venv, so checkouts never share them.
 #
-# Usage, from anywhere in the checkout (needs network, python3 >= 3.11 with venv, curl,
-# unzip, gcc, sha256sum):
+# Usage, from anywhere in the checkout (needs network, python3 >= 3.11 with venv/ensurepip,
+# git, curl, unzip, gcc, sha256sum, node):
 #   bash scripts/dev/cloud_setup.sh
 # Then run the printed commands; they start by sourcing the environment file, which
 # non-interactive shells (agents, ssh) do not read from ~/.bashrc.
 set -euo pipefail
+missing=0
+for tool in git curl unzip gcc sha256sum node; do
+  if ! command -v "$tool" > /dev/null 2>&1; then
+    echo "cloud_setup: missing prerequisite: $tool" >&2
+    missing=1
+  fi
+done
+if ! "${PYTHON:-python3}" -c 'import venv, ensurepip' > /dev/null 2>&1; then
+  echo "cloud_setup: missing prerequisite: ${PYTHON:-python3} venv/ensurepip" >&2
+  missing=1
+fi
+[ "$missing" = 0 ] || exit 1
 repo="$(git rev-parse --show-toplevel)"
 cd "$repo"
 

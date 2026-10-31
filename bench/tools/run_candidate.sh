@@ -45,10 +45,23 @@ stamp=$(date -u +%Y%m%dT%H%M%SZ)
 run="$root/run-$label-$stamp" green="$root/wt-$label-green-$stamp" redwt="$root/wt-$label-red-$stamp"
 mkdir "$run" || fail SETUP_FAILED
 [ ! -e "$green" ] && [ ! -e "$redwt" ] || fail SETUP_FAILED
-if [ "$stub" = 1 ]; then
+if [ "$stub" = 1 ] || [ "$full" = 1 ]; then
   # shellcheck disable=SC1090
   . "$helper" || fail STUB_FAILED
 fi
+yaml_absent() {
+  python - <<'PY'
+import importlib.util
+import sys
+
+for name in ("yaml", "ruamel.yaml"):
+    try:
+        if importlib.util.find_spec(name) is not None:
+            sys.exit(1)
+    except ImportError:
+        pass
+PY
+}
 # Print the prune command for each worktree this run made, after a failure as well.
 prune=''
 trap '[ -z "$prune" ] || printf "%s" "$prune"' EXIT
@@ -133,7 +146,29 @@ pytest_phase() {
   if [ "$phase" = red-on-base ]; then grep -E '^(FAILED|ERROR|PASSED|XFAIL|XPASS)' "$run/$phase.log" || :
   else grep -E '^(FAILED|ERROR)' "$run/$phase.log" || :; fi
   record "$phase" "$cmd" "$code" || fail SUMMARY_FAILED
-  case "$code" in 4|126|127) fail PYTEST_SETUP_FAILED;; esac
+  case "$code" in 5) fail "NO_TESTS_RAN: $phase";; 4|126|127) fail PYTEST_SETUP_FAILED;; esac
+}
+yaml_phase() {
+  local script code cmd rel
+  script=$(step_script "$green/.github/workflows/ci.yml" 'Test the upstream ruamel loader') || fail STEP_FAILED
+  rel="../$(basename "$run")"
+  mkdir "$run/home-green-yaml" || fail SETUP_FAILED
+  printf -v cmd '%q ' nice -n "$priority" bash -e -c "$script"
+  cmd="cd ../$(basename "$green") && export HOME=\"\$PWD/$rel/home-green-yaml\" PIP_TARGET=\"\$PWD/$rel/yaml-site\" PYTHONPATH=\"\$PWD/$rel/yaml-site\${PYTHONPATH:+:\$PYTHONPATH}\" PYTEST_ADDOPTS=\"--basetemp=$rel/bt-green-yaml -o tmp_path_retention_policy=failed\" && $cmd"
+  (
+    cd "$green" || exit 126
+    env HOME="$run/home-green-yaml" PIP_TARGET="$run/yaml-site" \
+      PYTHONPATH="$run/yaml-site${PYTHONPATH:+:$PYTHONPATH}" \
+      PYTEST_ADDOPTS="--basetemp=$rel/bt-green-yaml -o tmp_path_retention_policy=failed" \
+      nice -n "$priority" bash -e -c "$script"
+  ) > "$run/green-yaml.log" 2>&1
+  code=$?
+  echo "green-yaml: pytest_exit=$code"
+  tail -n 2 "$run/green-yaml.log"
+  grep -E '^(FAILED|ERROR)' "$run/green-yaml.log" || :
+  record green-yaml "$cmd" "$code" || fail SUMMARY_FAILED
+  yaml_absent || fail YAML_LEAKED
+  case "$code" in 5) fail 'NO_TESTS_RAN: green-yaml';; 4|126|127) fail PYTEST_SETUP_FAILED;; esac
 }
 prepare "$green" green
 changed=()
@@ -145,6 +180,7 @@ if [ "${#changed[@]}" -gt 0 ]; then printf -v cmd '%q ' ruff check -- "${changed
 (cd "$green" && bash -c "$cmd") > "$run/ruff.log" 2>&1
 code=$?; echo "ruff_exit=$code"; head -n 80 "$run/ruff.log"
 record ruff "cd ../$(basename "$green") && $cmd" "$code" || fail SUMMARY_FAILED
+yaml_absent || fail 'YAML_IN_VENV: run bash scripts/dev/cloud_setup.sh'
 [ -z "$focused" ] || pytest_phase green-focused "$green" "$focused" "$wf"
 if [ -n "$red" ]; then prepare "$redwt" red; pytest_phase red-on-base "$redwt" "$red" "$wf"; fi
 if [ "$full" = 1 ]; then
@@ -152,6 +188,7 @@ if [ "$full" = 1 ]; then
   pytest_phase green-full "$green" tests/ "$wa" --ignore=tests/test_embedding_privacy.py
   # CI runs this file even if a candidate removes it; a missing file fails as PYTEST_SETUP_FAILED.
   pytest_phase green-privacy "$green" tests/test_embedding_privacy.py 0
+  yaml_phase
 fi
 echo "dirs: $run $green"
 exit 0

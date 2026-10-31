@@ -30,6 +30,13 @@ CI = """jobs:
         run: |
           mkdir -p agent
           echo stubbed > agent/stub.txt
+      - name: Test the upstream ruamel loader
+        run: |
+          mkdir -p "$PIP_TARGET"
+          echo 'VALUE = "base"' > "$PIP_TARGET/lcmx_yaml_fixture.py"
+          echo 'def test_yaml():' > "$PIP_TARGET/test_yaml_phase.py"
+          echo '    import lcmx_yaml_fixture; assert lcmx_yaml_fixture.VALUE == "candidate"' >> "$PIP_TARGET/test_yaml_phase.py"
+          python -m pytest "$PIP_TARGET/test_yaml_phase.py" -q -p no:cacheprovider
 """
 
 
@@ -45,8 +52,20 @@ def test_run_candidate(tmp_path):
     ruff.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$RUFF_ARGS"\n')
     ruff.chmod(0o755)
     ruff_args = tmp_path / "ruff-args.txt"
+    # bench-test installs PyYAML in CI's interpreter. Hide it without changing that install.
+    # A fixture-local yaml.py deliberately makes it visible for the rejection/leak probes.
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "sitecustomize.py").write_text(
+        'import sys\nfrom pathlib import Path\n'
+        'if not Path(__file__).with_name("yaml.py").exists():\n'
+        '    sys.modules["yaml"] = None\n'
+        'sys.modules["ruamel"] = None\n'
+    )
     env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"),
                GIT_CONFIG_NOSYSTEM="1", RUFF_ARGS=str(ruff_args),
+               FIXTURE_SITE=str(site),
+               PYTHONPATH=os.pathsep.join([str(site), os.environ.get("PYTHONPATH", "")]),
                PATH=os.pathsep.join([str(bin_dir), PATH]))
     env.pop("FIXTURE_UNSET", None)
 
@@ -68,6 +87,7 @@ def test_run_candidate(tmp_path):
     (repo / ".gitignore").write_text("__pycache__/\nagent/\n")
     (repo / "notes.txt").write_text("old\n")
     (repo / "tests/test_embedding_privacy.py").write_text("def test_alone():\n    assert True\n")
+    (repo / "tests/empty.py").write_text("")
     module = repo / "tiny.py"
     module.write_text("VALUE = 1\n")
     test = repo / "tests/test_tiny.py"
@@ -78,6 +98,9 @@ def test_run_candidate(tmp_path):
     base = git("rev-parse", "HEAD").decode().strip()
     module.write_text("VALUE = 2\n")
     test.write_text(test.read_text() + textwrap.dedent(NEW_TEST))
+    workflow = repo / ".github/workflows/ci.yml"
+    candidate_ci = CI.replace('VALUE = "base"', 'VALUE = "candidate"')
+    workflow.write_text(candidate_ci)
     # NEW_TEST sees a dirty tree if the rename's deletion is left out of the commit.
     git("mv", "notes.txt", "notes.md")
     patch = make_patch("candidate.patch")
@@ -85,6 +108,15 @@ def test_run_candidate(tmp_path):
     docs = make_patch("docs.patch")
     git("rm", "-q", "tests/test_embedding_privacy.py")
     no_privacy = make_patch("no-privacy.patch")
+    # Each YAML-only patch uses the candidate step, including its failure path.
+    workflow.write_text(candidate_ci + "          exit 1\n")
+    yaml_failure = make_patch("yaml-failure.patch")
+    workflow.write_text(candidate_ci + '          echo leaked > "$FIXTURE_SITE/yaml.py"\n          exit 1\n')
+    yaml_leak = make_patch("yaml-leak.patch")
+    workflow.write_text(candidate_ci.replace("          python -m pytest", "          exit 5\n          python -m pytest"))
+    yaml_empty = make_patch("yaml-empty.patch")
+    workflow.write_text(CI.replace("Test the upstream ruamel loader", "Missing loader"))
+    no_yaml_step = make_patch("no-yaml-step.patch")
     # The runner sources the env file even when it expands an unset variable.
     env_file = tmp_path / "env.sh"
     env_file.write_text('export FIXTURE_ENV="loaded$FIXTURE_UNSET"\n')
@@ -106,9 +138,20 @@ def test_run_candidate(tmp_path):
     assert data["patch_sha256"] == hashlib.sha256(patch.read_bytes()).hexdigest()
     assert data["python"] and data["sqlite"]
     phases = data["phases"]
-    assert {"ruff", "green-focused", "red-on-base", "green-full", "green-privacy"} == set(phases)
+    assert list(phases) == ["ruff", "green-focused", "red-on-base", "green-full", "green-privacy", "green-yaml"]
     assert phases["green-focused"]["exit_code"] == phases["green-full"]["exit_code"] == 0
     assert phases["green-privacy"]["exit_code"] == 0 and "1 passed" in phases["green-privacy"]["final_line"]
+    assert phases["green-yaml"]["exit_code"] == 0 and "1 passed" in phases["green-yaml"]["final_line"]
+    assert "bash -e -c" in phases["green-yaml"]["command"]
+    assert "ulimit" not in phases["green-yaml"]["command"]
+    isolated = subprocess.run(
+        ["python", "-c", 'import importlib.util; assert importlib.util.find_spec("lcmx_yaml_fixture") is None'],
+        cwd=repo, env=env, text=True, capture_output=True, timeout=30,
+    )
+    assert isolated.returncode == 0, isolated.stderr
+    assert (summary_file.parent / "yaml-site/lcmx_yaml_fixture.py").exists()
+    assert (summary_file.parent / "home-green-yaml").is_dir()
+    assert (summary_file.parent / "bt-green-yaml").is_dir()
     assert "2 passed" in phases["green-full"]["final_line"]
     assert phases["red-on-base"]["exit_code"] == 1
     assert "FAILED tests/test_tiny.py::test_new" in result.stdout
@@ -133,6 +176,35 @@ def test_run_candidate(tmp_path):
     deleted_phases = json.loads(next(root.glob("run-noprivacy-*/summary.json")).read_text())["phases"]
     assert deleted_phases["green-full"]["exit_code"] == 0
     assert deleted_phases["green-privacy"]["exit_code"] == 4
+    for label, extra, phase in (
+        ("empty", ["--focused", "tests/empty.py"], "green-focused"),
+        ("emptyred", ["--red", "tests/empty.py"], "red-on-base"),
+    ):
+        empty = run(label, *extra, "--workers-focused", "1")
+        assert empty.returncode == 2 and f"NO_TESTS_RAN: {phase}" in empty.stderr
+        empty_phases = json.loads(next(root.glob(f"run-{label}-*/summary.json")).read_text())["phases"]
+        assert empty_phases[phase]["exit_code"] == 5
+    (site / "yaml.py").write_text("# fixture YAML library\n")
+    polluted = run("polluted", "--focused", "tests/", "--workers-focused", "1")
+    assert polluted.returncode == 2 and "YAML_IN_VENV" in polluted.stderr
+    assert "green-focused: pytest_exit=" not in polluted.stdout
+    (site / "yaml.py").unlink()
+    for label, yaml_patch, expected_code, reason in (
+        ("yamlfailure", yaml_failure, 0, ""),
+        ("yamlleak", yaml_leak, 2, "YAML_LEAKED"),
+        ("yamlempty", yaml_empty, 2, "NO_TESTS_RAN: green-yaml"),
+        ("yamlmissing", no_yaml_step, 2, "STEP_FAILED"),
+    ):
+        yaml_result = run(label, "--full", "--workers-full", "1", patch_file=yaml_patch)
+        assert yaml_result.returncode == expected_code, yaml_result.stdout + yaml_result.stderr
+        assert reason in yaml_result.stderr
+        yaml_phases = json.loads(next(root.glob(f"run-{label}-*/summary.json")).read_text())["phases"]
+        if label == "yamlmissing":
+            assert "green-yaml" not in yaml_phases
+        else:
+            assert yaml_phases["green-yaml"]["exit_code"] == (5 if label == "yamlempty" else 1)
+        if label == "yamlleak":
+            (site / "yaml.py").unlink()
     blank = run("blank", "--focused", " ")
     assert blank.returncode == 2 and "BAD_ARGUMENT" in blank.stderr
     missing = run("missing", "--env-file", str(tmp_path / "absent"))
