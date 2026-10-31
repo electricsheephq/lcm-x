@@ -12,14 +12,19 @@ Older product defaults are retained; the receipt reports effective thread use.
 Each role's sealed SQLite cache and hash manifest live in --output. Per-question
 embedding wall time (including cache reads and queries), hits/misses and
 corruptions live in embedding-metrics.jsonl; d1-receipt.json aggregates each arm.
+--seed-cache ROLE=PATH starts a role's serial build from a copy of a committed cache.
 """
 import argparse
+from contextlib import closing
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import runpy
+import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -33,6 +38,35 @@ def pin(tree):
     if subprocess.check_output(["git", "-C", str(tree), "status", "--porcelain"], timeout=60):
         raise ValueError("D1 requires clean product and instrument trees")
     return subprocess.check_output(["git", "-C", str(tree), "rev-parse", "HEAD"], text=True, timeout=60).strip()
+
+
+def file_sha256(path):
+    with open(path, "rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def seed_record(path):
+    """Validate a committed D1 cache read-only; return its receipt record."""
+    path = Path(path).resolve()
+    if not path.is_file():
+        raise ValueError(f"seed cache is not an existing file: {path}")
+    if any(Path(f"{path}{suffix}").exists() for suffix in ("-journal", "-wal", "-shm")):
+        raise ValueError(f"seed cache has an uncommitted SQLite sidecar: {path}")
+    try:
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {"binding", "entries"} <= tables:
+                raise ValueError(f"seed cache lacks the binding/entries tables: {path}")
+            bindings = db.execute("SELECT identity FROM binding").fetchall()
+            if len(bindings) != 1:
+                raise ValueError(f"seed cache must hold exactly one binding row: {path}")
+            if db.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+                raise ValueError(f"seed cache failed quick_check: {path}")
+            entries = db.execute("SELECT count(*) FROM entries").fetchone()[0]
+    except sqlite3.DatabaseError as exc:
+        raise ValueError(f"seed cache is not a readable SQLite cache: {path}: {exc}") from exc
+    return {"path": str(path), "sha256": file_sha256(path), "bytes": path.stat().st_size,
+            "entries": entries, "identity": bindings[0][0]}
 
 
 def worker(product, expected, instrument, *argv):
@@ -122,6 +156,8 @@ def _main(argv, interrupt):
     parser.add_argument("--build-threads", type=int, default=None)
     parser.add_argument("--thread-budget", type=int, default=8)
     parser.add_argument("--worker-timeout", type=float, default=14400)
+    parser.add_argument("--seed-cache", action="append", default=[], metavar="ROLE=PATH",
+                        help="start ROLE's serial build from a copy of this committed cache (repeatable; --build-workers 1)")
     args = parser.parse_args(argv)
     if not 0 < args.worker_timeout < float("inf"):
         parser.error("worker-timeout must be positive and finite")
@@ -138,6 +174,19 @@ def _main(argv, interrupt):
     if len(products) != 2 or any(not role.isidentifier() for role in products):
         parser.error("require two distinct identifier role names")
     products = {role: str(Path(tree).resolve()) for role, tree in products.items()}
+    seeds = {}
+    for item in args.seed_cache:
+        role, _, path = item.partition("=")
+        if role not in products or not path:
+            parser.error(f"--seed-cache needs ROLE=PATH with a --product role: {item}")
+        if role in seeds:
+            parser.error(f"--seed-cache allows one seed per role: {role}")
+        if args.build_workers != 1:
+            parser.error("seeded builds are serial only: partitioned builds change batch membership")
+        try:
+            seeds[role] = seed_record(path)
+        except ValueError as exc:
+            parser.error(str(exc))
     instrument = pin(ROOT)
     pins = {role: pin(tree) for role, tree in products.items()}
     shards = sorted(args.shards_dir.glob("shard-*/manifest.json"))
@@ -191,10 +240,16 @@ def _main(argv, interrupt):
     from benchmarking.d1_cache import merge, seal
     manifests, role_threads, build_threads, preembed = {}, {}, {}, []
     if args.build_workers == 1:
+        for role, seed in seeds.items():  # Copy and re-hash every seed before any worker starts.
+            caches[role].parent.mkdir()
+            shutil.copyfile(seed["path"], caches[role])
+            caches[role].chmod(0o644)
+            if file_sha256(caches[role]) != seed["sha256"]:
+                raise ValueError(f"seed cache copy hash mismatch for {role}")
         for role in products:
             if interrupt[0]:
                 break
-            caches[role].parent.mkdir()
+            caches[role].parent.mkdir(exist_ok=role in seeds)
             for name, prepared in (("preembed", args.prepared_dir), ("preembed-aa", args.aprime_dir)):
                 command = ["prewarm-cache", "--prepared-dir", str(prepared.resolve()), "--shards-manifest", str(prepared.resolve()), *common]
                 result = invoke(role, name, command, "build")
@@ -286,6 +341,8 @@ def _main(argv, interrupt):
                "ort_threads_per_shard_cap": threads, "thread_budget": args.thread_budget,
                "wall_seconds": time.monotonic() - started, "arms": arms,
                "not_proven": "Eight-hour acceptance requires the complete quiet-window run; recall equivalence is a separate gate."}
+    if seeds:
+        receipt["seeds"] = seeds
     if args.build_workers > 1:
         receipt.update(build_workers=args.build_workers, build_threads_requested=build_threads_requested, merged_entries=merged_entries, duplicate_keys=duplicate_keys, build_threads=build_threads)
     elif args.build_threads is not None:
