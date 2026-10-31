@@ -290,6 +290,25 @@ def test_a_row_changed_among_the_warm_turns_is_not_stored_again_after_a_restart(
 
 
 @pytest.mark.parametrize("change", ["insert", "replace"])
+def test_a_row_changed_after_a_published_compaction_is_not_stored_again_after_a_restart(host, change, monkeypatch):
+    """The whole field order: an earlier published compaction (its summary and carried rows head the list), the
+    committed cleanup list, warm turns, then a row the host changes among them. The re-key proves that list too."""
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _stub_summarizer)
+    _turns(host, None)
+    host.compact()
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", lambda *a, **k: pytest.fail("summariser called"))
+    _turns(host, "reasoning")
+    _commit_cleanup(host, "reasoning")
+    host.turn()
+    host.turn()
+    changed = _change(host, change, insert_at=len(host.live) - 3, replace_at=len(host.live) - 4)
+    host.turn()
+    assert host.count(changed) == 1
+    _restart_stores_only_the_next_turn(host)
+    assert host.count(changed) == 1
+
+
+@pytest.mark.parametrize("change", ["insert", "replace"])
 def test_a_row_changed_inside_the_committed_list_is_not_stored_again_after_a_restart(host, change):
     """The first ingest after the commit no longer finds the committed list as the cursor's prefix and persists
     the batch (#259); the restart after it must not persist it again."""
