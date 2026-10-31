@@ -912,6 +912,9 @@ class DelegateChildMixin:
         session_id = self._bypass_lcm_session_id()
         stored_tail = None
         with _DELEGATE_STORE_LOCK:
+            # Closing may have begun while this pass waited for the child-store lock.
+            if self._compaction_is_closing():
+                return messages
             pre_store = self._store_delegate_child_turn(session_id, messages, platform=_DELEGATE_SOURCE, require_agent=True)
             try:
                 if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
@@ -928,6 +931,8 @@ class DelegateChildMixin:
             except Exception as exc:
                 self._note_delegate_child_fallback(session_id, f"compression boundary not recorded: {exc}")
         result = self._compress_bypassed(messages, current_tokens, focus_topic, force)
+        if self._compaction_is_closing():
+            return messages
         try:
             with _DELEGATE_STORE_LOCK:
                 if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
