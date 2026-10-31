@@ -78,14 +78,14 @@ class Host:
         self.engines: list = []
         self.engine = self.bind()
 
-    def bind(self):
+    def bind(self, session_id=SID):
         engine = LCMEngine(config=LCMConfig(
             database_path=str(self.tmp_path / "lcm.db"),
             large_output_externalization_path=str(self.tmp_path / "externalized"),
             fresh_tail_count=2, leaf_chunk_tokens=100, fresh_tail_pressure_yield_enabled=False,
             deferred_maintenance_enabled=True, critical_budget_pressure_ratio=0.5, **self.config,
         ), hermes_home=str(self.tmp_path / "home"))
-        engine.on_session_start(SID, platform="telegram", conversation_id=CID, context_length=200_000)
+        engine.on_session_start(session_id, platform="telegram", conversation_id=CID, context_length=200_000)
         self.engines.append(engine)
         return engine
 
@@ -136,16 +136,16 @@ class Host:
         assert self.engine._last_compression_status == "compacted"
         self.commit_in_place(result, before)
 
-    def commit_in_place(self, result, before):
+    def commit_in_place(self, result, before, session_id=SID):
         """Hermes's in-place order: end on the list compress() was given, adopt, then the compression boundary."""
-        self.engine.on_session_end(SID, before)
+        self.engine.on_session_end(session_id, before)
         self.live = result
-        self.engine.on_session_start(SID, boundary_reason="compression", old_session_id=SID, platform="telegram",
-                                     conversation_id=CID, context_length=200_000)
+        self.engine.on_session_start(session_id, boundary_reason="compression", old_session_id=session_id,
+                                     platform="telegram", conversation_id=CID, context_length=200_000)
 
-    def restart(self):
+    def restart(self, session_id=SID):
         self.engine.shutdown()
-        self.engine = self.bind()
+        self.engine = self.bind(session_id)
 
     def rows(self):
         """(role, content, tool_call_id, tool_calls) per stored row, in store order."""
@@ -489,7 +489,9 @@ def test_a_later_cleanup_pass_does_not_prove_away_a_reply_the_warm_path_never_st
     _commit_cleanup(host, "reasoning")
     host.restart()
     host.turn()
-    assert host.count(reply) >= 1
+    assert host.count(reply) == 1
+    _restart_stores_only_the_next_turn(host)
+    assert host.count(reply) == 1
 
 
 def _carried(payload, session_id):
@@ -503,6 +505,17 @@ def test_a_re_key_in_a_compression_child_keeps_the_parent_rows_it_carries(host, 
     parent tail is stored at the child's tail; the in-order map then leaves the parent rows after it unmapped and
     the re-key's second mapping finds them. The re-keyed proof carries them too, or a later compaction consumes
     their host rows without their store ids (lost provenance)."""
+    proof = _rotate_into_a_child_and_insert_a_steer(host)
+    host.turn()
+    rekeyed = host.engine._durable_commit_proof_payload()
+    assert rekeyed != proof  # re-keyed
+    assert _carried(proof, SID) <= _carried(rekeyed, SID)
+    _assert_a_compaction_sources_the_parent_rows_it_consumes(host, monkeypatch)
+
+
+def _rotate_into_a_child_and_insert_a_steer(host):
+    """A cleanup-only list rotated into a compression child, one warm turn, then a steer inserted before the carried
+    parent tail (T4). Returns the child's durable proof before the steer is stored."""
     _turns(host, "reasoning")
     result, before = host.cleanup_pass(preflight=True)
     host.engine.on_session_end(SID, before)
@@ -514,10 +527,12 @@ def test_a_re_key_in_a_compression_child_keeps_the_parent_rows_it_carries(host, 
                      dict(STEER))
     proof = host.engine._durable_commit_proof_payload()
     assert _carried(proof, SID)  # the rotation carried the parent rows
-    host.turn()
-    rekeyed = host.engine._durable_commit_proof_payload()
-    assert rekeyed != proof  # re-keyed
-    assert _carried(proof, SID) <= _carried(rekeyed, SID)
+    return proof
+
+
+def _assert_a_compaction_sources_the_parent_rows_it_consumes(host, monkeypatch):
+    """A forced compaction of the child: every parent row whose host row it consumes has a copy among the summaries'
+    source ids (provenance)."""
     monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _stub_summarizer)
     before = deepcopy(host.live)
     result = host.engine.compress(host.live, force=True)
@@ -537,6 +552,68 @@ def test_a_re_key_in_a_compression_child_keeps_the_parent_rows_it_carries(host, 
                 if m["role"] != "system" and m.get("content") not in kept
                 and ("parent", m["role"], m.get("content")) in copies]
     assert consumed and [key for key in consumed if not copies[key] & sources] == []
+
+
+def test_a_later_cleanup_in_a_compression_child_keeps_the_parent_rows_it_carries(host, monkeypatch):
+    """Round 7: the same child, the steer stored at its tail by a turn whose reply carries reasoning, then a second
+    committed cleanup (that reasoning stripped) and a restart. The cleanup proof's coverage guard maps the parent rows
+    after the steer again; its carry must keep them (and the previous proof's uncovered parent ranges), as the re-key
+    does, or the parent carry shrinks and a later compaction consumes their host rows without their store ids."""
+    _rotate_into_a_child_and_insert_a_steer(host)
+    host.turn(reply=f"{THINK}reply to T{host.n_turns}{PAD}")
+    carried = _carried(host.engine._durable_commit_proof_payload(), SID)
+    result, before = host.cleanup_pass(preflight=True)
+    assert THINK not in str(result) and THINK in str(before)
+    assert host.engine._compress_commit_proof.get("cleanup_rewrite") is True
+    host.commit_in_place(result, before, session_id=CHILD)
+    host.restart(session_id=CHILD)
+    assert carried <= _carried(host.engine._durable_commit_proof_payload(), SID)
+    _assert_a_compaction_sources_the_parent_rows_it_consumes(host, monkeypatch)
+
+
+@pytest.mark.parametrize("stamped", [False, True], ids=["unstamped", "stamped"])
+def test_a_one_row_cleanup_proof_does_not_swallow_a_new_identical_message(host, stamped):
+    """Round 7 (I1): a committed cleanup over a session whose one effective row is a user message externalized into a
+    stub. Unstamped, nothing tells that row from a new message with the same text (the stub's identity restores the
+    payload), so its proof stays local: after a restart, a delta-only delivery of the new message is stored. A host
+    stamp tells them apart (the proof's host-occurrence snapshot), so that proof stays durable."""
+    def message():
+        return {"role": "user", "content": f"[T0] {RAW}", **({"timestamp": host.stamp()} if stamped else {})}
+
+    host.live = [message()]  # no system prompt: the one row is the whole list
+    host.engine.ingest(host.live)
+    assert host.stored() == 1
+    result, before = host.cleanup_pass(preflight=False)
+    assert any(str(m.get("content")).startswith("[Externalized payload: kind=raw_payload;") for m in result)
+    host.commit_in_place(result, before)
+    durable = host.engine._durable_commit_proof_payload() is not None
+    host.restart()
+    host.live = [message()]  # the gateway delivers only the new message
+    host.engine.ingest(host.live)
+    assert host.stored() == 2  # (the store holds the externalized form, so the rows are counted, not their text)
+    assert durable is stamped
+
+
+@pytest.mark.parametrize("variant", ["stub", "reasoning"])
+def test_a_delta_only_bind_does_not_re_key_the_proof_to_the_delta(host, variant):
+    """Round 7 (I1): a session holding rows with a durable proof, then a restart whose first delivery is only one new
+    unstamped user row (a delta-only gateway). The bind replays no stored row, so it has no replayed list to bind: the
+    row is stored and the proof stays. Re-keyed to the delta, the next restart's identical delta matched it and was
+    not stored."""
+    _turns(host, variant)
+    _commit_cleanup(host, variant)
+    proof = host.engine._durable_commit_proof_payload()
+    delta = {"role": "user", "content": f"a new message the gateway delivers alone{PAD}"}
+    host.restart()
+    host.live = [dict(delta)]
+    host.engine.ingest(host.live)
+    assert host.count(delta["content"]) == 1
+    durable = host.engine._durable_commit_proof_payload()
+    host.restart()
+    host.live = [dict(delta)]
+    host.engine.ingest(host.live)
+    assert host.count(delta["content"]) == 2
+    assert durable == proof
 
 
 @pytest.mark.parametrize("row", ["redacted-tool", "quarantined-reply"])
@@ -570,7 +647,7 @@ def test_a_row_stored_in_its_replay_form_still_re_keys(tmp_path, row, monkeypatc
         host.close()
 
 
-def test_a_failed_re_key_write_leaves_the_old_proof_and_snapshot(host, monkeypatch):
+def test_a_failed_re_key_write_leaves_the_old_proof_and_snapshot(host, monkeypatch, caplog):
     """The re-key writes the proof, then its occurrence snapshot, inside the ingest's savepoint. A failure in the
     second write rolls both back (the old proof stays, I1); the ingest's rows stay stored once."""
     _turns(host, "reasoning")
@@ -581,16 +658,20 @@ def test_a_failed_re_key_write_leaves_the_old_proof_and_snapshot(host, monkeypat
     store = host.engine._store
     key = host.engine._replay_snapshot_metadata_key("host_occurrence_snapshot")
     proof, snapshot = host.engine._durable_commit_proof_payload(), store.read_metadata_json(key)
-    write = store.write_metadata_json
+    write, reached = store.write_metadata_json, []
 
     def fail_snapshot(keys, serialized, **kwargs):
         if key in keys:
+            reached.append(keys)
             raise RuntimeError("snapshot write failed")
         return write(keys, serialized, **kwargs)
 
     monkeypatch.setattr(store, "write_metadata_json", fail_snapshot)
+    caplog.set_level(logging.WARNING, logger="hermes_lcm.engine")
     host.turn()
     monkeypatch.setattr(store, "write_metadata_json", write)
+    # The rollback path ran: the injected write was reached and the re-key reported its failure.
+    assert reached and "LCM durable commit proof re-key failed" in caplog.text
     assert host.engine._durable_commit_proof_payload() == proof
     assert store.read_metadata_json(key) == snapshot
     assert [host.count(m["content"]) for m in [STEER, *host.live[-2:]]] == [1, 1, 1]

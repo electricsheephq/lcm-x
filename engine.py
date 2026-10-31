@@ -8322,15 +8322,17 @@ class LCMEngine(
         # store (I1). Warm: below the entry cursor. Reconciled with a durable proof: below its cursor, or anywhere
         # when it proved nothing after a persisted batch, or after any bind of a session that already held rows (an
         # advanced cursor whose stores the anchor recognised): every later restart would otherwise repeat it. An
-        # empty rotation child's first bind keeps its own proof rules (#483, #519).
+        # empty rotation child's first bind keeps its own proof rules (#483, #519). Round 7 (I1): that branch only
+        # when the anchor recognised replayed rows: a bind that replays no stored row (a delta-only delivery) has no
+        # replayed list to bind, and a proof re-keyed to its delta would match an identical delta after a restart.
         if not reconciled_existing_session:
             proven_end = entry_cursor
         elif durable is None:
             proven_end = 0
         elif proven_cursor is not None:
             proven_end = proven_cursor
-        elif (max(bind_session_counts, default=0) > 0
-              or self._last_ingest_reconciliation.get("action") == "persisted batch"):
+        elif anchored_replay_indexes and (max(bind_session_counts, default=0) > 0
+                                          or self._last_ingest_reconciliation.get("action") == "persisted batch"):
             proven_end = n
         else:
             proven_end = 0
