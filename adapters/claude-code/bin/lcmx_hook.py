@@ -26,8 +26,10 @@ import lcmx_runtime  # noqa: E402
 MAX_PAYLOAD = 1024 * 1024
 PRECOMPACT_DEADLINE_S = 10
 LOG_ROTATE_BYTES = 5 * 1024 * 1024
+# PostToolBatch fires once per batch of tool calls; StopFailure replaces Stop when a turn
+# ends on an API error. Grok Build has no PostToolBatch, so its PostToolUse is accepted too.
 EVENTS = frozenset({
-    "SessionStart", "UserPromptSubmit", "PostToolUse", "PostToolUseFailure", "Stop",
+    "SessionStart", "UserPromptSubmit", "PostToolBatch", "PostToolUse", "Stop", "StopFailure",
     "SubagentStop", "PreCompact", "PostCompact", "SessionEnd",
 })
 SESSION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")

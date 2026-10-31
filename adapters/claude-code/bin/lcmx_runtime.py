@@ -30,6 +30,9 @@ def runtime_python(environ: Mapping[str, str], home: Path) -> Optional[Path]:
     """The Python 3.11+ interpreter with LCM-X's dependencies, if one is set up."""
     configured = environ.get("LCMX_PYTHON")
     candidates = [Path(configured).expanduser()] if configured else []
+    plugin_data = environ.get("CLAUDE_PLUGIN_DATA")
+    if plugin_data:  # survives plugin updates; removed with the plugin, unlike the store
+        candidates.append(Path(plugin_data).expanduser() / "venv" / "bin" / "python")
     candidates.append(home / "venv" / "bin" / "python")
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):

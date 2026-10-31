@@ -45,15 +45,27 @@ logged without content and capture catches up on the next hook.
 |---|---|---|
 | `SessionStart` (`startup`, `resume`, `fork`, `clear`, `compact`) | Register the session (cwd, source, transcript path); start the worker. A new session's transcript may not exist yet. A `fork` session links to its parent (below). | No |
 | `UserPromptSubmit` | Mark the session dirty; start the worker. | No |
-| `PostToolUse`, `PostToolUseFailure` | Mark dirty; start the worker only if none is running. Runs on every tool call, so the entry stays stdlib-only. | No |
-| `Stop` | Mark dirty; the worker drains the transcript to its end. Stop does not fire when the model call fails, so it is never the only trigger. | No |
-| `SubagentStop` | Ingest `agent_transcript_path` as a child lineage linked to the session. | No |
-| `PreCompact` | Drain synchronously, bounded to 10 s, before native compaction. Compaction appends a boundary and a summary and rewrites nothing, so this is insurance, not a dependency. | Bounded |
+| `PostToolBatch` | Mark dirty; start the worker only if none is running. Fires once per batch of tool calls (including inside subagents), so the entry stays stdlib-only and fast. | No |
+| `Stop`, `StopFailure` | Mark dirty; the worker drains the transcript to its end. `StopFailure` replaces `Stop` when the turn ends on an API error (observed: no `Stop` then). | No |
+| `SubagentStop` | Ingest `agent_transcript_path` (`<session>/subagents/agent-<id>.jsonl`) as a child lineage linked to the session. It also fires for internal agents (`agent_type` empty); those are captured and tagged. | No |
+| `PreCompact` | Drain synchronously, bounded to 10 s, before native compaction. Compaction normally appends a boundary and a summary, so this is insurance, except with the opt-in local transcript GC, which trims pre-compaction history from the file. | Bounded |
 | `PostCompact` | Mark dirty. | No |
 | `SessionEnd` | Start a detached drain and return at once. The transcript was complete when SessionEnd fired. | No |
 
 A crashed session that never reaches SessionEnd is caught up by the next worker run: the worker
 re-checks every registered transcript whose size passed its cursor.
+
+What Claude Code's documentation says about the transcript, and how capture copes:
+
+- It is written asynchronously and may lag the hook, even at `Stop`. The worker re-checks the
+  file after a short settle before it exits, and the next trigger catches anything later.
+- It is not strictly append-only: a resume could rewrite it (fixed in 2.1.288), an opt-in local GC
+  trims pre-compaction history, and set-aside copies (`.orphaned-`, `.superseded-`) can appear.
+  A rewrite starts a new cursor generation; stored rows are never deleted.
+- Its format is internal and changes between versions, hence the per-type classes below and the
+  `unknown_type` count.
+- Claude Code deletes transcripts after `cleanupPeriodDays` (30 by default). The store keeps
+  them.
 
 ## Store layout
 
@@ -92,7 +104,10 @@ idempotent by uid.
 - **Same uuid, same content:** nothing is written. A `--fork-session` transcript copies its
   parent's entries with the same uuids and a rewritten `sessionId` (observed). The content digest
   excludes envelope fields that change on copy, so the copies are recognised: the fork gets a
-  `session_lineage` link to its parent at the fork point and no duplicate rows.
+  `session_lineage` link to its parent at the fork point and no duplicate rows. The uuid reuse is
+  observed, not documented (the Agent SDK's own fork remaps uuids). If a version remaps them, the
+  fork's copied prefix is stored again as the fork's own rows: repeated content, never loss, and
+  the audit reports it as `fork_prefix_restored`. Content equality alone never merges events.
 - **Same uuid, changed content:** a new row with a `supersedes` relation to the earlier one. Rows
   are never overwritten. Claude Code's own revision fields (`supersedesUuids`,
   `retractedMessageUuids`) are kept in the ledger and recorded as relations, never as deletions.
@@ -141,8 +156,13 @@ hook entry handles:
 ## Runtime and failure modes
 
 - The hook entry runs on the system `python3` (3.9 or newer, stdlib only). The worker and the MCP
-  server need Python 3.11 or newer with LCM-X's dependencies, in `<home>/venv` or `LCMX_PYTHON`.
-  Without them hooks record `runtime_missing` and the server fails with a clear message.
+  server need Python 3.11 or newer with LCM-X's dependencies: `LCMX_PYTHON`, else a venv in the
+  plugin's data directory (`CLAUDE_PLUGIN_DATA`, which survives plugin updates and is removed on
+  uninstall), else `<home>/venv`. Without one, hooks record `runtime_missing` and the server
+  fails with a clear message.
+- Hooks print nothing: on `SessionStart` and `UserPromptSubmit` stdout would enter Claude's
+  context. The worker is started fully detached with its output discarded, so a `-p` session's
+  teardown cannot kill it.
 - One worker per store holds an exclusive lock; parallel sessions share it. WAL mode and short
   read transactions keep the reader and the writer apart (#1216).
 - Capture only reads transcripts named by a hook payload, under the Claude Code projects
@@ -155,7 +175,7 @@ store home, plus one interactive lane as client zero.
 
 | Run | What it proves |
 |---|---|
-| R0 | Hook shapes and timing with successful turns: `PostToolUse`, `Stop`, `SubagentStop`, `PostCompact`. |
+| R0 | Hook shapes and transcript lag with successful turns: `PostToolBatch`, `Stop`, `StopFailure`, `SubagentStop`, `PostCompact`; whether `PostToolBatch` fires on 2.1.314. |
 | R1 | Three turns with Bash, Read, Edit and Grep calls: audit passes. |
 | R2, R3 | `--resume` and `--fork-session`: fork copies add no rows; lineage recorded. |
 | R4 | Manual `/compact` and one auto-compaction: 0 lost and 0 duplicate rows across the boundary. |

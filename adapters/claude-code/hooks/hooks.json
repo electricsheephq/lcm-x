@@ -23,7 +23,7 @@
         ]
       }
     ],
-    "PostToolUse": [
+    "PostToolBatch": [
       {
         "hooks": [
           {
@@ -31,23 +31,21 @@
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py\"",
             "timeout": 5
           }
-        ],
-        "matcher": "*"
-      }
-    ],
-    "PostToolUseFailure": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py\"",
-            "timeout": 5
-          }
-        ],
-        "matcher": "*"
+        ]
       }
     ],
     "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
       {
         "hooks": [
           {

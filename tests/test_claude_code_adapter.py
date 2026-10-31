@@ -148,7 +148,7 @@ def test_plugin_files_are_consistent(hook):
     hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
     servers = json.loads((PLUGIN / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
     assert manifest["name"] == "lcm-x"
-    assert set(hooks) == set(hook.EVENTS)
+    assert set(hooks) == set(hook.EVENTS) - {"PostToolUse"}  # accepted for Grok Build only
     for entries in hooks.values():
         for entry in entries:
             assert entry["hooks"][0]["command"].endswith('bin/lcmx_hook.py"')
