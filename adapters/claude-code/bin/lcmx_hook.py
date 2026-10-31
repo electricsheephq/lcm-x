@@ -73,6 +73,11 @@ def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[st
         "agent_transcript_path": None,
         "observe_only": False,
         "observed_at": time.time(),
+        # The worker acknowledges each record's seq; a record newer than its ack is pending.
+        "seq": time.time_ns(),
+        # Claude Code's opt-in local GC deletes pre-compaction history from the transcript, so
+        # capture cannot be lossless under it; the audit reports such sessions.
+        "local_gc": environ.get("CLAUDE_CODE_TRANSCRIPT_LOCAL_GC") == "1",
     }
     if record["event"] not in EVENTS:
         record["problem"] = "unsupported_event"
@@ -151,12 +156,15 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0)
              "close_fds": True, "cwd": str(home)}
     if deadline_s:
         try:
-            subprocess.run(command + ["--deadline", str(deadline_s)], timeout=deadline_s + 2, **quiet)
+            done = subprocess.run(command + ["--deadline", str(deadline_s)], timeout=deadline_s + 2, **quiet)
         except subprocess.TimeoutExpired:
             return "drain_timeout"  # the batch in flight rolls back; the next drain resumes from the cursor
-        return "drained"
+        # The worker exits 0 only after a completed drain; 3 means its deadline left work pending.
+        return {0: "drained", 3: "drain_incomplete"}.get(done.returncode, "drain_failed:%d" % done.returncode)
+    # The record is already spooled. A held lock means a worker that will see it: the worker
+    # releases the lock first and rescans the spool after, so no record can fall between.
     if _lock_held(home / "capture.lock"):
-        return "worker_running"  # the running worker re-reads the spool before it exits
+        return "worker_running"
     subprocess.Popen(command, start_new_session=True, **quiet)
     return "worker_started"
 

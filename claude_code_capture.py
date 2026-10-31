@@ -21,14 +21,16 @@ SOURCE = "claude-code"
 # dropped silently: an unknown type keeps its raw line and is counted.
 PROJECTED = "projected"      # becomes message rows; raw line kept in the ledger
 RAW_ONLY = "raw_only"        # no rows; protected raw line kept in the ledger
-DIGEST_ONLY = "digest_only"  # no rows; digest only (copies of content already stored)
+SHARED_RAW = "shared_raw"    # no rows; protected raw line kept once per content digest
 UNKNOWN = "unknown_type"     # no rows; raw line kept and counted
 
 PROJECTED_TYPES = frozenset({"user", "assistant"})
-DIGEST_ONLY_TYPES = frozenset({"api-request", "api-request-blob", "api-request-shape"})
+# Request snapshots repeat content-addressed blobs (system prompt, tools, request bodies) many
+# times per session; their unique content is kept once, never reduced to a digest.
+SHARED_RAW_TYPES = frozenset({"api-request", "api-request-blob", "api-request-shape"})
 RAW_ONLY_TYPES = frozenset({
     "system", "attachment", "summary", "queue-operation", "last-prompt", "mode", "custom-title",
-    "agent-name", "cost-state", "pr-link", "file-history-snapshot", "file-history-delta",
+    "agent-name", "cost-state", "pr-link", "file-history-snapshot", "file-history-delta", "tools-used",
 })
 
 
@@ -37,8 +39,8 @@ def classify_entry(entry: Mapping[str, Any]) -> str:
     kind = entry.get("type")
     if kind in PROJECTED_TYPES and isinstance(entry.get("message"), Mapping):
         return PROJECTED
-    if kind in DIGEST_ONLY_TYPES:
-        return DIGEST_ONLY
+    if kind in SHARED_RAW_TYPES:
+        return SHARED_RAW
     if kind in RAW_ONLY_TYPES or kind in PROJECTED_TYPES:
         return RAW_ONLY
     return UNKNOWN

@@ -15,9 +15,9 @@ from pathlib import Path
 import pytest
 
 from hermes_lcm.claude_code_capture import (
-    DIGEST_ONLY,
     PROJECTED,
     RAW_ONLY,
+    SHARED_RAW,
     UNKNOWN,
     classify_entry,
     lineage_key,
@@ -161,7 +161,8 @@ def test_plugin_files_are_consistent(hook):
     ({"type": "user"}, RAW_ONLY),
     ({"type": "attachment", "attachment": {}}, RAW_ONLY),
     ({"type": "system", "subtype": "compact_boundary"}, RAW_ONLY),
-    ({"type": "api-request-blob"}, DIGEST_ONLY),
+    ({"type": "api-request-blob"}, SHARED_RAW),
+    ({"type": "tools-used"}, RAW_ONLY),
     ({"type": "a-type-from-a-future-version"}, UNKNOWN),
 ])
 def test_projection_v1_classes(entry, expected):
@@ -173,3 +174,26 @@ def test_lineage_keys():
     assert lineage_key("s1", "a7") == "claude-code:s1/agent:a7"
     with pytest.raises(ValueError):
         lineage_key("")
+
+
+def test_precompact_reports_the_worker_outcome(hook, env, tmp_path, monkeypatch):
+    """A failed or incomplete drain is never reported as drained."""
+    package = tmp_path / "package"
+    (package / "scripts").mkdir(parents=True)
+    (package / "plugin.yaml").write_text("", encoding="utf-8")
+    (package / "store.py").write_text("", encoding="utf-8")
+    worker = package / "scripts" / "lcm_x_capture.py"
+    import sys
+    lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(package)}
+    Path(env["LCMX_CC_HOME"]).mkdir(parents=True)
+    for code, outcome in ((0, "drained"), (3, "drain_incomplete"), (1, "drain_failed:1")):
+        worker.write_text(f"raise SystemExit({code})\n", encoding="utf-8")
+        assert hook.start_worker(Path(env["LCMX_CC_HOME"]), lane, deadline_s=5) == outcome
+
+
+def test_spool_record_carries_seq_and_local_gc(hook, env, tmp_path):
+    payload = {"hook_event_name": "Stop", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    hook.main(io.StringIO(json.dumps(payload)), {**env, "CLAUDE_CODE_TRANSCRIPT_LOCAL_GC": "1"})
+    [record_path] = _spooled(env)
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert isinstance(record["seq"], int) and record["local_gc"] is True
