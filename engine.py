@@ -95,7 +95,6 @@ from .ingest_protection import (
     _persisted_output_inline_preview_sha256,
     _persisted_output_preview_prefix_digest,
     _persisted_output_saved_path,
-    assistant_output_quarantine_reason,
     extract_all_externalized_payload_refs,
     extract_ingest_externalized_refs,
     protect_inline_payloads_in_text,
@@ -130,7 +129,6 @@ from .query_view_store import QueryViewStore
 from .tool_registry import TOOL_REGISTRY
 from .sanitize import (
     _clean_active_assistant_message,
-    _should_drop_active_assistant_message,
 )
 from .session_patterns import (
     build_session_match_keys,
@@ -6951,33 +6949,6 @@ class LCMEngine(
             hermes_home=self._hermes_home,
         )
         return durable_content is not None
-
-    @classmethod
-    def _is_active_context_droppable_identity(cls, identity: tuple[str, str, str, str, str]) -> bool:
-        """Return true for durable rows sanitized out of active replay only."""
-        role, content, _tool_call_id, tool_calls, _tool_name = identity
-        if role != "assistant" or tool_calls:
-            return False
-        return _should_drop_active_assistant_message({
-            "role": role,
-            "content": cls._identity_content_for_active_cleanup(content),
-        })
-
-    def _ignored_message_is_quarantinable_assistant(self, msg: Dict[str, Any]) -> bool:
-        if self._is_volatile_ignored_quarantine_placeholder(
-            msg,
-            text_content_for_pattern_matching(msg.get("content")) or "",
-        ):
-            return True
-        identity = self._message_replay_identity(msg)
-        if self._is_quarantined_assistant_replay_identity(identity):
-            return True
-        if not self._matches_ignore_message_patterns(msg):
-            return False
-        if identity[0] != "assistant":
-            return False
-        content = normalize_content_value(msg.get("content")) or ""
-        return assistant_output_quarantine_reason(content) is not None
 
     def _redact_active_replay_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         redacted_replay_messages: list[Dict[str, Any]] = []
