@@ -534,3 +534,33 @@ last adopted view. Adoption is limited to the two verified boundary continuation
 exits; other exits leave proposals unadopted and count them. The immutable handle
 is process-local: after restart, unsignalled vectors remain `proposed`. These
 limits remain for P1c-2, P1d and P2; this slice does not repair them.
+
+## P1c-2a pending-emission mark
+
+An attempted exit write that fails, is busy, or skips an already-open transaction
+keeps its complete pre-ref payload in a process-wide locked registry. Preparation
+failures, not-ready stores, salt changes and no-descriptor exits do not mark.
+The key is `((store.db_identity, salt), lineage)`; the identity is fixed at open
+and unique per `:memory:` store. Each key keeps the newest two payloads and
+counts an eviction. Copied files and re-keyed stores are distinct.
+
+The next ready foreground ingest of that store, from any engine, claims pending
+entries after BEGIN IMMEDIATE and retries each in its own savepoint before
+classification. The registry lock never spans store or SQLite work. Salt changes
+drop stale entries. Claims exclude concurrent attempts; rollback (including a
+busy retry or interrupt) releases them; successful entries settle immediately after
+COMMIT, while callbacks count recovery. Only the originating engine with the
+same compress-call number receives the recovered handle; other retries leave
+the emission proposed and count it as unhandled.
+
+Inside the ingest ledger savepoint, a stored row matching a still-pending
+descriptor in this store and lineage gains one `generated_unproven` relation.
+Only entries successfully retried by this attempt are excluded; claims never
+hide pending entries.
+Classification and compress output remain unchanged; rows today's classifier
+skips get no relation, and neither do rows whose ingest skips its ledger write:
+a crossed classification (`ledger.skipped_crossed`), a fail-open rollback
+(`ledger.write_failed`), or a store that is not ready, read-only or has a
+changed salt. Ledger-off behavior is unchanged. The mark is process-local and
+lost on restart: the restart path is P1c-2b. There is no universal generated
+marker yet.
