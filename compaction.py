@@ -923,6 +923,8 @@ class CompactionMixin:
                     messages, current_tokens=current_tokens, focus_topic=focus_topic, force=force,
                 )
                 if self._compaction_is_closing():
+                    state["_last_compression_status"] = "noop"
+                    state["_last_compression_noop_reason"] = "engine shutting down"
                     returned = messages
                     return messages
                 if (isinstance(result, list) and result is not messages and len(result) == len(messages)
@@ -935,6 +937,14 @@ class CompactionMixin:
             return result
         except BaseException as exc:
             if isinstance(exc, Exception) and self._compaction_is_closing():
+                try:  # #582: the gate keeps the connection open, so no partial write outlives the pass
+                    self._store.rollback_pending_write()
+                except Exception:
+                    logger.debug("LCM rollback after a closing bypassed compress exception failed", exc_info=True)
+                state["_last_compression_status"] = "noop"
+                state["_last_compression_noop_reason"] = "engine shutting down"
+                logger.warning("LCM bypassed compress failed while shutting down (%s); returning the host messages",
+                               type(exc).__name__, exc_info=True)
                 returned = messages
                 return messages
             state["_last_compression_status"] = "error"
