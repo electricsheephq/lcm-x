@@ -1,4 +1,8 @@
-"""D8 single-shot QA guard; recording capability, not a release-row certificate."""
+"""D8 single-shot QA guard (rule d8-count-margin-v1); recording capability, not a release-row certificate.
+
+Each guarded category passes on a count margin of discordant pairs, T(n) = max(3, ceil(0.02 n))
+questions. The bootstrap interval is disclosed only; it no longer gates.
+"""
 from __future__ import annotations
 
 import argparse
@@ -21,6 +25,10 @@ IDENTITY_FIELDS = (
     "scoringPath", "promptVersion", "readerPromptVersion", "questionSetSha256",
     "answerPresentationMode", "recallConfig",
 )
+RULE_ID = "d8-count-margin-v1"
+# Full D8 row category sizes: LongMemEval-S 500 (30 `_abs`, 78 knowledge-update) and
+# LoCoMo 1,986 (446 adversarial). Any other n in a full row is INCOMPLETE.
+PINNED_SIZES = {"abstention": 30, "knowledge-update": 78, "adversarial": 446}
 
 
 def classify_recall_health(health, config):
@@ -107,6 +115,41 @@ def bootstrap_bounds(clusters):
     samples.sort()
     return (samples[math.ceil(0.025 * len(samples)) - 1],
             samples[math.ceil(0.975 * len(samples)) - 1])
+
+
+def count_margin(n):
+    """T(n) = max(3, ceil(0.02 n)) questions, in integer form."""
+    return max(3, (2 * n + 99) // 100)
+
+
+def mcnemar_p(b, c):
+    """Exact two-sided McNemar p; disclosed only."""
+    discordant = b + c
+    if not discordant:
+        return 1.0
+    return min(1.0, 2 * sum(math.comb(discordant, k) for k in range(min(b, c) + 1)) / 2 ** discordant)
+
+
+def sign_flip_p(nets):
+    """Exact two-sided p over all 2^k sign flips of per-conversation net; disclosed only."""
+    ways = {0: 1}
+    for net in nets:
+        flipped = {}
+        for total, count in ways.items():
+            for signed in (net, -net):
+                flipped[total + signed] = flipped.get(total + signed, 0) + count
+        ways = flipped
+    observed = abs(sum(nets))
+    return sum(count for total, count in ways.items() if abs(total) >= observed) / 2 ** len(nets)
+
+
+def cluster_dispersion(conversations, net, discordant):
+    """Spread of per-conversation net around the pair's own shift; disclosed only."""
+    theta = net / discordant if discordant else 0
+    denominator = sum((v["b"] + v["c"]) * (1 - theta ** 2) for v in conversations.values())
+    if not denominator:
+        return None
+    return sum((v["net"] - (v["b"] + v["c"]) * theta) ** 2 for v in conversations.values()) / denominator
 
 
 def _record_identities(document, identities, issues):
@@ -252,6 +295,18 @@ def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False, re
         candidate.setdefault(qid, {"questionId": qid, "questionType": row.get("questionType", row.get("category")),
                                    "_failed": True})
     cc, bc = candidate_report.get("recallConfig"), baseline_report.get("recallConfig")
+
+    def defective(qid):  # A row-level completeness failure on either side of a pair.
+        pair = ((candidate[qid], cc), (baseline[qid], bc))
+        return (_failed(baseline[qid]) or any(_unscorable(row) for row, _ in pair)
+                or any(classify_recall_health(row.get("recallHealth"), config) == "missing"
+                       for row, config in pair))
+
+    defects = {qid for qid in baseline if defective(qid)}
+    # Failures no single category owns make every category INCOMPLETE (d8-count-margin-v1).
+    wrong_total = not subset and len(baseline) != {"longmemeval": 500, "locomo": 1986}[benchmark]
+    run_wide = (bool(issues) or bool(extra) or wrong_total
+                or any(not any(_category(baseline[qid], name) for name in names) for qid in defects))
     overall = {"candidate": degraded_rate(list(candidate.values()), cc),
                "baseline": degraded_rate(list(baseline.values()), bc)}
     issues += [f"{side}: unscorable rows: {rate['unscorable']}"
@@ -260,7 +315,7 @@ def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False, re
     if failed_baseline:
         issues.append(f"baseline: failed rows: {failed_baseline} (rerun the baseline)")
     incomplete = (bool(issues) or bool(extra) or any(row["INCOMPLETE"] for row in overall.values())
-                  or (not subset and len(baseline) != {"longmemeval": 500, "locomo": 1986}[benchmark]))
+                  or wrong_total)
     cr, br = overall["candidate"], overall["baseline"]
     rate_pass = None if placebo else (not cr["INCOMPLETE"] and not br["INCOMPLETE"]
                                      and cr["rate_points"] <= br["rate_points"] + 1)
@@ -270,31 +325,62 @@ def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False, re
                   "candidate": candidate_report.get("answerPresentationMode"),
                   "baseline": baseline_report.get("answerPresentationMode")},
               "INCOMPLETE": incomplete, "d8_row": not subset,
-              "mode": "placebo" if placebo else "non-inferiority", "rate_pass": rate_pass}
+              "mode": "placebo" if placebo else "non-inferiority", "rate_pass": rate_pass,
+              "rule_id": RULE_ID, "claim": "count-margin"}
     result["identities_missing_both"] = missing_both
     if differences:
         result["identity_differences"] = differences
-    if issues:
-        result["reason"] = "; ".join(issues)
     for name in names:
         base = {qid: row for qid, row in baseline.items() if _category(row, name)}
-        clusters = {}
+        clusters, b_failed, c_failed = {}, 0, 0
         for qid, row in sorted(base.items()):
             # LoCoMo module encodes `${sample_id}-q${index}`; sample_id is conversation.
             match = re.fullmatch(r"(.+)-q\d+", qid) if benchmark == "locomo" else None
             if benchmark == "locomo" and not match:
                 raise ValueError(f"invalid LoCoMo question id: {qid}")
             cluster = match[1] if match else qid
-            clusters.setdefault(cluster, []).append(int(_is_correct(candidate[qid])) - int(_is_correct(row)))
+            value = int(_is_correct(candidate[qid])) - int(_is_correct(row))
+            clusters.setdefault(cluster, []).append(value)
+            # Discordances whose losing side failed: baseline for b, candidate for c.
+            b_failed += value == 1 and bool(_failed(row))
+            c_failed += value == -1 and bool(_failed(candidate[qid]))
         lower, upper = bootstrap_bounds(list(clusters.values()))
         cr = degraded_rate([row for row in candidate.values() if _category(row, name)], cc)
         br = degraded_rate(list(base.values()), bc)
-        interval_pass = lower is not None and lower > -2.0 and (not placebo or upper < 2.0)
-        result["categories"][name] = {"paired_n": len(base), "clusters": len(clusters),
-            "difference_points": 100 * sum(sum(v) for v in clusters.values()) / len(base) if base else None,
-            "lower_bound_points": lower, "upper_bound_points": upper, "interval_pass": interval_pass,
-            "candidate": cr, "baseline": br, "pass": interval_pass}
-    result["pass"] = (all(row["pass"] for row in result["categories"].values())
+        # d8-count-margin-v1: the interval is disclosed only and never gates.
+        inside_band = lower is not None and lower > -2.0 and (not placebo or upper < 2.0)
+        vals = [v for vs in clusters.values() for v in vs]
+        b, c, n = vals.count(1), vals.count(-1), len(base)
+        margin = count_margin(n)
+        can_fail = n >= margin
+        count_pass = abs(b - c) < margin if placebo else (c - b) < margin
+        size_incomplete = not n or (not subset and n != PINNED_SIZES[name])
+        category_incomplete = size_incomplete or run_wide or bool(defects & base.keys())
+        if size_incomplete:
+            issues.append(f"category {name}: n {n}" + ("" if subset else f" (pinned {PINNED_SIZES[name]})"))
+        category = result["categories"][name] = {"paired_n": n, "clusters": len(clusters),
+            "difference_points": 100 * sum(vals) / n if n else None,
+            "lower_bound_points": lower, "upper_bound_points": upper, "interval_gates": False,
+            "interval_inside_band": inside_band, "b": b, "c": c, "discordant": b + c, "net": b - c,
+            "margin_questions": margin, "margin_points": 100 * margin / n if n else None,
+            "can_fail": can_fail, "gating": can_fail, "count_pass": count_pass,
+            "mcnemar_p": mcnemar_p(b, c), "discordance_rate": (b + c) / n if n else None,
+            "b_failed": b_failed, "c_failed": c_failed, "INCOMPLETE": category_incomplete,
+            "candidate": cr, "baseline": br,
+            "pass": count_pass and can_fail and not category_incomplete}
+        if benchmark == "locomo":
+            conversations = {key: {"n": len(vs), "b": vs.count(1), "c": vs.count(-1),
+                                   "net": vs.count(1) - vs.count(-1)} for key, vs in clusters.items()}
+            category["per_conversation"] = conversations
+            category["cluster_dispersion"] = cluster_dispersion(conversations, b - c, b + c)
+            category["sign_flip_p"] = sign_flip_p([v["net"] for v in conversations.values()])
+    # INCOMPLETE (run or category) takes precedence over every count verdict.
+    incomplete = result["INCOMPLETE"] = incomplete or any(
+        row["INCOMPLETE"] for row in result["categories"].values())
+    if issues:
+        result["reason"] = "; ".join(issues)
+    gating = [row for row in result["categories"].values() if row["gating"]]
+    result["pass"] = (bool(gating) and all(row["count_pass"] for row in gating)
                       and (placebo or rate_pass) and not incomplete)
     return result
 
@@ -307,7 +393,8 @@ def main(argv=None):
                         help="allow a held-out split; output is not a full D8 row")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--placebo", action="store_true",
-                        help="compare A-prime (candidate) with A (baseline); require intervals strictly inside +/-2 points")
+                        help="compare A-prime (candidate) with A (baseline); "
+                             "count margin |b-c| < T(n) per category (rule d8-count-margin-v1)")
     modes.add_argument("--reader-treatment", action="store_true",
                        help="disclose differing reader prompt versions instead of requiring equality")
     args = parser.parse_args(argv)
@@ -316,7 +403,8 @@ def main(argv=None):
                               placebo=args.placebo, reader_treatment=args.reader_treatment)
     except (ValueError, OSError, TypeError, KeyError) as error:
         print(json.dumps({"pass": False, "INCOMPLETE": True, "error": str(error),
-                          "d8_row": not args.subset, "mode": "placebo" if args.placebo else "non-inferiority"}))
+                          "d8_row": not args.subset, "mode": "placebo" if args.placebo else "non-inferiority",
+                          "rule_id": RULE_ID, "claim": "count-margin"}))
         return 1
     print(json.dumps(result, sort_keys=True))
     return 0 if result["pass"] else 1
