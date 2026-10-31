@@ -1078,12 +1078,16 @@ class CompactionMixin:
                 keys = [_host_row_key(m) for m, identity in zip(result, output_identities) if identity is not None]
                 if keys and None not in keys:
                     proof["filtered"], proof["filtered_row_keys"] = True, keys
-            if self._last_compression_status == "sanitized" and result is not messages and not (
-                    proof["published"] or proof["recovery"] or proof["stub_first"] or proof["filtered"]):
+            if (self._last_compression_status == "sanitized" and result is not messages
+                    and not getattr(self, "_compress_dropped_ignored_rows", False) and not (
+                        proof["published"] or proof["recovery"] or proof["stub_first"] or proof["filtered"])
+                    and not self._rekey_unstored_rows(result, occurrences, output_identities, dict(store_ids))):
                 # #1286: a cleanup-only pass (replay stubs, stripped reasoning) hands the host a rewritten list too: a
                 # restart after the host commits it must not leave the cold rebind a stale proof. Absent unless true
                 # (traces dump it). A held pass's survival fit stays local: a durable claim of its carrier would
-                # bypass the anchor's retirement of that carrier (#1000).
+                # bypass the anchor's retirement of that carrier (#1000). So does a list with a row no stored row
+                # holds (I1, the re-key's rule: the cold rebind's broken walk stores it), and an output that dropped
+                # ignored rows: #1013's host keys alone prove that one (same text is not identity).
                 proof["cleanup_rewrite"] = True
             self._last_emission_descriptors = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
@@ -1282,6 +1286,14 @@ class CompactionMixin:
                 logger.info("LCM durable commit proof not re-keyed: %d host rows have no stored occurrence; the "
                             "previous proof stays: session=%s", unstored, self._session_id)
                 return
+            recovered = {store_ids[id(m)] for m in messages if id(m) in store_ids} - carried_rows.keys()
+            if recovered:  # rows the re-map found (a compression child's parent rows after the out-of-order one)
+                carried_rows.update(self._store.get_batch(sorted(recovered)))
+                proof["carry_ranges"] = self._coalesce_compression_carry_ranges(
+                    (str(row["session_id"]), store_id - 1, store_id)
+                    for store_id, row in sorted(carried_rows.items())
+                    if row.get("session_id")
+                )
             proof["output_sha256_v3"] = [_commit_proof_identity_digest(self._proof_replay_identity(m)) for m in messages]
             proof["effective_sha256_v3"] = [
                 digest for m, digest in zip(messages, proof["output_sha256_v3"])
@@ -1304,7 +1316,7 @@ class CompactionMixin:
         text that is not verified is real content (#486). The in-order map leaves the rows after one stored out of
         host order unmapped (the case the re-key exists for), so unmapped rows are mapped again on their own,
         against the stored rows not yet claimed: each stored row is claimed once, and a repeated message cannot
-        take an earlier row's copy.
+        take an earlier row's copy. The rows mapped again join ``store_ids``.
         """
         claimed = set(store_ids.values())
         pending = []
@@ -1329,6 +1341,7 @@ class CompactionMixin:
             if not found:
                 break
             claimed.update(found.values())
+            store_ids.update((id(messages[idx]), store_id) for idx, store_id in found.items())
             pending = [idx for idx in pending if idx not in found]
         return len(pending)
 

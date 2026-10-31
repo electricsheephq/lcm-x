@@ -7269,24 +7269,7 @@ class LCMEngine(
         reconciled_existing_session = self._ingest_cursor_needs_reconcile
         reconcile_messages = replay_messages
         if self._ingest_cursor_needs_reconcile:
-            reconcile_messages = [
-                original_msg
-                if (
-                    (
-                        str(original_msg.get("role") or "") == "tool"
-                        and _is_hermes_persisted_output_marker(
-                            normalize_content_value(original_msg.get("content")) or ""
-                        )
-                        and self._has_any_durable_persisted_output_payload_for_marker(original_msg)
-                    )
-                    or (
-                        self._compiled_ignore_message_patterns
-                        and ignored_original_messages[idx]
-                    )
-                )
-                else replay_msg
-                for idx, (original_msg, replay_msg) in enumerate(zip(messages, replay_messages))
-            ]
+            reconcile_messages = self._cold_reader_replay_messages(messages, replay_messages, ignored_original_messages)
             self._ingest_cursor = self._reconcile_ingest_cursor_from_store(
                 reconcile_messages,
                 allow_session_end_replay_proof=allow_session_end_replay_proof,
@@ -7606,7 +7589,11 @@ class LCMEngine(
             proven_end = n if self._last_ingest_reconciliation.get("action") == "persisted batch" else 0
         if unaudited_from is None and any(store_id and idx < proven_end for (idx, _msg), store_id
                                           in zip(messages_to_store_with_index, store_ids)):
-            self._rekey_durable_commit_proof(messages)
+            # The list the next cold bind's reader compares with the proof, not the raw host rows (a redacted or
+            # quarantined row is stored, and read, in its replay form).
+            self._rekey_durable_commit_proof(
+                reconcile_messages if reconciled_existing_session else self._warm_cold_reader_replay_messages(
+                    messages, fresh_replay_messages, ignored_original_messages, scan_start))
         logger.debug("Ingested %d messages into LCM store", len(messages_to_store_with_index))
         self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
         # Most ``protected_messages`` changes are storage-only: inline media and
@@ -7614,6 +7601,43 @@ class LCMEngine(
         # exceptions are whole-message ``raw_payload`` externalization and the
         # separately opt-in textual tool-result interceptor above.
         return remember(active_replay_messages)
+
+    def _cold_reader_replay_messages(self, messages, replay_messages, ignored_original_messages):
+        """The list a cold bind reconciles against the store and the durable proof: the replay list, with the
+        host's own row back for an ignored row and for a tool row whose persisted-output marker has a durable
+        payload."""
+        return [
+            original_msg
+            if (
+                (
+                    str(original_msg.get("role") or "") == "tool"
+                    and _is_hermes_persisted_output_marker(
+                        normalize_content_value(original_msg.get("content")) or ""
+                    )
+                    and self._has_any_durable_persisted_output_payload_for_marker(original_msg)
+                )
+                or (
+                    self._compiled_ignore_message_patterns
+                    and ignored_original_messages[idx]
+                )
+            )
+            else replay_msg
+            for idx, (original_msg, replay_msg) in enumerate(zip(messages, replay_messages))
+        ]
+
+    def _warm_cold_reader_replay_messages(self, messages, replay_messages, ignored_original_messages, scan_start):
+        """#1286: the cold reader's list for a warm ingest's re-key. A warm ingest decides ignore patterns from
+        ``scan_start`` on; the rows below it are decided here as a cold bind decides them (pattern matches and
+        store reads only: nothing is externalized, quarantined or written)."""
+        ignored = list(ignored_original_messages)
+        if self._compiled_ignore_message_patterns and scan_start:
+            store_id_scope = self._compress_run.preserve_store_ids()
+            self._compress_run.store_ids_by_message_id = ignored_original_messages.store_ids
+            with store_id_scope:
+                for idx in range(scan_start):
+                    ignored[idx] = (self._matches_ignore_message_patterns(messages[idx])
+                                    or self._mapped_stored_row_matches_ignore_message_patterns(messages[idx]))
+        return self._cold_reader_replay_messages(messages, replay_messages, ignored)
 
     def _build_ingest_replay(
         self,

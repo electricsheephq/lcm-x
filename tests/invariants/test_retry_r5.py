@@ -26,7 +26,9 @@ def test_retry_host_merged_scaffold_after_compaction():
         state.new_turn("alpha", False, 0, True, "lookup")
         assert state.retry_occurrence_index is not None  # a retry, not a new turn with the same text
         state.exactly_once()
+        delivered = len(state.occurrences)
         state.cold_resume()
+        assert len(state.occurrences) == delivered + 2  # it ran: the resume delivered its next turn
         state.exactly_once()
     finally:
         state.teardown()
@@ -44,7 +46,9 @@ def test_retry_after_a_new_turn_beside_merged_scaffold():
         state.new_turn("alpha 2", False, 0, True, "lookup")
         assert state.retry_occurrence_index is not None
         state.exactly_once()
+        delivered = len(state.occurrences)
         state.cold_resume()
+        assert len(state.occurrences) == delivered + 2
         state.exactly_once()
     finally:
         state.teardown()
