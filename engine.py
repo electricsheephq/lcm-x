@@ -35,7 +35,7 @@ from .compaction_policy import (
     resolve_threshold,
     threshold_tokens,
 )
-from .config import LCMConfig, _disabled_tool_names, containment_base_dir, ingest_ledger_mode, lcm_env_get, profile_bound
+from .config import LCMConfig, _disabled_tool_names, _parse_float_env, containment_base_dir, ingest_ledger_mode, lcm_env_get, profile_bound
 from .dag import SummaryDAG, SummaryNode
 from . import ingest_ledger, sender_capture
 from .diagnostics import _enforce_state_db_containment
@@ -1131,6 +1131,9 @@ class LCMEngine(
             )
         self._hermes_home = hermes_home
         self._stable_use_lock = threading.Lock()
+        self._compaction_gate = threading.Condition()
+        self._compaction_inflight = 0
+        self._compaction_closing = False
         # #667: node ids a condensation has selected, until it publishes or fails; the level 3 repair skips them.
         self._condensation_inflight_ids: Counter[int] = Counter()
         self._condensation_inflight_lock = threading.Lock()
@@ -9294,11 +9297,14 @@ class LCMEngine(
                 with self._condensation_in_flight(to_condense) as fresh:
                     if fresh is None:
                         continue  # a selected node went away before registration (#667): nothing to condense here
-                    source_tokens, summary_tokens, level = self._condense_summary_nodes(
+                    condensed = self._condense_summary_nodes(
                         fresh,
                         focus_topic=focus_topic,
                         force_overflow=force_overflow,
                     )
+                    if condensed is None:
+                        break
+                    source_tokens, summary_tokens, level = condensed
             except SummaryResultRejected:
                 result_rejected = True  # #652: the nodes stay on the frontier
                 break
@@ -9365,7 +9371,7 @@ class LCMEngine(
         focus_topic: Optional[str] = None,
         deadline: Optional[float] = None,
         force_overflow: bool = False,
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int] | None:
         """Persist one same-depth condensation and return source/output tokens and level."""
         if not nodes:
             raise ValueError("condensation requires at least one summary node")
@@ -9406,6 +9412,8 @@ class LCMEngine(
                {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
             verbatim_small_source=True,  # #605 F2
         )
+        if self._compaction_is_closing():
+            return None
         # #1012 F4: a content-filtered group keeps its level 3 truncation, so condensation progresses
         if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow) and \
                 not provenance.get("content_filter_error"):
@@ -9427,6 +9435,8 @@ class LCMEngine(
             latest_at=latest_at,
             expand_hint=self._extract_expand_hint(summary_text),
         )
+        if self._compaction_is_closing():
+            return None
         self._dag.add_node(
             condensed_node, escalation_level=level, model=provenance.get("model", "")
         )
@@ -9514,11 +9524,13 @@ class LCMEngine(
                     if fresh is None:
                         continue  # a selected node went away before registration (#667): select again
                     before = self._summary_frontier_tokens()
-                    self._condense_summary_nodes(
+                    condensed = self._condense_summary_nodes(
                         fresh,
                         focus_topic=focus_topic,
                         deadline=deadline,
                     )
+                    if condensed is None:
+                        return passes, "shutdown"
             except SweepBudgetExhausted as exc:
                 return passes, getattr(exc, "reason", "time_budget_exhausted")  # #605: keep a soft stop
             except SummaryResultRejected:
@@ -11354,11 +11366,28 @@ class LCMEngine(
             self._stable_use_owner_thread = None
             self._stable_use_lock.release()
 
+    def _compaction_is_closing(self) -> bool:
+        with self._compaction_gate:
+            return self._compaction_closing
+
     def shutdown(self):
+        with self._compaction_gate:
+            self._compaction_closing = True
         sender_capture.retire(self)
         with self._exclusive_lifecycle("shutdown"):
             if self._stable_use_closed:
                 return
+            wait_s = _parse_float_env("LCM_SHUTDOWN_COMPACTION_WAIT_S", 10.0)
+            if not math.isfinite(wait_s) or wait_s < 0:
+                wait_s = 10.0
+            with self._compaction_gate:
+                if not self._compaction_gate.wait_for(
+                    lambda: self._compaction_inflight == 0, timeout=wait_s,
+                ):
+                    logger.warning(
+                        "shutdown: compaction still running after %gs; connections left open", wait_s,
+                    )
+                    return
             self._shutdown_unlocked(deadline=time.monotonic() + _SESSION_END_SHUTDOWN_TIMEOUT_MS / 1000)
             self._stable_use_closed = True
 
