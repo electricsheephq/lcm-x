@@ -27,6 +27,9 @@ LCM-X's dependencies, at `<store home>/venv` or named by `LCMX_PYTHON`.
 | `LCMX_PYTHON` | `<store home>/venv/bin/python` | Runtime interpreter |
 | `LCMX_PACKAGE_ROOT` | the plugin's vendored copy, else this checkout | LCM-X package |
 | `LCMX_GROK_CAPTURE` | off | `1` enables the experimental Grok Build reader |
+| `LCMX_GROK_HOME` | `~/.lcm-x/grok-build` | Store home for Grok Build sessions (one owning harness per store) |
+
+Home settings must be absolute paths; a relative one disables capture and the server says so.
 
 The store lives outside the plugin's folders, so removing or updating the plugin never removes
 your memory. Capture runs on macOS and Linux.

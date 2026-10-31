@@ -55,7 +55,7 @@ def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[st
     """One record shape for Claude Code's snake_case and Grok Build's camelCase payloads.
 
     ``problem`` is set when the event must not be spooled; ``observe_only`` marks
-    events that are recorded without starting the worker.
+    events that are logged only, never spooled.
     """
     grok = bool(environ.get("GROK_SESSION_ID")) or "hookEventName" in payload or "sessionId" in payload
     event = _pick(payload, "hook_event_name", "hookEventName")
@@ -91,7 +91,7 @@ def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[st
         return record
     if grok:
         # Grok Build has no transcript path. Its end-of-session Stop and the 1.5 s
-        # SessionEnd are recorded only. Its session-file reader stays off until
+        # SessionEnd are logged only. Its session-file reader stays off until
         # its own real-session proof passes.
         event_name = record["event"]
         record["observe_only"] = event_name == "SessionEnd" or (
@@ -100,6 +100,9 @@ def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[st
             record["problem"] = "grok_capture_off"
         return record
     root = lcmx_runtime.claude_projects_root(environ)
+    if root is None:
+        record["problem"] = "config_dir_not_absolute"
+        return record
     for key in ("transcript_path", "agent_transcript_path"):
         value = payload.get(key)
         if value is None:
@@ -192,11 +195,12 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> 
     started = time.monotonic()
     if environ.get("LCMX_CAPTURE", "").strip().lower() in OFF_VALUES:
         return 0
-    home: Optional[Path] = None
     record: Dict[str, Any] = {}
     outcome = "error"
+    home: Optional[Path] = None
     try:
-        home = lcmx_runtime.store_home(environ)
+        # A relative home setting gives None: nothing is written anywhere, not even the log.
+        home = lcmx_runtime.store_home(environ, "grok-build" if environ.get("GROK_SESSION_ID") else "claude-code")
         raw = stdin.read(MAX_PAYLOAD + 1)
         if len(raw) > MAX_PAYLOAD:
             outcome = "payload_too_large"
@@ -206,13 +210,18 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> 
             outcome = "payload_not_object"
             return 0
         record = normalize(payload, environ)
+        home = lcmx_runtime.store_home(environ, record["host"])  # camelCase payloads are Grok's too
+        if home is None:
+            return 0
         if record.get("problem"):
             outcome = record["problem"]
             return 0
-        outcome = spool(home, record)
-        if not record["observe_only"]:
-            deadline = PRECOMPACT_DEADLINE_S if record["event"] == "PreCompact" else 0
-            outcome = start_worker(home, environ, deadline_s=deadline)
+        if record["observe_only"]:
+            outcome = "observed"  # never spooled, so it cannot replace a pending record
+            return 0
+        spool(home, record)
+        deadline = PRECOMPACT_DEADLINE_S if record["event"] == "PreCompact" else 0
+        outcome = start_worker(home, environ, deadline_s=deadline)
     except Exception as exc:  # noqa: BLE001 - a hook never fails the session
         outcome = "error:" + type(exc).__name__
     finally:

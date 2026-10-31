@@ -31,6 +31,10 @@ SHARED_RAW_TYPES = frozenset({"api-request", "api-request-blob", "api-request-sh
 RAW_ONLY_TYPES = frozenset({
     "system", "attachment", "summary", "queue-operation", "last-prompt", "mode", "custom-title",
     "agent-name", "cost-state", "pr-link", "file-history-snapshot", "file-history-delta", "tools-used",
+    # Desktop bookkeeping seen in real transcripts. Types that may carry content (``result``,
+    # ``started``) stay unknown, so the audit shows them until a projection version handles them.
+    "atis-latch", "bridge-session", "frame-link", "history-suppression",
+    "artifact-autoreact-ledger", "artifact-comment-monitor",
 })
 
 
@@ -46,34 +50,42 @@ def classify_entry(entry: Mapping[str, Any]) -> str:
     return UNKNOWN
 
 
-def lineage_key(session_id: str, agent_id: str | None = None) -> str:
-    """``host_uid_bindings`` lineage: the session, or a subagent inside it."""
+def row_session_id(session_id: str, agent_id: str | None = None) -> str:
+    """The rows' ``session_id``. A subagent's entries carry the parent's ``sessionId``; its
+    rows get their own id, so the parent's chronology stays clean and the child has its own
+    ``session_lineage`` link."""
     if not session_id:
         raise ValueError("session_id is required")
-    base = f"{SOURCE}:{session_id}"
-    return f"{base}/agent:{agent_id}" if agent_id else base
+    return f"{session_id}/agent:{agent_id}" if agent_id else session_id
+
+
+def lineage_key(session_id: str, agent_id: str | None = None) -> str:
+    """``host_uid_bindings`` lineage: the session, or a subagent inside it."""
+    return f"{SOURCE}:{row_session_id(session_id, agent_id)}"
 
 
 def project_entry(entry: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Message rows for one projected entry, each with its uid (``uuid`` or ``uuid#n``).
 
     Contract: user text and images give one ``user`` row; each ``tool_result`` part gives
-    one ``tool`` row with ``tool_call_id``; assistant text and ``tool_use`` parts give one
-    ``assistant`` row with ``tool_calls``. Meta entries, compact summaries and API-error
-    entries become ``system`` rows. Thinking and unknown parts stay in the ledger only.
+    one ``tool`` row with ``tool_call_id``, holding the full text of a ``tool-results`` file
+    when Claude Code saved the output there; an assistant entry gives one row with its text
+    and ``tool_use`` parts (none for a thinking-only entry). Meta entries, compact summaries
+    and API-error entries become ``system`` rows. Thinking stays in the ledger only.
     """
     raise NotImplementedError("projection v1 lands in a later commit of this PR")
 
 
 def content_digest(entry: Mapping[str, Any]) -> str:
-    """Digest of an entry's message content, excluding envelope fields that change when
-    Claude Code copies the entry into another session (``sessionId`` on ``--fork-session``)."""
+    """Digest of an entry without the envelope fields that change when Claude Code copies
+    it into another session (``sessionId`` and ``promptId``, observed on ``--fork-session``)."""
     raise NotImplementedError("lands with the projection")
 
 
 def run_worker(home: str, *, deadline_s: float | None = None) -> dict[str, Any]:
-    """Drain the spool: read each changed transcript from its cursor and commit rows,
-    ``host_uid_bindings``, ``capture_events`` and the cursor per batch in one
-    ``ingest_atomic()`` transaction; then one bounded embedding catch-up pass.
-    One worker per store (exclusive lock); it re-reads the spool before exiting."""
+    """Drain the spool under the store lock: claim each record by rename, read its transcript
+    from the cursor and commit rows, bindings, relations, ``capture_events`` and the cursor
+    per batch in one ``ingest_atomic()`` transaction; settle; sweep registered transcripts;
+    run one bounded embedding pass; switch the store to rollback mode; release the lock and
+    rescan the spool, looping if a record arrived (no lost wake-up)."""
     raise NotImplementedError("the writer and worker land in a later commit of this PR")

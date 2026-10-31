@@ -21,6 +21,7 @@ from hermes_lcm.claude_code_capture import (
     UNKNOWN,
     classify_entry,
     lineage_key,
+    row_session_id,
 )
 
 PLUGIN = Path(__file__).resolve().parents[1] / "adapters" / "claude-code"
@@ -40,7 +41,8 @@ def hook():
 
 @pytest.fixture
 def env(tmp_path):
-    return {"LCMX_CC_HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": str(tmp_path / "config")}
+    return {"LCMX_CC_HOME": str(tmp_path / "home"), "LCMX_GROK_HOME": str(tmp_path / "grok-home"),
+            "CLAUDE_CONFIG_DIR": str(tmp_path / "config")}
 
 
 def _transcript(tmp_path) -> Path:
@@ -50,13 +52,13 @@ def _transcript(tmp_path) -> Path:
     return path
 
 
-def _log(env) -> list[dict]:
-    lines = (Path(env["LCMX_CC_HOME"]) / "logs" / "hook.log").read_text(encoding="utf-8").splitlines()
+def _log(env, setting="LCMX_CC_HOME") -> list[dict]:
+    lines = (Path(env[setting]) / "logs" / "hook.log").read_text(encoding="utf-8").splitlines()
     return [json.loads(line) for line in lines]
 
 
-def _spooled(env) -> list[Path]:
-    directory = Path(env["LCMX_CC_HOME"]) / "spool"
+def _spooled(env, setting="LCMX_CC_HOME") -> list[Path]:
+    directory = Path(env[setting]) / "spool"
     return sorted(directory.glob("*.json")) if directory.exists() else []
 
 
@@ -132,15 +134,35 @@ def test_grok_build_payload_is_normalized_and_off_by_default(hook, env):
     assert record["observe_only"] is True
     assert record["problem"] == "grok_capture_off"
     assert hook.main(io.StringIO(json.dumps(payload)), grok_env) == 0
-    assert _spooled(env) == []
+    assert _spooled(env) == [] and _spooled(env, "LCMX_GROK_HOME") == []
 
 
-def test_grok_build_end_turn_stop_is_spooled_when_enabled(hook, env):
+def test_grok_build_uses_its_own_home_and_never_spools_observe_only_events(hook, env):
+    """One owning harness per store; a session-end event cannot replace a pending record."""
     grok_env = {**env, "GROK_SESSION_ID": "g-1", "LCMX_GROK_CAPTURE": "1"}
-    payload = {"hookEventName": "Stop", "sessionId": "g-1", "cwd": "/work", "reason": "end_turn"}
-    assert hook.main(io.StringIO(json.dumps(payload)), grok_env) == 0
-    [record_path] = _spooled(env)
+    stop = {"hookEventName": "Stop", "sessionId": "g-1", "cwd": "/work", "reason": "end_turn"}
+    assert hook.main(io.StringIO(json.dumps(stop)), grok_env) == 0
+    assert _spooled(env) == []
+    [record_path] = _spooled(env, "LCMX_GROK_HOME")
     assert json.loads(record_path.read_text(encoding="utf-8"))["observe_only"] is False
+    for event, reason in (("SessionEnd", None), ("Stop", "session_end")):
+        payload = {"hookEventName": event, "sessionId": "g-1", "cwd": "/work", "reason": reason}
+        assert hook.main(io.StringIO(json.dumps(payload)), grok_env) == 0
+        assert _log(env, "LCMX_GROK_HOME")[-1]["outcome"] == "observed"
+    assert json.loads(record_path.read_text(encoding="utf-8"))["event"] == "Stop"
+    assert json.loads(record_path.read_text(encoding="utf-8"))["reason"] == "end_turn"
+
+
+@pytest.mark.parametrize("setting", ["LCMX_CC_HOME", "CLAUDE_CONFIG_DIR"])
+def test_relative_paths_are_refused(hook, env, tmp_path, monkeypatch, setting):
+    """A relative setting would resolve against whichever project directory the hook runs in."""
+    monkeypatch.chdir(tmp_path)
+    payload = {"hook_event_name": "Stop", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    assert hook.main(io.StringIO(json.dumps(payload)), {**env, setting: "relative/dir"}) == 0
+    assert not (tmp_path / "relative").exists()
+    assert _spooled(env) == []
+    if setting == "CLAUDE_CONFIG_DIR":
+        assert _log(env)[-1]["outcome"] == "config_dir_not_absolute"
 
 
 def test_plugin_files_are_consistent(hook):
@@ -163,13 +185,17 @@ def test_plugin_files_are_consistent(hook):
     ({"type": "system", "subtype": "compact_boundary"}, RAW_ONLY),
     ({"type": "api-request-blob"}, SHARED_RAW),
     ({"type": "tools-used"}, RAW_ONLY),
+    ({"type": "bridge-session"}, RAW_ONLY),
+    ({"type": "result", "result": "may carry content"}, UNKNOWN),
     ({"type": "a-type-from-a-future-version"}, UNKNOWN),
 ])
 def test_projection_v1_classes(entry, expected):
     assert classify_entry(entry) == expected
 
 
-def test_lineage_keys():
+def test_lineage_keys_and_subagent_session_ids():
+    assert row_session_id("s1") == "s1"
+    assert row_session_id("s1", "a7") == "s1/agent:a7"
     assert lineage_key("s1") == "claude-code:s1"
     assert lineage_key("s1", "a7") == "claude-code:s1/agent:a7"
     with pytest.raises(ValueError):

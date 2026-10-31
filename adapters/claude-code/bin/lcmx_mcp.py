@@ -15,7 +15,11 @@ import lcmx_runtime  # noqa: E402
 
 def main() -> int:
     environ = os.environ
-    home = lcmx_runtime.store_home(environ)
+    host = "grok-build" if environ.get("GROK_SESSION_ID") else "claude-code"
+    home = lcmx_runtime.store_home(environ, host)
+    if home is None:
+        print("lcm-x: %s must be an absolute path" % lcmx_runtime.HOMES[host][0], file=sys.stderr)
+        return 1
     python = lcmx_runtime.runtime_python(environ, home)
     package = lcmx_runtime.package_root(environ)
     reader = package / "scripts" / "lcm_x_mcp.py" if package else None

@@ -1,26 +1,39 @@
-# Claude Code adapter: capture and recall (design)
+# Claude Code adapter: capture and recall (design r2)
 
 Status: draft, 2026-11-01. Tracker: #1192 (one memory across harnesses), with #1010 (portable recall).
 Prior work: draft #1011 (portable capture and packaging) and draft #1216 (read-only MCP reader).
+r2 folds two independent design reviews (a Codex `gpt-6-astra` review and a fresh-context Claude
+review, both "sound with fixes"; dispositions are on the PR) and the first real-session probe (R0).
 
 ## Goal and scope
 
 Claude Code uses LCM-X memory now:
 
 - **Capture.** Every message and tool result of a Claude Code session is stored losslessly in an
-  LCM-X store that Claude Code owns.
+  LCM-X store that Claude Code owns, including the files Claude Code saves large tool outputs to.
 - **Recall.** The agent searches and reads that store through the read-only MCP reader (#1216).
 - **No compaction.** Claude Code keeps its native compaction. The adapter never blocks, rewrites
   or replaces Claude Code's context, and injects nothing in this version. Compaction stays a
   Hermes feature.
 
+What recall reaches in this version: user text and images, assistant text and tool calls, tool
+results in full, and system notes. Thinking, attachments (`@`-file contents, plans, hook-injected
+context) and bookkeeping entries are kept losslessly in the source ledger but are not searchable
+yet; a later projection version can expose them because their raw lines are kept.
+
+**Qualification boundary.** Lossless capture requires Claude Code's opt-in local transcript GC to
+be off (`CLAUDE_CODE_TRANSCRIPT_LOCAL_GC` unset). With it on, the GC can delete history a drain
+has not read yet; capture still runs, records the flag per session, and the audit lists those
+sessions without a lossless claim.
+
 It ships as a Claude Code plugin: hooks for capture, a bundled MCP server for recall. Claude Code
 plugins and settings hooks are also run by Grok Build, so the same package is the base for other
 harnesses (see "Grok Build").
 
-Non-goals: Hermes behaviour or defaults (unchanged); writing to a Hermes profile's store; hosted
-or cloud ingest; customer or reference-agent stores; a continuation capsule or any context
-injection; importing old transcripts automatically (an explicit backfill command comes later).
+Non-goals: Hermes behaviour, paths or defaults (unchanged; a Hermes-side refusal of capture stores
+is a separate follow-up); writing to a Hermes profile's store; hosted or cloud ingest; customer or
+reference-agent stores; a continuation capsule or any context injection; importing old transcripts
+automatically (an explicit backfill command comes later).
 
 ## Architecture
 
@@ -31,108 +44,198 @@ Claude Code ──hook (stdin JSON)──> hook entry ──spool record──> 
    └──MCP stdio──> lcm_x_mcp.py (#1216 reader, read-only) <─────────────────────────────────────────── lcm.db
 ```
 
-- The transcript file is the single capture source. Hook payloads only say which transcript
-  changed, so a payload that arrives early, late, twice or never cannot lose or double a row.
-- One store has one owning harness (H3, #1192 design v2). The capture writer refuses any store
-  not stamped as a Claude Code capture store, so it never writes a Hermes profile's store.
+- The transcript file (with the session's `subagents/` and `tool-results/` folders) is the capture
+  source. Hook payloads only say which transcript changed, so a payload that arrives early, late,
+  twice or never cannot lose or double a row.
+- One store has one owning harness (H3, #1192 design v2). The writer admits only a store it created
+  and stamped itself (see "Admission"), so it never writes a Hermes profile's store.
 
-## Capture path per hook
+## Capture triggers
 
-Observed on Claude Code 2.1.314 (see "Evidence"). Every hook exits 0 with no stdout; a failure is
-logged without content and capture catches up on the next hook.
+Observed on Claude Code 2.1.314 (R0, see "Evidence"). Every hook exits 0 with no stdout; a failure is
+logged without content and capture catches up on a later run.
 
 | Hook | What the adapter does | Waits? |
 |---|---|---|
-| `SessionStart` (`startup`, `resume`, `fork`, `clear`, `compact`) | Register the session (cwd, source, transcript path); start the worker. A new session's transcript may not exist yet. A `fork` session links to its parent (below). | No |
-| `UserPromptSubmit` | Mark the session dirty; start the worker. | No |
-| `PostToolBatch` | Mark dirty; start the worker only if none is running. Fires once per batch of tool calls (including inside subagents), so the entry stays stdlib-only and fast. | No |
-| `Stop`, `StopFailure` | Mark dirty; the worker drains the transcript to its end. `StopFailure` replaces `Stop` when the turn ends on an API error (observed: no `Stop` then). | No |
-| `SubagentStop` | Ingest `agent_transcript_path` (`<session>/subagents/agent-<id>.jsonl`) as a child lineage linked to the session. It also fires for internal agents (`agent_type` empty); those are captured and tagged. | No |
-| `PreCompact` | Drain synchronously, bounded to 10 s, before native compaction. Compaction normally appends a boundary and a summary, so this is insurance, except with the opt-in local transcript GC, which trims pre-compaction history from the file. | Bounded |
-| `PostCompact` | Mark dirty. | No |
-| `SessionEnd` | Start a detached drain and return at once. The transcript was complete when SessionEnd fired. | No |
+| `SessionStart` (`startup`, `resume`, `fork`, `clear`, `compact`) | Spool the session; start the worker. A new session's transcript may not exist yet. The `fork` payload names no parent: the parent is found by the fork's copied uuids (below). | No |
+| `UserPromptSubmit`, `PostToolBatch`, `PostCompact` | Spool; start the worker only if none is running. `PostToolBatch` fires once per batch of tool calls, also inside subagents (with `agent_id`). | No |
+| `Stop`, `StopFailure` | Spool; the worker drains the transcript, then settles (below). `StopFailure` replaces `Stop` when the turn ends on an API error. | No |
+| `SubagentStop` | Spool the subagent transcript (`<session>/subagents/agent-<id>.jsonl`) as a child lineage. Internal agents (`agent_type` empty) are captured and tagged; R0 saw the compaction summarizer fire it with a transcript path that does not exist, which is logged with nothing to ingest. | No |
+| `PreCompact` | Drain synchronously, bounded to 10 s, waiting for the store lock if a detached worker holds it. The hook logs `drained` only for a worker-confirmed complete drain, otherwise `drain_incomplete`, `drain_failed:<code>` or `drain_timeout`. | Bounded |
+| `SessionEnd` | Spool; start a detached drain and return at once. | No |
 
-A crashed session that never reaches SessionEnd is caught up by the next worker run: the worker
-re-checks every registered transcript whose size passed its cursor.
+### Spool and worker handshake
 
-What Claude Code's documentation says about the transcript, and how capture copes:
+Two reviews found a lost wake-up: a hook that fires while the worker finishes its last scan sees the
+lock held and starts nobody. The handshake closes it:
 
-- It is written asynchronously and may lag the hook, even at `Stop`. The worker re-checks the
-  file after a short settle before it exits, and the next trigger catches anything later.
-- It is not strictly append-only: a resume could rewrite it (fixed in 2.1.288), an opt-in local GC
-  trims pre-compaction history, and set-aside copies (`.orphaned-`, `.superseded-`) can appear.
-  A rewrite starts a new cursor generation; stored rows are never deleted.
-- Its format is internal and changes between versions, hence the per-type classes below and the
+1. **Hook:** write the spool record first (one file per session or subagent, atomic replace, with a
+   nanosecond `seq`), then probe the lock. Free: start a detached worker. Held: the holder will see
+   the record (step 3).
+2. **Claim by rename:** the worker renames `<key>.json` to `<key>.claimed` before reading it. A hook
+   firing meanwhile writes a new `<key>.json` and never touches the claimed file, so no record is
+   deleted unread. The worker deletes the claimed file only after that transcript's batch commits. A
+   claimed file found by the next lock holder comes from a crashed worker and is processed again
+   (ingest is idempotent).
+3. **Exit:** the worker releases the lock, then rescans the spool. If a record is there, it retakes
+   the lock without blocking and loops. If another worker holds the lock, that worker acquired it
+   after the record was written, and every worker scans after acquiring, so it sees the record.
+4. **Settle:** after draining a transcript to its end, the worker re-checks it until the file is
+   quiet (bounded to about 2 s): R0 found the final reply not yet written at `Stop` in 2 of 4 runs.
+5. **Sweep:** every worker run also checks each registered transcript, with its `subagents/` and
+   `tool-results/` folders, for growth past its cursor. A line written after the settle, or a session
+   killed before `SessionEnd`, is captured by the next run of any session. Claude Code deletes
+   transcripts after `cleanupPeriodDays` (30 by default), so capture is complete once any session
+   runs within that period.
+
+A synchronous `PreCompact` drain waits for the lock until its deadline, so it does not exit early
+while a detached worker holds it.
+
+### Transcript facts
+
+- **Lag.** The transcript is written asynchronously and may lag the hooks, even `Stop` (R0: the
+  tool result was not yet in the file at `PostToolUse`, and the final reply was missing at `Stop` in
+  2 of 4 runs). Handled by the settle and the sweep.
+- **Not strictly append-only.** A resume could rewrite the file (fixed in 2.1.288); the opt-in local
+  GC trims pre-compaction history; set-aside copies (`.orphaned-`, `.superseded-`) can appear.
+  `/compact` appended a boundary and a summary and rewrote nothing (R0).
+- **Large tool outputs** are saved to `<session>/tool-results/<name>` (text, images, PDFs); the
+  transcript keeps a `<persisted-output>` preview, and `toolUseResult.persistedOutputPath` names the
+  file on most entries.
+- **Subagents** write `<session>/subagents/agent-<id>.jsonl`; their entries carry the parent's
+  `sessionId`, plus `agentId` and `isSidechain`. The main transcript holds no sidechain entries.
+- **One API response, several entries.** Claude Code writes each content block of a response as its
+  own entry with its own uuid; the entries share `message.id`.
+- **Format** is internal and changes between versions, hence the per-type classes below and the
   `unknown_type` count.
-- Claude Code deletes transcripts after `cleanupPeriodDays` (30 by default). The store keeps
-  them.
+
+### Cursor
+
+- Per transcript file: device and inode, first-line digest, byte offset, line index, and the offset
+  and digest of the last consumed line. Only complete, newline-terminated lines are consumed; a
+  partly written last line waits for the next drain. No line length limit stalls a cursor (the
+  largest line seen is 3.5 MB); a line that is not valid JSON is kept raw and counted.
+- Each drain checks, in constant time: same device and inode, first line unchanged, the last
+  consumed line unchanged at its offset, size not below the offset. A failed check starts a new
+  generation read from the top: known (uid, content) pairs are no-ops and nothing is deleted. The
+  full prefix is not re-hashed per drain (the largest local transcript is 1.6 GB); the audit
+  re-reads every line against its ledger digest.
+- **Set-aside copies:** when the inode changes, the worker first drains a sibling `.orphaned-` or
+  `.superseded-` file whose device and inode match the cursor, so lines written to the old file
+  after the last drain are kept.
 
 ## Store layout
 
-- **One store per Claude Code configuration**, default `~/.lcm-x/claude-code/lcm.db`, overridable
-  with `LCMX_CC_HOME`. The store holds all sessions of all projects, so recall works across
-  sessions. It lives outside the plugin's install and data directories: removing or updating the
-  plugin never removes memory. The store home also holds externalized payloads, the spool, the
-  worker lock, the hook log and the runtime.
-- **Owner stamp.** On creation the writer records `capture:owner` (host `claude-code`, format 1) in
-  `metadata`. The writer opens only stores with that stamp.
+- **One store per harness.** Claude Code: default `~/.lcm-x/claude-code/lcm.db`, overridable with
+  `LCMX_CC_HOME` (an absolute path; a relative one is refused). The store holds all sessions of all
+  projects, so recall works across sessions. It lives outside the plugin's install and data
+  directories: removing or updating the plugin never removes memory. The home also holds
+  externalized payloads, the spool, the lock, the hook log and the runtime. Grok Build gets its own
+  home (see "Grok Build").
+- **Admission (H3).** Before any write-capable open:
+  - The home must not be a Hermes home: it is refused when it holds Hermes markers (`config.yaml`,
+    `state.db`) or lies inside the Hermes home.
+  - **Creation** happens only when the home has no `lcm.db`. The writer creates `capture-owner.json`
+    exclusively (`O_EXCL`) with a new store uuid and the home's real path, builds the database
+    under a temporary name with the full core schema (`MessageStore` and `SummaryDAG` tables, so the
+    reader's required `summary_nodes` exists; nothing compacts), stamps `capture:owner` = {host,
+    format, store uuid} in `metadata`, and links it into place with `os.link`, which fails if a
+    `lcm.db` appeared meanwhile.
+  - **Every later open** reads the stamp through a read-only connection first. The stamp's store
+    uuid must match `capture-owner.json`, and that file's recorded home must match the home's real
+    path. A mismatch (a copied or moved store) or a missing stamp refuses the store: logged, nothing
+    written. An existing unstamped database is never adopted.
+  - Hermes does not check the stamp, so a stamped store copied into a Hermes profile would be opened
+    by Hermes; refusing it there is a Hermes path change, proposed as a follow-up issue.
 - **Rows.** The normal `messages` table through `MessageStore.append_batch`, so ingest protection
   (externalized large and media payloads) applies exactly as in Hermes. `session_id` is the Claude
-  Code session id; `source` is `claude-code`.
-- **Identity.** The existing `host_uid_bindings` table. Lineage `claude-code:<session_id>` (a
-  subagent: `claude-code:<session_id>/agent:<agent_id>`); uid = the entry's `uuid`, plus `#<n>`
-  when one entry yields several rows; kind `canonical`.
-- **Lineage.** The existing `session_lineage` table links subagents and forks to their parent.
-- **Source ledger (new, additive).** `capture_events`: one row per transcript entry with lineage,
-  uid, entry type, line digest, content digest, the protected raw line (compressed; empty for
-  digest-only types), the store ids it produced, generation and line index. It makes capture
-  provable and lets a later projection version re-derive rows after Claude Code has deleted the
-  transcript. It is created by a named migration step in `store.py`, only in Claude Code stores;
-  an older reader ignores it. Per `docs/process/schema-changes.md`, the PR records the format and
-  the oldest reader and adds forward and rollback compat tests. Metadata keys (#1011's approach)
-  do not scale: one real desktop session holds about 670,000 transcript lines.
-- **Cursor.** Per transcript file: device and inode, first-line digest, byte offset, line index
-  and a digest of the consumed prefix (#1011's validated scheme). A rewritten or truncated file
-  starts a new generation read from the top; known uids are no-ops and nothing is deleted.
+  Code session id; a subagent's rows use `<session_id>/agent:<agent_id>`, which keeps the parent's
+  chronology clean and gives each child its own lineage link. `source` is `claude-code`.
+- **Identity.** The existing `host_uid_bindings` table. Lineage key `claude-code:<row session_id>`;
+  uid = the entry's `uuid`, plus `#<n>` when one entry yields several rows. The first binding of a
+  uid is `canonical`; a later content revision is a `version` binding (below).
+- **Lineage.** The existing `session_lineage` table: a subagent (child `<sid>/agent:<aid>`, parent
+  `<sid>`, `child_subagent_id`, role `subagent`) and a fork (role `fork`). The link is written before
+  the batch's ingest transaction, because `record_session_lineage` runs its own transaction and is
+  idempotent: a crash after the batch commits cannot lose the link.
+- **Source ledger (new, additive): `capture_events`**, the one table this adapter adds. One row per
+  transcript line and per `tool-results` file: lineage, generation, line index, uid, entry type,
+  class, line digest, content digest, disposition (`new`, `duplicate`, `version`, `fork_copy`), the
+  store ids it produced, and the raw bytes (zlib). Request snapshots keep their raw bytes once per
+  line digest; later identical lines point at the row that holds them. An index on uid serves the
+  store-wide fork lookup.
+  - It makes capture provable and lets a later projection version re-derive rows after Claude Code
+    has deleted the transcript.
+  - It is created by a named migration step in `store.py` (`capture_events_v1`), only in stamped
+    capture stores; a test shows it is never created in a Hermes store. An older reader ignores it.
+  - Forgetting a row also deletes its ledger rows and raw bytes, so a later re-projection cannot
+    bring forgotten content back.
+  - Per `docs/process/schema-changes.md`, the PR records the format, the oldest reader and the
+    removal version, and adds forward and rollback compat tests.
+- **Cursor storage.** One `metadata` key per transcript (`capture:cursor:<lineage>`), written inside
+  the batch transaction with a plain upsert (`update_metadata_json` opens its own transaction).
+- **Growth gate.** Measured on one real ~670,000-line transcript before merge: store bytes against
+  transcript bytes, the raw-line share, ingest time per 10,000 lines and peak memory. Above about 1.5
+  times the transcript, a cheaper raw-line policy is proposed before merge.
 
-Rows, bindings, ledger rows and the cursor of one batch commit in one `ingest_atomic()`
-transaction (BEGIN IMMEDIATE). A crash leaves the whole batch or none of it; a rerun is
-idempotent by uid.
+Rows, bindings, relations, ledger rows and the cursor of one batch commit in one `ingest_atomic()`
+transaction (BEGIN IMMEDIATE). Externalized payload files are written before it, so a crash leaves
+at worst an unreferenced payload file, never a lost row; a rerun is idempotent by uid.
 
 ## Identity and projection
 
-- **Same uuid, same content:** nothing is written. A `--fork-session` transcript copies its
-  parent's entries with the same uuids and a rewritten `sessionId` (observed). The content digest
-  excludes envelope fields that change on copy, so the copies are recognised: the fork gets a
-  `session_lineage` link to its parent at the fork point and no duplicate rows. The uuid reuse is
-  observed, not documented (the Agent SDK's own fork remaps uuids). If a version remaps them, the
-  fork's copied prefix is stored again as the fork's own rows: repeated content, never loss, and
-  the audit reports it as `fork_prefix_restored`. Content equality alone never merges events.
-- **Same uuid, changed content:** a new row with a `supersedes` relation to the earlier one. Rows
-  are never overwritten. Claude Code's own revision fields (`supersedesUuids`,
-  `retractedMessageUuids`) are kept in the ledger and recorded as relations, never as deletions.
-- **Projection v1, by entry type:**
+- **Duplicate:** the same (lineage, uid, content digest) again. No rows; the ledger records the
+  occurrence as `duplicate`. The content digest covers the entry without the envelope fields that
+  change when Claude Code copies an entry into another session (`sessionId`, `promptId`; R0 found
+  fork copies differ in exactly these).
+- **Revision:** a known uid with a different content digest. A new row, a `version` binding (the
+  canonical binding of a uid is unique per lineage) and a `supersedes` relation from the new row to
+  the earlier one, in the same transaction. Rows are never overwritten. Claude Code's own revision
+  fields (`supersedesUuids`, `retractedMessageUuids`) stay in the ledger and become relations, never
+  deletions. R0 and the review census saw 1,206 repeated uuids within single files, all with
+  identical content.
+- **Forks (changed in r2).** A fork's copied entries become the fork's own rows, so every session
+  reads back complete through the unchanged reader (`lcm_load_session` reads one session's rows,
+  and `session_lineage` cannot express a fork point). A copy is recognised by its uid and content
+  digest in another lineage, through the ledger's uid index: its binding carries proof kind
+  `fork_copy` and a `fork_copy_of` relation to the parent's row, and the last copied entry marks
+  the fork point. Uid identity decides; the digest only confirms; content equality alone never
+  merges. The cost is a second copy of the forked prefix (measured in R3). If the parent was never
+  captured, the copies are ordinary rows and the audit reports `fork_parent_unknown`.
+- **Projection v1, by entry:**
 
 | Entry | Rows |
 |---|---|
 | `user`, text or image parts | One `user` row. Meta entries, compact summaries and transcript-only entries become `system` rows. |
-| `user`, `tool_result` parts | One `tool` row per result, `tool_call_id` = `tool_use_id`. |
-| `assistant` | One `assistant` row: text parts as content, `tool_use` parts as `tool_calls`. Thinking and other parts stay in the ledger. API-error entries become `system` rows. |
-| `system`, `attachment`, bookkeeping (`queue-operation`, `last-prompt`, `mode`, `custom-title`, `file-history-*`, ...) | None; raw line in the ledger. |
-| Request snapshots (`api-request`, `api-request-blob`, `api-request-shape`) | None; digest only. They copy the conversation that is already stored. |
+| `user`, `tool_result` parts | One `tool` row per result, `tool_call_id` = `tool_use_id`. When Claude Code saved the output to a file inside the session's own `tool-results/` folder (`persistedOutputPath`, or the path in the marker), the row holds the file's full text (up to 64 MiB, as Hermes's persisted-output recovery does); the preview stays in the ledger's raw line. |
+| `assistant` | One row per entry: text parts as content, `tool_use` parts as `tool_calls`. An entry with only thinking gives no row. `message.id` stays in the ledger, so a reader can regroup one response. API-error entries become `system` rows. |
+| `tool-results` files | A ledger row each. Files not already held in full by a tool row (images, PDFs, unreferenced or over-limit files) keep their bytes in the ledger. |
+| `system`, `attachment`, bookkeeping (`queue-operation`, `last-prompt`, `mode`, `custom-title`, `file-history-*`, `tools-used`, desktop types such as `bridge-session` and `frame-link`) | None; raw line in the ledger. |
+| Request snapshots (`api-request`, `api-request-blob`, `api-request-shape`) | None; raw line kept once per line digest. They hold the exact model input, including system text and injected reminders that appear nowhere else in the transcript. |
 | Unknown types | None; raw line in the ledger, counted as `unknown_type`. |
 
 Nothing is dropped silently: the audit counts every entry by class.
 
 ## Recall surface
 
-- The plugin declares one MCP server, `lcm-x`, which runs `scripts/lcm_x_mcp.py --store <home>/lcm.db
-  --hermes-home <home>` from #1216 unchanged. Its five tools (`lcm_recall`, `lcm_grep`,
-  `lcm_expand`, `lcm_load_session`, `lcm_describe`) search across sessions. The `StoreReader` and
-  `handle()` signatures stay as they are.
-- The worker runs one bounded embedding catch-up pass (`run_incremental_embedding_pass`) after
-  each drain, so vector recall follows capture. Until it does, the reader falls back to full text
-  and says so (`degraded`).
+- The plugin declares one MCP server, `lcm-x`, which runs #1216's `scripts/lcm_x_mcp.py --store
+  <home>/lcm.db --hermes-home <home>`. Its five tools (`lcm_recall`, `lcm_grep`, `lcm_expand`,
+  `lcm_load_session`, `lcm_describe`) search across sessions. The `StoreReader` and `handle()`
+  signatures stay as they are. #1216 gets two behaviour changes in its own PR: host-neutral error
+  texts, and the offline check re-reads the header once before refusing.
+- **Between worker runs.** When the last connection to a WAL store closes, SQLite deletes the
+  `-wal` and `-shm` files, and the reader refuses a WAL store without them. So the worker
+  checkpoints and switches the store to rollback mode (`journal_mode=DELETE`) before it exits; the
+  reader then opens it read-only with no sidecars, and the next worker run switches it back to WAL.
+  If the switch fails because a reader is mid-call, the sidecars stay (a read-only connection
+  cannot delete them) and recall keeps working. R9 runs after the worker has exited and the reader
+  has restarted.
+- **One configuration.** The worker loads `LCM_*` settings from `<home>/.env`, exactly as the
+  reader does, so both compute the same embedding identity.
+- The worker runs one bounded embedding catch-up pass (`run_incremental_embedding_pass`) after each
+  drain, so vector recall follows capture; until it runs, recall falls back to full text.
+- Fork copies can make a search return the same text from the parent and the fork; a later reader
+  change can collapse them by the `fork_copy_of` relation.
 - One memory, two harnesses: a second, read-only server over a Hermes profile's store is
   configuration only.
 
@@ -143,11 +246,13 @@ hook entry handles:
 
 - Detect Grok by `GROK_SESSION_ID` or camelCase keys (`hookEventName`, `sessionId`) and
   normalise the payload.
+- Grok sessions get their own store home (`~/.lcm-x/grok-build`, `LCMX_GROK_HOME`), so each store
+  keeps one owning harness; a read-only server can read the other store.
 - There is no `transcript_path`. The session folder is
   `${GROK_HOME:-~/.grok}/sessions/<URL-encoded cwd>/<sessionId>/`, matched by its `.cwd` sidecar
   for long paths; never the newest session as a guess.
 - The end-of-session `Stop` (reason not `end_turn`) and `SessionEnd` (1.5 s budget) are
-  observe-only.
+  observe-only: logged, never spooled, so they cannot replace a pending record.
 - The Grok reader (`updates.jsonl`) is experimental and off (`LCMX_GROK_CAPTURE=1` enables it)
   until a real-session proof shows tool results are complete, `/compact` and `/rewind` never
   rewrite the file, and event ids are stable. Without stable ids, uid = session, line index and
@@ -163,48 +268,75 @@ hook entry handles:
 - Hooks print nothing: on `SessionStart` and `UserPromptSubmit` stdout would enter Claude's
   context. The worker is started fully detached with its output discarded, so a `-p` session's
   teardown cannot kill it.
-- One worker per store holds an exclusive lock; parallel sessions share it. WAL mode and short
-  read transactions keep the reader and the writer apart (#1216).
-- Capture only reads transcripts named by a hook payload, under the Claude Code projects
-  directory; it never scans other folders. `LCMX_CAPTURE=off` disables it.
+- One worker per store holds an exclusive lock; parallel sessions share it.
+- Capture reads only transcripts named by a hook payload under the Claude Code projects directory
+  (a relative `CLAUDE_CONFIG_DIR` is refused), plus those sessions' own `subagents/` and
+  `tool-results/` folders. `LCMX_CAPTURE=off` disables it.
+
+## Mapping to exactly-once ingest (#2055, design r3.4)
+
+The adapter writes no #2055 ledger tables. This is how its records adopt them once P1 lands:
+
+| Adapter | #2055 r3.4 | At adoption |
+|---|---|---|
+| Lineage key `claude-code:<session_id>` | Lineage (§3.8), keyed by the persisted host_uid key | Each session or subagent is a root lineage. A fork is a fork child whose parent link (by occ_id) is the parent occurrence of its last copied entry (§3.8). |
+| uid (`uuid`, `uuid#n`), `canonical` binding | Uid bindings (§3.1 item 2): UNIQUE (lineage, uid) on the canonical binding | Carried over unchanged. |
+| Content revision: `version` binding plus `supersedes` | Revision rows through host_uid's `version` kind (E5a) | Carried over; a supersedes row takes the ordinal right after the row it replaces (§3.1 item 1). |
+| Line index within a generation (parts in part order) | `occurrence_bindings.ordinal` | P1g's binding-only migration (§3.6) binds each stored row in store order, each appended at the lineage's last ordinal plus 2^20. No rows are inserted. |
+| New generation (rewritten file) | A known (uid, content) is a replay and writes no occurrence; new content under a known uid is a revision | Nothing to migrate. |
+| File cursor (inode, offset, line index) | The durable cursor = the newest ingest vector (P1d) | The byte cursor stays the source position; each drain batch then also writes one ingest view, and the newest becomes the durable cursor. |
+| Content digest (sha256, unsalted, without `sessionId` and `promptId`) | `identity_digest` (salted, pre-redaction identity tuple, M4) | Recomputed with the store salt from the rows or the ledger's raw lines; never copied. Content equality never merges. |
+| Entry `timestamp` | Host stamp | Read from the ledger's raw line. |
+| Disposition `new`, `duplicate`, `version`, `fork_copy` | `stored`; replay (no occurrence); revision; `stored` in the fork lineage | — |
+| — | `key_rank`, `view_seq` | `key_rank` NULL at P1 (X4); `view_seq` store-global (X8). |
 
 ## Test plan with real Claude Code sessions
 
-Headless `claude -p` sessions on Opus 5.5 with the plugin loaded by `--plugin-dir` and an isolated
-store home, plus one interactive lane as client zero.
+Headless `claude -p` sessions with the plugin loaded by `--plugin-dir` and an isolated store home,
+plus one interactive lane as client zero. R0-R10 run before 2026-11-03 on Claude Code backed by an
+Anthropic-compatible GLM endpoint; each run records its backend, and at least one R-test is repeated
+on Anthropic models afterwards. Only synthetic stores and the test lane's own sessions are used.
 
 | Run | What it proves |
 |---|---|
-| R0 | Hook shapes and transcript lag with successful turns: `PostToolBatch`, `Stop`, `StopFailure`, `SubagentStop`, `PostCompact`; whether `PostToolBatch` fires on 2.1.314. |
-| R1 | Three turns with Bash, Read, Edit and Grep calls: audit passes. |
-| R2, R3 | `--resume` and `--fork-session`: fork copies add no rows; lineage recorded. |
-| R4 | Manual `/compact` and one auto-compaction: 0 lost and 0 duplicate rows across the boundary. |
-| R5 | Two parallel subagents: child lineages linked to the session. |
+| R0 (done) | Hook shapes and transcript lag with successful turns (see "Evidence"). |
+| R1 | Three turns with Bash, Read, Edit and Grep calls, one output large enough for Claude Code to save it to `tool-results/`: the audit passes and `lcm_expand` returns the full output. |
+| R2, R3 | `--resume` and `--fork-session`: the fork reads back complete; its copies carry `fork_copy`; lineage recorded; parent rows unchanged. |
+| R4 | Manual `/compact` and one auto-compaction, local GC off: 0 lost and 0 duplicate rows across the boundary. |
+| R5 | Two parallel subagents: two child sessions, each linked to the parent. |
 | R6 | Four sessions in parallel on one store. |
-| R7 | SIGKILL of the worker mid-batch, and a session killed before SessionEnd: rerun gives 0 lost, 0 duplicate. |
+| R7 | SIGKILL of the worker mid-batch; a session killed before `SessionEnd`; a hook firing at the worker's final scan: reruns give 0 lost, 0 duplicate. |
 | R8 | Capture rerun twice over every transcript: 0 new rows. |
-| R9 | A new session recalls an exact string from R1 through the MCP tools; `lcm_expand` returns the stored source. |
+| R9 | After the worker has exited and the reader restarted, a new session recalls an exact string from R1 through the MCP tools; `lcm_expand` returns the stored source. |
 | R10 | One non-critical interactive lane for 24 h, then the audit. |
 | R11 | Grok Build: synthetic payloads now; real sessions once it is installed. |
 
-**The audit (the gate):** for every transcript, a multiset compare of projected uid and content
-digest against stored rows; each uuid appears once per store (fork copies as lineage links);
-counts per entry class; tool calls and results paired with no orphan and no double; every ledger
-row matches its transcript line digest. Also measured: hook wall time (target p95 ≤ 50 ms on
-`PostToolUse`), lag from transcript line to committed row, and store growth per 1,000 entries.
+**The audit (the gate):** per lineage, a multiset compare of projected (uid, content digest) against
+stored rows; counts per entry class; tool calls and results paired with no orphan and no double;
+every ledger row's line digest re-read from its file; every `tool-results` file present with its
+digest; sessions with local GC on listed; `fork_copy` and `fork_parent_unknown` counts. Also
+measured: hook wall time (target p95 at most 50 ms on `PostToolBatch`), lag from transcript line to
+committed row, and store growth (the growth gate above).
 
 ## Evidence
 
-- A metadata-only probe plugin on Claude Code 2.1.314 recorded payload keys and transcript state
-  per hook in five headless sessions. The model calls failed on a usage limit, so tool, Stop and
-  subagent payloads are still to be observed (R0). Observed: `SessionStart` sources `startup`,
-  `resume` and `fork`; a new session's transcript does not exist at `SessionStart`;
-  `UserPromptSubmit` carries `prompt` and `prompt_id`; `PreCompact` carries `trigger` and
-  `custom_instructions`; `SessionEnd` carries `reason` (`other` in print mode) and saw the complete
-  file; `Stop` did not fire when the model call failed; a fork copies the parent's entries with
-  the same uuids; plugin hooks get `CLAUDE_PLUGIN_ROOT`, `CLAUDE_PLUGIN_DATA` and
-  `CLAUDE_PROJECT_DIR`.
-- A key census of one long real transcript (no content read) found 22 entry types and the content
-  parts `text`, `thinking`, `tool_use`, `tool_result`, `image` and `fallback`.
+- **R0** (Claude Code 2.1.314, GLM-backed, five headless sessions with a metadata-only probe plugin):
+  `PostToolBatch` fires, also inside subagents with `agent_id`; the tool result is not yet in the
+  file at `PostToolUse`; the final assistant line was absent at `Stop` in 2 of 4 runs; `/compact`
+  appends `compact_boundary` and a summary entry with no rewrite; the compaction summarizer fires
+  `SubagentStop` with an empty `agent_type` and a transcript path that does not exist; fork copies
+  differ from the parent's entries only in `sessionId` and `promptId`; the `fork` `SessionStart`
+  payload names no parent; subagent files carry the parent's `sessionId`; a new entry type
+  `tools-used` appeared.
+- An earlier probe on the same version: `SessionStart` sources `startup`, `resume` and `fork`; a new
+  session's transcript does not exist at `SessionStart`; `UserPromptSubmit` carries `prompt` and
+  `prompt_id`; `PreCompact` carries `trigger` and `custom_instructions`; `SessionEnd` carries
+  `reason` and saw the complete file; plugin hooks get `CLAUDE_PLUGIN_ROOT`, `CLAUDE_PLUGIN_DATA`
+  and `CLAUDE_PROJECT_DIR`.
+- **Census** of one development machine's own transcripts (types, keys and counts; no content):
+  2,962 `tool-results` files (text, JPEG, PNG, PDF); in a 230-file sample, 153 persisted-output
+  markers, 112 of them with `persistedOutputPath`; desktop entry types beyond the documented ones
+  (`atis-latch`, `bridge-session`, `frame-link`, `history-suppression`, `artifact-*`, `started`,
+  `result`, `launched`); no set-aside copies.
 
 Claim class: design. Nothing here is measured capture or recall quality yet.

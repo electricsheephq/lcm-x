@@ -9,21 +9,28 @@ from pathlib import Path
 from typing import Mapping, Optional
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+# One store per harness, so each store has one owning writer: (setting, default directory name).
+HOMES = {"claude-code": ("LCMX_CC_HOME", "claude-code"), "grok-build": ("LCMX_GROK_HOME", "grok-build")}
 
 
-def store_home(environ: Mapping[str, str]) -> Path:
-    """The store home: ``lcm.db``, externalized payloads, spool, lock, logs and runtime."""
-    configured = environ.get("LCMX_CC_HOME")
-    if configured:
-        return Path(configured).expanduser()
-    return Path.home() / ".lcm-x" / "claude-code"
+def store_home(environ: Mapping[str, str], host: str = "claude-code") -> Optional[Path]:
+    """The store home: ``lcm.db``, externalized payloads, spool, lock, logs and runtime.
+
+    None when the setting is a relative path, which would resolve against whichever
+    project directory a hook happens to run in."""
+    setting, directory = HOMES[host]
+    configured = environ.get(setting)
+    if not configured:
+        return Path.home() / ".lcm-x" / directory
+    path = Path(configured).expanduser()
+    return path if path.is_absolute() else None
 
 
-def claude_projects_root(environ: Mapping[str, str]) -> Path:
-    """Claude Code keeps session transcripts under ``<config dir>/projects``."""
+def claude_projects_root(environ: Mapping[str, str]) -> Optional[Path]:
+    """Claude Code keeps session transcripts under ``<config dir>/projects``; None if relative."""
     configured = environ.get("CLAUDE_CONFIG_DIR")
     base = Path(configured).expanduser() if configured else Path.home() / ".claude"
-    return base / "projects"
+    return base / "projects" if base.is_absolute() else None
 
 
 def runtime_python(environ: Mapping[str, str], home: Path) -> Optional[Path]:
