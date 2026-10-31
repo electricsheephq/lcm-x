@@ -1300,9 +1300,11 @@ class CompactionMixin:
         Ingest can leave a host row unstored: an unstamped reply the host replaced below the cursor stays a
         positional replay. A proof of that row hides it from every later cold bind, where the old proof's broken
         walk stores it (with duplicates), so such a list is never re-keyed. Rows ingest never stores on purpose
-        (LCM's own scaffolds and placeholders, ignore-pattern matches) are not counted. The in-order map leaves the
-        rows after one stored out of host order unmapped (the case the re-key exists for), so unmapped rows are
-        mapped again on their own, each stored row claimed once.
+        (LCM's own DAG-verified scaffolds and placeholders, ignore-pattern matches) are not counted; summary-shaped
+        text that is not verified is real content (#486). The in-order map leaves the rows after one stored out of
+        host order unmapped (the case the re-key exists for), so unmapped rows are mapped again on their own,
+        against the stored rows not yet claimed: each stored row is claimed once, and a repeated message cannot
+        take an earlier row's copy.
         """
         claimed = set(store_ids.values())
         pending = []
@@ -1310,7 +1312,7 @@ class CompactionMixin:
             if identity is None or id(message) in store_ids:
                 continue
             text = text_content_for_pattern_matching(message.get("content")) or ""
-            if not (self._is_replayed_context_scaffold_message(message)
+            if not (self._is_verified_replay_scaffold_message(message)
                     or self._matches_ignore_message_patterns(message)
                     or self._is_ignored_active_replay_placeholder(message, text)
                     or self._is_volatile_ignored_quarantine_placeholder(message, text)):
@@ -1321,9 +1323,10 @@ class CompactionMixin:
             mapped = self._get_store_id_map_for_messages(
                 [messages[idx] for idx in pending],
                 None if occurrences is None else [occurrences[idx] for idx in pending],
+                exclude_store_ids=claimed,
             )
             found = {idx: mapped[id(messages[idx])] for idx in pending if id(messages[idx]) in mapped}
-            if not found or claimed & set(found.values()):
+            if not found:
                 break
             claimed.update(found.values())
             pending = [idx for idx in pending if idx not in found]
