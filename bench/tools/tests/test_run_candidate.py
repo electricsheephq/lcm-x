@@ -153,7 +153,8 @@ def test_run_candidate(tmp_path):
     assert isolated.returncode == 0, isolated.stderr
     assert (summary_file.parent / "yaml-site/lcmx_yaml_fixture.py").exists()
     assert (summary_file.parent / "home-green-yaml").is_dir()
-    assert (summary_file.parent / "bt-green-yaml").is_dir()
+    # pytest creates --basetemp only when a test uses tmp_path; check the wiring instead.
+    assert "--basetemp=../" in phases["green-yaml"]["command"] and "bt-green-yaml" in phases["green-yaml"]["command"]
     assert "2 passed" in phases["green-full"]["final_line"]
     assert phases["red-on-base"]["exit_code"] == 1
     assert "FAILED tests/test_tiny.py::test_new" in result.stdout
