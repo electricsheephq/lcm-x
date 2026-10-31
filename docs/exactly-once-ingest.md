@@ -550,8 +550,20 @@ classification. The registry lock never spans store or SQLite work. Salt changes
 drop stale entries. Claims exclude concurrent attempts; rollback (including a
 busy retry or interrupt) releases them; successful entries settle immediately after
 COMMIT, while callbacks count recovery. Only the originating engine with the
-same compress-call number receives the recovered handle; other retries leave
-the emission proposed and count it as unhandled.
+same compress-call number receives the recovered handle, provided the entry is
+neither superseded nor refused; other retries count it as unhandled.
+
+A host refusal or adoption before the retry is kept on the pending entry
+(`ledger.emission_signal_deferred`) and applied to its descriptors and emission
+view in the retry's savepoint. Refusal is sticky: adoption cannot overwrite it,
+and a refused entry never restores a handle. A signal arriving between the
+in-savepoint read and publication counts `ledger.emission_signal_late`; it may
+not reach the committed state, but a late refusal still restores no handle.
+A later successful exit write supersedes older pending entries in that lineage.
+Their retries recover descriptors, including any signal, without an emission
+view, and count `ledger.emission_retry_superseded`. Other entries retry oldest
+first in registry order. P1d may therefore rely on the newest emission view
+being the newest successful or recovered-in-order emission.
 
 Inside the ingest ledger savepoint, a stored row matching a still-pending
 descriptor in this store and lineage gains one `generated_unproven` relation.

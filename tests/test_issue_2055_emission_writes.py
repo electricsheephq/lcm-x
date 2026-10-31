@@ -332,7 +332,8 @@ def test_new_call_invalidates_old_signal(engines, monkeypatch, path):
     engine._session_stateless = False
     assert adopt(engine)
     assert emissions(engine)[0]["state"] == "proposed"
-    assert count(engine, "emission_signal_unmatched") == 1
+    assert count(engine, "emission_signal_unmatched") == (0 if path == "write_failure" else 1)
+    assert count(engine, "emission_signal_deferred") == (1 if path == "write_failure" else 0)
 
 
 def test_parent_handle_survives_child_bypass(engines, monkeypatch):

@@ -434,3 +434,135 @@ def test_retry_interrupt_rolls_back_partial_write_and_releases_claim(engines, mo
     assert all(e.ref is None and not e.is_descriptor for e in pending(engine)[0]["entries"])
     engine._ingest_messages(rows)
     assert pending(engine) == [] and count(engine, "emission_retry_ok") == 1
+
+
+@pytest.mark.parametrize("signals,expected", [(("refused",), "refused"), (("adopted",), "adopted"),
+                                             (("adopted", "refused", "adopted"), "refused")])
+def test_host_signal_before_retry_is_applied_and_refusal_sticks(engines, monkeypatch, signals, expected):
+    engine = engines()
+    insert, calls = ledger.insert_emissions, []
+
+    def fail_once(*args, **kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("exit write sentinel")
+        return insert(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger, "insert_emissions", fail_once)
+        _, rows = compress_path(engine, patch)
+        assert engine._emission_handle is None and len(pending(engine)) == 1
+        for signal in signals:
+            if signal == "refused":
+                engine.record_rejected_compaction()
+            else:
+                assert adopt(engine)
+        assert count(engine, "emission_signal_deferred") == len(signals)
+        assert count(engine, "emission_signal_unmatched") == 0
+        engine._ingest_messages(copy.deepcopy(rows))
+    assert len(calls) == 2 and pending(engine) == []
+    recovered = emissions(engine)
+    assert len(recovered) == len(emission_views(engine)) == 1
+    assert recovered[0]["state"] == emission_views(engine)[0]["state"] == expected
+    assert recovered[0]["view_seq"] == emission_views(engine)[0]["view_seq"]
+    if expected == "refused":
+        assert engine._emission_handle is None
+        assert adopt(engine)
+        assert emissions(engine) == recovered and emission_views(engine)[0]["state"] == "refused"
+    else:
+        assert engine._emission_handle.view_seq == recovered[0]["view_seq"]
+
+
+@pytest.mark.parametrize("refused", [False, True])
+def test_older_retries_keep_descriptors_without_evicting_current_view(engines, monkeypatch, refused):
+    engine = engines()
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger, "insert_emissions", failing)
+        for label in ("oldest", "older"):
+            # Exercise distinct exit writes without an intervening ingest retry.
+            engine._compress_calls += 1
+            emit(engine, output(label))
+            if refused and label == "oldest":
+                engine.record_rejected_compaction()
+    assert len(pending(engine)) == 2
+    engine._compress_calls += 1
+    rows = output("current")
+    emit(engine, rows)
+    current_handle, current_view = engine._emission_handle, emission_views(engine)[0]
+    assert all(entry["superseded"] for entry in pending(engine))
+    engine._ingest_messages(rows)
+    recovered = [r for r in emissions(engine) if r["view_seq"] != current_handle.view_seq]
+    assert len(recovered) == 2 and pending(engine) == []
+    assert [r["descriptor_digest"] for r in recovered] == [
+        ledger.identity_digest(SALT, output(label)[0]) for label in ("oldest", "older")]
+    assert [r["state"] for r in recovered] == ["refused" if refused else "proposed", "proposed"]
+    assert emission_views(engine) == [current_view]
+    assert engine._emission_handle is current_handle
+    assert count(engine, "emission_retry_superseded") == 2
+
+
+def test_pending_retries_without_newer_exit_keep_registry_order(engines, monkeypatch):
+    engine = engines()
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger, "insert_emissions", failing)
+        for label in ("older", "newer"):
+            engine._compress_calls += 1
+            emit(engine, output(label))
+    engine._ingest_messages(output("newer"))
+    views = emission_views(engine)
+    assert len(views) == 2 and views[0]["view_seq"] < views[1]["view_seq"]
+    assert [ledger.decode_entries(v["entries"])[0].identity_digest for v in views] == [
+        ledger.identity_digest(SALT, output(label)[0]) for label in ("older", "newer")]
+    assert engine._emission_handle.view_seq == views[-1]["view_seq"]
+    assert count(engine, "emission_retry_superseded") == 0
+
+
+@pytest.mark.parametrize("initial,late", [(None, "refused"), (None, "adopted"), ("adopted", "refused")])
+def test_signal_after_retry_read_is_counted_and_late_refusal_restores_no_handle(
+        engines, monkeypatch, initial, late):
+    engine = engines()
+    rows = fail_exit(engine, monkeypatch)
+    if initial:
+        engine._signal_emission_state(initial, "S", require_conversation=True)
+    read, observed = ledger.pending_emission_signal, []
+
+    def signal_after_read(entry):
+        signal = read(entry)
+        if not observed:
+            observed.append(signal)
+            engine._signal_emission_state(late, "S", require_conversation=True)
+        return signal
+
+    monkeypatch.setattr(ledger, "pending_emission_signal", signal_after_read)
+    engine._ingest_messages(rows)
+    assert observed == [initial] and pending(engine) == []
+    assert count(engine, "emission_signal_late") == 1
+    assert {r["state"] for r in emissions(engine)} == {initial or "proposed"}
+    assert {v["state"] for v in emission_views(engine)} == {initial or "proposed"}
+    assert (engine._emission_handle is None) == (late == "refused")
+
+
+@pytest.mark.parametrize("mismatch", ["store", "origin", "compress_call", "session", "conversation"])
+def test_pending_signal_requires_matching_owner_and_scope(engines, monkeypatch, mismatch):
+    engine = engines()
+    fail_exit(engine, monkeypatch)
+    args = [engine._store.db_identity, engine, engine._compress_calls, "S", engine._hold_conversation_key()]
+    index = ["store", "origin", "compress_call", "session", "conversation"].index(mismatch)
+    args[index] = object()
+    assert not ledger.record_pending_signal(*args, "refused", True)
+    assert ledger.pending_emission_signal(pending(engine)[0]) is None
+    if mismatch == "conversation":
+        assert ledger.record_pending_signal(*args, "adopted", False)
+        assert ledger.pending_emission_signal(pending(engine)[0]) == "adopted"
+
+
+def test_pending_signal_selects_newest_matching_entry_across_registry_keys(engines):
+    engine = engines()
+    key = (engine._store.db_identity, SALT)
+    for created, lineage in enumerate(("first", "second"), 1):
+        ledger.mark_pending_emission(key, lineage, origin=engine, compress_call=engine._compress_calls,
+                                     session_id="S", conversation_key=engine._hold_conversation_key())
+        pending(engine)[-1]["created_at"] = created
+    assert ledger.record_pending_signal(key[0], engine, engine._compress_calls, "S",
+                                        engine._hold_conversation_key(), "refused", True)
+    assert [ledger.pending_emission_signal(e) for e in pending(engine)] == [None, "refused"]

@@ -62,7 +62,7 @@ _PENDING_EMISSIONS_LOCK = threading.Lock()
 
 def mark_pending_emission(store_key, lineage, **payload):
     """Keep only payloads, never stores or strong engine references, under this lock."""
-    payload.update(lineage=lineage, created_at=time.time(), claim=None,
+    payload.update(lineage=lineage, created_at=time.time(), claim=None, signal=None, superseded=False,
                    origin=weakref.ref(payload.pop("origin")))
     with _PENDING_EMISSIONS_LOCK:
         entries = _PENDING_EMISSIONS.setdefault((store_key, lineage), [])
@@ -71,6 +71,33 @@ def mark_pending_emission(store_key, lineage, **payload):
         if dropped:
             entries.pop(0)
     return dropped
+
+
+def record_pending_signal(store_identity, origin, compress_call, session_id, conversation_key,
+                          new_state, require_conversation):
+    with _PENDING_EMISSIONS_LOCK:
+        entry = max((e for (key, _lineage), entries in _PENDING_EMISSIONS.items()
+                     if key[0] == store_identity for e in entries
+                     if e["origin"]() is origin and e["compress_call"] == compress_call
+                     and e["session_id"] == session_id
+                     and (not require_conversation or e["conversation_key"] == conversation_key)),
+                    key=lambda e: e["created_at"], default=None)
+        if entry is None:
+            return False
+        if new_state == "refused" or entry["signal"] != "refused":
+            entry["signal"] = new_state
+        return True
+
+
+def pending_emission_signal(entry):
+    with _PENDING_EMISSIONS_LOCK:
+        return entry["signal"]
+
+
+def note_emission_written(store_key, lineage):
+    with _PENDING_EMISSIONS_LOCK:
+        for entry in _PENDING_EMISSIONS.get((store_key, lineage), ()):
+            entry["superseded"] = True
 
 
 def has_pending(store_identity):
