@@ -739,7 +739,7 @@ def fake_build_child(env, units, provider=None):
 
 UNITS = [f"unit {i}" for i in range(30)]
 PROOF_KEYS = {"workers", "build_threads", "env", "plan_calls", "plan_units", "dispatch_compare", "verify_calls", "verify_mismatches",
-              "merged_entries", "aprime_dispatches", "embedding_path_fingerprint", "runtime", "sealed", "failure"}
+              "merged_entries", "aprime_units", "aprime_dispatches", "embedding_path_fingerprint", "runtime", "sealed", "failure"}
 
 
 @pytest.mark.parametrize("workers,failed_arm,reported,requested", [(None, None, 2, None), (1, None, 2, None), (2, None, 2, None), (2, "preembed", 2, None), (2, "preembed-aa", 2, None), (2, "preembed-plan", 2, None), (3, None, 1, 1), (3, None, 2, 1), (3, None, 6, 1), (4, None, 1, 1)])
@@ -753,7 +753,7 @@ def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, w
         argv += ["--build-threads", str(requested)]
     monkeypatch.setenv("LCM_D1_BUILD_PARTITION", "1/2")  # A stray parent value must reach no serial or read child.
     monkeypatch.setenv("LCM_D1_DISPATCH_LOG", str(tmp_path / "parent-dispatch.jsonl"))
-    for name in cli.PROOF_ENV:  # Stray verify values must reach only the verify child, which gets its own.
+    for name in [*cli.PROOF_ENV, "LCM_D1_LOOKUP_LOG"]:  # Stray values must reach no child; the owners get their own.
         monkeypatch.setenv(name, "stray")
     monkeypatch.delenv("PYTHONHASHSEED", raising=False)
     monkeypatch.setenv("LCM_LONGMEMEVAL_FASTEMBED_CACHE", str(tmp_path / "no-models"))
@@ -775,6 +775,7 @@ def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, w
             assert command == [*prefix, "prewarm-cache", "--prepared-dir", str(prepared), "--shards-manifest", str(prepared), *common]
             assert env["LCM_D1_ORT_THREADS"] == env["OMP_NUM_THREADS"] == (str(requested or 2) if name != "preembed-aa" else "2")
             assert env["PYTHONHASHSEED"] == "0"
+            assert env.get("LCM_D1_LOOKUP_LOG") == (str(tmp_path / "out" / f"{role}-preembed-aa-lookups.jsonl") if name == "preembed-aa" else None)
             parts = tmp_path / "out" / role / "parts"
             assert cache == {"preembed-plan": parts / "plan.sqlite", "preembed-verify": parts / "verify.sqlite"}.get(
                 name, parts / f"part-{part}.sqlite" if part is not None else tmp_path / "out" / role / "embeddings.sqlite")
@@ -802,7 +803,7 @@ def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, w
             return {"exit_code": 7 if role == failed_role and name in {failed_arm, f"{failed_arm}-part-0"} else 0, "timed_out": False}
         reads.append(role)
         assert env["LCM_D1_ORT_THREADS"] == env["OMP_NUM_THREADS"] == "2"
-        assert not proof_env and "PYTHONHASHSEED" not in env
+        assert not proof_env and "PYTHONHASHSEED" not in env and "LCM_D1_LOOKUP_LOG" not in env
         assert "LCM_D1_BUILD_PARTITION" not in env
         assert "LCM_D1_DISPATCH_LOG" not in env
         assert cache == tmp_path / "out" / role / "embeddings.sqlite"
@@ -857,7 +858,7 @@ def test_build_worker_launch_plan_and_failure_isolation(tmp_path, monkeypatch, w
             assert (proof["plan_calls"], proof["plan_units"], proof["merged_entries"]) == (3, 30, 30)
             assert proof["dispatch_compare"] == {"exit": 0, "only_serial": 0, "only_parts": 0, "count_mismatch": 0, "hash_mismatch": 0,
                                                  "duplicate_plan_calls": 0, "duplicate_part_calls": 0}
-            assert (proof["verify_calls"], proof["verify_mismatches"], proof["aprime_dispatches"]) == ([0, 1, 2], 0, 0)
+            assert (proof["verify_calls"], proof["verify_mismatches"], proof["aprime_units"], proof["aprime_dispatches"]) == ([0, 1, 2], 0, 30, 0)
             # The plan worker wrote only its own scratch DB and sent nothing; the merge target came from the parts alone.
             with closing(sqlite3.connect(tmp_path / "out" / role / "parts" / "plan.sqlite")) as db:
                 assert db.execute("SELECT COUNT(*) FROM entries").fetchone() == (0,)
@@ -884,6 +885,14 @@ class SaltedFake(BatchFake):
     ("stray_row", "merged entries differ from the plan's unique units"),
     ("verify_exit", "the verify worker failed"),
     ("merge_identity", "ValueError: D1 cache part model/options mismatch"),
+    ("verify_drop", "the verify log does not cover exactly the requested calls"),
+    ("empty_plan", "the plan logged no calls"),
+    ("aprime_no_lookups", "the A-prime pre-embed looked up no units"),
+    ("aprime_zero_units", "the A-prime pre-embed looked up no units"),
+    ("aprime_uncovered", "the A-prime pre-embed looked up units the plan does not cover"),
+    ("part_launch", "preembed-part-1 failed to launch: OSError: no such interpreter"),
+    ("plan_launch", "preembed-plan failed to launch: OSError: no such interpreter"),
+    ("verify_launch", "OSError: no such interpreter"),
 ])
 def test_partition_proof_failure_refuses_seal_with_reason(tmp_path, monkeypatch, fault, reason):
     cli = driver()
@@ -900,13 +909,23 @@ def test_partition_proof_failure_refuses_seal_with_reason(tmp_path, monkeypatch,
             (out / "per_question_checkpoint.jsonl").write_text('{"question_id":"q0"}\n')
             (out / "embedding-metrics.jsonl").write_text('{"wall_ms":1,"hits":1,"misses":0,"corruptions":0}\n')
             return {"exit_code": 0, "timed_out": False}
-        Path(env["LCM_D1_THREAD_REPORT"]).write_text(json.dumps({"effective_intra_op_threads": 2}))
         hit = role == "candidate"
+        if hit and name == {"part_launch": "preembed-part-1", "plan_launch": "preembed-plan", "verify_launch": "preembed-verify"}.get(fault):
+            raise OSError("no such interpreter")
+        Path(env["LCM_D1_THREAD_REPORT"]).write_text(json.dumps({"effective_intra_op_threads": 2}))
         units = UNITS + ["unplanned a", "unplanned b"] if hit and fault == "extra_call" and name == "preembed-part-1" else UNITS
+        if hit and (fault == "empty_plan" and name != "preembed-aa" or fault == "aprime_zero_units" and name == "preembed-aa"):
+            units = []
+            Path(env.get("LCM_D1_LOOKUP_LOG") or env["LCM_D1_DISPATCH_LOG"]).touch()
+        if hit and fault == "aprime_uncovered" and name == "preembed-aa":
+            units = UNITS + ["a unit the build never saw"]
         provider = SaltedFake() if hit and fault == "salted" and name == "preembed-verify" else BatchFake()
         if hit and fault == "merge_identity" and name == "preembed-part-1":
             env = dict(env, LCM_D1_ROLE="other")
-        fake_build_child(env, units, provider)
+        if hit and fault == "verify_drop" and name == "preembed-verify":
+            env = dict(env, LCM_D1_VERIFY_CALLS=json.dumps(json.loads(env["LCM_D1_VERIFY_CALLS"])[:-1]))
+        if not (hit and fault == "aprime_no_lookups" and name == "preembed-aa"):
+            fake_build_child(env, units, provider)
         if hit and fault == "stray_row" and name == "preembed-part-0":
             with closing(sqlite3.connect(env[lme.EMBED_CACHE_ENV])) as db, db:
                 db.execute("INSERT INTO entries VALUES ('stray', 64, x'00', 'x')")
@@ -929,7 +948,11 @@ def test_partition_proof_failure_refuses_seal_with_reason(tmp_path, monkeypatch,
     if fault == "stray_row":
         assert (proofs["candidate"]["merged_entries"], proofs["candidate"]["plan_units"]) == (31, 30)
     if fault == "aprime":
-        assert proofs["candidate"]["aprime_dispatches"] == 1
+        assert (proofs["candidate"]["aprime_units"], proofs["candidate"]["aprime_dispatches"]) == (30, 1)
+    if fault == "aprime_uncovered":
+        assert proofs["candidate"]["aprime_units"] == 31
+    if fault in {"part_launch", "plan_launch"}:
+        assert any(row["role"] == "candidate" and row["exit_code"] == 1 for row in receipt["preembed"])
 
 
 def test_embedding_path_fingerprint_binds_product_modules_runtime_model_and_threads(tmp_path):

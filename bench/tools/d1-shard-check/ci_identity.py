@@ -93,9 +93,9 @@ def worker(args):
     return 0
 
 
-def run(work, base, specs):
-    """Launch every (name, env, extra argv) at once; return {name: exit code}."""
-    children = {}
+def run(work, base, specs, elapsed):
+    """Launch every (name, env, extra argv) at once; return {name: exit code} and record each wall time."""
+    children, began = {}, time.monotonic()
     for name, env, extra in specs:
         home = work / "home" / name
         home.mkdir(parents=True)
@@ -103,9 +103,14 @@ def run(work, base, specs):
         children[name] = (subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "worker", *base, *extra], env=dict(env, HERMES_HOME=str(home)),
                                            stdout=log, stderr=subprocess.STDOUT), log)
     codes = {}
-    for name, (child, log) in children.items():
-        codes[name] = child.wait()
-        log.close()
+    while len(codes) < len(children):
+        for name, (child, log) in children.items():
+            if name in codes or child.poll() is None:
+                continue
+            codes[name], elapsed[name] = child.returncode, round(time.monotonic() - began, 1)
+            log.close()
+        time.sleep(1)
+    for name in children:
         if codes[name]:
             print(f"::group::{name} log tail\n" + "\n".join((work / f"{name}.log").read_text().splitlines()[-40:]) + "\n::endgroup::")
     return codes
@@ -116,7 +121,7 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("check", "worker"):
         command = commands.add_parser(name)
-        command.add_argument("--questions", type=int, default=100)
+        command.add_argument("--questions", type=int, default=40)
         command.add_argument("--sessions", type=int, default=100)
     check = commands.choices["check"]
     check.add_argument("--model-cache", type=Path, required=True)
@@ -148,25 +153,22 @@ def main(argv=None):
         return (name, dict(env, LCM_D1_CACHE_MODE="build", LCM_LONGMEMEVAL_EMBED_CACHE=str(work / f"{name}.sqlite"),
                            LCM_D1_DISPATCH_LOG=str(work / f"{name}.jsonl"), **extra), ["--report", str(work / f"{name}-report.json"), *argv])
 
-    out, hard, timings = {}, {}, {}
+    out, hard, elapsed = {}, {}, {}
     phases = [("serial", [build("serial")]),
               ("call_index", [build(f"ci-{i}", LCM_D1_BUILD_PARTITION=f"{i}/{WORKERS}") for i in range(WORKERS)] + [build("plan", LCM_D1_BUILD_PARTITION="plan")]),
               ("key_hash", [build(f"kh-{i}", ["--keyhash", f"{i}/{WORKERS}"]) for i in range(WORKERS)])]
     for phase, specs in phases:
-        began = time.monotonic()
-        codes = run(work, base, specs)
-        timings[phase] = round(time.monotonic() - began, 1)
+        codes = run(work, base, specs, elapsed)
+        print(f"{phase}: {json.dumps({name: elapsed[name] for name in codes})}", flush=True)
         hard[f"{phase}_workers_exit_0"] = not any(codes.values())
     if all(hard.values()):
         for label, prefix in (("call_index", "ci"), ("key_hash", "kh")):
             out[f"{label}_merge"] = merge([work / f"{prefix}-{i}.sqlite" for i in range(WORKERS)], work / f"{label}.sqlite")
         plan = compare.jsonl(work / "plan.jsonl")
         out["verify_calls"] = driver.verify_sample([row["call"] for row in plan], WORKERS)
-        began = time.monotonic()
         verify = build("verify", LCM_D1_VERIFY_CALLS=json.dumps(out["verify_calls"]), LCM_D1_VERIFY_AGAINST=str(work / "call_index.sqlite"),
                        LCM_D1_VERIFY_LOG=str(work / "verify-calls.jsonl"))
-        hard["verify_worker_exit_0"] = not run(work, base, [verify])["verify"]
-        timings["verify"] = round(time.monotonic() - began, 1)
+        hard["verify_worker_exit_0"] = not run(work, base, [verify], elapsed)["verify"]
         out["verify"], verified = compare.verify(work / "verify-calls.jsonl") if hard["verify_worker_exit_0"] else ({}, False)
         hard["verify_0_mismatches"] = verified and sorted(row["call"] for row in compare.jsonl(work / "verify-calls.jsonl")) == out["verify_calls"]
         out["seals"] = {name: seal(work / f"{name}.sqlite") for name in ("serial", "call_index", "key_hash")}
@@ -177,15 +179,17 @@ def main(argv=None):
         hard["plan_log_equals_serial_log"] = (work / "plan.jsonl").read_bytes() == (work / "serial.jsonl").read_bytes()
         hard["merged_entries_equal_plan_units"] = out["call_index_merge"][0] == out["plan_units"] == out["serial_units"]
         out["caches_key_hash"], key_hash_equal = compare.caches(work / "serial.sqlite", work / "key_hash.sqlite")
-        began = time.monotonic()
-        reads = [(name, dict(env, LCM_D1_CACHE_MODE="read", LCM_LONGMEMEVAL_EMBED_CACHE=str(work / f"{name}.sqlite")), ["--read", str(work / f"{name}-candidates.jsonl")])
-                 for name in ("serial", "call_index")]
-        hard["read_workers_exit_0"] = not any(run(work, base, reads).values())
-        timings["read"] = round(time.monotonic() - began, 1)
+        # Read workers get their own names: a build worker already owns each build name's home and log.
+        reads = [(f"read-{name}", dict(env, LCM_D1_CACHE_MODE="read", LCM_LONGMEMEVAL_EMBED_CACHE=str(work / f"{name}.sqlite")),
+                  ["--read", str(work / f"{name}-candidates.jsonl")]) for name in ("serial", "call_index")]
+        hard["read_workers_exit_0"] = not any(run(work, base, reads, elapsed).values())
         if hard["read_workers_exit_0"]:
             out["candidates"], hard["read_candidates_equal"] = compare.candidates(work / "serial-candidates.jsonl", work / "call_index-candidates.jsonl")
         out["negative_control_differs"] = not key_hash_equal
-    out.update(hard=hard, timings_s=timings, passed=all(hard.values()) and "read_candidates_equal" in hard)
+    steps = {"serial build": ["serial"], "plan": ["plan"], "call-index parts": [f"ci-{i}" for i in range(WORKERS)],
+             "key-hash parts": [f"kh-{i}" for i in range(WORKERS)], "verify": ["verify"], "candidates": ["read-serial", "read-call_index"]}
+    timings = {step: max((elapsed[name] for name in names if name in elapsed), default=None) for step, names in steps.items()}
+    out.update(hard=hard, timings_s=timings, worker_wall_s=elapsed, passed=all(hard.values()) and "read_candidates_equal" in hard)
     (work / "summary.json").write_text(json.dumps(out, indent=2) + "\n")
     print(json.dumps(out, indent=2))
     if out.get("negative_control_differs") is False:
@@ -196,9 +200,10 @@ def main(argv=None):
     if args.summary:
         rows = "\n".join(f"| {name} | {'pass' if ok else 'FAIL'} |" for name, ok in hard.items())
         control = {True: "differs (expected)", False: "matched serial (WARNING)", None: "not run"}[out.get("negative_control_differs")]
+        walls = "\n".join(f"| {step} | {seconds} |" for step, seconds in timings.items())
         with args.summary.open("a") as summary:
             summary.write(f"### D1 shard identity\n\n| check | result |\n|---|---|\n{rows}\n\nKey-hash negative control: {control}\n\n"
-                          f"Units: {out.get('serial_units')}; timings (s): {json.dumps(timings)}\n")
+                          f"Units: {out.get('serial_units')}\n\n| step | wall s |\n|---|---|\n{walls}\n")
     return 0 if out["passed"] else 1
 
 

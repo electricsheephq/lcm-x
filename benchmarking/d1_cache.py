@@ -64,6 +64,7 @@ class D1Cache(ContentHashEmbeddingCache):
         self._call_index = 0
         self._known = set()
         self.dispatch_log = env.get("LCM_D1_DISPATCH_LOG") if not readonly else None
+        self.lookup_log = env.get("LCM_D1_LOOKUP_LOG") if not readonly else None
         partition = env.get("LCM_D1_BUILD_PARTITION") if not readonly else None
         verify = env.get("LCM_D1_VERIFY_CALLS") if not readonly else None
         if verify is not None:
@@ -151,6 +152,10 @@ class D1Cache(ContentHashEmbeddingCache):
             self.misses += sum(key not in found for key in keys)
             call = self._call_index
             self._call_index += 1
+            if self.lookup_log:
+                unique = dict.fromkeys(keys)
+                with Path(self.lookup_log).open("a") as log:
+                    log.write(json.dumps({"call": call, "keys": len(unique), "hits": sum(key in found for key in unique)}, separators=(",", ":")) + "\n")
             if self.partition is not None:
                 i, count = self.partition
                 # prewarm_embedding_cache.flush_batch discards these placeholder vectors.

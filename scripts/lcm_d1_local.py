@@ -221,6 +221,7 @@ def _main(argv, interrupt):
                HF_HUB_OFFLINE="1", PYTHONDONTWRITEBYTECODE="1")
     env.pop("LCM_D1_BUILD_PARTITION", None)  # Only parallel build workers get a partition.
     env.pop("LCM_D1_DISPATCH_LOG", None)
+    env.pop("LCM_D1_LOOKUP_LOG", None)  # Only the A-prime pre-embed records its lookups.
     for name in PROOF_ENV:
         env.pop(name, None)
     build_env = {"LCM_D1_ORT_THREADS": str(build_threads_requested), "OMP_NUM_THREADS": str(build_threads_requested), "PYTHONHASHSEED": "0"}
@@ -238,6 +239,8 @@ def _main(argv, interrupt):
                          LCM_D1_CACHE_MODE=mode, HERMES_HOME=str(scratch / "home"), TMPDIR=str(scratch))
         if mode == "build":
             child_env.update(LCM_D1_DISPATCH_LOG=str(args.output.resolve() / f"{role}-{name}-dispatch.jsonl"), PYTHONHASHSEED="0")
+        if mode == "build" and name == "preembed-aa":
+            child_env["LCM_D1_LOOKUP_LOG"] = str(args.output.resolve() / f"{role}-{name}-lookups.jsonl")
         if name == "preembed" or part is not None or own_cache is not None:
             # Matching serial threads keeps ORT arithmetic the same; 1 thread needs measured byte-identity proof.
             child_env.update(build_env)
@@ -284,24 +287,31 @@ def _main(argv, interrupt):
         def build(task):
             role, part = task
             began = time.monotonic()
-            if part is None:
-                result = invoke(role, "preembed-plan", command, "build", own_cache=("plan", {"LCM_D1_BUILD_PARTITION": "plan"}))
-                return {"role": role, "part": None, "arm": "preembed-plan", **result, "elapsed_s": time.monotonic() - began}
-            result = invoke(role, f"preembed-part-{part}", command, "build", part=part)
-            return {"role": role, "part": part, "arm": "preembed", **result, "elapsed_s": time.monotonic() - began}
+            name, arm = ("preembed-plan", "preembed-plan") if part is None else (f"preembed-part-{part}", "preembed")
+            try:
+                if part is None:
+                    result = invoke(role, name, command, "build", own_cache=("plan", {"LCM_D1_BUILD_PARTITION": "plan"}))
+                else:
+                    result = invoke(role, name, command, "build", part=part)
+            except Exception as exc:
+                # A launch failure fails its role, never the receipt.
+                launch_errors.setdefault(role, f"{name} failed to launch: {type(exc).__name__}: {exc}")
+                result = {"exit_code": 1, "timed_out": False}
+            return {"role": role, "part": part, "arm": arm, **result, "elapsed_s": time.monotonic() - began}
 
         # One plan worker per role runs beside the parts; it enumerates only and embeds nothing.
         tasks = [(role, part) for role in products for part in range(args.build_workers)] + [(role, None) for role in products]
+        launch_errors = {}
         preembed = run_pool(tasks, 2 * args.build_workers + 2, build)
         merged_entries, duplicate_keys = {}, {}
         for role in products:
             rows = [row for row in preembed if row["role"] == role]
             proof = partition_proof[role] = {"workers": args.build_workers, "build_threads": build_threads_requested, "env": dict(build_env),
                                              "plan_calls": None, "plan_units": None, "dispatch_compare": None, "verify_calls": None,
-                                             "verify_mismatches": None, "merged_entries": None, "aprime_dispatches": None,
+                                             "verify_mismatches": None, "merged_entries": None, "aprime_units": None, "aprime_dispatches": None,
                                              "sealed": False, "failure": None}
             if interrupt[0] or any(row["exit_code"] for row in rows):
-                proof["failure"] = "interrupted" if interrupt[0] else "a part or plan worker failed"
+                proof["failure"] = "interrupted" if interrupt[0] else launch_errors.get(role, "a part or plan worker failed")
                 continue
             try:
                 build_threads[role] = [json.loads((out / f"{role}-preembed-part-{row['part']}-threads.json").read_text()) for row in rows if row["arm"] == "preembed"]
@@ -318,7 +328,9 @@ def _main(argv, interrupt):
                                              "duplicate_plan_calls": found["duplicate_serial_calls"], "duplicate_part_calls": found["duplicate_part_calls"]}
                 if not equal:
                     raise PartitionProofError("the parts' dispatch logs differ from the plan log")
-                if not plan or merged_entries[role] != proof["plan_units"]:
+                if not plan:
+                    raise PartitionProofError("the plan logged no calls")
+                if merged_entries[role] != proof["plan_units"]:
                     raise PartitionProofError("merged entries differ from the plan's unique units")
                 proof["verify_calls"] = verify_sample([row["call"] for row in plan], args.build_workers)
                 verify_log = out / f"{role}-preembed-verify-verify.jsonl"
@@ -330,7 +342,9 @@ def _main(argv, interrupt):
                     raise PartitionProofError("the verify worker failed")
                 verified = compare.jsonl(verify_log)
                 proof["verify_mismatches"] = sum(row["mismatches"] for row in verified)
-                if sorted(row["call"] for row in verified) != proof["verify_calls"] or proof["verify_mismatches"]:
+                if sorted(row["call"] for row in verified) != proof["verify_calls"]:
+                    raise PartitionProofError("the verify log does not cover exactly the requested calls")
+                if proof["verify_mismatches"]:
                     raise PartitionProofError("the verify re-embed differs from the merged cache")
                 command_aa = ["prewarm-cache", "--prepared-dir", str(args.aprime_dir.resolve()), "--shards-manifest", str(args.aprime_dir.resolve()), *common]
                 began = time.monotonic()
@@ -339,6 +353,14 @@ def _main(argv, interrupt):
                 if result["exit_code"] or interrupt[0]:
                     raise PartitionProofError("the A-prime pre-embed failed")
                 role_threads[role] = json.loads((out / f"{role}-preembed-aa-threads.json").read_text())
+                # Positive evidence: A-prime's questions are a subset of the build's, so it must look up
+                # at least one unit, at most the plan's units, and find every one in the merged cache.
+                lookups = compare.jsonl(out / f"{role}-preembed-aa-lookups.jsonl") if (out / f"{role}-preembed-aa-lookups.jsonl").exists() else []
+                proof["aprime_units"] = sum(row["keys"] for row in lookups)
+                if not proof["aprime_units"]:
+                    raise PartitionProofError("the A-prime pre-embed looked up no units")
+                if sum(row["hits"] for row in lookups) != proof["aprime_units"] or proof["aprime_units"] > proof["plan_units"]:
+                    raise PartitionProofError("the A-prime pre-embed looked up units the plan does not cover")
                 aa_log = out / f"{role}-preembed-aa-dispatch.jsonl"
                 proof["aprime_dispatches"] = len(aa_log.read_text().splitlines()) if aa_log.exists() else 0
                 if proof["aprime_dispatches"]:
