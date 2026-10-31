@@ -7421,23 +7421,29 @@ class LCMEngine(
         finally:
             self._last_emission_write_ms = {"digest": (_perf_counter() - started) * 1000, "ledger": 0.0}
         started = _perf_counter()
+        superseded = []
         try:
-            # Supersede older pending entries only once this write has committed, still under the write lock,
-            # so a rolled-back write supersedes nothing and no retry runs between the commit and the mark.
+            # Supersede older pending entries before COMMIT: a retry through any store on this database reads the
+            # mark only inside its own write transaction. A write that does not commit restores it, still under
+            # this store's write lock, so this store's retries never see a mark without the write.
             with self._store._write_lock:
-                with self._emission_owner(salt) as (conn, reason):
-                    if conn is None:
-                        if reason == "in_transaction":
-                            self._mark_pending_emission(store_key, lineage, payload)
-                        return
-                    persisted = conn.execute("SELECT value FROM ledger_meta WHERE key=?", (key,)).fetchone()
-                    lineage = persisted[0] if persisted else lineage
-                    seq = ingest_ledger.next_view_seq(conn)
-                    ids = ingest_ledger.insert_emissions(conn, lineage, seq, rows)
-                    for i, emission_id in zip(indices, ids):
-                        entries[i] = entries[i]._replace(ref=emission_id, is_descriptor=True)
-                    ingest_ledger.write_view(conn, salt, lineage, "emission", "proposed", entries, view_seq=seq)
-                ingest_ledger.note_emission_written(store_key, lineage)
+                try:
+                    with self._emission_owner(salt) as (conn, reason):
+                        if conn is None:
+                            if reason == "in_transaction":
+                                self._mark_pending_emission(store_key, lineage, payload)
+                            return
+                        persisted = conn.execute("SELECT value FROM ledger_meta WHERE key=?", (key,)).fetchone()
+                        lineage = persisted[0] if persisted else lineage
+                        seq = ingest_ledger.next_view_seq(conn)
+                        ids = ingest_ledger.insert_emissions(conn, lineage, seq, rows)
+                        for i, emission_id in zip(indices, ids):
+                            entries[i] = entries[i]._replace(ref=emission_id, is_descriptor=True)
+                        ingest_ledger.write_view(conn, salt, lineage, "emission", "proposed", entries, view_seq=seq)
+                        superseded = ingest_ledger.note_emission_written(store_key, lineage)
+                except BaseException:
+                    ingest_ledger.restore_superseded(superseded)
+                    raise
             self._ledger_count("ledger.emissions_written", amount=len(ids))
             self._ledger_count("ledger.emission_views_written")
             self._emission_handle = ingest_ledger.EmissionHandle(lineage, seq, self._compress_calls, sid, conversation_key)

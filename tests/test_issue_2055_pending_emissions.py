@@ -531,6 +531,25 @@ def test_exit_write_that_rolls_back_supersedes_nothing(engines, monkeypatch):
     assert count(engine, "emission_retry_superseded") == 0
 
 
+def test_supersession_is_marked_before_the_exit_write_commits(engines, monkeypatch):
+    engine = engines()
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger, "insert_emissions", failing)
+        engine._compress_calls += 1
+        emit(engine, output("older"))
+    real_note, seen = ledger.note_emission_written, []
+
+    def note(*args):
+        # Another store's retry reads the mark only inside its own write transaction, so it must precede COMMIT.
+        seen.append(engine._store._conn.in_transaction)
+        return real_note(*args)
+
+    monkeypatch.setattr(ledger, "note_emission_written", note)
+    engine._compress_calls += 1
+    emit(engine, output("current"))
+    assert seen == [True] and len(pending(engine)) == 1 and pending(engine)[0]["superseded"]
+
+
 def test_pending_retries_without_newer_exit_keep_registry_order(engines, monkeypatch):
     engine = engines()
     with monkeypatch.context() as patch:

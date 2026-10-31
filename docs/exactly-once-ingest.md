@@ -560,9 +560,11 @@ and a refused entry never restores a handle. A signal arriving between the
 in-savepoint read and publication counts `ledger.emission_signal_late`; it does
 not reach the committed state, though a late refusal recorded on the entry
 still restores no handle.
-A later successful exit write supersedes older pending entries in that lineage
-once it commits, while it still holds the store's write lock; a write that rolls
-back supersedes nothing. Their retries recover descriptors, including
+A later successful exit write supersedes older pending entries in that lineage.
+It marks them inside its write transaction, so a retry through any store on the
+same database, which reads the mark only inside its own write transaction, sees
+it; a write that does not commit restores the mark under its store's write lock.
+Their retries recover descriptors, including
 any signal, without an emission view, and count
 `ledger.emission_retry_superseded`. Other entries retry oldest first in
 registry order, so within one process emission views stay in emission order,

@@ -95,9 +95,19 @@ def pending_emission_signal(entry):
 
 
 def note_emission_written(store_key, lineage):
+    """Mark this lineage's pending entries superseded; returns the ones it changed, for a rollback."""
     with _PENDING_EMISSIONS_LOCK:
-        for entry in _PENDING_EMISSIONS.get((store_key, lineage), ()):
+        changed = [entry for entry in _PENDING_EMISSIONS.get((store_key, lineage), ()) if not entry["superseded"]]
+        for entry in changed:
             entry["superseded"] = True
+    return changed
+
+
+def restore_superseded(entries):
+    """Undo ``note_emission_written`` for an exit write that did not commit."""
+    with _PENDING_EMISSIONS_LOCK:
+        for entry in entries:
+            entry["superseded"] = False
 
 
 def has_pending(store_identity):
