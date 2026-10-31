@@ -69,7 +69,8 @@ def keyhash(cache, i, count):
 def worker(args):
     import benchmarking.longmemeval as lme
 
-    provider = lme.resolve_harness_provider("fastembed", MODEL)
+    # The per-call deadline only bounds waiting, never the vectors; four parts beside a plan oversubscribe a 3-core runner.
+    provider = lme.resolve_harness_provider("fastembed", MODEL, timeout=3600.0)
     if args.keyhash:
         keyhash(provider, *map(int, args.keyhash.split("/")))
     if not args.read:
