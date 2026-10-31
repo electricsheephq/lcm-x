@@ -1180,44 +1180,7 @@ class CompactionMixin:
         ``last_store_id`` marks where later rows begin (default: the store tail now).
         """
         try:
-            effective = [_commit_proof_identity_digest(identity) for identity in proof["output_effective"]]
-            full = [_commit_proof_identity_digest(identity) for identity in proof["output"]]
-            payload = {
-                "version": _COMPACTION_COMMIT_PROOF_WIRE_VERSION,
-                "descriptor_version": _COMPACTION_COMMIT_PROOF_VERSION,
-                # Scope: the Hermes home that wrote it (a configured shared
-                # database_path serves several homes) and its creation time,
-                # so a proof older than a lifecycle reset is ignored.
-                "hermes_home": str(self._hermes_home or ""),
-                "session_id": proof.get("session_id") or "",
-                "conversation_id": proof.get("conversation_id") or "",
-                "reset_epoch": proof.get("reset_epoch"),
-                "created_at": time.time(),
-                # effective_sha256/scaffold_sha256 are what v0.24.0 compares; the *_v4 twins are
-                # this reader's projection digests, swapped in for a bound record (#517).
-                "effective_sha256": proof.get("effective_sha256_v3", effective),
-                "effective_sha256_v4": effective,
-                "last_store_id": self._commit_proof_last_store_id() if last_store_id is None else int(last_store_id),
-                "native": bool(proof.get("native")),
-                "droppable": list(proof.get("droppable") or []),
-                "skip_landing": list(proof.get("skip_landing") or []),
-                "native_summary_index": proof.get("native_summary_index"),
-                "carry_ranges": [
-                    list(item)
-                    for item in self._coalesce_compression_carry_ranges(
-                        proof.get("carry_ranges") or []
-                    )
-                ],
-                "emissions": copy.deepcopy(proof.get("emissions") or []),
-            }
-            if proof.get("filtered_row_keys") is not None:
-                payload["filtered_row_keys"] = [list(key) for key in proof["filtered_row_keys"]]
-            if not payload["effective_sha256"]:
-                # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).
-                payload["scaffold_sha256"] = proof.get("output_sha256_v3", full)
-            if not effective:
-                payload["scaffold_sha256_v4"] = full
-            self._write_compress_commit_proof_payload(proof, payload)
+            self._write_compress_commit_proof_payload(proof, self._compress_commit_proof_payload(proof, last_store_id))
             self._compress_commit_reason, self._compress_commit_publication = "ready", "durable"
             if "durable" in proof:
                 proof["durable"] = True
@@ -1225,6 +1188,47 @@ class CompactionMixin:
             proof["durable"] = False
             self._compress_commit_reason, self._compress_commit_publication = "publication_failed", "local"
             logger.warning("LCM occurrence-proof publication failed; proof not durable", exc_info=True)
+
+    def _compress_commit_proof_payload(self, proof, last_store_id: Optional[int] = None) -> dict:
+        """The durable record of ``proof`` that _persist_compress_commit_proof writes."""
+        effective = [_commit_proof_identity_digest(identity) for identity in proof["output_effective"]]
+        full = [_commit_proof_identity_digest(identity) for identity in proof["output"]]
+        payload = {
+            "version": _COMPACTION_COMMIT_PROOF_WIRE_VERSION,
+            "descriptor_version": _COMPACTION_COMMIT_PROOF_VERSION,
+            # Scope: the Hermes home that wrote it (a configured shared
+            # database_path serves several homes) and its creation time,
+            # so a proof older than a lifecycle reset is ignored.
+            "hermes_home": str(self._hermes_home or ""),
+            "session_id": proof.get("session_id") or "",
+            "conversation_id": proof.get("conversation_id") or "",
+            "reset_epoch": proof.get("reset_epoch"),
+            "created_at": time.time(),
+            # effective_sha256/scaffold_sha256 are what v0.24.0 compares; the *_v4 twins are
+            # this reader's projection digests, swapped in for a bound record (#517).
+            "effective_sha256": proof.get("effective_sha256_v3", effective),
+            "effective_sha256_v4": effective,
+            "last_store_id": self._commit_proof_last_store_id() if last_store_id is None else int(last_store_id),
+            "native": bool(proof.get("native")),
+            "droppable": list(proof.get("droppable") or []),
+            "skip_landing": list(proof.get("skip_landing") or []),
+            "native_summary_index": proof.get("native_summary_index"),
+            "carry_ranges": [
+                list(item)
+                for item in self._coalesce_compression_carry_ranges(
+                    proof.get("carry_ranges") or []
+                )
+            ],
+            "emissions": copy.deepcopy(proof.get("emissions") or []),
+        }
+        if proof.get("filtered_row_keys") is not None:
+            payload["filtered_row_keys"] = [list(key) for key in proof["filtered_row_keys"]]
+        if not payload["effective_sha256"]:
+            # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).
+            payload["scaffold_sha256"] = proof.get("output_sha256_v3", full)
+        if not effective:
+            payload["scaffold_sha256_v4"] = full
+        return payload
 
     def _rekey_durable_commit_proof(self, messages) -> None:
         """#1286: re-key the bound durable proof to the host's list ``messages``, later rows from the store tail now.
@@ -1235,7 +1239,6 @@ class CompactionMixin:
         old proof, which can duplicate but loses nothing. Built as compress() would build it for this list returned
         unchanged; nothing process-local changes.
         """
-        reason, publication = self._compress_commit_reason, self._compress_commit_publication
         try:
             if self._durable_commit_proof_payload() is None:
                 return
@@ -1276,14 +1279,11 @@ class CompactionMixin:
                 if not self._is_replayed_context_scaffold_message(m)
             ]
             self._prepare_compress_commit_proof(proof, messages)
-            self._persist_compress_commit_proof(proof)
-            if self._compress_commit_publication == "durable":
-                logger.info("LCM durable commit proof re-keyed after an out-of-order store: session=%s rows=%d",
-                            self._session_id, len(messages))
+            self._write_compress_commit_proof_payload(proof, self._compress_commit_proof_payload(proof))
+            logger.info("LCM durable commit proof re-keyed after an out-of-order store: session=%s rows=%d",
+                        self._session_id, len(messages))
         except Exception:
             logger.warning("LCM durable commit proof re-key failed; the previous proof stays", exc_info=True)
-        finally:
-            self._compress_commit_reason, self._compress_commit_publication = reason, publication
 
     def _prepare_compress_commit_proof(self, proof, result) -> None:
         """Attach engine-specific evidence before the proof's publication point."""
