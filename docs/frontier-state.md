@@ -13,7 +13,8 @@ them against their durable counterparts.
 Divergence between this in-memory frontier and durable state, after a restart, rebind, rotation or reset, is the largest
 defect family in the engine:
 
-- Open: #1116 and #1286 (an adopted output whose durable proof is stale), #1211 (rebind reconcile), #1004 (fit proof not
+- Open: #1286 for an output adopted without the host's commit signal (a committed stub-first or cleanup-only output now
+  persists its proof at the boundary: #1116, #1286), #1211 (rebind reconcile), #1004 (fit proof not
   persisted), #503 (frontier-bounded matching), #806 and #871 (rotation handoff and crash window), #1037 (no durable per-row
   identity), #7 (positional cursor), #1184, #1162 and #1097 (downstream symptoms of a stale proof).
 - Closed: #493 and #499 (host rewrites the cursor never saw), #517 (proof wire format), #534 and #644 (fit and recovery rows

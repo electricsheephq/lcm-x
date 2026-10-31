@@ -105,8 +105,8 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "durable-metadata-conflict": {
-      "outcome_sha": "31f4c3b6be2b63591edd1878a76cdc709d8bcbb8255e6afcdd8d7ca9d31c5918",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "1d73ee4822d8f1eab9f0117530c63fe26dd6fa8b8bc514c152e69656cb37aa8b",
+      "reason": "#1286: a warm ingest stores a row out of host order, so the durable commit proof is re-keyed (two metadata writes: the proof and the host occurrence snapshot) and the later cold bind proves its cursor from it; the re-key's store reads add two host-rewrite cache entries; no return or alias outcome changed"
     },
     "durable-v2-allow-end": {
       "outcome_sha": "4a50c398cb1026a014036d2a12d052468fb33f95339269d020fee89a3c81beee",
@@ -621,12 +621,12 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "sequence-host-merge": {
-      "outcome_sha": "98564592816cee9505ff6c2ac785d1fea082ed049070ffe0e586d91a06de32a9",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "7fe1c25e04d8563141f80dbd2d8f2d4b19400043d8f1df5fdb663d38dc1c4474",
+      "reason": "#1286: the re-key trigger fires but keeps the existing proof (no metadata write); its store reads cache one host-rewrite lookup on the engine, which the state snapshot records; no return or alias outcome changed"
     },
     "sequence-rewrite": {
-      "outcome_sha": "2cea267a4e1a39c7e0b7c55a4a4515afc3cbb3f690bd9a3583585a0f49b25975",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "fec61f779a38d4ebcee037628905e773d34f66ea31d5223b300efa79b933550d",
+      "reason": "#1286: the cold bind of a session that already held rows proves nothing from its stale proof, so it re-keys the proof (two metadata writes: the proof and the host occurrence snapshot) and the next cold bind proves its cursor (4 of 4) from it instead of reconciling from cursor 1 through the identity anchor; only the state outcomes changed, no return, raise or alias outcome"
     },
     "sequence-rotation": {
       "outcome_sha": "8bbb5c7d0ac702e19089ca444eb06b6f091133935e07c03e882b6e2e1b42f44e",

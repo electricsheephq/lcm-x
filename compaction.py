@@ -46,6 +46,7 @@ from .reconcile import (
     _commit_proof_identity_digest,
     _emission_identity,
     _finalize_emission_descriptors,
+    _has_lossy_redacted_identity,
     _host_row_key,
     _project_emitted_occurrences,
     _proof_user_identity,
@@ -1050,7 +1051,9 @@ class CompactionMixin:
             }
             for item in emissions:  # multiplicity witness for carried-forward proofs, which omit "output"
                 item["output_multiplicity"] = proof["output"].count(proof["output"][item["output_occurrence"]["index"]])
-            if proof["output"] == proof["input"]:
+            # #1286: a new list with the same replay identities (an externalized stub swapped in)
+            # still differs in public bytes, so Hermes commits it; only the host's own list is a no-op.
+            if proof["output"] == proof["input"] and result is messages:
                 self._compress_commit_reason = "identity_noop"
                 # No-progress compress: Hermes has nothing to commit, and an
                 # end call with this list must stay a real session end.
@@ -1085,6 +1088,33 @@ class CompactionMixin:
                 keys = [_host_row_key(m) for m, identity in zip(result, output_identities) if identity is not None]
                 if keys and None not in keys:
                     proof["filtered"], proof["filtered_row_keys"] = True, keys
+            remapped = dict(store_ids)  # the coverage guard maps the rows the in-order map missed into this copy
+            effective = [m for m, identity in zip(result, output_identities) if identity is not None]
+            if (self._last_compression_status == "sanitized" and result is not messages
+                    and not getattr(self, "_compress_dropped_ignored_rows", False) and not (
+                        proof["published"] or proof["recovery"] or proof["stub_first"] or proof["filtered"])
+                    and not (len(effective) == 1 and not self._host_occurrence_known(effective[0]))
+                    and not self._rekey_unstored_rows(result, occurrences, output_identities, remapped)
+                    and self._covers_the_session_after_the_frontier(result, remapped, output_identities)):
+                # #1286: a cleanup-only pass (replay stubs, stripped reasoning) hands the host a rewritten list too: a
+                # restart after the host commits it must not leave the cold rebind a stale proof. Absent unless true
+                # (traces dump it). A held pass's survival fit stays local: a durable claim of its carrier would
+                # bypass the anchor's retirement of that carrier (#1000). So does a list with a row no stored row
+                # holds (I1, the re-key's rule: the cold rebind's broken walk stores it), and an output that dropped
+                # ignored rows: #1013's host keys alone prove that one (same text is not identity). Round 7: so does
+                # a list of one effective row no host stamp or uid witnesses: a stub's identity restores its payload,
+                # so a new message with the same text, delivered alone after a restart, would match it and be lost
+                # (the tail path's singleton rule stores it). A stamped or uid row stays durable: the proof's
+                # host-occurrence snapshot tells the two occurrences apart (_host_occurrence_changed). Round 7c: so does
+                # a list that does not cover this session after the compaction frontier (a stored identity it does not
+                # carry): a delta of new rows, even behind the system prompt every host list carries, whose new copies
+                # after a restart would match it (the tail path's rule: replay is proven only by covering the session).
+                # Round 7d: one occurrence covers one stored identity, never its mapped row's and its own at once.
+                proof["cleanup_rewrite"] = True
+                # Round 7: its carry is the re-key's (the rows the guard mapped again, the previous proof's parent
+                # ranges), or a compression child's committed cleanup drops the parent rows after an out-of-order row.
+                self._keep_recovered_and_inherited_carry(
+                    proof, result, remapped, carried_rows, self._durable_commit_proof_payload())
             self._last_emission_descriptors = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
@@ -1096,9 +1126,9 @@ class CompactionMixin:
                 self._identity_anchor_record_recovery(result, emissions)
             if proof["published"] or proof["native"] or proof["recovery"] or proof["filtered"]:
                 self._persist_compress_commit_proof(proof)
-            elif proof["stub_first"]:
-                # #1116: the host can still refuse or roll back the list, so the proof becomes durable only on its
-                # commit signal (the compression boundary), with the store tail of this compress().
+            elif proof["stub_first"] or proof.get("cleanup_rewrite"):
+                # #1116, #1286: the host can still refuse or roll back the list, so the proof becomes durable only on
+                # its commit signal (the compression boundary), with the store tail of this compress().
                 proof["stub_first_last_store_id"] = self._commit_proof_last_store_id()
                 proof["stub_first_compress_call"] = self._compress_calls
             return result, fresh, None
@@ -1180,49 +1210,12 @@ class CompactionMixin:
         process re-index the host's post-compaction list without guessing.
 
         Written for a published LCM compaction, adopted native recovery, an
-        output that dropped ignored rows (#1013), or a stub-first list the host
-        committed (#1116: from the compression boundary, never from compress());
+        output that dropped ignored rows (#1013), or a stub-first (#1116) or cleanup-only
+        (#1286) list the host committed (from the compression boundary, never from compress());
         ``last_store_id`` marks where later rows begin (default: the store tail now).
         """
         try:
-            effective = [_commit_proof_identity_digest(identity) for identity in proof["output_effective"]]
-            full = [_commit_proof_identity_digest(identity) for identity in proof["output"]]
-            payload = {
-                "version": _COMPACTION_COMMIT_PROOF_WIRE_VERSION,
-                "descriptor_version": _COMPACTION_COMMIT_PROOF_VERSION,
-                # Scope: the Hermes home that wrote it (a configured shared
-                # database_path serves several homes) and its creation time,
-                # so a proof older than a lifecycle reset is ignored.
-                "hermes_home": str(self._hermes_home or ""),
-                "session_id": proof.get("session_id") or "",
-                "conversation_id": proof.get("conversation_id") or "",
-                "reset_epoch": proof.get("reset_epoch"),
-                "created_at": time.time(),
-                # effective_sha256/scaffold_sha256 are what v0.24.0 compares; the *_v4 twins are
-                # this reader's projection digests, swapped in for a bound record (#517).
-                "effective_sha256": proof.get("effective_sha256_v3", effective),
-                "effective_sha256_v4": effective,
-                "last_store_id": self._commit_proof_last_store_id() if last_store_id is None else int(last_store_id),
-                "native": bool(proof.get("native")),
-                "droppable": list(proof.get("droppable") or []),
-                "skip_landing": list(proof.get("skip_landing") or []),
-                "native_summary_index": proof.get("native_summary_index"),
-                "carry_ranges": [
-                    list(item)
-                    for item in self._coalesce_compression_carry_ranges(
-                        proof.get("carry_ranges") or []
-                    )
-                ],
-                "emissions": copy.deepcopy(proof.get("emissions") or []),
-            }
-            if proof.get("filtered_row_keys") is not None:
-                payload["filtered_row_keys"] = [list(key) for key in proof["filtered_row_keys"]]
-            if not payload["effective_sha256"]:
-                # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).
-                payload["scaffold_sha256"] = proof.get("output_sha256_v3", full)
-            if not effective:
-                payload["scaffold_sha256_v4"] = full
-            self._write_compress_commit_proof_payload(proof, payload)
+            self._write_compress_commit_proof_payload(proof, self._compress_commit_proof_payload(proof, last_store_id))
             self._compress_commit_reason, self._compress_commit_publication = "ready", "durable"
             if "durable" in proof:
                 proof["durable"] = True
@@ -1230,6 +1223,205 @@ class CompactionMixin:
             proof["durable"] = False
             self._compress_commit_reason, self._compress_commit_publication = "publication_failed", "local"
             logger.warning("LCM occurrence-proof publication failed; proof not durable", exc_info=True)
+
+    def _compress_commit_proof_payload(self, proof, last_store_id: Optional[int] = None) -> dict:
+        """The durable record of ``proof`` that _persist_compress_commit_proof writes."""
+        effective = [_commit_proof_identity_digest(identity) for identity in proof["output_effective"]]
+        full = [_commit_proof_identity_digest(identity) for identity in proof["output"]]
+        payload = {
+            "version": _COMPACTION_COMMIT_PROOF_WIRE_VERSION,
+            "descriptor_version": _COMPACTION_COMMIT_PROOF_VERSION,
+            # Scope: the Hermes home that wrote it (a configured shared
+            # database_path serves several homes) and its creation time,
+            # so a proof older than a lifecycle reset is ignored.
+            "hermes_home": str(self._hermes_home or ""),
+            "session_id": proof.get("session_id") or "",
+            "conversation_id": proof.get("conversation_id") or "",
+            "reset_epoch": proof.get("reset_epoch"),
+            "created_at": time.time(),
+            # effective_sha256/scaffold_sha256 are what v0.24.0 compares; the *_v4 twins are
+            # this reader's projection digests, swapped in for a bound record (#517).
+            "effective_sha256": proof.get("effective_sha256_v3", effective),
+            "effective_sha256_v4": effective,
+            "last_store_id": self._commit_proof_last_store_id() if last_store_id is None else int(last_store_id),
+            "native": bool(proof.get("native")),
+            "droppable": list(proof.get("droppable") or []),
+            "skip_landing": list(proof.get("skip_landing") or []),
+            "native_summary_index": proof.get("native_summary_index"),
+            "carry_ranges": [
+                list(item)
+                for item in self._coalesce_compression_carry_ranges(
+                    proof.get("carry_ranges") or []
+                )
+            ],
+            "emissions": copy.deepcopy(proof.get("emissions") or []),
+        }
+        if proof.get("filtered_row_keys") is not None:
+            payload["filtered_row_keys"] = [list(key) for key in proof["filtered_row_keys"]]
+        if not payload["effective_sha256"]:
+            # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).
+            payload["scaffold_sha256"] = proof.get("output_sha256_v3", full)
+        if not effective:
+            payload["scaffold_sha256_v4"] = full
+        return payload
+
+    def _rekey_durable_commit_proof(self, messages) -> None:
+        """#1286: re-key the bound durable proof to the host's list ``messages``, later rows from the store tail now.
+
+        Called after an ingest stored a row out of host order (a row the host changed or inserted before the proven
+        end goes to the store tail). When the old proof no longer proves the host list (its after-walk fails), a
+        restart would bind cold at cursor 0 and store the session again. A list it still proves (a #535 merge
+        behind the last output row, a carrier off its index) keeps it. The rows are stored first (I1): a failure
+        here keeps the old proof, which can duplicate but loses nothing; it is raised, so the caller's savepoint
+        rolls back a half-written proof and snapshot. Built as compress() would build it for this list returned
+        unchanged; nothing process-local changes.
+        """
+        previous = self._durable_commit_proof_payload()
+        if previous is None:
+            return
+        if self._cursor_from_durable_commit_proof(messages) == len(messages):
+            return
+        emission_binding = self._emission_binding()
+        emissions: list = []
+        self._carry_prior_emissions(messages, messages, emissions, emission_binding)
+        occurrences, _v4 = self._replay_occurrences(messages, {"version": 4, **emission_binding, "emissions": emissions})
+        store_ids = self._get_store_id_map_for_messages(messages, occurrences)
+        carried_rows = self._store.get_batch(sorted({store_ids[id(m)] for m in messages if id(m) in store_ids}))
+        output = [self._proof_replay_identity(m, strip_carrier=False) for m in messages]
+        for item in emissions:
+            item["output_multiplicity"] = output.count(output[item["output_occurrence"]["index"]])
+        proof = {
+            "version": _COMPACTION_COMMIT_PROOF_VERSION,
+            **emission_binding,
+            "session_id": self._session_id,
+            "conversation_id": self._conversation_id,
+            "input": output,
+            "output": output,
+            "end_consumed": False,
+            "carry_ranges": self._coalesce_compression_carry_ranges(
+                (str(row["session_id"]), store_id - 1, store_id)
+                for store_id, row in sorted(carried_rows.items())
+                if row.get("session_id")
+            ),
+            "emissions": emissions,
+            "native": False,
+        }
+        _projection, output_identities = self._occurrence_replay_identities(messages, {**proof, **emission_binding})
+        proof["output_effective"] = [
+            _proof_user_identity(identity) for identity in output_identities if identity is not None
+        ]
+        if any(_has_lossy_redacted_identity(identity) for identity in proof["output_effective"]):
+            return  # the reader proves nothing through such a row: the old proof stays
+        unstored = self._rekey_unstored_rows(messages, occurrences, output_identities, store_ids)
+        if unstored:
+            logger.info("LCM durable commit proof not re-keyed: %d host rows have no stored occurrence; the "
+                        "previous proof stays: session=%s", unstored, self._session_id)
+            return
+        self._keep_recovered_and_inherited_carry(proof, messages, store_ids, carried_rows, previous)
+        proof["output_sha256_v3"] = [_commit_proof_identity_digest(self._proof_replay_identity(m)) for m in messages]
+        proof["effective_sha256_v3"] = [
+            digest for m, digest in zip(messages, proof["output_sha256_v3"])
+            if not self._is_replayed_context_scaffold_message(m)
+        ]
+        self._prepare_compress_commit_proof(proof, messages)
+        self._write_compress_commit_proof_payload(proof, self._compress_commit_proof_payload(proof))
+        logger.info("LCM durable commit proof re-keyed after an out-of-order store: session=%s rows=%d",
+                    self._session_id, len(messages))
+
+    def _keep_recovered_and_inherited_carry(self, proof, messages, store_ids, carried_rows, previous) -> None:
+        """#1286: extend ``proof["carry_ranges"]`` (built from the in-order map's ``carried_rows``) with the rows the
+        coverage guard mapped again (``store_ids``, after ``_rekey_unstored_rows``) and ``previous``'s ranges for other
+        sessions. Shared by the re-key and a cleanup-only proof (round 7): a proof that proves those rows must carry
+        them, or a later compaction consumes their host rows without their store ids (I1, summary provenance)."""
+        recovered = {store_ids[id(m)] for m in messages if id(m) in store_ids} - carried_rows.keys()
+        # A compression child's inherited parent ranges stay above the compaction frontier: a parent row whose host
+        # row now maps to a copy in this session (or not at all) is still uncovered, and only a summary consumes it.
+        frontier = int(self._last_compacted_store_id or 0)
+        inherited = [(str(source), max(int(start), frontier), int(end))
+                     for source, start, end in (previous or {}).get("carry_ranges") or ()
+                     if str(source) != str(self._session_id)]
+        if recovered or inherited:  # recovered: rows the re-map found (the parent rows after the out-of-order one)
+            if recovered:
+                carried_rows.update(self._store.get_batch(sorted(recovered)))
+            proof["carry_ranges"] = self._coalesce_compression_carry_ranges([
+                *((str(row["session_id"]), store_id - 1, store_id)
+                  for store_id, row in sorted(carried_rows.items()) if row.get("session_id")),
+                *inherited,
+            ])
+
+    def _covers_the_session_after_the_frontier(self, messages, store_ids, identities) -> bool:
+        """#1286 (I1): whether a cleanup list covers this session's stored rows after the compaction frontier.
+
+        Every distinct replay identity among those rows (the reader's stored-row identity; rows the reader ignores,
+        ignore-pattern matches and LCM's own system and todo scaffolds, aside) needs an occurrence of the list: first
+        one the list mapped to a row with that identity (the in-order map admits a row's cleanup form, a stripped
+        reasoning block), then one left over whose effective output identity it is. Identities, not store ids: an old
+        writer's duplicate copies share one identity, and a full replay maps one copy of each. Round 7d: one occurrence
+        covers one identity (a greedy assignment: a list it refuses keeps its proof local, which only duplicates). A
+        session with no such row is covered.
+        """
+        need, by_store_id, after = set(), {}, int(self._last_compacted_store_id or 0)
+        while page := self._store.get_session_messages_after(self._session_id, after_store_id=after):
+            after = int(page[-1]["store_id"])
+            for row in page:
+                if self._matches_ignore_message_patterns(row, stored_row=True) or (
+                        self._is_replayed_context_scaffold_message(row)
+                        and (row.get("role") == "system" or self._is_preserved_todo_context_message(row))):
+                    continue
+                identity = _proof_user_identity(self._message_replay_identity(row, stored_row=True))
+                need.add(identity)
+                by_store_id[int(row["store_id"])] = identity
+        covered, unused = set(), []
+        for message, identity in zip(messages, identities):
+            row_identity = by_store_id.get(store_ids.get(id(message)))
+            if row_identity is not None and row_identity not in covered:
+                covered.add(row_identity)
+            else:
+                unused.append(identity)
+        for identity in unused:
+            identity = None if identity is None else _proof_user_identity(identity)
+            if identity in need:
+                covered.add(identity)
+        return need <= covered
+
+    def _rekey_unstored_rows(self, messages, occurrences, identities, store_ids) -> int:
+        """#1286 (I1): how many rows the re-key would prove that no stored row holds.
+
+        Ingest can leave a host row unstored: an unstamped reply the host replaced below the cursor stays a
+        positional replay. A proof of that row hides it from every later cold bind, where the old proof's broken
+        walk stores it (with duplicates), so such a list is never re-keyed. Rows ingest never stores on purpose
+        (LCM's own DAG-verified scaffolds and placeholders, ignore-pattern matches) are not counted; summary-shaped
+        text that is not verified is real content (#486). The in-order map leaves the rows after one stored out of
+        host order unmapped (the case the re-key exists for), so unmapped rows are mapped again on their own,
+        against the stored rows not yet claimed: each stored row is claimed once, and a repeated message cannot
+        take an earlier row's copy. The rows mapped again join ``store_ids``.
+        """
+        claimed = set(store_ids.values())
+        pending = []
+        for idx, (message, identity) in enumerate(zip(messages, identities)):
+            if identity is None or id(message) in store_ids:
+                continue
+            text = text_content_for_pattern_matching(message.get("content")) or ""
+            if not (self._is_verified_replay_scaffold_message(message)
+                    or self._matches_ignore_message_patterns(message)
+                    or self._is_ignored_active_replay_placeholder(message, text)
+                    or self._is_volatile_ignored_quarantine_placeholder(message, text)):
+                pending.append(idx)
+        for _attempt in range(3):
+            if not pending:
+                break
+            mapped = self._get_store_id_map_for_messages(
+                [messages[idx] for idx in pending],
+                None if occurrences is None else [occurrences[idx] for idx in pending],
+                exclude_store_ids=claimed,
+            )
+            found = {idx: mapped[id(messages[idx])] for idx in pending if id(messages[idx]) in mapped}
+            if not found:
+                break
+            claimed.update(found.values())
+            store_ids.update((id(messages[idx]), store_id) for idx, store_id in found.items())
+            pending = [idx for idx in pending if idx not in found]
+        return len(pending)
 
     def _prepare_compress_commit_proof(self, proof, result) -> None:
         """Attach engine-specific evidence before the proof's publication point."""

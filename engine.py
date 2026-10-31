@@ -4453,14 +4453,15 @@ class LCMEngine(
         proof = self._compress_commit_proof
         if (
             proof
-            and proof.get("stub_first")
+            and (proof.get("stub_first") or proof.get("cleanup_rewrite"))
             and proof.get("stub_first_compress_call") == self._compress_calls  # the call whose list was committed
             and proof.get("session_id") == session_id
             and proof.get("conversation_id") == self._conversation_id
             and not (proof.get("published") or proof.get("native") or proof.get("recovery") or proof.get("filtered"))
         ):
-            # #1116: Hermes fires this boundary only after it committed the compression, so the stub-first list
-            # compress() handed it is the host's now: its proof becomes durable, as the rotation re-key does.
+            # #1116, #1286: Hermes fires this boundary only after it committed the compression, so the stub-first
+            # or cleanup-only list compress() handed it is the host's now: its proof becomes durable, as the rotation
+            # re-key does.
             self._persist_compress_commit_proof(proof, last_store_id=proof.get("stub_first_last_store_id"))
             proof = self._compress_commit_proof
         cursor_proven = bool(
@@ -4836,7 +4837,8 @@ class LCMEngine(
                     )
             self._frontier_holder().transfer_to_child(commit_proof, "input", None)
             if (commit_proof.get("published") or commit_proof.get("native") or commit_proof.get("recovery")
-                    or commit_proof.get("filtered") or commit_proof.get("stub_first")):
+                    or commit_proof.get("filtered") or commit_proof.get("stub_first")
+                    or commit_proof.get("cleanup_rewrite")):
                 self._persist_compress_commit_proof(commit_proof)
             self._signal_emission_state("adopted", source_session_id)
         elif can_reassign:
@@ -7833,7 +7835,7 @@ class LCMEngine(
         """
         self._capture_host_rewrites(messages)
         n = len(messages)
-        cursor = min(max(self._ingest_cursor, 0), n)
+        cursor = entry_cursor = min(max(self._ingest_cursor, 0), n)
         new_prefix_occurrences = set()
         unchanged_prefix_occurrences = set()
         proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.
@@ -7952,31 +7954,17 @@ class LCMEngine(
         )
         reconciled_existing_session = self._ingest_cursor_needs_reconcile
         reconcile_messages = replay_messages
+        bind_session_counts: list = []
         if self._ingest_cursor_needs_reconcile:
-            reconcile_messages = [
-                original_msg
-                if (
-                    (
-                        str(original_msg.get("role") or "") == "tool"
-                        and _is_hermes_persisted_output_marker(
-                            normalize_content_value(original_msg.get("content")) or ""
-                        )
-                        and self._has_any_durable_persisted_output_payload_for_marker(original_msg)
-                    )
-                    or (
-                        self._compiled_ignore_message_patterns
-                        and ignored_original_messages[idx]
-                    )
-                )
-                else replay_msg
-                for idx, (original_msg, replay_msg) in enumerate(zip(messages, replay_messages))
-            ]
+            reconcile_messages = self._cold_reader_replay_messages(messages, replay_messages, ignored_original_messages)
             self._ingest_cursor = self._reconcile_ingest_cursor_from_store(
                 reconcile_messages,
                 allow_session_end_replay_proof=allow_session_end_replay_proof,
+                session_counts=bind_session_counts,
             )
             self._ingest_cursor_needs_reconcile = False
         cursor = min(max(self._ingest_cursor, 0), n)
+        durable = None
         if reconciled_existing_session:
             try:
                 durable = self._durable_commit_proof_payload()
@@ -8329,12 +8317,80 @@ class LCMEngine(
         # (maintainer #388 P1).
         self._ingest_cursor = n
         self._persist_ingest_replay_evidence(active_replay_messages)
+        # #1286: a row stored out of host order (one the host changed or inserted before the proven end goes to the
+        # store tail) breaks the durable proof's in-order after-walk at the next cold bind: re-key it, after the
+        # store (I1). Warm: below the entry cursor. Reconciled with a durable proof: below its cursor, or anywhere
+        # when it proved nothing after a persisted batch, or after any bind of a session that already held rows (an
+        # advanced cursor whose stores the anchor recognised): every later restart would otherwise repeat it. An
+        # empty rotation child's first bind keeps its own proof rules (#483, #519). Round 7 (I1): that branch only
+        # when the anchor recognised replayed rows: a bind that replays no stored row (a delta-only delivery) has no
+        # replayed list to bind, and a proof re-keyed to its delta would match an identical delta after a restart.
+        if not reconciled_existing_session:
+            proven_end = entry_cursor
+        elif durable is None:
+            proven_end = 0
+        elif proven_cursor is not None:
+            proven_end = proven_cursor
+        elif anchored_replay_indexes and (max(bind_session_counts, default=0) > 0
+                                          or self._last_ingest_reconciliation.get("action") == "persisted batch"):
+            proven_end = n
+        else:
+            proven_end = 0
+        if unaudited_from is None and any(store_id and idx < proven_end for (idx, _msg), store_id
+                                          in zip(messages_to_store_with_index, store_ids)):
+            try:
+                with self._ingest_evidence():
+                    # The list the next cold bind's reader compares with the proof, not the raw host rows (a
+                    # redacted or quarantined row is stored, and read, in its replay form).
+                    self._rekey_durable_commit_proof(
+                        reconcile_messages if reconciled_existing_session else self._warm_cold_reader_replay_messages(
+                            messages, fresh_replay_messages, ignored_original_messages, scan_start))
+            except Exception as exc:
+                self._raise_ingest_busy(exc)
+                logger.warning("LCM durable commit proof re-key failed (%s)", type(exc).__name__)
         logger.debug("Ingested %d messages into LCM store", len(messages_to_store_with_index))
         # Most ``protected_messages`` changes are storage-only: inline media and
         # data/base64 substrings stay provider-usable in active replay. The
         # exceptions are whole-message ``raw_payload`` externalization and the
         # separately opt-in textual tool-result interceptor above.
         return active_replay_messages, lambda: remember(active_replay_messages)
+
+    def _cold_reader_replay_messages(self, messages, replay_messages, ignored_original_messages):
+        """The list a cold bind reconciles against the store and the durable proof: the replay list, with the
+        host's own row back for an ignored row and for a tool row whose persisted-output marker has a durable
+        payload."""
+        return [
+            original_msg
+            if (
+                (
+                    str(original_msg.get("role") or "") == "tool"
+                    and _is_hermes_persisted_output_marker(
+                        normalize_content_value(original_msg.get("content")) or ""
+                    )
+                    and self._has_any_durable_persisted_output_payload_for_marker(original_msg)
+                )
+                or (
+                    self._compiled_ignore_message_patterns
+                    and ignored_original_messages[idx]
+                )
+            )
+            else replay_msg
+            for idx, (original_msg, replay_msg) in enumerate(zip(messages, replay_messages))
+        ]
+
+    def _warm_cold_reader_replay_messages(self, messages, replay_messages, ignored_original_messages, scan_start):
+        """#1286: the cold reader's list for a warm ingest's re-key. A warm ingest decides ignore patterns from
+        ``scan_start`` on; the rows below it are decided here as a cold bind decides them (pattern matches and
+        store reads only: nothing is externalized, quarantined or written)."""
+        ignored = list(ignored_original_messages)
+        if self._compiled_ignore_message_patterns and scan_start:
+            store_id_scope = self._compress_run.preserve_store_ids()
+            self._compress_run.store_ids_by_message_id = ignored_original_messages.store_ids
+            with store_id_scope:
+                for idx in range(scan_start):
+                    ignored[idx] = (self._matches_ignore_message_patterns(messages[idx])
+                                    or self._mapped_stored_row_matches_ignore_message_patterns(messages[idx]))
+        return self._cold_reader_replay_messages(messages, replay_messages, ignored)
 
     def _build_ingest_replay(
         self,
