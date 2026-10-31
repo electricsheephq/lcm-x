@@ -558,6 +558,9 @@ descriptor in this store and lineage gains one `generated_unproven` relation.
 Only entries successfully retried by this attempt are excluded; claims never
 hide pending entries.
 Classification and compress output remain unchanged; rows today's classifier
-skips get no relation. Ledger-off
-behavior is unchanged. The mark is process-local and lost on restart: the
-restart path is P1c-2b. There is no universal generated marker yet.
+skips get no relation, and neither do rows whose ingest skips its ledger write:
+a crossed classification (`ledger.skipped_crossed`), a fail-open rollback
+(`ledger.write_failed`), or a store that is not ready, read-only or has a
+changed salt. Ledger-off behavior is unchanged. The mark is process-local and
+lost on restart: the restart path is P1c-2b. There is no universal generated
+marker yet.
