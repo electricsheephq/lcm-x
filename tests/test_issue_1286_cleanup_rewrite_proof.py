@@ -290,6 +290,26 @@ def test_a_row_changed_among_the_warm_turns_is_not_stored_again_after_a_restart(
 
 
 @pytest.mark.parametrize("change", ["insert", "replace"])
+@pytest.mark.parametrize("variant", ["stub", "reasoning"])
+def test_a_repeated_reply_after_the_changed_row_still_re_keys(host, variant, change):
+    """The row right after the one stored out of order repeats an earlier warm reply ("OK"). Mapped again on its
+    own, it must take its own stored copy, not the earlier reply's (already claimed), or the re-key gives up and
+    the restart stores the session again."""
+    _turns(host, variant)
+    _commit_cleanup(host, variant)
+    host.turn(reply=f"OK{PAD}")
+    host.turn(reply=f"OK{PAD}")
+    host.turn()
+    changed = _change(host, change, insert_at=len(host.live) - 3, replace_at=len(host.live) - 4)
+    proof = host.engine._durable_commit_proof_payload()
+    host.turn()
+    assert host.count(changed) == 1
+    assert host.engine._durable_commit_proof_payload() != proof  # re-keyed
+    _restart_stores_only_the_next_turn(host)
+    assert host.count(changed) == 1
+
+
+@pytest.mark.parametrize("change", ["insert", "replace"])
 def test_a_row_changed_after_a_published_compaction_is_not_stored_again_after_a_restart(host, change, monkeypatch):
     """The whole field order: an earlier published compaction (its summary and carried rows head the list), the
     committed cleanup list, warm turns, then a row the host changes among them. The re-key proves that list too."""
@@ -321,8 +341,13 @@ def test_a_row_changed_inside_the_committed_list_is_not_stored_again_after_a_res
     assert host.count(changed) == 1
 
 
+@pytest.mark.parametrize("reply", [
+    f"a new reply to the resent turn{PAD}",
+    # Summary-shaped text that no DAG node verifies is real content (#486), not a scaffold.
+    f"as the summary said: [Recent Summary (d0, node 7)] the plan [Expand for details: lcm_expand 7]{PAD}",
+], ids=["plain", "quotes-summary"])
 @pytest.mark.parametrize("variant", ["stub", "reasoning"])
-def test_a_reply_the_warm_path_never_stored_is_not_proven_away(host, variant):
+def test_a_reply_the_warm_path_never_stored_is_not_proven_away(host, variant, reply):
     """I1: a retry or an edit-resend replaces the stamped user row and its unstamped reply between two ingests.
     The warm anchor stores the new user row out of host order but keeps the new reply as a positional replay, so
     it is never stored warm (a gap that predates the re-key). No proof may claim that reply: the restart stores it
@@ -331,7 +356,7 @@ def test_a_reply_the_warm_path_never_stored_is_not_proven_away(host, variant):
     _commit_cleanup(host, variant)
     host.turn()
     host.turn()
-    user, reply = f"[resent] the user resent this turn{PAD}", f"a new reply to the resent turn{PAD}"
+    user = f"[resent] the user resent this turn{PAD}"
     host.live[-2:] = [{"role": "user", "content": user, "timestamp": host.stamp()},
                       {"role": "assistant", "content": reply}]
     proof = host.engine._durable_commit_proof_payload()
