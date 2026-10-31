@@ -65,7 +65,7 @@ def test_run_candidate(tmp_path):
     env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"),
                GIT_CONFIG_NOSYSTEM="1", RUFF_ARGS=str(ruff_args),
                FIXTURE_SITE=str(site),
-               PYTHONPATH=os.pathsep.join([str(site), os.environ.get("PYTHONPATH", "")]),
+               PYTHONPATH=os.pathsep.join(filter(None, [str(site), os.environ.get("PYTHONPATH", "")])),
                PATH=os.pathsep.join([str(bin_dir), PATH]))
     env.pop("FIXTURE_UNSET", None)
 
@@ -115,6 +115,8 @@ def test_run_candidate(tmp_path):
     yaml_leak = make_patch("yaml-leak.patch")
     workflow.write_text(candidate_ci.replace("          python -m pytest", "          exit 5\n          python -m pytest"))
     yaml_empty = make_patch("yaml-empty.patch")
+    workflow.write_text(candidate_ci.replace("          python -m pytest", "          exit 1\n          python -m pytest"))
+    yaml_setup = make_patch("yaml-setup.patch")
     workflow.write_text(CI.replace("Test the upstream ruamel loader", "Missing loader"))
     no_yaml_step = make_patch("no-yaml-step.patch")
     # The runner sources the env file even when it expands an unset variable.
@@ -194,10 +196,14 @@ def test_run_candidate(tmp_path):
         ("yamlleak", yaml_leak, 2, "YAML_LEAKED"),
         ("yamlempty", yaml_empty, 2, "NO_TESTS_RAN: green-yaml"),
         ("yamlmissing", no_yaml_step, 2, "STEP_FAILED"),
+        ("yamlsetup", yaml_setup, 2, "YAML_STEP_SETUP_FAILED"),
     ):
         yaml_result = run(label, "--full", "--workers-full", "1", patch_file=yaml_patch)
         assert yaml_result.returncode == expected_code, yaml_result.stdout + yaml_result.stderr
-        assert reason in yaml_result.stderr
+        if reason:
+            assert reason in yaml_result.stderr
+        else:
+            assert "YAML_" not in yaml_result.stderr and "NO_TESTS_RAN" not in yaml_result.stderr
         yaml_phases = json.loads(next(root.glob(f"run-{label}-*/summary.json")).read_text())["phases"]
         if label == "yamlmissing":
             assert "green-yaml" not in yaml_phases

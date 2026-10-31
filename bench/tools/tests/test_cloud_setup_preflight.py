@@ -41,5 +41,5 @@ def test_missing_venv_support_stops_before_work(tmp_path):
         text=True, capture_output=True, timeout=30,
     )
     assert result.returncode == 1
-    assert f"cloud_setup: missing prerequisite: {python} venv/ensurepip" in result.stderr
+    assert result.stderr.splitlines() == [f"cloud_setup: missing prerequisite: {python} venv/ensurepip"]
     assert not (tmp_path / ".venv").exists()

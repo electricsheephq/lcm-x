@@ -22,14 +22,16 @@ the changed `.py` files, `green-focused`, `red-on-base`, and, with `--full`, CI'
 without `tests/test_embedding_privacy.py` (`green-full`) followed by that file alone
 (`green-privacy`), then CI's upstream ruamel loader step (`green-yaml`). The YAML step is read
 from the candidate's workflow and installs into the run's `yaml-site`, isolated from the shared
-venv. Each pytest phase gets an empty HOME in the run directory.
+venv. It passes `--basetemp` through `PYTEST_ADDOPTS`, which any pytest a test starts also
+inherits. Each pytest phase gets an empty HOME in the run directory.
 The runner prints each phase's exit and last lines and writes `summary.json` to the run
 directory; its commands use paths relative to that directory. Test failures are recorded: exit 0
 means every requested phase ran, and exit 2 reports a setup failure with its reason, such as
 `NO_ENV`, `NO_RUFF`, `APPLY_FAILED` or `NO_TEST_HUNKS`. An empty pytest phase is fatal with
 `NO_TESTS_RAN: <phase>`. `YAML_IN_VENV` means the shared interpreter already has a YAML
 library; rerun setup to remove it. `YAML_LEAKED` means a YAML library became importable by the
-shared interpreter after `green-yaml`; `STEP_FAILED` means the CI YAML step could not be read.
+shared interpreter after `green-yaml`; `STEP_FAILED` means the CI YAML step could not be read, and `YAML_STEP_SETUP_FAILED` means the
+step failed before pytest ran (for example its pip install).
 Nothing is deleted; the runner prints
 the `git worktree remove` commands for the worktrees it made.
 Red-on-base applies only `tests/` hunks, so a test that needs a new non-test file errors on base.

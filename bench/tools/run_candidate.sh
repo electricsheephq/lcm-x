@@ -50,17 +50,23 @@ if [ "$stub" = 1 ] || [ "$full" = 1 ]; then
   . "$helper" || fail STUB_FAILED
 fi
 yaml_absent() {
-  python - <<'PY'
+  # Run from the green worktree, so sys.path starts where the pytest phases' does.
+  (cd "$green" && python - <<'PY'
 import importlib.util
 import sys
 
 for name in ("yaml", "ruamel.yaml"):
     try:
         if importlib.util.find_spec(name) is not None:
+            print(f"importable: {name}", file=sys.stderr)
             sys.exit(1)
     except ImportError:
         pass
+    except Exception as exc:  # a broken module still counts as present
+        print(f"importable: {name} ({type(exc).__name__})", file=sys.stderr)
+        sys.exit(1)
 PY
+  )
 }
 # Print the prune command for each worktree this run made, after a failure as well.
 prune=''
@@ -169,6 +175,9 @@ yaml_phase() {
   record green-yaml "$cmd" "$code" || fail SUMMARY_FAILED
   yaml_absent || fail YAML_LEAKED
   case "$code" in 5) fail 'NO_TESTS_RAN: green-yaml';; 4|126|127) fail PYTEST_SETUP_FAILED;; esac
+  # No pytest summary means the step failed before pytest ran (for example its pip install).
+  grep -qE '[0-9]+ (passed|failed|errors?|skipped|xfailed|xpassed|deselected)|no tests ran' "$run/green-yaml.log" \
+    || fail YAML_STEP_SETUP_FAILED
 }
 prepare "$green" green
 changed=()

@@ -14,6 +14,8 @@
 # Then run the printed commands; they start by sourcing the environment file, which
 # non-interactive shells (agents, ssh) do not read from ~/.bashrc.
 set -euo pipefail
+# Resolve a relative PYTHON once, before any cd, so every check uses the same interpreter.
+case "${PYTHON:-}" in */*) PYTHON="$(cd "$(dirname "$PYTHON")" 2>/dev/null && pwd)/$(basename "$PYTHON")";; esac
 missing=0
 for tool in git curl unzip gcc sha256sum node; do
   if ! command -v "$tool" > /dev/null 2>&1; then
