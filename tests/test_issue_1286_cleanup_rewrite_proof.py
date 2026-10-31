@@ -76,13 +76,18 @@ class Host:
                       {"role": "assistant", "content": reply or f"reply to T{i}{PAD}"}]
         self.engine.ingest(self.live)
 
-    def cleanup_pass(self):
-        """The engine-driven preflight below the threshold (deferred maintenance under critical pressure, or an
-        oversized payload to stub): the automatic compress() is cleanup-only. Returns (result, the input)."""
+    def cleanup_pass(self, preflight):
+        """The engine-driven automatic compress() below the threshold, which is cleanup-only. Returns (result, the
+        input). ``preflight`` asks through the host's preflight (deferred maintenance under critical pressure).
+        Otherwise the engine's own request marker stands in: below the threshold the preflight defers a size-only
+        replay diff (the stub swap alone), so it asks for this pass only alongside another reason."""
         rough = count_messages_tokens(self.live)
         self.engine.threshold_tokens = 10 * rough
-        self.engine.context_length = int(rough * 1.6)  # pressure ~0.62 >= 0.5, below the threshold
-        assert self.engine.should_compress_preflight(self.live) is True
+        if preflight:
+            self.engine.context_length = int(rough * 1.6)  # pressure ~0.62 >= 0.5, below the threshold
+            assert self.engine.should_compress_preflight(self.live) is True
+        else:
+            assert self.engine._mark_below_threshold_maintenance() is True
         before = deepcopy(self.live)
         result = self.engine.compress(self.live, current_tokens=rough)
         assert self.engine._last_compression_status == "sanitized"
@@ -133,7 +138,7 @@ def _turns(host, variant):
 @pytest.mark.parametrize("variant", ["stub", "reasoning"])
 def test_committed_cleanup_rewrite_survives_a_restart(host, variant):
     _turns(host, variant)
-    result, before = host.cleanup_pass()
+    result, before = host.cleanup_pass(preflight=variant == "reasoning")
     if variant == "stub":
         assert any(str(m.get("content")).startswith("[Externalized payload: kind=raw_payload;") for m in result)
     else:
@@ -155,7 +160,7 @@ def test_committed_cleanup_rewrite_survives_a_restart(host, variant):
 @pytest.mark.parametrize("variant", ["stub", "reasoning"])
 def test_cleanup_rewrite_the_host_never_commits_stays_local(host, variant):
     _turns(host, variant)
-    result, before = host.cleanup_pass()
+    result, before = host.cleanup_pass(preflight=variant == "reasoning")
     assert host.engine._compress_commit_proof and host.engine._compress_commit_proof.get("cleanup_rewrite")
     assert host.engine._durable_commit_proof_payload() is None  # durable only on the commit signal
     rows = host.stored()
