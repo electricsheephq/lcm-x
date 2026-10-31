@@ -335,6 +335,44 @@ def test_a_row_changed_after_a_published_compaction_is_not_stored_again_after_a_
 
 
 @pytest.mark.parametrize("change", ["insert", "replace"])
+@pytest.mark.parametrize("variant", ["stub", "reasoning"])
+def test_the_first_cold_bind_after_an_upgrade_re_keys_an_old_writers_stale_proof(
+        host, variant, change, monkeypatch, caplog):
+    """The upgrade path (P-S2): an old writer ran the whole field order, published no cleanup-only proof and had no
+    re-key, so the published compaction's proof is stale at shutdown. The first cold bind after the install advances
+    its cursor past the scaffold prefix and stores the rows again; it must re-key the proof whatever the
+    reconciliation action, or every later restart stores them again."""
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _stub_summarizer)
+    _turns(host, None)
+    host.compact()
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", lambda *a, **k: pytest.fail("summariser called"))
+    with monkeypatch.context() as old_writer:
+        prepare = LCMEngine._prepare_compress_commit_proof
+
+        def without_cleanup_proof(self, proof, result):
+            proof.pop("cleanup_rewrite", None)  # the old writer never marks a cleanup-only proof for the boundary
+            return prepare(self, proof, result)
+
+        old_writer.setattr(LCMEngine, "_prepare_compress_commit_proof", without_cleanup_proof)
+        old_writer.setattr(LCMEngine, "_rekey_durable_commit_proof", lambda self, messages: None, raising=False)
+        _turns(host, variant)
+        _commit_cleanup(host, variant)
+        host.turn()
+        host.turn()
+        changed = _change(host, change, insert_at=len(host.live) - 3, replace_at=len(host.live) - 4)
+        host.turn()
+        assert host.count(changed) == 1
+        host.engine.shutdown()
+    caplog.set_level(logging.INFO, logger="hermes_lcm.compaction")
+    caplog.clear()
+    host.restart()
+    host.turn()
+    assert host.engine._last_ingest_reconciliation.get("action") == "advanced cursor"
+    assert "LCM durable commit proof re-keyed after an out-of-order store" in caplog.text
+    _restart_stores_only_the_next_turn(host)
+
+
+@pytest.mark.parametrize("change", ["insert", "replace"])
 def test_a_row_changed_inside_the_committed_list_is_not_stored_again_after_a_restart(host, change):
     """The first ingest after the commit no longer finds the committed list as the cursor's prefix and persists
     the batch (#259); the restart after it must not persist it again."""
