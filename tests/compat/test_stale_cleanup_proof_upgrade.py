@@ -114,11 +114,19 @@ def test_stale_cleanup_proof_upgrade(tmp_path, old_tree, host_root, variant, cha
             if not kept:
                 preservation_errors.append(f"{side} restart {restart}: pre-restart-1 rows missing or reordered")
             counts = Counter(after)
+            added = counts - Counter(before)
             turns = Counter(row for n in range(1, restart + 1) for row in _turn_rows(n))
-            for row in turns:
-                if counts[row] != 1:
+            # This restart's own turn is stored exactly once; an earlier restart's turn only has to be present
+            # (a repeat of it at this restart is a duplicate, counted in dupN, not a preservation error).
+            for row in _turn_rows(restart):
+                if counts[row] != 1 or added[row] != 1:
                     preservation_errors.append(
                         f"{side} restart {restart}: new-turn row {_identity_hash(row)} stored {counts[row]} times")
+            for earlier in range(1, restart):
+                for row in _turn_rows(earlier):
+                    if counts[row] < 1:
+                        preservation_errors.append(
+                            f"{side} restart {restart}: restart {earlier}'s turn row {_identity_hash(row)} missing")
             receipts.append({"restart": restart, "rows_before": len(before), "rows_after": len(after),
                              "added_count": sum((counts - Counter(before)).values()),
                              "duplicate_count": sum(dup.values()), "duplicates": _hashed_counts(dup),
