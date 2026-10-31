@@ -1,6 +1,5 @@
 # ruff: noqa: F811
 """Diagnostic records observe the existing end/proof decisions without authority."""
-import copy
 import logging
 import sqlite3
 
@@ -97,7 +96,7 @@ def test_writer_reasons(published, monkeypatch, reason):
     elif reason == "cursor_mismatch":
         engine._ingest_cursor = -1
     elif reason == "identity_noop":
-        host = copy.deepcopy(output)
+        host = output  # #1286: only the host's own list back is a no-op; an equal copy is a rewrite it commits
     elif reason == "construction_error":
         monkeypatch.setattr(engine, "_emission_binding", lambda: 1 / 0)
     engine._record_compress_commit_proof(host, output)

@@ -1050,7 +1050,9 @@ class CompactionMixin:
             }
             for item in emissions:  # multiplicity witness for carried-forward proofs, which omit "output"
                 item["output_multiplicity"] = proof["output"].count(proof["output"][item["output_occurrence"]["index"]])
-            if proof["output"] == proof["input"]:
+            # #1286: a new list with the same replay identities (an externalized stub swapped in)
+            # still differs in public bytes, so Hermes commits it; only the host's own list is a no-op.
+            if proof["output"] == proof["input"] and result is messages:
                 self._compress_commit_reason = "identity_noop"
                 # No-progress compress: Hermes has nothing to commit, and an
                 # end call with this list must stay a real session end.
@@ -1074,6 +1076,9 @@ class CompactionMixin:
             # #671: a stub-first exit hands the host a rewritten list (summary prefix re-emitted from the DAG, stubs);
             # once the host commits it, the durable proof must describe that list, or a cold rebind reads a stale one.
             proof["stub_first"] = bool(getattr(self, "_stub_first_exit_now", None))
+            # #1286: a cleanup-only pass (sanitized: replay stubs, stripped reasoning) hands the host a rewritten list
+            # too; a restart after the host commits it must not leave the cold rebind a stale proof.
+            proof["cleanup_rewrite"] = self._last_compression_status == "sanitized" and result is not messages
             # #1013: an output that dropped ignored rows with no leaf is still a rewrite the host
             # adopts; a cold rebind needs this proof to tell its replay from a new turn. Same text is
             # not identity (a gateway may send only a new turn), so the proof binds each row's host key
@@ -1096,9 +1101,9 @@ class CompactionMixin:
                 self._identity_anchor_record_recovery(result, emissions)
             if proof["published"] or proof["native"] or proof["recovery"] or proof["filtered"]:
                 self._persist_compress_commit_proof(proof)
-            elif proof["stub_first"]:
-                # #1116: the host can still refuse or roll back the list, so the proof becomes durable only on its
-                # commit signal (the compression boundary), with the store tail of this compress().
+            elif proof["stub_first"] or proof["cleanup_rewrite"]:
+                # #1116, #1286: the host can still refuse or roll back the list, so the proof becomes durable only on
+                # its commit signal (the compression boundary), with the store tail of this compress().
                 proof["stub_first_last_store_id"] = self._commit_proof_last_store_id()
                 proof["stub_first_compress_call"] = self._compress_calls
             return result, fresh, None
@@ -1180,8 +1185,8 @@ class CompactionMixin:
         process re-index the host's post-compaction list without guessing.
 
         Written for a published LCM compaction, adopted native recovery, an
-        output that dropped ignored rows (#1013), or a stub-first list the host
-        committed (#1116: from the compression boundary, never from compress());
+        output that dropped ignored rows (#1013), or a stub-first (#1116) or cleanup-only
+        (#1286) list the host committed (from the compression boundary, never from compress());
         ``last_store_id`` marks where later rows begin (default: the store tail now).
         """
         try:
