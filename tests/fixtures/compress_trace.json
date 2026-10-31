@@ -14157,6 +14157,7 @@
 "sql BEGIN IMMEDIATE",
 "sql #1 sha12/len=8f4593e2ff18/159",
 "sql COMMIT",
+"log hermes_lcm.compaction INFO \"LCM durable commit proof not re-keyed: %d host rows have no stored occurrence; the previous proof stays: session=%s\"",
 "log hermes_lcm.engine DEBUG \"Ingested %d messages into LCM store\"",
 "log hermes_lcm.store_complete INFO \"LCM store-complete leaf: frontier=%d last=%d rows=%d host_rows=%d/%d hidden=%d excluded=%d copies=%d cut=%s\"",
 "log hermes_lcm.engine INFO \"LCM leaf summary input: input_tokens=%d source_tokens=%d messages=%d\"",
