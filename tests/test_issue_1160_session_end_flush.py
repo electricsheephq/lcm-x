@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 import hermes_lcm.engine as engine_module
+import hermes_lcm.maintenance_scheduler as maintenance_scheduler
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
@@ -58,7 +59,7 @@ def test_locked_flush_reports_pending_count_without_content(engines, monkeypatch
     """Warn only after shutdown's bounded retry still cannot store the tail."""
     engine = engines()
     messages = _locked_flush(engine, caplog)
-    monkeypatch.setattr(engine_module, "_SESSION_END_SHUTDOWN_TIMEOUT_MS", 20)
+    monkeypatch.setattr(maintenance_scheduler, "_SESSION_END_SHUTDOWN_TIMEOUT_MS", 20)
     caplog.clear()  # Assert the shutdown diagnostic, not the end notice.
     locker = sqlite3.connect(str(engine._store.db_path), isolation_level=None)
     locker.execute("BEGIN IMMEDIATE")

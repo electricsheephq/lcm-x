@@ -344,9 +344,10 @@ def test_home_resolver_outside_out_blocks_before_engine_construction(tmp_path):
     assert "engine must not be constructed" not in receipt
 
 
+@pytest.mark.parametrize("layout", ["engine", "maintenance_scheduler"])
 @pytest.mark.parametrize("drained", [True, False])
 def test_run_quiesces_maintenance_inside_synthetic_home_before_cleanup(
-    tmp_path, monkeypatch, drained
+    tmp_path, monkeypatch, drained, layout
 ):
     phase_a = _runner_module()
     worktree = Path(__file__).resolve().parents[1]
@@ -360,16 +361,19 @@ def test_run_quiesces_maintenance_inside_synthetic_home_before_cleanup(
         calls.append(name)
         return drained
 
-    engine = SimpleNamespace(**{
+    schedulers = SimpleNamespace(**{
         name: SimpleNamespace(quiesce=lambda timeout, name=name: quiesce(name, timeout))
         for name in ("_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER")
     })
+    # Older product trees keep the schedulers in engine; moved trees in maintenance_scheduler.
+    modules = ({"engine": schedulers} if layout == "engine"
+               else {"engine": SimpleNamespace(), "maintenance_scheduler": schedulers})
 
     def load(*args, **kwargs):
         def cleanup():
             assert Path(os.environ["HERMES_HOME"]).is_relative_to(out)
             calls.append("cleanup")
-        return {"engine": engine}, "fake-host", None, cleanup
+        return modules, "fake-host", None, cleanup
 
     monkeypatch.setattr(phase_a, "_load", load)
     monkeypatch.setattr(phase_a.importlib, "import_module", lambda _name: SimpleNamespace(

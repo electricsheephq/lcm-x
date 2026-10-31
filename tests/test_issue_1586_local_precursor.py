@@ -11,6 +11,7 @@ import pytest
 
 from hermes_lcm import command, embedding_maintenance as maintenance
 from hermes_lcm import embedding_provider as providers, engine as engines, tools
+from hermes_lcm import maintenance_scheduler
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.dag import SummaryNode
@@ -44,7 +45,7 @@ def test_explicit_off_identity(make_engine, monkeypatch):
     engine = make_engine(embeddings_enabled=False)
     calls = []
     monkeypatch.setattr(providers, "_load_fastembed", lambda: calls.append("model"))
-    monkeypatch.setattr(engines._EMBEDDING_MAINTENANCE_SCHEDULER, "schedule",
+    monkeypatch.setattr(maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER, "schedule",
                         lambda *_a, **_k: calls.append("enqueue"))
     before = tools._embedding_provider_health_check(engine)
     assert before == {"check": "embedding_provider_health", "status": "pass",
@@ -76,8 +77,8 @@ def test_profile_capture_completion_and_retirement(make_engine, monkeypatch, ret
     profile = contextvars.ContextVar("scheduling-profile", default="unbound")
     entered, release = threading.Event(), threading.Event()
     prepared, passes, enqueued = [], [], []
-    scheduler = engines._RollupMaintenanceScheduler(kind="incremental embedding")
-    monkeypatch.setattr(engines, "_EMBEDDING_MAINTENANCE_SCHEDULER", scheduler)
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(kind="incremental embedding")
+    monkeypatch.setattr(maintenance_scheduler, "_EMBEDDING_MAINTENANCE_SCHEDULER", scheduler)
     original_schedule = scheduler.schedule
 
     def schedule(key, job, **kwargs):
@@ -382,7 +383,7 @@ def test_retire_snapshots_owner_before_concurrent_rearm(make_engine, monkeypatch
     engine = make_engine("race")
     old_owner = engine._embedding_maintenance_owner
     retired = []
-    monkeypatch.setattr(engines._EMBEDDING_MAINTENANCE_SCHEDULER, "retire_owner",
+    monkeypatch.setattr(maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER, "retire_owner",
                         lambda owner, timeout=0: retired.append(owner))
     real_lock = engine._embedding_maintenance_lock
 

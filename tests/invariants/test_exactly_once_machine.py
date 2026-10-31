@@ -30,7 +30,7 @@ pytest.importorskip("hypothesis")
 from hypothesis import Phase, settings, strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 
-from hermes_lcm import engine as engine_module
+from hermes_lcm import maintenance_scheduler
 from hermes_lcm import escalation, tokens
 from tests.conftest import _MAINTENANCE_SCHEDULERS, _wait_scheduler_idle
 from hermes_lcm.config import LCMConfig
@@ -268,7 +268,7 @@ class ExactlyOnceMachine(RuleBasedStateMachine):
             # Product-default maintenance is asynchronous; keep the temporary
             # store and fakes alive until the existing test drain says idle.
             for name in _MAINTENANCE_SCHEDULERS:
-                scheduler = getattr(engine_module, name, None)
+                scheduler = getattr(maintenance_scheduler, name, None)
                 if scheduler is not None:
                     assert _wait_scheduler_idle(scheduler, 30.0), name
         finally:

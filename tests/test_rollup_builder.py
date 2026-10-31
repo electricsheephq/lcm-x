@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 import hermes_lcm.engine as engine_module
+import hermes_lcm.maintenance_scheduler as maintenance_scheduler
 import hermes_lcm.rollup_builder as builder_module
 import hermes_lcm.rollup_periods as periods_module
 from tests.timing_helpers import returns_while_blocked
@@ -612,7 +613,7 @@ def test_rollup_background_maintenance_deduplicates_rapid_scope_binds(
 
 
 def test_rollup_background_scheduler_bounds_distinct_pending_scopes():
-    scheduler = engine_module._RollupMaintenanceScheduler(max_pending_jobs=2)
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(max_pending_jobs=2)
     first_started = threading.Event()
     release_first = threading.Event()
     completed: list[str] = []
@@ -662,7 +663,7 @@ def test_rollup_background_scheduler_bounds_distinct_pending_scopes():
 
 
 def test_rollup_scheduler_reserves_active_follow_up_when_queue_is_full():
-    scheduler = engine_module._RollupMaintenanceScheduler(max_pending_jobs=1)
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(max_pending_jobs=1)
     first_started = threading.Event()
     release_first = threading.Event()
     completed: list[str] = []
@@ -695,7 +696,7 @@ def test_rollup_scheduler_reserves_active_follow_up_when_queue_is_full():
 
 
 def test_rollup_scheduler_follow_up_slot_is_single_and_queue_fair():
-    scheduler = engine_module._RollupMaintenanceScheduler(max_pending_jobs=1)
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(max_pending_jobs=1)
     a1_started = threading.Event()
     release_a1 = threading.Event()
     a2_started = threading.Event()
@@ -765,7 +766,7 @@ def test_rollup_scheduler_follow_up_slot_is_single_and_queue_fair():
 
 
 def test_rollup_scheduler_releases_completed_owner_keys():
-    scheduler = engine_module._RollupMaintenanceScheduler(max_pending_jobs=2)
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(max_pending_jobs=2)
     owner = object()
     completed: list[int] = []
 
@@ -784,7 +785,7 @@ def test_rollup_scheduler_releases_completed_owner_keys():
 
 
 def test_rollup_scheduler_runs_same_key_after_cancelled_job():
-    scheduler = engine_module._RollupMaintenanceScheduler(max_pending_jobs=1)
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(max_pending_jobs=1)
     key = ("db", "cancelled")
     first_started = threading.Event()
     second_ran = threading.Event()
@@ -803,7 +804,7 @@ def test_rollup_scheduler_runs_same_key_after_cancelled_job():
 
 
 def test_rollup_scheduler_operator_exclusion_is_bounded_and_defers_maintenance():
-    scheduler = engine_module._RollupMaintenanceScheduler(max_pending_jobs=1)
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(max_pending_jobs=1)
     operator_key = ("db", "operator")
     completed: list[str] = []
 
