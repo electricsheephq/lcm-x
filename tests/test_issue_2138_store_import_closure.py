@@ -16,7 +16,7 @@ def _module_file(name):
     parts = name.split(".")[1:]
     if not parts or not all(part.isidentifier() for part in parts):
         return None
-    for path in (ROOT.joinpath(*parts).with_suffix(".py"), ROOT.joinpath(*parts, "__init__.py")):
+    for path in (ROOT.joinpath(*parts, "__init__.py"), ROOT.joinpath(*parts).with_suffix(".py")):
         if path.is_file():
             return path
     return None
@@ -49,9 +49,11 @@ def _targets(path):
                     and isinstance(arg.value, str):
                 if not arg.value.startswith("."):
                     yield arg.value
-                elif len(node.args) > 1 and isinstance(node.args[1], ast.Constant) \
-                        and isinstance(node.args[1].value, str):
-                    yield resolve_name(arg.value, node.args[1].value)
+                else:
+                    package_arg = node.args[1] if len(node.args) > 1 else next(
+                        (k.value for k in node.keywords if k.arg == "package"), None)
+                    if isinstance(package_arg, ast.Constant) and isinstance(package_arg.value, str):
+                        yield resolve_name(arg.value, package_arg.value)
 
 
 def _imported_files(target):
