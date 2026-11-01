@@ -29,5 +29,11 @@ def test_claude_code_unit_smoke_at_head(tmp_path, runtime):
     assert summary["runtime"] == runtime
     assert summary["core_commit"] and summary["unit"]
     assert all(step["outcome"] == "pass" for step in summary["steps"])
-    assert {"drain", "tools/list", "lcm_grep", "lcm_expand", "MCP exit"} <= {
+    assert {"hook worker capture", "tools/list", "lcm_grep", "lcm_expand", "MCP exit"} <= {
         step["step"] for step in summary["steps"]}
+    for field in ("hook_wall_ms", "hook_in_process_ms"):
+        assert set(summary[field]) == {"SessionStart", "UserPromptSubmit", "PostToolBatch", "Stop"}
+        for event, stats in summary[field].items():
+            assert stats["n"] == (20 if event == "PostToolBatch" else 1)
+            assert 0 <= stats["p50"] <= stats["p95"] <= stats["max"]
+    assert summary["hook_wall_ms"]["PostToolBatch"]["n"] == 20

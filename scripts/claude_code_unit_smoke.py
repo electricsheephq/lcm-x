@@ -11,6 +11,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import selectors
 import shutil
@@ -30,6 +31,17 @@ TOOLS = {"lcm_recall", "lcm_grep", "lcm_expand", "lcm_load_session", "lcm_descri
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
+
+
+def timings(samples: dict[str, list[float]]) -> dict[str, dict]:
+    """Nearest-rank percentiles of the unrounded samples, reported in milliseconds."""
+    result = {}
+    for event, values in samples.items():
+        ordered = sorted(values)
+        result[event] = {"n": len(ordered), "p50": round(ordered[math.ceil(len(ordered) * 0.50) - 1], 1),
+                         "p95": round(ordered[math.ceil(len(ordered) * 0.95) - 1], 1),
+                         "max": round(ordered[-1], 1)}
+    return result
 
 
 def environment(home: Path, runtime: str) -> dict[str, str]:
@@ -55,9 +67,12 @@ class Smoke:
         self.runtime_mode = runtime
         self.env = environment(home, runtime)
         self.runtime_command: list[str] = []
+        self.found_name = f"python3.{sys.version_info.minor}"
+        self.hook_events: list[str] = []
         self.deadline = time.monotonic() + 50
         self.summary = {"pass": False, "ref": ref, "runtime": runtime,
-                        "core_commit": None, "unit": None, "steps": []}
+                        "core_commit": None, "unit": None, "steps": [],
+                        "hook_wall_ms": {}, "hook_in_process_ms": {}}
         self.current = "setup"
         self.stderr = ""
 
@@ -114,6 +129,10 @@ class Smoke:
                 "bundle does not name the requested commit")
         manifest = json.loads((plugin / ".claude-plugin/plugin.json").read_text())
         require(bundle["unit"] == manifest["version"], "bundle unit differs from plugin version")
+        core_version = next(line.split(":", 1)[1].strip()
+                            for line in (plugin / "lcm-x/plugin.yaml").read_text().splitlines()
+                            if line.startswith("version:"))
+        require(bundle["core_version"] == core_version, "bundle core version differs from plugin.yaml")
         self.summary["unit"] = bundle["unit"]
         self.env["CLAUDE_PLUGIN_ROOT"] = str(plugin)
         return plugin
@@ -125,9 +144,10 @@ class Smoke:
         else:
             require(not (self.home / "venv").exists() and "LCMX_PYTHON" not in self.env,
                     "found runtime must have no venv or LCMX_PYTHON")
-            self.runtime_command = [str(self.home / "bin/python3.11"), "-I", "-S"]
+            self.runtime_command = [str(self.home / "bin" / self.found_name), "-I", "-S"]
             self.run([*self.runtime_command, "-c",
-                      "import sys; assert sys.version_info >= (3, 11) and sys.flags.isolated and sys.flags.no_site"])
+                      f"import sys; assert sys.version_info[:2] == {sys.version_info[:2]!r}; "
+                      "assert sys.version_info >= (3, 11) and sys.flags.isolated and sys.flags.no_site"])
         self.run([*self.runtime_command, "-c",
                   "import importlib.util; "
                   "assert all(importlib.util.find_spec(n) is None for n in ('agent', 'fastembed', 'pip'))"])
@@ -150,14 +170,42 @@ class Smoke:
         return {"session_id": session, "transcript_path": str(path), "cwd": str(self.home)}
 
     def hooks(self, plugin: Path, payload: dict) -> None:
-        for event in ("SessionStart", "UserPromptSubmit", "PostToolBatch", "Stop"):
+        wall: dict[str, list[float]] = {}
+        for event, count in (("SessionStart", 1), ("UserPromptSubmit", 1), ("PostToolBatch", 20), ("Stop", 1)):
             with self.step(event):
+                registered = json.loads((plugin / "hooks/hooks.json").read_text())["hooks"].get(event, [])
+                hooks = [hook for group in registered for hook in group["hooks"]]
+                require(len(hooks) == 1 and hooks[0].get("type") == "command",
+                        f"{event} must register exactly one command hook")
+                hook = hooks[0]
+                require(isinstance(hook.get("timeout"), (int, float)) and hook["timeout"] > 0,
+                        f"{event} must register a positive timeout")
                 body = {**payload, "hook_event_name": event}
                 if event == "SessionStart":
                     body["source"] = "startup"
-                done = self.run([sys.executable, str(plugin / "bin/lcmx_hook.py")],
-                                payload=json.dumps(body), timeout=5)
-                require(not done.stdout and not done.stderr, "hook printed output")
+                raw = json.dumps(body)
+                wall[event] = []
+                for _ in range(count):
+                    started = time.monotonic()
+                    done = self.run(["/bin/sh", "-c", hook["command"]], payload=raw, timeout=hook["timeout"])
+                    wall[event].append((time.monotonic() - started) * 1000)
+                    self.hook_events.append(event)
+                    require(not done.stdout and not done.stderr, "hook printed output")
+        self.summary["hook_wall_ms"] = timings(wall)
+
+    def hook_records(self) -> None:
+        records = [json.loads(line) for line in (self.home / "store/logs/hook.log").read_text().splitlines()]
+        require(len(records) == len(self.hook_events), "hook log must contain one record per hook run")
+        measured: dict[str, list[float]] = {}
+        for event, record in zip(self.hook_events, records):
+            require(record.get("event") == event and record.get("host") == "claude-code",
+                    "hook log event or host differs from the fired hook")
+            outcome = record.get("outcome")
+            require(outcome in {"worker_started", "worker_running"}, f"{event}: {outcome}")
+            require(isinstance(record.get("ms"), (int, float)) and math.isfinite(record["ms"])
+                    and record["ms"] >= 0, f"{event}: invalid in-process timing")
+            measured.setdefault(event, []).append(record["ms"])
+        self.summary["hook_in_process_ms"] = timings(measured)
 
     def wait_worker(self, timeout: float = 5) -> None:
         lock = self.home / "store/capture.lock"
@@ -176,16 +224,26 @@ class Smoke:
                     fcntl.flock(handle, fcntl.LOCK_UN)
                     return
 
-    def drain(self, plugin: Path) -> None:
-        for _ in range(3):
-            done = self.run([*self.runtime_command, str(plugin / "lcm-x/scripts/lcm_x_capture.py"),
-                             "worker", "--home", self.env["LCMX_CC_HOME"], "--deadline", "20"],
-                            timeout=22, accepted=(0, 3))
-            if done.returncode == 0:
-                self.wait_worker(self.remaining(5))
-                return
-            time.sleep(min(0.1, self.remaining(0.1)))
-        raise RuntimeError("worker remained incomplete after three drains")
+    def wait_capture(self) -> None:
+        # Fail with the hook's own token before waiting on records it could not drain.
+        self.hook_records()
+        spool = self.home / "store/spool"
+        end = time.monotonic() + self.remaining(30)
+        while True:
+            require(not any(spool.glob("*.failed")), "hook-started worker left a failed spool record")
+            if not any(spool.glob("*.json")) and not any(spool.glob("*.claimed")):
+                try:
+                    self.wait_worker(0)
+                except TimeoutError:
+                    pass
+                else:
+                    # A worker may release its lock and rescan; check pending work again.
+                    if not any(spool.glob("*.json")) and not any(spool.glob("*.claimed")):
+                        require(not any(spool.glob("*.failed")), "hook-started worker left a failed spool record")
+                        self.hook_records()
+                        return
+            require(time.monotonic() < end, "hook-started worker did not drain before the capture deadline")
+            time.sleep(min(0.05, self.remaining(0.05)))
 
     def recall(self, plugin: Path, marker: str) -> None:
         server = json.loads((plugin / ".mcp.json").read_text())["mcpServers"]["lcm-x"]
@@ -287,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
             (home / "tmp").mkdir()
             if args.runtime == "found":
                 (home / "bin").mkdir()
-                (home / "bin/python3.11").symlink_to(sys.executable)
+                (home / "bin" / smoke.found_name).symlink_to(sys.executable)
         with smoke.step("build and unpack"):
             plugin = smoke.build()
         with smoke.step("fresh runtime"):
@@ -296,8 +354,8 @@ def main(argv: list[str] | None = None) -> int:
             marker = "lcmx-smoke-" + uuid.uuid4().hex
             payload = smoke.transcript(marker)
         smoke.hooks(plugin, payload)
-        with smoke.step("drain"):
-            smoke.drain(plugin)
+        with smoke.step("hook worker capture"):
+            smoke.wait_capture()
         smoke.recall(plugin, marker)
         require(not Path(smoke.env["HERMES_HOME"]).exists(), "smoke created a Hermes home")
         smoke.summary["pass"] = True
