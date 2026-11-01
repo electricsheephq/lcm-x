@@ -893,6 +893,35 @@ def test_t10_store_offline_then_recovers(fx, monkeypatch):
         writer.close()
 
 
+def test_t10_header_flip_to_rollback_journal_during_reread_opens(fx, monkeypatch):
+    """REGRESSION: a WAL header without sidecars that a writer's exit flips to rollback journal
+    before the re-read opens normally; the reader creates no file."""
+    _, readonly_store = _reader_modules()
+    reader = make_reader(fx, monkeypatch)
+    ok, is_error, _ = call(reader, "lcm_grep", {"query": "heron"})
+    assert not is_error
+    stop_agents()
+    for suffix in ("-wal", "-shm"):
+        Path(f"{fx.db}{suffix}").unlink(missing_ok=True)
+    with open(fx.db, "r+b") as handle:
+        handle.seek(18)
+        assert max(handle.read(2)) >= 2  # a WAL header with both sidecars gone
+    flips = []
+
+    def writer_exits_to_rollback_journal() -> None:
+        with open(fx.db, "r+b") as handle:
+            handle.seek(18)
+            handle.write(bytes((1, 1)))
+        flips.append(True)
+
+    monkeypatch.setattr(readonly_store, "_pause_before_header_reread", writer_exits_to_rollback_journal)
+    listing = sorted(os.listdir(fx.home))
+    back, is_error, _ = call(reader, "lcm_grep", {"query": "heron"})
+    assert not is_error and back["total_results"] == ok["total_results"]
+    assert flips == [True]
+    assert sorted(os.listdir(fx.home)) == listing
+
+
 # -- T11: store_uuid ---------------------------------------------------------------
 
 def _metadata_uuid(db: Path) -> str | None:

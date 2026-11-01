@@ -21,6 +21,7 @@ import hashlib
 import os
 import sqlite3
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -86,8 +87,23 @@ def wal_sidecars_missing(db_path: str | Path) -> bool:
     return not (Path(f"{path}-wal").exists() and Path(f"{path}-shm").exists())
 
 
-_OFFLINE_MESSAGE = ("store_offline: the store's -wal/-shm files are absent (Hermes is stopped); "
-                    "start Hermes and retry")
+_OFFLINE_MESSAGE = ("store_offline: the store's -wal/-shm files are absent (its writer is not running); "
+                    "retry once the writer has written to it")
+# A writer may leave WAL at exit and rewrite the header to rollback journal while we
+# look, so a WAL header without sidecars is read once more after this pause.
+_HEADER_REREAD_DELAY_S = 0.05
+
+
+def _pause_before_header_reread() -> None:
+    time.sleep(_HEADER_REREAD_DELAY_S)
+
+
+def _store_offline(db_path: str | Path) -> bool:
+    """``wal_sidecars_missing``, confirmed by one header re-read after a short pause."""
+    if not wal_sidecars_missing(db_path):
+        return False
+    _pause_before_header_reread()
+    return wal_sidecars_missing(db_path)
 
 
 def open_readonly_connection(
@@ -95,11 +111,12 @@ def open_readonly_connection(
 ) -> sqlite3.Connection:
     """Open ``file:<abs>?mode=ro`` in autocommit; raise StoreOfflineError for a stopped WAL store.
 
-    The sidecar check runs BEFORE the open, so the reader never creates -wal/-shm. A writer
+    The sidecar check runs BEFORE the open, so the reader never creates -wal/-shm; a WAL
+    header without sidecars is re-read once before refusing (``_store_offline``). A writer
     that stops between the check and the open is a residual race (see the operator guide).
     The open is forced with one schema read so a failure surfaces here, not inside a tool.
     """
-    if wal_sidecars_missing(db_path):
+    if _store_offline(db_path):
         raise StoreOfflineError(_OFFLINE_MESSAGE)
     conn = sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True, timeout=timeout,
                            isolation_level=None, check_same_thread=False)
@@ -158,7 +175,7 @@ def check_schema(conn: sqlite3.Connection) -> int:
     if version < MIN_SCHEMA_VERSION:
         raise SchemaRefusedError(
             f"schema_refused: LCM database schema version {version} is older than the "
-            f"supported minimum v{MIN_SCHEMA_VERSION}; let Hermes open (migrate) it first"
+            f"supported minimum v{MIN_SCHEMA_VERSION}; let its writer open (migrate) it first"
         )
     health = inspect_lcm_schema_health(conn)
     if health.get("error"):
