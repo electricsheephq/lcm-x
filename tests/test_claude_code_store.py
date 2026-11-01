@@ -1200,7 +1200,7 @@ def test_core_never_imports_the_adapter():
     assert named == []
 
 
-def test_a_bounded_drain_never_waits_for_the_lock_and_the_holder_captures_everything(tmp_path, home, hermes):
+def test_a_bounded_drain_never_waits_for_the_lock_and_the_next_worker_captures_everything(tmp_path, home, hermes):
     """REGRESSION: a bounded (PreCompact) run waited up to its deadline for a lock another worker
     held; now it returns at once, drains nothing, and the next worker captures every line."""
     _record(_hook(), home, _transcript(tmp_path, CONVERSATION))
@@ -1303,5 +1303,62 @@ def test_a_drain_killed_at_its_timeout_keeps_whole_batches_and_its_record(tmp_pa
         positions = [row[0] for row in store.connection.execute(
             "SELECT position FROM capture_events WHERE source_kind = 'line' ORDER BY position")]
         assert positions == list(range(9)) and len(_rows(store)) == 9 and not cc.pending(home)
+    finally:
+        store.close()
+
+
+def test_a_saved_output_ingest_externalizes_in_part_is_kept_not_held(tmp_path, home, hermes):
+    """REGRESSION: below the whole-output threshold, ingest protection externalizes a long base64
+    run inside a saved output on its own, so the tool row holds a placeholder where the run was;
+    the file was held anyway and kept no bytes. Now a file is held only when a row, as stored,
+    holds its exact text, and this one keeps its bytes."""
+    import base64
+    import random
+    folder = tmp_path / "projects" / "-work" / "s1" / "tool-results"
+    folder.mkdir(parents=True)
+    saved = folder / "toolu_1.txt"
+    blob = base64.b64encode(random.Random(0).randbytes(5000)).decode()
+    saved.write_text("image follows\n" + blob + "\nend of output\n", encoding="utf-8")
+    marker = (f"<persisted-output>\nOutput too large (7KB). Full output saved to: {saved}\n\n"
+              "Preview (first 2KB):\nimage follows\n</persisted-output>")
+    path = _transcript(tmp_path, [_entry("user", "r1", [
+        {"type": "tool_result", "tool_use_id": "toolu_1", "content": marker}])])
+    lineage = cc.Lineage("s1", None, path)
+    store = _open(home, hermes)
+    try:
+        cc.drain(store, lineage)
+        [(_, _, content, _)] = _rows(store)
+        assert "[Externalized LCM ingest payload" in content and "end of output" in content
+        assert cc.capture_files(store, lineage) == 1
+        rows = store.connection.execute("SELECT disposition, raw FROM capture_events WHERE source_kind = 'file' "
+                                        "ORDER BY position").fetchall()
+        assert [row[0] for row in rows] == ["kept"]
+        assert b"".join(zlib.decompress(row[1]) for row in rows) == saved.read_bytes()
+        assert cc.capture_files(store, lineage) == 0
+    finally:
+        store.close()
+
+
+def test_a_sweep_cut_by_its_deadline_keeps_the_claimed_record(tmp_path, home, hermes, monkeypatch):
+    """REGRESSION: a drained record was removed before the sweep that captures its saved outputs,
+    so a deadline or a kill during the sweep left no record; now the record stays claimed until
+    the sweep has run, and the next worker captures the file."""
+    folder = tmp_path / "projects" / "-work" / "s1" / "tool-results"
+    folder.mkdir(parents=True)
+    (folder / "shot.png").write_bytes(b"\x89PNG not text")
+    _record(_hook(), home, _transcript(tmp_path, CONVERSATION))
+    real = cc.capture_files
+    monkeypatch.setattr(cc, "capture_files", lambda store, lineage, deadline=None: None)  # its deadline came first
+    report = cc.run_worker(home, deadline_s=30, hermes_home=hermes, settle_s=0)
+    assert not report["complete"] and report["records"] == 1 and cc.pending(home)
+    assert [path.suffix for path in (home / "spool").iterdir() if not path.name.startswith(".")] == [".claimed"]
+    monkeypatch.setattr(cc, "capture_files", real)
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"] and not cc.pending(home)
+    store = _open(home, hermes)
+    try:
+        assert store.connection.execute("SELECT uid, disposition FROM capture_events WHERE source_kind = 'file'"
+                                        ).fetchall() == [("tool-results/shot.png", "kept")]
+        assert store.connection.execute("SELECT COUNT(*) FROM capture_events WHERE source_kind = 'line'"
+                                        ).fetchone()[0] == len(CONVERSATION)
     finally:
         store.close()

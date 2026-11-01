@@ -41,7 +41,7 @@ from .dag import SummaryDAG
 from .db_bootstrap import mark_migration_step_complete
 from .config import embedding_provider_id
 from .embedding_maintenance import run_incremental_embedding_pass
-from .ingest_protection import redact_sensitive_value
+from .externalize import extract_externalized_refs, load_externalized_payload
 from .store import MessageStore, register_session_purge
 
 OWNER_FILE = "capture-owner.json"
@@ -619,7 +619,6 @@ def _write_events(store: MessageStore, lineage: Lineage, generation: int, events
     now = time.time()
     shared: dict[str, int] = {}
     results = results_dir(session_dir(lineage.path)) if any(event["files"] for event in events) else None
-    config = store._ingest_protection_config  # what append_batch redacted the rows with
     for event in events:
         line: _Line = event["line"]
         digest = _digest(line.raw)
@@ -642,7 +641,7 @@ def _write_events(store: MessageStore, lineage: Lineage, generation: int, events
         if line.entry_class == SHARED_RAW and raw is not None and cursor.lastrowid:
             shared[digest] = int(cursor.lastrowid)
         for name in event["files"]:
-            row = _held_file_row(lineage, results, name, store_ids, now, config)
+            row = _held_file_row(store, lineage, results, name, store_ids, now)
             if row is not None:
                 conn.execute(INSERT_EVENT, row)
 
@@ -652,11 +651,11 @@ def _fingerprint(path: Path) -> str:
     return json.dumps({"size": status.st_size, "mtime_ns": status.st_mtime_ns}, sort_keys=True)
 
 
-def _held_file_row(lineage: Lineage, results: Optional[Path], name: str, store_ids: Optional[list[int]],
-                   now: float, config: Any) -> Optional[tuple]:
-    """A ``tool-results`` file whose full text a tool row holds: digest and row ids, no bytes.
-    None when ingest protection redacts that text: the row holds less than the file, so the
-    sweep keeps the file's bytes."""
+def _held_file_row(store: MessageStore, lineage: Lineage, results: Optional[Path], name: str,
+                   store_ids: Optional[list[int]], now: float) -> Optional[tuple]:
+    """A ``tool-results`` file whose exact text a tool row holds, as stored: digest and row ids,
+    no bytes. None when no row holds it whole (ingest protection redacted it or externalized only
+    parts of it, or the file changed after its line was read): the sweep keeps the file's bytes."""
     if results is None:
         return None
     try:
@@ -665,11 +664,31 @@ def _held_file_row(lineage: Lineage, results: Optional[Path], name: str, store_i
         text = data.decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return None
-    if redact_sensitive_value(text, config, parse_json_strings=False) != text:
+    if not _rows_hold(store, lineage.rows_session, store_ids or [], text):
         return None
     digest = _digest(data)
     return (lineage.rows_session, lineage.key, "file", 0, 0, "tool-results/" + name, None, "tool_results_file",
             digest, digest, "held", json.dumps(store_ids or []), fingerprint, None, None, PROJECTION_VERSION, now)
+
+
+def _rows_hold(store: MessageStore, session: str, store_ids: list[int], text: str) -> bool:
+    """Whether one of these rows, as stored, holds ``text`` exactly: inline, or as the whole
+    content of an externalized payload it references."""
+    for store_id in store_ids:
+        row = store.connection.execute("SELECT content FROM messages WHERE session_id = ? AND store_id = ?",
+                                       (session, store_id)).fetchone()
+        content = row[0] if row else None
+        if content == text:
+            return True
+        for ref in extract_externalized_refs(content) if isinstance(content, str) else ():
+            try:
+                payload = load_externalized_payload(ref, config=store._ingest_protection_config,
+                                                    hermes_home=store._hermes_home)
+            except (OSError, ValueError):
+                payload = None
+            if payload and payload.get("content") == text:
+                return True
+    return False
 
 
 class _KnownBytes(Exception):
@@ -903,7 +922,8 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
                 hermes_home: Optional[Path], embedding_state: dict) -> str:
     """``done``, ``refused`` or ``deadline``. A record whose drain raises is set aside as
     ``.failed`` (the next hook of that session spools a fresh one), so one bad transcript
-    cannot stall the others or loop the worker."""
+    cannot stall the others or loop the worker. A drained record is removed only after the
+    sweep, which captures its saved outputs: a deadline or a kill before then leaves it claimed."""
     try:
         database = admit(home, hermes_home=hermes_home)
     except AdmissionError as refused:
@@ -913,6 +933,7 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
     try:
         before = store.connection.execute("SELECT MAX(store_id) FROM messages").fetchone()[0]
         claimed = claim_records(home)
+        done: list[Path] = []  # removed only once the sweep below has run: a cut sweep keeps them
         for _path, record in claimed:  # before any drain, so a fork's first rows already know it is one
             remember_session(store, record)
         for path, record in claimed:
@@ -932,7 +953,7 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
                 _log_failure(home, "record", error)
                 os.replace(path, path.with_suffix(".failed"))
                 continue
-            path.unlink()
+            done.append(path)
         seen: set[str] = set()
         for lineage in registered(store):
             for each in (lineage, *_subagents(lineage)):
@@ -953,6 +974,8 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
                     report["failed"] += 1
                     report["complete"] = False
                     _log_failure(home, "sweep", error)
+        for path in done:
+            path.unlink(missing_ok=True)
         token, vectors = _embed_after_drain(home, database, store, config, deadline, before, embedding_state)
         report["embedding"] = token
         report["vectors"] += vectors
