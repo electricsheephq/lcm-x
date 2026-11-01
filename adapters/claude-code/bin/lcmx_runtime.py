@@ -53,17 +53,17 @@ def runtime_python(environ: Mapping[str, str], home: Path) -> Optional[Path]:
 
 
 def found_python(environ: Mapping[str, str]) -> Optional[Path]:
-    """A Python 3.11+ on the hook's ``PATH``: a versioned name, or ``python3`` when it is the
-    3.11+ interpreter running this hook. Only that ``PATH`` is searched, never another one."""
+    """A Python 3.11+ on the hook's ``PATH``: ``python3`` when it is the 3.11+ interpreter running
+    this hook, else a versioned name, newest first. Only that ``PATH`` is searched, never another one."""
     search = environ.get("PATH", "")
+    own = shutil.which("python3", path=search)
+    if own and sys.version_info >= (3, 11) and sys.executable and (
+            os.path.realpath(own) == os.path.realpath(sys.executable)):
+        return Path(own)
     for name in VERSIONED_PYTHONS:
         found = shutil.which(name, path=search)
         if found:
             return Path(found)
-    found = shutil.which("python3", path=search)
-    if found and sys.version_info >= (3, 11) and sys.executable and (
-            os.path.realpath(found) == os.path.realpath(sys.executable)):
-        return Path(found)
     return None
 
 

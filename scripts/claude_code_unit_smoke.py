@@ -32,26 +32,32 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-def environment(home: Path) -> dict[str, str]:
+def environment(home: Path, runtime: str) -> dict[str, str]:
     """An allowlist, including bootstrap children: never inherit host configuration."""
-    return {
-        "PATH": os.pathsep.join((str(Path(sys.executable).parent), os.defpath)),
+    env = {
+        "PATH": os.pathsep.join((str(home / "bin") if runtime == "found"
+                                 else str(Path(sys.executable).parent), os.defpath)),
         "HOME": str(home / "user"),
         "HERMES_HOME": str(home / "user/.hermes"),
         "CLAUDE_CONFIG_DIR": str(home / "user/.claude"),
         "LCMX_CC_HOME": str(home / "store"),
-        "LCMX_PYTHON": str(home / "venv/bin/python"),
         "CLAUDE_PLUGIN_ROOT": str(home / "unpacked"),
         "TMPDIR": str(home / "tmp"),
     }
+    if runtime == "venv":
+        env["LCMX_PYTHON"] = str(home / "venv/bin/python")
+    return env
 
 
 class Smoke:
-    def __init__(self, home: Path, ref: str) -> None:
+    def __init__(self, home: Path, ref: str, runtime: str) -> None:
         self.home, self.ref = home, ref
-        self.env = environment(home)
+        self.runtime_mode = runtime
+        self.env = environment(home, runtime)
+        self.runtime_command: list[str] = []
         self.deadline = time.monotonic() + 50
-        self.summary = {"pass": False, "ref": ref, "core_commit": None, "unit": None, "steps": []}
+        self.summary = {"pass": False, "ref": ref, "runtime": runtime,
+                        "core_commit": None, "unit": None, "steps": []}
         self.current = "setup"
         self.stderr = ""
 
@@ -113,8 +119,16 @@ class Smoke:
         return plugin
 
     def runtime(self) -> None:
-        self.run([sys.executable, "-m", "venv", "--without-pip", str(self.home / "venv")])
-        self.run([self.env["LCMX_PYTHON"], "-c",
+        if self.runtime_mode == "venv":
+            self.run([sys.executable, "-m", "venv", "--without-pip", str(self.home / "venv")])
+            self.runtime_command = [self.env["LCMX_PYTHON"]]
+        else:
+            require(not (self.home / "venv").exists() and "LCMX_PYTHON" not in self.env,
+                    "found runtime must have no venv or LCMX_PYTHON")
+            self.runtime_command = [str(self.home / "bin/python3.11"), "-I", "-S"]
+            self.run([*self.runtime_command, "-c",
+                      "import sys; assert sys.version_info >= (3, 11) and sys.flags.isolated and sys.flags.no_site"])
+        self.run([*self.runtime_command, "-c",
                   "import importlib.util; "
                   "assert all(importlib.util.find_spec(n) is None for n in ('agent', 'fastembed', 'pip'))"])
         require(not Path(self.env["HERMES_HOME"]).exists(), "Hermes home must remain absent")
@@ -164,7 +178,7 @@ class Smoke:
 
     def drain(self, plugin: Path) -> None:
         for _ in range(3):
-            done = self.run([self.env["LCMX_PYTHON"], str(plugin / "lcm-x/scripts/lcm_x_capture.py"),
+            done = self.run([*self.runtime_command, str(plugin / "lcm-x/scripts/lcm_x_capture.py"),
                              "worker", "--home", self.env["LCMX_CC_HOME"], "--deadline", "20"],
                             timeout=22, accepted=(0, 3))
             if done.returncode == 0:
@@ -262,14 +276,18 @@ class Smoke:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--ref", default="HEAD")
+    parser.add_argument("--runtime", choices=("venv", "found"), default="venv")
     parser.add_argument("--keep", action="store_true", help="keep the fresh temporary directory")
     args = parser.parse_args(argv)
     home = Path(tempfile.mkdtemp(prefix="smoke-"))
-    smoke = Smoke(home, args.ref)
+    smoke = Smoke(home, args.ref, args.runtime)
     try:
         with smoke.step("setup"):
             (home / "user").mkdir()
             (home / "tmp").mkdir()
+            if args.runtime == "found":
+                (home / "bin").mkdir()
+                (home / "bin/python3.11").symlink_to(sys.executable)
         with smoke.step("build and unpack"):
             plugin = smoke.build()
         with smoke.step("fresh runtime"):

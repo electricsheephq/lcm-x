@@ -366,6 +366,8 @@ def test_a_python_on_the_hooks_path_runs_with_the_standard_library_only(hook, en
     own.parent.mkdir()
     own.symlink_to(sys.executable)
     assert runtime.runtime_command({**env, "PATH": str(own.parent)}, home) == [str(own), "-I", "-S"]
+    _executable(own.parent / "python3.12")  # the hook's own python3 comes before a versioned name
+    assert runtime.runtime_command({**env, "PATH": str(own.parent)}, home) == [str(own), "-I", "-S"]
 
 
 def test_the_worker_and_the_reader_start_isolated_on_a_found_python(hook, env, tmp_path, monkeypatch):

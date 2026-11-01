@@ -312,12 +312,17 @@ hook entry handles:
   server need Python 3.11 or newer with LCM-X's dependencies: `LCMX_PYTHON`, else a venv in the
   plugin's data directory (`CLAUDE_PLUGIN_DATA`, which survives plugin updates and is removed on
   uninstall), else `<home>/venv`.
-  - Otherwise the plugin uses a Python 3.11+ on the hook's `PATH`: a versioned `python3.1x`, or
-    `python3` when it is the hook's own 3.11+ interpreter.
-  - That interpreter runs with `-I -S`, so only the standard library loads and nothing installed
-    in it, Hermes included, can change core. Core needs nothing else; FastEmbed needs a venv.
-  - Without any of these, hooks record `runtime_missing`, and the server's error names the one
-    setup step: install Python 3.11+, or run `uv venv --python 3.11 <home>/venv`.
+  - **Zero steps** when a Python 3.11+ exists. Without `LCMX_PYTHON` or a venv, the plugin finds
+    one on the hook's `PATH`: the hook's own `python3` if it is 3.11+, else `python3.14` down to
+    `python3.11`.
+    - It always runs that interpreter with `-I -S`, so only the standard library loads, and
+      nothing installed in it, Hermes included, can change core.
+    - Core needs nothing else; FastEmbed needs a venv.
+    - The CLI smoke runs the release asset exactly this way, in a fresh environment.
+  - **One step** otherwise: install Python 3.11+, or run `uv venv --python 3.11 <home>/venv`.
+    - Until then, hooks record `runtime_missing`, and the server's error names that step.
+    - The plugin never provisions an interpreter itself: that would download one without
+      consent.
 - Hooks print nothing: on `SessionStart` and `UserPromptSubmit` stdout would enter Claude's
   context. The worker is started fully detached with its output discarded, so a `-p` session's
   teardown cannot kill it.
@@ -436,6 +441,20 @@ digest; sessions with local GC on listed; fork copies counted in their own colum
 duplicates or surplus, with `fork_parent_unknown`; spool records set aside as `.failed`. Also
 measured: hook wall time (target p95 at most 50 ms on `PostToolBatch`), lag from transcript line to
 committed row, and store growth (the growth gate above).
+
+**Each run's record**, which is also evidence for #2141:
+- the backend;
+- the audit's `ok` and `verified`, and every failure counter;
+- the hook latency per event: n, p50, p95 and max, with `PostToolBatch` p95 at most 50 ms;
+- the lag and the growth.
+
+**Install records**, one per supported platform (macOS and Linux):
+- **Setup:** only the documented install steps, on a fresh machine. On macOS this may be a clean
+  account environment, named as such in the record.
+- **Recorded:** whether capture writes rows or records `runtime_missing`, and how many manual steps
+  it took.
+- **Without Claude Code:** the CLI smoke (`scripts/claude_code_unit_smoke.py`) runs the same path
+  in both runtime modes, a fresh venv and a found Python.
 
 ## Evidence
 
