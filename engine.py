@@ -5269,7 +5269,8 @@ class LCMEngine(
         self._log_session_filter_diagnostics()
         if ingest_ledger_mode() == "shadow":
             try:
-                if self._store.ingest_ledger_state() != "ready":
+                if (self._store.ingest_ledger_state() != "ready"
+                        or not self._store.emission_provenance_floor_recorded()):
                     self._store.ensure_ingest_ledger()
                 self._store._ingest_ledger_cached_salt = self._store.ingest_ledger_salt()
             except Exception as exc:
@@ -7480,29 +7481,20 @@ class LCMEngine(
         finally:
             self._last_emission_write_ms = {"digest": (_perf_counter() - started) * 1000, "ledger": 0.0}
         started = _perf_counter()
-        superseded = []
+        seq = None
         try:
-            # Supersede older pending entries before COMMIT: a retry through any store on this database reads the
-            # mark only inside its own write transaction. A write that does not commit restores it, still under
-            # this store's write lock, so this store's retries never see a mark without the write.
-            with self._store._write_lock:
-                try:
-                    with self._emission_owner(salt) as (conn, reason):
-                        if conn is None:
-                            if reason == "in_transaction":
-                                self._mark_pending_emission(store_key, lineage, payload)
-                            return
-                        persisted = conn.execute("SELECT value FROM ledger_meta WHERE key=?", (key,)).fetchone()
-                        lineage = persisted[0] if persisted else lineage
-                        seq = ingest_ledger.next_view_seq(conn)
-                        ids = ingest_ledger.insert_emissions(conn, lineage, seq, rows)
-                        for i, emission_id in zip(indices, ids):
-                            entries[i] = entries[i]._replace(ref=emission_id, is_descriptor=True)
-                        ingest_ledger.write_view(conn, salt, lineage, "emission", "proposed", entries, view_seq=seq)
-                        superseded = ingest_ledger.note_emission_written(store_key, lineage)
-                except BaseException:
-                    ingest_ledger.restore_superseded(superseded)
-                    raise
+            with self._emission_owner(salt) as (conn, reason):
+                if conn is None:
+                    if reason == "in_transaction":
+                        self._mark_pending_emission(store_key, lineage, payload)
+                    return
+                persisted = conn.execute("SELECT value FROM ledger_meta WHERE key=?", (key,)).fetchone()
+                lineage = persisted[0] if persisted else lineage
+                seq = ingest_ledger.next_view_seq(conn)
+                ids = ingest_ledger.insert_emissions(conn, lineage, seq, rows)
+                for i, emission_id in zip(indices, ids):
+                    entries[i] = entries[i]._replace(ref=emission_id, is_descriptor=True)
+                ingest_ledger.write_view(conn, salt, lineage, "emission", "proposed", entries, view_seq=seq)
             self._ledger_count("ledger.emissions_written", amount=len(ids))
             self._ledger_count("ledger.emission_views_written")
             self._emission_handle = ingest_ledger.EmissionHandle(lineage, seq, self._compress_calls, sid, conversation_key)
@@ -7510,6 +7502,29 @@ class LCMEngine(
             self._mark_pending_emission(store_key, lineage, payload)
             self._ledger_count("ledger.emission_busy" if _is_ingest_busy_error(exc) else "ledger.emission_write_failed",
                                exc, subject="compress output")
+        except BaseException:
+            # The owner has finished, but teardown can interrupt after COMMIT.
+            # A rolled-back sequence can be reused: require this write's descriptors too.
+            def readback_matches():
+                conn = self._store._conn
+                return conn.execute(
+                    "SELECT 1 FROM ingest_views WHERE lineage=? AND view_seq=? AND kind='emission'",
+                    (lineage, seq)).fetchone() is not None and conn.execute(
+                    "SELECT output_index,descriptor_digest FROM ledger_emissions "
+                    "WHERE lineage=? AND view_seq=? ORDER BY output_index", (lineage, seq)).fetchall() == [
+                        (row["output_index"], row["descriptor_digest"]) for row in rows]
+
+            committed = False
+            if seq is not None:
+                try:
+                    with self._store._write_lock:
+                        if not self._store._conn.in_transaction:
+                            committed = readback_matches()
+                except BaseException:
+                    pass  # Unknown commit state registers conservatively.
+            if not committed:
+                self._mark_pending_emission(store_key, lineage, payload)
+            raise
         finally:
             self._last_emission_write_ms["ledger"] = (_perf_counter() - started) * 1000
             logger.debug("LCM emission write ledger_digest_ms=%.3f ledger_ms=%.3f",
@@ -7533,7 +7548,6 @@ class LCMEngine(
             claimed, dropped = ingest_ledger.claim_pending_emissions((store.db_identity, salt), token)
             if dropped:
                 self._ledger_count("ledger.emission_unproven_salt_changed", amount=dropped)
-            handles = []
             for entry in claimed:
                 try:
                     with _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
@@ -7541,18 +7555,12 @@ class LCMEngine(
                             ("session_lineage:" + str(entry["session_id"]),)).fetchone()
                         lineage = persisted[0] if persisted else entry["lineage"]
                         seq = ingest_ledger.next_view_seq(conn)
-                        ids = ingest_ledger.insert_emissions(conn, lineage, seq, entry["rows"])
-                        entries = list(entry["entries"])
-                        for i, emission_id in zip(entry["indices"], ids):
-                            entries[i] = entries[i]._replace(ref=emission_id, is_descriptor=True)
-                        if not entry["superseded"]:
-                            ingest_ledger.write_view(conn, salt, lineage, "emission", "proposed", entries, view_seq=seq)
-                        signal = ingest_ledger.pending_emission_signal(entry)
-                        if signal is not None:
-                            ingest_ledger.set_emission_state(conn, lineage, seq, signal)
+                        ingest_ledger.insert_emissions(conn, lineage, seq, entry["rows"])
+                        conn.execute("INSERT INTO ledger_meta(key,value) VALUES (?,?) "
+                                     "ON CONFLICT(key) DO UPDATE SET value=CAST("
+                                     "max(CAST(ledger_meta.value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)",
+                                     ("emission_recovered:" + lineage, str(seq)))
                     succeeded.append(entry)
-                    handles.append((ingest_ledger.EmissionHandle(lineage, seq, entry["compress_call"],
-                                                                entry["session_id"], entry["conversation_key"]), signal))
                 except Exception as exc:
                     if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction:
                         raise
@@ -7560,18 +7568,9 @@ class LCMEngine(
                     self._ledger_count("ledger.emission_retry_failed", exc)
 
             def publish():
-                for entry, (handle, applied_signal) in zip(succeeded, handles):
+                for _entry in succeeded:
                     self._ledger_count("ledger.emission_retry_ok")
-                    signal = ingest_ledger.pending_emission_signal(entry)
-                    if signal != applied_signal:
-                        self._ledger_count("ledger.emission_signal_late")
-                    if entry["superseded"]:
-                        self._ledger_count("ledger.emission_retry_superseded")
-                    if (entry["origin"]() is self and self._compress_calls == entry["compress_call"]
-                            and not entry["superseded"] and signal != "refused"):
-                        self._emission_handle = handle
-                    else:
-                        self._ledger_count("ledger.emission_retry_unhandled")
+                    self._ledger_count("ledger.emission_recovered_provenance_only")
             after_commit.append(publish)
         except Exception as exc:
             if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction:
@@ -7586,10 +7585,6 @@ class LCMEngine(
             handle = self._emission_handle
             if (handle is None or handle.compress_call != self._compress_calls or handle.session_id != session_id
                     or require_conversation and handle.conversation_key != self._hold_conversation_key()):
-                if ingest_ledger.record_pending_signal(self._store.db_identity, self, self._compress_calls,
-                        session_id, self._hold_conversation_key(), new_state, require_conversation):
-                    self._ledger_count("ledger.emission_signal_deferred")
-                    return
                 self._ledger_count("ledger.emission_signal_unmatched")
                 return
             salt = self._store.ingest_ledger_salt()
