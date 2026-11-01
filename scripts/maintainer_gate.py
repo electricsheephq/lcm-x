@@ -87,6 +87,7 @@ NON_TURN_PATH_FILES = {
     "assertion_state.py",  # Default-off assertion query state.
     "assertion_store.py",  # Default-off assertion persistence.
     "chunking.py",  # Explicit chunk backfill or default-off embeddings.
+    "claude_code_audit.py",  # Claude Code capture audit; reads a capture store only, never on the turn path.
     "claude_code_capture.py",  # Claude Code transcript projection; not imported by the Hermes turn path.
     "claude_code_store.py",  # Claude Code capture writer, only for stores it creates and stamps.
     "command.py",  # Explicit commands or default-off embedding backfill.
