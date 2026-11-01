@@ -72,6 +72,8 @@ def main(argv: list[str] | None = None) -> int:
     report = run_worker(home, deadline_s=args.deadline, config=LCMConfig.from_env(), hermes_home=hermes_home)
     if report.get("refused"):
         return 2
+    if report.get("lock") == "held":
+        return 4  # a bounded drain found another worker holding the store; it takes the record
     if not report["complete"]:
         return 3 if args.deadline is not None else 1
     return 0

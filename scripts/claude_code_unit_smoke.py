@@ -33,9 +33,15 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-def timings(samples: dict[str, list[float]]) -> dict[str, dict]:
-    """Nearest-rank percentiles of the unrounded samples, reported in milliseconds."""
-    result = {}
+def timings(runs: list[tuple[str, float]]) -> dict[str, dict]:
+    """Nearest-rank percentiles of the unrounded samples per event, in milliseconds. The
+    session's first hook run (a cold interpreter start) is reported apart, as ``first``, and
+    left out of its event's percentiles."""
+    (first_event, first_ms), rest = runs[0], runs[1:]
+    samples: dict[str, list[float]] = {}
+    for event, value in rest:
+        samples.setdefault(event, []).append(value)
+    result = {"first": {"event": first_event, "n": 1, "max": round(first_ms, 1)}}
     for event, values in samples.items():
         ordered = sorted(values)
         result[event] = {"n": len(ordered), "p50": round(ordered[math.ceil(len(ordered) * 0.50) - 1], 1),
@@ -170,7 +176,7 @@ class Smoke:
         return {"session_id": session, "transcript_path": str(path), "cwd": str(self.home)}
 
     def hooks(self, plugin: Path, payload: dict) -> None:
-        wall: dict[str, list[float]] = {}
+        wall: list[tuple[str, float]] = []
         for event, count in (("SessionStart", 1), ("UserPromptSubmit", 1), ("PostToolBatch", 20), ("Stop", 1)):
             with self.step(event):
                 registered = json.loads((plugin / "hooks/hooks.json").read_text())["hooks"].get(event, [])
@@ -184,11 +190,10 @@ class Smoke:
                 if event == "SessionStart":
                     body["source"] = "startup"
                 raw = json.dumps(body)
-                wall[event] = []
                 for _ in range(count):
                     started = time.monotonic()
                     done = self.run(["/bin/sh", "-c", hook["command"]], payload=raw, timeout=hook["timeout"])
-                    wall[event].append((time.monotonic() - started) * 1000)
+                    wall.append((event, (time.monotonic() - started) * 1000))
                     self.hook_events.append(event)
                     require(not done.stdout and not done.stderr, "hook printed output")
         self.summary["hook_wall_ms"] = timings(wall)
@@ -196,7 +201,7 @@ class Smoke:
     def hook_records(self) -> None:
         records = [json.loads(line) for line in (self.home / "store/logs/hook.log").read_text().splitlines()]
         require(len(records) == len(self.hook_events), "hook log must contain one record per hook run")
-        measured: dict[str, list[float]] = {}
+        measured: list[tuple[str, float]] = []
         for event, record in zip(self.hook_events, records):
             require(record.get("event") == event and record.get("host") == "claude-code",
                     "hook log event or host differs from the fired hook")
@@ -204,7 +209,7 @@ class Smoke:
             require(outcome in {"worker_started", "worker_running"}, f"{event}: {outcome}")
             require(isinstance(record.get("ms"), (int, float)) and math.isfinite(record["ms"])
                     and record["ms"] >= 0, f"{event}: invalid in-process timing")
-            measured.setdefault(event, []).append(record["ms"])
+            measured.append((event, record["ms"]))
         self.summary["hook_in_process_ms"] = timings(measured)
 
     def wait_worker(self, timeout: float = 5) -> None:

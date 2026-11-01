@@ -171,13 +171,18 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0)
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
              "close_fds": True, "cwd": str(home)}
     if deadline_s:
+        # A hook never waits on another worker: the holder of the lock sees the spooled record.
+        if _lock_held(home / "capture.lock"):
+            return "worker_running"
         try:
             done = subprocess.run(command + ["--deadline", str(deadline_s)], timeout=deadline_s + 2, **quiet)
-            # The worker exits 0 only after a completed drain; 3 means its deadline left work pending.
-            outcome = {0: "drained", 3: "drain_incomplete"}.get(done.returncode, "drain_failed:%d" % done.returncode)
+            # The worker exits 0 only after a completed drain; 3 means its deadline left work pending;
+            # 4 means another worker took the lock first and holds the record.
+            outcome = {0: "drained", 3: "drain_incomplete", 4: "worker_running"}.get(
+                done.returncode, "drain_failed:%d" % done.returncode)
         except subprocess.TimeoutExpired:
             outcome = "drain_timeout"  # the batch in flight rolls back; the next drain resumes from the cursor
-        if outcome in ("drained", "drain_failed:2"):  # 2: the store was refused; another worker would be too
+        if outcome in ("drained", "drain_failed:2", "worker_running"):  # 2: the store was refused
             return outcome
         # A bounded worker does not rescan: records left behind, including another session's
         # spooled while it held the lock, go to a detached worker now.
@@ -204,7 +209,8 @@ def _log(home: Optional[Path], record: Mapping[str, Any], outcome: str, started:
         if log.exists() and log.stat().st_size > LOG_ROTATE_BYTES:
             os.replace(log, directory / "hook.log.1")
         line = {"t": round(time.time(), 3), "event": record.get("event"), "host": record.get("host"),
-                "outcome": outcome, "ms": round((time.monotonic() - started) * 1000, 1)}
+                "session": record.get("session_id"), "outcome": outcome,
+                "ms": round((time.monotonic() - started) * 1000, 1)}
         descriptor = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(line) + "\n")

@@ -867,9 +867,11 @@ def run_worker(home: Path, *, deadline_s: Optional[float] = None, config: Any = 
     arrived while the lock was held is processed by this worker (it retakes the lock) or by the
     worker now holding it, which took the lock after the record was written and scans first.
 
-    ``deadline_s`` (the PreCompact drain) waits for the lock until the deadline; ``complete`` is
-    true only when every record was drained. A bounded run that ends incomplete leaves the rest
-    to a detached worker, which the hook starts."""
+    ``deadline_s`` (the PreCompact drain) bounds the run; ``complete`` is true only when every
+    record was drained. No run waits for the lock, so no hook waits on another worker: a held lock
+    means a holder that sees every spooled record when it rescans. A bounded run that finds the
+    lock held at once reports ``lock: held``; one that ends incomplete leaves the rest to a
+    detached worker, which the hook starts."""
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
     deadline = None if deadline_s is None else time.monotonic() + deadline_s
     report: dict[str, Any] = {"records": 0, "drained": 0, "missing": 0, "forgotten": 0, "failed": 0, "files": 0,
@@ -878,19 +880,21 @@ def run_worker(home: Path, *, deadline_s: Optional[float] = None, config: Any = 
     embedding_state: dict[str, Any] = {}
     lock = _Lock(home)
     try:
-        wait_s = deadline_s or 0.0
+        first = True
         while True:
-            if not lock.acquire(wait_s):
+            if not lock.acquire(0.0):
                 if deadline_s is not None:
-                    report["complete"] = False  # another worker holds the store past this deadline
+                    report["complete"] = False
+                    if first:
+                        report["lock"] = "held"  # this bounded run drained nothing: the holder will
                 return report
+            first = False
             try:
                 status = _drain_once(home, report, deadline, config, settle_s, hermes_home, embedding_state)
             finally:
                 lock.release()
             if status != "done" or not pending(home):
                 return report
-            wait_s = 0.0 if deadline is None else max(0.0, deadline - time.monotonic())
     finally:
         lock.close()
 

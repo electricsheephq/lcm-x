@@ -32,8 +32,11 @@ def test_claude_code_unit_smoke_at_head(tmp_path, runtime):
     assert {"hook worker capture", "tools/list", "lcm_grep", "lcm_expand", "MCP exit"} <= {
         step["step"] for step in summary["steps"]}
     for field in ("hook_wall_ms", "hook_in_process_ms"):
-        assert set(summary[field]) == {"SessionStart", "UserPromptSubmit", "PostToolBatch", "Stop"}
+        # The session's first hook, a cold interpreter start, stays out of the percentiles.
+        assert set(summary[field]) == {"first", "UserPromptSubmit", "PostToolBatch", "Stop"}
+        assert summary[field]["first"]["event"] == "SessionStart" and summary[field]["first"]["n"] == 1
         for event, stats in summary[field].items():
-            assert stats["n"] == (20 if event == "PostToolBatch" else 1)
-            assert 0 <= stats["p50"] <= stats["p95"] <= stats["max"]
+            if event != "first":
+                assert stats["n"] == (20 if event == "PostToolBatch" else 1)
+                assert 0 <= stats["p50"] <= stats["p95"] <= stats["max"]
     assert summary["hook_wall_ms"]["PostToolBatch"]["n"] == 20
