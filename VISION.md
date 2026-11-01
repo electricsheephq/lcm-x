@@ -17,23 +17,23 @@ This page states what we are building and how we will know it works. The [roadma
 
 1. **Nothing is lost by default.**
    - Every message, tool result and subagent's work the agent sees is kept verbatim and never deleted. Raw rows are stored once, and every summary and derived memory links back to the rows it came from.
-   - The promise covers everything the agent sees and does: subagent sessions ([#1931](https://github.com/electricsheephq/lcm-x/issues/1931)), retries, crashes and restarts ([#1837](https://github.com/electricsheephq/lcm-x/issues/1837), [#1838](https://github.com/electricsheephq/lcm-x/issues/1838), [#1451](https://github.com/electricsheephq/lcm-x/issues/1451)), and every harness LCM-X serves (from v0.33.0).
+   - The promise covers everything the agent sees and does: subagent sessions ([#1931](https://github.com/electricsheephq/lcm-x/issues/1931)), retries, crashes and restarts ([#1837](https://github.com/electricsheephq/lcm-x/issues/1837), [#1838](https://github.com/electricsheephq/lcm-x/issues/1838), [#1451](https://github.com/electricsheephq/lcm-x/issues/1451)), and every harness LCM-X serves (from LCM-X for Claude Code).
    - Every release is gated on 0 lost rows. A known exception is a bug against this promise, not a limit of it: each one is tracked and listed in that release's Known issues.
    - **Nothing lost from view** is the second level: what is kept also stays within the model's reach. Rows dropped from the model's working set ([#2004](https://github.com/electricsheephq/lcm-x/issues/2004)) and compaction that never engages ([#1998](https://github.com/electricsheephq/lcm-x/issues/1998)) are bugs against it.
    - The one rewrite is a cleanup (on by default from v0.27.0) that moves a large tool output into a file and leaves a reference the agent can expand.
    - Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`).
 2. **The right evidence at the right moment.**
-   - Recall finds what matters across months of history. Full-text search is built in today; local semantic search is built in and on by default from v0.29.0 if it passes its measurement, and a built-in reranker follows once it passes its measurement, re-screened in v0.32.0 (today reranking needs the Voyage cloud provider).
-   - Next (v0.31.0): evidence the agent needs is put in front of it before it answers, not only when it thinks to search.
+   - Recall finds what matters across months of history. Full-text search is built in today; local semantic search is built in and on by default from v0.29.0 if it passes its measurement, and a built-in reranker follows once it passes its measurement, re-screened in facts that update (today reranking needs the Voyage cloud provider).
+   - Next (with compaction you don't notice): evidence the agent needs is put in front of it before it answers, not only when it thinks to search.
    - The agent can always open the exact source behind what it was shown.
 3. **Memory that grows.**
-   - Next (v0.32.0): from the record, LCM-X will derive what an agent should know about its user and its work: facts, preferences, entities, events and their times.
+   - Next (facts that update): from the record, LCM-X will derive what an agent should know about its user and its work: facts, preferences, entities, events and their times.
    - Each derived memory links to the turns it came from. Derived memory is a view of the record, never a replacement for it.
 4. **Long sessions keep working.**
-   - The same record runs the context window: a session can run for weeks and the model stays inside its window. Today the user waits for compaction (p90 about 55 s); v0.31.0 removes that wait.
+   - The same record runs the context window: a session can run for weeks and the model stays inside its window. Today the user waits for compaction (p90 about 55 s); compaction you don't notice removes that wait.
    - Anything compacted can be recovered exactly.
 5. **One memory, any harness.**
-   - Next (from v0.33.0): the memory an agent builds in Hermes becomes available in other harnesses, Claude Code first, then Codex, OpenClaw and any MCP client.
+   - Next (Claude Code preview by 2026-11-18): Claude Code sessions are kept in their own store and recalled over MCP. Grok Build follows, then a hosted store that recalls across harnesses, then Codex, OpenClaw and any MCP client.
    - Each event keeps a stable identity across hosts, so the record stays lossless when several harnesses share it.
 6. **We measure it.** Claims about recall, continuity and speed come with a pinned commit, a configuration and a published number. From v0.29.0 our rows are read and judged by current frontier models; earlier rows name the judge they used.
 
@@ -43,14 +43,14 @@ This page states what we are building and how we will know it works. The [roadma
 - **A durable store** (SQLite) with:
   - a summary DAG;
   - externalized large outputs;
-  - full-text search, with optional semantic search and cloud reranking today; local semantic search (built in and on by default from v0.29.0 if it passes its measurement), a built-in reranker and source-linked derived memory (v0.32.0) next.
-- **Agent tools** (`lcm_*`), **operator commands** (`/lcm`, the doctor), and, from v0.33.0, a service endpoint so other harnesses can read the same memory (writes from other harnesses with v0.34.0).
+  - full-text search, with optional semantic search and cloud reranking today; local semantic search (built in and on by default from v0.29.0 if it passes its measurement), a built-in reranker and source-linked derived memory (facts that update) next.
+- **Agent tools** (`lcm_*`), **operator commands** (`/lcm`, the doctor), and, from LCM-X for Claude Code, a read-only endpoint so other harnesses can read the same memory, plus adapters that capture other harnesses into their own store.
 
 ## What LCM-X is not
 
 - **Not a filing cabinet.** Keeping everything is the floor; the product is the right evidence at the moment of need.
 - **Not a lossy fact store.** A derived memory never replaces the record it came from; every one links back to its source.
-- **Not a fork of any host.** LCM-X integrates through each host's public contract: the Hermes plugin today, hooks and MCP for other hosts from v0.33.0.
+- **Not a fork of any host.** LCM-X integrates through each host's public contract: the Hermes plugin today, hooks and MCP for other hosts from LCM-X for Claude Code.
 
 ## Principles
 
@@ -89,7 +89,7 @@ This page states what we are building and how we will know it works. The [roadma
   - Agentic rows (the reader drives LCM-X's tools) and single-retrieval rows are reported separately.
 - **The objective scorecard.** From v0.29.1, each release reports one row against the objective, with six cells: kept in store, kept in view, used correctly, at shipped defaults, any harness, unnoticed.
    - Each cell is read from a gate that already exists, links its receipt and states its claim class. A cell with no gate result stays in the table, empty.
-   - Kept in store: the lossless gates (0 lost and 0 duplicate rows). Used correctly: facts kept and the never-below-Hermes-built-in floor, per fact class ([#1595](https://github.com/electricsheephq/lcm-x/issues/1595)). At shipped defaults: the board targets, run with the default configuration ([#2018](https://github.com/electricsheephq/lcm-x/issues/2018)). Any harness: the cross-harness parity audit (from v0.33.0). Unnoticed: compaction wait and tokens per turn. Kept in view has no gate yet, so its cell stays empty until one exists.
+   - Kept in store: the lossless gates (0 lost and 0 duplicate rows). Used correctly: facts kept and the never-below-Hermes-built-in floor, per fact class ([#1595](https://github.com/electricsheephq/lcm-x/issues/1595)). At shipped defaults: the board targets, run with the default configuration ([#2018](https://github.com/electricsheephq/lcm-x/issues/2018)). Any harness: the cross-harness parity audit (from cloud step 2, one store with many harnesses). Unnoticed: compaction wait and tokens per turn. Kept in view has no gate yet, so its cell stays empty until one exists.
 - **Boards are targets, not gates.** Our own benchmark ([#1964](https://github.com/electricsheephq/lcm-x/issues/1964)) becomes a headline measure only after it validly scores LCM-X against Hermes built-in at shipped defaults.
 - **Shared-reader boards.** We enter boards that run every system with the same models. Until local semantic recall becomes the default (v0.29.0), we enter the configuration we ship to the managed fleet, labelled as such; after that, the shipped default. We report where we place.
 - **Compaction parity.** Facts kept, instruction continuity and compaction wall time against other compaction systems, on the same material, three seeds.
