@@ -186,9 +186,11 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0)
         if outcome in ("drained", "drain_failed:2", "worker_running"):  # 2: the store was refused
             return outcome
         # A bounded worker does not rescan: records left behind, including another session's
-        # spooled while it held the lock, go to a detached worker now.
-        if not _lock_held(home / "capture.lock"):
-            subprocess.Popen(command, start_new_session=True, **quiet)
+        # spooled while it held the lock, go to a detached worker now, or to the worker that has
+        # taken the lock since, which rescans after it releases it.
+        if _lock_held(home / "capture.lock"):
+            return outcome + "+holder"
+        subprocess.Popen(command, start_new_session=True, **quiet)
         return outcome + "+worker"
     # The record is already spooled. A held lock means a worker that will see it: a detached
     # worker releases the lock first and rescans the spool after, and a bounded one ends with

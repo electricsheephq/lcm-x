@@ -458,3 +458,19 @@ def test_a_precompact_drain_cut_at_its_timeout_hands_the_rest_to_a_detached_work
     assert hook.start_worker(home, lane, deadline_s=hook.PRECOMPACT_DEADLINE_S) == "drain_timeout+worker"
     assert [timeout for _command, timeout in bounded] == [hook.PRECOMPACT_DEADLINE_S + 2]
     assert "--deadline" in bounded[0][0] and len(detached) == 1 and "--deadline" not in detached[0]
+
+
+def test_a_cut_precompact_drain_leaves_the_rest_to_the_worker_that_took_the_lock(hook, env, tmp_path, monkeypatch):
+    """A bounded drain that ends incomplete starts a detached worker only when the lock is free.
+    When another worker has taken it since, that worker rescans, and the outcome says so
+    (``+holder``, never ``+worker``)."""
+    home = Path(env["LCMX_CC_HOME"])
+    home.mkdir(parents=True)
+    lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(_package(tmp_path))}
+    with open(home / "capture.lock", "a") as handle:
+        def incomplete_then_taken(command, *, timeout, **kwargs):
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)  # another worker takes the lock meanwhile
+            return hook.subprocess.CompletedProcess(command, 3)
+        monkeypatch.setattr(hook.subprocess, "run", incomplete_then_taken)
+        monkeypatch.setattr(hook.subprocess, "Popen", lambda *a, **k: pytest.fail("the holder takes the rest"))
+        assert hook.start_worker(home, lane, deadline_s=hook.PRECOMPACT_DEADLINE_S) == "drain_incomplete+holder"
