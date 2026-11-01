@@ -39,7 +39,7 @@ from .claude_code_store import (
     read_stamp,
 )
 from .config import LCMConfig
-from .externalize import extract_externalized_refs, load_externalized_payload
+from .externalize import DEFAULT_LARGE_OUTPUT_DIRNAME, extract_externalized_refs, load_externalized_payload
 
 FAILURES = ("lost_lines", "digest_mismatch", "surplus_lines", "corrupt", "lost", "duplicates",
             "missing_rows", "orphans", "doubles", "stray_rows", "row_count", "held_mismatch")
@@ -459,8 +459,9 @@ def _log_records(path: Path):
 def _home_report(home: Path) -> dict:
     """Hook timing per event. Each session's first hook (a cold interpreter start) is reported
     apart, as ``first``, and left out of its event's percentiles; ``precompact`` counts which
-    path each PreCompact run took (a drain, a poke of the worker holding the lock, or neither,
-    when no runtime, package or worker was found) and how many drains reached their bound."""
+    path each PreCompact run took (a drain, a poke of the worker holding the lock, or neither:
+    no runtime, package or worker, a record the hook would not spool, or a hook error) and how
+    many drains reached their bound."""
     hooks, first, seen = defaultdict(list), [], set()
     precompact = {"drain": 0, "poke": 0, "bound": 0, "other": 0}
     for name in ("hook.log.1", "hook.log"):
@@ -492,8 +493,9 @@ def _home_report(home: Path) -> dict:
 
 def _growth(home: Path, records: list[dict]) -> dict:
     files = [home / "lcm.db", home / "lcm.db-wal"]
-    if (home / "payloads").is_dir():
-        files.extend(path for path in (home / "payloads").rglob("*") if path.is_file())
+    payloads = home / DEFAULT_LARGE_OUTPUT_DIRNAME  # where the worker's ingest externalizes, in its home
+    if payloads.is_dir():
+        files.extend(path for path in payloads.rglob("*") if path.is_file())
     store_bytes = sum(path.stat().st_size for path in files if path.is_file())
     transcript_bytes = sum(record["lineage"].path.stat().st_size for record in records
                            if not record["forgotten"] and record["lineage"].path.is_file())
@@ -503,7 +505,7 @@ def _growth(home: Path, records: list[dict]) -> dict:
 
 def _failed_records(home: Path) -> list[Lineage | None]:
     """The lineages each set-aside (``.failed``) spool record names: its session's, and its
-    subagent's while that transcript exists. None for a record that cannot be read."""
+    subagent's if any. None for a record that cannot be read."""
     directory = home / "spool"
     found: list[Lineage | None] = []
     for path in sorted(directory.glob("*.failed")) if directory.is_dir() else []:
@@ -513,15 +515,13 @@ def _failed_records(home: Path) -> list[Lineage | None]:
             if not isinstance(session, str) or not isinstance(agent, (str, type(None))):
                 raise TypeError("lineage ids")
             lineage_key(session, agent)  # the check the writer's lineage ids passed
-            # The compaction summarizer's SubagentStop names a transcript that never exists (R0):
-            # the writer has nothing to capture there, so it cannot be behind.
-            transcript = record.get("agent_transcript_path")
-            child = bool(agent) and isinstance(transcript, str) and Path(transcript).is_file()
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             found.append(None)
             continue
         found.append(Lineage(session, None, path))
-        if child:
+        # A subagent counts even when its transcript is not on disk: one never written (the
+        # compaction summarizer's) looks the same as one removed before it was captured.
+        if agent:
             found.append(Lineage(session, agent, path))
     return found
 

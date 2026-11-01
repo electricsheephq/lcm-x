@@ -369,8 +369,8 @@ def test_round5_hook_latency_worker_log_spool_and_growth(captured):
     spool.mkdir()
     for name in ("one.json", "two.claimed", "three.failed", "ignore.txt"):
         (spool / name).write_text("{}", encoding="utf-8")
-    (home / "payloads").mkdir()
-    (home / "payloads" / "one").write_bytes(b"abc")
+    (home / "lcm-large-outputs").mkdir()
+    (home / "lcm-large-outputs" / "one").write_bytes(b"abc")
     report = ca.audit(home)
     assert report["hooks_in_process_ms"]["PostToolBatch"] == {"n": 20, "p50": 10, "p95": 19, "max": 20}
     assert "hook_budget_ok" not in report and "hooks" not in report
@@ -519,6 +519,16 @@ def test_round5_held_text_must_match(capsys, tmp_path, external):
     assert _cli().main(["audit", "--home", str(home)]) == 1
     assert json.loads(capsys.readouterr().out)["failures"]["held_mismatch"] == 1
     assert _home_state(home) == before
+
+
+def test_growth_counts_the_externalized_payloads(tmp_path):
+    """REGRESSION: the growth counted a ``payloads`` folder, while ingest externalizes large
+    outputs into the home's ``lcm-large-outputs``, so the store read small by their bytes."""
+    home = _held_store(tmp_path, external=True)
+    payloads = [path for path in (home / "lcm-large-outputs").rglob("*") if path.is_file()]
+    assert payloads
+    assert ca.audit(home)["growth"]["store_bytes"] == (home / "lcm.db").stat().st_size + sum(
+        path.stat().st_size for path in payloads)
 
 
 @pytest.mark.parametrize("session", [None, "absent"])
@@ -702,16 +712,16 @@ def test_a_projected_row_id_listed_twice_fails_row_count(tmp_path, case):
     _failed(home, "row_count")
 
 
-@pytest.mark.parametrize("case", ["no_cursor", "subagent_without_cursor", "subagent_never_written", "with_cursor",
+@pytest.mark.parametrize("case", ["no_cursor", "subagent_without_cursor", "subagent_not_on_disk", "with_cursor",
                                   "unreadable"])
 def test_a_failed_record_without_a_cursor_is_unverified(captured, tmp_path, case):
     """REGRESSION: a record set aside as ``.failed`` before its transcript had a cursor names a
     session nothing else shows, and a whole-home audit verified the store without it. A subagent
-    transcript that never existed, as the compaction summarizer's, left the home unverified for ever."""
+    transcript not on disk still counts: one removed before capture was dropped, and verified."""
     home, _lineage = captured
     (home / "spool").mkdir()
     session, agent = {"no_cursor": ("s9", None), "subagent_without_cursor": ("s1", "a3"),
-                      "subagent_never_written": ("s1", "a3")}.get(case, ("s1", None))
+                      "subagent_not_on_disk": ("s1", "a3")}.get(case, ("s1", None))
     agent_path = tmp_path / "elsewhere" / "agent-a3.jsonl"  # outside subagents/: only the record names it
     if case == "subagent_without_cursor":
         agent_path.parent.mkdir()
@@ -722,7 +732,8 @@ def test_a_failed_record_without_a_cursor_is_unverified(captured, tmp_path, case
     (home / "spool" / "k.failed").write_text(text, encoding="utf-8")
     report = ca.audit(home)
     expected = {"no_cursor": [cc.lineage_key("s9")], "subagent_without_cursor": [cc.lineage_key("s1", "a3")],
-                "subagent_never_written": [], "with_cursor": [], "unreadable": ["spool:unreadable_failed_record"]}[case]
+                "subagent_not_on_disk": [cc.lineage_key("s1", "a3")], "with_cursor": [],
+                "unreadable": ["spool:unreadable_failed_record"]}[case]
     assert report["ok"] is True and report["spool"]["failed"] == 1
     assert report["unverified"] == expected and report["verified"] is (not expected)
     if case == "no_cursor":  # another session's record does not touch this one's verdict

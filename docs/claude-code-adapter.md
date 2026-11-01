@@ -389,7 +389,8 @@ gate's instrument (see "The audit" in the test plan).
     neither, such as no runtime, package or worker, a record the hook would not spool, or a hook
     error; and drains that reached their bound: `drain_bound`, as the worker reports it, or killed
     at the hook's timeout);
-  - lag and store growth.
+  - lag and store growth: the database and its externalized payloads (`lcm-large-outputs/` in
+    the home) against the captured transcripts.
 - **Exit 2:** the home is not absolute, holds no store, or the store has no capture stamp.
 - **It does not re-derive row text.** Ingest protection may redact, normalize or externalize it by
   design; the ledger's raw line is the lossless copy, which the `corrupt` check and the
@@ -403,9 +404,10 @@ gate's instrument (see "The audit" in the test plan).
   - every selected session, and every subagent transcript on disk (a forgotten session's too),
     has a cursor;
   - every lineage a set-aside (`.failed`) spool record names has a cursor, unless that lineage
-    was forgotten. A record names its subagent only while that transcript exists: the compaction
-    summarizer's `SubagentStop` names one that never does. A record that cannot be read withholds
-    `verified`;
+    was forgotten. A record names its subagent even when that transcript is not on disk: one never
+    written (the compaction summarizer's `SubagentStop` names one) looks the same as one removed
+    before it was captured, so such a home stays unverified. A record that cannot be read
+    withholds `verified`;
   - no spool record waits.
 
   A store that is only behind is unverified, never failed. A local-GC session is best effort and
