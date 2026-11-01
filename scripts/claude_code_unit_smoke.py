@@ -124,11 +124,12 @@ class Smoke:
         unpacked.mkdir()
         root = unpacked.resolve()  # a temporary directory can sit behind a symlink (/var on macOS)
         with tarfile.open(asset) as archive:
-            # The builder emits regular files only; refuse paths escaping this fresh root.
+            # The builder emits regular files only; refuse paths escaping this fresh root. The
+            # data filter refuses them again during extraction (Python 3.11.4 and newer).
             for member in archive.getmembers():
                 require(member.isfile() and (root / member.name).resolve().is_relative_to(root),
                         "unsafe archive member")
-            archive.extractall(unpacked)
+            archive.extractall(unpacked, filter="data")
         plugin = unpacked / asset.name.removesuffix(".tar.gz")
         bundle = json.loads((plugin / "bundle.json").read_text())
         require(bundle["core_commit"] == self.summary["core_commit"] and bundle["ref"] == self.ref,
