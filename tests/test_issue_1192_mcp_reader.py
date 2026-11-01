@@ -710,6 +710,16 @@ def test_t8_any_session_reach_in_process(fx, monkeypatch):
     assert payload["tool_call_id"] == "call-inv-1"
 
 
+def test_t8_explicit_session_filter_holds_for_externalized_refs(fx, monkeypatch):
+    """REGRESSION: lcm_expand(externalized_ref, session_id) answers as Hermes does: a payload of
+    another session is not found; the payload's own session serves it."""
+    reader = make_reader(fx, monkeypatch)
+    other, _, _ = call(reader, "lcm_expand", {"externalized_ref": fx.ref, "session_id": "s1"})
+    assert other["error"] == f"Externalized payload {fx.ref} not found in session s1"
+    own, is_error, _ = call(reader, "lcm_expand", {"externalized_ref": fx.ref, "session_id": "s2"})
+    assert not is_error and own["session_id"] == "s2" and "item-59 quantity 177" in own["content"]
+
+
 # -- T9: protocol ------------------------------------------------------------------
 
 def test_t9_protocol_session_over_stdio(spawned_fx, tmp_path):
@@ -922,6 +932,25 @@ def test_t10_header_flip_to_rollback_journal_during_reread_opens(fx, monkeypatch
     assert sorted(os.listdir(fx.home)) == listing
 
 
+def test_t10_store_unreadable_at_reread_stays_offline(fx, monkeypatch):
+    """REGRESSION: a WAL header without sidecars whose file is gone at the re-read (a restore in
+    progress) stays store_offline, and the reader creates no file."""
+    _, readonly_store = _reader_modules()
+    reader = make_reader(fx, monkeypatch)
+    stop_agents()
+    for suffix in ("-wal", "-shm"):
+        Path(f"{fx.db}{suffix}").unlink(missing_ok=True)
+    away = fx.db.with_name("lcm.db.restoring")
+    monkeypatch.setattr(readonly_store, "_pause_before_header_reread", lambda: os.rename(fx.db, away))
+    listing = sorted(os.listdir(fx.home))
+    try:
+        offline, is_error, _ = call(reader, "lcm_grep", {"query": "heron"})
+        assert is_error and offline["error"].startswith("store_offline:")
+    finally:
+        os.rename(away, fx.db)
+    assert sorted(os.listdir(fx.home)) == listing
+
+
 # -- T11: store_uuid ---------------------------------------------------------------
 
 def _metadata_uuid(db: Path) -> str | None:
@@ -998,6 +1027,49 @@ def test_t11_absent_store_uuid_is_derived_and_flagged(fx, monkeypatch):
     expected = hashlib.sha256(f"{real}\x1f{st.st_dev}\x1f{st.st_ino}".encode()).hexdigest()[:32]
     assert payload["store_uuid"] == expected
     assert payload["reader"]["store_uuid_source"] == "derived"
+
+
+def _copy_store(db: Path, target: Path) -> Path:
+    """A consistent copy (the backup API), left in rollback-journal mode so it opens read-only."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source, copy = sqlite3.connect(db), sqlite3.connect(target)
+    try:
+        source.backup(copy)
+        copy.execute("PRAGMA journal_mode=DELETE").fetchone()
+    finally:
+        source.close()
+        copy.close()
+    return target
+
+
+def _store_uuid(db: Path) -> tuple[str, str]:
+    _, readonly_store = _reader_modules()
+    conn = readonly_store.open_readonly_connection(db)
+    try:
+        return readonly_store.store_uuid_for(conn, db)
+    finally:
+        conn.close()
+
+
+def test_t11_stamped_store_uuid_survives_reopen_and_copy(fx, tmp_path):
+    """REGRESSION: a store whose writer stamped an id reports that id on every open and from a copy."""
+    stamped = _stamp(fx.db)
+    copy = _copy_store(fx.db, tmp_path / "copy" / "lcm.db")
+    assert [_store_uuid(db) for db in (fx.db, fx.db, copy)] == [(stamped, "metadata")] * 3
+
+
+def test_t11_derived_store_uuid_is_stable_across_reopen_and_new_for_a_copy(fx, monkeypatch, tmp_path):
+    """REGRESSION: without a stamp the id is derived from the file: the same on every open (and for
+    ids a client qualified with it), a new one for a copy, move or restore (operator guide)."""
+    first = _store_uuid(fx.db)
+    assert first[1] == "derived" and _store_uuid(fx.db) == first
+    assert _store_uuid(_copy_store(fx.db, tmp_path / "copy" / "lcm.db"))[0] != first[0]
+    reader = make_reader(fx, monkeypatch)
+    bare, _, bare_text = call(reader, "lcm_expand", {"store_id": fx.s1_ids[0]})
+    assert bare["store_uuid"] == first[0] and bare["reader"]["store_uuid_source"] == "derived"
+    again = make_reader(fx, monkeypatch)
+    qualified, is_error, qualified_text = call(again, "lcm_expand", {"store_id": f"{first[0]}:{fx.s1_ids[0]}"})
+    assert not is_error and strip_envelope(qualified_text) == strip_envelope(bare_text)
 
 
 # -- T12: product seams default to today's behaviour --------------------------------

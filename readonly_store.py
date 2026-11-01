@@ -99,11 +99,12 @@ def _pause_before_header_reread() -> None:
 
 
 def _store_offline(db_path: str | Path) -> bool:
-    """``wal_sidecars_missing``, confirmed by one header re-read after a short pause."""
+    """``wal_sidecars_missing``, confirmed by one header re-read after a short pause; a file that
+    cannot be read at the re-read (a restore in progress) stays offline."""
     if not wal_sidecars_missing(db_path):
         return False
     _pause_before_header_reread()
-    return wal_sidecars_missing(db_path)
+    return not os.access(db_path, os.R_OK) or wal_sidecars_missing(db_path)
 
 
 def open_readonly_connection(

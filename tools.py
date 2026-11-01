@@ -252,7 +252,8 @@ def _get_externalized_payload(
     payload_session_id = payload.get("session_id") or ""
     if require_profile_containment and not payload_session_id:
         return None
-    if _reader_any_session(engine):
+    # An explicit session_id (the caller that requires containment) keeps its filter, as in Hermes.
+    if _reader_any_session(engine) and not require_profile_containment:
         return payload
     allowed = allowed_session_ids
     if not allowed:
