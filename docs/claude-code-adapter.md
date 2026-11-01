@@ -247,7 +247,7 @@ at worst an unreferenced payload file, never a lost row; a rerun is idempotent b
 | `user`, text or image parts | One `user` row. Meta entries, compact summaries and transcript-only entries become `system` rows. |
 | `user`, `tool_result` parts | One `tool` row per result, `tool_call_id` = `tool_use_id`. When Claude Code saved the output to a file inside the session's own `tool-results/` folder (`persistedOutputPath`, or the path in the marker), the row holds the file's full text (up to 64 MiB, as Hermes's persisted-output recovery does); the preview stays in the ledger's raw line. |
 | `assistant` | One row per entry: text parts as content, `tool_use` parts as `tool_calls`. An entry with only thinking gives no row. `message.id` stays in the ledger, so a reader can regroup one response. API-error entries become `system` rows. |
-| `tool-results` files | Ledger rows each. Files not already held in full by a tool row (images, PDFs, unreferenced or large files) keep their bytes in the ledger, in rows of at most 64 MiB, with no size limit; a file whose bytes change is kept again, a held one included. A `tool-results` folder that is a symlink, or in a symlinked session folder, is never read, for files or for saved outputs. |
+| `tool-results` files | Ledger rows each. Files not already held in full by a tool row (images, PDFs, unreferenced or large files, and saved outputs that ingest protection redacts, since the row then holds less than the file) keep their bytes in the ledger, in rows of at most 64 MiB, with no size limit; a file whose bytes change is kept again, a held one included. A `tool-results` folder that is a symlink, or in a symlinked session folder, is never read, for files or for saved outputs. |
 | `system`, `attachment`, bookkeeping (`queue-operation`, `last-prompt`, `mode`, `custom-title`, `file-history-*`, `tools-used`, desktop types such as `bridge-session` and `frame-link`) | None; raw line in the ledger. |
 | Request snapshots (`api-request`, `api-request-blob`, `api-request-shape`) | None; raw line kept once per line digest. They hold the exact model input, including system text and injected reminders that appear nowhere else in the transcript. |
 | Unknown types | None; raw line in the ledger, counted as `unknown_type`. |
@@ -281,6 +281,13 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
   reader does, so both compute the same embedding identity.
 - The worker runs one bounded embedding catch-up pass (`run_incremental_embedding_pass`) after each
   drain, so vector recall follows capture; until it runs, recall falls back to full text.
+  - Only the detached worker runs it, with FastEmbed only, and never downloads a model.
+  - Its 8 s budget is soft. A new hook record or the budget stops it between slices, but one
+    slice runs to its end: the first slice loads the model, and a message with many chunks is
+    embedded whole. A slice holds the capture lock, so capture waits behind it; nothing is lost,
+    since hooks keep spooling. The growth run measures the longest slice.
+  - Failures go to `worker.log` as tokens only. A worker run by hand also shows core's own
+    warning on stderr; a hook-started worker discards it.
 - Fork copies can make a search return the same text from the parent and the fork. R3 measures
   how often; collapsing a copy onto its source through `fork_copy_of` is a reader change, filed
   as its own issue with that measurement.
@@ -314,7 +321,8 @@ hook entry handles:
   uninstall), else `<home>/venv`.
   - **Zero steps** when a Python 3.11+ exists. Without `LCMX_PYTHON` or a venv, the plugin finds
     one on the hook's `PATH`: the hook's own `python3` if it is 3.11+, else `python3.14` down to
-    `python3.11`.
+    `python3.11`. Only absolute `PATH` entries are searched: a relative one would name the project
+    folder Claude Code runs the hook in.
     - It always runs that interpreter with `-I -S`, so only the standard library loads, and
       nothing installed in it, Hermes included, can change core.
     - Core needs nothing else; FastEmbed needs a venv.
@@ -387,9 +395,16 @@ LCM-X for Claude Code is its own release unit, versioned by the plugin manifest
   commit and version.
 - A unit release needs two passes on its candidate:
   - the unit gate: the audit gate, with its local-GC qualification;
-  - the CLI smoke. It unpacks the asset into a fresh Python 3.11 venv with no Hermes, runs the
-    hook entry on a synthetic transcript and then the worker, and passes when the reader finds a
-    planted string through the MCP entry. It needs #1216 on `main`.
+  - the CLI smoke (`scripts/claude_code_unit_smoke.py`). It needs #1216 on `main`.
+    - It unpacks the asset with no Hermes, in two runtime modes: a fresh venv of the running
+      Python (3.11 or newer), and that Python found on `PATH` and run with `-I -S`.
+    - It runs each hook's registered command from `hooks/hooks.json` through the shell, as Claude
+      Code does, on a synthetic transcript. It then waits for the worker those hooks started; it
+      never runs a worker itself.
+    - It passes when every hook run logged a started or running worker, no spool record failed,
+      `bundle.json` names the commit and core version, and the reader, started from `.mcp.json`,
+      finds a planted string and returns its stored source.
+    - It reports each hook's wall time (`PostToolBatch` run 20 times) beside its in-process time.
 - The gate re-runs whenever a file the unit depends on changed since the last `claude-code-v*`
   tag. `scripts/claude_code_unit_delta.py` computes that set and lists what changed in it:
   - the set is the import closure of the worker and reader entry points, plus the plugin folder;
@@ -439,13 +454,16 @@ stored rows; counts per entry class; tool calls and results paired with no orpha
 every ledger row's line digest re-read from its file; every `tool-results` file present with its
 digest; sessions with local GC on listed; fork copies counted in their own column, never as
 duplicates or surplus, with `fork_parent_unknown`; spool records set aside as `.failed`. Also
-measured: hook wall time (target p95 at most 50 ms on `PostToolBatch`), lag from transcript line to
+measured: hook wall time (target p95 at most 50 ms on `PostToolBatch`; see the run record below), lag from transcript line to
 committed row, and store growth (the growth gate above).
 
 **Each run's record**, which is also evidence for #2141:
 - the backend;
 - the audit's `ok` and `verified`, and every failure counter;
-- the hook latency per event: n, p50, p95 and max, with `PostToolBatch` p95 at most 50 ms;
+- the hook latency per event (n, p50, p95, max): in-process from the audit (`hooks_in_process_ms`),
+  and wall time from a smoke run on the same machine right after (`hook_wall_ms`), which adds the
+  interpreter start-up the hook log cannot see. #2141 judges `PostToolBatch`'s wall p95 against
+  50 ms;
 - the lag and the growth.
 
 **Install records**, one per supported platform (macOS and Linux):
