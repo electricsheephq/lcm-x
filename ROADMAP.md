@@ -33,6 +33,9 @@ full gate in its milestone and in the table further down; nothing here replaces 
   the design check finds that recall can't read across stores, step 1 folds into step 2, which then ships without it.
 - **Least certain:** v0.30.0, and the rows that depend on it (8, 9 and 11). Their bars are partly research outcomes,
   so these are the first dates to slip. A failed no-loss invariant never ships to meet a date.
+- **Language:** LCM-X stays in Python. Users wait on summariser calls, not the interpreter, and Hermes loads it in
+  process. A native binary is considered only for the out-of-process capture runtime, and only if the Claude Code
+  real-session runs show the need ([#2141](https://github.com/electricsheephq/lcm-x/issues/2141)).
 - **Lanes:** at most three product lanes run at once (exactly-once ingest, then compaction; Claude Code, the reader and
   the cloud; facts, after v0.29.1 ships). The compaction bug-fix lane runs beside them, so reviews keep up.
 
