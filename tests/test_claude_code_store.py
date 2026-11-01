@@ -6,6 +6,7 @@ Design: docs/claude-code-adapter.md.
 from __future__ import annotations
 
 import ast
+import gc
 import hashlib
 import importlib.util
 import json
@@ -22,6 +23,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_lcm import claude_code_store as cc
+from hermes_lcm.config import LCMConfig
 from hermes_lcm.db_bootstrap import REQUIRED_CORE_TABLES
 from hermes_lcm.store import MessageStore
 
@@ -410,6 +412,222 @@ def test_capture_cli_drains_the_spool(tmp_path, home, hermes):
     assert not cc.pending(home)
     assert subprocess.run([sys.executable, str(script), "worker", "--home", "relative/home"],
                           env=env, capture_output=True, timeout=60).returncode == 2
+
+
+def _embedding_slice(state, outcome="complete", *, vectors=0, again=False, delay=0.0):
+    state.update(vectors_written=vectors, delay=delay, **{"continue": again})
+    return dict(state, outcome=outcome)
+
+
+def test_worker_embedding_rotates_past_empty_summaries_and_leaves_rollback_mode(tmp_path, home, hermes, monkeypatch):
+    hermes.mkdir()
+    for name in ("state.db", "lcm.db"):
+        (hermes / name).write_bytes(b"synthetic Hermes bytes: " + name.encode())
+    snapshot = {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in hermes.iterdir()}
+    monkeypatch.setenv("HERMES_HOME", str(hermes))
+    config = LCMConfig(embeddings_enabled=True, embedding_provider=" Fast-Embed ",
+                       database_path=str(hermes / "lcm.db"))
+    calls = []
+
+    def sliced(database, passed_config, *, slice_state):
+        assert database == home / "lcm.db" and passed_config is config
+        assert Path(f"{database}-wal").exists() and Path(f"{database}-shm").exists()
+        stage = slice_state.get("stage", 0)
+        calls.append(stage)
+        with closing(sqlite3.connect(database)) as conn:
+            assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+            conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES('fake_embedding_stage', ?)",
+                         (str(stage),))
+            conn.commit()
+        slice_state["stage"] = stage + 1
+        return _embedding_slice(slice_state, "summaries=complete:0" if stage == 0 else "chunks=complete:2 complete",
+                                vectors=0 if stage == 0 else 2, again=stage == 0)
+
+    monkeypatch.setattr(cc, "run_incremental_embedding_pass", sliced)
+    _record(_hook(), home, _transcript(tmp_path, CONVERSATION[:1]))
+    report = cc.run_worker(home, config=config, hermes_home=hermes, settle_s=0)
+    assert calls == [0, 1] and report["vectors"] == 2 and report["complete"]
+    assert report["embedding"] == "chunks=complete complete"
+    assert _header_mode(home / "lcm.db") == 1 and not cc._wal_without_sidecars(home / "lcm.db")
+    assert not (home / "lcm.db-wal").exists() and not (home / "lcm.db-shm").exists()
+    assert {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in hermes.iterdir()} == snapshot
+    assert not (home / "logs" / "worker.log").exists()
+
+
+def test_embedding_exception_collects_a_failed_constructor_before_switch(tmp_path, home, hermes, monkeypatch):
+    class BrokenVectorStore:
+        def __init__(self, database):
+            self.connection = sqlite3.connect(database)
+            self.connection.execute("PRAGMA journal_mode=WAL")
+            self.cycle = self
+            raise RuntimeError("synthetic /private/model/cache failure")
+
+    def broken(database, config, *, slice_state):
+        BrokenVectorStore(database)
+
+    monkeypatch.setattr(cc, "run_incremental_embedding_pass", broken)
+    _record(_hook(), home, _transcript(tmp_path, CONVERSATION[:1]))
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        report = cc.run_worker(home, config=LCMConfig(), hermes_home=hermes, settle_s=0)
+        assert report["complete"] and report["embedding"] == "error" and report["vectors"] == 0
+        assert _header_mode(home / "lcm.db") == 1 and not cc._wal_without_sidecars(home / "lcm.db")
+        assert not (home / "lcm.db-wal").exists() and not (home / "lcm.db-shm").exists()
+        [logged] = [json.loads(line) for line in (home / "logs" / "worker.log").read_text().splitlines()]
+        assert {key: value for key, value in logged.items() if key != "t"} == {"stage": "embed", "error": "error"}
+    finally:
+        gc.collect()
+        if enabled:
+            gc.enable()
+
+
+@pytest.mark.parametrize("deadline,enabled,provider,expected", [
+    (20, True, "fastembed", "skipped_bounded"),
+    (20, False, "voyage", "skipped_bounded"),
+    (None, False, "voyage", "skipped_disabled"),
+    (None, True, "voyage", "skipped_provider"),
+    (None, True, "ollama", "skipped_provider"),
+])
+def test_embedding_guards_never_call_the_pass(tmp_path, home, hermes, monkeypatch,
+                                            deadline, enabled, provider, expected):
+    monkeypatch.setattr(cc, "run_incremental_embedding_pass", lambda *a, **k: pytest.fail("embedding called"))
+    _record(_hook(), home, _transcript(tmp_path, CONVERSATION[:1]))
+    config = LCMConfig(embeddings_enabled=enabled, embedding_provider=provider)
+    report = cc.run_worker(home, deadline_s=deadline, config=config, hermes_home=hermes, settle_s=0)
+    assert report["complete"] and report["embedding"] == expected and report["vectors"] == 0
+
+
+def test_idle_worker_does_not_load_embeddings(tmp_path, home, hermes, monkeypatch):
+    path = _transcript(tmp_path, CONVERSATION[:1])
+    _record(_hook(), home, path)
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
+    monkeypatch.setattr(cc, "run_incremental_embedding_pass", lambda *a, **k: pytest.fail("idle embedding"))
+    _record(_hook(), home, path)
+    report = cc.run_worker(home, config=LCMConfig(), hermes_home=hermes, settle_s=0)
+    assert report["complete"] and report["embedding"] == "skipped_idle" and report["vectors"] == 0
+
+
+@pytest.mark.parametrize("during_sleep", [False, True])
+def test_embedding_yields_to_spool_and_resumes_state_in_the_same_run(tmp_path, home, hermes, monkeypatch, during_sleep):
+    hook = _hook()
+    late = _transcript(tmp_path, [_entry("user", "v1", "late", session="s2")], session="s2")
+    _record(hook, home, _transcript(tmp_path, CONVERSATION[:1]))
+    calls, reports, sleeps = [], [], []
+
+    def sliced(database, config, *, slice_state):
+        stage = slice_state.get("stage", 0)
+        calls.append((id(slice_state), stage, slice_state["capture_budget_end"]))
+        slice_state["stage"] = stage + 1
+        if stage == 0 and not during_sleep:
+            _record(hook, home, late, session="s2")
+        return _embedding_slice(slice_state, "chunks=complete:1", vectors=1, again=stage == 0, delay=0.2)
+
+    real_drain = cc._drain_once
+
+    def observed(*args):
+        status = real_drain(*args)
+        reports.append((args[1]["embedding"], len(calls)))
+        return status
+
+    def sleep(delay):
+        sleeps.append(delay)
+        _record(hook, home, late, session="s2")
+
+    monkeypatch.setattr(cc, "run_incremental_embedding_pass", sliced)
+    monkeypatch.setattr(cc, "_drain_once", observed)
+    if during_sleep:
+        monkeypatch.setattr(cc, "time", SimpleNamespace(monotonic=time.monotonic, time=time.time, sleep=sleep))
+    report = cc.run_worker(home, config=LCMConfig(), hermes_home=hermes, settle_s=0)
+    assert reports[0] == ("yielded", 1) and [call[1] for call in calls] == [0, 1]
+    assert calls[0][0] == calls[1][0] and calls[0][2] == calls[1][2]
+    assert report["complete"] and report["records"] == 2 and report["vectors"] == 2 and not cc.pending(home)
+    assert not during_sleep or (sleeps and all(0 < delay <= 0.05 for delay in sleeps))
+    with closing(sqlite3.connect(home / "lcm.db")) as conn:
+        assert conn.execute("SELECT content FROM messages WHERE session_id = 's2'").fetchall() == [("late",)]
+
+
+@pytest.mark.parametrize("outcome,explicit,expected,logged", [
+    ("error", True, "error", True),
+    ("summaries=error:0", True, "summaries=error", True),
+    ("chunks=failed:2", True, "chunks=failed", True),
+    ("chunks=refused", True, "chunks=refused", True),
+    ("provider_unavailable", True, "provider_unavailable", True),
+    ("auto_register_unavailable", True, "auto_register_unavailable", True),
+    ("auto_register_unavailable", False, "auto_register_unavailable", False),
+    ("profile_held:voyage", True, "profile_held", False),
+    ("lease_held", True, "lease_held", False),
+    ("chunks=complete:2 complete", True, "chunks=complete complete", False),
+])
+def test_embedding_logs_only_error_tokens(tmp_path, home, hermes, monkeypatch, outcome, explicit, expected, logged):
+    def sliced(database, config, *, slice_state):
+        return dict(_embedding_slice(slice_state, outcome), failure="synthetic /private/model/cache failure")
+
+    monkeypatch.setattr(cc, "run_incremental_embedding_pass", sliced)
+    _record(_hook(), home, _transcript(tmp_path, CONVERSATION[:1]))
+    config = LCMConfig(embeddings_enabled_explicit=explicit)
+    report = cc.run_worker(home, config=config, hermes_home=hermes, settle_s=0)
+    assert report["complete"] and report["embedding"] == expected
+    log = home / "logs" / "worker.log"
+    if logged:
+        [entry] = [json.loads(line) for line in log.read_text().splitlines()]
+        assert {key: value for key, value in entry.items() if key != "t"} == {"stage": "embed", "error": expected}
+    else:
+        assert not log.exists()
+
+
+@pytest.mark.parametrize("delay", [0.1, 20.0])
+def test_embedding_budget_counts_slices_and_sleep(tmp_path, home, hermes, monkeypatch, delay):
+    clock, calls, sleeps = [100.0], [], []
+
+    def sliced(database, config, *, slice_state):
+        calls.append(clock[0])
+        clock[0] += 1.0
+        return _embedding_slice(slice_state, "chunks=complete:1", vectors=1, again=True, delay=delay)
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(cc, "run_incremental_embedding_pass", sliced)
+    monkeypatch.setattr(cc, "time", SimpleNamespace(monotonic=lambda: clock[0], time=time.time, sleep=sleep))
+    _record(_hook(), home, _transcript(tmp_path, CONVERSATION[:1]))
+    report = cc.run_worker(home, config=LCMConfig(), hermes_home=hermes, settle_s=0)
+    assert report["embedding"] == "budget" and report["complete"] and report["vectors"] == len(calls)
+    assert all(start < 108.0 for start in calls) and clock[0] <= 109.0
+    assert (len(calls) > 1 and sleeps) if delay == 0.1 else (len(calls) == 1 and not sleeps)
+    assert all(0 < seconds <= 0.05 for seconds in sleeps)
+
+
+@pytest.mark.parametrize("guard", ["pending", "transaction"])
+def test_embedding_skips_pending_records_and_open_transactions(tmp_path, home, hermes, monkeypatch, guard):
+    _record(_hook(), home, _transcript(tmp_path, CONVERSATION[:1]))
+    real_registered = cc.registered
+    observed = []
+
+    def registered(store):
+        found = real_registered(store)
+        if not observed:
+            observed.append(store)
+            if guard == "pending":
+                _record(_hook(), home, _transcript(tmp_path, [], session="s2"), session="s2")
+            else:
+                store.connection.execute("BEGIN")
+        return found
+
+    real_drain = cc._drain_once
+    tokens = []
+
+    def drain(*args):
+        status = real_drain(*args)
+        tokens.append(args[1]["embedding"])
+        return status
+
+    monkeypatch.setattr(cc, "registered", registered)
+    monkeypatch.setattr(cc, "_drain_once", drain)
+    monkeypatch.setattr(cc, "run_incremental_embedding_pass", lambda *a, **k: pytest.fail("guarded embedding"))
+    report = cc.run_worker(home, config=LCMConfig(), hermes_home=hermes, settle_s=0)
+    assert tokens[0] == "skipped_" + guard and report["vectors"] == 0
 
 
 # -- round 2 review regressions --------------------------------------------------------

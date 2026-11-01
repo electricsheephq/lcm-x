@@ -10,6 +10,7 @@ rows, inside one ``ingest_atomic()`` transaction per batch. One worker per store
 from __future__ import annotations
 
 import fcntl
+import gc
 import hashlib
 import json
 import os
@@ -38,6 +39,8 @@ from .claude_code_capture import (
 )
 from .dag import SummaryDAG
 from .db_bootstrap import mark_migration_step_complete
+from .config import embedding_provider_id
+from .embedding_maintenance import run_incremental_embedding_pass
 from .store import MessageStore, register_session_purge
 
 OWNER_FILE = "capture-owner.json"
@@ -52,6 +55,7 @@ BATCH_BYTES = 8 * 1024 * 1024
 FILE_CHUNK_BYTES = 64 * 1024 * 1024  # a larger tool-results file is kept as several rows
 SETTLE_S = 2.0
 QUIET_S = 0.5
+EMBED_BUDGET_S = 8.0
 END_EVENTS = frozenset({"Stop", "StopFailure", "SubagentStop", "SessionEnd", "PreCompact"})
 SET_ASIDE_TAGS = (".orphaned-", ".superseded-")
 CAPTURE_EVENTS_DDL = (
@@ -862,7 +866,9 @@ def run_worker(home: Path, *, deadline_s: Optional[float] = None, config: Any = 
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
     deadline = None if deadline_s is None else time.monotonic() + deadline_s
     report: dict[str, Any] = {"records": 0, "drained": 0, "missing": 0, "forgotten": 0, "failed": 0, "files": 0,
-                              "complete": True}
+                              "complete": True, "embedding": "skipped_bounded" if deadline is not None else
+                              "skipped_idle", "vectors": 0}
+    embedding_state: dict[str, Any] = {}
     lock = _Lock(home)
     try:
         wait_s = deadline_s or 0.0
@@ -872,7 +878,7 @@ def run_worker(home: Path, *, deadline_s: Optional[float] = None, config: Any = 
                     report["complete"] = False  # another worker holds the store past this deadline
                 return report
             try:
-                status = _drain_once(home, report, deadline, config, settle_s, hermes_home)
+                status = _drain_once(home, report, deadline, config, settle_s, hermes_home, embedding_state)
             finally:
                 lock.release()
             if status != "done" or not pending(home):
@@ -883,7 +889,7 @@ def run_worker(home: Path, *, deadline_s: Optional[float] = None, config: Any = 
 
 
 def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any, settle_s: float,
-                hermes_home: Optional[Path]) -> str:
+                hermes_home: Optional[Path], embedding_state: dict) -> str:
     """``done``, ``refused`` or ``deadline``. A record whose drain raises is set aside as
     ``.failed`` (the next hook of that session spools a fresh one), so one bad transcript
     cannot stall the others or loop the worker."""
@@ -894,6 +900,7 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
         return "refused"
     store = open_store(database, home, config)
     try:
+        before = store.connection.execute("SELECT MAX(store_id) FROM messages").fetchone()[0]
         claimed = claim_records(home)
         for _path, record in claimed:  # before any drain, so a fork's first rows already know it is one
             remember_session(store, record)
@@ -935,6 +942,9 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
                     report["failed"] += 1
                     report["complete"] = False
                     _log_failure(home, "sweep", error)
+        token, vectors = _embed_after_drain(home, database, store, config, deadline, before, embedding_state)
+        report["embedding"] = token
+        report["vectors"] += vectors
         return "done"
     finally:
         switched = to_rollback_journal(store.connection)
@@ -942,6 +952,67 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
         if not switched and not leave_readable(database):
             report["complete"] = False  # a bounded run's hook starts a worker; else the next hook's does
             _log_failure(home, "journal", "still_wal")
+
+
+def _embed_after_drain(home: Path, database: Path, store: MessageStore, config: Any,
+                       deadline: Optional[float], before: Optional[int], state: dict) -> tuple[str, int]:
+    """Catch up local vectors in slices, yielding to capture and the run's budget."""
+    if deadline is not None:
+        return "skipped_bounded", 0
+    if config is None or not config.embeddings_enabled:
+        return "skipped_disabled", 0
+    provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
+    if embedding_provider_id(provider) != "fastembed":
+        return "skipped_provider", 0
+    if pending(home):
+        return "skipped_pending", 0
+    if store.connection.in_transaction:
+        return "skipped_transaction", 0
+    if store.connection.execute("SELECT MAX(store_id) FROM messages").fetchone()[0] == before:
+        return "skipped_idle", 0
+    end = state.setdefault("capture_budget_end", time.monotonic() + EMBED_BUDGET_S)
+    token, vectors = "budget", 0
+    try:
+        while time.monotonic() < end:
+            if pending(home):
+                token = "yielded"
+                break
+            try:
+                result = run_incremental_embedding_pass(database, config, slice_state=state)
+            except Exception:  # noqa: BLE001 - embedding never changes capture's result
+                token = "error"
+                break
+            token = " ".join(part.split(":", 1)[0] for part in result["outcome"].split())
+            vectors += state["vectors_written"]
+            if not state["continue"]:
+                break
+            if pending(home):
+                token = "yielded"
+                break
+            remaining = end - time.monotonic()
+            if remaining <= 0 or state["delay"] > remaining:
+                token = "budget"
+                break
+            wake = time.monotonic() + state["delay"]
+            while True:
+                if pending(home):
+                    token = "yielded"
+                    break
+                delay = wake - time.monotonic()
+                if delay <= 0:
+                    break
+                time.sleep(min(0.05, delay))
+            if token == "yielded":
+                break
+        else:
+            token = "budget"
+    finally:
+        gc.collect()
+    if (token == "error" or any(mark in token for mark in ("=error", "=failed", "=refused"))
+            or token == "provider_unavailable"
+            or (token == "auto_register_unavailable" and config.embeddings_enabled_explicit)):
+        _log_failure(home, "embed", token)
+    return token, vectors
 
 
 def remember_session(store: MessageStore, record: dict) -> None:
