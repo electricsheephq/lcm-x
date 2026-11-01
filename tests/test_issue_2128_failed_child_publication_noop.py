@@ -1,14 +1,13 @@
-"""A failed rotation-child publication is still an identity no-op (#2128; the #541 cell at v0.29.1-rc3).
+"""A failed rotation-child publication's copy is an identity no-op again (#2128; the #541 cell at v0.29.1-rc3).
 
-In rotation mode a child session's compaction publication can fail (LifecyclePublicationConflictError).
-compress() then hands the host a copy of its own list: the same replay identities, a new list object. v0.29.0
-called that an identity no-op whatever the object; #1286 added ``result is messages`` so that a cleanup-only
-rewrite (status ``sanitized``: same identities, new public bytes) is committed. The rule also caught the failed
-publication's copy, so the host's rotation into the next child left that child's first bind no proof of the summary
-row LCM itself emitted, and it stored that row again as a new user row (one surplus row, the reliability matrix's
-``publication-failure/rotation-child`` B2). Only a ``sanitized`` copy is a rewrite; every other copy with the same
-identities is still the no-op it was in v0.29.0. The reliability cell is the end-to-end regression (the next child's
-store); this test pins the predicate, and the #1286 tests keep a ``sanitized`` copy a committed rewrite.
+This test pins the predicate only. In rotation mode a child session's compaction publication can fail
+(LifecyclePublicationConflictError), and compress() then hands back a copy with the same replay identities in a new
+list object. v0.29.0 called any such copy an identity no-op; #1286 added ``result is messages`` so that a cleanup-only
+rewrite (status ``sanitized``) is committed, and that rule also caught this copy. On the real hosts (the reliability
+cell ``publication-failure/rotation-child``, B2), rc3 then stored the earlier summary row again in the next child.
+This process-local host does not reproduce that store effect, so the reliability cell is the end-to-end regression.
+This test checks that the copy is again an identity no-op with no commit proof; the #1286 tests keep a ``sanitized``
+copy a committed rewrite.
 """
 
 from __future__ import annotations
