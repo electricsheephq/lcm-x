@@ -47,8 +47,11 @@ def _stub_summaries(monkeypatch):
 
 
 class RotatingHost:
-    """Hermes in rotation mode: stamps user rows, ingests every turn, and on a compression ends the session on the
-    list compress() was given, then starts a child session that adopts compress()'s output."""
+    """Hermes in rotation mode, simplified: stamps user rows and ingests the live list on every turn(). On a
+    compression, compress_and_rotate() ends the session on the list compress() was given and starts a child session
+    that adopts compress()'s output; the next turn()'s ingest stores the child's rows. Unlike Hermes 0.21.5 and later,
+    it rotates even when compress() returns a byte-equal list. Only the predicate is asserted here, not the rows each
+    session stores."""
 
     def __init__(self, tmp_path):
         self.clock, self.n_turns, self.session = 1_760_000_000.0, 0, PARENT
