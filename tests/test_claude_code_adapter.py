@@ -6,6 +6,7 @@ session-file capture off until its own proof.
 """
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import io
 import json
@@ -229,7 +230,8 @@ def test_precompact_reports_the_worker_outcome(hook, env, tmp_path, monkeypatch)
         return popen(*args, **kwargs)
     monkeypatch.setattr(hook.subprocess, "Popen", counting)
     for code, outcome, detached in ((0, "drained", False), (3, "drain_incomplete+worker", True),
-                                    (1, "drain_failed:1+worker", True), (2, "drain_failed:2", False)):
+                                    (1, "drain_failed:1+worker", True), (2, "drain_failed:2", False),
+                                    (4, "worker_running", False)):
         continued.unlink(missing_ok=True)
         starts.clear()
         worker.write_text("import pathlib, sys\n"
@@ -420,3 +422,18 @@ def test_the_reader_names_the_one_setup_step_when_no_python_is_found(env, tmp_pa
     monkeypatch.setenv("LCMX_PACKAGE_ROOT", str(_package(tmp_path)))
     assert launcher.main() == 1
     assert "uv venv --python 3.11" in capsys.readouterr().err
+
+
+def test_a_precompact_drain_never_waits_on_a_held_lock(hook, env, tmp_path, monkeypatch):
+    """REGRESSION: the bounded PreCompact drain waited up to its deadline for a lock another
+    worker held; now the hook returns at once and leaves the spooled record to the holder."""
+    home = Path(env["LCMX_CC_HOME"])
+    home.mkdir(parents=True)
+    lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(_package(tmp_path))}
+    monkeypatch.setattr(hook.subprocess, "run", lambda *a, **k: pytest.fail("a held lock must not start a drain"))
+    monkeypatch.setattr(hook.subprocess, "Popen", lambda *a, **k: pytest.fail("the holder takes the record"))
+    with open(home / "capture.lock", "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        started = time.monotonic()
+        assert hook.start_worker(home, lane, deadline_s=10) == "worker_running"
+        assert time.monotonic() - started < 1

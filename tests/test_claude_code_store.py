@@ -6,6 +6,7 @@ Design: docs/claude-code-adapter.md.
 from __future__ import annotations
 
 import ast
+import fcntl
 import gc
 import hashlib
 import importlib.util
@@ -1197,3 +1198,53 @@ def test_core_never_imports_the_adapter():
     named = [path.relative_to(root).as_posix() for path in core
              if any(module in path.read_text(encoding="utf-8") for module in ADAPTER_MODULES)]
     assert named == []
+
+
+def test_a_bounded_drain_never_waits_for_the_lock_and_the_holder_captures_everything(tmp_path, home, hermes):
+    """REGRESSION: a bounded (PreCompact) run waited up to its deadline for a lock another worker
+    held; now it returns at once, drains nothing, and the next worker captures every line."""
+    _record(_hook(), home, _transcript(tmp_path, CONVERSATION))
+    with open(home / "capture.lock", "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        started = time.monotonic()
+        report = cc.run_worker(home, deadline_s=10, hermes_home=hermes, settle_s=0)
+        assert time.monotonic() - started < 1
+    assert report["lock"] == "held" and not report["complete"] and report["records"] == 0
+    assert cc.pending(home)
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
+    store = _open(home, hermes)
+    try:
+        assert len(_events(store)) == len(CONVERSATION) and not cc.pending(home)
+    finally:
+        store.close()
+
+
+def test_a_bounded_drain_cut_by_its_deadline_keeps_whole_batches_and_its_record(tmp_path, home, hermes, monkeypatch):
+    """A PreCompact drain that hits its bound keeps each batch it committed whole, leaves its
+    spool record, and the next worker captures the rest exactly once."""
+    entries = [_entry("user", f"u{index}", f"line {index}") for index in range(9)]
+    _record(_hook(), home, _transcript(tmp_path, entries))
+    real_read, real_ingest = cc.read_lines, cc.ingest_lines
+    monkeypatch.setattr(cc, "read_lines", lambda path, offset, **_kw: real_read(path, offset, max_lines=2))
+
+    def slow(store, lineage, cursor, lines):
+        result = real_ingest(store, lineage, cursor, lines)
+        time.sleep(0.3)  # the bound passes after this batch commits
+        return result
+    monkeypatch.setattr(cc, "ingest_lines", slow)
+    report = cc.run_worker(home, deadline_s=0.2, hermes_home=hermes, settle_s=0)
+    assert not report["complete"] and "lock" not in report and cc.pending(home)
+    store = _open(home, hermes)
+    try:
+        assert len(_events(store)) == 2  # one whole batch
+    finally:
+        store.close()
+    monkeypatch.setattr(cc, "ingest_lines", real_ingest)
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
+    store = _open(home, hermes)
+    try:
+        positions = [row[0] for row in store.connection.execute(
+            "SELECT position FROM capture_events WHERE source_kind = 'line' ORDER BY position")]
+        assert positions == list(range(9)) and len(_rows(store)) == 9 and not cc.pending(home)
+    finally:
+        store.close()
