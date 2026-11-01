@@ -12,6 +12,7 @@ import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -422,6 +423,164 @@ def test_the_reader_names_the_one_setup_step_when_no_python_is_found(env, tmp_pa
     monkeypatch.setenv("LCMX_PACKAGE_ROOT", str(_package(tmp_path)))
     assert launcher.main() == 1
     assert "uv venv --python 3.11" in capsys.readouterr().err
+
+
+class _Started(Exception):
+    """Stands in for a successful exec, which never returns."""
+
+
+@pytest.fixture
+def start_reader(env, tmp_path, monkeypatch):
+    """Runs the launcher in-process on a set-up runtime. Returns the one exec it made, as
+    (which, path, argv, environment): "override" for execve, "plain" for execv."""
+    spec = importlib.util.spec_from_file_location("lcmx_mcp_under_test", PLUGIN / "bin" / "lcmx_mcp.py")
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    package = _package(tmp_path)
+    Path(env["LCMX_CC_HOME"]).mkdir(parents=True)
+    for name in ("CLAUDE_PLUGIN_DATA", "GROK_SESSION_ID"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(package)}.items():
+        monkeypatch.setenv(name, value)
+    made = []
+
+    def recorder(which):
+        def execute(path, argv, environment=None):
+            made.append((which, path, argv, environment))
+            raise _Started
+        return execute
+
+    monkeypatch.setattr(launcher.os, "execv", recorder("plain"))
+    monkeypatch.setattr(launcher.os, "execve", recorder("override"))
+
+    def start():
+        made.clear()
+        with pytest.raises(_Started):
+            launcher.main()
+        (only,) = made
+        return only
+    return start
+
+
+def _plain_reader(env, tmp_path):
+    home = Path(env["LCMX_CC_HOME"])
+    return [sys.executable, str(tmp_path / "package" / "scripts" / "lcm_x_mcp.py"), "--store", str(home / "lcm.db"),
+            "--hermes-home", str(home), "--log-dir", str(home / "logs")]
+
+
+def _write_override(env, spec):
+    path = Path(env["LCMX_CC_HOME"]) / "reader-override.json"
+    path.write_text(spec if isinstance(spec, str) else json.dumps(spec), encoding="utf-8")
+
+
+def test_a_valid_reader_override_starts_instead_of_the_plain_reader(start_reader, env, tmp_path, capsys):
+    """With no file the plain reader starts and nothing is logged. A valid file's command starts
+    instead, with the plain reader's exact argv in LCMX_LOCAL_READER_CMD and the rest of the
+    environment unchanged; other keys are ignored."""
+    plain = _plain_reader(env, tmp_path)
+    assert start_reader() == ("plain", plain[0], plain, None)
+    assert capsys.readouterr().err == ""
+    override = str(_executable(tmp_path / "override" / "reader"))
+    _write_override(env, {"version": 1, "command": [override, "--flag"], "other": "ignored"})
+    which, path, argv, environment = start_reader()
+    assert (which, path, argv) == ("override", override, [override, "--flag"])
+    assert environment == {**os.environ, "LCMX_LOCAL_READER_CMD": json.dumps(plain)}
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("case, reason", [
+    ("malformed", "not valid JSON"),
+    ("not_an_object", "not a JSON object"),
+    ("version_text", '"version" is not an integer'),
+    ("version_true", '"version" is not an integer'),
+    ("version_float", '"version" is not an integer'),
+    ("version_2", '"version" is not 1'),
+    ("command_text", '"command" is not an array of strings'),
+    ("command_number", '"command" is not an array of strings'),
+    ("command_empty", '"command" is empty'),
+    ("relative", '"command[0]" is not an absolute path'),
+    ("missing", '"command[0]" is missing or not executable'),
+    ("not_executable", '"command[0]" is missing or not executable'),
+    ("unreadable", "could not be read"),
+])
+def test_a_bad_reader_override_starts_the_plain_reader(start_reader, env, tmp_path, monkeypatch, capsys, case,
+                                                       reason):
+    """Every fail-open case starts the plain reader and logs one line naming the reason."""
+    reader = str(_executable(tmp_path / "override" / "reader"))
+    idle = tmp_path / "override" / "idle"
+    idle.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")  # no execute bit
+    monkeypatch.chdir(tmp_path)  # so the relative command names a real executable
+    specs = {
+        "malformed": '{"version": 1, "command": [',
+        "not_an_object": [1],
+        "version_text": {"version": "1", "command": [reader]},
+        "version_true": {"version": True, "command": [reader]},
+        "version_float": {"version": 1.0, "command": [reader]},
+        "version_2": {"version": 2, "command": [reader]},
+        "command_text": {"version": 1, "command": reader},
+        "command_number": {"version": 1, "command": [reader, 1]},
+        "command_empty": {"version": 1, "command": []},
+        "relative": {"version": 1, "command": ["override/reader"]},
+        "missing": {"version": 1, "command": [str(tmp_path / "override" / "missing")]},
+        "not_executable": {"version": 1, "command": [str(idle)]},
+    }
+    if case == "unreadable":
+        (Path(env["LCMX_CC_HOME"]) / "reader-override.json").mkdir()
+    else:
+        _write_override(env, specs[case])
+    plain = _plain_reader(env, tmp_path)
+    assert start_reader() == ("plain", plain[0], plain, None)
+    (line,) = capsys.readouterr().err.splitlines()
+    assert reason in line and line.endswith("; starting the plain reader")
+
+
+# Each program the launcher ends up running appends [which, argv] to LCMX_TEST_RECORD.
+_RECORDER = ("import json, os, sys\n"
+             "with open(os.environ['LCMX_TEST_RECORD'], 'a') as out:\n"
+             "    out.write(json.dumps([%r, sys.argv]) + '\\n')\n")
+
+
+def _launch(env, tmp_path):
+    """Runs the launcher as Claude Code does, in its own process, over a recording plain reader."""
+    home, package, record = Path(env["LCMX_CC_HOME"]), _package(tmp_path), tmp_path / "started.jsonl"
+    (package / "scripts" / "lcm_x_mcp.py").write_text(_RECORDER % "plain", encoding="utf-8")
+    lane = {"PATH": os.environ.get("PATH", ""), "LCMX_CC_HOME": str(home), "LCMX_PYTHON": sys.executable,
+            "LCMX_PACKAGE_ROOT": str(package), "LCMX_TEST_RECORD": str(record)}
+    result = subprocess.run([sys.executable, str(PLUGIN / "bin" / "lcmx_mcp.py")], env=lane,
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+    started = record.read_text(encoding="utf-8").splitlines() if record.exists() else []
+    return result, [json.loads(line) for line in started]
+
+
+def test_a_reader_override_runs_and_its_reader_command_starts_the_plain_reader(env, tmp_path):
+    """The real exec: the override's process starts, and the argv it gets in LCMX_LOCAL_READER_CMD
+    starts the plain reader, as the override's own fallback would."""
+    Path(env["LCMX_CC_HOME"]).mkdir(parents=True)
+    override = tmp_path / "override.py"
+    override.write_text(_RECORDER % "override" + "command = json.loads(os.environ['LCMX_LOCAL_READER_CMD'])\n"
+                        "os.execv(command[0], command)\n", encoding="utf-8")
+    _write_override(env, {"version": 1, "command": [sys.executable, str(override), "--flag"]})
+    result, started = _launch(env, tmp_path)
+    assert (result.returncode, result.stderr) == (0, "")
+    assert started == [["override", [str(override), "--flag"]], ["plain", _plain_reader(env, tmp_path)[1:]]]
+
+
+@pytest.mark.parametrize("program", ["#!/nonexistent/interpreter\n", "not a program\n"],
+                         ids=["missing_interpreter", "no_executable_format"])
+def test_a_reader_override_that_does_not_start_falls_back_to_the_plain_reader(env, tmp_path, program):
+    """The one start failure an override cannot catch itself: the exec raises OSError, ENOENT for
+    a shebang naming a missing interpreter and ENOEXEC for a file with no executable format."""
+    Path(env["LCMX_CC_HOME"]).mkdir(parents=True)
+    script = tmp_path / "override" / "reader"
+    script.parent.mkdir()
+    script.write_text(program, encoding="utf-8")
+    script.chmod(0o755)
+    _write_override(env, {"version": 1, "command": [str(script)]})
+    result, started = _launch(env, tmp_path)
+    assert result.returncode == 0
+    assert started == [["plain", _plain_reader(env, tmp_path)[1:]]]
+    (line,) = result.stderr.splitlines()
+    assert "the command did not start" in line and line.endswith("; starting the plain reader")
 
 
 def test_a_precompact_drain_never_waits_on_a_held_lock(hook, env, tmp_path, monkeypatch):

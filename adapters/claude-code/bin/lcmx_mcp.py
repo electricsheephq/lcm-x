@@ -2,15 +2,55 @@
 
 Stdlib only and Python 3.9 compatible: Claude Code starts it with the system ``python3``,
 and it replaces itself with the LCM-X runtime interpreter.
+
+A valid ``reader-override.json`` in the store home names a command to start instead, which gets
+the plain reader's argv in ``LCMX_LOCAL_READER_CMD``. Anything else about that file, or a command
+that does not start, starts the plain reader. The plugin never writes the file.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lcmx_runtime  # noqa: E402
+
+OVERRIDE = "reader-override.json"
+READER_CMD = "LCMX_LOCAL_READER_CMD"
+
+
+def reader_override(path: Path) -> Tuple[Optional[List[str]], str]:
+    """The command the override file names, else None and why it is not used ("" for no file)."""
+    try:
+        text = path.read_bytes()
+    except FileNotFoundError:
+        return None, ""
+    except OSError as error:
+        return None, "could not be read (%s)" % (error.strerror or error)
+    try:
+        spec = json.loads(text)
+    except (ValueError, RecursionError):  # bad UTF-8 is a ValueError too
+        return None, "not valid JSON"
+    if not isinstance(spec, dict):
+        return None, "not a JSON object"
+    version = spec.get("version")
+    if type(version) is not int:  # true is a bool and 1.0 a float, not the integer 1
+        return None, '"version" is not an integer'
+    if version != 1:
+        return None, '"version" is not 1'
+    command = spec.get("command")
+    if not isinstance(command, list) or not all(isinstance(part, str) for part in command):
+        return None, '"command" is not an array of strings'
+    if not command:
+        return None, '"command" is empty'
+    if not os.path.isabs(command[0]):
+        return None, '"command[0]" is not an absolute path'
+    if not (os.path.isfile(command[0]) and os.access(command[0], os.X_OK)):
+        return None, '"command[0]" is missing or not executable'
+    return command, ""
 
 
 def main() -> int:
@@ -35,8 +75,17 @@ def main() -> int:
         return 1
     logs = home / "logs"
     logs.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.execv(runtime[0], [*runtime, str(reader), "--store", str(home / "lcm.db"),
-                          "--hermes-home", str(home), "--log-dir", str(logs)])
+    plain = [*runtime, str(reader), "--store", str(home / "lcm.db"), "--hermes-home", str(home),
+             "--log-dir", str(logs)]
+    command, reason = reader_override(home / OVERRIDE)
+    if command is not None:
+        try:  # once started, the override owns recall and its own fallback to the plain reader
+            os.execve(command[0], command, {**environ, READER_CMD: json.dumps(plain)})
+        except (OSError, ValueError) as error:  # ValueError: a NUL byte in an argument
+            reason = "the command did not start (%s)" % error
+    if reason:
+        print("lcm-x: %s: %s; starting the plain reader" % (home / OVERRIDE, reason), file=sys.stderr, flush=True)
+    os.execv(plain[0], plain)
     return 1
 
 

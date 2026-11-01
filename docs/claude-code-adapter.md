@@ -271,6 +271,23 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
   `lcm_load_session`, `lcm_describe`) search across sessions. The `StoreReader` and `handle()`
   signatures stay as they are. #1216 gets two behaviour changes in its own PR: host-neutral error
   texts, and the offline check re-reads the header once before refusing.
+- **Reader override.** A valid `reader-override.json` in the store home makes the server start
+  another reader in place of the plain one. Something outside the plugin writes the file to opt in
+  and removes it to opt out; the plugin never writes it. Each harness reads the file in its own home.
+  - The file is `{"version": 1, "command": ["<absolute path>", "<arg>", ...]}`. `version` is the
+    integer 1, `command` is a non-empty array of strings whose first item is the absolute path of
+    an executable file, and other keys are ignored.
+  - The plugin starts `command` on the same stdio and adds one environment variable,
+    `LCMX_LOCAL_READER_CMD`: a JSON array holding the exact argv the plugin would have run for the
+    plain reader. The rest of the environment passes through unchanged.
+  - With no file, the plain reader starts and nothing is logged. The plain reader also starts, and
+    one line on the server's stderr names the reason, when the file is not valid JSON, has a field
+    of the wrong type, a `version` other than 1, an empty `command`, or a first item that is
+    relative, missing or not executable. The same holds when starting the command fails with an
+    OS error, such as a script whose interpreter is gone.
+  - Once started, the override owns recall. The plugin does not supervise it; falling back to
+    `LCMX_LOCAL_READER_CMD` on its own failures is the override's job. The file is read only when
+    the plain reader could start; otherwise the server reports the missing setup step as before.
 - **Between worker runs.** When the last connection to a WAL store closes, SQLite deletes the
   `-wal` and `-shm` files, and the reader refuses a WAL store without them. So the worker
   checkpoints and switches the store to rollback mode (`journal_mode=DELETE`) before it exits; the
