@@ -462,9 +462,9 @@ def start_reader(env, tmp_path, monkeypatch):
     return start
 
 
-def _plain_reader(env, tmp_path):
+def _plain_reader(env, tmp_path, runtime=(sys.executable,)):
     home = Path(env["LCMX_CC_HOME"])
-    return [sys.executable, str(tmp_path / "package" / "scripts" / "lcm_x_mcp.py"), "--store", str(home / "lcm.db"),
+    return [*runtime, str(tmp_path / "package" / "scripts" / "lcm_x_mcp.py"), "--store", str(home / "lcm.db"),
             "--hermes-home", str(home), "--log-dir", str(home / "logs")]
 
 
@@ -473,11 +473,19 @@ def _write_override(env, spec):
     path.write_text(spec if isinstance(spec, str) else json.dumps(spec), encoding="utf-8")
 
 
-def test_a_valid_reader_override_starts_instead_of_the_plain_reader(start_reader, env, tmp_path, capsys):
+@pytest.mark.parametrize("runtime", ["set_up", "found"])
+def test_a_valid_reader_override_starts_instead_of_the_plain_reader(start_reader, env, tmp_path, monkeypatch, capsys,
+                                                                    runtime):
     """With no file the plain reader starts and nothing is logged. A valid file's command starts
-    instead, with the plain reader's exact argv in LCMX_LOCAL_READER_CMD and the rest of the
-    environment unchanged; other keys are ignored."""
-    plain = _plain_reader(env, tmp_path)
+    instead, with the plain reader's exact argv in LCMX_LOCAL_READER_CMD (a found Python's -I -S
+    included) and the rest of the environment unchanged; other keys are ignored."""
+    python = [sys.executable]
+    if runtime == "found":
+        found = _executable(tmp_path / "bin" / "python3.11")
+        monkeypatch.delenv("LCMX_PYTHON")
+        monkeypatch.setenv("PATH", str(found.parent))
+        python = [str(found), "-I", "-S"]
+    plain = _plain_reader(env, tmp_path, python)
     assert start_reader() == ("plain", plain[0], plain, None)
     assert capsys.readouterr().err == ""
     override = str(_executable(tmp_path / "override" / "reader"))
@@ -501,7 +509,10 @@ def test_a_valid_reader_override_starts_instead_of_the_plain_reader(start_reader
     ("relative", '"command[0]" is not an absolute path'),
     ("missing", '"command[0]" is missing or not executable'),
     ("not_executable", '"command[0]" is missing or not executable'),
-    ("unreadable", "could not be read"),
+    ("directory", "not a regular file"),
+    ("device", "not a regular file"),
+    pytest.param("no_permission", "could not be read",
+                 marks=pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")),
 ])
 def test_a_bad_reader_override_starts_the_plain_reader(start_reader, env, tmp_path, monkeypatch, capsys, case,
                                                        reason):
@@ -524,8 +535,14 @@ def test_a_bad_reader_override_starts_the_plain_reader(start_reader, env, tmp_pa
         "missing": {"version": 1, "command": [str(tmp_path / "override" / "missing")]},
         "not_executable": {"version": 1, "command": [str(idle)]},
     }
-    if case == "unreadable":
-        (Path(env["LCMX_CC_HOME"]) / "reader-override.json").mkdir()
+    path = Path(env["LCMX_CC_HOME"]) / "reader-override.json"
+    if case == "directory":
+        path.mkdir()
+    elif case == "device":
+        path.symlink_to(os.devnull)
+    elif case == "no_permission":
+        _write_override(env, {"version": 1, "command": [reader]})
+        path.chmod(0)
     else:
         _write_override(env, specs[case])
     plain = _plain_reader(env, tmp_path)
@@ -547,7 +564,7 @@ def _launch(env, tmp_path):
     lane = {"PATH": os.environ.get("PATH", ""), "LCMX_CC_HOME": str(home), "LCMX_PYTHON": sys.executable,
             "LCMX_PACKAGE_ROOT": str(package), "LCMX_TEST_RECORD": str(record)}
     result = subprocess.run([sys.executable, str(PLUGIN / "bin" / "lcmx_mcp.py")], env=lane,
-                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
     started = record.read_text(encoding="utf-8").splitlines() if record.exists() else []
     return result, [json.loads(line) for line in started]
 
@@ -581,6 +598,18 @@ def test_a_reader_override_that_does_not_start_falls_back_to_the_plain_reader(en
     assert started == [["plain", _plain_reader(env, tmp_path)[1:]]]
     (line,) = result.stderr.splitlines()
     assert "the command did not start" in line and line.endswith("; starting the plain reader")
+
+
+def test_a_fifo_at_the_override_path_starts_the_plain_reader_at_once(env, tmp_path):
+    """Opening a FIFO waits for a writer, and a launcher that waited would start no reader. The
+    child's timeout bounds a regression."""
+    Path(env["LCMX_CC_HOME"]).mkdir(parents=True)
+    os.mkfifo(Path(env["LCMX_CC_HOME"]) / "reader-override.json")
+    result, started = _launch(env, tmp_path)
+    assert result.returncode == 0
+    assert started == [["plain", _plain_reader(env, tmp_path)[1:]]]
+    (line,) = result.stderr.splitlines()
+    assert "not a regular file" in line and line.endswith("; starting the plain reader")
 
 
 def test_a_precompact_drain_never_waits_on_a_held_lock(hook, env, tmp_path, monkeypatch):

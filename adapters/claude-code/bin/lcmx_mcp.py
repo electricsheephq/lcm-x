@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -25,11 +26,21 @@ READER_CMD = "LCMX_LOCAL_READER_CMD"
 def reader_override(path: Path) -> Tuple[Optional[List[str]], str]:
     """The command the override file names, else None and why it is not used ("" for no file)."""
     try:
-        text = path.read_bytes()
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)  # opening a FIFO waits for a writer otherwise
     except FileNotFoundError:
         return None, ""
     except OSError as error:
         return None, "could not be read (%s)" % (error.strerror or error)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):  # a FIFO or a device can block or never end
+            return None, "not a regular file"
+        os.set_blocking(fd, True)
+        with open(fd, "rb", closefd=False) as handle:
+            text = handle.read()
+    except OSError as error:
+        return None, "could not be read (%s)" % (error.strerror or error)
+    finally:
+        os.close(fd)
     try:
         spec = json.loads(text)
     except (ValueError, RecursionError):  # bad UTF-8 is a ValueError too

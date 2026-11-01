@@ -281,10 +281,11 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
     `LCMX_LOCAL_READER_CMD`: a JSON array holding the exact argv the plugin would have run for the
     plain reader. The rest of the environment passes through unchanged.
   - With no file, the plain reader starts and nothing is logged. The plain reader also starts, and
-    one line on the server's stderr names the reason, when the file is not valid JSON, has a field
-    of the wrong type, a `version` other than 1, an empty `command`, or a first item that is
-    relative, missing or not executable. The same holds when starting the command fails with an
-    OS error, such as a script whose interpreter is gone.
+    one line on the server's stderr names the reason, when the file is not a regular file (a FIFO
+    or a device is never read), cannot be read, is not valid JSON, has a field of the wrong type, a
+    `version` other than 1, an empty `command`, or a first item that is relative, missing or not
+    executable. The same holds when starting the command fails with an OS error, such as a script
+    whose interpreter is gone.
   - Once started, the override owns recall. The plugin does not supervise it; falling back to
     `LCMX_LOCAL_READER_CMD` on its own failures is the override's job. The file is read only when
     the plain reader could start; otherwise the server reports the missing setup step as before.
