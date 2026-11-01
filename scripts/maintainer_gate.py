@@ -36,6 +36,7 @@ REVIEW_POLICY_FILES = {
 MEMORY_MIGRATION_FILES = {
     "scripts/backfill_externalized_tool_outputs.py",
     "scripts/import_lossless_claw.py",
+    "scripts/lcm_x_capture.py",
 }
 # Modules that directly shape main-model context, summary requests, stored turn
 # content/identity/ownership, compaction selection/commit/progress, or host
@@ -86,6 +87,8 @@ NON_TURN_PATH_FILES = {
     "assertion_state.py",  # Default-off assertion query state.
     "assertion_store.py",  # Default-off assertion persistence.
     "chunking.py",  # Explicit chunk backfill or default-off embeddings.
+    "claude_code_capture.py",  # Claude Code transcript projection; not imported by the Hermes turn path.
+    "claude_code_store.py",  # Claude Code capture writer, only for stores it creates and stamps.
     "command.py",  # Explicit commands or default-off embedding backfill.
     "command_auth.py",  # Explicit slash-command authorization only.
     "command_doctor.py",  # Read-only /lcm doctor text diagnostics only.

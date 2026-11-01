@@ -123,10 +123,21 @@ def spool(home: Path, record: Mapping[str, Any]) -> str:
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     identity = "\0".join([record["host"], record["session_id"], record.get("agent_id") or ""])
     key = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+    record = dict(record)
+    if record.get("event") == "SessionStart" and record.get("source"):
+        record["start_source"] = record["source"]
+    else:  # a later hook of the session keeps how it started (a fork links to its parent)
+        try:
+            with open(directory / (key + ".json"), encoding="utf-8") as handle:
+                started = json.load(handle).get("start_source")
+        except (OSError, ValueError, AttributeError):
+            started = None
+        if started:
+            record["start_source"] = started
     temporary = directory / (".%s.%d.tmp" % (key, os.getpid()))
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        json.dump(dict(record), handle, sort_keys=True)
+        json.dump(record, handle, sort_keys=True)
     os.replace(temporary, directory / (key + ".json"))
     return "spooled"
 

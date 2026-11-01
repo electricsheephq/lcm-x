@@ -447,6 +447,31 @@ def delete_session_lineage(conn: sqlite3.Connection, sessions_sql: str, args: tu
         conn.execute(f"DELETE FROM session_lineage WHERE child_session_id IN ({sessions_sql})", args)
 
 
+# A harness capture writer stamps the stores it creates (docs/claude-code-adapter.md); Hermes never does.
+CAPTURE_OWNER_KEY = "capture:owner"
+CAPTURE_EVENTS_DDL = (
+    "CREATE TABLE IF NOT EXISTS capture_events (event_id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, "
+    "lineage_key TEXT NOT NULL, source_kind TEXT NOT NULL, generation INTEGER NOT NULL, position INTEGER NOT NULL, "
+    "uid TEXT, entry_type TEXT, entry_class TEXT NOT NULL, line_digest TEXT NOT NULL, content_digest TEXT, "
+    "disposition TEXT NOT NULL, store_ids TEXT, notes TEXT, raw BLOB, raw_from INTEGER, "
+    "projection_version TEXT NOT NULL, captured_at REAL NOT NULL)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_events_line ON capture_events(lineage_key, generation, position) "
+    "WHERE source_kind = 'line'",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_events_file ON capture_events(lineage_key, uid, line_digest) "
+    "WHERE source_kind = 'file'",
+    "CREATE INDEX IF NOT EXISTS idx_capture_events_uid ON capture_events(uid) WHERE uid IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_capture_events_shared ON capture_events(line_digest) "
+    "WHERE entry_class = 'shared_raw'",
+)
+
+
+def delete_capture_events(conn: sqlite3.Connection, sessions_sql: str, args: tuple = ()) -> None:
+    """A deleted session's capture ledger rows and raw lines go with its messages, on the caller's
+    transaction, so a later re-projection cannot bring forgotten content back. Never creates the table."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'capture_events'").fetchone():
+        conn.execute(f"DELETE FROM capture_events WHERE session_id IN ({sessions_sql})", args)
+
+
 def _database_identity(path: Path, store: object) -> str:
     """#719: the file a store opens, however its path was spelled; ``:memory:`` is one per store."""
     if str(path) == ":memory:":
@@ -895,6 +920,7 @@ class MessageStore:
             delete_host_uid_bindings(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_chunk_inflight(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_session_lineage(self._conn, "SELECT ?", (session_id,))
+            delete_capture_events(self._conn, "SELECT ?", (session_id,))
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),
@@ -1575,6 +1601,24 @@ class MessageStore:
                     (child_session_id, parent_session_id, child_subagent_id or None, parent_subagent_id or None,
                      child_role or None, source, time.time()))
             self._session_lineage_schema_ready = True
+
+    def ensure_capture_events(self) -> None:
+        """The harness-capture source ledger: the NAMED step ``capture_events_v1``, created only in a
+        store stamped ``capture:owner`` by its capture writer, never in a Hermes profile's store. No
+        SCHEMA_VERSION bump, no existing table touched; older readers ignore the table."""
+        conn = self._conn
+        with self._write_lock:
+            if getattr(self, "_capture_events_ready", False):
+                return
+            if conn.in_transaction:
+                raise sqlite3.OperationalError("capture ledger setup skipped: the connection is in a transaction")
+            if not self.read_metadata_json(CAPTURE_OWNER_KEY):
+                raise sqlite3.OperationalError("capture ledger refused: the store has no capture:owner stamp")
+            with self.atomic(immediate=True):
+                for sql in CAPTURE_EVENTS_DDL:
+                    conn.execute(sql)
+                mark_migration_step_complete(conn, "capture_events_v1")
+            self._capture_events_ready = True
 
     def session_lineage_parents(self, session_ids: Iterable[str]) -> dict[str, str]:
         """``{child_session_id: parent_session_id}`` for the ids that are recorded children."""

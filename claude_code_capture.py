@@ -1,20 +1,21 @@
 """Claude Code transcript capture into an LCM-X store that Claude Code owns.
 
 Design: docs/claude-code-adapter.md. The transcript file is the capture source; hooks
-only say which transcript changed. One store has one owning harness: the writer opens
-only stores stamped ``capture:owner`` for Claude Code, never a Hermes profile's store.
+only say which transcript changed. This module holds projection v1: entry classes, the
+rows of an entry and its content digest. The writer and worker are claude_code_store.py.
 Nothing here compacts, blocks or injects context.
-
-Skeleton: the classification below is final for projection v1; the projection, the
-writer and the worker land in later commits of this PR.
 """
 from __future__ import annotations
 
-from typing import Any, Mapping
+import hashlib
+import json
+import os
+import re
+import stat
+from pathlib import Path
+from typing import Any, Mapping, NamedTuple
 
 PROJECTION_VERSION = "claude-code-v1"
-OWNER_KEY = "capture:owner"
-OWNER_STAMP = {"host": "claude-code", "format": 1}
 SOURCE = "claude-code"
 
 # Entry classes. The audit counts every transcript entry by class, so nothing is
@@ -36,6 +37,15 @@ RAW_ONLY_TYPES = frozenset({
     "atis-latch", "bridge-session", "frame-link", "history-suppression",
     "artifact-autoreact-ledger", "artifact-comment-monitor",
 })
+# Envelope fields that differ between an entry and its copy in a forked session.
+COPY_ENVELOPE = frozenset({"sessionId", "promptId"})
+# User entries Claude Code writes itself (command output, compaction summaries) become system rows.
+SYSTEM_FLAGS = ("isMeta", "isCompactSummary", "isVisibleInTranscriptOnly")
+# Claude Code saves a large tool output to <session>/tool-results/ and keeps a preview:
+# "<persisted-output>\nOutput too large (30.7KB). Full output saved to: <path>\n\nPreview ...".
+PERSISTED_TAG = "<persisted-output>"
+SAVED_TO = re.compile(r"Full output saved to:\s*(?P<path>[^\r\n]+)")
+MAX_RECOVERED_OUTPUT = 64 * 1024 * 1024  # as Hermes's persisted-output recovery
 
 
 def classify_entry(entry: Mapping[str, Any]) -> str:
@@ -64,28 +74,119 @@ def lineage_key(session_id: str, agent_id: str | None = None) -> str:
     return f"{SOURCE}:{row_session_id(session_id, agent_id)}"
 
 
-def project_entry(entry: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Message rows for one projected entry, each with its uid (``uuid`` or ``uuid#n``).
+class Projection(NamedTuple):
+    rows: list[tuple[str, dict[str, Any]]]  # (uid, message for MessageStore.append_batch)
+    files: list[str]  # tool-results file names whose full text a row now holds
+    problems: list[str]  # persisted outputs kept as their preview, by reason
 
-    Contract: user text and images give one ``user`` row; each ``tool_result`` part gives
-    one ``tool`` row with ``tool_call_id``, holding the full text of a ``tool-results`` file
-    when Claude Code saved the output there; an assistant entry gives one row with its text
-    and ``tool_use`` parts (none for a thinking-only entry). Meta entries, compact summaries
-    and API-error entries become ``system`` rows. Thinking stays in the ledger only.
+
+def session_dir(transcript: Path) -> Path:
+    """``<session>/`` beside ``<session>.jsonl``; a subagent transcript lives inside it."""
+    return transcript.parent.parent if transcript.parent.name == "subagents" else transcript.with_suffix("")
+
+
+def project_entry(entry: Mapping[str, Any], *, folder: Path | None = None) -> Projection:
+    """Message rows for one projected entry; uid ``uuid``, or ``uuid#n`` when it gives several.
+
+    User text and images give one ``user`` row; each ``tool_result`` part gives one ``tool``
+    row with ``tool_call_id``, holding the full text of the ``tool-results`` file under
+    ``folder`` (the session folder) when Claude Code saved the output there. An assistant
+    entry gives one row with its text and ``tool_use`` parts, none if it holds only thinking.
+    Meta entries, compact summaries and API-error entries become ``system`` rows. Thinking
+    and other parts stay in the ledger's raw line only.
     """
-    raise NotImplementedError("projection v1 lands in a later commit of this PR")
+    uid = entry.get("uuid")
+    message = entry.get("message")
+    if classify_entry(entry) != PROJECTED or not isinstance(uid, str) or not uid:
+        return Projection([], [], [])
+    stamp = {"timestamp": entry["timestamp"]} if isinstance(entry.get("timestamp"), str) else {}
+    parts = message.get("content")
+    parts = [{"type": "text", "text": parts}] if isinstance(parts, str) else [
+        part for part in parts or [] if isinstance(part, Mapping)]
+    rows: list[dict[str, Any]] = []
+    files: list[str] = []
+    problems: list[str] = []
+    if entry.get("type") == "assistant":
+        text = _joined_text(parts)
+        if entry.get("isApiErrorMessage"):
+            rows.append({"role": "system", "content": text, **stamp})
+        else:
+            calls = [{"id": part.get("id"), "type": "function", "function": {
+                "name": part.get("name"), "arguments": json.dumps(part.get("input", {}), ensure_ascii=False)}}
+                for part in parts if part.get("type") == "tool_use"]
+            if text or calls:
+                rows.append({"role": "assistant", "content": text, **({"tool_calls": calls} if calls else {}),
+                             **stamp})
+    else:
+        saved = _saved_output_path(entry)
+        for part in parts:
+            if part.get("type") != "tool_result":
+                continue
+            content = _result_content(part.get("content"))
+            if folder is not None and isinstance(content, str) and PERSISTED_TAG in content:
+                content, file_name, problem = _recover_saved_output(content, saved, folder)
+                files += [file_name] if file_name else []
+                problems += [problem] if problem else []
+            rows.append({"role": "tool", "content": content, "tool_call_id": part.get("tool_use_id"), **stamp})
+        rest = [part for part in parts if part.get("type") in ("text", "image")]
+        if rest:
+            role = "system" if any(entry.get(flag) for flag in SYSTEM_FLAGS) else "user"
+            content = _joined_text(rest) if all(part.get("type") == "text" for part in rest) else rest
+            rows.append({"role": role, "content": content, **stamp})
+    if len(rows) == 1:
+        return Projection([(uid, rows[0])], files, problems)
+    return Projection([(f"{uid}#{index}", row) for index, row in enumerate(rows)], files, problems)
 
 
 def content_digest(entry: Mapping[str, Any]) -> str:
     """Digest of an entry without the envelope fields that change when Claude Code copies
     it into another session (``sessionId`` and ``promptId``, observed on ``--fork-session``)."""
-    raise NotImplementedError("lands with the projection")
+    kept = {key: value for key, value in entry.items() if key not in COPY_ENVELOPE}
+    canonical = json.dumps(kept, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()
 
 
-def run_worker(home: str, *, deadline_s: float | None = None) -> dict[str, Any]:
-    """Drain the spool under the store lock: claim each record by rename, read its transcript
-    from the cursor and commit rows, bindings, relations, ``capture_events`` and the cursor
-    per batch in one ``ingest_atomic()`` transaction; settle; sweep registered transcripts;
-    run one bounded embedding pass; switch the store to rollback mode; release the lock and
-    rescan the spool, looping if a record arrived (no lost wake-up)."""
-    raise NotImplementedError("the writer and worker land in a later commit of this PR")
+def _joined_text(parts: list[Mapping[str, Any]]) -> str:
+    return "\n\n".join(part["text"] for part in parts
+                       if part.get("type") == "text" and isinstance(part.get("text"), str))
+
+
+def _result_content(content: Any) -> Any:
+    """A tool result's text, or its parts when it holds an image."""
+    if isinstance(content, list):
+        parts = [part for part in content if isinstance(part, Mapping)]
+        if all(part.get("type") == "text" for part in parts):
+            return _joined_text(parts)
+        return parts
+    return content if isinstance(content, str) else ""
+
+
+def _saved_output_path(entry: Mapping[str, Any]) -> str | None:
+    result = entry.get("toolUseResult")
+    path = result.get("persistedOutputPath") if isinstance(result, Mapping) else None
+    return path if isinstance(path, str) and path else None
+
+
+def _recover_saved_output(preview: str, saved: str | None, folder: Path) -> tuple[str, str | None, str | None]:
+    """The saved file's full text when it lies in ``<folder>/tool-results``, else the preview."""
+    match = SAVED_TO.search(preview)  # the marker names its own file; toolUseResult is per entry
+    named = (match.group("path").strip() if match else None) or saved
+    if not named:
+        return preview, None, "persisted_output_unnamed"
+    results = (folder / "tool-results").resolve()
+    try:
+        path = Path(named).expanduser()
+        if path.is_symlink() or not path.resolve().is_relative_to(results):
+            return preview, None, "persisted_output_outside_session"
+        with open(path, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return preview, None, "persisted_output_not_a_file"
+            data = handle.read(MAX_RECOVERED_OUTPUT + 1)
+    except OSError:
+        return preview, None, "persisted_output_missing"
+    if len(data) > MAX_RECOVERED_OUTPUT:
+        return preview, None, "persisted_output_too_large"
+    try:
+        return data.decode("utf-8"), path.name, None
+    except UnicodeDecodeError:
+        return preview, None, "persisted_output_binary"

@@ -89,7 +89,9 @@ lock held and starts nobody. The handshake closes it:
    runs within that period.
 
 A synchronous `PreCompact` drain waits for the lock until its deadline, so it does not exit early
-while a detached worker holds it.
+while a detached worker holds it. A record whose drain raises is set aside as `<key>.failed` and
+logged by error type only; the session's next hook spools a fresh record, so one bad transcript
+cannot stall the others or loop the worker.
 
 ### Transcript facts
 
@@ -197,11 +199,15 @@ at worst an unreferenced payload file, never a lost row; a rerun is idempotent b
 - **Forks (changed in r2).** A fork's copied entries become the fork's own rows, so every session
   reads back complete through the unchanged reader (`lcm_load_session` reads one session's rows,
   and `session_lineage` cannot express a fork point). A copy is recognised by its uid and content
-  digest in another lineage, through the ledger's uid index: its binding carries proof kind
-  `fork_copy` and a `fork_copy_of` relation to the parent's row, and the last copied entry marks
-  the fork point. Uid identity decides; the digest only confirms; content equality alone never
-  merges. The cost is a second copy of the forked prefix (measured in R3). If the parent was never
-  captured, the copies are ordinary rows and the audit reports `fork_parent_unknown`.
+  digest in another lineage, through the ledger's uid index, and only in a session that started as
+  a fork (`SessionStart` source `fork`, which the hook carries onto the session's later spool
+  records): its binding carries proof kind `fork_copy` and a `fork_copy_of` relation to the latest
+  earlier row, so a fork of a fork links to its direct parent, and the last copied entry marks the
+  fork point. A session not known to be a fork keeps such entries as ordinary rows without a link,
+  because the direction would be a guess. Uid identity decides; the digest only confirms; content
+  equality alone never merges. The cost is a second copy of the forked prefix (measured in R3). If
+  the parent was never captured, the copies are ordinary rows and the audit reports
+  `fork_parent_unknown`.
 - **Projection v1, by entry:**
 
 | Entry | Rows |
@@ -227,15 +233,17 @@ Nothing is dropped silently: the audit counts every entry by class.
   `-wal` and `-shm` files, and the reader refuses a WAL store without them. So the worker
   checkpoints and switches the store to rollback mode (`journal_mode=DELETE`) before it exits; the
   reader then opens it read-only with no sidecars, and the next worker run switches it back to WAL.
-  If the switch fails because a reader is mid-call, the sidecars stay (a read-only connection
-  cannot delete them) and recall keeps working. R9 runs after the worker has exited and the reader
-  has restarted.
+  The switch runs only under the store lock, so no other writer is active. If it fails because a
+  reader is mid-call, the store stays in WAL with its sidecars (a read-only connection cannot delete
+  them), recall keeps working, and the next run retries; the reader's refusal text says to retry once
+  the writer has run. R9 runs after the worker has exited and the reader has restarted.
 - **One configuration.** The worker loads `LCM_*` settings from `<home>/.env`, exactly as the
   reader does, so both compute the same embedding identity.
 - The worker runs one bounded embedding catch-up pass (`run_incremental_embedding_pass`) after each
   drain, so vector recall follows capture; until it runs, recall falls back to full text.
-- Fork copies can make a search return the same text from the parent and the fork; a later reader
-  change can collapse them by the `fork_copy_of` relation.
+- Fork copies can make a search return the same text from the parent and the fork. R3 measures
+  how often; collapsing a copy onto its source through `fork_copy_of` is a reader change, filed
+  as its own issue with that measurement.
 - One memory, two harnesses: a second, read-only server over a Hermes profile's store is
   configuration only.
 
@@ -314,7 +322,8 @@ on Anthropic models afterwards. Only synthetic stores and the test lane's own se
 **The audit (the gate):** per lineage, a multiset compare of projected (uid, content digest) against
 stored rows; counts per entry class; tool calls and results paired with no orphan and no double;
 every ledger row's line digest re-read from its file; every `tool-results` file present with its
-digest; sessions with local GC on listed; `fork_copy` and `fork_parent_unknown` counts. Also
+digest; sessions with local GC on listed; fork copies counted in their own column, never as
+duplicates or surplus, with `fork_parent_unknown`; spool records set aside as `.failed`. Also
 measured: hook wall time (target p95 at most 50 ms on `PostToolBatch`), lag from transcript line to
 committed row, and store growth (the growth gate above).
 

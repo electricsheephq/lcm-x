@@ -20,8 +20,11 @@ from hermes_lcm.claude_code_capture import (
     SHARED_RAW,
     UNKNOWN,
     classify_entry,
+    content_digest,
     lineage_key,
+    project_entry,
     row_session_id,
+    session_dir,
 )
 
 PLUGIN = Path(__file__).resolve().parents[1] / "adapters" / "claude-code"
@@ -223,3 +226,87 @@ def test_spool_record_carries_seq_and_local_gc(hook, env, tmp_path):
     [record_path] = _spooled(env)
     record = json.loads(record_path.read_text(encoding="utf-8"))
     assert isinstance(record["seq"], int) and record["local_gc"] is True
+
+
+def _entry(kind, content, **extra):
+    return {"type": kind, "uuid": "u1", "sessionId": "s1", "timestamp": "2026-11-01T00:00:00.000Z",
+            "message": {"role": kind, "content": content}, **extra}
+
+
+def test_projection_user_and_assistant_rows():
+    [(uid, row)] = project_entry(_entry("user", "hello")).rows
+    assert uid == "u1" and row == {"role": "user", "content": "hello", "timestamp": "2026-11-01T00:00:00.000Z"}
+    parts = [{"type": "thinking", "thinking": "private", "signature": "x"},
+             {"type": "text", "text": "Running it."},
+             {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}}]
+    [(uid, row)] = project_entry(_entry("assistant", parts)).rows
+    assert uid == "u1" and row["content"] == "Running it."
+    assert row["tool_calls"] == [{"id": "toolu_1", "type": "function",
+                                  "function": {"name": "Bash", "arguments": '{"command": "ls"}'}}]
+    assert "private" not in json.dumps(row)
+    assert project_entry(_entry("assistant", parts[:1])).rows == []  # thinking only: ledger only
+
+
+def test_projection_tool_results_and_system_rows():
+    results = [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "one"},
+               {"type": "tool_result", "tool_use_id": "toolu_2",
+                "content": [{"type": "text", "text": "two"}, {"type": "image", "source": {"type": "base64"}}]}]
+    rows = project_entry(_entry("user", results)).rows
+    assert [uid for uid, _ in rows] == ["u1#0", "u1#1"]
+    assert rows[0][1] == {"role": "tool", "content": "one", "tool_call_id": "toolu_1",
+                          "timestamp": "2026-11-01T00:00:00.000Z"}
+    assert rows[1][1]["content"][1]["type"] == "image"
+    for flag in ("isMeta", "isCompactSummary"):
+        assert project_entry(_entry("user", "note", **{flag: True})).rows[0][1]["role"] == "system"
+    error = _entry("assistant", [{"type": "text", "text": "API Error"}], isApiErrorMessage=True)
+    assert project_entry(error).rows[0][1]["role"] == "system"
+    image = _entry("user", [{"type": "text", "text": "see"}, {"type": "image", "source": {}}])
+    assert isinstance(project_entry(image).rows[0][1]["content"], list)
+
+
+def _saved(tmp_path, name, data):
+    folder = tmp_path / "proj" / "s1"
+    (folder / "tool-results").mkdir(parents=True)
+    path = folder / "tool-results" / name
+    path.write_bytes(data)
+    marker = (f"<persisted-output>\nOutput too large (40.0KB). Full output saved to: {path}\n\n"
+              "Preview (first 2KB):\nline 1\n</persisted-output>")
+    return folder, path, marker
+
+
+def test_projection_recovers_the_saved_tool_output(tmp_path):
+    folder, path, marker = _saved(tmp_path, "toolu_1.txt", b"line 1\nline 2\n" * 3000)
+    entry = _entry("user", [{"type": "tool_result", "tool_use_id": "toolu_1", "content": marker}],
+                   toolUseResult={"persistedOutputPath": str(path)})
+    projection = project_entry(entry, folder=folder)
+    assert projection.rows[0][1]["content"] == path.read_text()
+    assert projection.files == ["toolu_1.txt"] and projection.problems == []
+    # Without the session folder (or outside it) the preview is kept and the reason recorded.
+    assert project_entry(entry).rows[0][1]["content"] == marker
+    elsewhere = tmp_path / "other"
+    elsewhere.mkdir()
+    assert project_entry(entry, folder=elsewhere).problems == ["persisted_output_outside_session"]
+
+
+@pytest.mark.parametrize("data, problem", [(b"\xff\xfe\x00binary", "persisted_output_binary"),
+                                           (None, "persisted_output_missing")])
+def test_projection_keeps_the_preview_when_the_saved_output_cannot_be_read(tmp_path, data, problem):
+    folder, path, marker = _saved(tmp_path, "toolu_1.bin", data or b"x")
+    if data is None:
+        path.unlink()
+    entry = _entry("user", [{"type": "tool_result", "tool_use_id": "toolu_1", "content": marker}])
+    projection = project_entry(entry, folder=folder)
+    assert projection.rows[0][1]["content"] == marker and projection.problems == [problem]
+
+
+def test_content_digest_ignores_only_the_copy_envelope():
+    entry = _entry("user", "hello", promptId="p1")
+    copy = {**entry, "sessionId": "fork", "promptId": "p2"}
+    assert content_digest(entry) == content_digest(copy)
+    assert content_digest(entry) != content_digest({**entry, "cwd": "/elsewhere"})
+    assert content_digest(entry) != content_digest(_entry("user", "hello!"))
+
+
+def test_session_folder_of_main_and_subagent_transcripts(tmp_path):
+    assert session_dir(tmp_path / "proj" / "s1.jsonl") == tmp_path / "proj" / "s1"
+    assert session_dir(tmp_path / "proj" / "s1" / "subagents" / "agent-a1.jsonl") == tmp_path / "proj" / "s1"
