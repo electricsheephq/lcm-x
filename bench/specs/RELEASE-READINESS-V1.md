@@ -40,6 +40,9 @@ its rc1 is cut, and the gauntlet runs once for the whole train, not once per fix
    From v0.31.0, and for patch releases from v0.29.1, the Tiers section below selects the required rows; the minor
    releases v0.29.0 and v0.30.0 run all phases. From v0.29.2 the smoke stage (L1, below) runs first, and no L2 row starts until it passes.
 4. **Fix-and-respin**: any P0/P1 finding → fix PR (through the gate) → `-rc2` → re-run.
+   From v0.29.2, a fix PR that a respin will carry also runs the reliability matrix on every supported host build (a
+   CI dispatch on the PR branch, about 20 minutes) before the respin is cut, and a new failure against the previous GA
+   stops the cut. (v0.29.1-rc3's fix passed its own suites; only rc3's matrix found the regression it caused, #2128.)
    Carry-forward rule (every receipt binds an exact tree, so carrying needs proof): **Phase B
    re-runs on every respin** (it is diff-scoped by definition). Phases A and C may carry a prior
    rc's receipt ONLY when the rcN→rcN+1 diff touches nothing outside bench/, docs/, tests/, and
