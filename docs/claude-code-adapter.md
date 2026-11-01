@@ -63,7 +63,7 @@ logged without content and capture catches up on a later run.
 | `UserPromptSubmit`, `PostToolBatch`, `PostCompact` | Spool; start the worker only if none is running. `PostToolBatch` fires once per batch of tool calls, also inside subagents (with `agent_id`). | No |
 | `Stop`, `StopFailure` | Spool; the worker drains the transcript, then settles (below). `StopFailure` replaces `Stop` when the turn ends on an API error. | No |
 | `SubagentStop` | Spool the subagent transcript (`<session>/subagents/agent-<id>.jsonl`) as a child lineage. Internal agents (`agent_type` empty) are captured and tagged; R0 saw the compaction summarizer fire it with a transcript path that does not exist, which is logged with nothing to ingest. | No |
-| `PreCompact` | Drain synchronously, bounded to 10 s, only when the store lock is free; it never waits for the lock. If a worker holds it, the hook returns at once (`worker_running`) and the holder takes the spooled record. The hook logs `drained` only for a worker-confirmed complete drain, otherwise `drain_incomplete`, `drain_failed:<code>` or `drain_timeout`; any of these but a refused store then starts a detached worker for the rest (`+worker`). The drain captures only; it never embeds. | Bounded, never on the lock |
+| `PreCompact` | Drain synchronously, bounded to 10 s, only when the store lock is free; it never waits for the lock. If a worker holds it, the hook returns at once (`worker_running`) and the holder takes the spooled record. The hook logs `drained` only for a worker-confirmed complete drain, otherwise `drain_incomplete`, `drain_failed:<code>` or `drain_timeout`; any of these but a refused store then starts a detached worker for the rest (`+worker`), or leaves it to the worker that has taken the lock since (`+holder`). The drain captures only; it never embeds. The hook kills a drain still running 2 s after its bound. | Bounded, never on the lock |
 | `SessionEnd` | Spool; start a detached drain and return at once. | No |
 
 ### Spool and worker handshake
@@ -93,10 +93,13 @@ lock held and starts nobody. The handshake closes it:
 
 No hook waits on the store lock, and no worker waits for it: a held lock means a holder that sees
 every spooled record when it rescans. So a synchronous `PreCompact` drain runs only when the lock is
-free. It stops at its deadline, keeping every batch it committed whole, and its record stays for the
-next worker. It exists for sessions with Claude Code's local GC on, which trims pre-compaction
-history: there it captures what it can before the trim, best effort. A bounded worker does not
-rescan once its deadline has passed, so when it ends incomplete its hook starts a detached worker: a
+free. It stops at the first batch boundary after its deadline, keeping every batch it committed
+whole; a batch still running 2 s after the deadline is killed with the drain and rolls back. Either
+way its record stays for the next worker, since a worker removes a drained record only after the
+sweep that captures its saved outputs. It exists for sessions with Claude Code's local GC on, which
+trims pre-compaction history: there it captures what it can before the trim, best effort. A bounded
+worker does not rescan once its deadline has passed, so when it ends incomplete its hook starts a
+detached worker, or leaves the rest to the worker that has taken the lock since, which rescans: a
 record another session spooled while it held the lock is not left for a later hook. A record whose
 drain raises is set aside as `<key>.failed` and logged by error type only; the session's next hook
 spools a fresh record, and a transcript's cursor is written before its first batch, so the sweep
@@ -252,7 +255,7 @@ at worst an unreferenced payload file, never a lost row; a rerun is idempotent b
 | `user`, text or image parts | One `user` row. Meta entries, compact summaries and transcript-only entries become `system` rows. |
 | `user`, `tool_result` parts | One `tool` row per result, `tool_call_id` = `tool_use_id`. When Claude Code saved the output to a file inside the session's own `tool-results/` folder (`persistedOutputPath`, or the path in the marker), the row holds the file's full text (up to 64 MiB, as Hermes's persisted-output recovery does); the preview stays in the ledger's raw line. |
 | `assistant` | One row per entry: text parts as content, `tool_use` parts as `tool_calls`. An entry with only thinking gives no row. `message.id` stays in the ledger, so a reader can regroup one response. API-error entries become `system` rows. |
-| `tool-results` files | Ledger rows each. Files not already held in full by a tool row (images, PDFs, unreferenced or large files, and saved outputs that ingest protection redacts, since the row then holds less than the file) keep their bytes in the ledger, in rows of at most 64 MiB, with no size limit; a file whose bytes change is kept again, a held one included. A `tool-results` folder that is a symlink, or in a symlinked session folder, is never read, for files or for saved outputs. |
+| `tool-results` files | Ledger rows each. A saved output is held, with no bytes of its own, only when its tool row, as stored, holds its exact text, inline or as one externalized payload. Every other file (images, PDFs, unreferenced or large files, and saved outputs that ingest protection redacts or externalizes in parts, such as a long base64 run, or that changed after their line was read) keeps its bytes in the ledger, in rows of at most 64 MiB, with no size limit; a file whose bytes change is kept again, a held one included. A `tool-results` folder that is a symlink, or in a symlinked session folder, is never read, for files or for saved outputs. |
 | `system`, `attachment`, bookkeeping (`queue-operation`, `last-prompt`, `mode`, `custom-title`, `file-history-*`, `tools-used`, desktop types such as `bridge-session` and `frame-link`) | None; raw line in the ledger. |
 | Request snapshots (`api-request`, `api-request-blob`, `api-request-shape`) | None; raw line kept once per line digest. They hold the exact model input, including system text and injected reminders that appear nowhere else in the transcript. |
 | Unknown types | None; raw line in the ledger, counted as `unknown_type`. |
@@ -365,8 +368,8 @@ gate's instrument (see "The audit" in the test plan).
   - `orphans`, `doubles`: tool calls and results pair one to one, over the rows no revision
     superseded;
   - `stray_rows`: no row of the lineage's session lacks a ledger row that references it;
-  - `row_count`: each projected row's store ids match the number of rows a re-projection of its
-    own raw line gives;
+  - `row_count`: each projected entry's store ids are its own (none listed twice, by it or by
+    another projected entry) and as many as a re-projection of its own raw line gives;
   - `held_mismatch`: a held file's referenced rows hold its exact text, inline or externalized.
 - **Reported, never failures:**
   - lines after the cursor (`pending_lines`) and `tool-results` files whose current bytes have no
@@ -381,8 +384,10 @@ gate's instrument (see "The audit" in the test plan).
   - local-GC sessions;
   - spool and worker-log counts;
   - each hook's in-process time per event (`hooks_in_process_ms`: n, p50, p95, max), with each
-    session's first hook apart (`first`), and `PreCompact`'s paths (`precompact`: drains, pokes of
-    the worker holding the lock, drains that reached their bound);
+    session's first hook the log still holds apart (`first`), and `PreCompact`'s paths
+    (`precompact`: drains, pokes of the worker holding the lock, runs that started neither for
+    want of a runtime, package or worker, and drains that reached their bound: ended incomplete
+    or were killed after at least 10 s);
   - lag and store growth.
 - **Exit 2:** the home is not absolute, holds no store, or the store has no capture stamp.
 - **It does not re-derive row text.** Ingest protection may redact, normalize or externalize it by
@@ -394,7 +399,8 @@ gate's instrument (see "The audit" in the test plan).
   - at least one lineage was checked;
   - every selected lineage's transcript was read in full (`transcript_state` `ok`, no generation
     gone), with nothing pending: no line after the cursor and no uncaptured file;
-  - every selected session, and every subagent transcript on disk, has a cursor;
+  - every selected session, every subagent transcript on disk (a forgotten session's too), and
+    every lineage a set-aside (`.failed`) spool record names, has a cursor;
   - no spool record waits.
 
   A store that is only behind is unverified, never failed. A local-GC session is best effort and
@@ -492,7 +498,7 @@ committed row, and store growth (the growth gate above).
   wall p95 over 50 ms in either mode on any R1-R10 machine, or a first hook over 500 ms; R1 states
   the margin;
 - `PreCompact` as its own event, never pooled with the per-turn hooks: p50, p95 and max, and each
-  run's path (a drain, or a poke of the worker holding the lock). A p95 over 2 s, or any run that
+  run's path (a drain, or a poke of the worker holding the lock). A p95 over 2 s, or any drain that
   reaches the 10 s bound, goes to the release manager;
 - the lag and the growth.
 
