@@ -6,7 +6,9 @@ One migration (the `conversation_id` columns) exists twice. These rules stop the
 
 ## Rules for a PR that changes the schema
 1. **No new DDL owners.** New `CREATE`/`ALTER`/`DROP` statements go into one of the store modules above, never into a new module or
-   a command, tool or engine path. `command.py`'s existing DDL is grandfathered until consolidation; it takes no new DDL.
+   a command, tool or engine path. `command.py`'s existing DDL is grandfathered until consolidation; it takes no new DDL. One
+   exception: the Claude Code capture ledger (`capture_events`), which exists only in stores the capture writer creates and stamps,
+   lives with that writer in `claude_code_store.py`, so the Hermes plugin never loads it.
 2. **Record the migration.** The PR body states, for each migration:
    - the new on-disk format;
    - the oldest reader that can still open it;

@@ -1,7 +1,9 @@
 """Claude Code capture writer and worker: admission, transcript ingest and the spool handshake.
 
-Design: docs/claude-code-adapter.md. The DDL lives in store.py (``ensure_capture_events``);
-this module writes through the store's own APIs plus plain DML on its ledger and cursor
+Design: docs/claude-code-adapter.md. This module owns the capture ledger (``capture_events``):
+its DDL (``ensure_capture_events``, only in stores it stamps) and its purge, which it registers
+with core, so both session delete paths clear it; core never imports this module, so Hermes never
+loads either. It writes through the store's own APIs plus plain DML on its ledger and cursor
 rows, inside one ``ingest_atomic()`` transaction per batch. One worker per store holds
 ``capture.lock``; it never opens a store it did not create and stamp.
 """
@@ -35,10 +37,13 @@ from .claude_code_capture import (
     session_dir,
 )
 from .dag import SummaryDAG
-from .store import CAPTURE_FORGOTTEN_PREFIX, CAPTURE_OWNER_KEY, MessageStore
+from .db_bootstrap import mark_migration_step_complete
+from .store import MessageStore, register_session_purge
 
 OWNER_FILE = "capture-owner.json"
+OWNER_KEY = "capture:owner"  # the stamp this writer puts on every store it creates; Hermes never does
 HERMES_MARKERS = ("config.yaml", "state.db")
+FORGOTTEN_PREFIX = "capture:forgotten:"  # a forgotten session's transcript and files are never read again
 CURSOR_PREFIX = "capture:cursor:"
 FORK_PREFIX = "capture:fork:"  # sessions whose SessionStart source was ``fork``, and when they started
 LOCAL_GC_PREFIX = "capture:local_gc:"  # sessions seen with Claude Code's local GC on (sticky)
@@ -49,6 +54,50 @@ SETTLE_S = 2.0
 QUIET_S = 0.5
 END_EVENTS = frozenset({"Stop", "StopFailure", "SubagentStop", "SessionEnd", "PreCompact"})
 SET_ASIDE_TAGS = (".orphaned-", ".superseded-")
+CAPTURE_EVENTS_DDL = (
+    "CREATE TABLE IF NOT EXISTS capture_events (event_id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, "
+    "lineage_key TEXT NOT NULL, source_kind TEXT NOT NULL, generation INTEGER NOT NULL, position INTEGER NOT NULL, "
+    "uid TEXT, entry_type TEXT, entry_class TEXT NOT NULL, line_digest TEXT NOT NULL, content_digest TEXT, "
+    "disposition TEXT NOT NULL, store_ids TEXT, notes TEXT, raw BLOB, raw_from INTEGER, "
+    "projection_version TEXT NOT NULL, captured_at REAL NOT NULL)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_events_line ON capture_events(lineage_key, generation, position) "
+    "WHERE source_kind = 'line'",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_events_file "
+    "ON capture_events(lineage_key, uid, content_digest, position) WHERE source_kind = 'file'",
+    "CREATE INDEX IF NOT EXISTS idx_capture_events_uid ON capture_events(uid) WHERE uid IS NOT NULL",
+    # Shared raw lines are kept once per session, so forgetting one session never takes another's bytes.
+    "CREATE INDEX IF NOT EXISTS idx_capture_events_shared ON capture_events(session_id, line_digest) "
+    "WHERE entry_class = 'shared_raw'",
+)
+
+
+def ensure_capture_events(store: MessageStore) -> None:
+    """The capture ledger: the NAMED step ``capture_events_v1``, created only in a store stamped
+    ``capture:owner`` by this writer, never in a Hermes profile's store. No SCHEMA_VERSION bump, no
+    existing table touched; older readers ignore the table."""
+    conn = store.connection
+    if conn.in_transaction:
+        raise sqlite3.OperationalError("capture ledger setup skipped: the connection is in a transaction")
+    if not store.read_metadata_json(OWNER_KEY):
+        raise sqlite3.OperationalError("capture ledger refused: the store has no capture:owner stamp")
+    with store.atomic(immediate=True):
+        for sql in CAPTURE_EVENTS_DDL:
+            conn.execute(sql)
+        mark_migration_step_complete(conn, "capture_events_v1")
+
+
+def delete_capture_events(conn: sqlite3.Connection, sessions_sql: str, args: tuple = ()) -> None:
+    """A deleted session's capture ledger rows and raw lines go with its messages, on the caller's
+    transaction, and the session is marked forgotten: its capture writer never reads its transcript
+    or files again, so forgotten content cannot come back. Never creates the table."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'capture_events'").fetchone():
+        conn.execute(f"DELETE FROM capture_events WHERE session_id IN ({sessions_sql})", args)
+        conn.execute(f"WITH scoped(session_id) AS ({sessions_sql}) INSERT OR REPLACE INTO metadata(key, value) "
+                     "SELECT ? || session_id, ? FROM scoped",
+                     (*args, FORGOTTEN_PREFIX, json.dumps({"at": round(time.time(), 3)})))
+
+
+register_session_purge("capture_events", delete_capture_events)
 
 
 class AdmissionError(RuntimeError):
@@ -145,8 +194,8 @@ def _create_store(home: Path, owner: dict) -> None:
     store = MessageStore(temporary, hermes_home=str(home))
     try:
         SummaryDAG(temporary).close()  # the reader requires summary_nodes; nothing compacts
-        store.update_metadata_json(CAPTURE_OWNER_KEY, lambda _current: stamp)
-        store.ensure_capture_events()
+        store.update_metadata_json(OWNER_KEY, lambda _current: stamp)
+        ensure_capture_events(store)
         to_rollback_journal(store.connection)
     finally:
         store.close()
@@ -167,7 +216,7 @@ def read_stamp(database: Path) -> Optional[dict]:
     for query in ("immutable=1",) if _wal_without_sidecars(database) else ("mode=ro", "immutable=1"):
         try:
             with closing(sqlite3.connect(f"{database.resolve().as_uri()}?{query}", uri=True)) as conn:
-                row = conn.execute("SELECT value FROM metadata WHERE key = ?", (CAPTURE_OWNER_KEY,)).fetchone()
+                row = conn.execute("SELECT value FROM metadata WHERE key = ?", (OWNER_KEY,)).fetchone()
             value = json.loads(row[0]) if row and row[0] else None
             return value if isinstance(value, dict) else None
         except (sqlite3.Error, ValueError):
@@ -226,7 +275,7 @@ def leave_readable(database: Path) -> bool:
 
 def open_store(database: Path, home: Path, config: Any = None) -> MessageStore:
     store = MessageStore(database, ingest_protection_config=config, hermes_home=str(home))
-    store.ensure_capture_events()
+    ensure_capture_events(store)
     return store
 
 
@@ -291,7 +340,7 @@ def read_lines(path: Path, offset: int, *, max_lines: int = BATCH_LINES,
 
 def forgotten(store: MessageStore, lineage: Lineage) -> bool:
     """The session was deleted from the store (store.py marks it): never read its transcript or files again."""
-    return bool(store.read_metadata_json(CAPTURE_FORGOTTEN_PREFIX + lineage.rows_session))
+    return bool(store.read_metadata_json(FORGOTTEN_PREFIX + lineage.rows_session))
 
 
 def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = None) -> str:

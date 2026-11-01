@@ -5,6 +5,7 @@ Design: docs/claude-code-adapter.md.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -129,7 +130,7 @@ def test_capture_events_is_never_created_in_a_hermes_store(tmp_path):
     store = MessageStore(tmp_path / "lcm.db")
     try:
         with pytest.raises(sqlite3.OperationalError, match="capture:owner"):
-            store.ensure_capture_events()
+            cc.ensure_capture_events(store)
         assert "capture_events" not in _tables(store.connection)
     finally:
         store.close()
@@ -858,18 +859,55 @@ def test_a_chunk_row_the_ledger_cannot_add_fails_loudly(tmp_path, home, hermes, 
         store.close()
 
 
-def test_a_purged_session_is_never_captured_again(tmp_path, home, hermes):
-    """The cleanup purge (a scope table, with no arguments of its own) marks its sessions
-    forgotten like a single delete does, so the capture writer never reads them again."""
+@pytest.mark.parametrize("path", ["core", "cli"])
+def test_forgetting_through_core_or_the_cli_clears_capture_events(tmp_path, home, hermes, path):
+    """Both session delete paths run the purge the adapter registers: core's
+    ``delete_session_messages`` and the CLI's doctor clean apply (a scope table, with no arguments
+    of its own) delete the session's ledger rows, keep other sessions' rows, and mark it forgotten,
+    so the capture writer never reads it again."""
     from hermes_lcm.command import _delete_clean_candidates_atomically
 
-    lineage = cc.Lineage("s1", None, _transcript(tmp_path, CONVERSATION[:1]))
+    one = cc.Lineage("s1", None, _transcript(tmp_path, CONVERSATION[:1]))
+    two = cc.Lineage("s2", None, _transcript(tmp_path, [{**CONVERSATION[0], "sessionId": "s2"}], session="s2"))
     store = _open(home, hermes)
     try:
-        cc.drain(store, lineage)
-        _delete_clean_candidates_atomically(SimpleNamespace(_store=store, _session_id=""), {"s1"})
-        assert store.read_metadata_json("capture:forgotten:s1")
-        assert cc.drain(store, lineage) == "forgotten"
-        assert store.connection.execute("SELECT COUNT(*) FROM capture_events").fetchone()[0] == 0
+        cc.drain(store, one)
+        cc.drain(store, two)
+        if path == "core":
+            store.delete_session_messages("s1")
+        else:
+            _delete_clean_candidates_atomically(SimpleNamespace(_store=store, _session_id=""), {"s1"})
+        assert [row[0] for row in store.connection.execute("SELECT session_id FROM capture_events")] == ["s2"]
+        assert store.read_metadata_json("capture:forgotten:s1") and not store.read_metadata_json("capture:forgotten:s2")
+        assert cc.drain(store, one) == "forgotten"
     finally:
         store.close()
+
+
+ADAPTER_MODULES = {"claude_code_capture", "claude_code_store"}
+
+
+def _imports_the_adapter(path: Path) -> bool:
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module or ""] + [alias.name for alias in node.names]
+        else:
+            continue
+        if any(part in ADAPTER_MODULES for name in names for part in name.split(".")):
+            return True
+    return False
+
+
+def test_core_never_imports_the_adapter():
+    """The Hermes plugin loads core only: no core module imports a Claude Code adapter module, so
+    the capture ledger's DDL and purge never load in Hermes. The adapter's own entry points do
+    import it (the check finds them)."""
+    root = Path(__file__).resolve().parents[1]
+    core = [path for path in root.glob("*.py") if path.stem not in ADAPTER_MODULES]
+    for package in ("access_context", "access_policy", "teams"):
+        core += sorted((root / package).rglob("*.py"))
+    assert {"__init__.py", "engine.py", "store.py", "command.py"} <= {path.name for path in core}
+    assert [path.relative_to(root).as_posix() for path in core if _imports_the_adapter(path)] == []
+    assert _imports_the_adapter(root / "scripts" / "lcm_x_capture.py")

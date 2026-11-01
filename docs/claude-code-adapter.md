@@ -175,13 +175,17 @@ failed. One bad transcript cannot stall the others or loop the worker.
   without statistics SQLite would scan the whole lineage on every batch).
   - It makes capture provable and lets a later projection version re-derive rows after Claude Code
     has deleted the transcript.
-  - It is created by a named migration step in `store.py` (`capture_events_v1`), only in stamped
-    capture stores; a test shows it is never created in a Hermes store. An older reader ignores it.
+  - The adapter owns it: its DDL is the named migration step `capture_events_v1` in
+    `claude_code_store.py`, created only in stamped capture stores; a test shows it is never created
+    in a Hermes store. An older reader ignores it. Core never imports the adapter (a test checks
+    every core module), so the Hermes plugin loads neither the DDL nor the purge below.
   - Deleting a session deletes its ledger rows and raw bytes and marks the session forgotten
     (`capture:forgotten:<session>`): the worker never reads its transcript or `tool-results` files
     again, even after Claude Code rewrites the transcript, so forgotten content cannot come back.
     Later turns of a forgotten session are not captured either. A subagent is its own session
-    (`<session>/agent:<agent>`) and is forgotten on its own.
+    (`<session>/agent:<agent>`) and is forgotten on its own. The adapter registers this purge with
+    core (`register_session_purge`), and both session delete paths run it: core's
+    `delete_session_messages` and the CLI's doctor clean apply; one test covers both.
   - Per `docs/process/schema-changes.md`, the PR records the format, the oldest reader and the
     removal version, and adds forward and rollback compat tests.
 - **Cursor storage.** One `metadata` key per transcript (`capture:cursor:<lineage>`), written inside
