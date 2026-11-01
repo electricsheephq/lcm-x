@@ -208,15 +208,20 @@ def to_rollback_journal(conn: Optional[sqlite3.Connection], attempts: int = 5) -
 def leave_readable(database: Path) -> bool:
     """After the writer's close, still under the lock: a store left in WAL mode without its
     sidecars (a reader blocked the switch, then closed before the writer, whose close removed
-    them) is switched now, so the reader can open it. Sidecars that remain belong to a reader
-    still open; it keeps reading, and the next run switches."""
+    them) is switched now, so the reader can open it. The switching connection uses exclusive
+    locking: from its first read to its close no reader can attach and no shared-memory file
+    exists, so a reader can neither block the switch nor leave this close to remove sidecars
+    it needs. Sidecars that remain belong to a reader still open; it keeps reading, and the
+    next run switches. True when the store, as this close left it, opens for the reader."""
     if not _wal_without_sidecars(database):
         return True
     try:
-        with closing(sqlite3.connect(database)) as conn:
-            return to_rollback_journal(conn)
+        with closing(sqlite3.connect(database, timeout=0.2)) as conn:
+            conn.execute("PRAGMA locking_mode = EXCLUSIVE")  # before the first read, or it has no effect
+            to_rollback_journal(conn)
     except sqlite3.Error:
-        return False
+        pass
+    return not _wal_without_sidecars(database)
 
 
 def open_store(database: Path, home: Path, config: Any = None) -> MessageStore:
@@ -356,7 +361,9 @@ def ingest_lines(store: MessageStore, lineage: Lineage, cursor: dict, lines: lis
     uid with other content is a revision (new rows, ``version`` bindings, ``supersedes``). In a
     session that started as a fork, an entry written before the fork started is a copy: the
     fork's own rows, marked ``fork_copy`` and ``fork_copy_of`` the row that first held that
-    content in the session that wrote it. A line whose projection fails stays raw, noted."""
+    content in the session that wrote it. A copied revision is both: it supersedes the fork's
+    earlier version and stays marked as a copy, so it is never taken as its writer's row. A
+    line whose projection fails stays raw, noted."""
     folder = session_dir(lineage.path)
     parsed: list[_Line] = []
     for index, (_offset, raw) in enumerate(lines):
@@ -372,12 +379,12 @@ def ingest_lines(store: MessageStore, lineage: Lineage, cursor: dict, lines: lis
     uids = {line.uid for line in parsed if line.uid and line.entry_class == PROJECTED}
     known = _versions(store, lineage.key, uids)
     fork, started = _fork_start(store, lineage)
-    origins = _origins(store, lineage.key, uids - set(known)) if fork else {}
+    origins = _origins(store, lineage.key, uids) if fork else {}
     copied_from = cursor.get("fork_parent")  # the session that wrote the latest copy so far
     parent: Optional[str] = None
 
     messages: list[dict] = []
-    pending: list[tuple[str, str, str, list[tuple[str, Any]], dict]] = []
+    pending: list[tuple[str, str, list[tuple[str, Any]], dict]] = []
     events: list[dict] = []
     for line in parsed:
         event: dict[str, Any] = {"line": line, "disposition": "raw", "version": None, "files": [], "notes": []}
@@ -398,20 +405,24 @@ def ingest_lines(store: MessageStore, lineage: Lineage, cursor: dict, lines: lis
             event["notes"] = ["projection_error:" + type(error).__name__]
             continue
         origin = origins.get((line.uid, line.digest))
-        if versions:
-            disposition, kind, proof, previous = "version", "version", "transcript_uuid", versions[-1]["row_ids"]
-        elif fork and _copied(line.entry, started, origin):
-            disposition, kind, proof, previous = "fork_copy", "canonical", "fork_copy", origin["row_ids"] if origin else {}
-            copied_from = origin["session"] if origin else copied_from
+        links: list[tuple[str, dict[str, int]]] = []
+        if versions:  # a revision supersedes this lineage's previous version, copied or not
+            links.append(("supersedes", versions[-1]["row_ids"]))
+        if fork and _copied(line.entry, started, origin):
+            disposition, proof = "fork_copy", "fork_copy"
+            if origin:
+                links.append(("fork_copy_of", origin["row_ids"]))
+                copied_from = origin["session"]
         else:
-            disposition, kind, proof, previous = "new", "canonical", "transcript_uuid", {}
+            disposition, proof = ("version" if versions else "new"), "transcript_uuid"
             if fork and not cursor.get("fork_linked") and parent is None:
                 parent = copied_from or ""  # the fork's own first entry ends its copied prefix
+        kind = "version" if versions else "canonical"
         # Filled in place inside the transaction, so later lines of this batch see the store ids.
         version = {"digest": line.digest, "store_ids": [], "row_ids": {}}
         versions.append(version)
         event.update(disposition=disposition, version=version, files=projection.files, notes=projection.problems)
-        pending.append((disposition, kind, proof, projection.rows, {"event": event, "previous": previous}))
+        pending.append((kind, proof, projection.rows, {"event": event, "links": links}))
         messages.extend(row for _uid, row in projection.rows)
     _link_lineage(store, lineage, cursor, parent)
 
@@ -419,15 +430,15 @@ def ingest_lines(store: MessageStore, lineage: Lineage, cursor: dict, lines: lis
         store_ids = iter(store.append_batch(lineage.rows_session, messages, source=SOURCE) if messages else [])
         bindings: list[tuple[int, str, str, str]] = []
         relations: list[list[tuple]] = []
-        for disposition, kind, proof, rows, state in pending:
+        for kind, proof, rows, state in pending:
             version = state["event"]["version"]
             for row_uid, _row in rows:
                 store_id = next(store_ids)
                 version["store_ids"].append(store_id)
                 version["row_ids"][row_uid] = store_id
                 bindings.append((store_id, row_uid, kind, proof))
-            kind_of = "supersedes" if disposition == "version" else "fork_copy_of"
-            relations.extend([(new, kind_of, old, 0, None)] for new, old in _pairs(version["store_ids"], state["previous"]))
+            for relation, previous in state["links"]:
+                relations.extend([(new, relation, old, 0, None)] for new, old in _pairs(version["store_ids"], previous))
         store.add_host_uid_bindings(lineage.key, bindings)
         if relations:
             store.add_message_relations(relations)
@@ -545,6 +556,8 @@ INSERT_EVENT = (
     "INSERT OR IGNORE INTO capture_events(session_id, lineage_key, source_kind, generation, position, uid, "
     "entry_type, entry_class, line_digest, content_digest, disposition, store_ids, notes, raw, raw_from, "
     "projection_version, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+# A file's chunk rows are always new; a conflict raises rather than leave ``lastrowid`` stale.
+INSERT_CHUNK = INSERT_EVENT.replace("INSERT OR IGNORE", "INSERT", 1)
 
 
 def _write_events(store: MessageStore, lineage: Lineage, generation: int, events: list[dict]) -> None:
@@ -606,7 +619,8 @@ class _KnownBytes(Exception):
 def capture_files(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = None) -> Optional[int]:
     """Every ``tool-results`` file of a session gets ledger rows holding its bytes, in rows of at
     most ``FILE_CHUNK_BYTES``, unless a tool row holds its full text. A file is read only when
-    it is new or its size or modification time changed. ``None`` when the deadline came first."""
+    it is new or its size or modification time changed, a held one too: its new bytes are kept.
+    ``None`` when the deadline came first."""
     results = results_dir(session_dir(lineage.path))
     if results is None or forgotten(store, lineage):
         return 0
@@ -625,7 +639,7 @@ def capture_files(store: MessageStore, lineage: Lineage, *, deadline: Optional[f
         except OSError:
             continue
         if conn.execute("SELECT 1 FROM capture_events WHERE source_kind = 'file' AND lineage_key = ? AND uid = ? "
-                        "AND (disposition = 'held' OR notes = ?) LIMIT 1", (lineage.key, uid, fingerprint)).fetchone():
+                        "AND notes = ? LIMIT 1", (lineage.key, uid, fingerprint)).fetchone():
             continue
         try:
             _keep_file(store, lineage, path, uid, fingerprint)
@@ -653,7 +667,7 @@ def _keep_file(store: MessageStore, lineage: Lineage, path: Path, uid: str, fing
             if event_ids and not data:
                 break
             whole.update(data)
-            cursor = conn.execute(INSERT_EVENT, (
+            cursor = conn.execute(INSERT_CHUNK, (
                 lineage.rows_session, lineage.key, "file", 0, len(event_ids), uid, None, "tool_results_file",
                 _digest(data), None, "kept", None, fingerprint if not event_ids else None, zlib.compress(data),
                 None, PROJECTION_VERSION, now))
@@ -877,7 +891,8 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
         switched = to_rollback_journal(store.connection)
         store.close()
         if not switched and not leave_readable(database):
-            _log_failure(home, "journal", "still_wal")  # the reader waits for the next run's switch
+            report["complete"] = False  # a bounded run's hook starts a worker; else the next hook's does
+            _log_failure(home, "journal", "still_wal")
 
 
 def remember_session(store: MessageStore, record: dict) -> None:

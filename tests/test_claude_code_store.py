@@ -13,6 +13,7 @@ import shutil
 import sqlite3
 import time
 import zlib
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -583,8 +584,9 @@ def test_sibling_forks_both_link_to_the_session_that_wrote_their_copies(tmp_path
 
 def test_a_forks_own_entries_are_never_copies_of_a_later_fork(tmp_path, home, hermes):
     """REGRESSION: f2 (forked from f1) is captured before f1's own entry is. That entry stays
-    f1's own row (written after f1 started), never a copy of f2's; f2's copy of it has no
-    known writer yet, so it gets no link rather than a wrong one."""
+    f1's own row (written after f1 started), never a copy of f2's. f2's copy of it has no known
+    writer yet, so it gets no ``fork_copy_of`` link rather than a wrong one, and f2's parent is
+    the nearest captured writer, s1 (the design's ancestor rule), not f1."""
     first = CONVERSATION[0]
     own_f1 = _entry("user", "u-f1", "f1 writes this", session="f1", timestamp="2026-11-01T01:30:00.000Z")
     own_f2 = _entry("user", "u-f2", "f2 writes this", session="f2", timestamp="2026-11-01T02:30:00.000Z")
@@ -721,5 +723,135 @@ def test_a_lineage_whose_first_batch_fails_is_retried_by_the_sweep(tmp_path, hom
     store = _open(home, hermes)
     try:
         assert [row[2] for row in _rows(store)] == ["find the secret word"]
+    finally:
+        store.close()
+
+
+# -- round 2 re-review regressions -----------------------------------------------------
+
+def test_a_reader_cannot_attach_while_the_store_is_switched_after_close(home, hermes, monkeypatch):
+    """REGRESSION: the switch after close holds the store alone from its first read to its close.
+    A reader that would block it, then close before the switching connection, cannot attach, so
+    that close never leaves a WAL header without sidecars again."""
+    database = cc.admit(home, hermes_home=hermes)
+    cc.open_store(database, home).close()  # WAL header, sidecars removed by the last close
+    switch = cc.to_rollback_journal
+    attached = []
+
+    def racing(conn, attempts=5):
+        conn.execute("SELECT COUNT(*) FROM metadata").fetchone()  # the switching connection's first read
+        reader = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True, timeout=0)
+        try:
+            reader.execute("SELECT COUNT(*) FROM metadata").fetchone()
+        except sqlite3.OperationalError:  # the store is held: the reader retries after the switch
+            reader.close()
+            attached.append(False)
+            return switch(conn, attempts)
+        attached.append(True)
+        try:
+            conn.execute("PRAGMA busy_timeout = 0")
+            return switch(conn, 1)  # the reader blocks the switch ...
+        finally:
+            reader.close()  # ... and closes first, so the switching connection's close is the last
+
+    monkeypatch.setattr(cc, "to_rollback_journal", racing)
+    assert cc.leave_readable(database)
+    assert attached == [False] and _header_mode(database) == 1
+    with closing(sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)) as reader:
+        assert reader.execute("SELECT COUNT(*) FROM metadata").fetchone()[0] > 0
+
+
+def test_a_store_still_in_wal_after_the_switch_leaves_the_run_incomplete(tmp_path, home, hermes, monkeypatch):
+    """REGRESSION: when the store cannot be left readable the worker says so: the run is
+    incomplete (a bounded run's hook then starts a detached worker) and the case is logged."""
+    _record(_hook(), home, _transcript(tmp_path, CONVERSATION[:1]))
+    monkeypatch.setattr(cc, "to_rollback_journal", lambda conn, attempts=5: False)
+    monkeypatch.setattr(cc, "leave_readable", lambda database: False)
+    report = cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert report["drained"] == 1 and report["complete"] is False
+    lines = (home / "logs" / "worker.log").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["error"] for line in lines] == ["still_wal"]
+
+
+def test_a_copied_revision_is_never_taken_as_its_writers_row(tmp_path, home, hermes):
+    """REGRESSION: f1 copied two versions of one entry before s1's second version was captured.
+    Both stay copies (the second supersedes the first), so a later fork holding that second
+    version points at s1's row, and its parent is s1, never its sibling f1."""
+    v1, v2 = _entry("user", "u1", "first"), _entry("user", "u1", "second")
+    parent = _transcript(tmp_path, [v1])
+    store = _open(home, hermes)
+    try:
+        cc.drain(store, cc.Lineage("s1", None, parent))
+        own_f1 = [_entry("user", "u-f1", "in f1", session="f1", timestamp="2026-11-01T02:00:00.000Z")]
+        cc.drain(store, _fork(tmp_path, store, "f1", [v1, v2], own_f1))
+        with open(parent, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(v2) + "\n")
+        cc.drain(store, cc.Lineage("s1", None, parent))
+        own_f2 = [_entry("user", "u-f2", "in f2", session="f2", timestamp="2026-11-01T02:00:00.000Z")]
+        cc.drain(store, _fork(tmp_path, store, "f2", [v2], own_f2))
+        assert store.connection.execute(
+            "SELECT disposition FROM capture_events WHERE session_id = 'f1' AND uid = 'u1' ORDER BY event_id"
+        ).fetchall() == [("fork_copy",), ("fork_copy",)]
+        assert store.connection.execute(
+            "SELECT kind, proof_kind FROM host_uid_bindings WHERE lineage_key = 'claude-code:f1' AND uid = 'u1' "
+            "ORDER BY store_id").fetchall() == [("canonical", "fork_copy"), ("version", "fork_copy")]
+        (s1_v1, *_), (s1_v2, *_) = _rows(store, "s1")
+        (f1_v1, *_), (f1_v2, *_), _ = _rows(store, "f1")
+        (f2_v2, *_), _ = _rows(store, "f2")
+        assert (f1_v2, f1_v1) in _relations(store, "supersedes")
+        assert {(f1_v1, s1_v1), (f2_v2, s1_v2)} <= set(_relations(store, "fork_copy_of"))
+        assert store.session_lineage_parents(["f1", "f2"]) == {"f1": "s1", "f2": "s1"}
+    finally:
+        store.close()
+
+
+def test_a_held_file_whose_bytes_change_is_kept(tmp_path, home, hermes):
+    """REGRESSION: a tool-results file whose full text a tool row holds is kept as a file once
+    its bytes change (it used to be skipped for good); touching it alone stores nothing."""
+    folder = tmp_path / "projects" / "-work" / "s1" / "tool-results"
+    folder.mkdir(parents=True)
+    saved = folder / "toolu_1.txt"
+    saved.write_text("full output\n" * 5000, encoding="utf-8")
+    marker = (f"<persisted-output>\nOutput too large (60KB). Full output saved to: {saved}\n\n"
+              "Preview (first 2KB):\nfull output\n</persisted-output>")
+    path = _transcript(tmp_path, [_entry("user", "r1", [
+        {"type": "tool_result", "tool_use_id": "toolu_1", "content": marker}])])
+    lineage = cc.Lineage("s1", None, path)
+    store = _open(home, hermes)
+
+    def kept():
+        return store.connection.execute("SELECT raw FROM capture_events WHERE uid = 'tool-results/toolu_1.txt' "
+                                        "AND disposition = 'kept' ORDER BY position").fetchall()
+    try:
+        cc.drain(store, lineage)
+        assert cc.capture_files(store, lineage) == 0 and kept() == []
+        os.utime(saved, ns=(1, 1))
+        assert cc.capture_files(store, lineage) == 0 and kept() == []
+        saved.write_text("changed output\n" * 5000, encoding="utf-8")
+        assert cc.capture_files(store, lineage) == 1
+        assert b"".join(zlib.decompress(row[0]) for row in kept()) == saved.read_bytes()
+        assert cc.capture_files(store, lineage) == 0
+    finally:
+        store.close()
+
+
+def test_a_chunk_row_the_ledger_cannot_add_fails_loudly(tmp_path, home, hermes, monkeypatch):
+    """REGRESSION: on a store whose file index predates chunk rows, identical chunks used to be
+    ignored silently (rows missing, the digest written to the wrong row); now the file's
+    transaction fails and rolls back."""
+    monkeypatch.setattr(cc, "FILE_CHUNK_BYTES", 10)
+    folder = tmp_path / "projects" / "-work" / "s1" / "tool-results"
+    folder.mkdir(parents=True)
+    (folder / "big.bin").write_bytes(b"0123456789" * 2 + b"end")
+    lineage = cc.Lineage("s1", None, _transcript(tmp_path, CONVERSATION[:1]))
+    store = _open(home, hermes)
+    try:
+        store.connection.execute("DROP INDEX idx_capture_events_file")
+        store.connection.execute("CREATE UNIQUE INDEX idx_capture_events_file "
+                                 "ON capture_events(lineage_key, uid, line_digest) WHERE source_kind = 'file'")
+        with pytest.raises(sqlite3.IntegrityError):
+            cc.capture_files(store, lineage)
+        assert store.connection.execute("SELECT COUNT(*) FROM capture_events WHERE source_kind = 'file'"
+                                        ).fetchone()[0] == 0
     finally:
         store.close()

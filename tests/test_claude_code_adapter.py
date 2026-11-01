@@ -220,14 +220,23 @@ def test_precompact_reports_the_worker_outcome(hook, env, tmp_path, monkeypatch)
     home = Path(env["LCMX_CC_HOME"])
     home.mkdir(parents=True)
     continued = home / "continued"
+    popen, starts = hook.subprocess.Popen, []
+
+    def counting(*args, **kwargs):  # counts a detached start even if its worker has not run yet
+        if kwargs.get("start_new_session"):
+            starts.append(args)
+        return popen(*args, **kwargs)
+    monkeypatch.setattr(hook.subprocess, "Popen", counting)
     for code, outcome, detached in ((0, "drained", False), (3, "drain_incomplete+worker", True),
                                     (1, "drain_failed:1+worker", True), (2, "drain_failed:2", False)):
         continued.unlink(missing_ok=True)
+        starts.clear()
         worker.write_text("import pathlib, sys\n"
                           "if '--deadline' not in sys.argv:\n"
                           "    (pathlib.Path(sys.argv[3]) / 'continued').touch()\n"
                           f"raise SystemExit({code})\n", encoding="utf-8")
         assert hook.start_worker(home, lane, deadline_s=5) == outcome
+        assert len(starts) == int(detached)
         end = time.monotonic() + 10
         while detached and not continued.exists() and time.monotonic() < end:
             time.sleep(0.05)

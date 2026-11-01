@@ -221,6 +221,10 @@ at worst an unreferenced payload file, never a lost row; a rerun is idempotent b
   - A copy's binding carries proof kind `fork_copy`. Its `fork_copy_of` relation points at the row
     that first held that uid and content in the session that wrote it (a `new` or `version` row,
     never another fork's copy), so sibling forks point at the same writer.
+  - A copied revision (a second content version of a uid the fork already holds, written before
+    the fork started) is a copy too: disposition `fork_copy`, a `version` binding with proof kind
+    `fork_copy`, `supersedes` the fork's earlier version and `fork_copy_of` its writer's row. So a
+    later fork never takes one fork's copy as the row its writer wrote.
   - The fork's parent session is the one that wrote its last copied entry, recorded when the fork
     writes its first own entry. A copy whose writer is not captured yet gets no link, and the parent
     is then the nearest captured ancestor.
@@ -235,7 +239,7 @@ at worst an unreferenced payload file, never a lost row; a rerun is idempotent b
 | `user`, text or image parts | One `user` row. Meta entries, compact summaries and transcript-only entries become `system` rows. |
 | `user`, `tool_result` parts | One `tool` row per result, `tool_call_id` = `tool_use_id`. When Claude Code saved the output to a file inside the session's own `tool-results/` folder (`persistedOutputPath`, or the path in the marker), the row holds the file's full text (up to 64 MiB, as Hermes's persisted-output recovery does); the preview stays in the ledger's raw line. |
 | `assistant` | One row per entry: text parts as content, `tool_use` parts as `tool_calls`. An entry with only thinking gives no row. `message.id` stays in the ledger, so a reader can regroup one response. API-error entries become `system` rows. |
-| `tool-results` files | Ledger rows each. Files not already held in full by a tool row (images, PDFs, unreferenced or large files) keep their bytes in the ledger, in rows of at most 64 MiB, with no size limit; a file whose bytes change is kept again. A `tool-results` folder that is a symlink, or in a symlinked session folder, is never read, for files or for saved outputs. |
+| `tool-results` files | Ledger rows each. Files not already held in full by a tool row (images, PDFs, unreferenced or large files) keep their bytes in the ledger, in rows of at most 64 MiB, with no size limit; a file whose bytes change is kept again, a held one included. A `tool-results` folder that is a symlink, or in a symlinked session folder, is never read, for files or for saved outputs. |
 | `system`, `attachment`, bookkeeping (`queue-operation`, `last-prompt`, `mode`, `custom-title`, `file-history-*`, `tools-used`, desktop types such as `bridge-session` and `frame-link`) | None; raw line in the ledger. |
 | Request snapshots (`api-request`, `api-request-blob`, `api-request-shape`) | None; raw line kept once per line digest. They hold the exact model input, including system text and injected reminders that appear nowhere else in the transcript. |
 | Unknown types | None; raw line in the ledger, counted as `unknown_type`. |
@@ -260,7 +264,11 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
   them), recall keeps working, and the next run retries; the reader's refusal text says to retry once
   the writer has run. If that reader closes before the worker does, the worker's close removes the
   sidecars of a store still marked WAL, so the worker checks the header after its close and switches
-  the store again, still under the lock; it logs the case where the store stays in WAL. R9 runs after the worker has exited and the reader has restarted.
+  the store again, still under the lock, through a connection in exclusive locking mode: from its
+  first read to its close no reader can attach, so none can block the switch or leave that close to
+  remove sidecars again. A store still in WAL without sidecars after that close is logged and leaves
+  the run incomplete: a bounded run's hook then starts a detached worker, and otherwise the next
+  hook's worker retries. R9 runs after the worker has exited and the reader has restarted.
 - **One configuration.** The worker loads `LCM_*` settings from `<home>/.env`, exactly as the
   reader does, so both compute the same embedding identity.
 - The worker runs one bounded embedding catch-up pass (`run_incremental_embedding_pass`) after each
