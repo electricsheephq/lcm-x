@@ -1051,9 +1051,10 @@ class CompactionMixin:
             }
             for item in emissions:  # multiplicity witness for carried-forward proofs, which omit "output"
                 item["output_multiplicity"] = proof["output"].count(proof["output"][item["output_occurrence"]["index"]])
-            # #1286: a new list with the same replay identities (an externalized stub swapped in)
-            # still differs in public bytes, so Hermes commits it; only the host's own list is a no-op.
-            if proof["output"] == proof["input"] and result is messages:
+            # #1286: a cleanup-only rewrite (status sanitized: an externalized stub swapped in) keeps the replay
+            # identities but differs in public bytes, so Hermes commits it. Any other copy with the same identities,
+            # such as a failed rotation-child publication's (#2128), is still the no-op it was in v0.29.0.
+            if proof["output"] == proof["input"] and (result is messages or self._last_compression_status != "sanitized"):
                 self._compress_commit_reason = "identity_noop"
                 # No-progress compress: Hermes has nothing to commit, and an
                 # end call with this list must stay a real session end.
