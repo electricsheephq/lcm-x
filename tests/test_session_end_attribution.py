@@ -112,7 +112,7 @@ def test_an_equal_copy_is_an_identity_noop_unless_it_is_a_cleanup_rewrite(publis
     engine, _host, output = published
     engine._last_compression_status = status
     engine._record_compress_commit_proof(output, deepcopy(output))
-    assert (engine._compress_commit_reason == "identity_noop") is (status != "sanitized")
+    assert engine._compress_commit_reason == ("ready" if status == "sanitized" else "identity_noop")
 
 
 def test_clone_and_reset_ownership(published):
