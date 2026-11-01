@@ -151,7 +151,7 @@ def _payload_matches(ref: str, digest: str, home: Path, config: LCMConfig) -> bo
     try:
         payload = load_externalized_payload(ref, config=config, hermes_home=str(home))
         text = payload.get("content") if payload else None
-        return isinstance(text, str) and _digest(text.encode("utf-8")) == digest
+        return isinstance(text, str) and _digest(text.encode("utf-8", "surrogatepass")) == digest
     except (OSError, ValueError, TypeError, AttributeError):
         return False
 
@@ -163,7 +163,7 @@ def _held_matches(conn: sqlite3.Connection, session: str, event: dict, home: Pat
         text = row[0] if row else None
         if not isinstance(text, str):
             continue
-        if _digest(text.encode("utf-8")) == event["content_digest"]:
+        if _digest(text.encode("utf-8", "surrogatepass")) == event["content_digest"]:
             return True
         for ref in extract_externalized_refs(text):
             if _payload_matches(ref, event["content_digest"], home, config):
@@ -446,19 +446,33 @@ def _log_records(path: Path):
 
 
 def _home_report(home: Path) -> dict:
-    hooks = defaultdict(list)
+    """Hook timing per event. Each session's first hook (a cold interpreter start) is reported
+    apart, as ``first``, and left out of its event's percentiles; ``precompact`` counts which
+    path each PreCompact run took (a drain, or a poke of the worker holding the lock) and how
+    many drains reached their bound."""
+    hooks, first, seen = defaultdict(list), [], set()
+    precompact = {"drain": 0, "poke": 0, "bound": 0}
     for name in ("hook.log.1", "hook.log"):
         for row in _log_records(home / "logs" / name):
-            ms = row.get("ms")
-            if isinstance(row.get("event"), str) and type(ms) in (int, float) and math.isfinite(ms):
-                hooks[row["event"]].append(ms)
+            ms, session, outcome = row.get("ms"), row.get("session"), row.get("outcome")
+            if not (isinstance(row.get("event"), str) and type(ms) in (int, float) and math.isfinite(ms)):
+                continue
+            if row["event"] == "PreCompact" and isinstance(outcome, str):
+                precompact["poke" if outcome == "worker_running" else "drain"] += 1
+                precompact["bound"] += outcome.startswith(("drain_incomplete", "drain_timeout"))
+            if isinstance(session, str) and session not in seen:
+                seen.add(session)
+                first.append(ms)
+                continue
+            hooks[row["event"]].append(ms)
     latency = {event: {"n": len(values), **_percentiles(values)} for event, values in hooks.items()}
+    latency["first"] = {"n": len(first), "max": max(first, default=None)}
     worker = Counter(f"{row['stage']}:{row['error']}" for row in _log_records(home / "logs" / "worker.log")
                      if isinstance(row.get("stage"), str) and isinstance(row.get("error"), str))
     spool = list((home / "spool").iterdir()) if (home / "spool").is_dir() else []
     return {"spool": {"failed": sum(path.is_file() and path.suffix == ".failed" for path in spool),
                       "waiting": sum(path.is_file() and path.suffix in (".json", ".claimed") for path in spool)},
-            "hooks_in_process_ms": latency,
+            "hooks_in_process_ms": latency, "precompact": precompact,
             "worker_log": dict(worker)}
 
 

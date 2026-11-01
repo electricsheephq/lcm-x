@@ -645,3 +645,25 @@ def test_round5_projected_without_uuid_is_reported(tmp_path):
         _close(store)
     report = ca.audit(home)
     assert report["ok"] is True and report["lineages"][0]["projected_without_uuid"] == 1
+
+
+def test_each_sessions_first_hook_and_precompact_paths_are_reported_apart(captured):
+    """For #2141: a session's first hook (a cold interpreter start) stays out of its event's
+    percentiles, PreCompact keeps its own event, and its runs are counted by path."""
+    home, _lineage = captured
+    logs = home / "logs"
+    logs.mkdir()
+    rows = [{"event": "SessionStart", "session": "a", "ms": 400, "outcome": "worker_started"},
+            {"event": "PostToolBatch", "session": "a", "ms": 3, "outcome": "worker_running"},
+            {"event": "PostToolBatch", "session": "b", "ms": 300, "outcome": "worker_started"},
+            {"event": "PostToolBatch", "session": "b", "ms": 5, "outcome": "worker_running"},
+            {"event": "PreCompact", "session": "a", "ms": 900, "outcome": "drained"},
+            {"event": "PreCompact", "session": "a", "ms": 2, "outcome": "worker_running"},
+            {"event": "PreCompact", "session": "b", "ms": 10000, "outcome": "drain_incomplete+worker"}]
+    (logs / "hook.log").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    report = ca.audit(home)
+    hooks = report["hooks_in_process_ms"]
+    assert hooks["first"] == {"n": 2, "max": 400}
+    assert "SessionStart" not in hooks and hooks["PostToolBatch"]["n"] == 2 and hooks["PostToolBatch"]["max"] == 5
+    assert hooks["PreCompact"]["n"] == 3 and hooks["PreCompact"]["max"] == 10000
+    assert report["precompact"] == {"drain": 2, "poke": 1, "bound": 1}
