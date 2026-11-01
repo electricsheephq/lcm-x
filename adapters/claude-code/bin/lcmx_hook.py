@@ -4,7 +4,8 @@ Every hook event lands here. The contract: read the payload, record which transc
 changed, start the capture worker if none is running, and exit 0 without printing.
 The transcript file, not this payload, is the capture source, so a hook that fires
 early, late, twice or never cannot lose or double a stored row. Nothing here blocks
-the session: PreCompact waits for a bounded drain, every other event returns at once.
+the session: PreCompact waits for a bounded drain when no worker holds the store, every
+other event returns at once, and no hook waits for the store lock.
 
 Stdlib only and Python 3.9 compatible: hooks run on the system ``python3``.
 """

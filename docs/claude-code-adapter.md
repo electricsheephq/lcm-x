@@ -23,8 +23,10 @@ yet; a later projection version can expose them because their raw lines are kept
 
 **Qualification boundary.** Lossless capture requires Claude Code's opt-in local transcript GC to
 be off (`CLAUDE_CODE_TRANSCRIPT_LOCAL_GC` unset). With it on, the GC can delete history a drain
-has not read yet; capture still runs, records the flag per session (`capture:local_gc:<session>`, kept
-once any hook saw it on), and the audit lists those sessions without a lossless claim.
+has not read yet. Capture still runs, best effort: the `PreCompact` drain reads the history before
+the trim only when the store lock is free and within 10 s. It records the flag per session
+(`capture:local_gc:<session>`, kept once any hook saw it on), and the audit lists those sessions
+without a lossless claim.
 
 It ships as a Claude Code plugin: hooks for capture, a bundled MCP server for recall. Claude Code
 plugins and settings hooks are also run by Grok Build, so the same package is the base for other
@@ -61,7 +63,7 @@ logged without content and capture catches up on a later run.
 | `UserPromptSubmit`, `PostToolBatch`, `PostCompact` | Spool; start the worker only if none is running. `PostToolBatch` fires once per batch of tool calls, also inside subagents (with `agent_id`). | No |
 | `Stop`, `StopFailure` | Spool; the worker drains the transcript, then settles (below). `StopFailure` replaces `Stop` when the turn ends on an API error. | No |
 | `SubagentStop` | Spool the subagent transcript (`<session>/subagents/agent-<id>.jsonl`) as a child lineage. Internal agents (`agent_type` empty) are captured and tagged; R0 saw the compaction summarizer fire it with a transcript path that does not exist, which is logged with nothing to ingest. | No |
-| `PreCompact` | Drain synchronously, bounded to 10 s, waiting for the store lock if a detached worker holds it. The hook logs `drained` only for a worker-confirmed complete drain, otherwise `drain_incomplete`, `drain_failed:<code>` or `drain_timeout`; any of these but a refused store then starts a detached worker for the rest (`+worker`). | Bounded |
+| `PreCompact` | Drain synchronously, bounded to 10 s, only when the store lock is free; it never waits for the lock. If a worker holds it, the hook returns at once (`worker_running`) and the holder takes the spooled record. The hook logs `drained` only for a worker-confirmed complete drain, otherwise `drain_incomplete`, `drain_failed:<code>` or `drain_timeout`; any of these but a refused store then starts a detached worker for the rest (`+worker`). The drain captures only; it never embeds. | Bounded, never on the lock |
 | `SessionEnd` | Spool; start a detached drain and return at once. | No |
 
 ### Spool and worker handshake
@@ -89,14 +91,17 @@ lock held and starts nobody. The handshake closes it:
    transcripts after `cleanupPeriodDays` (30 by default), so capture is complete once any session
    runs within that period.
 
-A synchronous `PreCompact` drain waits for the lock until its deadline, so it does not exit early
-while a detached worker holds it, and waits again for what is left of the deadline when it retakes
-the lock after a rescan. A bounded worker does not rescan once its deadline has passed, so when it
-ends incomplete its hook starts a detached worker: a record another session spooled while it held
-the lock is not left for a later hook. A record whose drain raises is set aside as `<key>.failed`
-and logged by error type only; the session's next hook spools a fresh record, and a transcript's
-cursor is written before its first batch, so the sweep retries a transcript whose first batch
-failed. One bad transcript cannot stall the others or loop the worker.
+No hook waits on the store lock, and no worker waits for it: a held lock means a holder that sees
+every spooled record when it rescans. So a synchronous `PreCompact` drain runs only when the lock is
+free. It stops at its deadline, keeping every batch it committed whole, and its record stays for the
+next worker. It exists for sessions with Claude Code's local GC on, which trims pre-compaction
+history: there it captures what it can before the trim, best effort. A bounded worker does not
+rescan once its deadline has passed, so when it ends incomplete its hook starts a detached worker: a
+record another session spooled while it held the lock is not left for a later hook. A record whose
+drain raises is set aside as `<key>.failed` and logged by error type only; the session's next hook
+spools a fresh record, and a transcript's cursor is written before its first batch, so the sweep
+retries a transcript whose first batch failed. One bad transcript cannot stall the others or loop
+the worker.
 
 ### Transcript facts
 
@@ -359,10 +364,15 @@ gate's instrument (see "The audit" in the test plan).
     against the `new`, `version` and `fork_copy` rows, whose store ids must exist;
   - `orphans`, `doubles`: tool calls and results pair one to one, over the rows no revision
     superseded;
-  - `files_lost`: every `tool-results` file of a session has a ledger row with its current digest.
+  - `stray_rows`: no row of the lineage's session lacks a ledger row that references it;
+  - `row_count`: each projected row's store ids match the number of rows a re-projection of its
+    own raw line gives;
+  - `held_mismatch`: a held file's referenced rows hold its exact text, inline or externalized.
 - **Reported, never failures:**
-  - lines and files written after the last capture: `pending_lines`, and `files_pending` for a file
-    newer than the lineage's last capture;
+  - lines after the cursor (`pending_lines`) and `tool-results` files whose current bytes have no
+    captured version (`files.uncaptured`): both leave the lineage unverified;
+  - forgotten lineages, which are not checked; rows of an older projection version
+    (`other_projection`); projected entries without a `uuid` (`projected_without_uuid`);
   - a transcript that is gone, replaced or rewritten (`transcript_state`), and older generations
     without a set-aside copy (`generations_gone`);
   - entry classes and unknown types, and projection errors;
@@ -370,12 +380,26 @@ gate's instrument (see "The audit" in the test plan).
   - fork copies, `fork_parent_unknown` and copies without an origin;
   - local-GC sessions;
   - spool and worker-log counts;
-  - hook p95 per event, with `hook_budget_ok` (`PostToolBatch` p95 at most 50 ms);
+  - each hook's in-process time per event (`hooks_in_process_ms`: n, p50, p95, max), with each
+    session's first hook apart (`first`), and `PreCompact`'s paths (`precompact`: drains, pokes of
+    the worker holding the lock, drains that reached their bound);
   - lag and store growth.
 - **Exit 2:** the home is not absolute, holds no store, or the store has no capture stamp.
-- **A run passes the gate** when the audit exits 0 and every lineage of the run was verified: its
-  transcript was read in full (`transcript_state` `ok`, no generation gone). A local-GC session is
-  listed without a lossless claim.
+- **It does not re-derive row text.** Ingest protection may redact, normalize or externalize it by
+  design; the ledger's raw line is the lossless copy, which the `corrupt` check and the
+  comparison with the transcript verify. To find externalized payloads it reads the `LCM_*`
+  settings of its own environment, not the store's `.env`: a mismatch can fail `held_mismatch`,
+  never pass it.
+- **A run passes the gate** when the audit exits 0 and `verified` is true:
+  - at least one lineage was checked;
+  - every selected lineage's transcript was read in full (`transcript_state` `ok`, no generation
+    gone), with nothing pending: no line after the cursor and no uncaptured file;
+  - every selected session, and every subagent transcript on disk, has a cursor;
+  - no spool record waits.
+
+  A store that is only behind is unverified, never failed. A local-GC session is best effort and
+  is listed without a lossless claim: Claude Code's local GC trims pre-compaction history, and the
+  `PreCompact` drain captures it first only when the store lock is free and within 10 s.
 
 ## Release mechanics
 
@@ -460,10 +484,16 @@ committed row, and store growth (the growth gate above).
 **Each run's record**, which is also evidence for #2141:
 - the backend;
 - the audit's `ok` and `verified`, and every failure counter;
-- the hook latency per event (n, p50, p95, max): in-process from the audit (`hooks_in_process_ms`),
-  and wall time from a smoke run on the same machine right after (`hook_wall_ms`), which adds the
-  interpreter start-up the hook log cannot see. #2141 judges `PostToolBatch`'s wall p95 against
-  50 ms;
+- the machine (model and RAM), the runtime mode (venv or found) and the exact interpreter version;
+- the per-turn hook latency per event (n, p50, p95, max): in-process from the audit
+  (`hooks_in_process_ms`), and wall time from a smoke run on the same machine right after
+  (`hook_wall_ms`), which adds the interpreter start-up the hook log cannot see. Each session's
+  first hook, a cold interpreter start, is reported apart (`first`: n and max). #2141 reopens on a
+  wall p95 over 50 ms in either mode on any R1-R10 machine, or a first hook over 500 ms; R1 states
+  the margin;
+- `PreCompact` as its own event, never pooled with the per-turn hooks: p50, p95 and max, and each
+  run's path (a drain, or a poke of the worker holding the lock). A p95 over 2 s, or any run that
+  reaches the 10 s bound, goes to the release manager;
 - the lag and the growth.
 
 **Install records**, one per supported platform (macOS and Linux):

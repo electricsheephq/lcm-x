@@ -3,8 +3,8 @@
 
 The plugin's hook entry (adapters/claude-code/bin/lcmx_hook.py) starts it detached, or, on
 PreCompact, waits for it with ``--deadline``. Exit codes: 0 every record drained, 3 records
-left (deadline or a held lock), 2 the store was refused, 1 an error. Design:
-docs/claude-code-adapter.md.
+left (the deadline, or another worker took the lock), 4 a bounded run found the lock held and
+drained nothing, 2 the store was refused, 1 an error. Design: docs/claude-code-adapter.md.
 """
 
 from __future__ import annotations
