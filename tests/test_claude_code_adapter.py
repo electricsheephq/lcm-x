@@ -10,6 +10,8 @@ import importlib.util
 import io
 import json
 import stat
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -206,18 +208,30 @@ def test_lineage_keys_and_subagent_session_ids():
 
 
 def test_precompact_reports_the_worker_outcome(hook, env, tmp_path, monkeypatch):
-    """A failed or incomplete drain is never reported as drained."""
+    """REGRESSION: a failed or incomplete bounded drain is never reported as drained, and it
+    leaves the rest to a detached worker (a bounded worker does not rescan the spool), unless
+    the store was refused."""
     package = tmp_path / "package"
     (package / "scripts").mkdir(parents=True)
     (package / "plugin.yaml").write_text("", encoding="utf-8")
     (package / "store.py").write_text("", encoding="utf-8")
     worker = package / "scripts" / "lcm_x_capture.py"
-    import sys
     lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(package)}
-    Path(env["LCMX_CC_HOME"]).mkdir(parents=True)
-    for code, outcome in ((0, "drained"), (3, "drain_incomplete"), (1, "drain_failed:1")):
-        worker.write_text(f"raise SystemExit({code})\n", encoding="utf-8")
-        assert hook.start_worker(Path(env["LCMX_CC_HOME"]), lane, deadline_s=5) == outcome
+    home = Path(env["LCMX_CC_HOME"])
+    home.mkdir(parents=True)
+    continued = home / "continued"
+    for code, outcome, detached in ((0, "drained", False), (3, "drain_incomplete+worker", True),
+                                    (1, "drain_failed:1+worker", True), (2, "drain_failed:2", False)):
+        continued.unlink(missing_ok=True)
+        worker.write_text("import pathlib, sys\n"
+                          "if '--deadline' not in sys.argv:\n"
+                          "    (pathlib.Path(sys.argv[3]) / 'continued').touch()\n"
+                          f"raise SystemExit({code})\n", encoding="utf-8")
+        assert hook.start_worker(home, lane, deadline_s=5) == outcome
+        end = time.monotonic() + 10
+        while detached and not continued.exists() and time.monotonic() < end:
+            time.sleep(0.05)
+        assert continued.exists() == detached
 
 
 def test_spool_record_carries_seq_and_local_gc(hook, env, tmp_path):

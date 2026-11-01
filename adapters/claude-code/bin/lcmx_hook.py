@@ -126,14 +126,16 @@ def spool(home: Path, record: Mapping[str, Any]) -> str:
     record = dict(record)
     if record.get("event") == "SessionStart" and record.get("source"):
         record["start_source"] = record["source"]
-    else:  # a later hook of the session keeps how it started (a fork links to its parent)
+        record["started_at"] = record.get("observed_at")
+    else:  # a later hook of the session keeps how and when it started (a fork's copies predate it)
         try:
             with open(directory / (key + ".json"), encoding="utf-8") as handle:
-                started = json.load(handle).get("start_source")
-        except (OSError, ValueError, AttributeError):
-            started = None
-        if started:
-            record["start_source"] = started
+                previous = json.load(handle)
+        except (OSError, ValueError):
+            previous = None
+        if isinstance(previous, dict) and previous.get("start_source"):
+            record["start_source"] = previous["start_source"]
+            record["started_at"] = previous.get("started_at")
     temporary = directory / (".%s.%d.tmp" % (key, os.getpid()))
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -171,12 +173,20 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0)
     if deadline_s:
         try:
             done = subprocess.run(command + ["--deadline", str(deadline_s)], timeout=deadline_s + 2, **quiet)
+            # The worker exits 0 only after a completed drain; 3 means its deadline left work pending.
+            outcome = {0: "drained", 3: "drain_incomplete"}.get(done.returncode, "drain_failed:%d" % done.returncode)
         except subprocess.TimeoutExpired:
-            return "drain_timeout"  # the batch in flight rolls back; the next drain resumes from the cursor
-        # The worker exits 0 only after a completed drain; 3 means its deadline left work pending.
-        return {0: "drained", 3: "drain_incomplete"}.get(done.returncode, "drain_failed:%d" % done.returncode)
-    # The record is already spooled. A held lock means a worker that will see it: the worker
-    # releases the lock first and rescans the spool after, so no record can fall between.
+            outcome = "drain_timeout"  # the batch in flight rolls back; the next drain resumes from the cursor
+        if outcome in ("drained", "drain_failed:2"):  # 2: the store was refused; another worker would be too
+            return outcome
+        # A bounded worker does not rescan: records left behind, including another session's
+        # spooled while it held the lock, go to a detached worker now.
+        if not _lock_held(home / "capture.lock"):
+            subprocess.Popen(command, start_new_session=True, **quiet)
+        return outcome + "+worker"
+    # The record is already spooled. A held lock means a worker that will see it: a detached
+    # worker releases the lock first and rescans the spool after, and a bounded one ends with
+    # the step above, so no record can fall between.
     if _lock_held(home / "capture.lock"):
         return "worker_running"
     subprocess.Popen(command, start_new_session=True, **quiet)

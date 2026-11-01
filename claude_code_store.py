@@ -16,6 +16,7 @@ import time
 import uuid
 import zlib
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, NamedTuple, Optional
 
@@ -29,19 +30,21 @@ from .claude_code_capture import (
     content_digest,
     lineage_key,
     project_entry,
+    results_dir,
     row_session_id,
     session_dir,
 )
 from .dag import SummaryDAG
-from .store import CAPTURE_OWNER_KEY, MessageStore
+from .store import CAPTURE_FORGOTTEN_PREFIX, CAPTURE_OWNER_KEY, MessageStore
 
 OWNER_FILE = "capture-owner.json"
 HERMES_MARKERS = ("config.yaml", "state.db")
 CURSOR_PREFIX = "capture:cursor:"
-FORK_PREFIX = "capture:fork:"  # sessions whose SessionStart source was ``fork``
+FORK_PREFIX = "capture:fork:"  # sessions whose SessionStart source was ``fork``, and when they started
+LOCAL_GC_PREFIX = "capture:local_gc:"  # sessions seen with Claude Code's local GC on (sticky)
 BATCH_LINES = 1000
 BATCH_BYTES = 8 * 1024 * 1024
-MAX_FILE_BYTES = 256 * 1024 * 1024
+FILE_CHUNK_BYTES = 64 * 1024 * 1024  # a larger tool-results file is kept as several rows
 SETTLE_S = 2.0
 QUIET_S = 0.5
 END_EVENTS = frozenset({"Stop", "StopFailure", "SubagentStop", "SessionEnd", "PreCompact"})
@@ -87,11 +90,12 @@ def _read_json(path: Path) -> Optional[dict]:
 def admit(home: Path, *, host: str = SOURCE, hermes_home: Optional[Path] = None) -> Path:
     """The store path once ``home`` is admitted, creating the store when the home has none.
 
-    Refuses a Hermes home, an existing unstamped database (never adopted), a copied or moved
-    store, and a store whose stamp does not match its owner file. Nothing here opens a store
-    for writing before the stamp is checked read-only."""
+    Refuses a Hermes home (``hermes_home``, which the worker command reads from HERMES_HOME
+    before the store's own settings load; default ``~/.hermes``), an existing unstamped
+    database (never adopted), a copied or moved store, and a store whose stamp does not match
+    its owner file. Nothing here opens a store for writing before the stamp is checked read-only."""
     home = home.resolve()
-    hermes = (hermes_home or Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")).expanduser().resolve()
+    hermes = (hermes_home or Path.home() / ".hermes").expanduser().resolve()
     if home == hermes or home.is_relative_to(hermes) or any((home / name).exists() for name in HERMES_MARKERS):
         raise AdmissionError("hermes_home")
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -155,11 +159,12 @@ def _create_store(home: Path, owner: dict) -> None:
 
 
 def read_stamp(database: Path) -> Optional[dict]:
-    """The ``capture:owner`` stamp, read without a write-capable open: no migration, no sidecars.
+    """The ``capture:owner`` stamp, read without a write-capable open and without migrating.
 
-    ``immutable`` serves a WAL-mode file whose sidecars are gone, when everything is in the
-    main file (the stamp is written and checkpointed before the store is linked into place)."""
-    for query in ("mode=ro", "immutable=1"):
+    A WAL-mode file whose sidecars are gone is read ``immutable`` only, since a ``mode=ro``
+    open could create them; the stamp is written and checkpointed before the store is linked
+    into place and never rewritten, so the main file holds it."""
+    for query in ("immutable=1",) if _wal_without_sidecars(database) else ("mode=ro", "immutable=1"):
         try:
             with closing(sqlite3.connect(f"{database.resolve().as_uri()}?{query}", uri=True)) as conn:
                 row = conn.execute("SELECT value FROM metadata WHERE key = ?", (CAPTURE_OWNER_KEY,)).fetchone()
@@ -170,21 +175,48 @@ def read_stamp(database: Path) -> Optional[dict]:
     return None
 
 
+def _wal_without_sidecars(database: Path) -> bool:
+    """A WAL-mode header (either format byte 2) whose -wal or -shm file is missing."""
+    try:
+        with open(database, "rb") as handle:
+            handle.seek(18)
+            header = handle.read(2)
+    except OSError:
+        return False
+    return len(header) == 2 and max(header) >= 2 and not (
+        Path(f"{database}-wal").exists() and Path(f"{database}-shm").exists())
+
+
 def to_rollback_journal(conn: Optional[sqlite3.Connection], attempts: int = 5) -> bool:
     """Checkpoint and leave WAL mode, so the read-only reader opens the store between worker runs
     (it refuses a WAL store whose sidecars SQLite deleted at the last close). A reader mid-call
     can block the switch; its sidecars then stay and recall keeps working."""
     if conn is None:
         return False
-    for _ in range(attempts):
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(0.1)
         try:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             if str(conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0]).lower() == "delete":
                 return True
         except sqlite3.OperationalError:
             pass
-        time.sleep(0.1)
     return False
+
+
+def leave_readable(database: Path) -> bool:
+    """After the writer's close, still under the lock: a store left in WAL mode without its
+    sidecars (a reader blocked the switch, then closed before the writer, whose close removed
+    them) is switched now, so the reader can open it. Sidecars that remain belong to a reader
+    still open; it keeps reading, and the next run switches."""
+    if not _wal_without_sidecars(database):
+        return True
+    try:
+        with closing(sqlite3.connect(database)) as conn:
+            return to_rollback_journal(conn)
+    except sqlite3.Error:
+        return False
 
 
 def open_store(database: Path, home: Path, config: Any = None) -> MessageStore:
@@ -226,9 +258,10 @@ def cursor_state(path: Path, cursor: Optional[dict]) -> str:
 
 def _new_generation(path: Path, lineage: Lineage, cursor: Optional[dict]) -> dict:
     status = os.stat(path)
+    kept = {key: cursor[key] for key in ("fork_parent", "fork_linked") if cursor and key in cursor}
     return {"path": str(path), "session_id": lineage.session_id, "agent_id": lineage.agent_id,
             "dev": status.st_dev, "ino": status.st_ino, "generation": cursor["generation"] + 1 if cursor else 0,
-            "offset": 0, "line_index": 0, "first": None, "last_offset": None, "last": None}
+            "offset": 0, "line_index": 0, "first": None, "last_offset": None, "last": None, **kept}
 
 
 def read_lines(path: Path, offset: int, *, max_lines: int = BATCH_LINES,
@@ -251,8 +284,15 @@ def read_lines(path: Path, offset: int, *, max_lines: int = BATCH_LINES,
 
 # -- ingest --
 
+def forgotten(store: MessageStore, lineage: Lineage) -> bool:
+    """The session was deleted from the store (store.py marks it): never read its transcript or files again."""
+    return bool(store.read_metadata_json(CAPTURE_FORGOTTEN_PREFIX + lineage.rows_session))
+
+
 def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = None) -> str:
-    """Ingest a transcript to its current end: ``drained``, ``missing`` or ``deadline``."""
+    """Ingest a transcript to its current end: ``drained``, ``missing``, ``forgotten`` or ``deadline``."""
+    if forgotten(store, lineage):
+        return "forgotten"
     cursor = read_cursor(store, lineage)
     state = cursor_state(lineage.path, cursor)
     if state == "missing":
@@ -265,6 +305,9 @@ def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = 
                 return "deadline"
     if state != "ok":
         cursor = _new_generation(lineage.path, lineage, cursor)
+        if state == "new":  # registered before its first batch, so the sweep retries a lineage that fails
+            new = cursor
+            store.update_metadata_json(CURSOR_PREFIX + lineage.key, lambda _current: new)
     return "deadline" if _drain_file(store, lineage, lineage.path, cursor, deadline) is None else "drained"
 
 
@@ -311,8 +354,9 @@ def ingest_lines(store: MessageStore, lineage: Lineage, cursor: dict, lines: lis
 
     Identity is (lineage, uid, content digest): the same again is a duplicate (no rows); a known
     uid with other content is a revision (new rows, ``version`` bindings, ``supersedes``). In a
-    session that started as a fork, an entry first captured in another session with the same
-    content is a fork copy: the fork's own rows, marked ``fork_copy`` and ``fork_copy_of``."""
+    session that started as a fork, an entry written before the fork started is a copy: the
+    fork's own rows, marked ``fork_copy`` and ``fork_copy_of`` the row that first held that
+    content in the session that wrote it. A line whose projection fails stays raw, noted."""
     folder = session_dir(lineage.path)
     parsed: list[_Line] = []
     for index, (_offset, raw) in enumerate(lines):
@@ -327,9 +371,10 @@ def ingest_lines(store: MessageStore, lineage: Lineage, cursor: dict, lines: lis
                             content_digest(entry) if entry else None))
     uids = {line.uid for line in parsed if line.uid and line.entry_class == PROJECTED}
     known = _versions(store, lineage.key, uids)
-    fork = lineage.agent_id is None and bool(store.read_metadata_json(FORK_PREFIX + lineage.session_id))
-    copies = _copies_elsewhere(store, lineage.key, uids - set(known)) if fork else {}
-    _link_lineage(store, lineage, cursor, copies)
+    fork, started = _fork_start(store, lineage)
+    origins = _origins(store, lineage.key, uids - set(known)) if fork else {}
+    copied_from = cursor.get("fork_parent")  # the session that wrote the latest copy so far
+    parent: Optional[str] = None
 
     messages: list[dict] = []
     pending: list[tuple[str, str, str, list[tuple[str, Any]], dict]] = []
@@ -337,26 +382,38 @@ def ingest_lines(store: MessageStore, lineage: Lineage, cursor: dict, lines: lis
     for line in parsed:
         event: dict[str, Any] = {"line": line, "disposition": "raw", "version": None, "files": [], "notes": []}
         events.append(event)
-        if line.entry_class != PROJECTED or not line.uid:
+        if line.entry_class != PROJECTED:
+            continue
+        if not line.uid:
+            event["notes"] = ["projected_entry_without_uuid"]  # kept raw; the audit counts it
             continue
         versions = known.setdefault(line.uid, [])
         same = next((version for version in versions if version["digest"] == line.digest), None)
         if same is not None:
             event.update(disposition="duplicate", version=same)
             continue
-        projection = project_entry(line.entry, folder=folder)
+        try:
+            projection = project_entry(line.entry, folder=folder)
+        except Exception as error:  # noqa: BLE001 - the line stays raw and noted; capture goes on
+            event["notes"] = ["projection_error:" + type(error).__name__]
+            continue
+        origin = origins.get((line.uid, line.digest))
         if versions:
             disposition, kind, proof, previous = "version", "version", "transcript_uuid", versions[-1]["row_ids"]
-        elif line.uid in copies and copies[line.uid]["digest"] == line.digest:
-            disposition, kind, proof, previous = "fork_copy", "canonical", "fork_copy", copies[line.uid]["row_ids"]
+        elif fork and _copied(line.entry, started, origin):
+            disposition, kind, proof, previous = "fork_copy", "canonical", "fork_copy", origin["row_ids"] if origin else {}
+            copied_from = origin["session"] if origin else copied_from
         else:
             disposition, kind, proof, previous = "new", "canonical", "transcript_uuid", {}
+            if fork and not cursor.get("fork_linked") and parent is None:
+                parent = copied_from or ""  # the fork's own first entry ends its copied prefix
         # Filled in place inside the transaction, so later lines of this batch see the store ids.
         version = {"digest": line.digest, "store_ids": [], "row_ids": {}}
         versions.append(version)
         event.update(disposition=disposition, version=version, files=projection.files, notes=projection.problems)
         pending.append((disposition, kind, proof, projection.rows, {"event": event, "previous": previous}))
         messages.extend(row for _uid, row in projection.rows)
+    _link_lineage(store, lineage, cursor, parent)
 
     with store.ingest_atomic():
         store_ids = iter(store.append_batch(lineage.rows_session, messages, source=SOURCE) if messages else [])
@@ -369,19 +426,56 @@ def ingest_lines(store: MessageStore, lineage: Lineage, cursor: dict, lines: lis
                 version["store_ids"].append(store_id)
                 version["row_ids"][row_uid] = store_id
                 bindings.append((store_id, row_uid, kind, proof))
-                related = state["previous"].get(row_uid)
-                if related is not None:
-                    kind_of = "supersedes" if disposition == "version" else "fork_copy_of"
-                    relations.append([(store_id, kind_of, related, 0, None)])
+            kind_of = "supersedes" if disposition == "version" else "fork_copy_of"
+            relations.extend([(new, kind_of, old, 0, None)] for new, old in _pairs(version["store_ids"], state["previous"]))
         store.add_host_uid_bindings(lineage.key, bindings)
         if relations:
             store.add_message_relations(relations)
         _write_events(store, lineage, cursor["generation"], events)
         cursor = _advance(cursor, lines)
+        if fork:
+            cursor.update(fork_parent=copied_from, fork_linked=bool(cursor.get("fork_linked")) or parent is not None)
         store.connection.execute(
             "INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (CURSOR_PREFIX + lineage.key, json.dumps(cursor, sort_keys=True)))
     return cursor
+
+
+def _fork_start(store: MessageStore, lineage: Lineage) -> tuple[bool, Optional[float]]:
+    """Whether this is a fork's main thread, and when the fork started (None if unknown)."""
+    if lineage.agent_id is not None:
+        return False, None
+    flag = store.read_metadata_json(FORK_PREFIX + lineage.session_id)
+    started = flag.get("started_at") if isinstance(flag, dict) else None
+    return bool(flag), float(started) if isinstance(started, (int, float)) else None
+
+
+def _copied(entry: dict, started: Optional[float], origin: Optional[dict]) -> bool:
+    """A fork's entry is a copy when it was written before the fork started (Claude Code keeps
+    each copied entry's timestamp), else, with no start time, when its writer's row is known."""
+    try:
+        written = datetime.fromisoformat(str(entry["timestamp"]).replace("Z", "+00:00")).timestamp()
+    except (KeyError, TypeError, ValueError):
+        written = None
+    if started is None or written is None:
+        return origin is not None
+    return written < started
+
+
+def _component(uid: str) -> int:
+    head, mark, tail = uid.rpartition("#")
+    return int(tail) if mark and head and tail.isdigit() else 0
+
+
+def _pairs(new_ids: list[int], previous: dict[str, int]) -> list[tuple[int, int]]:
+    """(new row, previous row) links, row for row in projection order. When a revision changed
+    the number of rows, extra new rows link to the last previous row and extra previous rows to
+    the last new row, so every previous row has a successor and every new row a predecessor."""
+    old_ids = [store_id for _uid, store_id in sorted(previous.items(), key=lambda item: _component(item[0]))]
+    if not old_ids or not new_ids:
+        return []
+    pairs = [(new_id, old_ids[min(index, len(old_ids) - 1)]) for index, new_id in enumerate(new_ids)]
+    return pairs + [(new_ids[-1], old_id) for old_id in old_ids[len(new_ids):]]
 
 
 def _advance(cursor: dict, lines: list[tuple[int, bytes]]) -> dict:
@@ -392,51 +486,59 @@ def _advance(cursor: dict, lines: list[tuple[int, bytes]]) -> dict:
 
 
 def _versions(store: MessageStore, key: str, uids: Iterable[str]) -> dict[str, list[dict]]:
-    """Per uid, the content versions this lineage already holds, oldest first."""
+    """Per uid, the content versions this lineage already holds, oldest first. The uid index is
+    named: without statistics SQLite would scan the whole lineage on every batch."""
     found: dict[str, list[dict]] = {}
     uids = sorted(uids)
     for start in range(0, len(uids), 500):
         chunk = uids[start:start + 500]
         for uid, digest, store_ids in store.connection.execute(
-                f"SELECT uid, content_digest, store_ids FROM capture_events WHERE uid IN ({','.join('?' * len(chunk))}) "
-                "AND lineage_key = ? AND source_kind = 'line' AND disposition IN ('new', 'version', 'fork_copy') "
-                "ORDER BY event_id", [*chunk, key]):
-            ids = json.loads(store_ids or "[]")
-            found.setdefault(uid, []).append({"digest": digest, "store_ids": ids, "row_ids": _row_ids(store, key, ids)})
+                f"SELECT uid, content_digest, store_ids FROM capture_events INDEXED BY idx_capture_events_uid "
+                f"WHERE uid IN ({','.join('?' * len(chunk))}) AND lineage_key = ? AND source_kind = 'line' "
+                "AND disposition IN ('new', 'version', 'fork_copy') ORDER BY event_id", [*chunk, key]):
+            found.setdefault(uid, []).append({"digest": digest, "store_ids": json.loads(store_ids or "[]")})
+    _fill_row_ids(store, key, [version for versions in found.values() for version in versions])
     return found
 
 
-def _row_ids(store: MessageStore, key: str, ids: list[int]) -> dict[str, int]:
-    return {uid: store_id for store_id, uids in store.host_uid_uids_of_stores(key, ids).items() for uid in uids}
+def _fill_row_ids(store: MessageStore, key: str, versions: list[dict]) -> None:
+    """Each version's ``row_ids`` (row uid -> store id), from one binding lookup for all of them."""
+    owners = store.host_uid_uids_of_stores(key, [store_id for version in versions for store_id in version["store_ids"]])
+    for version in versions:
+        version["row_ids"] = {uid: store_id for store_id in version["store_ids"] for uid in owners.get(store_id, ())}
 
 
-def _copies_elsewhere(store: MessageStore, key: str, uids: Iterable[str]) -> dict[str, dict]:
-    """The latest capture of each uid in another lineage: a fork's copied entries, so a fork of a
-    fork links to its direct parent."""
-    found: dict[str, dict] = {}
+def _origins(store: MessageStore, key: str, uids: Iterable[str]) -> dict[tuple[str, str], dict]:
+    """For a fork's entries, per (uid, content digest): the row that first held that content in
+    a session that wrote it (``new`` or ``version``), never another fork's copy, so sibling forks
+    point at the same writer."""
+    found: dict[tuple[str, str], dict] = {}
     uids = sorted(uids)
     for start in range(0, len(uids), 500):
         chunk = uids[start:start + 500]
         for uid, other, session, digest, store_ids in store.connection.execute(
                 f"SELECT uid, lineage_key, session_id, content_digest, store_ids FROM capture_events "
-                f"WHERE uid IN ({','.join('?' * len(chunk))}) AND lineage_key != ? AND source_kind = 'line' "
-                "AND disposition IN ('new', 'fork_copy') ORDER BY event_id DESC", [*chunk, key]):
-            if uid not in found:
-                ids = json.loads(store_ids or "[]")
-                found[uid] = {"lineage": other, "session": session, "digest": digest,
-                              "row_ids": _row_ids(store, other, ids)}
+                f"INDEXED BY idx_capture_events_uid WHERE uid IN ({','.join('?' * len(chunk))}) AND lineage_key != ? "
+                "AND source_kind = 'line' AND disposition IN ('new', 'version') ORDER BY event_id", [*chunk, key]):
+            found.setdefault((uid, digest), {"lineage": other, "session": session,
+                                             "store_ids": json.loads(store_ids or "[]")})
+    by_lineage: dict[str, list[dict]] = {}
+    for origin in found.values():
+        by_lineage.setdefault(origin["lineage"], []).append(origin)
+    for other, origins in by_lineage.items():
+        _fill_row_ids(store, other, origins)
     return found
 
 
-def _link_lineage(store: MessageStore, lineage: Lineage, cursor: dict, copies: dict[str, dict]) -> None:
+def _link_lineage(store: MessageStore, lineage: Lineage, cursor: dict, parent: Optional[str]) -> None:
     """Parent links go in before the batch's transaction (the lineage write runs its own and is
-    idempotent), so a crash after the batch commits cannot lose them."""
+    idempotent), so a crash after the batch commits cannot lose them. A fork's parent is the
+    session that wrote its last copied entry, known once the fork writes its own first entry."""
     if lineage.agent_id and cursor["offset"] == 0:
         store.record_session_lineage(lineage.rows_session, lineage.session_id, source=SOURCE,
                                      child_subagent_id=lineage.agent_id, child_role="subagent")
-    parents = {copy["session"] for copy in copies.values()} - {lineage.rows_session}
-    if len(parents) == 1:
-        store.record_session_lineage(lineage.rows_session, parents.pop(), source=SOURCE, child_role="fork")
+    if parent and parent != lineage.rows_session:
+        store.record_session_lineage(lineage.rows_session, parent, source=SOURCE, child_role="fork")
 
 
 INSERT_EVENT = (
@@ -449,14 +551,16 @@ def _write_events(store: MessageStore, lineage: Lineage, generation: int, events
     conn = store.connection
     now = time.time()
     shared: dict[str, int] = {}
+    results = results_dir(session_dir(lineage.path)) if any(event["files"] for event in events) else None
     for event in events:
         line: _Line = event["line"]
         digest = _digest(line.raw)
         raw, raw_from = zlib.compress(line.raw), None
-        if line.entry_class == SHARED_RAW:
+        if line.entry_class == SHARED_RAW:  # kept once per session: a forget never takes another session's bytes
             if digest not in shared:
-                held = conn.execute("SELECT event_id FROM capture_events WHERE line_digest = ? AND entry_class = ? "
-                                    "AND raw IS NOT NULL LIMIT 1", (digest, SHARED_RAW)).fetchone()
+                held = conn.execute("SELECT event_id FROM capture_events WHERE session_id = ? AND line_digest = ? "
+                                    "AND entry_class = 'shared_raw' AND raw IS NOT NULL LIMIT 1",
+                                    (lineage.rows_session, digest)).fetchone()
                 if held:
                     shared[digest] = int(held[0])
             if digest in shared:
@@ -470,49 +574,98 @@ def _write_events(store: MessageStore, lineage: Lineage, generation: int, events
         if line.entry_class == SHARED_RAW and raw is not None and cursor.lastrowid:
             shared[digest] = int(cursor.lastrowid)
         for name in event["files"]:
-            row = _held_file_row(lineage, session_dir(lineage.path) / "tool-results" / name, store_ids, now)
+            row = _held_file_row(lineage, results, name, store_ids, now)
             if row is not None:
                 conn.execute(INSERT_EVENT, row)
 
 
-def _held_file_row(lineage: Lineage, path: Path, store_ids: Optional[list[int]], now: float) -> Optional[tuple]:
+def _fingerprint(path: Path) -> str:
+    status = path.stat()
+    return json.dumps({"size": status.st_size, "mtime_ns": status.st_mtime_ns}, sort_keys=True)
+
+
+def _held_file_row(lineage: Lineage, results: Optional[Path], name: str, store_ids: Optional[list[int]],
+                   now: float) -> Optional[tuple]:
     """A ``tool-results`` file whose full text a tool row holds: digest and row ids, no bytes."""
+    if results is None:
+        return None
     try:
-        data = path.read_bytes()
+        fingerprint = _fingerprint(results / name)
+        data = (results / name).read_bytes()
     except OSError:
         return None
-    return (lineage.rows_session, lineage.key, "file", 0, 0, "tool-results/" + path.name, None, "tool_results_file",
-            _digest(data), None, "held", json.dumps(store_ids or []), None, None, None, PROJECTION_VERSION, now)
+    digest = _digest(data)
+    return (lineage.rows_session, lineage.key, "file", 0, 0, "tool-results/" + name, None, "tool_results_file",
+            digest, digest, "held", json.dumps(store_ids or []), fingerprint, None, None, PROJECTION_VERSION, now)
 
 
-def capture_files(store: MessageStore, lineage: Lineage) -> int:
-    """Every ``tool-results`` file of a session gets a ledger row; bytes are kept unless a row holds them."""
-    folder = session_dir(lineage.path) / "tool-results"
+class _KnownBytes(Exception):
+    """The ledger already holds this file's bytes: the file was only touched."""
+
+
+def capture_files(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = None) -> Optional[int]:
+    """Every ``tool-results`` file of a session gets ledger rows holding its bytes, in rows of at
+    most ``FILE_CHUNK_BYTES``, unless a tool row holds its full text. A file is read only when
+    it is new or its size or modification time changed. ``None`` when the deadline came first."""
+    results = results_dir(session_dir(lineage.path))
+    if results is None or forgotten(store, lineage):
+        return 0
     try:
-        paths = sorted(path for path in folder.iterdir() if path.is_file() and not path.is_symlink())
+        paths = sorted(path for path in results.iterdir() if path.is_file() and not path.is_symlink())
     except OSError:
         return 0
     conn = store.connection
     added = 0
     for path in paths:
+        if deadline is not None and time.monotonic() > deadline:
+            return None
         uid = "tool-results/" + path.name
         try:
-            size = path.stat().st_size
-            data = path.read_bytes() if size <= MAX_FILE_BYTES else None
+            fingerprint = _fingerprint(path)
         except OSError:
             continue
-        digest = _digest(data) if data is not None else "size:%d" % size
         if conn.execute("SELECT 1 FROM capture_events WHERE source_kind = 'file' AND lineage_key = ? AND uid = ? "
-                        "AND (line_digest = ? OR disposition = 'held')", (lineage.key, uid, digest)).fetchone():
+                        "AND (disposition = 'held' OR notes = ?) LIMIT 1", (lineage.key, uid, fingerprint)).fetchone():
             continue
-        with store.ingest_atomic():
-            conn.execute(
-                INSERT_EVENT,
-                (lineage.rows_session, lineage.key, "file", 0, 0, uid, None, "tool_results_file", digest, None,
-                 "kept" if data is not None else "too_large", None, None,
-                 zlib.compress(data) if data is not None else None, None, PROJECTION_VERSION, time.time()))
+        try:
+            _keep_file(store, lineage, path, uid, fingerprint)
+        except _KnownBytes:
+            with store.ingest_atomic():  # remember the new fingerprint, so the file is not read again
+                conn.execute("UPDATE capture_events SET notes = ? WHERE source_kind = 'file' AND lineage_key = ? "
+                             "AND uid = ? AND position = 0", (fingerprint, lineage.key, uid))
+            continue
+        except OSError:
+            continue
         added += 1
     return added
+
+
+def _keep_file(store: MessageStore, lineage: Lineage, path: Path, uid: str, fingerprint: str) -> None:
+    """The file's bytes as ledger rows, one per chunk, in one transaction (rolled back when the
+    ledger already holds the same bytes)."""
+    conn = store.connection
+    whole = hashlib.sha256()
+    now = time.time()
+    with store.ingest_atomic(), open(path, "rb") as handle:
+        event_ids = []
+        while True:
+            data = handle.read(FILE_CHUNK_BYTES)
+            if event_ids and not data:
+                break
+            whole.update(data)
+            cursor = conn.execute(INSERT_EVENT, (
+                lineage.rows_session, lineage.key, "file", 0, len(event_ids), uid, None, "tool_results_file",
+                _digest(data), None, "kept", None, fingerprint if not event_ids else None, zlib.compress(data),
+                None, PROJECTION_VERSION, now))
+            event_ids.append(cursor.lastrowid)
+            if len(data) < FILE_CHUNK_BYTES:
+                break
+        digest = whole.hexdigest()
+        if conn.execute("SELECT 1 FROM capture_events WHERE source_kind = 'file' AND lineage_key = ? AND uid = ? "
+                        "AND content_digest = ? LIMIT 1", (lineage.key, uid, digest)).fetchone():
+            raise _KnownBytes()
+        conn.executemany("UPDATE capture_events SET content_digest = ? WHERE event_id = ?",
+                         [(digest, event_id) for event_id in event_ids])
 
 
 # -- worker --
@@ -641,10 +794,12 @@ def run_worker(home: Path, *, deadline_s: Optional[float] = None, config: Any = 
     worker now holding it, which took the lock after the record was written and scans first.
 
     ``deadline_s`` (the PreCompact drain) waits for the lock until the deadline; ``complete`` is
-    true only when every record was drained."""
+    true only when every record was drained. A bounded run that ends incomplete leaves the rest
+    to a detached worker, which the hook starts."""
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
     deadline = None if deadline_s is None else time.monotonic() + deadline_s
-    report: dict[str, Any] = {"records": 0, "drained": 0, "missing": 0, "failed": 0, "files": 0, "complete": True}
+    report: dict[str, Any] = {"records": 0, "drained": 0, "missing": 0, "forgotten": 0, "failed": 0, "files": 0,
+                              "complete": True}
     lock = _Lock(home)
     try:
         wait_s = deadline_s or 0.0
@@ -659,7 +814,7 @@ def run_worker(home: Path, *, deadline_s: Optional[float] = None, config: Any = 
                 lock.release()
             if status != "done" or not pending(home):
                 return report
-            wait_s = 0.0
+            wait_s = 0.0 if deadline is None else max(0.0, deadline - time.monotonic())
     finally:
         lock.close()
 
@@ -676,18 +831,19 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
         return "refused"
     store = open_store(database, home, config)
     try:
-        for path, record in claim_records(home):
+        claimed = claim_records(home)
+        for _path, record in claimed:  # before any drain, so a fork's first rows already know it is one
+            remember_session(store, record)
+        for path, record in claimed:
             report["records"] += 1
             try:
-                if record.get("start_source") == "fork" and record.get("session_id"):
-                    store.update_metadata_json(FORK_PREFIX + record["session_id"], lambda _current: True)
                 for lineage in lineages_of(record):
                     outcome = drain(store, lineage, deadline=deadline)
                     if outcome == "deadline":
                         report["complete"] = False
                         return "deadline"  # the claimed record stays for the next run
                     report[outcome] += 1
-                    if record.get("event") in END_EVENTS:
+                    if outcome == "drained" and record.get("event") in END_EVENTS:
                         _settle(store, lineage, deadline, settle_s)
             except Exception as error:  # noqa: BLE001 - logged without content; capture goes on
                 report["failed"] += 1
@@ -707,24 +863,46 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
                         report["complete"] = False
                         return "deadline"
                     if each.agent_id is None:
-                        report["files"] += capture_files(store, each)
+                        added = capture_files(store, each, deadline=deadline)
+                        if added is None:
+                            report["complete"] = False
+                            return "deadline"
+                        report["files"] += added
                 except Exception as error:  # noqa: BLE001
                     report["failed"] += 1
                     report["complete"] = False
                     _log_failure(home, "sweep", error)
         return "done"
     finally:
-        to_rollback_journal(store.connection)
+        switched = to_rollback_journal(store.connection)
         store.close()
+        if not switched and not leave_readable(database):
+            _log_failure(home, "journal", "still_wal")  # the reader waits for the next run's switch
 
 
-def _log_failure(home: Path, stage: str, error: BaseException) -> None:
+def remember_session(store: MessageStore, record: dict) -> None:
+    """What the fork rules and the audit need from a hook record, kept before the record is
+    acknowledged: that the session started as a fork, and when; and that Claude Code's local
+    GC was on for it, which stays set once seen."""
+    session = record.get("session_id")
+    if not isinstance(session, str) or not session:
+        return
+    if record.get("start_source") == "fork" and not isinstance(store.read_metadata_json(FORK_PREFIX + session), dict):
+        started = record.get("started_at")
+        flag = {"started_at": started} if isinstance(started, (int, float)) else True
+        store.update_metadata_json(FORK_PREFIX + session, lambda current: current if isinstance(current, dict) else flag)
+    if record.get("local_gc") is True and not store.read_metadata_json(LOCAL_GC_PREFIX + session):
+        store.update_metadata_json(LOCAL_GC_PREFIX + session, lambda _current: True)
+
+
+def _log_failure(home: Path, stage: str, error: BaseException | str) -> None:
     """One line per failure, with the error type only: never content or paths."""
     try:
         directory = home / "logs"
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         descriptor = os.open(directory / "worker.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        kind = error if isinstance(error, str) else type(error).__name__
         with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"t": round(time.time(), 3), "stage": stage, "error": type(error).__name__}) + "\n")
+            handle.write(json.dumps({"t": round(time.time(), 3), "stage": stage, "error": kind}) + "\n")
     except OSError:
         pass

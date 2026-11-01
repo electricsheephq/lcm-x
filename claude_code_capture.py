@@ -85,6 +85,19 @@ def session_dir(transcript: Path) -> Path:
     return transcript.parent.parent if transcript.parent.name == "subagents" else transcript.with_suffix("")
 
 
+def results_dir(folder: Path) -> Path | None:
+    """``<folder>/tool-results``, resolved, when it is a real directory of the session folder:
+    neither it nor the folder is a symlink, so saved outputs and captured files stay inside."""
+    results = folder / "tool-results"
+    try:
+        if folder.is_symlink() or results.is_symlink() or not results.is_dir():
+            return None
+        resolved = results.resolve()
+        return resolved if resolved == folder.resolve() / "tool-results" else None
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 def project_entry(entry: Mapping[str, Any], *, folder: Path | None = None) -> Projection:
     """Message rows for one projected entry; uid ``uuid``, or ``uuid#n`` when it gives several.
 
@@ -173,7 +186,9 @@ def _recover_saved_output(preview: str, saved: str | None, folder: Path) -> tupl
     named = (match.group("path").strip() if match else None) or saved
     if not named:
         return preview, None, "persisted_output_unnamed"
-    results = (folder / "tool-results").resolve()
+    results = results_dir(folder)
+    if results is None:
+        return preview, None, "persisted_output_outside_session"
     try:
         path = Path(named).expanduser()
         if path.is_symlink() or not path.resolve().is_relative_to(results):
@@ -182,7 +197,7 @@ def _recover_saved_output(preview: str, saved: str | None, folder: Path) -> tupl
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 return preview, None, "persisted_output_not_a_file"
             data = handle.read(MAX_RECOVERED_OUTPUT + 1)
-    except OSError:
+    except (OSError, RuntimeError, ValueError):  # also an unknown ~user or a NUL in a quoted marker
         return preview, None, "persisted_output_missing"
     if len(data) > MAX_RECOVERED_OUTPUT:
         return preview, None, "persisted_output_too_large"

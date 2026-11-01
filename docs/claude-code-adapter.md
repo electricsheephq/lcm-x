@@ -23,8 +23,8 @@ yet; a later projection version can expose them because their raw lines are kept
 
 **Qualification boundary.** Lossless capture requires Claude Code's opt-in local transcript GC to
 be off (`CLAUDE_CODE_TRANSCRIPT_LOCAL_GC` unset). With it on, the GC can delete history a drain
-has not read yet; capture still runs, records the flag per session, and the audit lists those
-sessions without a lossless claim.
+has not read yet; capture still runs, records the flag per session (`capture:local_gc:<session>`, kept
+once any hook saw it on), and the audit lists those sessions without a lossless claim.
 
 It ships as a Claude Code plugin: hooks for capture, a bundled MCP server for recall. Claude Code
 plugins and settings hooks are also run by Grok Build, so the same package is the base for other
@@ -61,7 +61,7 @@ logged without content and capture catches up on a later run.
 | `UserPromptSubmit`, `PostToolBatch`, `PostCompact` | Spool; start the worker only if none is running. `PostToolBatch` fires once per batch of tool calls, also inside subagents (with `agent_id`). | No |
 | `Stop`, `StopFailure` | Spool; the worker drains the transcript, then settles (below). `StopFailure` replaces `Stop` when the turn ends on an API error. | No |
 | `SubagentStop` | Spool the subagent transcript (`<session>/subagents/agent-<id>.jsonl`) as a child lineage. Internal agents (`agent_type` empty) are captured and tagged; R0 saw the compaction summarizer fire it with a transcript path that does not exist, which is logged with nothing to ingest. | No |
-| `PreCompact` | Drain synchronously, bounded to 10 s, waiting for the store lock if a detached worker holds it. The hook logs `drained` only for a worker-confirmed complete drain, otherwise `drain_incomplete`, `drain_failed:<code>` or `drain_timeout`. | Bounded |
+| `PreCompact` | Drain synchronously, bounded to 10 s, waiting for the store lock if a detached worker holds it. The hook logs `drained` only for a worker-confirmed complete drain, otherwise `drain_incomplete`, `drain_failed:<code>` or `drain_timeout`; any of these but a refused store then starts a detached worker for the rest (`+worker`). | Bounded |
 | `SessionEnd` | Spool; start a detached drain and return at once. | No |
 
 ### Spool and worker handshake
@@ -83,15 +83,20 @@ lock held and starts nobody. The handshake closes it:
 4. **Settle:** after draining a transcript to its end, the worker re-checks it until the file is
    quiet (bounded to about 2 s): R0 found the final reply not yet written at `Stop` in 2 of 4 runs.
 5. **Sweep:** every worker run also checks each registered transcript, with its `subagents/` and
-   `tool-results/` folders, for growth past its cursor. A line written after the settle, or a session
+   `tool-results/` folders, for growth past its cursor (a `tool-results` file is read again only
+   when its size or modification time changed). A line written after the settle, or a session
    killed before `SessionEnd`, is captured by the next run of any session. Claude Code deletes
    transcripts after `cleanupPeriodDays` (30 by default), so capture is complete once any session
    runs within that period.
 
 A synchronous `PreCompact` drain waits for the lock until its deadline, so it does not exit early
-while a detached worker holds it. A record whose drain raises is set aside as `<key>.failed` and
-logged by error type only; the session's next hook spools a fresh record, so one bad transcript
-cannot stall the others or loop the worker.
+while a detached worker holds it, and waits again for what is left of the deadline when it retakes
+the lock after a rescan. A bounded worker does not rescan once its deadline has passed, so when it
+ends incomplete its hook starts a detached worker: a record another session spooled while it held
+the lock is not left for a later hook. A record whose drain raises is set aside as `<key>.failed`
+and logged by error type only; the session's next hook spools a fresh record, and a transcript's
+cursor is written before its first batch, so the sweep retries a transcript whose first batch
+failed. One bad transcript cannot stall the others or loop the worker.
 
 ### Transcript facts
 
@@ -162,16 +167,21 @@ cannot stall the others or loop the worker.
   idempotent: a crash after the batch commits cannot lose the link.
 - **Source ledger (new, additive): `capture_events`**, the one table this adapter adds. One row per
   transcript line and per `tool-results` file: lineage, generation, line index, uid, entry type,
-  class, line digest, content digest, disposition (`new`, `duplicate`, `version`, `fork_copy`), the
-  store ids it produced, and the raw bytes (zlib). Request snapshots keep their raw bytes once per
-  line digest; later identical lines point at the row that holds them. An index on uid serves the
-  store-wide fork lookup.
+  class, line digest, content digest, disposition (`new`, `duplicate`, `version`, `fork_copy`, or
+  `raw` for a line without rows), the store ids it produced, and the raw bytes (zlib). Request
+  snapshots keep their raw bytes once per session and line digest; later identical lines of the
+  same session point at the row that holds them, so deleting one session never takes another
+  session's bytes. An index on uid serves the version and fork lookups (the queries name it:
+  without statistics SQLite would scan the whole lineage on every batch).
   - It makes capture provable and lets a later projection version re-derive rows after Claude Code
     has deleted the transcript.
   - It is created by a named migration step in `store.py` (`capture_events_v1`), only in stamped
     capture stores; a test shows it is never created in a Hermes store. An older reader ignores it.
-  - Forgetting a row also deletes its ledger rows and raw bytes, so a later re-projection cannot
-    bring forgotten content back.
+  - Deleting a session deletes its ledger rows and raw bytes and marks the session forgotten
+    (`capture:forgotten:<session>`): the worker never reads its transcript or `tool-results` files
+    again, even after Claude Code rewrites the transcript, so forgotten content cannot come back.
+    Later turns of a forgotten session are not captured either. A subagent is its own session
+    (`<session>/agent:<agent>`) and is forgotten on its own.
   - Per `docs/process/schema-changes.md`, the PR records the format, the oldest reader and the
     removal version, and adds forward and rollback compat tests.
 - **Cursor storage.** One `metadata` key per transcript (`capture:cursor:<lineage>`), written inside
@@ -191,23 +201,33 @@ at worst an unreferenced payload file, never a lost row; a rerun is idempotent b
   change when Claude Code copies an entry into another session (`sessionId`, `promptId`; R0 found
   fork copies differ in exactly these).
 - **Revision:** a known uid with a different content digest. A new row, a `version` binding (the
-  canonical binding of a uid is unique per lineage) and a `supersedes` relation from the new row to
-  the earlier one, in the same transaction. Rows are never overwritten. Claude Code's own revision
+  canonical binding of a uid is unique per lineage) and `supersedes` relations from the new rows to
+  the earlier ones, row for row in projection order, in the same transaction. When a revision changes
+  the number of rows, extra new rows link to the last earlier row and extra earlier rows to the last
+  new row, so every earlier row has a successor. Rows are never overwritten. Claude Code's own revision
   fields (`supersedesUuids`, `retractedMessageUuids`) stay in the ledger and become relations, never
   deletions. R0 and the review census saw 1,206 repeated uuids within single files, all with
   identical content.
-- **Forks (changed in r2).** A fork's copied entries become the fork's own rows, so every session
-  reads back complete through the unchanged reader (`lcm_load_session` reads one session's rows,
-  and `session_lineage` cannot express a fork point). A copy is recognised by its uid and content
-  digest in another lineage, through the ledger's uid index, and only in a session that started as
-  a fork (`SessionStart` source `fork`, which the hook carries onto the session's later spool
-  records): its binding carries proof kind `fork_copy` and a `fork_copy_of` relation to the latest
-  earlier row, so a fork of a fork links to its direct parent, and the last copied entry marks the
-  fork point. A session not known to be a fork keeps such entries as ordinary rows without a link,
-  because the direction would be a guess. Uid identity decides; the digest only confirms; content
-  equality alone never merges. The cost is a second copy of the forked prefix (measured in R3). If
-  the parent was never captured, the copies are ordinary rows and the audit reports
-  `fork_parent_unknown`.
+- **Forks (changed in r2 and r3).** A fork's copied entries become the fork's own rows, so every
+  session reads back complete through the unchanged reader (`lcm_load_session` reads one session's
+  rows, and `session_lineage` cannot express a fork point).
+  - Only a session that started as a fork has copies. The hook carries the `SessionStart` source
+    `fork` and its time onto the session's later spool records, and the worker records both for
+    every claimed record before it drains any.
+  - A copy is an entry written before the fork started: Claude Code keeps each copied entry's
+    timestamp. Without a start time, a copy is an entry whose uid and content digest another
+    session wrote. An entry the fork wrote itself is never a copy, even when a later fork's copy of
+    it was captured first.
+  - A copy's binding carries proof kind `fork_copy`. Its `fork_copy_of` relation points at the row
+    that first held that uid and content in the session that wrote it (a `new` or `version` row,
+    never another fork's copy), so sibling forks point at the same writer.
+  - The fork's parent session is the one that wrote its last copied entry, recorded when the fork
+    writes its first own entry. A copy whose writer is not captured yet gets no link, and the parent
+    is then the nearest captured ancestor.
+  - A session not known to be a fork keeps such entries as ordinary rows without a link, because
+    the direction would be a guess. Content equality alone never merges. The cost is a second copy
+    of the forked prefix (measured in R3). If the parent was never captured, the copies have no link
+    and the audit reports `fork_parent_unknown`.
 - **Projection v1, by entry:**
 
 | Entry | Rows |
@@ -215,12 +235,14 @@ at worst an unreferenced payload file, never a lost row; a rerun is idempotent b
 | `user`, text or image parts | One `user` row. Meta entries, compact summaries and transcript-only entries become `system` rows. |
 | `user`, `tool_result` parts | One `tool` row per result, `tool_call_id` = `tool_use_id`. When Claude Code saved the output to a file inside the session's own `tool-results/` folder (`persistedOutputPath`, or the path in the marker), the row holds the file's full text (up to 64 MiB, as Hermes's persisted-output recovery does); the preview stays in the ledger's raw line. |
 | `assistant` | One row per entry: text parts as content, `tool_use` parts as `tool_calls`. An entry with only thinking gives no row. `message.id` stays in the ledger, so a reader can regroup one response. API-error entries become `system` rows. |
-| `tool-results` files | A ledger row each. Files not already held in full by a tool row (images, PDFs, unreferenced or over-limit files) keep their bytes in the ledger. |
+| `tool-results` files | Ledger rows each. Files not already held in full by a tool row (images, PDFs, unreferenced or large files) keep their bytes in the ledger, in rows of at most 64 MiB, with no size limit; a file whose bytes change is kept again. A `tool-results` folder that is a symlink, or in a symlinked session folder, is never read, for files or for saved outputs. |
 | `system`, `attachment`, bookkeeping (`queue-operation`, `last-prompt`, `mode`, `custom-title`, `file-history-*`, `tools-used`, desktop types such as `bridge-session` and `frame-link`) | None; raw line in the ledger. |
 | Request snapshots (`api-request`, `api-request-blob`, `api-request-shape`) | None; raw line kept once per line digest. They hold the exact model input, including system text and injected reminders that appear nowhere else in the transcript. |
 | Unknown types | None; raw line in the ledger, counted as `unknown_type`. |
 
-Nothing is dropped silently: the audit counts every entry by class.
+Nothing is dropped silently: the audit counts every entry by class. A `user` or `assistant` entry
+without a `uuid` (none seen in real transcripts) and an entry whose projection fails keep their raw
+line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), and the audit lists them.
 
 ## Recall surface
 
@@ -236,7 +258,9 @@ Nothing is dropped silently: the audit counts every entry by class.
   The switch runs only under the store lock, so no other writer is active. If it fails because a
   reader is mid-call, the store stays in WAL with its sidecars (a read-only connection cannot delete
   them), recall keeps working, and the next run retries; the reader's refusal text says to retry once
-  the writer has run. R9 runs after the worker has exited and the reader has restarted.
+  the writer has run. If that reader closes before the worker does, the worker's close removes the
+  sidecars of a store still marked WAL, so the worker checks the header after its close and switches
+  the store again, still under the lock; it logs the case where the store stays in WAL. R9 runs after the worker has exited and the reader has restarted.
 - **One configuration.** The worker loads `LCM_*` settings from `<home>/.env`, exactly as the
   reader does, so both compute the same embedding identity.
 - The worker runs one bounded embedding catch-up pass (`run_incremental_embedding_pass`) after each

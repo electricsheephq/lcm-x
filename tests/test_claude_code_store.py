@@ -5,11 +5,15 @@ Design: docs/claude-code-adapter.md.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
 import shutil
 import sqlite3
+import time
+import zlib
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -382,10 +386,11 @@ def test_a_refused_store_stops_the_worker(tmp_path, hermes):
 def test_the_session_start_source_survives_later_hooks(tmp_path, home):
     hook = _hook()
     path = _transcript(tmp_path, CONVERSATION[:1])
-    _record(hook, home, path, event="SessionStart", source="fork")
-    _record(hook, home, path, event="UserPromptSubmit")
+    _record(hook, home, path, event="SessionStart", source="fork", observed_at=1234.5)
+    _record(hook, home, path, event="UserPromptSubmit", observed_at=2000.0)
     [record] = [json.loads(p.read_text()) for p in (home / "spool").glob("*.json")]
     assert record["event"] == "UserPromptSubmit" and record["start_source"] == "fork"
+    assert record["started_at"] == 1234.5  # when the fork started: its copies were written before
 
 
 def test_capture_cli_drains_the_spool(tmp_path, home, hermes):
@@ -402,3 +407,319 @@ def test_capture_cli_drains_the_spool(tmp_path, home, hermes):
     assert not cc.pending(home)
     assert subprocess.run([sys.executable, str(script), "worker", "--home", "relative/home"],
                           env=env, capture_output=True, timeout=60).returncode == 2
+
+
+# -- round 2 review regressions --------------------------------------------------------
+
+FORK_START = datetime(2026, 11, 1, 1, tzinfo=timezone.utc).timestamp()
+
+
+def _fork(tmp_path, store, fork, entries, own, started=FORK_START):
+    """A fork transcript: copies of ``entries`` then its own entries, flagged as a fork."""
+    copies = [{**entry, "sessionId": fork, "promptId": "p-" + fork} for entry in entries]
+    path = _transcript(tmp_path, [*copies, *own], session=fork)
+    store.update_metadata_json(cc.FORK_PREFIX + fork, lambda _current: {"started_at": started})
+    return cc.Lineage(fork, None, path)
+
+
+def _relations(store, kind):
+    return store.connection.execute("SELECT store_id, related_store_id FROM message_relations WHERE kind = ? "
+                                    "ORDER BY 1, 2", (kind,)).fetchall()
+
+
+def test_forgetting_a_session_keeps_another_sessions_shared_raw_bytes(tmp_path, home, hermes):
+    """REGRESSION: identical request blobs are kept once per session, so forgetting one session
+    never takes the bytes another session's ledger rows point to."""
+    blob = {"type": "api-request-blob", "hash": "h1", "blob": {"system": "big prompt"}}
+    one = _transcript(tmp_path, [blob], session="s1")
+    two = _transcript(tmp_path, [blob, blob], session="s2")
+    store = _open(home, hermes)
+    try:
+        cc.drain(store, cc.Lineage("s1", None, one))
+        cc.drain(store, cc.Lineage("s2", None, two))
+        store.delete_session_messages("s1")
+        (first, kept, _), (_, second_kept, points_to) = store.connection.execute(
+            "SELECT event_id, raw IS NOT NULL, raw_from FROM capture_events WHERE session_id = 's2' "
+            "ORDER BY event_id").fetchall()
+        assert kept == 1 and second_kept == 0 and points_to == first
+    finally:
+        store.close()
+
+
+def test_a_forgotten_session_is_never_captured_again(tmp_path, home, hermes):
+    """REGRESSION: after a session is deleted, its transcript (even rewritten) and its
+    tool-results files are never read again, so forgotten content cannot come back."""
+    folder = tmp_path / "projects" / "-work" / "s1" / "tool-results"
+    folder.mkdir(parents=True)
+    (folder / "shot.png").write_bytes(b"\x89PNG not text")
+    path = _transcript(tmp_path, CONVERSATION)
+    lineage = cc.Lineage("s1", None, path)
+    store = _open(home, hermes)
+    try:
+        cc.drain(store, lineage)
+        assert cc.capture_files(store, lineage) == 1
+        store.delete_session_messages("s1")
+        replacement = path.with_suffix(".rewrite")
+        replacement.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        os.replace(replacement, path)  # a new inode: without the mark this is a new generation
+        assert cc.drain(store, lineage) == "forgotten"
+        assert cc.capture_files(store, lineage) == 0
+        assert store.connection.execute("SELECT COUNT(*) FROM capture_events").fetchone()[0] == 0
+        assert _rows(store) == [] and store.read_metadata_json("capture:forgotten:s1")
+    finally:
+        store.close()
+
+
+def test_a_store_left_in_wal_without_sidecars_is_switched_after_close(home, hermes):
+    """REGRESSION: when a reader blocks the switch and closes first, the writer's close leaves a
+    WAL header without sidecars; the stamp still reads (immutable, no file created) and the
+    worker switches the store again, still under its lock."""
+    database = cc.admit(home, hermes_home=hermes)
+    cc.open_store(database, home).close()  # WAL while open; the last close removes the sidecars
+    assert _header_mode(database) == 2 and not Path(f"{database}-shm").exists()
+    assert cc.read_stamp(database)["host"] == "claude-code"
+    assert not Path(f"{database}-shm").exists() and not Path(f"{database}-wal").exists()
+    assert cc.leave_readable(database) and _header_mode(database) == 1
+
+
+def test_tool_results_files_of_any_size_are_kept_whole_and_read_once(tmp_path, home, hermes, monkeypatch):
+    """REGRESSION: a file above the chunk size is kept as rows that rebuild its bytes (no size
+    limit drops it); an unchanged file is not read again; a touched one is not stored twice; a
+    changed one is kept again; the deadline stops the sweep."""
+    monkeypatch.setattr(cc, "FILE_CHUNK_BYTES", 10)
+    folder = tmp_path / "projects" / "-work" / "s1" / "tool-results"
+    folder.mkdir(parents=True)
+    data = b"0123456789" * 3 + b"end"  # identical chunks must not collapse
+    (folder / "big.bin").write_bytes(data)
+    lineage = cc.Lineage("s1", None, _transcript(tmp_path, CONVERSATION[:1]))
+    store = _open(home, hermes)
+
+    def chunks():
+        return store.connection.execute("SELECT content_digest, position, raw FROM capture_events "
+                                        "WHERE uid = 'tool-results/big.bin' ORDER BY event_id").fetchall()
+    try:
+        assert cc.capture_files(store, lineage) == 1
+        assert [row[1] for row in chunks()] == [0, 1, 2, 3]
+        assert b"".join(zlib.decompress(row[2]) for row in chunks()) == data
+        assert {row[0] for row in chunks()} == {hashlib.sha256(data).hexdigest()}
+        keep = cc._keep_file
+        monkeypatch.setattr(cc, "_keep_file", lambda *args: pytest.fail("an unchanged file was read again"))
+        assert cc.capture_files(store, lineage) == 0
+        monkeypatch.setattr(cc, "_keep_file", keep)
+        os.utime(folder / "big.bin", ns=(1, 1))
+        assert cc.capture_files(store, lineage) == 0 and len(chunks()) == 4
+        (folder / "big.bin").write_bytes(data + b"!")
+        assert cc.capture_files(store, lineage) == 1 and len(chunks()) == 8
+        (folder / "more.bin").write_bytes(b"x")
+        assert cc.capture_files(store, lineage, deadline=time.monotonic() - 1) is None
+    finally:
+        store.close()
+
+
+def test_a_symlinked_tool_results_folder_is_never_followed(tmp_path, home, hermes):
+    """REGRESSION: a tool-results folder that links out of the session folder is neither captured
+    nor used to recover a saved output; the tool row keeps its preview."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("not this session's\n" * 4000, encoding="utf-8")
+    session = tmp_path / "projects" / "-work" / "s1"
+    session.mkdir(parents=True)
+    (session / "tool-results").symlink_to(outside, target_is_directory=True)
+    marker = (f"<persisted-output>\nOutput too large (70KB). Full output saved to: "
+              f"{session / 'tool-results' / 'secret.txt'}\n\nPreview (first 2KB):\nnot this\n</persisted-output>")
+    path = _transcript(tmp_path, [_entry("user", "r1", [
+        {"type": "tool_result", "tool_use_id": "toolu_1", "content": marker}])])
+    lineage = cc.Lineage("s1", None, path)
+    store = _open(home, hermes)
+    try:
+        cc.drain(store, lineage)
+        assert cc.capture_files(store, lineage) == 0
+        [(_, _, content, _)] = _rows(store)
+        assert content == marker
+        notes = store.connection.execute("SELECT notes FROM capture_events WHERE uid = 'r1'").fetchone()[0]
+        assert json.loads(notes) == ["persisted_output_outside_session"]
+    finally:
+        store.close()
+
+
+def test_a_revision_that_changes_the_row_count_still_supersedes(tmp_path, home, hermes):
+    """REGRESSION: one row becoming two, then two becoming one, links every new row to a previous
+    row and every previous row to a new one."""
+    result = {"type": "tool_result", "tool_use_id": "t1", "content": "first"}
+    versions = [_entry("user", "r1", [result]),
+                _entry("user", "r1", [result, {"type": "text", "text": "and a note"}]),
+                _entry("user", "r1", [{**result, "content": "third"}])]
+    path = _transcript(tmp_path, versions[:1])
+    lineage = cc.Lineage("s1", None, path)
+    store = _open(home, hermes)
+    try:
+        cc.drain(store, lineage)
+        for entry in versions[1:]:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry) + "\n")
+            cc.drain(store, lineage)
+        v0, v1a, v1b, v2 = (row[0] for row in _rows(store))
+        assert _relations(store, "supersedes") == sorted([(v1a, v0), (v1b, v0), (v2, v1a), (v2, v1b)])
+    finally:
+        store.close()
+
+
+def test_sibling_forks_both_link_to_the_session_that_wrote_their_copies(tmp_path, home, hermes):
+    """REGRESSION: two forks of one session copy the same entries; every copy points at the
+    parent's row and each fork's parent is that session, never its sibling."""
+    store = _open(home, hermes)
+    try:
+        cc.drain(store, cc.Lineage("s1", None, _transcript(tmp_path, CONVERSATION[:3])))
+        for fork in ("f1", "f2"):
+            own = [_entry("user", "u-" + fork, "in the fork", session=fork, timestamp="2026-11-01T02:00:00.000Z")]
+            cc.drain(store, _fork(tmp_path, store, fork, CONVERSATION[:3], own))
+        assert store.session_lineage_parents(["f1", "f2"]) == {"f1": "s1", "f2": "s1"}
+        parent_rows = {row[0] for row in _rows(store, "s1")}
+        copies = _relations(store, "fork_copy_of")
+        assert len(copies) == 6 and {related for _, related in copies} == parent_rows
+    finally:
+        store.close()
+
+
+def test_a_forks_own_entries_are_never_copies_of_a_later_fork(tmp_path, home, hermes):
+    """REGRESSION: f2 (forked from f1) is captured before f1's own entry is. That entry stays
+    f1's own row (written after f1 started), never a copy of f2's; f2's copy of it has no
+    known writer yet, so it gets no link rather than a wrong one."""
+    first = CONVERSATION[0]
+    own_f1 = _entry("user", "u-f1", "f1 writes this", session="f1", timestamp="2026-11-01T01:30:00.000Z")
+    own_f2 = _entry("user", "u-f2", "f2 writes this", session="f2", timestamp="2026-11-01T02:30:00.000Z")
+    store = _open(home, hermes)
+    try:
+        cc.drain(store, cc.Lineage("s1", None, _transcript(tmp_path, [first])))
+        later = datetime(2026, 11, 1, 2, tzinfo=timezone.utc).timestamp()
+        cc.drain(store, _fork(tmp_path, store, "f2", [first, {**own_f1, "sessionId": "f2"}], [own_f2], started=later))
+        cc.drain(store, _fork(tmp_path, store, "f1", [first], [own_f1]))
+        proofs = dict(store.connection.execute("SELECT uid, proof_kind FROM host_uid_bindings "
+                                               "WHERE lineage_key = 'claude-code:f1'").fetchall())
+        assert proofs == {"u1": "fork_copy", "u-f1": "transcript_uuid"}
+        f2_rows = {row[0] for row in _rows(store, "f2")}
+        assert not any(related in f2_rows for _, related in _relations(store, "fork_copy_of"))
+        assert store.session_lineage_parents(["f1", "f2"]) == {"f1": "s1", "f2": "s1"}
+    finally:
+        store.close()
+
+
+def test_a_fork_flag_from_any_claimed_record_applies_before_the_first_drain(tmp_path, home, hermes):
+    """REGRESSION: a fork's subagent record can be claimed before its SessionStart(fork) record;
+    the fork's copies are still copies."""
+    hook = _hook()
+    store = _open(home, hermes)
+    try:
+        cc.drain(store, cc.Lineage("s1", None, _transcript(tmp_path, CONVERSATION[:1])))
+    finally:
+        store.close()
+    copies = [{**CONVERSATION[0], "sessionId": "f1", "promptId": "p2"}]
+    own = _entry("user", "u9", "own", session="f1", timestamp="2026-11-01T02:00:00.000Z")
+    fork = _transcript(tmp_path, [*copies, own], session="f1")
+
+    def key(agent):
+        return hashlib.sha256("\0".join(["claude-code", "f1", agent]).encode()).hexdigest()[:32]
+    agent = next(f"a{n}" for n in range(1000) if key(f"a{n}") < key(""))  # claimed first
+    agent_path = _transcript(tmp_path, [_entry("user", "x1", "subtask", session="f1", isSidechain=True,
+                                                timestamp="2026-11-01T02:00:01.000Z")],
+                             name=f"f1/subagents/agent-{agent}.jsonl")
+    _record(hook, home, fork, session="f1", event="SessionStart", source="fork", observed_at=FORK_START)
+    _record(hook, home, fork, session="f1", event="SubagentStop", agent_id=agent,
+            agent_transcript_path=str(agent_path))
+    report = cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert report["complete"] and report["records"] == 2
+    store = _open(home, hermes)
+    try:
+        proofs = dict(store.connection.execute("SELECT uid, proof_kind FROM host_uid_bindings "
+                                               "WHERE lineage_key = 'claude-code:f1'").fetchall())
+        assert proofs == {"u1": "fork_copy", "u9": "transcript_uuid"}
+    finally:
+        store.close()
+
+
+def test_a_projected_entry_without_uuid_is_kept_raw_and_noted(tmp_path, home, hermes):
+    """REGRESSION: a user or assistant entry without a uuid has no identity to deduplicate by; its
+    line is kept raw and noted for the audit, never dropped silently."""
+    path = _transcript(tmp_path, [{**_entry("user", "u1", "no id"), "uuid": None}])
+    store = _open(home, hermes)
+    try:
+        cc.drain(store, cc.Lineage("s1", None, path))
+        assert _rows(store) == []
+        assert store.connection.execute("SELECT disposition, notes, raw IS NOT NULL FROM capture_events"
+                                        ).fetchall() == [("raw", '["projected_entry_without_uuid"]', 1)]
+    finally:
+        store.close()
+
+
+def test_local_gc_is_remembered_for_the_session(tmp_path, home, hermes):
+    """REGRESSION: a hook that saw Claude Code's local GC on marks the session for the audit,
+    and a later hook with it off does not clear the mark."""
+    hook = _hook()
+    path = _transcript(tmp_path, CONVERSATION[:1])
+    for local_gc in (True, False):
+        _record(hook, home, path, local_gc=local_gc)
+        assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
+    store = _open(home, hermes)
+    try:
+        assert store.read_metadata_json(cc.LOCAL_GC_PREFIX + "s1") is True
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("named", ["~nosuchuser-lcmx/x.txt", "/tmp/a\x00b"], ids=["unknown-user", "nul"])
+def test_a_saved_output_path_that_cannot_resolve_keeps_the_preview(tmp_path, home, hermes, named):
+    """REGRESSION: a marker naming an unknown ~user or holding a NUL keeps its preview, and the
+    transcript drains past it (it used to raise on every run)."""
+    (tmp_path / "projects" / "-work" / "s1" / "tool-results").mkdir(parents=True)
+    marker = f"<persisted-output>\nOutput too large (1KB). Full output saved to: {named}\n\nPreview:\nx\n</persisted-output>"
+    path = _transcript(tmp_path, [_entry("user", "r1", [{"type": "tool_result", "tool_use_id": "t1", "content": marker}]),
+                                  _entry("user", "u2", "next")])
+    store = _open(home, hermes)
+    try:
+        assert cc.drain(store, cc.Lineage("s1", None, path)) == "drained"
+        assert [row[2] for row in _rows(store)] == [marker, "next"]
+    finally:
+        store.close()
+
+
+def test_a_line_whose_projection_fails_stays_raw_and_the_rest_drains(tmp_path, home, hermes, monkeypatch):
+    """REGRESSION: an unexpected projection error keeps that line raw and noted; later lines drain."""
+    project = cc.project_entry
+
+    def failing(entry, **kwargs):
+        if entry.get("uuid") == "u1":
+            raise TypeError("synthetic")
+        return project(entry, **kwargs)
+    monkeypatch.setattr(cc, "project_entry", failing)
+    path = _transcript(tmp_path, [_entry("user", "u1", "breaks"), _entry("user", "u2", "fine")])
+    store = _open(home, hermes)
+    try:
+        assert cc.drain(store, cc.Lineage("s1", None, path)) == "drained"
+        assert [row[2] for row in _rows(store)] == ["fine"]
+        assert store.connection.execute("SELECT notes FROM capture_events WHERE uid = 'u1'").fetchone()[0] == (
+            '["projection_error:TypeError"]')
+    finally:
+        store.close()
+
+
+def test_a_lineage_whose_first_batch_fails_is_retried_by_the_sweep(tmp_path, home, hermes, monkeypatch):
+    """REGRESSION: the cursor is registered before the first batch, so when that batch fails the
+    sweep retries the transcript (it used to wait for the session's next hook)."""
+    path = _transcript(tmp_path, CONVERSATION[:1])
+    _record(_hook(), home, path)
+    ingest = cc.ingest_lines
+    calls = []
+
+    def failing_once(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("synthetic")
+        return ingest(*args, **kwargs)
+    monkeypatch.setattr(cc, "ingest_lines", failing_once)
+    report = cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert report["failed"] == 1 and len(calls) == 2
+    store = _open(home, hermes)
+    try:
+        assert [row[2] for row in _rows(store)] == ["find the secret word"]
+    finally:
+        store.close()

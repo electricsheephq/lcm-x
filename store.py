@@ -449,6 +449,8 @@ def delete_session_lineage(conn: sqlite3.Connection, sessions_sql: str, args: tu
 
 # A harness capture writer stamps the stores it creates (docs/claude-code-adapter.md); Hermes never does.
 CAPTURE_OWNER_KEY = "capture:owner"
+# A forgotten session's capture writer never reads its transcript or files again.
+CAPTURE_FORGOTTEN_PREFIX = "capture:forgotten:"
 CAPTURE_EVENTS_DDL = (
     "CREATE TABLE IF NOT EXISTS capture_events (event_id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, "
     "lineage_key TEXT NOT NULL, source_kind TEXT NOT NULL, generation INTEGER NOT NULL, position INTEGER NOT NULL, "
@@ -457,19 +459,24 @@ CAPTURE_EVENTS_DDL = (
     "projection_version TEXT NOT NULL, captured_at REAL NOT NULL)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_events_line ON capture_events(lineage_key, generation, position) "
     "WHERE source_kind = 'line'",
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_events_file ON capture_events(lineage_key, uid, line_digest) "
-    "WHERE source_kind = 'file'",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_events_file "
+    "ON capture_events(lineage_key, uid, content_digest, position) WHERE source_kind = 'file'",
     "CREATE INDEX IF NOT EXISTS idx_capture_events_uid ON capture_events(uid) WHERE uid IS NOT NULL",
-    "CREATE INDEX IF NOT EXISTS idx_capture_events_shared ON capture_events(line_digest) "
+    # Shared raw lines are kept once per session, so forgetting one session never takes another's bytes.
+    "CREATE INDEX IF NOT EXISTS idx_capture_events_shared ON capture_events(session_id, line_digest) "
     "WHERE entry_class = 'shared_raw'",
 )
 
 
 def delete_capture_events(conn: sqlite3.Connection, sessions_sql: str, args: tuple = ()) -> None:
     """A deleted session's capture ledger rows and raw lines go with its messages, on the caller's
-    transaction, so a later re-projection cannot bring forgotten content back. Never creates the table."""
+    transaction, and the session is marked forgotten: its capture writer never reads its transcript
+    or files again, so forgotten content cannot come back. Never creates the table."""
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'capture_events'").fetchone():
         conn.execute(f"DELETE FROM capture_events WHERE session_id IN ({sessions_sql})", args)
+        conn.execute(f"WITH scoped(session_id) AS ({sessions_sql}) INSERT OR REPLACE INTO metadata(key, value) "
+                     "SELECT ? || session_id, ? FROM scoped",
+                     (*args, CAPTURE_FORGOTTEN_PREFIX, json.dumps({"at": round(time.time(), 3)})))
 
 
 def _database_identity(path: Path, store: object) -> str:

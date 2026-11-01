@@ -374,6 +374,11 @@ def test_environment_read_inventory():
         ("config.py", "containment_base_dir"): "LCM_HERMES_BASE_DIR: operator containment root stays process-wide",
         ("embedding_provider.py", "__init__"): "FASTEMBED_CACHE_PATH: process-wide model download cache",
         ("inactive_record.py", "_process_start"): "LC_ALL=C subprocess for ps process identity, not profile configuration",
+        ("adapters/claude-code/bin/lcmx_hook.py", "main"):
+            "Claude Code plugin hook: the harness's own variables (capture switch, config dir, plugin paths), "
+            "never Hermes profile configuration",
+        ("adapters/claude-code/bin/lcmx_mcp.py", "main"):
+            "Claude Code plugin launcher: the harness's own variables pick the capture store home",
         ("docs/process/evidence/1880-persisted-hold/compat_probe.py", "main"):
             "synthetic compatibility proof tool: isolated home and lazy-install controls only",
         ("docs/process/evidence/1880-persisted-hold/cost/cost_probe.py", "main"):
