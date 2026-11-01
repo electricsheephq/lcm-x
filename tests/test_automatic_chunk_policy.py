@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hermes_lcm import command, embedding_maintenance
+from hermes_lcm import embedding_provider
 from hermes_lcm.config import LCMConfig
 
 
@@ -16,7 +16,7 @@ from hermes_lcm.config import LCMConfig
     ("fast-embed", False), ("voyage", False), ("openai", False), ("", False), (None, False),
 ])
 def test_local_embedding_provider_names(name, local):
-    assert command._is_local_embedding_provider(name) is local
+    assert embedding_provider._is_local_embedding_provider(name) is local
 
 
 @pytest.mark.parametrize(("provider", "base_url", "allowed"), [
@@ -35,14 +35,14 @@ def test_local_embedding_provider_names(name, local):
 def test_automatic_chunks_allowed(provider, base_url, allowed):
     options = {} if base_url is None else {"ollama_base_url": base_url}
     config = LCMConfig(embedding_provider=provider, **options)
-    assert embedding_maintenance._automatic_chunks_allowed(config, command) is allowed
+    assert embedding_provider._automatic_chunks_allowed(config) is allowed
 
 
 def test_automatic_chunks_allowed_empty_provider():
     # LCMConfig resolves an empty provider to fastembed, unless only a model is set.
-    assert embedding_maintenance._automatic_chunks_allowed(LCMConfig(embedding_provider=""), command)
+    assert embedding_provider._automatic_chunks_allowed(LCMConfig(embedding_provider=""))
     model_only = LCMConfig(embedding_provider="", embedding_model="model-a")
-    assert not embedding_maintenance._automatic_chunks_allowed(model_only, command)
+    assert not embedding_provider._automatic_chunks_allowed(model_only)
 
 
 @pytest.mark.parametrize(("config", "allowed"), [
@@ -52,4 +52,4 @@ def test_automatic_chunks_allowed_empty_provider():
     (SimpleNamespace(embedding_provider="ollama", ollama_base_url="http://192.0.2.1:11434"), False),
 ])
 def test_automatic_chunks_allowed_attribute_defaults(config, allowed):
-    assert embedding_maintenance._automatic_chunks_allowed(config, command) is allowed
+    assert embedding_provider._automatic_chunks_allowed(config) is allowed

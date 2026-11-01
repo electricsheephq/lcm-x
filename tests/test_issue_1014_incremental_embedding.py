@@ -533,7 +533,7 @@ def test_http_transport_bypasses_proxy_only_for_loopback(monkeypatch, host, loop
     assert result.status == (429 if http_error else 200)
     assert result.body == body and result.headers == headers
     config = LCMConfig(embedding_provider="ollama", ollama_base_url=url)
-    assert maintenance_mod._automatic_chunks_allowed(config, command_mod) is loopback
+    assert provider_mod._automatic_chunks_allowed(config) is loopback
 
 
 def test_b_held_manual_lease_skips_then_next_pass_completes_once(
@@ -921,7 +921,7 @@ def test_every_accepted_local_provider_spelling_allows_automatic_chunks(spelling
     config = LCMConfig(embedding_provider=spelling, embedding_model="model-a")
     resolved = provider_mod.resolve_provider(config)
     assert resolved.provider_id in {"fastembed", "ollama"}
-    assert maintenance_mod._automatic_chunks_allowed(config, command_mod)
+    assert provider_mod._automatic_chunks_allowed(config)
 
 
 def test_1063_f_slow_cached_load_is_outside_the_query_deadline(

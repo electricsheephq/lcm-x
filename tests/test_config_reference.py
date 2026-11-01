@@ -202,7 +202,7 @@ def _provider_choice_row(monkeypatch, spelling):
         health_result = tools._embedding_provider_health_check(SimpleNamespace(
             _config=cfg, _store=SimpleNamespace(db_path="unused"),
         ))
-    auto = maintenance._automatic_chunks_allowed(cfg, command)
+    auto = providers._automatic_chunks_allowed(cfg)
     monkeypatch.setattr(command, "_embedding_read_connection", lambda _: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(command, "_embedding_current_profile", lambda _: None)
     monkeypatch.setattr(command, "_chunk_current_profile", lambda _: None)

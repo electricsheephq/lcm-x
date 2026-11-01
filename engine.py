@@ -3296,10 +3296,11 @@ class LCMEngine(
             database_path = Path(raw_database_path).resolve()
             config = copy.deepcopy(self._config)
             from . import command
-            from .embedding_maintenance import _automatic_chunks_allowed, start_local_model_prepare
+            from .embedding_maintenance import start_local_model_prepare
+            from .embedding_provider import _automatic_chunks_allowed
             from .vector_store import VectorStore
 
-            chunks_allowed = _automatic_chunks_allowed(config, command)
+            chunks_allowed = _automatic_chunks_allowed(config)
             schema_key = (database_path, chunks_allowed)
             with _EMBEDDING_SCHEMA_LOCK:
                 if schema_key not in _EMBEDDING_SCHEMA_READY:
