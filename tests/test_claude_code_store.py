@@ -485,6 +485,22 @@ def test_a_store_left_in_wal_without_sidecars_is_switched_after_close(home, herm
     assert cc.leave_readable(database) and _header_mode(database) == 1
 
 
+def test_a_store_the_switch_fails_on_is_reported_unreadable_and_left_as_it_was(home, hermes, monkeypatch):
+    """REGRESSION: when the switch fails, the store is reported as not readable (the run is then
+    incomplete) and stays a WAL header without sidecars, for the next run to switch."""
+    database = cc.admit(home, hermes_home=hermes)
+    cc.open_store(database, home).close()
+
+    def failing(conn, attempts=5):
+        conn.execute("SELECT COUNT(*) FROM metadata").fetchone()  # the switching connection reads, then fails
+        return False
+
+    monkeypatch.setattr(cc, "to_rollback_journal", failing)
+    assert cc.leave_readable(database) is False
+    assert _header_mode(database) == 2
+    assert not Path(f"{database}-wal").exists() and not Path(f"{database}-shm").exists()
+
+
 def test_tool_results_files_of_any_size_are_kept_whole_and_read_once(tmp_path, home, hermes, monkeypatch):
     """REGRESSION: a file above the chunk size is kept as rows that rebuild its bytes (no size
     limit drops it); an unchanged file is not read again; a touched one is not stored twice; a
@@ -903,7 +919,8 @@ def _imports_the_adapter(path: Path) -> bool:
 def test_core_never_imports_the_adapter():
     """The Hermes plugin loads core only: no core module imports a Claude Code adapter module, so
     the capture ledger's DDL and purge never load in Hermes. The adapter's own entry points do
-    import it (the check finds them)."""
+    import it (the check finds them). No core module names one either, so a dynamic import
+    (``importlib.import_module``) fails the check too."""
     root = Path(__file__).resolve().parents[1]
     core = [path for path in root.glob("*.py") if path.stem not in ADAPTER_MODULES]
     for package in ("access_context", "access_policy", "teams"):
@@ -911,3 +928,6 @@ def test_core_never_imports_the_adapter():
     assert {"__init__.py", "engine.py", "store.py", "command.py"} <= {path.name for path in core}
     assert [path.relative_to(root).as_posix() for path in core if _imports_the_adapter(path)] == []
     assert _imports_the_adapter(root / "scripts" / "lcm_x_capture.py")
+    named = [path.relative_to(root).as_posix() for path in core
+             if any(module in path.read_text(encoding="utf-8") for module in ADAPTER_MODULES)]
+    assert named == []

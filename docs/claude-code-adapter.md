@@ -184,8 +184,10 @@ failed. One bad transcript cannot stall the others or loop the worker.
     again, even after Claude Code rewrites the transcript, so forgotten content cannot come back.
     Later turns of a forgotten session are not captured either. A subagent is its own session
     (`<session>/agent:<agent>`) and is forgotten on its own. The adapter registers this purge with
-    core (`register_session_purge`), and both session delete paths run it: core's
-    `delete_session_messages` and the CLI's doctor clean apply; one test covers both.
+    core (`register_session_purge`) when it loads, and both session delete paths run every
+    registered purge: core's `delete_session_messages` and the doctor clean apply; one test covers
+    both. Hermes never loads the adapter, so a Hermes delete on a capture store (unsupported: see
+    the stamp follow-up above) would leave the ledger and write no marker.
   - Per `docs/process/schema-changes.md`, the PR records the format, the oldest reader and the
     removal version, and adds forward and rollback compat tests.
 - **Cursor storage.** One `metadata` key per transcript (`capture:cursor:<lineage>`), written inside
@@ -219,9 +221,11 @@ at worst an unreferenced payload file, never a lost row; a rerun is idempotent b
     `fork` and its time onto the session's later spool records, and the worker records both for
     every claimed record before it drains any.
   - A copy is an entry written before the fork started: Claude Code keeps each copied entry's
-    timestamp. Without a start time, a copy is an entry whose uid and content digest another
-    session wrote. An entry the fork wrote itself is never a copy, even when a later fork's copy of
-    it was captured first.
+    timestamp. So an entry the fork wrote itself is never a copy, even when a later fork's copy of
+    it was captured first. Without a usable start time or entry timestamp, a copy is an entry whose
+    uid and content digest another session wrote; that rule can take the fork's own entry for a
+    copy when a later fork's copy of it was captured first. The hook records every fork's start
+    time.
   - A copy's binding carries proof kind `fork_copy`. Its `fork_copy_of` relation points at the row
     that first held that uid and content in the session that wrote it (a `new` or `version` row,
     never another fork's copy), so sibling forks point at the same writer.
@@ -316,6 +320,33 @@ hook entry handles:
 - Capture reads only transcripts named by a hook payload under the Claude Code projects directory
   (a relative `CLAUDE_CONFIG_DIR` is refused), plus those sessions' own `subagents/` and
   `tool-results/` folders. `LCMX_CAPTURE=off` disables it.
+
+## Release mechanics
+
+LCM-X for Claude Code is its own release unit, versioned by the plugin manifest
+(`adapters/claude-code/.claude-plugin/plugin.json`; `0.1.0` is the preview).
+- A release is an annotated tag `claude-code-v<version>` on a `main` commit. The Hermes release
+  workflows trigger on `v*` tags, so they never fire on it.
+- `scripts/build_claude_code_unit.py <tag>` builds the release asset from the tag's tree alone
+  (`git archive`). The asset holds:
+  - the plugin folder;
+  - core, vendored at `lcm-x/`, without tests, bench, docs or repository tooling (the license and
+    the files core reads at run time stay);
+  - `bundle.json`: the unit version, the tag, the full core commit and core's own version.
+
+  The asset is `lcm-x-claude-code-<version>.tar.gz`, with its `.sha256` beside it. The build
+  refuses a tag that does not name the manifest's version. The release notes repeat the core
+  commit and version.
+- A unit release needs two passes on its candidate:
+  - the unit gate: the audit gate, with its local-GC qualification;
+  - the CLI smoke. It unpacks the asset into a fresh Python 3.11 venv with no Hermes, runs the
+    hook entry on a synthetic transcript and then the worker, and passes when the reader finds a
+    planted string through the MCP entry. It needs #1216 on `main`.
+- The gate re-runs whenever a file the unit depends on changed since the last `claude-code-v*`
+  tag. `scripts/claude_code_unit_delta.py` computes that set and lists what changed in it:
+  - the set is the import closure of the worker and reader entry points, plus the plugin folder;
+  - `--check` exits 1 when anything in it changed;
+  - before the first tag, everything counts as changed.
 
 ## Mapping to exactly-once ingest (#2055, design r3.4)
 

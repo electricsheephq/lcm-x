@@ -339,7 +339,7 @@ def read_lines(path: Path, offset: int, *, max_lines: int = BATCH_LINES,
 # -- ingest --
 
 def forgotten(store: MessageStore, lineage: Lineage) -> bool:
-    """The session was deleted from the store (store.py marks it): never read its transcript or files again."""
+    """The session was deleted from the store (this module's purge marks it): never read its transcript or files again."""
     return bool(store.read_metadata_json(FORGOTTEN_PREFIX + lineage.rows_session))
 
 
