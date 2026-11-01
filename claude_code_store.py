@@ -41,6 +41,7 @@ from .dag import SummaryDAG
 from .db_bootstrap import mark_migration_step_complete
 from .config import embedding_provider_id
 from .embedding_maintenance import run_incremental_embedding_pass
+from .ingest_protection import redact_sensitive_value
 from .store import MessageStore, register_session_purge
 
 OWNER_FILE = "capture-owner.json"
@@ -618,6 +619,7 @@ def _write_events(store: MessageStore, lineage: Lineage, generation: int, events
     now = time.time()
     shared: dict[str, int] = {}
     results = results_dir(session_dir(lineage.path)) if any(event["files"] for event in events) else None
+    config = store._ingest_protection_config  # what append_batch redacted the rows with
     for event in events:
         line: _Line = event["line"]
         digest = _digest(line.raw)
@@ -640,7 +642,7 @@ def _write_events(store: MessageStore, lineage: Lineage, generation: int, events
         if line.entry_class == SHARED_RAW and raw is not None and cursor.lastrowid:
             shared[digest] = int(cursor.lastrowid)
         for name in event["files"]:
-            row = _held_file_row(lineage, results, name, store_ids, now)
+            row = _held_file_row(lineage, results, name, store_ids, now, config)
             if row is not None:
                 conn.execute(INSERT_EVENT, row)
 
@@ -651,14 +653,19 @@ def _fingerprint(path: Path) -> str:
 
 
 def _held_file_row(lineage: Lineage, results: Optional[Path], name: str, store_ids: Optional[list[int]],
-                   now: float) -> Optional[tuple]:
-    """A ``tool-results`` file whose full text a tool row holds: digest and row ids, no bytes."""
+                   now: float, config: Any) -> Optional[tuple]:
+    """A ``tool-results`` file whose full text a tool row holds: digest and row ids, no bytes.
+    None when ingest protection redacts that text: the row holds less than the file, so the
+    sweep keeps the file's bytes."""
     if results is None:
         return None
     try:
         fingerprint = _fingerprint(results / name)
         data = (results / name).read_bytes()
-    except OSError:
+        text = data.decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if redact_sensitive_value(text, config, parse_json_strings=False) != text:
         return None
     digest = _digest(data)
     return (lineage.rows_session, lineage.key, "file", 0, 0, "tool-results/" + name, None, "tool_results_file",

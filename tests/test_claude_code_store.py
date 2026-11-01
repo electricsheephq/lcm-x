@@ -1071,6 +1071,33 @@ def test_a_held_file_whose_bytes_change_is_kept(tmp_path, home, hermes):
         store.close()
 
 
+def test_a_saved_output_the_store_redacts_is_kept_not_held(tmp_path, home, hermes):
+    """REGRESSION: with redaction on (``LCM_SENSITIVE_PATTERNS_ENABLED``, which the worker reads
+    from its environment), ingest protection redacts secrets in the tool row that holds a saved
+    output, and a held file keeps no bytes of its own, so the output's original text was lost;
+    now such a file keeps its bytes in the ledger."""
+    folder = tmp_path / "projects" / "-work" / "s1" / "tool-results"
+    folder.mkdir(parents=True)
+    saved = folder / "toolu_1.txt"
+    saved.write_text("api_key=sk-test-secret-value-123456\n" + "full output\n" * 5000, encoding="utf-8")
+    marker = (f"<persisted-output>\nOutput too large (60KB). Full output saved to: {saved}\n\n"
+              "Preview (first 2KB):\nfull output\n</persisted-output>")
+    path = _transcript(tmp_path, [_entry("user", "r1", [
+        {"type": "tool_result", "tool_use_id": "toolu_1", "content": marker}])])
+    lineage = cc.Lineage("s1", None, path)
+    store = cc.open_store(cc.admit(home, hermes_home=hermes), home, LCMConfig(sensitive_patterns_enabled=True))
+    try:
+        cc.drain(store, lineage)
+        assert cc.capture_files(store, lineage) == 1
+        rows = store.connection.execute("SELECT disposition, raw FROM capture_events WHERE source_kind = 'file' "
+                                        "ORDER BY position").fetchall()
+        assert [row[0] for row in rows] == ["kept"]
+        assert b"".join(zlib.decompress(row[1]) for row in rows) == saved.read_bytes()
+        assert cc.capture_files(store, lineage) == 0
+    finally:
+        store.close()
+
+
 def test_a_chunk_row_the_ledger_cannot_add_fails_loudly(tmp_path, home, hermes, monkeypatch):
     """REGRESSION: on a store whose file index predates chunk rows, identical chunks used to be
     ignored silently (rows missing, the digest written to the wrong row); now the file's
