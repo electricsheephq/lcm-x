@@ -5,12 +5,17 @@ Stdlib only and Python 3.9 compatible: hooks run on the system ``python3``.
 from __future__ import annotations
 
 import os
+import shutil
+import sys
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import List, Mapping, Optional
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 # One store per harness, so each store has one owning writer: (setting, default directory name).
 HOMES = {"claude-code": ("LCMX_CC_HOME", "claude-code"), "grok-build": ("LCMX_GROK_HOME", "grok-build")}
+VERSIONED_PYTHONS = ("python3.14", "python3.13", "python3.12", "python3.11")
+# Core needs only the standard library: a found interpreter runs isolated from what is installed in it.
+ISOLATED = ["-I", "-S"]
 
 
 def store_home(environ: Mapping[str, str], host: str = "claude-code") -> Optional[Path]:
@@ -45,6 +50,32 @@ def runtime_python(environ: Mapping[str, str], home: Path) -> Optional[Path]:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
     return None
+
+
+def found_python(environ: Mapping[str, str]) -> Optional[Path]:
+    """A Python 3.11+ on the hook's ``PATH``: a versioned name, or ``python3`` when it is the
+    3.11+ interpreter running this hook. Only that ``PATH`` is searched, never another one."""
+    search = environ.get("PATH", "")
+    for name in VERSIONED_PYTHONS:
+        found = shutil.which(name, path=search)
+        if found:
+            return Path(found)
+    found = shutil.which("python3", path=search)
+    if found and sys.version_info >= (3, 11) and sys.executable and (
+            os.path.realpath(found) == os.path.realpath(sys.executable)):
+        return Path(found)
+    return None
+
+
+def runtime_command(environ: Mapping[str, str], home: Path) -> Optional[List[str]]:
+    """How to run the worker and the reader. A set-up interpreter (``LCMX_PYTHON`` or a venv) runs
+    as it is, so optional dependencies such as FastEmbed load. Otherwise a found Python 3.11+ runs
+    with the standard library only (``-I -S``), so nothing installed in it, Hermes included, loads."""
+    python = runtime_python(environ, home)
+    if python is not None:
+        return [str(python)]
+    found = found_python(environ)
+    return [str(found), *ISOLATED] if found is not None else None
 
 
 def package_root(environ: Mapping[str, str]) -> Optional[Path]:

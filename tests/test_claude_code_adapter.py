@@ -333,3 +333,75 @@ def test_content_digest_ignores_only_the_copy_envelope():
 def test_session_folder_of_main_and_subagent_transcripts(tmp_path):
     assert session_dir(tmp_path / "proj" / "s1.jsonl") == tmp_path / "proj" / "s1"
     assert session_dir(tmp_path / "proj" / "s1" / "subagents" / "agent-a1.jsonl") == tmp_path / "proj" / "s1"
+
+
+def _executable(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def _package(tmp_path) -> Path:
+    package = tmp_path / "package"
+    (package / "scripts").mkdir(parents=True)
+    for name in ("plugin.yaml", "store.py", "scripts/lcm_x_capture.py", "scripts/lcm_x_mcp.py"):
+        (package / name).write_text("", encoding="utf-8")
+    return package
+
+
+def test_a_python_on_the_hooks_path_runs_with_the_standard_library_only(hook, env, tmp_path):
+    """Without a set-up runtime, a Python 3.11+ on the hook's PATH runs isolated (-I -S): a
+    versioned name, or python3 when it is the interpreter running the hook. A configured
+    runtime runs as it is, and only the hook's own PATH is searched."""
+    runtime, home = hook.lcmx_runtime, Path(env["LCMX_CC_HOME"])
+    found = _executable(tmp_path / "bin" / "python3.12")
+    assert runtime.runtime_command({**env, "PATH": str(found.parent)}, home) == [str(found), "-I", "-S"]
+    configured = {**env, "PATH": str(found.parent), "LCMX_PYTHON": sys.executable}
+    assert runtime.runtime_command(configured, home) == [sys.executable]
+    assert runtime.runtime_command(env, home) is None
+    other = _executable(tmp_path / "other" / "python3")  # not the interpreter running the hook
+    assert runtime.runtime_command({**env, "PATH": str(other.parent)}, home) is None
+    own = tmp_path / "own" / "python3"
+    own.parent.mkdir()
+    own.symlink_to(sys.executable)
+    assert runtime.runtime_command({**env, "PATH": str(own.parent)}, home) == [str(own), "-I", "-S"]
+
+
+def test_the_worker_and_the_reader_start_isolated_on_a_found_python(hook, env, tmp_path, monkeypatch):
+    package, found = _package(tmp_path), _executable(tmp_path / "bin" / "python3.11")
+    home = Path(env["LCMX_CC_HOME"])
+    home.mkdir(parents=True)
+    started = []
+    monkeypatch.setattr(hook.subprocess, "Popen", lambda command, **kwargs: started.append(command))
+    lane = {**env, "PATH": str(found.parent), "LCMX_PACKAGE_ROOT": str(package)}
+    assert hook.start_worker(home, lane) == "worker_started"
+    assert started == [[str(found), "-I", "-S", str(package / "scripts" / "lcm_x_capture.py"), "worker",
+                        "--home", str(home)]]
+
+    spec = importlib.util.spec_from_file_location("lcmx_mcp_under_test", PLUGIN / "bin" / "lcmx_mcp.py")
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    for name in ("LCMX_PYTHON", "CLAUDE_PLUGIN_DATA", "GROK_SESSION_ID"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in {**lane, "LCMX_CC_HOME": str(home)}.items():
+        monkeypatch.setenv(name, value)
+    executed = []
+    monkeypatch.setattr(launcher.os, "execv", lambda path, argv: executed.append((path, argv)))
+    launcher.main()
+    assert executed == [(str(found), [str(found), "-I", "-S", str(package / "scripts" / "lcm_x_mcp.py"),
+                                      "--store", str(home / "lcm.db"), "--hermes-home", str(home),
+                                      "--log-dir", str(home / "logs")])]
+
+
+def test_the_reader_names_the_one_setup_step_when_no_python_is_found(env, tmp_path, monkeypatch, capsys):
+    spec = importlib.util.spec_from_file_location("lcmx_mcp_under_test", PLUGIN / "bin" / "lcmx_mcp.py")
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    for name in ("LCMX_PYTHON", "CLAUDE_PLUGIN_DATA", "GROK_SESSION_ID"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("LCMX_CC_HOME", env["LCMX_CC_HOME"])
+    monkeypatch.setenv("LCMX_PACKAGE_ROOT", str(_package(tmp_path)))
+    assert launcher.main() == 1
+    assert "uv venv --python 3.11" in capsys.readouterr().err

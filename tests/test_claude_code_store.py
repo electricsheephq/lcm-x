@@ -900,7 +900,7 @@ def test_forgetting_through_core_or_the_cli_clears_capture_events(tmp_path, home
         store.close()
 
 
-ADAPTER_MODULES = {"claude_code_capture", "claude_code_store"}
+ADAPTER_MODULES = {"claude_code_audit", "claude_code_capture", "claude_code_store"}
 
 
 def _imports_the_adapter(path: Path) -> bool:

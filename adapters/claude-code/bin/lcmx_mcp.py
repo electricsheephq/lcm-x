@@ -20,11 +20,12 @@ def main() -> int:
     if home is None:
         print("lcm-x: %s must be an absolute path" % lcmx_runtime.HOMES[host][0], file=sys.stderr)
         return 1
-    python = lcmx_runtime.runtime_python(environ, home)
+    runtime = lcmx_runtime.runtime_command(environ, home)
     package = lcmx_runtime.package_root(environ)
     reader = package / "scripts" / "lcm_x_mcp.py" if package else None
-    if python is None:
-        problem = "no LCM-X runtime: set LCMX_PYTHON or create <store home>/venv"
+    if runtime is None:
+        problem = ("no Python 3.11 or newer for LCM-X: install one, or run `uv venv --python 3.11 %s`"
+                   % (home / "venv"))
     elif reader is None or not reader.is_file():
         problem = "the LCM-X package with scripts/lcm_x_mcp.py was not found"
     else:
@@ -34,8 +35,8 @@ def main() -> int:
         return 1
     logs = home / "logs"
     logs.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.execv(str(python), [str(python), str(reader), "--store", str(home / "lcm.db"),
-                           "--hermes-home", str(home), "--log-dir", str(logs)])
+    os.execv(runtime[0], [*runtime, str(reader), "--store", str(home / "lcm.db"),
+                          "--hermes-home", str(home), "--log-dir", str(logs)])
     return 1
 
 

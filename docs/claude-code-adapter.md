@@ -311,8 +311,13 @@ hook entry handles:
 - The hook entry runs on the system `python3` (3.9 or newer, stdlib only). The worker and the MCP
   server need Python 3.11 or newer with LCM-X's dependencies: `LCMX_PYTHON`, else a venv in the
   plugin's data directory (`CLAUDE_PLUGIN_DATA`, which survives plugin updates and is removed on
-  uninstall), else `<home>/venv`. Without one, hooks record `runtime_missing` and the server
-  fails with a clear message.
+  uninstall), else `<home>/venv`.
+  - Otherwise the plugin uses a Python 3.11+ on the hook's `PATH`: a versioned `python3.1x`, or
+    `python3` when it is the hook's own 3.11+ interpreter.
+  - That interpreter runs with `-I -S`, so only the standard library loads and nothing installed
+    in it, Hermes included, can change core. Core needs nothing else; FastEmbed needs a venv.
+  - Without any of these, hooks record `runtime_missing`, and the server's error names the one
+    setup step: install Python 3.11+, or run `uv venv --python 3.11 <home>/venv`.
 - Hooks print nothing: on `SessionStart` and `UserPromptSubmit` stdout would enter Claude's
   context. The worker is started fully detached with its output discarded, so a `-p` session's
   teardown cannot kill it.
@@ -320,6 +325,44 @@ hook entry handles:
 - Capture reads only transcripts named by a hook payload under the Claude Code projects directory
   (a relative `CLAUDE_CONFIG_DIR` is refused), plus those sessions' own `subagents/` and
   `tool-results/` folders. `LCMX_CAPTURE=off` disables it.
+
+## The audit command
+
+`lcm_x_capture.py audit --home <store home> [--session <id>]` checks a capture store against its
+transcripts and prints one JSON report of counts and ids, never paths or content. It is the unit
+gate's instrument (see "The audit" in the test plan).
+- **Read-only.**
+  - The connection is `mode=ro`. It is `immutable` only for a WAL header without sidecars, which
+    means no connection is open.
+  - The audit takes no capture lock and writes nothing to the store or the home.
+  - Each lineage's cursor, ledger rows, message rows and relations are read in one read
+    transaction; its transcript and `tool-results` files are read after it.
+- **Failures** (exit 1 when any is above 0):
+  - `lost_lines`, `digest_mismatch`, `surplus_lines`: every line before the cursor has a ledger
+    row with that line's digest, and no ledger row lies past the cursor;
+  - `corrupt`: each ledger row's bytes, or those of the shared row its `raw_from` names, hash to
+    its digest; a kept file's chunks rebuild the file's digest;
+  - `lost`, `duplicates`, `missing_rows`: the multiset compare of projected (uid, content digest)
+    against the `new`, `version` and `fork_copy` rows, whose store ids must exist;
+  - `orphans`, `doubles`: tool calls and results pair one to one, over the rows no revision
+    superseded;
+  - `files_lost`: every `tool-results` file of a session has a ledger row with its current digest.
+- **Reported, never failures:**
+  - lines and files written after the last capture: `pending_lines`, and `files_pending` for a file
+    newer than the lineage's last capture;
+  - a transcript that is gone, replaced or rewritten (`transcript_state`), and older generations
+    without a set-aside copy (`generations_gone`);
+  - entry classes and unknown types, and projection errors;
+  - unanswered calls, which an interrupted turn leaves;
+  - fork copies, `fork_parent_unknown` and copies without an origin;
+  - local-GC sessions;
+  - spool and worker-log counts;
+  - hook p95 per event, with `hook_budget_ok` (`PostToolBatch` p95 at most 50 ms);
+  - lag and store growth.
+- **Exit 2:** the home is not absolute, holds no store, or the store has no capture stamp.
+- **A run passes the gate** when the audit exits 0 and every lineage of the run was verified: its
+  transcript was read in full (`transcript_state` `ok`, no generation gone). A local-GC session is
+  listed without a lossless claim.
 
 ## Release mechanics
 

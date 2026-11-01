@@ -10,6 +10,7 @@ docs/claude-code-adapter.md.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import types
@@ -29,13 +30,32 @@ def _ensure_local_package_importable() -> None:
     sys.modules[PACKAGE_NAME] = pkg
 
 
+def _run_audit(home: Path, session: str | None) -> int:
+    """Print the read-only audit report without loading the worker's reader settings."""
+    _ensure_local_package_importable()
+    from hermes_lcm.claude_code_audit import AuditError, audit
+
+    try:
+        report = audit(home, session=session)
+    except AuditError as error:
+        print(json.dumps({"ok": False, "error": str(error)}, indent=2, sort_keys=True))
+        return 2
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["ok"] else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     worker = commands.add_parser("worker", help="drain the spool into the store")
     worker.add_argument("--home", required=True, type=Path, help="the store home (absolute)")
     worker.add_argument("--deadline", type=float, help="seconds to wait and drain (PreCompact)")
+    audit = commands.add_parser("audit", help="check capture without changing the store")
+    audit.add_argument("--home", required=True, type=Path, help="the store home (absolute)")
+    audit.add_argument("--session", help="audit this session and its subagents")
     args = parser.parse_args(argv)
+    if args.command == "audit":
+        return _run_audit(args.home, args.session)
     home = args.home.expanduser()
     if not home.is_absolute():
         return 2

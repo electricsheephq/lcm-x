@@ -16,8 +16,17 @@ and recall need the read-only MCP reader (#1216), which lands first. Design:
 claude --plugin-dir adapters/claude-code
 ```
 
-Hooks need the system `python3` (3.9 or newer). Capture and recall need Python 3.11 or newer with
-LCM-X's dependencies, at `<store home>/venv` or named by `LCMX_PYTHON`.
+Hooks need the system `python3` (3.9 or newer). Capture and recall need Python 3.11 or newer. The
+plugin looks for one in this order:
+- `LCMX_PYTHON`;
+- a venv in the plugin's data folder, or at `<store home>/venv`;
+- any Python 3.11+ on `PATH` (`python3.11` to `python3.14`, or a `python3` that is 3.11 or newer),
+  run with the standard library only.
+
+Without one, capture records `runtime_missing`. One step sets it up: install Python 3.11 or newer,
+or run `uv venv --python 3.11 ~/.lcm-x/claude-code/venv`. Vector recall also needs FastEmbed
+installed in that venv, with its model already downloaded; without it, recall uses full-text
+search.
 
 ## Settings (environment)
 

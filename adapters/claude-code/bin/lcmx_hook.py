@@ -158,8 +158,8 @@ def _lock_held(lock: Path) -> bool:
 
 def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0) -> str:
     """Start one detached drain, or with ``deadline_s`` run a bounded drain and wait for it."""
-    python = lcmx_runtime.runtime_python(environ, home)
-    if python is None:
+    runtime = lcmx_runtime.runtime_command(environ, home)
+    if runtime is None:
         return "runtime_missing"
     package = lcmx_runtime.package_root(environ)
     if package is None:
@@ -167,7 +167,7 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0)
     script = package / "scripts" / "lcm_x_capture.py"
     if not script.is_file():
         return "worker_missing"
-    command = [str(python), str(script), "worker", "--home", str(home)]
+    command = [*runtime, str(script), "worker", "--home", str(home)]
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
              "close_fds": True, "cwd": str(home)}
     if deadline_s:
