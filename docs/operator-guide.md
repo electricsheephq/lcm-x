@@ -1587,7 +1587,7 @@ Result flags. Every result is the production JSON object prefixed with
 
 | Field | Meaning |
 | --- | --- |
-| `store_uuid` | The store's id. Hermes writes it once to the store's metadata (no schema-version change). A store Hermes has not opened since upgrading gets an id derived from the file's identity, with `store_uuid_source: derived`. |
+| `store_uuid` | The store's id. Hermes does not stamp one, so for a Hermes store it is derived from the file's identity, with `store_uuid_source: derived`. A store whose writer stamped an id in its metadata reports that id, with `store_uuid_source: metadata`. |
 | `reader.degraded` | `embedding_identity_mismatch`: the store's active embedding identity (provider, model, revision, dimension, dtype) differs from the reader's model. `provider_unavailable`: no local model is cached (the server never downloads one), or the profile uses a cloud provider, which the reader never calls. Either way only full text answers. |
 | `reader.tokenizer` | `estimate` while the tokenizer is not loaded (the server waits up to 30 s at start); content cut by token budget can then differ from Hermes' cut. |
 | `reader.capabilities` | Optional parts of the store: FTS indexes, the stem index, embeddings, chunk vectors, the summary provenance sidecar, lifecycle state. A missing one degrades that feature instead of failing the call. |

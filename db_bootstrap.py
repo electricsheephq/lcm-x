@@ -2573,8 +2573,10 @@ STORE_UUID_METADATA_KEY = "store_uuid"
 def ensure_store_uuid(conn: sqlite3.Connection) -> None:
     """Stamp a stable per-store id once (#1192); readers outside Hermes qualify ids with it.
 
-    The SELECT keeps a steady-state open free of write locks (#622); the INSERT runs
-    once per store, and OR IGNORE makes a racing second writer a no-op. Not a
+    Hermes' migration chain never calls this, so a Hermes store stays byte-identical
+    and the reader derives its id from the file identity instead. A writer that
+    creates its own store may call it. The SELECT keeps a repeat call free of write
+    locks (#622); OR IGNORE makes a racing second writer a no-op. Not a
     schema-version step: older builds simply ignore the extra metadata row.
     """
     if conn.execute(
@@ -3827,8 +3829,6 @@ def run_versioned_migrations(conn: sqlite3.Connection) -> None:
     if current_version < 5:
         mark_migration_step_complete(conn, "v5_message_conversation_id")
         current_version = 5
-
-    ensure_store_uuid(conn)
 
     # NOTE: the opt-in temporal-rollup tables are deliberately NOT created here.
     # Creating them would advance the core schema for every install (even with

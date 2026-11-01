@@ -28,7 +28,7 @@ import hermes_lcm.retrieval_core as retrieval_core
 import hermes_lcm.tools as lcm_tools
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
-from hermes_lcm.db_bootstrap import join_background_stem_backfills
+from hermes_lcm.db_bootstrap import ensure_store_uuid, join_background_stem_backfills
 from hermes_lcm.externalize import DEFAULT_LARGE_OUTPUT_DIRNAME
 from hermes_lcm.store import MessageStore
 from hermes_lcm.vector_store import EmbeddingIdentity, VectorStore
@@ -901,22 +901,43 @@ def _metadata_uuid(db: Path) -> str | None:
     return row[0] if row else None
 
 
-def test_t11_writer_stamps_store_uuid_once_and_keeps_it(tmp_path):
-    """REGRESSION: the migration chain writes store_uuid once; reopening never changes it."""
+def _stamp(db: Path) -> str:
+    conn = sqlite3.connect(db)
+    try:
+        with conn:
+            ensure_store_uuid(conn)
+    finally:
+        conn.close()
+    stamped = _metadata_uuid(db)
+    assert stamped
+    return stamped
+
+
+def test_t11_hermes_open_never_stamps_store_uuid(tmp_path):
+    """REGRESSION: opening a store through Hermes' classes writes no store_uuid row (stores stay as on main)."""
     db = tmp_path / "lcm.db"
     MessageStore(db).close()
-    first = _metadata_uuid(db)
-    assert first and re.fullmatch(r"[0-9a-f]{32}", first)
     SummaryDAG(db).close()
     MessageStore(db).close()
     VectorStore(db, config=LCMConfig(database_path=str(db))).close()
-    assert _metadata_uuid(db) == first
+    assert _metadata_uuid(db) is None
+
+
+def test_t11_explicit_stamp_is_written_once_and_kept(tmp_path):
+    """REGRESSION: a writer that calls ensure_store_uuid stamps once; reopening and re-calling never change it."""
+    db = tmp_path / "lcm.db"
+    MessageStore(db).close()
+    first = _stamp(db)
+    assert re.fullmatch(r"[0-9a-f]{32}", first)
+    MessageStore(db).close()
+    VectorStore(db, config=LCMConfig(database_path=str(db))).close()
+    assert _stamp(db) == first
 
 
 def test_t11_reader_returns_store_uuid_and_accepts_qualified_ids(fx, monkeypatch):
     """REGRESSION: every result carries the store's uuid; own-prefixed ids == bare ids."""
+    stamped = _stamp(fx.db)
     reader = make_reader(fx, monkeypatch)
-    stamped = _metadata_uuid(fx.db)
     bare, _, bare_text = call(reader, "lcm_expand", {"store_id": fx.s1_ids[0]})
     qualified, is_error, qualified_text = call(reader, "lcm_expand", {"store_id": f"{stamped}:{fx.s1_ids[0]}"})
     assert not is_error and bare["store_uuid"] == stamped == qualified["store_uuid"]
@@ -939,9 +960,8 @@ def test_t11_foreign_prefix_is_refused(fx, monkeypatch):
 
 
 def test_t11_absent_store_uuid_is_derived_and_flagged(fx, monkeypatch):
-    """REGRESSION: a store without the stamp gets sha256(realpath, st_dev, st_ino)[:32], flagged."""
-    with sqlite3.connect(fx.db) as conn:
-        conn.execute("DELETE FROM metadata WHERE key = 'store_uuid'")
+    """REGRESSION: a store without the stamp (every Hermes store) gets sha256(realpath, st_dev, st_ino)[:32], flagged."""
+    assert _metadata_uuid(fx.db) is None
     reader = make_reader(fx, monkeypatch)
     payload, _, _ = call(reader, "lcm_describe", {"session_id": "s1"})
     real = os.path.realpath(fx.db)
