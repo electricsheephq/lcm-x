@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import sqlite3
+import sys
 import time
 import zlib
 from contextlib import closing
@@ -452,6 +453,26 @@ def test_worker_embedding_rotates_past_empty_summaries_and_leaves_rollback_mode(
     assert not (home / "lcm.db-wal").exists() and not (home / "lcm.db-shm").exists()
     assert {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in hermes.iterdir()} == snapshot
     assert not (home / "logs" / "worker.log").exists()
+
+
+def test_the_real_embedding_pass_leaves_the_store_readable(tmp_path, home, hermes, monkeypatch):
+    """The catch-up through the real pass, not a stub: with FastEmbed configured but not
+    installed, the pass reports its token, downloads nothing, and the store ends in
+    rollback-journal mode with no sidecars, for the reader."""
+    hermes.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes))
+    monkeypatch.setitem(sys.modules, "fastembed", None)  # absent even where a test host installed it
+    config = LCMConfig(embeddings_enabled=True, embedding_provider="fastembed",
+                       database_path=str(hermes / "lcm.db"))
+    _record(_hook(), home, _transcript(tmp_path, CONVERSATION))
+    report = cc.run_worker(home, config=config, hermes_home=hermes, settle_s=0)
+    assert report["complete"] and report["drained"] == 1
+    assert report["embedding"] == "auto_register_unavailable" and report["vectors"] == 0
+    records = [json.loads(line) for line in (home / "logs" / "worker.log").read_text().splitlines()]
+    assert records == [{"t": records[0]["t"], "stage": "embed", "error": "auto_register_unavailable"}]
+    assert _header_mode(home / "lcm.db") == 1 and not cc._wal_without_sidecars(home / "lcm.db")
+    assert not (home / "lcm.db-wal").exists() and not (home / "lcm.db-shm").exists()
+    assert list(hermes.iterdir()) == []
 
 
 def test_embedding_exception_collects_a_failed_constructor_before_switch(tmp_path, home, hermes, monkeypatch):
