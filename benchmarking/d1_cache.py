@@ -51,11 +51,16 @@ def merge(parts, target):
 
 
 class D1Cache(ContentHashEmbeddingCache):
-    """Exact document boundary, one options binding per DB, read-only fallbacks."""
+    """Workers walk identical batches from empty arm caches in the same order.
+    Before call n, the serial cache holds exactly the keys from calls 0..n-1.
+    """
 
     def __init__(self, provider, path, *, options, readonly=True):
         self.readonly = readonly
         self.partition = None
+        self._call_index = 0
+        self._known = set()
+        self.dispatch_log = os.environ.get("LCM_D1_DISPATCH_LOG") if not readonly else None
         partition = os.environ.get("LCM_D1_BUILD_PARTITION") if not readonly else None
         if partition is not None:
             values = partition.split("/")
@@ -128,13 +133,20 @@ class D1Cache(ContentHashEmbeddingCache):
             found = self._lookup(keys)
             self.hits += sum(key in found for key in keys)
             self.misses += sum(key not in found for key in keys)
+            call = self._call_index
+            self._call_index += 1
             if self.partition is not None:
                 i, count = self.partition
                 # prewarm_embedding_cache.flush_batch discards these placeholder vectors.
-                found.update((key, [0.0] * self.dim) for key in keys if int(key[:16], 16) % count != i)
+                found.update((key, [0.0] * self.dim) for key in keys
+                             if key not in found and (call % count != i or key in self._known))
+                self._known.update(keys)
             missing = dict((key, text) for key, text in zip(keys, texts) if key not in found)
             if missing:
                 self.provider_dispatches += 1
+                if self.dispatch_log:
+                    with Path(self.dispatch_log).open("a") as log:
+                        log.write(json.dumps({"call": call, "sent": len(missing), "keys_sha256": hashlib.sha256("\n".join(missing).encode()).hexdigest()}, separators=(",", ":")) + "\n")
                 vectors = list(self._provider.embed_documents(list(missing.values())))
                 if len(vectors) != len(missing):
                     raise ValueError("D1 provider vector count mismatch")

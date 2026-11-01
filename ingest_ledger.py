@@ -11,6 +11,9 @@ from __future__ import annotations
 from bisect import bisect_left
 from collections import defaultdict
 import struct
+import threading
+import time
+import weakref
 from typing import NamedTuple
 
 from .message_content import normalize_content_value
@@ -51,6 +54,100 @@ class EmissionHandle(NamedTuple):
     compress_call: int
     session_id: str
     conversation_key: str
+
+
+_PENDING_EMISSIONS = {}
+_PENDING_EMISSIONS_LOCK = threading.Lock()
+
+
+def mark_pending_emission(store_key, lineage, **payload):
+    """Keep only payloads, never stores or strong engine references, under this lock."""
+    payload.update(lineage=lineage, created_at=time.time(), claim=None, signal=None, superseded=False,
+                   origin=weakref.ref(payload.pop("origin")))
+    with _PENDING_EMISSIONS_LOCK:
+        entries = _PENDING_EMISSIONS.setdefault((store_key, lineage), [])
+        entries.append(payload)
+        dropped = len(entries) > 2
+        if dropped:
+            entries.pop(0)
+    return dropped
+
+
+def record_pending_signal(store_identity, origin, compress_call, session_id, conversation_key,
+                          new_state, require_conversation):
+    with _PENDING_EMISSIONS_LOCK:
+        entry = max((e for (key, _lineage), entries in _PENDING_EMISSIONS.items()
+                     if key[0] == store_identity for e in entries
+                     if e["origin"]() is origin and e["compress_call"] == compress_call
+                     and e["session_id"] == session_id
+                     and (not require_conversation or e["conversation_key"] == conversation_key)),
+                    key=lambda e: e["created_at"], default=None)
+        if entry is None:
+            return False
+        if new_state == "refused" or entry["signal"] != "refused":
+            entry["signal"] = new_state
+        return True
+
+
+def pending_emission_signal(entry):
+    with _PENDING_EMISSIONS_LOCK:
+        return entry["signal"]
+
+
+def note_emission_written(store_key, lineage):
+    """Mark this lineage's pending entries superseded; returns the ones it changed, for a rollback."""
+    with _PENDING_EMISSIONS_LOCK:
+        changed = [entry for entry in _PENDING_EMISSIONS.get((store_key, lineage), ()) if not entry["superseded"]]
+        for entry in changed:
+            entry["superseded"] = True
+    return changed
+
+
+def restore_superseded(entries):
+    """Undo ``note_emission_written`` for an exit write that did not commit."""
+    with _PENDING_EMISSIONS_LOCK:
+        for entry in entries:
+            entry["superseded"] = False
+
+
+def has_pending(store_identity):
+    """Check this store without holding the registry lock across store work."""
+    with _PENDING_EMISSIONS_LOCK:
+        return any(key[0] == store_identity for key, _lineage in _PENDING_EMISSIONS)
+
+
+def claim_pending_emissions(store_key, token):
+    claimed, dropped = [], 0
+    with _PENDING_EMISSIONS_LOCK:
+        for (key, lineage), entries in list(_PENDING_EMISSIONS.items()):
+            if key[0] != store_key[0]:
+                continue
+            if key[1] != store_key[1]:
+                dropped += len(entries)
+                del _PENDING_EMISSIONS[(key, lineage)]
+                continue
+            for entry in entries:
+                if entry["claim"] is None:
+                    entry["claim"] = token
+                    claimed.append(entry)
+    return claimed, dropped
+
+
+def settle_pending_emissions(token, completed=(), release=None):
+    with _PENDING_EMISSIONS_LOCK:
+        for key, entries in list(_PENDING_EMISSIONS.items()):
+            entries[:] = [e for e in entries if not (e["claim"] is token and any(e is c for c in completed))]
+            for entry in entries:
+                if entry["claim"] is token and (release is None or any(entry is e for e in release)):
+                    entry["claim"] = None
+            if not entries:
+                del _PENDING_EMISSIONS[key]
+
+
+def pending_emission_digests(store_key, lineage, excluded=()):
+    with _PENDING_EMISSIONS_LOCK:
+        return {row["descriptor_digest"] for entry in _PENDING_EMISSIONS.get((store_key, lineage), ())
+                if not any(entry is e for e in excluded) for row in entry["rows"]}
 
 
 class Placement(NamedTuple):

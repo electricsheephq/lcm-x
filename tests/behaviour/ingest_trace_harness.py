@@ -83,6 +83,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_host_uid_lineage_cache", "_engine_uids_pending", "_engine_uids_recorded",
     "_pending_ingest_frontier", "_last_ingest_attribution", "_end_attribution", "_ingest_read_only",
     "_ingest_ledger_attempt", "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
+    "_compress_calls", "_emission_handle",
 })
 Trace = list[str]
 Message = dict[str, Any]
@@ -342,6 +343,7 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
     for name in sorted(OBSERVED_ATTRIBUTES - {"_store", "_dag", "_lifecycle", "_host_rewrite_store"}):
         register(observed_attribute(engine, name))
     for name in sorted(OBSERVED_ATTRIBUTES - {"_last_ingest_attribution", "_ingest_ledger_attempt",
+                                            "_compress_calls", "_emission_handle",
                                             "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned"}):
         value = observed_attribute(engine, name)
         if name in {"_store", "_host_rewrite_store"}:
@@ -881,6 +883,12 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                         if isinstance(v, (list, tuple)):
                             return [argument(x) for x in v]
                         return v
+                    if name == "write_metadata_json" and len(args) > 1 and isinstance(args[1], str) and any(
+                            str(key).startswith("compaction_commit_proof:") for key in args[0]):
+                        # #1286: a proof the ingest writes (the re-key) is checksummed by its occurrence
+                        # snapshot with the sandbox path inside, like the proof read before the ingest.
+                        canonical.path_hashes[hashlib.sha256(args[1].encode()).hexdigest()] = hashlib.sha256(
+                            json.dumps(canonical.value(json.loads(args[1])), sort_keys=True).encode()).hexdigest()
                     emit("store " + name, argument([args, kwargs]))
                     callback = kwargs.get("metadata_factory")
                     if callback is not None:
