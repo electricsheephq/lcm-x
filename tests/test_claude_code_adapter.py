@@ -437,3 +437,24 @@ def test_a_precompact_drain_never_waits_on_a_held_lock(hook, env, tmp_path, monk
         started = time.monotonic()
         assert hook.start_worker(home, lane, deadline_s=10) == "worker_running"
         assert time.monotonic() - started < 1
+
+
+def test_a_precompact_drain_cut_at_its_timeout_hands_the_rest_to_a_detached_worker(hook, env, tmp_path, monkeypatch):
+    """The hook kills a bounded drain at its own timeout (``drain_timeout``), before Claude Code's
+    hook timeout: the batch in flight rolls back and the record stays (the store tests), and a
+    detached worker takes the rest at once."""
+    hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+    assert hook.PRECOMPACT_DEADLINE_S + 2 < hooks["PreCompact"][0]["hooks"][0]["timeout"]
+    home = Path(env["LCMX_CC_HOME"])
+    home.mkdir(parents=True)
+    lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(_package(tmp_path))}
+    bounded, detached = [], []
+
+    def timed_out(command, *, timeout, **kwargs):
+        bounded.append((command, timeout))
+        raise hook.subprocess.TimeoutExpired(command, timeout)
+    monkeypatch.setattr(hook.subprocess, "run", timed_out)
+    monkeypatch.setattr(hook.subprocess, "Popen", lambda command, **kwargs: detached.append(command))
+    assert hook.start_worker(home, lane, deadline_s=hook.PRECOMPACT_DEADLINE_S) == "drain_timeout+worker"
+    assert [timeout for _command, timeout in bounded] == [hook.PRECOMPACT_DEADLINE_S + 2]
+    assert "--deadline" in bounded[0][0] and len(detached) == 1 and "--deadline" not in detached[0]

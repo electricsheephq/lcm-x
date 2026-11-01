@@ -1248,3 +1248,60 @@ def test_a_bounded_drain_cut_by_its_deadline_keeps_whole_batches_and_its_record(
         assert positions == list(range(9)) and len(_rows(store)) == 9 and not cc.pending(home)
     finally:
         store.close()
+
+
+_KILLED_DRIVER = """
+import sys, time, types
+from pathlib import Path
+plugin, home, hermes, stalled = sys.argv[1:5]
+package = types.ModuleType("hermes_lcm")
+package.__path__, package.__package__ = [plugin], "hermes_lcm"
+sys.modules["hermes_lcm"] = package
+from hermes_lcm import claude_code_store as cc
+real_read, real_write = cc.read_lines, cc._write_events
+cc.read_lines = lambda path, offset, **_kw: real_read(path, offset, max_lines=2)
+batches = []
+
+def stall_in_the_second_batch(store, lineage, generation, events):
+    real_write(store, lineage, generation, events)
+    batches.append(len(events))
+    if len(batches) == 2:  # its rows and ledger rows are written, not committed
+        Path(stalled).touch()
+        time.sleep(60)
+cc._write_events = stall_in_the_second_batch
+cc.run_worker(Path(home), deadline_s=30, hermes_home=Path(hermes), settle_s=0)
+"""
+
+
+def test_a_drain_killed_at_its_timeout_keeps_whole_batches_and_its_record(tmp_path, home, hermes):
+    """The hook kills a bounded drain at its timeout (SIGKILL, ``drain_timeout``) while a batch
+    is written but not committed: that batch rolls back, the one before it stays whole, the
+    spool record stays, and the next worker captures the rest exactly once."""
+    import subprocess
+    entries = [_entry("user", f"u{index}", f"line {index}") for index in range(9)]
+    _record(_hook(), home, _transcript(tmp_path, entries))
+    stalled = tmp_path / "stalled"
+    worker = subprocess.Popen([sys.executable, "-c", _KILLED_DRIVER, str(PLUGIN.parents[1]), str(home),
+                               str(hermes), str(stalled)], stderr=subprocess.PIPE, text=True)
+    try:
+        end = time.monotonic() + 30
+        while not stalled.exists() and worker.poll() is None and time.monotonic() < end:
+            time.sleep(0.05)
+    finally:
+        worker.kill()  # what subprocess.run does at the hook's timeout
+        _out, error = worker.communicate(timeout=10)
+    assert stalled.exists(), error[-2000:]
+    assert cc.pending(home)
+    store = _open(home, hermes)
+    try:
+        assert len(_events(store)) == 2 and len(_rows(store)) == 2  # the first batch, whole
+    finally:
+        store.close()
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
+    store = _open(home, hermes)
+    try:
+        positions = [row[0] for row in store.connection.execute(
+            "SELECT position FROM capture_events WHERE source_kind = 'line' ORDER BY position")]
+        assert positions == list(range(9)) and len(_rows(store)) == 9 and not cc.pending(home)
+    finally:
+        store.close()
