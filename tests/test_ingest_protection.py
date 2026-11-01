@@ -4522,6 +4522,32 @@ def test_delta_only_identical_turn_after_ignored_row_cleanup_is_stored(tmp_path,
         second.shutdown()
 
 
+def test_delta_only_identical_turn_after_a_committed_ignored_row_cleanup_without_host_keys_is_stored(tmp_path):
+    """#1286: Hermes commits the cleanup (session end on the input, then the compression boundary). A returned
+    row with no timestamp and no platform id leaves #1013 no host key to bind, so no durable proof is written; the
+    commit must not make the cleanup-only proof durable in its place, or the delta's same text is taken as replay."""
+    config = _ignored_cleanup_config(tmp_path)
+    session_id, conversation_id = "ignored-cleanup-rebind-session", "ignored-cleanup-rebind-conversation"
+    messages = [{"role": "assistant", "content": _broken_assistant_output()}, {"role": "user", "content": "fresh request"}]
+    first = _ignored_cleanup_engine(tmp_path, config)
+    try:
+        first_active = first.compress(messages)
+        assert [(m["role"], m["content"]) for m in first_active] == [("user", "fresh request")]
+        assert first._last_compression_status == "sanitized"
+        first.on_session_end(session_id, messages)
+        first.on_session_start(session_id, boundary_reason="compression", old_session_id=session_id,
+                               platform="telegram", conversation_id=conversation_id, context_length=10_000)
+    finally:
+        first.shutdown()
+
+    second = _ignored_cleanup_engine(tmp_path, config)
+    try:
+        second.compress([{"role": "user", "content": "fresh request"}])
+        assert _stored_contents(second) == ["fresh request", "fresh request"]
+    finally:
+        second.shutdown()
+
+
 def test_ignored_row_cleanup_proof_is_not_kept_after_a_publication_rollback(tmp_path, monkeypatch):
     """A compress that drops ignored rows and then fails to publish its leaf leaves no durable proof."""
     config = _ignored_cleanup_config(tmp_path, fresh_tail_count=2, leaf_chunk_tokens=1_000, context_threshold=0.5)
