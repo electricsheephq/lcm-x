@@ -531,8 +531,8 @@ def test_exit_write_that_rolls_back_leaves_both_payloads_for_provenance(engines,
     real_atomic, armed = engine._store.atomic, [True]
 
     @contextmanager
-    def commit_fails(*, immediate=False, commit_marker=None):
-        with real_atomic(immediate=immediate, commit_marker=commit_marker):
+    def commit_fails(*, immediate=False):
+        with real_atomic(immediate=immediate):
             yield
             if armed[0] and immediate:
                 armed[0] = False
@@ -788,7 +788,8 @@ def test_window_6_partial_retry_failure_cannot_reorder_live_views(engines, monke
     assert_next_live_candidate(engine, monkeypatch)
 
 
-@pytest.mark.parametrize("site", ["before_commit", "owner_cleanup", "store_publication", "timeout_restore", "after_with"])
+@pytest.mark.parametrize("site", ["before_seq", "before_commit", "readback_failure", "owner_cleanup",
+                                 "store_publication", "timeout_restore", "after_with"])
 @pytest.mark.parametrize("error", [KeyboardInterrupt, pytest.param(asyncio.CancelledError, id="cancelled")])
 def test_window_7_exit_interrupt_registers_only_without_successful_commit(engines, monkeypatch, site, error):
     engine = engines()
@@ -802,6 +803,12 @@ def test_window_7_exit_interrupt_registers_only_without_successful_commit(engine
     armed = []
 
     def abort(*args, **kwargs):
+        raise interrupt
+
+    def abort_with_failed_readback(*args, **kwargs):
+        engine._store._conn.set_authorizer(
+            lambda action, table, *_: sqlite3.SQLITE_DENY
+            if action == sqlite3.SQLITE_READ and table == "ingest_views" else sqlite3.SQLITE_OK)
         raise interrupt
 
     def abort_publication():
@@ -844,8 +851,12 @@ def test_window_7_exit_interrupt_registers_only_without_successful_commit(engine
 
     with monkeypatch.context() as patch:
         patch.setattr(engine, "_emission_owner", after_owner)
-        if site == "before_commit":
+        if site == "before_seq":
+            patch.setattr(ledger, "next_view_seq", abort)
+        elif site == "before_commit":
             patch.setattr(ledger, "write_view", abort)
+        elif site == "readback_failure":
+            patch.setattr(ledger, "write_view", abort_with_failed_readback)
         elif site == "owner_cleanup":
             patch.setattr(real_owner, "_active_owners", InterruptCleanup())
         elif site == "store_publication":
@@ -856,12 +867,15 @@ def test_window_7_exit_interrupt_registers_only_without_successful_commit(engine
         else:
             patch.setattr(engine, "_emission_owner", after_owner)
             patch.setattr(engine, "_ledger_count", after_with)
-        with pytest.raises(error) as caught:
-            engine.compress(before, current_tokens=100, force=True)
+        try:
+            with pytest.raises(error) as caught:
+                engine.compress(before, current_tokens=100, force=True)
+        finally:
+            engine._store._conn.set_authorizer(None)
         assert caught.value is interrupt
     engine.record_rejected_compaction()
     assert count(engine, "emission_signal_unmatched") == 1
-    if site == "before_commit":
+    if site in ("before_seq", "before_commit", "readback_failure"):
         assert len(pending(engine)) == 1 and emissions(engine) == emission_views(engine) == []
         engine._ingest_messages(output())
         assert_recovered(engine)
@@ -987,12 +1001,17 @@ def test_historical_recovered_view_is_below_floor_until_next_live_exit(engines, 
     emit(engine, rows)  # Pre-change retries wrote exactly this ordinary proposed view.
     historical = emission_views(engine)[0]
     conn = engine._store._conn
+    # Simulate an upgrade from a store whose recovered views predate the floor.
+    conn.execute("DELETE FROM ledger_meta WHERE key='emission_provenance_floor'")
+    conn.commit()
     assert candidate(engine, historical["lineage"]) == (None, "below_floor")
-    engine._ingest_messages(rows)
+    engine._store.ensure_ingest_ledger()
     floor = conn.execute("SELECT value FROM ledger_meta WHERE key='emission_provenance_floor'").fetchone()
     assert floor == (historical["view_seq"],)
+    engine._ingest_messages(rows)
     assert candidate(engine) == (None, "below_floor")
     assert_next_live_candidate(engine, monkeypatch)
+    engine._store.ensure_ingest_ledger()
     assert conn.execute("SELECT value FROM ledger_meta WHERE key='emission_provenance_floor'").fetchone() == floor
 
 

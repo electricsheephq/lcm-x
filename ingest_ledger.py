@@ -413,8 +413,8 @@ def emission_candidate(conn, lineage):
     One SQL statement reads the view, state, recovered mark and provenance floor
     in a consistent snapshot when no transaction is open. Inside the caller's
     transaction it also sees that transaction's uncommitted retry writes, so a
-    same-transaction recovery already withholds the candidate. Before the first
-    foreground ingest records the floor, existing views remain ineligible.
+    same-transaction recovery already withholds the candidate. If bootstrap has
+    not recorded the floor, the current counter keeps existing views ineligible.
     """
     rows = _rows(conn.execute(
         "SELECT v.*, "

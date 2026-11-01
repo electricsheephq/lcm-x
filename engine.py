@@ -7423,14 +7423,14 @@ class LCMEngine(
             pass  # Telemetry must never fail the ingest.
 
     @contextmanager
-    def _emission_owner(self, salt, *, commit_marker=None):
+    def _emission_owner(self, salt):
         store, conn = self._store, self._store._conn
         with store._write_lock:
             if store._transaction_owner.owns(conn) or conn.in_transaction:
                 self._ledger_count("ledger.emission_skipped_in_transaction")
                 yield None, "in_transaction"
                 return
-            with _temporary_sqlite_busy_timeout([conn], 100), store.atomic(immediate=True, commit_marker=commit_marker):
+            with _temporary_sqlite_busy_timeout([conn], 100), store.atomic(immediate=True):
                 if store.ingest_ledger_state() != "ready" or getattr(self, "_ingest_read_only", None) is not None:
                     self._ledger_count("ledger.emission_skipped_not_ready")
                     yield None, "not_ready"
@@ -7480,9 +7480,9 @@ class LCMEngine(
         finally:
             self._last_emission_write_ms = {"digest": (_perf_counter() - started) * 1000, "ledger": 0.0}
         started = _perf_counter()
-        committed = []
+        seq = None
         try:
-            with self._emission_owner(salt, commit_marker=committed) as (conn, reason):
+            with self._emission_owner(salt) as (conn, reason):
                 if conn is None:
                     if reason == "in_transaction":
                         self._mark_pending_emission(store_key, lineage, payload)
@@ -7502,6 +7502,17 @@ class LCMEngine(
             self._ledger_count("ledger.emission_busy" if _is_ingest_busy_error(exc) else "ledger.emission_write_failed",
                                exc, subject="compress output")
         except BaseException:
+            # The owner has finished, but teardown can interrupt after COMMIT.
+            # Only this exact emission row proves that the write committed.
+            committed = False
+            if seq is not None:
+                try:
+                    with self._store._write_lock:
+                        committed = self._store._conn.execute(
+                            "SELECT 1 FROM ingest_views WHERE lineage=? AND view_seq=? AND kind='emission'",
+                            (lineage, seq)).fetchone() is not None
+                except BaseException:
+                    pass  # Unknown commit state registers conservatively.
             if not committed:
                 self._mark_pending_emission(store_key, lineage, payload)
             raise
@@ -7525,7 +7536,6 @@ class LCMEngine(
             if store.ingest_ledger_state() != "ready" or getattr(self, "_ingest_read_only", None) is not None:
                 return
             salt = store.ingest_ledger_salt()
-            conn.execute("INSERT OR IGNORE INTO ledger_meta(key,value) SELECT 'emission_provenance_floor',value FROM ledger_meta WHERE key='view_seq'")
             claimed, dropped = ingest_ledger.claim_pending_emissions((store.db_identity, salt), token)
             if dropped:
                 self._ledger_count("ledger.emission_unproven_salt_changed", amount=dropped)
@@ -7644,8 +7654,6 @@ class LCMEngine(
         try:
             # Register after the inner savepoint releases, including the crossed return.
             with committed_delta(), _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
-                if conn.execute("SELECT 1 FROM ledger_meta WHERE key='emission_provenance_floor'").fetchone() is None:
-                    conn.execute("INSERT OR IGNORE INTO ledger_meta(key,value) SELECT 'emission_provenance_floor',value FROM ledger_meta WHERE key='view_seq'")
                 key = "session_lineage:" + str(self._session_id)
                 persisted = conn.execute("SELECT value FROM ledger_meta WHERE key=?", (key,)).fetchone()
                 lineage = persisted[0] if persisted else attempt["lineage"]

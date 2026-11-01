@@ -1401,6 +1401,7 @@ class MessageStore:
                 self._conn.executemany("INSERT OR IGNORE INTO ledger_meta(key, value) VALUES (?, ?)", (
                     ("digest_salt", secrets.token_bytes(32)), ("ledger_format", 1), ("view_seq", 0),
                 ))
+                self._conn.execute("INSERT OR IGNORE INTO ledger_meta(key,value) SELECT 'emission_provenance_floor',value FROM ledger_meta WHERE key='view_seq'")
             self._ingest_ledger_schema_ready = True
             if deleted:
                 logger.warning("ingest ledger salt_missing: cleared ledger rows %s", deleted)
@@ -2062,8 +2063,7 @@ class MessageStore:
                 finally:
                     self._foreground_ingest_owner = previous
 
-    def atomic(self, *, immediate: bool = False,
-               commit_marker: list[bool] | None = None) -> AbstractContextManager[None]:
+    def atomic(self, *, immediate: bool = False) -> AbstractContextManager[None]:
         """Own a transaction under the existing write lock, joining nested entries.
 
         By default the first write opens the transaction. Explicit owners use
@@ -2080,7 +2080,7 @@ class MessageStore:
         def marked():
             with self._write_lock:
                 try:
-                    with self._transaction_owner.atomic(conn, immediate=immediate, commit_marker=commit_marker):
+                    with self._transaction_owner.atomic(conn, immediate=immediate):
                         yield
                 except BaseException:
                     if not conn.in_transaction:

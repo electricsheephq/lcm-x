@@ -745,7 +745,7 @@ def _main_ledger_write(self, attempt, after_commit, attribution):
 
 
 
-def test_plain_ingest_has_exact_main_sql_except_provenance_floor(engines, monkeypatch):
+def test_plain_ingest_has_exact_main_sql(engines, monkeypatch):
     engine = engines()
     write, comparisons = engine._write_ingest_ledger, []
 
@@ -767,12 +767,7 @@ def test_plain_ingest_has_exact_main_sql_except_provenance_floor(engines, monkey
             write(attempt, callbacks, attribution)
         finally:
             conn.set_trace_callback(None)
-        floor_sql = {
-            "SELECT 1 FROM ledger_meta WHERE key='emission_provenance_floor'",
-            "INSERT OR IGNORE INTO ledger_meta(key,value) SELECT 'emission_provenance_floor',value FROM ledger_meta WHERE key='view_seq'",
-        }
-        assert [sql for sql in candidate if sql not in floor_sql] == baseline
-        assert "SELECT 1 FROM ledger_meta WHERE key='emission_provenance_floor'" in candidate
+        assert candidate == baseline
         comparisons.append(candidate)
 
     monkeypatch.setattr(engine, "_write_ingest_ledger", compare)

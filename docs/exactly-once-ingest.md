@@ -566,10 +566,10 @@ verified boundary continuation exits.
 The retry savepoint records `emission_recovered:<lineage>` in `ledger_meta` as the
 numeric maximum of its existing value and the retry's `view_seq`, using the
 persisted session lineage when present. The mark commits or rolls back with the
-descriptors. The first ledger-ready foreground ingest records
-`emission_provenance_floor` once, with `INSERT OR IGNORE` in its transaction,
-from the current `view_seq` counter before any pending retry allocates a sequence;
-without pending entries this happens in the ingest ledger savepoint. Fresh stores get 0.
+descriptors. Store bootstrap records `emission_provenance_floor` once, with
+`INSERT OR IGNORE` immediately after initializing the `view_seq` counter, from
+that counter's current value. Fresh stores get 0; upgraded stores retain their
+current counter as the floor. Ingest and retry add no floor SQL.
 Historical recovered views cannot be distinguished from old live views, so every
 pre-floor emission remains ineligible until a newer live exit write commits.
 
@@ -592,17 +592,18 @@ The ten #2112 windows close as follows:
 4. Provisional-lineage drift cannot create a view, and the retry mark uses the persisted lineage.
 5. Cross-process retries durably raise the high-water mark, withholding older live candidates without process memory.
 6. Partial failures cannot reorder views because retries write none, and the recovered mark uses a numeric maximum.
-7. An exit-write interrupt registers the payload unless the optional marker recorded this exact successful COMMIT, then propagates unchanged.
+7. An exit-write interrupt registers the payload unless readback finds this exact committed emission view, then propagates unchanged.
 8. A rollback cannot clear another store's supersession flag because those flags no longer exist.
 9. Publication only counts recovery; it neither reads supersession flags nor restores a handle outside the transaction.
 10. A session reset cannot retain a deferred signal because no pending entry stores one.
 
-The successful-COMMIT marker is set immediately after `conn.commit()` returns,
-before transaction-owner cleanup, store publication and timeout restoration.
-Rollback and nested scopes leave it unset. Unknown commit state registers the
-payload conservatively; an extra recovered sequence can withhold a candidate,
-but cannot make a recovered emission eligible. An interrupt after known COMMIT,
-including teardown or work after the owner scope, does not register it.
+After the owner finishes, a non-`Exception` interrupt reads back the emission
+view by lineage and this write's allocated `view_seq`. A row proves COMMIT even
+when teardown or work after the owner scope interrupted; no row registers the
+payload. A failed readback or unallocated sequence registers conservatively;
+an extra recovered sequence can withhold a candidate, but cannot make a
+recovered emission eligible. The original interrupt always propagates unchanged.
+Ordinary exit writes add no readback or transaction arguments.
 
 Inside the ingest ledger savepoint, a stored row matching a still-pending
 descriptor in this store and lineage gains one `generated_unproven` relation.
