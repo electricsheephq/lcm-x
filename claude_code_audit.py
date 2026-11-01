@@ -503,7 +503,7 @@ def _growth(home: Path, records: list[dict]) -> dict:
 
 def _failed_records(home: Path) -> list[Lineage | None]:
     """The lineages each set-aside (``.failed``) spool record names: its session's, and its
-    subagent's if any. None for a record that cannot be read."""
+    subagent's while that transcript exists. None for a record that cannot be read."""
     directory = home / "spool"
     found: list[Lineage | None] = []
     for path in sorted(directory.glob("*.failed")) if directory.is_dir() else []:
@@ -513,11 +513,15 @@ def _failed_records(home: Path) -> list[Lineage | None]:
             if not isinstance(session, str) or not isinstance(agent, (str, type(None))):
                 raise TypeError("lineage ids")
             lineage_key(session, agent)  # the check the writer's lineage ids passed
+            # The compaction summarizer's SubagentStop names a transcript that never exists (R0):
+            # the writer has nothing to capture there, so it cannot be behind.
+            transcript = record.get("agent_transcript_path")
+            child = bool(agent) and isinstance(transcript, str) and Path(transcript).is_file()
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             found.append(None)
             continue
         found.append(Lineage(session, None, path))
-        if agent:
+        if child:
             found.append(Lineage(session, agent, path))
     return found
 

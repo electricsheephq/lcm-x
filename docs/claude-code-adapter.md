@@ -255,7 +255,7 @@ at worst an unreferenced payload file, never a lost row; a rerun is idempotent b
 | `user`, text or image parts | One `user` row. Meta entries, compact summaries and transcript-only entries become `system` rows. |
 | `user`, `tool_result` parts | One `tool` row per result, `tool_call_id` = `tool_use_id`. When Claude Code saved the output to a file inside the session's own `tool-results/` folder (`persistedOutputPath`, or the path in the marker), the row holds the file's full text (up to 64 MiB, as Hermes's persisted-output recovery does); the preview stays in the ledger's raw line. |
 | `assistant` | One row per entry: text parts as content, `tool_use` parts as `tool_calls`. An entry with only thinking gives no row. `message.id` stays in the ledger, so a reader can regroup one response. API-error entries become `system` rows. |
-| `tool-results` files | Ledger rows each. A saved output is held, with no bytes of its own, only when its tool row, as stored, holds its exact text, inline or as one externalized payload. Every other file (images, PDFs, unreferenced or large files, and saved outputs that ingest protection redacts or externalizes in parts, such as a long base64 run, or that changed after their line was read) keeps its bytes in the ledger, in rows of at most 64 MiB, with no size limit; a file whose bytes change is kept again, a held one included. A `tool-results` folder that is a symlink, or in a symlinked session folder, is never read, for files or for saved outputs. |
+| `tool-results` files | Ledger rows each. A saved output is held, with no bytes of its own, only when a row of the entry that references it, as stored, holds its exact text, inline or as one externalized payload. Every other file (images, PDFs, unreferenced or large files, and saved outputs that ingest protection redacts or externalizes in parts, such as a long base64 run, or that changed after their line was read) keeps its bytes in the ledger, in rows of at most 64 MiB, with no size limit; a file whose bytes change is kept again, a held one included. A `tool-results` folder that is a symlink, or in a symlinked session folder, is never read, for files or for saved outputs. |
 | `system`, `attachment`, bookkeeping (`queue-operation`, `last-prompt`, `mode`, `custom-title`, `file-history-*`, `tools-used`, desktop types such as `bridge-session` and `frame-link`) | None; raw line in the ledger. |
 | Request snapshots (`api-request`, `api-request-blob`, `api-request-shape`) | None; raw line kept once per line digest. They hold the exact model input, including system text and injected reminders that appear nowhere else in the transcript. |
 | Unknown types | None; raw line in the ledger, counted as `unknown_type`. |
@@ -385,9 +385,10 @@ gate's instrument (see "The audit" in the test plan).
   - spool and worker-log counts;
   - each hook's in-process time per event (`hooks_in_process_ms`: n, p50, p95, max), with each
     session's first hook the log still holds apart (`first`), and `PreCompact`'s paths
-    (`precompact`: drains, pokes of the worker holding the lock, runs that started neither for
-    want of a runtime, package or worker, and drains that reached their bound: `drain_bound`, as
-    the worker reports it, or killed at the hook's timeout);
+    (`precompact`: drains; pokes of the worker holding the lock; other runs, which started
+    neither, such as no runtime, package or worker, a record the hook would not spool, or a hook
+    error; and drains that reached their bound: `drain_bound`, as the worker reports it, or killed
+    at the hook's timeout);
   - lag and store growth.
 - **Exit 2:** the home is not absolute, holds no store, or the store has no capture stamp.
 - **It does not re-derive row text.** Ingest protection may redact, normalize or externalize it by
@@ -399,8 +400,12 @@ gate's instrument (see "The audit" in the test plan).
   - at least one lineage was checked;
   - every selected lineage's transcript was read in full (`transcript_state` `ok`, no generation
     gone), with nothing pending: no line after the cursor and no uncaptured file;
-  - every selected session, every subagent transcript on disk (a forgotten session's too), and
-    every lineage a set-aside (`.failed`) spool record names, has a cursor;
+  - every selected session, and every subagent transcript on disk (a forgotten session's too),
+    has a cursor;
+  - every lineage a set-aside (`.failed`) spool record names has a cursor, unless that lineage
+    was forgotten. A record names its subagent only while that transcript exists: the compaction
+    summarizer's `SubagentStop` names one that never does. A record that cannot be read withholds
+    `verified`;
   - no spool record waits.
 
   A store that is only behind is unverified, never failed. A local-GC session is best effort and

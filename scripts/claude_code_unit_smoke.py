@@ -126,6 +126,7 @@ class Smoke:
         with tarfile.open(asset) as archive:
             # The builder emits regular files only; refuse paths escaping this fresh root. The
             # data filter refuses them again during extraction (Python 3.11.4 and newer).
+            require(hasattr(tarfile, "data_filter"), "this smoke needs Python 3.11.4 or newer")
             for member in archive.getmembers():
                 require(member.isfile() and (root / member.name).resolve().is_relative_to(root),
                         "unsafe archive member")

@@ -702,21 +702,29 @@ def test_a_projected_row_id_listed_twice_fails_row_count(tmp_path, case):
     _failed(home, "row_count")
 
 
-@pytest.mark.parametrize("case", ["no_cursor", "subagent_without_cursor", "with_cursor", "unreadable"])
-def test_a_failed_record_without_a_cursor_is_unverified(captured, case):
+@pytest.mark.parametrize("case", ["no_cursor", "subagent_without_cursor", "subagent_never_written", "with_cursor",
+                                  "unreadable"])
+def test_a_failed_record_without_a_cursor_is_unverified(captured, tmp_path, case):
     """REGRESSION: a record set aside as ``.failed`` before its transcript had a cursor names a
-    session nothing else shows, and a whole-home audit verified the store without it."""
+    session nothing else shows, and a whole-home audit verified the store without it. A subagent
+    transcript that never existed, as the compaction summarizer's, left the home unverified for ever."""
     home, _lineage = captured
     (home / "spool").mkdir()
-    session, agent = {"no_cursor": ("s9", None), "subagent_without_cursor": ("s1", "a3")}.get(case, ("s1", None))
-    text = "{" if case == "unreadable" else json.dumps({"host": "claude-code", "event": "Stop",
-                                                         "session_id": session, "agent_id": agent})
+    session, agent = {"no_cursor": ("s9", None), "subagent_without_cursor": ("s1", "a3"),
+                      "subagent_never_written": ("s1", "a3")}.get(case, ("s1", None))
+    agent_path = tmp_path / "elsewhere" / "agent-a3.jsonl"  # outside subagents/: only the record names it
+    if case == "subagent_without_cursor":
+        agent_path.parent.mkdir()
+        agent_path.write_text("{}\n", encoding="utf-8")
+    text = "{" if case == "unreadable" else json.dumps({
+        "host": "claude-code", "event": "SubagentStop" if agent else "Stop", "session_id": session,
+        "agent_id": agent, "agent_transcript_path": str(agent_path) if agent else None})
     (home / "spool" / "k.failed").write_text(text, encoding="utf-8")
     report = ca.audit(home)
     expected = {"no_cursor": [cc.lineage_key("s9")], "subagent_without_cursor": [cc.lineage_key("s1", "a3")],
-                "with_cursor": [], "unreadable": ["spool:unreadable_failed_record"]}[case]
+                "subagent_never_written": [], "with_cursor": [], "unreadable": ["spool:unreadable_failed_record"]}[case]
     assert report["ok"] is True and report["spool"]["failed"] == 1
-    assert report["unverified"] == expected and report["verified"] is (case == "with_cursor")
+    assert report["unverified"] == expected and report["verified"] is (not expected)
     if case == "no_cursor":  # another session's record does not touch this one's verdict
         assert ca.audit(home, session="s1")["unverified"] == []
 
