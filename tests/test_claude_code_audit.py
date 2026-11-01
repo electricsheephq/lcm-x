@@ -9,6 +9,7 @@ import json
 import os
 import sqlite3
 import sys
+import weakref
 from contextlib import closing
 from pathlib import Path
 
@@ -16,6 +17,8 @@ import pytest
 
 from hermes_lcm import claude_code_audit as ca
 from hermes_lcm import claude_code_store as cc
+from hermes_lcm.config import LCMConfig
+from hermes_lcm.externalize import extract_externalized_refs
 from tests.test_claude_code_store import CONVERSATION, _entry, _fork, _open, _transcript
 
 
@@ -81,7 +84,7 @@ def test_clean_capture(captured, capsys):
     assert row["classes"] == {"projected": 6, "raw_only": 1, "shared_raw": 2, "unknown_type": 1}
     assert row["unknown_types"] == {"future-kind": 1}
     assert row["fork_copies"] == row["surplus"] == row["unverifiable"] == row["unanswered"] == 0
-    assert row["files"] == {"held": 1, "kept": 1, "pending": 0}
+    assert row["files"] == {"held": 1, "kept": 1, "uncaptured": 0}
     assert report["lag_s"]["p50"] > 0
     assert report["growth"]["transcript_bytes"] == lineage.path.stat().st_size
     assert str(home) not in json.dumps(report) and "complete saved output" not in json.dumps(report)
@@ -151,19 +154,24 @@ def test_snapshot_keeps_no_raw_and_decompresses_shared_bytes_once(captured, monk
         monkeypatch.setattr(ca.zlib, "decompress", counted)
         snapshot = ca._snapshot(conn, cc.CURSOR_PREFIX + lineage.key)
         assert shared_reads == [True]
-        assert snapshot[-1] == 0 and not conn.in_transaction
-        assert all(set(event) == set(ca.EVENT_FIELDS) for event in snapshot[2])
+        assert snapshot[5]["corrupt"] == 0 and not conn.in_transaction
+        assert all(set(event) <= set(ca.EVENT_FIELDS) for event in snapshot[2])
         assert all(not isinstance(value, bytes) for event in snapshot[2] for value in event.values())
 
 
 def test_audit_never_reads_whole_files(captured, monkeypatch):
-    home, _lineage = captured
+    home, lineage = captured
+    read_text = Path.read_text
 
     def refused(*_args, **_kwargs):
         pytest.fail("audit used a whole-file read")
 
+    def config_only(path, *args, **kwargs):
+        assert path != lineage.path and not path.is_relative_to(cc.session_dir(lineage.path))
+        return read_text(path, *args, **kwargs)
+
     monkeypatch.setattr(Path, "read_bytes", refused)
-    monkeypatch.setattr(Path, "read_text", refused)
+    monkeypatch.setattr(Path, "read_text", config_only)
     assert ca.audit(home)["ok"] is True
 
 
@@ -207,12 +215,17 @@ def test_surplus_line(captured):
     _failed(home, "surplus_lines")
 
 
-def test_lost_file(captured):
+def test_round5_uncaptured_old_file_does_not_fail(captured):
     home, lineage = captured
     path = cc.session_dir(lineage.path) / "tool-results" / "binary.bin"
     os.utime(path, (0, 0))
     _tamper(home, "DELETE FROM capture_events WHERE source_kind = 'file' AND disposition = 'kept'")
-    _failed(home, "files_lost")
+    report = ca.audit(home)
+    assert report["ok"] is True and report["verified"] is False
+    assert report["unverified"] == [lineage.key]
+    assert report["lineages"][0]["files"]["uncaptured"] == 1
+    assert "pending" not in report["lineages"][0]["files"]
+    assert "files_lost" not in report["failures"]
 
 
 def test_pending_lines_and_files_are_not_lost(captured):
@@ -225,7 +238,8 @@ def test_pending_lines_and_files_are_not_lost(captured):
     report = ca.audit(home)
     assert report["ok"] is True
     assert report["lineages"][0]["pending_lines"] == 1
-    assert report["lineages"][0]["files"]["pending"] == 1
+    assert report["lineages"][0]["files"]["uncaptured"] == 1
+    assert report["verified"] is False
 
 
 def test_revision_restatement_is_not_a_double(tmp_path):
@@ -342,7 +356,7 @@ def test_audit_leaves_home_bytes_sizes_mtimes_and_names_unchanged(captured, immu
     assert not Path(f"{database}-wal").exists() and not Path(f"{database}-shm").exists()
 
 
-def test_hook_latency_worker_log_spool_and_growth(captured):
+def test_round5_hook_latency_worker_log_spool_and_growth(captured):
     home, lineage = captured
     logs = home / "logs"
     logs.mkdir()
@@ -358,13 +372,14 @@ def test_hook_latency_worker_log_spool_and_growth(captured):
     (home / "payloads").mkdir()
     (home / "payloads" / "one").write_bytes(b"abc")
     report = ca.audit(home)
-    assert report["hooks"]["PostToolBatch"] == {"n": 20, "p50": 10, "p95": 19, "max": 20}
-    assert report["hook_budget_ok"] is True and report["worker_log"] == {"sweep:OSError": 2}
+    assert report["hooks_in_process_ms"]["PostToolBatch"] == {"n": 20, "p50": 10, "p95": 19, "max": 20}
+    assert "hook_budget_ok" not in report and "hooks" not in report
+    assert report["worker_log"] == {"sweep:OSError": 2}
     assert report["spool"] == {"failed": 1, "waiting": 2}
     assert report["growth"]["store_bytes"] == (home / "lcm.db").stat().st_size + 3
     assert report["growth"]["ratio"] == report["growth"]["store_bytes"] / lineage.path.stat().st_size
     (logs / "hook.log").write_text('{"event":"PostToolBatch","ms":75}\n', encoding="utf-8")
-    assert ca.audit(home)["hook_budget_ok"] is False
+    assert ca.audit(home)["hooks_in_process_ms"]["PostToolBatch"]["max"] == 75
 
 
 def test_projection_errors_are_report_only(tmp_path):
@@ -428,3 +443,205 @@ def test_missing_or_replaced_transcript_is_unverified(captured, state):
     assert report["ok"] is True and report["verified"] is False
     assert report["lineages"][0]["transcript_state"] == state
     assert report["unverified"] == [lineage.key]
+
+
+def test_round5_stray_rows(captured):
+    home, _lineage = captured
+    _tamper(home, "INSERT INTO messages(session_id, role, content, timestamp) VALUES('s1', 'user', 'stray', 0)")
+    _failed(home, "stray_rows")
+
+
+@pytest.mark.parametrize("case", ["empty_ids", "projection_raises"])
+def test_round5_projection_row_count(captured, monkeypatch, case):
+    home, _lineage = captured
+    if case == "empty_ids":
+        _tamper(home, "UPDATE capture_events SET store_ids = '[]' WHERE source_kind = 'line' AND position = 0")
+    else:
+        project = cc.project_entry
+
+        def failed(entry, **kwargs):
+            if entry.get("uuid") == "u1":
+                raise ValueError("synthetic projection failure")
+            return project(entry, **kwargs)
+
+        monkeypatch.setattr(ca, "project_entry", failed, raising=False)
+    _failed(home, "row_count")
+
+
+def test_round5_other_projection_is_report_only(captured):
+    home, _lineage = captured
+    _tamper(home, "UPDATE capture_events SET projection_version = 'older', "
+            "store_ids = json_insert(store_ids, '$[#]', json_extract(store_ids, '$[0]')) "
+            "WHERE source_kind = 'line' AND position = 0")
+    report = ca.audit(home)
+    assert report["ok"] is True
+    assert report["lineages"][0]["other_projection"] == 1
+    assert report["failures"]["row_count"] == 0
+
+
+def _held_store(tmp_path, external):
+    home = tmp_path / "home"
+    folder = tmp_path / "projects" / "-work" / "s1" / "tool-results"
+    folder.mkdir(parents=True)
+    saved = folder / "saved.txt"
+    saved.write_text("complete output\n" * 200, encoding="utf-8")
+    marker = f"<persisted-output>\nFull output saved to: {saved}\npreview"
+    result = _entry("user", "r1", [{"type": "tool_result", "tool_use_id": "toolu_1", "content": marker}])
+    path = _transcript(tmp_path, [*CONVERSATION[:2], result])
+    config = LCMConfig(large_output_externalization_threshold_chars=100 if external else 12_000)
+    store = cc.open_store(cc.admit(home, hermes_home=tmp_path / "hermes"), home, config)
+    try:
+        cc.drain(store, cc.Lineage("s1", None, path))
+        assert cc.capture_files(store, cc.Lineage("s1", None, path)) == 0
+    finally:
+        _close(store)
+    return home
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_round5_held_text_must_match(capsys, tmp_path, external):
+    home = _held_store(tmp_path, external)
+    assert ca.audit(home)["ok"] is True
+    with closing(sqlite3.connect(home / "lcm.db")) as conn:
+        content = conn.execute("SELECT content FROM messages WHERE role = 'tool'").fetchone()[0]
+    if external:
+        [ref] = extract_externalized_refs(content)
+        payload_path = home / "lcm-large-outputs" / ref
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        payload["content"] = "damaged output"
+        payload_path.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        _tamper(home, "UPDATE messages SET content = 'damaged output' WHERE role = 'tool'")
+    before = _home_state(home)
+    _failed(home, "held_mismatch")
+    assert _cli().main(["audit", "--home", str(home)]) == 1
+    assert json.loads(capsys.readouterr().out)["failures"]["held_mismatch"] == 1
+    assert _home_state(home) == before
+
+
+@pytest.mark.parametrize("session", [None, "absent"])
+def test_round5_no_vacuous_pass(tmp_path, session):
+    home = tmp_path / "home"
+    _close(_open(home, tmp_path / "hermes"))
+    report = ca.audit(home, session=session)
+    assert report["ok"] is True and report["verified"] is False
+    assert report["unverified"] == ([cc.lineage_key(session)] if session else [])
+
+
+def test_round5_subagent_without_cursor(captured):
+    home, lineage = captured
+    _transcript(lineage.path.parents[2], [_entry("user", "child", "child")],
+                name="s1/subagents/agent-a7.jsonl")
+    report = ca.audit(home)
+    assert report["ok"] is True and report["verified"] is False
+    assert report["unverified"] == [cc.lineage_key("s1", "a7")]
+
+
+@pytest.mark.parametrize("pending", ["line", "file", "spool"])
+def test_round5_pending_is_not_verified(captured, pending):
+    home, lineage = captured
+    if pending == "line":
+        with lineage.path.open("ab") as handle:
+            handle.write(json.dumps(_entry("user", "later", "later")).encode() + b"\n")
+    elif pending == "file":
+        (cc.session_dir(lineage.path) / "tool-results" / "later.txt").write_text("later", encoding="utf-8")
+    else:
+        (home / "spool").mkdir()
+        (home / "spool" / "waiting.claimed").write_text("{}", encoding="utf-8")
+    report = ca.audit(home)
+    assert report["ok"] is True and report["verified"] is False
+    assert report["unverified"] == ([] if pending == "spool" else [lineage.key])
+
+
+@pytest.mark.parametrize("matching_copy", [False, True])
+def test_round5_older_generation_requires_full_match(tmp_path, matching_copy):
+    home = tmp_path / "home"
+    original = [CONVERSATION[0], _entry("user", "u2", "original second line")]
+    path = _transcript(tmp_path, original)
+    lineage = cc.Lineage("s1", None, path)
+    store = _open(home, tmp_path / "hermes")
+    try:
+        cc.drain(store, lineage)
+        if matching_copy:
+            path.with_name(path.name + ".superseded-z").write_bytes(path.read_bytes())
+        wrong = [original[0], _entry("user", "u2", "different second line")]
+        path.with_name(path.name + ".superseded-a").write_text(
+            "".join(json.dumps(entry) + "\n" for entry in wrong), encoding="utf-8")
+        path.write_text(json.dumps(_entry("user", "new", "new generation")) + "\n", encoding="utf-8")
+        cc.drain(store, lineage)
+    finally:
+        _close(store)
+    report = ca.audit(home)
+    assert report["ok"] is True
+    assert report["failures"]["digest_mismatch"] == report["failures"]["lost_lines"] == 0
+    assert report["lineages"][0]["generations_gone"] == (0 if matching_copy else 1)
+    assert report["verified"] is matching_copy
+
+
+@pytest.mark.parametrize("marker", [{"at": 0}, False])
+def test_round5_forgotten_is_skipped(captured, tmp_path, monkeypatch, marker):
+    home, _lineage = captured
+    store = _open(home, tmp_path / "hermes")
+    try:
+        store.delete_session_messages("s1")
+        store.update_metadata_json(cc.FORGOTTEN_PREFIX + "s1", lambda _current: marker)
+    finally:
+        _close(store)
+
+    def refused(*_args, **_kwargs):
+        pytest.fail("forgotten lineage was checked")
+
+    monkeypatch.setattr(ca, "_ledger", refused)
+    monkeypatch.setattr(ca, "cursor_state", refused)
+    report = ca.audit(home)
+    assert report["ok"] is True and report["verified"] is False and report["unverified"] == []
+    assert report["lineages"][0]["forgotten"] is True
+    assert not any(report["failures"].values())
+
+
+def test_round5_releases_each_lineage_before_next_snapshot(captured, tmp_path, monkeypatch):
+    home, _lineage = captured
+    path = _transcript(tmp_path, [_entry("user", "other", "other")], session="s2")
+    store = _open(home, tmp_path / "hermes")
+    try:
+        cc.drain(store, cc.Lineage("s2", None, path))
+    finally:
+        _close(store)
+    original = ca._snapshot
+    refs = []
+
+    class Tracked(list):
+        pass
+
+    def tracked(*args, **kwargs):
+        assert all(ref() is None for ref in refs), "previous lineage ledger is still retained"
+        snapshot = list(original(*args, **kwargs))
+        snapshot[2] = Tracked(snapshot[2])
+        refs.append(weakref.ref(snapshot[2]))
+        return tuple(snapshot)
+
+    monkeypatch.setattr(ca, "_snapshot", tracked)
+    assert ca.audit(home)["ok"] is True
+    assert len(refs) == 2 and all(ref() is None for ref in refs)
+
+
+def test_round5_messages_keep_only_call_ids(captured):
+    home, lineage = captured
+    with closing(sqlite3.connect(f"{(home / 'lcm.db').as_uri()}?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        messages = ca._snapshot(conn, cc.CURSOR_PREFIX + lineage.key)[3]
+    assert all(set(row) == {"store_id", "role", "tool_call_id", "call_ids"} for row in messages)
+    assert [row["call_ids"] for row in messages if row["role"] == "assistant"] == [["toolu_1"], []]
+
+
+def test_round5_projected_without_uuid_is_reported(tmp_path):
+    home = tmp_path / "home"
+    entry = _entry("user", "", "no uuid")
+    path = _transcript(tmp_path, [entry])
+    store = _open(home, tmp_path / "hermes")
+    try:
+        cc.drain(store, cc.Lineage("s1", None, path))
+    finally:
+        _close(store)
+    report = ca.audit(home)
+    assert report["ok"] is True and report["lineages"][0]["projected_without_uuid"] == 1

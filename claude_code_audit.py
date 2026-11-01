@@ -15,7 +15,16 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
-from .claude_code_capture import PROJECTED, classify_entry, content_digest, results_dir, session_dir
+from .claude_code_capture import (
+    PROJECTED,
+    PROJECTION_VERSION,
+    classify_entry,
+    content_digest,
+    lineage_key,
+    project_entry,
+    results_dir,
+    session_dir,
+)
 from .claude_code_store import (
     CURSOR_PREFIX,
     FORGOTTEN_PREFIX,
@@ -24,13 +33,16 @@ from .claude_code_store import (
     SET_ASIDE_TAGS,
     Lineage,
     _digest,
+    _subagents,
     _wal_without_sidecars,
     cursor_state,
     read_stamp,
 )
+from .config import LCMConfig
+from .externalize import extract_externalized_refs, load_externalized_payload
 
 FAILURES = ("lost_lines", "digest_mismatch", "surplus_lines", "corrupt", "lost", "duplicates",
-            "missing_rows", "orphans", "doubles", "files_lost")
+            "missing_rows", "orphans", "doubles", "stray_rows", "row_count", "held_mismatch")
 PROJECTED_DISPOSITIONS = frozenset({"new", "version", "fork_copy"})
 EVENT_FIELDS = ("source_kind", "generation", "position", "uid", "entry_type", "entry_class", "line_digest",
                 "content_digest", "disposition", "store_ids", "notes", "captured_at")
@@ -45,14 +57,27 @@ def _metadata(conn: sqlite3.Connection) -> dict:
         "SELECT key, value FROM metadata WHERE key LIKE 'capture:%'")}
 
 
-def _line_corrupt(row: sqlite3.Row) -> bool:
+def _line_checks(row: sqlite3.Row, checks: dict) -> None:
+    data = None
     if row["raw"] is None:
-        return not (row["raw_held"] and row["raw_session"] == row["session_id"]
-                    and row["raw_digest"] == row["line_digest"])
+        checks["corrupt"] += not (row["raw_held"] and row["raw_session"] == row["session_id"]
+                                   and row["raw_digest"] == row["line_digest"])
+    else:
+        try:
+            data = zlib.decompress(row["raw"])
+            checks["corrupt"] += _digest(data) != row["line_digest"]
+        except (zlib.error, TypeError):
+            checks["corrupt"] += 1
+    if row["disposition"] not in PROJECTED_DISPOSITIONS:
+        return
+    if row["projection_version"] != PROJECTION_VERSION:
+        checks["other_projection"] += 1
+        return
     try:
-        return _digest(zlib.decompress(row["raw"])) != row["line_digest"]
-    except (zlib.error, TypeError):
-        return True
+        count = len(project_entry(json.loads(data), folder=None).rows)
+        checks["row_count"] += len(json.loads(row["store_ids"] or "[]")) != count
+    except Exception:  # noqa: BLE001 - a failed projection is a mismatch, with no content reported
+        checks["row_count"] += 1
 
 
 def _kept_corrupt(conn: sqlite3.Connection, key: str) -> int:
@@ -82,53 +107,121 @@ def _kept_corrupt(conn: sqlite3.Connection, key: str) -> int:
     return count
 
 
-def _ledger(conn: sqlite3.Connection, key: str) -> tuple[list[dict], int]:
+def _ledger(conn: sqlite3.Connection, key: str) -> tuple[list[dict], dict]:
     """Verify raw rows in the snapshot, retaining only compact ledger metadata."""
     fields = ", ".join("e." + name for name in EVENT_FIELDS)
-    events, corrupt = [], 0
+    events = []
+    checks = dict.fromkeys(("corrupt", "row_count", "held_mismatch", "other_projection"), 0)
     rows = conn.execute(
-        f"SELECT {fields}, e.raw, e.session_id, r.session_id AS raw_session, "
+        f"SELECT {fields}, e.raw, e.session_id, e.projection_version, r.session_id AS raw_session, "
         "r.line_digest AS raw_digest, r.raw IS NOT NULL AS raw_held FROM capture_events e "
         "LEFT JOIN capture_events r ON r.event_id = e.raw_from "
         "WHERE e.lineage_key = ? AND e.source_kind = 'line'", (key,))
     for row in rows:
-        corrupt += _line_corrupt(row)
-        events.append({name: row[name] for name in EVENT_FIELDS})
+        _line_checks(row, checks)
+        event = {name: row[name] for name in EVENT_FIELDS}
+        event["store_ids"] = tuple(json.loads(event["store_ids"] or "[]"))
+        event["notes"] = tuple(json.loads(event["notes"] or "[]"))
+        events.append(event)
     events.extend(dict(row) for row in conn.execute(
-        f"SELECT {', '.join(EVENT_FIELDS)} FROM capture_events "
-        "WHERE lineage_key = ? AND source_kind = 'file'", (key,)))
-    return events, corrupt + _kept_corrupt(conn, key)
+        "SELECT source_kind, uid, content_digest, disposition, store_ids FROM capture_events "
+        "WHERE lineage_key = ? AND source_kind = 'file' GROUP BY uid, content_digest, disposition, store_ids", (key,)))
+    for event in events:
+        if event["source_kind"] == "file":
+            event["store_ids"] = tuple(json.loads(event["store_ids"] or "[]"))
+    checks["corrupt"] += _kept_corrupt(conn, key)
+    return events, checks
 
 
-def _snapshot(conn: sqlite3.Connection, key: str) -> tuple:
+def _messages(conn: sqlite3.Connection, session: str) -> list[dict]:
+    messages = []
+    for store_id, role, tool_call_id, tool_calls in conn.execute(
+            "SELECT store_id, role, tool_call_id, tool_calls FROM messages WHERE session_id = ?", (session,)):
+        try:
+            calls = json.loads(tool_calls or "[]")
+        except (ValueError, TypeError):
+            calls = []
+        ids = [call.get("id") for call in calls if isinstance(call, dict)] if isinstance(calls, list) else []
+        del calls, tool_calls
+        messages.append({"store_id": store_id, "role": role, "tool_call_id": tool_call_id, "call_ids": ids})
+    return messages
+
+
+def _payload_matches(ref: str, digest: str, home: Path, config: LCMConfig) -> bool:
+    try:
+        payload = load_externalized_payload(ref, config=config, hermes_home=str(home))
+        text = payload.get("content") if payload else None
+        return isinstance(text, str) and _digest(text.encode("utf-8")) == digest
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def _held_matches(conn: sqlite3.Connection, session: str, event: dict, home: Path, config: LCMConfig) -> bool:
+    for store_id in event["store_ids"]:
+        row = conn.execute("SELECT content FROM messages WHERE session_id = ? AND store_id = ?",
+                           (session, store_id)).fetchone()
+        text = row[0] if row else None
+        if not isinstance(text, str):
+            continue
+        if _digest(text.encode("utf-8")) == event["content_digest"]:
+            return True
+        for ref in extract_externalized_refs(text):
+            if _payload_matches(ref, event["content_digest"], home, config):
+                return True
+    return False
+
+
+def _snapshot(conn: sqlite3.Connection, key: str, home: Path | None = None) -> tuple:
     """Read one consistent database view, including shared raw references."""
     conn.execute("BEGIN")
     try:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         cursor = json.loads(conn.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()[0])
         lineage = Lineage(cursor["session_id"], cursor.get("agent_id"), Path(cursor["path"]))
-        events, corrupt = _ledger(conn, lineage.key)
-        messages = [dict(row) for row in conn.execute(
-            "SELECT store_id, role, tool_call_id, tool_calls FROM messages WHERE session_id = ?",
-            (lineage.rows_session,))] if "messages" in tables else []
+        forgotten = conn.execute("SELECT 1 FROM metadata WHERE key = ?",
+                                 (FORGOTTEN_PREFIX + lineage.rows_session,)).fetchone() is not None
+        if forgotten:
+            return lineage, cursor, [], [], [], {}, True
+        events, checks = _ledger(conn, lineage.key)
+        messages = _messages(conn, lineage.rows_session) if "messages" in tables else []
         relations = [dict(row) for row in conn.execute(
             "SELECT store_id, kind, related_store_id FROM message_relations "
             "WHERE store_id IN (SELECT store_id FROM messages WHERE session_id = ?)",
             (lineage.rows_session,))] if {"message_relations", "messages"} <= tables else []
+        held = [event for event in events if event["source_kind"] == "file" and event["disposition"] == "held"]
+        if held:
+            home = home or Path(conn.execute("PRAGMA database_list").fetchone()[2]).parent
+            config = LCMConfig.from_env()
+            checks["held_mismatch"] = sum(not _held_matches(conn, lineage.rows_session, event, home, config)
+                                           for event in held) if "messages" in tables else len(held)
     finally:
         conn.execute("COMMIT")
-    return lineage, cursor, events, messages, relations, corrupt
+    return lineage, cursor, events, messages, relations, checks, False
 
 
-def _older_copy(path: Path, first: dict | None) -> Path | None:
-    if first is None:
-        return None
-    for sibling in sorted(path.parent.iterdir()) if path.parent.is_dir() else []:
-        if sibling == path or not any(tag in sibling.name for tag in SET_ASIDE_TAGS) or not sibling.is_file():
-            continue
-        with sibling.open("rb") as handle:
-            if _digest(handle.readline()) == first["line_digest"]:
-                return sibling
+def _set_aside_siblings(path: Path) -> list[Path]:
+    return [sibling for sibling in sorted(path.parent.iterdir())
+            if sibling != path and any(tag in sibling.name for tag in SET_ASIDE_TAGS)
+            and sibling.is_file()] if path.parent.is_dir() else []
+
+
+def _matches_generation(path: Path, rows: dict) -> bool:
+    if not rows or 0 not in rows:
+        return False
+    count = 0
+    with path.open("rb") as handle:
+        for raw in handle:
+            row = rows.get(count)
+            if not raw.endswith(b"\n") or row is None or _digest(raw) != row["line_digest"]:
+                return False
+            count += 1
+    return count == len(rows)
+
+
+def _older_copy(siblings: list[Path], rows: dict) -> Path | None:
+    for sibling in siblings:
+        if _matches_generation(sibling, rows):
+            return sibling
     return None
 
 
@@ -168,9 +261,10 @@ def _transcripts(lineage: Lineage, cursor: dict, events: list[dict], report: dic
             handle.seek(cursor["offset"])
             report["pending_lines"] = sum(line.endswith(b"\n") for line in handle)
         report["failures"]["surplus_lines"] += sum(i >= cursor["line_index"] for i in rows)
+    siblings = _set_aside_siblings(lineage.path) if cursor["generation"] else []
     for generation in range(cursor["generation"]):
         rows = generations[generation]
-        copy = _older_copy(lineage.path, rows.get(0))
+        copy = _older_copy(siblings, rows)
         if copy is None:
             report["generations_gone"] += 1
             continue
@@ -207,7 +301,7 @@ def _identities(events: list[dict], messages: list[dict], expected: set, report:
     for pair in expected - present:
         rows = errors[pair]
         if rows and all(row["disposition"] == "raw" and any(
-                note.startswith("projection_error:") for note in json.loads(row["notes"] or "[]")) for row in rows):
+                note.startswith("projection_error:") for note in row["notes"]) for row in rows):
             report["projection_errors"] += 1
         else:
             report["failures"]["lost"] += 1
@@ -220,7 +314,9 @@ def _identities(events: list[dict], messages: list[dict], expected: set, report:
     referenced = [*projected, *(row for row in events if row["source_kind"] == "file"
                               and row["disposition"] == "held")]
     report["failures"]["missing_rows"] = sum(
-        store_id not in ids for row in referenced for store_id in json.loads(row["store_ids"] or "[]"))
+        store_id not in ids for row in referenced for store_id in row["store_ids"])
+    referenced_ids = {store_id for row in referenced for store_id in row["store_ids"]}
+    report["failures"]["stray_rows"] = len(ids - referenced_ids)
 
 
 def _tools(messages: list[dict], relations: list[dict], report: dict) -> None:
@@ -231,8 +327,8 @@ def _tools(messages: list[dict], relations: list[dict], report: dict) -> None:
         if row["store_id"] in superseded:
             continue
         if row["role"] == "assistant":
-            for call in json.loads(row["tool_calls"] or "[]"):
-                calls[call.get("id")].add(row["store_id"])
+            for call_id in row["call_ids"]:
+                calls[call_id].add(row["store_id"])
         elif row["role"] == "tool":
             results[row["tool_call_id"]] += 1
     report["failures"]["orphans"] = sum(n for uid, n in results.items() if not uid or uid not in calls)
@@ -240,13 +336,12 @@ def _tools(messages: list[dict], relations: list[dict], report: dict) -> None:
     report["unanswered"] = sum(not results[uid] for uid in calls)
 
 
-def _files(lineage: Lineage, events: list[dict], forgotten: bool, report: dict) -> None:
-    if lineage.agent_id is not None or forgotten:
+def _files(lineage: Lineage, events: list[dict], report: dict) -> None:
+    if lineage.agent_id is not None:
         return
     folder = results_dir(session_dir(lineage.path))
     if folder is None:
         return
-    newest = max((row["captured_at"] for row in events), default=0)
     versions = {(row["uid"], row["content_digest"]): row["disposition"]
                 for row in events if row["source_kind"] == "file"}
     for path in sorted(folder.iterdir()):
@@ -255,10 +350,8 @@ def _files(lineage: Lineage, events: list[dict], forgotten: bool, report: dict) 
         disposition = versions.get(("tool-results/" + path.name, _file_digest(path)))
         if disposition in ("held", "kept"):
             report["files"][disposition] += 1
-        elif path.stat().st_mtime > newest:
-            report["files"]["pending"] += 1
         else:
-            report["failures"]["files_lost"] += 1
+            report["files"]["uncaptured"] += 1
 
 
 def _file_digest(path: Path) -> str:
@@ -270,24 +363,47 @@ def _file_digest(path: Path) -> str:
 
 
 def _lineage_report(lineage: Lineage, cursor: dict, events: list[dict], messages: list[dict],
-                    relations: list[dict], corrupt: int, metadata: dict, lag: list[float]) -> dict:
+                    relations: list[dict], checks: dict, forgotten: bool, lag: list[float]) -> dict:
     report = {"lineage": lineage.key, "session": lineage.rows_session, "generation": cursor["generation"],
               "lines": 0, "pending_lines": 0, "generations_gone": 0, "projection_errors": 0,
               "surplus": 0, "unverifiable": 0, "fork_copies": 0, "unanswered": 0,
-              "files": dict.fromkeys(("held", "kept", "pending"), 0), "failures": dict.fromkeys(FAILURES, 0)}
+              "forgotten": forgotten, "transcript_state": "forgotten" if forgotten else "ok",
+              "other_projection": 0, "projected_without_uuid": 0,
+              "files": dict.fromkeys(("held", "kept", "uncaptured"), 0), "failures": dict.fromkeys(FAILURES, 0)}
+    report.update(classes={}, unknown_types={})
+    if forgotten:
+        return report
     lines = [row for row in events if row["source_kind"] == "line"]
     report["classes"] = dict(Counter(row["entry_class"] for row in lines))
     report["unknown_types"] = dict(Counter(row["entry_type"] or "null" for row in lines
                                            if row["entry_class"] == "unknown_type"))
+    report["projected_without_uuid"] = sum("projected_entry_without_uuid" in row["notes"] for row in lines)
     expected = _transcripts(lineage, cursor, events, report, lag)
-    report["failures"]["corrupt"] = corrupt
+    report["other_projection"] = checks["other_projection"]
+    report["failures"].update({key: value for key, value in checks.items() if key in FAILURES})
     _identities(events, messages, expected, report)
     _tools(messages, relations, report)
-    _files(lineage, events, bool(metadata.get(FORGOTTEN_PREFIX + lineage.rows_session)), report)
+    _files(lineage, events, report)
     return report
 
 
-def _session_report(metadata: dict, snapshots: list[tuple], session: str | None) -> dict:
+def _compact_record(snapshot: tuple) -> dict:
+    lineage, cursor, events, _messages, relations, _checks, forgotten = snapshot
+    origins = {row["store_id"] for row in relations if row["kind"] == "fork_copy_of"}
+    unlinked = sum(row["disposition"] == "fork_copy" and not origins.intersection(row["store_ids"])
+                   for row in events)
+    return {"lineage": lineage, "forgotten": forgotten,
+            "parent_unknown": bool(cursor.get("fork_linked") and not cursor.get("fork_parent")),
+            "unlinked": unlinked}
+
+
+def _audit_lineage(conn: sqlite3.Connection, key: str, home: Path, lag: list[float]) -> tuple[dict, dict]:
+    snapshot = _snapshot(conn, key, home)
+    report = _lineage_report(*snapshot, lag)
+    return report, _compact_record(snapshot)
+
+
+def _session_report(metadata: dict, records: list[dict], session: str | None) -> dict:
     def selected(value):
         return session is None or value == session or value.startswith(session + "/agent:")
 
@@ -297,14 +413,13 @@ def _session_report(metadata: dict, snapshots: list[tuple], session: str | None)
              if key.startswith(FORK_PREFIX) and selected(key[len(FORK_PREFIX):])}
     unknown = set()
     unlinked = 0
-    for lineage, cursor, events, _messages, relations, _corrupt_count in snapshots:
-        if lineage.session_id not in forks:
+    for record in records:
+        lineage = record["lineage"]
+        if record["forgotten"] or lineage.session_id not in forks:
             continue
-        if cursor.get("fork_linked") and not cursor.get("fork_parent"):
+        if record["parent_unknown"]:
             unknown.add(lineage.rows_session)
-        origins = {row["store_id"] for row in relations if row["kind"] == "fork_copy_of"}
-        unlinked += sum(row["disposition"] == "fork_copy" and not origins.intersection(
-            json.loads(row["store_ids"] or "[]")) for row in events)
+        unlinked += record["unlinked"]
     forgotten = sum(key.startswith(FORGOTTEN_PREFIX) and selected(key[len(FORGOTTEN_PREFIX):]) for key in metadata)
     return {"local_gc": local_gc, "forgotten": forgotten, "forks": len(forks),
             "fork_parent_unknown": sorted(unknown), "fork_copy_without_origin": unlinked}
@@ -343,18 +458,34 @@ def _home_report(home: Path) -> dict:
     spool = list((home / "spool").iterdir()) if (home / "spool").is_dir() else []
     return {"spool": {"failed": sum(path.is_file() and path.suffix == ".failed" for path in spool),
                       "waiting": sum(path.is_file() and path.suffix in (".json", ".claimed") for path in spool)},
-            "hooks": latency, "hook_budget_ok": latency.get("PostToolBatch", {}).get("p95", 0) <= 50,
+            "hooks_in_process_ms": latency,
             "worker_log": dict(worker)}
 
 
-def _growth(home: Path, snapshots: list[tuple]) -> dict:
+def _growth(home: Path, records: list[dict]) -> dict:
     files = [home / "lcm.db", home / "lcm.db-wal"]
     if (home / "payloads").is_dir():
         files.extend(path for path in (home / "payloads").rglob("*") if path.is_file())
     store_bytes = sum(path.stat().st_size for path in files if path.is_file())
-    transcript_bytes = sum(lineage.path.stat().st_size for lineage, *_rest in snapshots if lineage.path.is_file())
+    transcript_bytes = sum(record["lineage"].path.stat().st_size for record in records
+                           if not record["forgotten"] and record["lineage"].path.is_file())
     return {"store_bytes": store_bytes, "transcript_bytes": transcript_bytes,
             "ratio": store_bytes / transcript_bytes if transcript_bytes else None}
+
+
+def _unverified(metadata: dict, records: list[dict], lineages: list[dict], session: str | None) -> list[str]:
+    unknown = {row["lineage"] for row in lineages if not row["forgotten"] and (
+        row["transcript_state"] != "ok" or row["generations_gone"] or row["pending_lines"]
+        or row["files"]["uncaptured"])}
+    if session is not None and CURSOR_PREFIX + lineage_key(session) not in metadata:
+        unknown.add(lineage_key(session))
+    for record in records:
+        if record["forgotten"]:
+            continue
+        for child in _subagents(record["lineage"]):
+            if CURSOR_PREFIX + child.key not in metadata and FORGOTTEN_PREFIX + child.rows_session not in metadata:
+                unknown.add(child.key)
+    return sorted(unknown)
 
 
 def audit(home: Path, session: str | None = None) -> dict:
@@ -368,18 +499,21 @@ def audit(home: Path, session: str | None = None) -> dict:
         raise AuditError("store_unstamped")
     immutable = _wal_without_sidecars(database)
     query = "immutable=1" if immutable else "mode=ro"
+    lag, lineages, records = [], [], []
     with closing(sqlite3.connect(f"{database.as_uri()}?{query}", uri=True)) as conn:
         conn.row_factory = sqlite3.Row
         metadata = _metadata(conn)
         keys = sorted(key for key, cursor in metadata.items() if key.startswith(CURSOR_PREFIX)
                       and (session is None or cursor["session_id"] == session))
-        snapshots = [_snapshot(conn, key) for key in keys]
-    lag = []
-    lineages = [_lineage_report(*snapshot, metadata, lag) for snapshot in snapshots]
+        for key in keys:
+            report, record = _audit_lineage(conn, key, home, lag)
+            lineages.append(report)
+            records.append(record)
     failures = {key: sum(row["failures"][key] for row in lineages) for key in FAILURES}
-    unverified = sorted(row["lineage"] for row in lineages
-                        if row["transcript_state"] != "ok" or row["generations_gone"])
+    unverified = _unverified(metadata, records, lineages, session)
+    home_report = _home_report(home)
+    checked = any(not row["forgotten"] for row in lineages)
     return {"ok": not any(failures.values()), "opened_immutable": immutable, "failures": failures,
-            "unverified": unverified, "verified": not unverified,
-            "lineages": lineages, "sessions": _session_report(metadata, snapshots, session),
-            **_home_report(home), "lag_s": _percentiles(lag), "growth": _growth(home, snapshots)}
+            "unverified": unverified, "verified": checked and not unverified and not home_report["spool"]["waiting"],
+            "lineages": lineages, "sessions": _session_report(metadata, records, session),
+            **home_report, "lag_s": _percentiles(lag), "growth": _growth(home, records)}
