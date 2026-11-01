@@ -160,7 +160,20 @@ class ReaderEngine:
         self._lcm_chunk_provider_cache = provider_caches.get("_lcm_chunk_provider_cache")
 
     def _rotation_predecessor_session_ids(self, session_id: str, max_hops: int = 32) -> list[str]:
-        return []  # no current session; payload reach is any-session instead
+        """Hermes's walk over the recorded compression-boundary predecessors (#680), with read-only
+        metadata reads, so an explicit ``session_id`` reaches what it reaches in Hermes."""
+        found: list[str] = []
+        current = session_id
+        for _ in range(max_hops):
+            try:
+                predecessor = self._store.read_metadata_json(f"rotation_predecessor_session:{current}")
+            except Exception:  # noqa: BLE001 - a lineage read never fails the call, as in Hermes
+                break
+            if not isinstance(predecessor, str) or not predecessor or predecessor == session_id or predecessor in found:
+                break
+            found.append(predecessor)
+            current = predecessor
+        return found
 
 
 def _unqualify(key: str, value: Any, store_uuid: str) -> Any:

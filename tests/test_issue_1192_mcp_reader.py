@@ -720,6 +720,24 @@ def test_t8_explicit_session_filter_holds_for_externalized_refs(fx, monkeypatch)
     assert not is_error and own["session_id"] == "s2" and "item-59 quantity 177" in own["content"]
 
 
+def test_t8_explicit_session_reaches_payloads_of_its_rotation_predecessors(fx, monkeypatch):
+    """REGRESSION: as in Hermes (#680), an explicit session reaches a payload written before its
+    compression-boundary rotation, through the recorded predecessor chain (s4 <- s3 <- s2)."""
+    writer = sqlite3.connect(fx.db)
+    try:
+        with writer:
+            writer.executemany("INSERT INTO metadata(key, value) VALUES (?, ?)",
+                               [("rotation_predecessor_session:s4", '"s3"'),
+                                ("rotation_predecessor_session:s3", '"s2"')])
+    finally:
+        writer.close()
+    reader = make_reader(fx, monkeypatch)
+    rotated, is_error, _ = call(reader, "lcm_expand", {"externalized_ref": fx.ref, "session_id": "s4"})
+    assert not is_error and rotated["session_id"] == "s2"
+    other, _, _ = call(reader, "lcm_expand", {"externalized_ref": fx.ref, "session_id": "s1"})
+    assert other["error"] == f"Externalized payload {fx.ref} not found in session s1"
+
+
 # -- T9: protocol ------------------------------------------------------------------
 
 def test_t9_protocol_session_over_stdio(spawned_fx, tmp_path):
