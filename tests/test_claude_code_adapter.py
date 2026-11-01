@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import stat
 import sys
 import time
@@ -368,6 +369,18 @@ def test_a_python_on_the_hooks_path_runs_with_the_standard_library_only(hook, en
     assert runtime.runtime_command({**env, "PATH": str(own.parent)}, home) == [str(own), "-I", "-S"]
     _executable(own.parent / "python3.12")  # the hook's own python3 comes before a versioned name
     assert runtime.runtime_command({**env, "PATH": str(own.parent)}, home) == [str(own), "-I", "-S"]
+
+
+def test_relative_path_entries_are_never_searched_for_a_python(hook, env, tmp_path, monkeypatch):
+    """REGRESSION: an empty or relative PATH entry names the folder Claude Code runs the hook in,
+    so a python3.12 planted in a project could have run the worker."""
+    runtime, home = hook.lcmx_runtime, Path(env["LCMX_CC_HOME"])
+    planted = _executable(tmp_path / "project" / "python3.12")
+    monkeypatch.chdir(planted.parent)
+    for search in (".", os.pathsep + "/nonexistent"):
+        assert runtime.runtime_command({**env, "PATH": search}, home) is None
+    monkeypatch.chdir(tmp_path)
+    assert runtime.runtime_command({**env, "PATH": "project"}, home) is None
 
 
 def test_the_worker_and_the_reader_start_isolated_on_a_found_python(hook, env, tmp_path, monkeypatch):

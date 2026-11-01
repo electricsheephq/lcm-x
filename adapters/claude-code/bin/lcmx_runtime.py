@@ -54,8 +54,9 @@ def runtime_python(environ: Mapping[str, str], home: Path) -> Optional[Path]:
 
 def found_python(environ: Mapping[str, str]) -> Optional[Path]:
     """A Python 3.11+ on the hook's ``PATH``: ``python3`` when it is the 3.11+ interpreter running
-    this hook, else a versioned name, newest first. Only that ``PATH`` is searched, never another one."""
-    search = environ.get("PATH", "")
+    this hook, else a versioned name, newest first. Only that ``PATH``'s absolute entries are
+    searched: a relative one would name the project folder Claude Code runs the hook in."""
+    search = os.pathsep.join(entry for entry in environ.get("PATH", "").split(os.pathsep) if os.path.isabs(entry))
     own = shutil.which("python3", path=search)
     if own and sys.version_info >= (3, 11) and sys.executable and (
             os.path.realpath(own) == os.path.realpath(sys.executable)):

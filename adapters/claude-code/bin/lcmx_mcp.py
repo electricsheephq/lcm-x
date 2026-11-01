@@ -24,7 +24,7 @@ def main() -> int:
     package = lcmx_runtime.package_root(environ)
     reader = package / "scripts" / "lcm_x_mcp.py" if package else None
     if runtime is None:
-        problem = ("no Python 3.11 or newer for LCM-X: install one, or run `uv venv --python 3.11 %s`"
+        problem = ("no Python 3.11 or newer on PATH for LCM-X: install one, or run `uv venv --python 3.11 %s`"
                    % (home / "venv"))
     elif reader is None or not reader.is_file():
         problem = "the LCM-X package with scripts/lcm_x_mcp.py was not found"
