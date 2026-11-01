@@ -16,12 +16,13 @@ This page states what we are building and how we will know it works. The [roadma
 ## The promise
 
 1. **Nothing is lost by default.**
-   - Every message, tool result and subagent's work the agent sees is kept verbatim and never deleted. Raw rows are stored once, and every summary and derived memory links back to the rows it came from.
+   - Every message, tool result and subagent's work the agent sees is kept verbatim and never deleted unless a user or operator deletes it on purpose. Raw rows are stored once, and every summary and derived memory links back to the rows it came from.
    - The promise covers everything the agent sees and does: subagent sessions ([#1931](https://github.com/electricsheephq/lcm-x/issues/1931)), retries, crashes and restarts ([#1837](https://github.com/electricsheephq/lcm-x/issues/1837), [#1838](https://github.com/electricsheephq/lcm-x/issues/1838), [#1451](https://github.com/electricsheephq/lcm-x/issues/1451)), and every harness LCM-X serves (from LCM-X for Claude Code).
    - Every release is gated on 0 lost rows. A known exception is a bug against this promise, not a limit of it: each one is tracked and listed in that release's Known issues.
    - **Nothing lost from view** is the second level: what is kept also stays within the model's reach. Rows dropped from the model's working set ([#2004](https://github.com/electricsheephq/lcm-x/issues/2004)) and compaction that never engages ([#1998](https://github.com/electricsheephq/lcm-x/issues/1998)) are bugs against it.
    - The one rewrite is a cleanup (on by default from v0.27.0) that moves a large tool output into a file and leaves a reference the agent can expand.
    - Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`).
+   - Deleting on purpose: the operator's `/lcm doctor clean apply` (off by default, takes a backup first) and, once it ships, forgetting a memory on request ([#1171](https://github.com/electricsheephq/lcm-x/issues/1171)).
 2. **The right evidence at the right moment.**
    - Recall finds what matters across months of history. Full-text search is built in today; local semantic search is built in and on by default from v0.29.0 if it passes its measurement, and a built-in reranker follows once it passes its measurement, re-screened in facts that update (today reranking needs the Voyage cloud provider).
    - Next (with compaction you don't notice): evidence the agent needs is put in front of it before it answers, not only when it thinks to search.
