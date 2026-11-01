@@ -566,10 +566,12 @@ verified boundary continuation exits.
 The retry savepoint records `emission_recovered:<lineage>` in `ledger_meta` as the
 numeric maximum of its existing value and the retry's `view_seq`, using the
 persisted session lineage when present. The mark commits or rolls back with the
-descriptors. Store bootstrap records `emission_provenance_floor` once, with
-`INSERT OR IGNORE` immediately after initializing the `view_seq` counter, from
-that counter's current value. Fresh stores get 0; upgraded stores retain their
-current counter as the floor. Ingest and retry add no floor SQL.
+descriptors. Shadow-mode `on_session_start` calls ledger setup when an
+already-ready store lacks `emission_provenance_floor`. Setup records it once
+with `INSERT OR IGNORE`, from the current `view_seq` counter, in its own
+transaction, immediately after initializing the counter. Fresh ledgers get 0.
+A store without the key treats the current counter as its floor until it is
+recorded. Ingest, retry and compress add no floor SQL.
 Historical recovered views cannot be distinguished from old live views, so every
 pre-floor emission remains ineligible until a newer live exit write commits.
 
@@ -600,7 +602,8 @@ The ten #2112 windows close as follows:
 After the owner finishes, a non-`Exception` interrupt reads back the emission
 view by lineage and this write's allocated `view_seq`. A row proves COMMIT even
 when teardown or work after the owner scope interrupted; no row registers the
-payload. A failed readback or unallocated sequence registers conservatively;
+payload. An open transaction skips readback and leaves the commit state unknown.
+A failed readback, open transaction or unallocated sequence registers conservatively;
 an extra recovered sequence can withhold a candidate, but cannot make a
 recovered emission eligible. The original interrupt always propagates unchanged.
 Ordinary exit writes add no readback or transaction arguments.

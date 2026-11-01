@@ -5269,7 +5269,8 @@ class LCMEngine(
         self._log_session_filter_diagnostics()
         if ingest_ledger_mode() == "shadow":
             try:
-                if self._store.ingest_ledger_state() != "ready":
+                if (self._store.ingest_ledger_state() != "ready"
+                        or not self._store.emission_provenance_floor_recorded()):
                     self._store.ensure_ingest_ledger()
                 self._store._ingest_ledger_cached_salt = self._store.ingest_ledger_salt()
             except Exception as exc:
@@ -7508,9 +7509,10 @@ class LCMEngine(
             if seq is not None:
                 try:
                     with self._store._write_lock:
-                        committed = self._store._conn.execute(
-                            "SELECT 1 FROM ingest_views WHERE lineage=? AND view_seq=? AND kind='emission'",
-                            (lineage, seq)).fetchone() is not None
+                        if not self._store._conn.in_transaction:
+                            committed = self._store._conn.execute(
+                                "SELECT 1 FROM ingest_views WHERE lineage=? AND view_seq=? AND kind='emission'",
+                                (lineage, seq)).fetchone() is not None
                 except BaseException:
                     pass  # Unknown commit state registers conservatively.
             if not committed:

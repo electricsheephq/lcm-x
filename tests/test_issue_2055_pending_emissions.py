@@ -800,16 +800,16 @@ def test_window_7_exit_interrupt_registers_only_without_successful_commit(engine
     real_scope = engine._emission_owner
     real_count = engine._ledger_count
     publication = engine._store._publish_ingest_schemas
-    armed = []
+    armed, denied_readbacks, committed_rows = [], [], []
 
     def abort(*args, **kwargs):
         raise interrupt
 
-    def abort_with_failed_readback(*args, **kwargs):
-        engine._store._conn.set_authorizer(
-            lambda action, table, *_: sqlite3.SQLITE_DENY
-            if action == sqlite3.SQLITE_READ and table == "ingest_views" else sqlite3.SQLITE_OK)
-        raise interrupt
+    def deny_readback(action, table, *_):
+        if action == sqlite3.SQLITE_READ and table == "ingest_views":
+            denied_readbacks.append(True)
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
 
     def abort_publication():
         if armed:
@@ -846,6 +846,11 @@ def test_window_7_exit_interrupt_registers_only_without_successful_commit(engine
 
     def after_with(key, *args, **kwargs):
         if key == "ledger.emissions_written":
+            if site == "readback_failure":
+                assert not engine._store._conn.in_transaction
+                committed_rows.extend(emission_views(engine))
+                assert len(committed_rows) == 1  # The exact exit row committed before readback fails.
+                engine._store._conn.set_authorizer(deny_readback)
             raise interrupt
         return real_count(key, *args, **kwargs)
 
@@ -855,8 +860,6 @@ def test_window_7_exit_interrupt_registers_only_without_successful_commit(engine
             patch.setattr(ledger, "next_view_seq", abort)
         elif site == "before_commit":
             patch.setattr(ledger, "write_view", abort)
-        elif site == "readback_failure":
-            patch.setattr(ledger, "write_view", abort_with_failed_readback)
         elif site == "owner_cleanup":
             patch.setattr(real_owner, "_active_owners", InterruptCleanup())
         elif site == "store_publication":
@@ -875,15 +878,55 @@ def test_window_7_exit_interrupt_registers_only_without_successful_commit(engine
         assert caught.value is interrupt
     engine.record_rejected_compaction()
     assert count(engine, "emission_signal_unmatched") == 1
-    if site in ("before_seq", "before_commit", "readback_failure"):
+    if site in ("before_seq", "before_commit"):
         assert len(pending(engine)) == 1 and emissions(engine) == emission_views(engine) == []
         engine._ingest_messages(output())
         assert_recovered(engine)
         assert candidate(engine) == (None, "none")
+    elif site == "readback_failure":
+        assert denied_readbacks and emission_views(engine) == committed_rows
+        assert len(pending(engine)) == 1
+        engine._ingest_messages(output())
+        assert_recovered(engine)
+        assert candidate(engine) == (None, "withheld_recovered")
     else:
         assert not pending(engine) and len(emissions(engine)) == len(emission_views(engine)) == 1
         assert candidate(engine) == (emission_views(engine)[0], "usable")
     assert not engine._store._conn.in_transaction
+    assert_next_live_candidate(engine, monkeypatch)
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, pytest.param(asyncio.CancelledError, id="cancelled")])
+def test_window_7_open_transaction_skips_readback_and_registers(engines, monkeypatch, error):
+    engine = engines()
+    before = prepare_path(engine, monkeypatch)
+    conn, trace = engine._store._conn, []
+    interrupt = error("window 7 open transaction sentinel")
+    real_scope = engine._emission_owner
+
+    @contextmanager
+    def unfinished_owner(*args, **kwargs):
+        with real_scope(*args, **kwargs) as value:
+            yield value
+        conn.execute("BEGIN")  # Teardown leaves a transaction open with the exact row visible.
+        raise interrupt
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(engine, "_emission_owner", unfinished_owner)
+            conn.set_trace_callback(trace.append)
+            try:
+                with pytest.raises(error) as caught:
+                    engine.compress(before, current_tokens=100, force=True)
+            finally:
+                conn.set_trace_callback(None)
+            assert caught.value is interrupt
+        assert conn.in_transaction and len(emission_views(engine)) == 1
+        assert len(pending(engine)) == 1
+        assert not any(sql.startswith("SELECT 1 FROM ingest_views WHERE lineage=") for sql in trace)
+    finally:
+        conn.rollback()
+    assert len(emission_views(engine)) == 1  # The row committed, but readback was forbidden.
     assert_next_live_candidate(engine, monkeypatch)
 
 
@@ -1004,15 +1047,18 @@ def test_historical_recovered_view_is_below_floor_until_next_live_exit(engines, 
     # Simulate an upgrade from a store whose recovered views predate the floor.
     conn.execute("DELETE FROM ledger_meta WHERE key='emission_provenance_floor'")
     conn.commit()
+    assert engine._store.ingest_ledger_state() == "ready"
+    counter = conn.execute("SELECT value FROM ledger_meta WHERE key='view_seq'").fetchone()
     assert candidate(engine, historical["lineage"]) == (None, "below_floor")
-    engine._store.ensure_ingest_ledger()
-    floor = conn.execute("SELECT value FROM ledger_meta WHERE key='emission_provenance_floor'").fetchone()
-    assert floor == (historical["view_seq"],)
+    engine.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")
+    assert conn.execute("SELECT value FROM ledger_meta WHERE key='emission_provenance_floor'").fetchone() == counter
+    assert not conn.in_transaction
     engine._ingest_messages(rows)
     assert candidate(engine) == (None, "below_floor")
     assert_next_live_candidate(engine, monkeypatch)
-    engine._store.ensure_ingest_ledger()
-    assert conn.execute("SELECT value FROM ledger_meta WHERE key='emission_provenance_floor'").fetchone() == floor
+    engine.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")
+    assert conn.execute("SELECT value FROM ledger_meta WHERE key='emission_provenance_floor'").fetchone() == counter
+    assert candidate(engine)[1] == "usable"
 
 
 def test_fresh_store_floor_zero_and_refused_newest_never_falls_back(engines, monkeypatch):
