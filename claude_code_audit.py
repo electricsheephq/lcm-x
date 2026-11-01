@@ -44,6 +44,8 @@ from .externalize import extract_externalized_refs, load_externalized_payload
 FAILURES = ("lost_lines", "digest_mismatch", "surplus_lines", "corrupt", "lost", "duplicates",
             "missing_rows", "orphans", "doubles", "stray_rows", "row_count", "held_mismatch")
 PROJECTED_DISPOSITIONS = frozenset({"new", "version", "fork_copy"})
+# The hook's PreCompact deadline (PRECOMPACT_DEADLINE_S): a drain that reached it ran this long.
+PRECOMPACT_BOUND_MS = 10_000
 EVENT_FIELDS = ("source_kind", "generation", "position", "uid", "entry_type", "entry_class", "line_digest",
                 "content_digest", "disposition", "store_ids", "notes", "captured_at")
 
@@ -129,6 +131,15 @@ def _ledger(conn: sqlite3.Connection, key: str) -> tuple[list[dict], dict]:
     for event in events:
         if event["source_kind"] == "file":
             event["store_ids"] = tuple(json.loads(event["store_ids"] or "[]"))
+    # A projected entry's rows are its own: an id it lists twice, or that another projected entry
+    # also lists, hides a lost row from the count and from missing_rows.
+    claimed: set = set()
+    for event in events:
+        if event["source_kind"] == "line" and event["disposition"] in PROJECTED_DISPOSITIONS:
+            for store_id in event["store_ids"]:
+                checks["row_count"] += store_id in claimed
+                claimed.add(store_id)
+    del claimed
     checks["corrupt"] += _kept_corrupt(conn, key)
     return events, checks
 
@@ -206,8 +217,6 @@ def _set_aside_siblings(path: Path) -> list[Path]:
 
 
 def _matches_generation(path: Path, rows: dict) -> bool:
-    if not rows or 0 not in rows:
-        return False
     count = 0
     with path.open("rb") as handle:
         for raw in handle:
@@ -448,18 +457,22 @@ def _log_records(path: Path):
 def _home_report(home: Path) -> dict:
     """Hook timing per event. Each session's first hook (a cold interpreter start) is reported
     apart, as ``first``, and left out of its event's percentiles; ``precompact`` counts which
-    path each PreCompact run took (a drain, or a poke of the worker holding the lock) and how
-    many drains reached their bound."""
+    path each PreCompact run took (a drain, a poke of the worker holding the lock, or neither,
+    when no runtime, package or worker was found) and how many drains reached their bound."""
     hooks, first, seen = defaultdict(list), [], set()
-    precompact = {"drain": 0, "poke": 0, "bound": 0}
+    precompact = {"drain": 0, "poke": 0, "bound": 0, "other": 0}
     for name in ("hook.log.1", "hook.log"):
         for row in _log_records(home / "logs" / name):
             ms, session, outcome = row.get("ms"), row.get("session"), row.get("outcome")
             if not (isinstance(row.get("event"), str) and type(ms) in (int, float) and math.isfinite(ms)):
                 continue
             if row["event"] == "PreCompact" and isinstance(outcome, str):
-                precompact["poke" if outcome == "worker_running" else "drain"] += 1
-                precompact["bound"] += outcome.startswith(("drain_incomplete", "drain_timeout"))
+                path = "poke" if outcome == "worker_running" else "drain" if outcome.startswith("drain") else "other"
+                precompact[path] += 1
+                # Exit 3 also covers a failed record, a store left in WAL mode, or the lock taken
+                # after a first pass: only a drain that ran out its time reached the bound.
+                precompact["bound"] += (outcome.startswith(("drain_incomplete", "drain_timeout"))
+                                        and ms >= PRECOMPACT_BOUND_MS)
             if isinstance(session, str) and session not in seen:
                 seen.add(session)
                 first.append(ms)
@@ -487,15 +500,42 @@ def _growth(home: Path, records: list[dict]) -> dict:
             "ratio": store_bytes / transcript_bytes if transcript_bytes else None}
 
 
-def _unverified(metadata: dict, records: list[dict], lineages: list[dict], session: str | None) -> list[str]:
+def _failed_records(home: Path) -> list[Lineage | None]:
+    """The lineages each set-aside (``.failed``) spool record names: its session's, and its
+    subagent's if any. None for a record that cannot be read."""
+    directory = home / "spool"
+    found: list[Lineage | None] = []
+    for path in sorted(directory.glob("*.failed")) if directory.is_dir() else []:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            session, agent = record["session_id"], record.get("agent_id")
+            if not isinstance(session, str) or not isinstance(agent, (str, type(None))):
+                raise TypeError("lineage ids")
+            lineage_key(session, agent)  # the check the writer's lineage ids passed
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            found.append(None)
+            continue
+        found.append(Lineage(session, None, path))
+        if agent:
+            found.append(Lineage(session, agent, path))
+    return found
+
+
+def _unverified(metadata: dict, records: list[dict], lineages: list[dict], session: str | None,
+                failed: list[Lineage | None]) -> list[str]:
     unknown = {row["lineage"] for row in lineages if not row["forgotten"] and (
         row["transcript_state"] != "ok" or row["generations_gone"] or row["pending_lines"]
         or row["files"]["uncaptured"])}
     if session is not None and CURSOR_PREFIX + lineage_key(session) not in metadata:
         unknown.add(lineage_key(session))
-    for record in records:
-        if record["forgotten"]:
-            continue
+    # A record set aside before its transcript had a cursor names a lineage nothing else shows.
+    for lineage in failed:
+        if lineage is None:
+            unknown.add("spool:unreadable_failed_record")
+        elif ((session is None or lineage.session_id == session) and CURSOR_PREFIX + lineage.key not in metadata
+              and FORGOTTEN_PREFIX + lineage.rows_session not in metadata):
+            unknown.add(lineage.key)
+    for record in records:  # a forgotten session's subagents are still captured
         for child in _subagents(record["lineage"]):
             if CURSOR_PREFIX + child.key not in metadata and FORGOTTEN_PREFIX + child.rows_session not in metadata:
                 unknown.add(child.key)
@@ -524,7 +564,7 @@ def audit(home: Path, session: str | None = None) -> dict:
             lineages.append(report)
             records.append(record)
     failures = {key: sum(row["failures"][key] for row in lineages) for key in FAILURES}
-    unverified = _unverified(metadata, records, lineages, session)
+    unverified = _unverified(metadata, records, lineages, session, _failed_records(home))
     home_report = _home_report(home)
     checked = any(not row["forgotten"] for row in lineages)
     return {"ok": not any(failures.values()), "opened_immutable": immutable, "failures": failures,

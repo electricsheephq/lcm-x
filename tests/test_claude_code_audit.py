@@ -19,7 +19,7 @@ from hermes_lcm import claude_code_audit as ca
 from hermes_lcm import claude_code_store as cc
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.externalize import extract_externalized_refs
-from tests.test_claude_code_store import CONVERSATION, _entry, _fork, _open, _transcript
+from tests.test_claude_code_store import CONVERSATION, _entry, _fork, _hook, _open, _transcript
 
 
 def _close(store):
@@ -470,8 +470,10 @@ def test_round5_projection_row_count(captured, monkeypatch, case):
 
 def test_round5_other_projection_is_report_only(captured):
     home, _lineage = captured
+    # An older projection gave this line one row more than the current one does.
+    _tamper(home, "INSERT INTO messages(session_id, role, content, timestamp) VALUES('s1', 'user', 'older', 0)")
     _tamper(home, "UPDATE capture_events SET projection_version = 'older', "
-            "store_ids = json_insert(store_ids, '$[#]', json_extract(store_ids, '$[0]')) "
+            "store_ids = json_insert(store_ids, '$[#]', (SELECT MAX(store_id) FROM messages)) "
             "WHERE source_kind = 'line' AND position = 0")
     report = ca.audit(home)
     assert report["ok"] is True
@@ -659,11 +661,100 @@ def test_each_sessions_first_hook_and_precompact_paths_are_reported_apart(captur
             {"event": "PostToolBatch", "session": "b", "ms": 5, "outcome": "worker_running"},
             {"event": "PreCompact", "session": "a", "ms": 900, "outcome": "drained"},
             {"event": "PreCompact", "session": "a", "ms": 2, "outcome": "worker_running"},
-            {"event": "PreCompact", "session": "b", "ms": 10000, "outcome": "drain_incomplete+worker"}]
+            {"event": "PreCompact", "session": "b", "ms": 10000, "outcome": "drain_incomplete+worker"},
+            {"event": "PreCompact", "session": "b", "ms": 300, "outcome": "drain_incomplete+holder"},
+            {"event": "PreCompact", "session": "c", "ms": 40, "outcome": "runtime_missing"}]
     (logs / "hook.log").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     report = ca.audit(home)
     hooks = report["hooks_in_process_ms"]
-    assert hooks["first"] == {"n": 2, "max": 400}
+    assert hooks["first"] == {"n": 3, "max": 400}
     assert "SessionStart" not in hooks and hooks["PostToolBatch"]["n"] == 2 and hooks["PostToolBatch"]["max"] == 5
-    assert hooks["PreCompact"]["n"] == 3 and hooks["PreCompact"]["max"] == 10000
-    assert report["precompact"] == {"drain": 2, "poke": 1, "bound": 1}
+    assert hooks["PreCompact"]["n"] == 4 and hooks["PreCompact"]["max"] == 10000
+    # A drain that ended incomplete within 10 s did not reach its bound (a failed record, a
+    # store left in WAL mode, or the lock taken after a first pass), and no runtime is no drain.
+    assert report["precompact"] == {"drain": 3, "poke": 1, "bound": 1, "other": 1}
+
+
+def test_the_precompact_bound_is_the_hooks_deadline():
+    assert ca.PRECOMPACT_BOUND_MS == _hook().PRECOMPACT_DEADLINE_S * 1000
+
+
+@pytest.mark.parametrize("case", ["listed_twice", "listed_by_two_entries"])
+def test_a_projected_row_id_listed_twice_fails_row_count(tmp_path, case):
+    """REGRESSION: a lost row hid behind an id listed twice, by one projected entry or by two:
+    the count still matched, and every listed id existed."""
+    home = tmp_path / "home"
+    two_rows = _entry("user", "r2", [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "the output"},
+                                     {"type": "text", "text": "and a note"}])
+    path = _transcript(tmp_path, [CONVERSATION[0], CONVERSATION[1], two_rows])
+    store = _open(home, tmp_path / "hermes")
+    try:
+        cc.drain(store, cc.Lineage("s1", None, path))
+    finally:
+        _close(store)
+    with closing(sqlite3.connect(home / "lcm.db")) as conn:
+        ids = {uid: json.loads(store_ids) for uid, store_ids in conn.execute(
+            "SELECT uid, store_ids FROM capture_events WHERE source_kind = 'line'")}
+    assert len(ids["r2"]) == 2 and ca.audit(home)["ok"] is True
+    if case == "listed_twice":  # the note's row is lost; the tool row's id is listed in its place
+        lost, uid, listed = ids["r2"][1], "r2", [ids["r2"][0]] * 2
+    else:  # the first prompt's row is lost; it lists the note's row instead
+        lost, uid, listed = ids["u1"][0], "u1", [ids["r2"][1]]
+    _tamper(home, "DELETE FROM messages WHERE store_id = ?", (lost,))
+    _tamper(home, "UPDATE capture_events SET store_ids = ? WHERE uid = ?", (json.dumps(listed), uid))
+    _failed(home, "row_count")
+
+
+@pytest.mark.parametrize("case", ["no_cursor", "subagent_without_cursor", "with_cursor", "unreadable"])
+def test_a_failed_record_without_a_cursor_is_unverified(captured, case):
+    """REGRESSION: a record set aside as ``.failed`` before its transcript had a cursor names a
+    session nothing else shows, and a whole-home audit verified the store without it."""
+    home, _lineage = captured
+    (home / "spool").mkdir()
+    session, agent = {"no_cursor": ("s9", None), "subagent_without_cursor": ("s1", "a3")}.get(case, ("s1", None))
+    text = "{" if case == "unreadable" else json.dumps({"host": "claude-code", "event": "Stop",
+                                                         "session_id": session, "agent_id": agent})
+    (home / "spool" / "k.failed").write_text(text, encoding="utf-8")
+    report = ca.audit(home)
+    expected = {"no_cursor": [cc.lineage_key("s9")], "subagent_without_cursor": [cc.lineage_key("s1", "a3")],
+                "with_cursor": [], "unreadable": ["spool:unreadable_failed_record"]}[case]
+    assert report["ok"] is True and report["spool"]["failed"] == 1
+    assert report["unverified"] == expected and report["verified"] is (case == "with_cursor")
+    if case == "no_cursor":  # another session's record does not touch this one's verdict
+        assert ca.audit(home, session="s1")["unverified"] == []
+
+
+def test_a_forgotten_sessions_subagent_without_a_cursor_is_unverified(captured, tmp_path):
+    """REGRESSION: the writer still captures a forgotten session's subagents (their rows are their
+    own), but the audit skipped them, so one not captured yet left nothing unverified."""
+    home, lineage = captured
+    store = _open(home, tmp_path / "hermes")
+    try:
+        store.delete_session_messages("s1")
+        store.update_metadata_json(cc.FORGOTTEN_PREFIX + "s1", lambda _current: {"at": 0})
+    finally:
+        _close(store)
+    _transcript(lineage.path.parents[2], [_entry("user", "child", "child")], name="s1/subagents/agent-a7.jsonl")
+    report = ca.audit(home)
+    assert report["unverified"] == [cc.lineage_key("s1", "a7")] and report["verified"] is False
+
+
+def test_an_empty_generation_matches_an_empty_set_aside_copy(tmp_path):
+    """REGRESSION: a cursor registered on an empty transcript left generation 0 without rows, which
+    no set-aside copy could match, so the lineage could never be verified."""
+    home = tmp_path / "home"
+    path = _transcript(tmp_path, [])
+    lineage = cc.Lineage("s1", None, path)
+    store = _open(home, tmp_path / "hermes")
+    try:
+        cc.drain(store, lineage)
+        assert store.read_metadata_json(cc.CURSOR_PREFIX + lineage.key)["generation"] == 0
+        os.rename(path, path.with_name(path.name + ".superseded-1"))
+        _transcript(tmp_path, [CONVERSATION[0]])
+        cc.drain(store, lineage)
+        assert store.read_metadata_json(cc.CURSOR_PREFIX + lineage.key)["generation"] == 1
+    finally:
+        _close(store)
+    report = ca.audit(home)
+    assert report["ok"] is True and report["lineages"][0]["generations_gone"] == 0
+    assert report["verified"] is True
