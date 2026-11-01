@@ -82,7 +82,9 @@ class TransactionOwner:
             conn.commit()
 
     @contextmanager
-    def atomic(self, conn: sqlite3.Connection, *, immediate: bool = False) -> Iterator[None]:
+    def atomic(self, conn: sqlite3.Connection, *, immediate: bool = False,
+               commit_marker: list[bool] | None = None) -> Iterator[None]:
+        """Append True to the optional marker only after this scope's own successful COMMIT."""
         with self._lock:
             if self._active_connection is conn:
                 if immediate and not conn.in_transaction:
@@ -99,6 +101,8 @@ class TransactionOwner:
             try:
                 yield
                 conn.commit()
+                if commit_marker is not None:
+                    commit_marker.append(True)
             except BaseException:
                 conn.rollback()
                 raise

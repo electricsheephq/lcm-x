@@ -2062,7 +2062,8 @@ class MessageStore:
                 finally:
                     self._foreground_ingest_owner = previous
 
-    def atomic(self, *, immediate: bool = False) -> AbstractContextManager[None]:
+    def atomic(self, *, immediate: bool = False,
+               commit_marker: list[bool] | None = None) -> AbstractContextManager[None]:
         """Own a transaction under the existing write lock, joining nested entries.
 
         By default the first write opens the transaction. Explicit owners use
@@ -2079,7 +2080,7 @@ class MessageStore:
         def marked():
             with self._write_lock:
                 try:
-                    with self._transaction_owner.atomic(conn, immediate=immediate):
+                    with self._transaction_owner.atomic(conn, immediate=immediate, commit_marker=commit_marker):
                         yield
                 except BaseException:
                     if not conn.in_transaction:

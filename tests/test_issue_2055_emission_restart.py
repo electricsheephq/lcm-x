@@ -129,7 +129,7 @@ def _assert_visible(conn, scripted=(), *, require_generated=False):
 
 @contextmanager
 def _exit_fault(patch, fault):
-    """Fault the whole run, including retries; the view fault is emission-only."""
+    """Fault the whole run; emission-view faults no longer affect provenance-only retries."""
     if fault == "insert":
         def fail(*args, **kwargs):
             raise sqlite3.OperationalError("injected emission insert failure")
@@ -217,7 +217,9 @@ def test_failure_then_restart_gate(tmp_path, monkeypatch, fault, in_place, merge
         with sqlite3.connect(root / "lcm.db") as conn:
             _assert_visible(conn, scripted)
             if failure in {"insert", "view"}:
-                assert conn.execute("SELECT count(*) FROM ledger_emissions").fetchone()[0] == 0
+                recovered = conn.execute("SELECT count(*) FROM ledger_emissions").fetchone()[0]
+                assert recovered == (0 if failure == "insert" else totals["ledger.emission_recovered_provenance_only"])
+                assert conn.execute("SELECT count(*) FROM ingest_views WHERE kind='emission'").fetchone()[0] == 0
                 assert totals["ledger.emission_write_failed"] >= 1
             elif failure == "busy":
                 assert totals["ledger.emission_busy"] >= 1
@@ -299,7 +301,9 @@ def test_no_proof_exit_restart_gate(tmp_path, monkeypatch, survival_host, caplog
             _extended_exit(root, patch, path, survival_host, caplog, restart)
         with sqlite3.connect(root / "lcm.db") as conn:
             if failure in {"insert", "view"}:
-                assert conn.execute("SELECT count(*) FROM ledger_emissions").fetchone()[0] == 0
+                recovered = conn.execute("SELECT count(*) FROM ledger_emissions").fetchone()[0]
+                assert recovered == (0 if failure == "insert" else totals["ledger.emission_recovered_provenance_only"])
+                assert conn.execute("SELECT count(*) FROM ingest_views WHERE kind='emission'").fetchone()[0] == 0
                 assert totals["ledger.emission_write_failed"] >= 1
             elif failure == "busy":
                 assert totals["ledger.emission_busy"] >= 1
@@ -741,7 +745,7 @@ def _main_ledger_write(self, attempt, after_commit, attribution):
 
 
 
-def test_plain_ingest_has_exact_main_sql(engines, monkeypatch):
+def test_plain_ingest_has_exact_main_sql_except_provenance_floor(engines, monkeypatch):
     engine = engines()
     write, comparisons = engine._write_ingest_ledger, []
 
@@ -763,7 +767,12 @@ def test_plain_ingest_has_exact_main_sql(engines, monkeypatch):
             write(attempt, callbacks, attribution)
         finally:
             conn.set_trace_callback(None)
-        assert candidate == baseline
+        floor_sql = {
+            "SELECT 1 FROM ledger_meta WHERE key='emission_provenance_floor'",
+            "INSERT OR IGNORE INTO ledger_meta(key,value) SELECT 'emission_provenance_floor',value FROM ledger_meta WHERE key='view_seq'",
+        }
+        assert [sql for sql in candidate if sql not in floor_sql] == baseline
+        assert "SELECT 1 FROM ledger_meta WHERE key='emission_provenance_floor'" in candidate
         comparisons.append(candidate)
 
     monkeypatch.setattr(engine, "_write_ingest_ledger", compare)

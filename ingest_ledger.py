@@ -62,7 +62,7 @@ _PENDING_EMISSIONS_LOCK = threading.Lock()
 
 def mark_pending_emission(store_key, lineage, **payload):
     """Keep only payloads, never stores or strong engine references, under this lock."""
-    payload.update(lineage=lineage, created_at=time.time(), claim=None, signal=None, superseded=False,
+    payload.update(lineage=lineage, created_at=time.time(), claim=None,
                    origin=weakref.ref(payload.pop("origin")))
     with _PENDING_EMISSIONS_LOCK:
         entries = _PENDING_EMISSIONS.setdefault((store_key, lineage), [])
@@ -71,43 +71,6 @@ def mark_pending_emission(store_key, lineage, **payload):
         if dropped:
             entries.pop(0)
     return dropped
-
-
-def record_pending_signal(store_identity, origin, compress_call, session_id, conversation_key,
-                          new_state, require_conversation):
-    with _PENDING_EMISSIONS_LOCK:
-        entry = max((e for (key, _lineage), entries in _PENDING_EMISSIONS.items()
-                     if key[0] == store_identity for e in entries
-                     if e["origin"]() is origin and e["compress_call"] == compress_call
-                     and e["session_id"] == session_id
-                     and (not require_conversation or e["conversation_key"] == conversation_key)),
-                    key=lambda e: e["created_at"], default=None)
-        if entry is None:
-            return False
-        if new_state == "refused" or entry["signal"] != "refused":
-            entry["signal"] = new_state
-        return True
-
-
-def pending_emission_signal(entry):
-    with _PENDING_EMISSIONS_LOCK:
-        return entry["signal"]
-
-
-def note_emission_written(store_key, lineage):
-    """Mark this lineage's pending entries superseded; returns the ones it changed, for a rollback."""
-    with _PENDING_EMISSIONS_LOCK:
-        changed = [entry for entry in _PENDING_EMISSIONS.get((store_key, lineage), ()) if not entry["superseded"]]
-        for entry in changed:
-            entry["superseded"] = True
-    return changed
-
-
-def restore_superseded(entries):
-    """Undo ``note_emission_written`` for an exit write that did not commit."""
-    with _PENDING_EMISSIONS_LOCK:
-        for entry in entries:
-            entry["superseded"] = False
 
 
 def has_pending(store_identity):
@@ -442,6 +405,36 @@ def newest_view(conn, lineage, kind):
     rows = _rows(conn.execute("SELECT * FROM ingest_views WHERE lineage=? AND kind=? ORDER BY view_seq DESC LIMIT 1",
                               (lineage, kind)))
     return rows[0] if rows else None
+
+
+def emission_candidate(conn, lineage):
+    """Return (newest usable live emission view, reason), without registry reads.
+
+    One SQL statement reads the view, state, recovered mark and provenance floor
+    in a consistent snapshot when no transaction is open. Inside the caller's
+    transaction it also sees that transaction's uncommitted retry writes, so a
+    same-transaction recovery already withholds the candidate. Before the first
+    foreground ingest records the floor, existing views remain ineligible.
+    """
+    rows = _rows(conn.execute(
+        "SELECT v.*, "
+        "(SELECT CAST(value AS INTEGER) FROM ledger_meta WHERE key=?) AS recovered, "
+        "COALESCE((SELECT CAST(value AS INTEGER) FROM ledger_meta "
+        "WHERE key='emission_provenance_floor'), "
+        "(SELECT CAST(value AS INTEGER) FROM ledger_meta WHERE key='view_seq'), 0) AS floor "
+        "FROM ingest_views v WHERE lineage=? AND kind='emission' ORDER BY view_seq DESC LIMIT 1",
+        ("emission_recovered:" + lineage, lineage)))
+    if not rows:
+        return None, "none"
+    view = rows[0]
+    recovered, floor = view.pop("recovered"), view.pop("floor")
+    if view["state"] not in ("proposed", "adopted"):
+        return None, "refused"
+    if recovered is not None and view["view_seq"] <= recovered:
+        return None, "withheld_recovered"
+    if view["view_seq"] <= floor:
+        return None, "below_floor"
+    return view, "usable"
 
 
 def lineage_ordinals(conn, lineage):

@@ -332,8 +332,7 @@ def test_new_call_invalidates_old_signal(engines, monkeypatch, path):
     engine._session_stateless = False
     assert adopt(engine)
     assert emissions(engine)[0]["state"] == "proposed"
-    assert count(engine, "emission_signal_unmatched") == (0 if path == "write_failure" else 1)
-    assert count(engine, "emission_signal_deferred") == (1 if path == "write_failure" else 0)
+    assert count(engine, "emission_signal_unmatched") == 1
 
 
 def test_parent_handle_survives_child_bypass(engines, monkeypatch):
@@ -428,7 +427,11 @@ def test_ordinary_failures_count_warn_once_and_preserve_output(engines, monkeypa
     warnings = [r.getMessage() for r in caplog.records if "ledger." + counter in r.getMessage()]
     assert len(warnings) == 1 and "compress output unaffected" in warnings[0]
     assert all(r["state"] == "proposed" for r in emissions(engine))
-    if site != "set_emission_state":
+    if site == "write_view":
+        assert emissions(engine) and emission_views(engine) == []
+        assert count(engine, "emission_recovered_provenance_only") == len(emissions(engine))
+        assert engine._emission_handle is None
+    elif site != "set_emission_state":
         assert emissions(engine) == emission_views(engine) == []
 
 
@@ -457,3 +460,42 @@ def test_rotation_skip_without_handle_counts_unadopted(engines):
     engine._session_id = "unrelated"
     engine._continue_compression_boundary("child", "missing", dict(conversation_id="other"))
     assert count(engine, "emission_boundary_unadopted") == 1
+
+
+def test_successful_commit_marker_stays_unset_on_rollback_and_nested_scope(engines):
+    store = engines()._store
+    outer, nested, rolled_back = [], [], []
+    statements = []
+    store._conn.set_trace_callback(lambda sql: statements.append((sql, list(outer))))
+    try:
+        with store.atomic(immediate=True, commit_marker=outer):
+            with store.atomic(commit_marker=nested):
+                assert outer == nested == []
+            assert outer == nested == []
+        assert outer == [True] and nested == []
+        assert ("COMMIT", []) in statements
+        with pytest.raises(ValueError, match="marker rollback"):
+            with store.atomic(immediate=True, commit_marker=rolled_back):
+                raise ValueError("marker rollback")
+        assert rolled_back == []
+    finally:
+        store._conn.set_trace_callback(None)
+
+
+def test_failed_commit_never_sets_successful_commit_marker():
+    import threading
+    from hermes_lcm.sqlite_session import TransactionOwner
+
+    class FailedCommit(sqlite3.Connection):
+        def commit(self):
+            raise sqlite3.OperationalError("COMMIT failed")
+
+    conn = sqlite3.connect(":memory:", factory=FailedCommit)
+    marker = []
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="COMMIT failed"):
+            with TransactionOwner(threading.RLock()).atomic(conn, immediate=True, commit_marker=marker):
+                assert marker == []
+        assert marker == [] and not conn.in_transaction
+    finally:
+        conn.close()
