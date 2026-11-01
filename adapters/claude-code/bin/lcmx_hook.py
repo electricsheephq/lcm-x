@@ -177,9 +177,10 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0)
             return "worker_running"
         try:
             done = subprocess.run(command + ["--deadline", str(deadline_s)], timeout=deadline_s + 2, **quiet)
-            # The worker exits 0 only after a completed drain; 3 means its deadline left work pending;
-            # 4 means another worker took the lock first and holds the record.
-            outcome = {0: "drained", 3: "drain_incomplete", 4: "worker_running"}.get(
+            # The worker exits 0 only after a completed drain; 5 means its deadline left work pending,
+            # 3 that work is pending for another reason; 4 that another worker took the lock first
+            # and holds the record.
+            outcome = {0: "drained", 3: "drain_incomplete", 4: "worker_running", 5: "drain_bound"}.get(
                 done.returncode, "drain_failed:%d" % done.returncode)
         except subprocess.TimeoutExpired:
             outcome = "drain_timeout"  # the batch in flight rolls back; the next drain resumes from the cursor

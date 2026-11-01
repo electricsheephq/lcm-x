@@ -912,6 +912,8 @@ def run_worker(home: Path, *, deadline_s: Optional[float] = None, config: Any = 
                 status = _drain_once(home, report, deadline, config, settle_s, hermes_home, embedding_state)
             finally:
                 lock.release()
+            if status == "deadline":
+                report["deadline"] = True  # the bound, not a failure or the lock, ended this run
             if status != "done" or not pending(home):
                 return report
     finally:

@@ -1209,7 +1209,7 @@ def test_a_bounded_drain_never_waits_for_the_lock_and_the_next_worker_captures_e
         started = time.monotonic()
         report = cc.run_worker(home, deadline_s=10, hermes_home=hermes, settle_s=0)
         assert time.monotonic() - started < 1
-    assert report["lock"] == "held" and not report["complete"] and report["records"] == 0
+    assert report["lock"] == "held" and not report["complete"] and report["records"] == 0 and "deadline" not in report
     assert cc.pending(home)
     assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
     store = _open(home, hermes)
@@ -1233,7 +1233,7 @@ def test_a_bounded_drain_cut_by_its_deadline_keeps_whole_batches_and_its_record(
         return result
     monkeypatch.setattr(cc, "ingest_lines", slow)
     report = cc.run_worker(home, deadline_s=0.2, hermes_home=hermes, settle_s=0)
-    assert not report["complete"] and "lock" not in report and cc.pending(home)
+    assert not report["complete"] and report["deadline"] and "lock" not in report and cc.pending(home)
     store = _open(home, hermes)
     try:
         assert len(_events(store)) == 2  # one whole batch
@@ -1350,7 +1350,7 @@ def test_a_sweep_cut_by_its_deadline_keeps_the_claimed_record(tmp_path, home, he
     real = cc.capture_files
     monkeypatch.setattr(cc, "capture_files", lambda store, lineage, deadline=None: None)  # its deadline came first
     report = cc.run_worker(home, deadline_s=30, hermes_home=hermes, settle_s=0)
-    assert not report["complete"] and report["records"] == 1 and cc.pending(home)
+    assert not report["complete"] and report["deadline"] and report["records"] == 1 and cc.pending(home)
     assert [path.suffix for path in (home / "spool").iterdir() if not path.name.startswith(".")] == [".claimed"]
     monkeypatch.setattr(cc, "capture_files", real)
     assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"] and not cc.pending(home)

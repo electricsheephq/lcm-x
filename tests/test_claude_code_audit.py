@@ -19,7 +19,7 @@ from hermes_lcm import claude_code_audit as ca
 from hermes_lcm import claude_code_store as cc
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.externalize import extract_externalized_refs
-from tests.test_claude_code_store import CONVERSATION, _entry, _fork, _hook, _open, _transcript
+from tests.test_claude_code_store import CONVERSATION, _entry, _fork, _open, _transcript
 
 
 def _close(store):
@@ -661,22 +661,19 @@ def test_each_sessions_first_hook_and_precompact_paths_are_reported_apart(captur
             {"event": "PostToolBatch", "session": "b", "ms": 5, "outcome": "worker_running"},
             {"event": "PreCompact", "session": "a", "ms": 900, "outcome": "drained"},
             {"event": "PreCompact", "session": "a", "ms": 2, "outcome": "worker_running"},
-            {"event": "PreCompact", "session": "b", "ms": 10000, "outcome": "drain_incomplete+worker"},
-            {"event": "PreCompact", "session": "b", "ms": 300, "outcome": "drain_incomplete+holder"},
+            {"event": "PreCompact", "session": "b", "ms": 10000, "outcome": "drain_bound+worker"},
+            {"event": "PreCompact", "session": "b", "ms": 10400, "outcome": "drain_incomplete+holder"},
+            {"event": "PreCompact", "session": "b", "ms": 10100, "outcome": "drain_bound+holder"},
             {"event": "PreCompact", "session": "c", "ms": 40, "outcome": "runtime_missing"}]
     (logs / "hook.log").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     report = ca.audit(home)
     hooks = report["hooks_in_process_ms"]
     assert hooks["first"] == {"n": 3, "max": 400}
     assert "SessionStart" not in hooks and hooks["PostToolBatch"]["n"] == 2 and hooks["PostToolBatch"]["max"] == 5
-    assert hooks["PreCompact"]["n"] == 4 and hooks["PreCompact"]["max"] == 10000
-    # A drain that ended incomplete within 10 s did not reach its bound (a failed record, a
-    # store left in WAL mode, or the lock taken after a first pass), and no runtime is no drain.
-    assert report["precompact"] == {"drain": 3, "poke": 1, "bound": 1, "other": 1}
-
-
-def test_the_precompact_bound_is_the_hooks_deadline():
-    assert ca.PRECOMPACT_BOUND_MS == _hook().PRECOMPACT_DEADLINE_S * 1000
+    assert hooks["PreCompact"]["n"] == 5 and hooks["PreCompact"]["max"] == 10400
+    # Only the worker knows its deadline ended the run (drain_bound): an incomplete drain that took
+    # as long (a failed record, a store left in WAL mode, the lock taken) did not reach it.
+    assert report["precompact"] == {"drain": 4, "poke": 1, "bound": 2, "other": 1}
 
 
 @pytest.mark.parametrize("case", ["listed_twice", "listed_by_two_entries"])
@@ -739,9 +736,10 @@ def test_a_forgotten_sessions_subagent_without_a_cursor_is_unverified(captured, 
     assert report["unverified"] == [cc.lineage_key("s1", "a7")] and report["verified"] is False
 
 
-def test_an_empty_generation_matches_an_empty_set_aside_copy(tmp_path):
-    """REGRESSION: a cursor registered on an empty transcript left generation 0 without rows, which
-    no set-aside copy could match, so the lineage could never be verified."""
+def test_an_empty_generation_never_matches_a_set_aside_copy(tmp_path):
+    """A generation with no ledger rows may have lost them all, so no set-aside copy, an empty
+    one included, can stand in for it: it stays gone (unverified, never failed). An empty
+    transcript replaced later is the one case this leaves unverified for nothing."""
     home = tmp_path / "home"
     path = _transcript(tmp_path, [])
     lineage = cc.Lineage("s1", None, path)
@@ -756,5 +754,5 @@ def test_an_empty_generation_matches_an_empty_set_aside_copy(tmp_path):
     finally:
         _close(store)
     report = ca.audit(home)
-    assert report["ok"] is True and report["lineages"][0]["generations_gone"] == 0
-    assert report["verified"] is True
+    assert report["ok"] is True and report["lineages"][0]["generations_gone"] == 1
+    assert report["verified"] is False and report["unverified"] == [lineage.key]

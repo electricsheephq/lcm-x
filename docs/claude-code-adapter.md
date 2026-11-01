@@ -63,7 +63,7 @@ logged without content and capture catches up on a later run.
 | `UserPromptSubmit`, `PostToolBatch`, `PostCompact` | Spool; start the worker only if none is running. `PostToolBatch` fires once per batch of tool calls, also inside subagents (with `agent_id`). | No |
 | `Stop`, `StopFailure` | Spool; the worker drains the transcript, then settles (below). `StopFailure` replaces `Stop` when the turn ends on an API error. | No |
 | `SubagentStop` | Spool the subagent transcript (`<session>/subagents/agent-<id>.jsonl`) as a child lineage. Internal agents (`agent_type` empty) are captured and tagged; R0 saw the compaction summarizer fire it with a transcript path that does not exist, which is logged with nothing to ingest. | No |
-| `PreCompact` | Drain synchronously, bounded to 10 s, only when the store lock is free; it never waits for the lock. If a worker holds it, the hook returns at once (`worker_running`) and the holder takes the spooled record. The hook logs `drained` only for a worker-confirmed complete drain, otherwise `drain_incomplete`, `drain_failed:<code>` or `drain_timeout`; any of these but a refused store then starts a detached worker for the rest (`+worker`), or leaves it to the worker that has taken the lock since (`+holder`). The drain captures only; it never embeds. The hook kills a drain still running 2 s after its bound. | Bounded, never on the lock |
+| `PreCompact` | Drain synchronously, bounded to 10 s, only when the store lock is free; it never waits for the lock. If a worker holds it, the hook returns at once (`worker_running`) and the holder takes the spooled record. The hook logs `drained` only for a worker-confirmed complete drain, otherwise `drain_bound` (the worker's deadline ended it), `drain_incomplete` (work left for another reason), `drain_failed:<code>` or `drain_timeout`; any of these but a refused store then starts a detached worker for the rest (`+worker`), or leaves it to the worker that has taken the lock since (`+holder`). The drain captures only; it never embeds. The hook kills a drain still running 2 s after its bound. | Bounded, never on the lock |
 | `SessionEnd` | Spool; start a detached drain and return at once. | No |
 
 ### Spool and worker handshake
@@ -386,8 +386,8 @@ gate's instrument (see "The audit" in the test plan).
   - each hook's in-process time per event (`hooks_in_process_ms`: n, p50, p95, max), with each
     session's first hook the log still holds apart (`first`), and `PreCompact`'s paths
     (`precompact`: drains, pokes of the worker holding the lock, runs that started neither for
-    want of a runtime, package or worker, and drains that reached their bound: ended incomplete
-    or were killed after at least 10 s);
+    want of a runtime, package or worker, and drains that reached their bound: `drain_bound`, as
+    the worker reports it, or killed at the hook's timeout);
   - lag and store growth.
 - **Exit 2:** the home is not absolute, holds no store, or the store has no capture stamp.
 - **It does not re-derive row text.** Ingest protection may redact, normalize or externalize it by

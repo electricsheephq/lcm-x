@@ -44,8 +44,6 @@ from .externalize import extract_externalized_refs, load_externalized_payload
 FAILURES = ("lost_lines", "digest_mismatch", "surplus_lines", "corrupt", "lost", "duplicates",
             "missing_rows", "orphans", "doubles", "stray_rows", "row_count", "held_mismatch")
 PROJECTED_DISPOSITIONS = frozenset({"new", "version", "fork_copy"})
-# The hook's PreCompact deadline (PRECOMPACT_DEADLINE_S): a drain that reached it ran this long.
-PRECOMPACT_BOUND_MS = 10_000
 EVENT_FIELDS = ("source_kind", "generation", "position", "uid", "entry_type", "entry_class", "line_digest",
                 "content_digest", "disposition", "store_ids", "notes", "captured_at")
 
@@ -217,6 +215,10 @@ def _set_aside_siblings(path: Path) -> list[Path]:
 
 
 def _matches_generation(path: Path, rows: dict) -> bool:
+    # A generation with no ledger rows proves nothing: it may have lost them all, so it never
+    # matches, and stays gone (unverified), even if it was empty.
+    if not rows or 0 not in rows:
+        return False
     count = 0
     with path.open("rb") as handle:
         for raw in handle:
@@ -469,10 +471,9 @@ def _home_report(home: Path) -> dict:
             if row["event"] == "PreCompact" and isinstance(outcome, str):
                 path = "poke" if outcome == "worker_running" else "drain" if outcome.startswith("drain") else "other"
                 precompact[path] += 1
-                # Exit 3 also covers a failed record, a store left in WAL mode, or the lock taken
-                # after a first pass: only a drain that ran out its time reached the bound.
-                precompact["bound"] += (outcome.startswith(("drain_incomplete", "drain_timeout"))
-                                        and ms >= PRECOMPACT_BOUND_MS)
+                # The worker says when its deadline ended the run (drain_bound); the hook's kill at
+                # its own timeout (drain_timeout) also means the drain ran out its time.
+                precompact["bound"] += outcome.startswith(("drain_bound", "drain_timeout"))
             if isinstance(session, str) and session not in seen:
                 seen.add(session)
                 first.append(ms)

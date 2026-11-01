@@ -2,9 +2,10 @@
 """LCM-X capture for Claude Code: ``worker`` drains the plugin's spool into its store.
 
 The plugin's hook entry (adapters/claude-code/bin/lcmx_hook.py) starts it detached, or, on
-PreCompact, waits for it with ``--deadline``. Exit codes: 0 every record drained, 3 records
-left (the deadline, or another worker took the lock), 4 a bounded run found the lock held and
-drained nothing, 2 the store was refused, 1 an error. Design: docs/claude-code-adapter.md.
+PreCompact, waits for it with ``--deadline``. Exit codes: 0 every record drained, 5 a bounded
+run reached its deadline, 3 records left for another reason (a failed record, the store left in
+WAL mode, or another worker took the lock), 4 a bounded run found the lock held and drained
+nothing, 2 the store was refused, 1 an error. Design: docs/claude-code-adapter.md.
 """
 
 from __future__ import annotations
@@ -75,7 +76,9 @@ def main(argv: list[str] | None = None) -> int:
     if report.get("lock") == "held":
         return 4  # a bounded drain found another worker holding the store; it takes the record
     if not report["complete"]:
-        return 3 if args.deadline is not None else 1
+        if args.deadline is None:
+            return 1
+        return 5 if report.get("deadline") else 3
     return 0
 
 

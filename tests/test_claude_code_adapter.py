@@ -231,7 +231,7 @@ def test_precompact_reports_the_worker_outcome(hook, env, tmp_path, monkeypatch)
     monkeypatch.setattr(hook.subprocess, "Popen", counting)
     for code, outcome, detached in ((0, "drained", False), (3, "drain_incomplete+worker", True),
                                     (1, "drain_failed:1+worker", True), (2, "drain_failed:2", False),
-                                    (4, "worker_running", False)):
+                                    (4, "worker_running", False), (5, "drain_bound+worker", True)):
         continued.unlink(missing_ok=True)
         starts.clear()
         worker.write_text("import pathlib, sys\n"
