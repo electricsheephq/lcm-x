@@ -594,15 +594,18 @@ The ten #2112 windows close as follows:
 4. Provisional-lineage drift cannot create a view, and the retry mark uses the persisted lineage.
 5. Cross-process retries durably raise the high-water mark, withholding older live candidates without process memory.
 6. Partial failures cannot reorder views because retries write none, and the recovered mark uses a numeric maximum.
-7. An exit-write interrupt registers the payload unless readback finds this exact committed emission view, then propagates unchanged.
+7. An exit-write interrupt registers the payload unless readback finds the emission view and exactly this write's ordered descriptor pairs, then propagates unchanged.
 8. A rollback cannot clear another store's supersession flag because those flags no longer exist.
 9. Publication only counts recovery; it neither reads supersession flags nor restores a handle outside the transaction.
 10. A session reset cannot retain a deferred signal because no pending entry stores one.
 
 After the owner finishes, a non-`Exception` interrupt reads back the emission
-view by lineage and this write's allocated `view_seq`. A row proves COMMIT even
-when teardown or work after the owner scope interrupted; no row registers the
-payload. An open transaction skips readback and leaves the commit state unknown.
+view by lineage and this write's allocated `view_seq`, plus the `ledger_emissions`
+`(output_index, descriptor_digest)` pairs ordered by `output_index`. Only an
+existing view and an exact pair match, including count and order, prove COMMIT;
+a peer's different write at a reused sequence registers the failed payload.
+The read helper uses at most two SELECTs under the store write lock, with no write.
+An open transaction skips readback and leaves the commit state unknown.
 A failed readback, open transaction or unallocated sequence registers conservatively;
 an extra recovered sequence can withhold a candidate, but cannot make a
 recovered emission eligible. The original interrupt always propagates unchanged.

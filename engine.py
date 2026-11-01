@@ -7504,15 +7504,22 @@ class LCMEngine(
                                exc, subject="compress output")
         except BaseException:
             # The owner has finished, but teardown can interrupt after COMMIT.
-            # Only this exact emission row proves that the write committed.
+            # A rolled-back sequence can be reused: require this write's descriptors too.
+            def readback_matches():
+                conn = self._store._conn
+                return conn.execute(
+                    "SELECT 1 FROM ingest_views WHERE lineage=? AND view_seq=? AND kind='emission'",
+                    (lineage, seq)).fetchone() is not None and conn.execute(
+                    "SELECT output_index,descriptor_digest FROM ledger_emissions "
+                    "WHERE lineage=? AND view_seq=? ORDER BY output_index", (lineage, seq)).fetchall() == [
+                        (row["output_index"], row["descriptor_digest"]) for row in rows]
+
             committed = False
             if seq is not None:
                 try:
                     with self._store._write_lock:
                         if not self._store._conn.in_transaction:
-                            committed = self._store._conn.execute(
-                                "SELECT 1 FROM ingest_views WHERE lineage=? AND view_seq=? AND kind='emission'",
-                                (lineage, seq)).fetchone() is not None
+                            committed = readback_matches()
                 except BaseException:
                     pass  # Unknown commit state registers conservatively.
             if not committed:

@@ -896,6 +896,65 @@ def test_window_7_exit_interrupt_registers_only_without_successful_commit(engine
     assert_next_live_candidate(engine, monkeypatch)
 
 
+@pytest.mark.parametrize("peer_shape", ["different_digest", "different_index", "extra", "missing", "exact"])
+def test_window_7_reused_sequence_checks_exact_write(engines, monkeypatch, peer_shape):
+    engine = engines()
+    before = prepare_path(engine, monkeypatch)
+    peer = _engine(Path(engine._store.db_path).parent)
+    interrupt = KeyboardInterrupt("window 7 reused sequence sentinel")
+    scope, insert = engine._emission_owner, ledger.insert_emissions
+    attempted, peer_rows = {}, []
+
+    def interrupt_after_insert(conn, lineage, seq, rows):
+        insert(conn, lineage, seq, rows)
+        attempted.update(lineage=lineage, seq=seq, rows=copy.deepcopy(rows))
+        raise interrupt
+
+    @contextmanager
+    def rollback_then_peer_commit(*args, **kwargs):
+        try:
+            with scope(*args, **kwargs) as value:
+                yield value
+        except KeyboardInterrupt:
+            assert not engine._store._conn.in_transaction
+            assert emissions(engine) == emission_views(engine) == []
+            peer_rows.extend(copy.deepcopy(attempted["rows"]))
+            if peer_shape == "different_digest":
+                peer_rows[0]["descriptor_digest"] = "peer digest"
+            elif peer_shape == "different_index":
+                peer_rows[0]["output_index"] += 1
+            elif peer_shape == "extra":
+                peer_rows.append(dict(peer_rows[0], output_index=peer_rows[-1]["output_index"] + 1))
+            elif peer_shape == "missing":
+                peer_rows.clear()
+            with peer._emission_owner(SALT) as (conn, reason):
+                assert reason is None
+                seq = ledger.next_view_seq(conn)
+                assert seq == attempted["seq"]
+                insert(conn, attempted["lineage"], seq, peer_rows)
+                ledger.write_view(conn, SALT, attempted["lineage"], "emission", "proposed", [], view_seq=seq)
+            raise
+
+    try:
+        assert peer._store._conn is not engine._store._conn
+        with monkeypatch.context() as patch:
+            patch.setattr(engine, "_emission_owner", rollback_then_peer_commit)
+            patch.setattr(ledger, "insert_emissions", interrupt_after_insert)
+            with pytest.raises(KeyboardInterrupt) as caught:
+                engine.compress(before, current_tokens=100, force=True)
+        assert caught.value is interrupt
+        view = emission_views(engine)[0]
+        assert (view["lineage"], view["view_seq"]) == (attempted["lineage"], attempted["seq"])
+        assert len(emissions(engine)) == len(peer_rows)
+        if peer_shape == "exact":
+            assert not pending(engine)
+        else:
+            assert len(pending(engine)) == 1
+            assert pending(engine)[0]["rows"] == attempted["rows"]
+    finally:
+        peer.shutdown()
+
+
 @pytest.mark.parametrize("error", [KeyboardInterrupt, pytest.param(asyncio.CancelledError, id="cancelled")])
 def test_window_7_open_transaction_skips_readback_and_registers(engines, monkeypatch, error):
     engine = engines()
