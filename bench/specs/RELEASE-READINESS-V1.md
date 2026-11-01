@@ -44,8 +44,9 @@ its rc1 is cut, and the gauntlet runs once for the whole train, not once per fix
    before the respin is cut: a CI dispatch on the branch of the PR the respin carries (on a patch train, the
    maintenance-branch PR), with the host jobs in parallel, about 20 minutes. A failure that the previous GA's run of
    the same matrix on the same host build does not show stops the cut; a matched failure follows the no-new-regression
-   rule (the same failing test ids on the previous GA's run, plus a tracked defect). (v0.29.1-rc3's fix passed its own
-   suites; only rc3's matrix found the regression it caused, #2128.)
+   rule (the same failing test ids on the previous GA's run, plus a tracked defect), and without that tracked defect
+   it stops the cut. (v0.29.1-rc3's fix passed its own suites; only rc3's matrix found the regression it caused,
+   #2128.)
    Carry-forward rule (every receipt binds an exact tree, so carrying needs proof): **Phase B
    re-runs on every respin** (it is diff-scoped by definition). Phases A and C may carry a prior
    rc's receipt ONLY when the rcN→rcN+1 diff touches nothing outside bench/, docs/, tests/, and
