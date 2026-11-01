@@ -16,6 +16,7 @@ import zlib
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -853,5 +854,22 @@ def test_a_chunk_row_the_ledger_cannot_add_fails_loudly(tmp_path, home, hermes, 
             cc.capture_files(store, lineage)
         assert store.connection.execute("SELECT COUNT(*) FROM capture_events WHERE source_kind = 'file'"
                                         ).fetchone()[0] == 0
+    finally:
+        store.close()
+
+
+def test_a_purged_session_is_never_captured_again(tmp_path, home, hermes):
+    """The cleanup purge (a scope table, with no arguments of its own) marks its sessions
+    forgotten like a single delete does, so the capture writer never reads them again."""
+    from hermes_lcm.command import _delete_clean_candidates_atomically
+
+    lineage = cc.Lineage("s1", None, _transcript(tmp_path, CONVERSATION[:1]))
+    store = _open(home, hermes)
+    try:
+        cc.drain(store, lineage)
+        _delete_clean_candidates_atomically(SimpleNamespace(_store=store, _session_id=""), {"s1"})
+        assert store.read_metadata_json("capture:forgotten:s1")
+        assert cc.drain(store, lineage) == "forgotten"
+        assert store.connection.execute("SELECT COUNT(*) FROM capture_events").fetchone()[0] == 0
     finally:
         store.close()
