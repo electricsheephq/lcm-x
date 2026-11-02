@@ -590,7 +590,7 @@ def test_a_fresh_worker_loads_the_chunk_model_before_its_first_slice(tmp_path, h
         with closing(sqlite3.connect(database)) as conn:
             late_rows = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = 's2'").fetchone()[0]
         slices.append((time.monotonic(), bool(fake_fastembed.models), late_rows,
-                       slice_state["capture_budget_end"] - cc.EMBED_BUDGET_S, slice_state.get("model_load_s")))
+                       slice_state["capture_budget_end"], slice_state.get("model_load_s")))
         return real_pass(database, passed_config, slice_state=slice_state)
 
     monkeypatch.setattr(cc, "run_incremental_embedding_pass", observed)
@@ -598,8 +598,62 @@ def test_a_fresh_worker_loads_the_chunk_model_before_its_first_slice(tmp_path, h
     assert report["complete"] and report["records"] == 2 and report["vectors"] == 2
     [(load_start, load_end)] = fake_fastembed.loads
     assert slices and all(loaded and late_rows == 1 for _, loaded, late_rows, _, _ in slices)
-    assert load_end <= slices[0][0] and all(budget_start >= load_end for _, _, _, budget_start, _ in slices)
+    assert load_end <= slices[0][0] and slices[0][3] - slices[0][0] > cc.EMBED_BUDGET_S - 0.5  # the load used none
     assert all(load_end - load_start <= load_s < load_end - load_start + 1.0 for *_, load_s in slices)
+
+
+def test_a_round_after_the_budget_ran_out_loads_no_model(tmp_path, home, hermes, monkeypatch, fake_fastembed):
+    """No slice can run once the budget has run out, so a later drain round neither searches for
+    a chunk nor loads the model."""
+    config = LCMConfig(embeddings_enabled=True, embedding_provider="fastembed")
+    hook = _fresh_worker_after(tmp_path, home, hermes, fake_fastembed, config, CONVERSATION[2])  # a tool result
+    late = _transcript(tmp_path, [_entry("user", "v1", "late", session="s2")], session="s2")
+    probes, real_pass, real_load = [], cc.run_incremental_embedding_pass, cc._load_chunk_model
+
+    def observed(database, passed_config, *, slice_state):
+        if not cc.pending(home):
+            _record(hook, home, late, session="s2")  # the next round has a chunk to embed
+            time.sleep(0.6)  # and starts after the budget ran out
+        return real_pass(database, passed_config, slice_state=slice_state)
+
+    def load(database, passed_config):
+        probes.append(database)
+        return real_load(database, passed_config)
+
+    monkeypatch.setattr(cc, "EMBED_BUDGET_S", 0.5)
+    monkeypatch.setattr(cc, "run_incremental_embedding_pass", observed)
+    monkeypatch.setattr(cc, "_load_chunk_model", load)
+    report = cc.run_worker(home, config=config, hermes_home=hermes, settle_s=0)
+    assert report["complete"] and report["records"] == 2 and report["embedding"] == "budget"
+    assert len(probes) == 1 and fake_fastembed.loads == [] and not fake_fastembed.models
+    with closing(sqlite3.connect(home / "lcm.db")) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = 's2'").fetchone()[0] == 1
+
+
+def test_the_budget_covers_the_discovery_but_not_the_model_load(tmp_path, home, hermes, monkeypatch,
+                                                                fake_fastembed):
+    from hermes_lcm import command
+
+    config = LCMConfig(embeddings_enabled=True, embedding_provider="fastembed")
+    _fresh_worker_after(tmp_path, home, hermes, fake_fastembed, config, CONVERSATION[-1])
+    clock, starts, real_discovery = [100.0], [], command._chunk_pending_rows
+
+    def discovery(*args, **kwargs):
+        clock[0] += 1.0  # a slow discovery
+        return real_discovery(*args, **kwargs)
+
+    def sliced(database, passed_config, *, slice_state):
+        starts.append(clock[0])
+        clock[0] += 1.0
+        return _embedding_slice(slice_state, "chunks=complete:1", vectors=1, again=True)
+
+    fake_fastembed.during.append(lambda: clock.__setitem__(0, clock[0] + 3.0))  # a slow load
+    monkeypatch.setattr(command, "_chunk_pending_rows", discovery)
+    monkeypatch.setattr(cc, "run_incremental_embedding_pass", sliced)
+    monkeypatch.setattr(cc, "time", SimpleNamespace(monotonic=lambda: clock[0], time=time.time, sleep=time.sleep))
+    report = cc.run_worker(home, config=config, hermes_home=hermes, settle_s=0)
+    assert report["embedding"] == "budget" and len(fake_fastembed.loads) == 1
+    assert starts == [104.0 + n for n in range(7)]  # 8 s from 100.0 less the 1 s discovery; the 3 s load is extra
 
 
 def test_a_worker_with_no_chunk_to_embed_loads_no_model(tmp_path, home, hermes, fake_fastembed):

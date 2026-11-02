@@ -994,8 +994,9 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
 def _embed_after_drain(home: Path, database: Path, store: MessageStore, config: Any,
                        deadline: Optional[float], before: Optional[int], state: dict) -> tuple[str, int]:
     """Catch up local vectors in slices, yielding to capture and the run's budget. The chunk model
-    loads before the first slice and the budget, so a slice is embedding only and a record spooled
-    during the load is captured before the first batch."""
+    loads before the first slice and outside the budget, so a slice is embedding only and a record
+    spooled during the load is captured before the first batch; once the budget has run out, no
+    round searches for a chunk or loads the model."""
     if deadline is not None:
         return "skipped_bounded", 0
     if config is None or not config.embeddings_enabled:
@@ -1009,9 +1010,10 @@ def _embed_after_drain(home: Path, database: Path, store: MessageStore, config: 
         return "skipped_transaction", 0
     if store.connection.execute("SELECT MAX(store_id) FROM messages").fetchone()[0] == before:
         return "skipped_idle", 0
-    if state.get("model_load_s") is None:
-        state["model_load_s"] = _load_chunk_model(database, config)
     end = state.setdefault("capture_budget_end", time.monotonic() + EMBED_BUDGET_S)
+    if state.get("model_load_s") is None and time.monotonic() < end:
+        state["model_load_s"] = _load_chunk_model(database, config)
+        end = state["capture_budget_end"] = end + (state["model_load_s"] or 0.0)  # the load is timed apart
     token, vectors = "budget", 0
     try:
         while time.monotonic() < end:
