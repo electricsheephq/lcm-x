@@ -521,7 +521,8 @@ def test_the_cache_fix_fails_open(env, tmp_path):
     assert {name: (done.returncode, done.stdout, done.stderr) for name, done in runs.items()} == {
         name: (0, "", "") for name in runs}
     assert [row["outcome"] for row in _log(env)] == ["worker_running"] * 3
-    assert not (locked / "absent").exists() and not (locked / "home" / "Library").exists()
+    if os.geteuid() != 0:  # root writes through the 0o500 folders
+        assert not (locked / "absent").exists() and not (locked / "home" / "Library").exists()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Apple's system Python exists only on macOS")

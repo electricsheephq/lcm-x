@@ -349,7 +349,7 @@ hook entry handles:
   loads no `subprocess`, and with a set-up runtime no `shutil` either (#2141). Under `-I`, Apple's
   system Python (Xcode or the Command Line Tools) loses its bytecode cache in
   `~/Library/Caches/com.apple.python` and stops writing one, so each start compiled the standard
-  library from source and took about twice as long. Before any other import, the hook gives that
+  library from source and took about twice as long. Before its standard-library imports, the hook gives that
   Python back the cache and the writing it has without `-I`; any other Python keeps its own. The worker and the MCP
   server need Python 3.11 or newer with LCM-X's dependencies: `LCMX_PYTHON`, else a venv in the
   plugin's data directory (`CLAUDE_PLUGIN_DATA`, which survives plugin updates and is removed on

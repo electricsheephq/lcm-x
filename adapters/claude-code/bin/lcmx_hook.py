@@ -29,7 +29,7 @@ def _apple_bytecode_cache(platform: str, base_prefix: str, prefix: Optional[str]
     return None
 
 
-if sys.platform == "darwin":  # before the first import that would compile from source
+if sys.platform == "darwin":  # before the standard-library imports below; only __future__ precedes it
     import posix  # loaded at start-up; os is not
 
     _cache = _apple_bytecode_cache(sys.platform, sys.base_prefix, sys.pycache_prefix, posix.environ)
