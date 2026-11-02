@@ -21,18 +21,20 @@ def _apple_bytecode_cache(platform: str, base_prefix: str, prefix: Optional[str]
     that off and stops writing bytecode, so every start compiled json, re, pathlib and the rest
     from source, which doubled the hook's time (#2141). This gives back the cache and the
     writing that Apple's Python has without -I (none if PYTHONDONTWRITEBYTECODE is set), or
-    None: any other Python keeps its own. A cache it cannot write only costs the compile."""
+    None: any other Python keeps its own. A relative HOME gets none, so no cache lands in the
+    project the hook runs in. A cache it cannot write only costs the compile."""
     home = environ.get(b"HOME")
-    if platform == "darwin" and prefix is None and "/Python3.framework/" in base_prefix and home:
+    if platform == "darwin" and prefix is None and "/Python3.framework/" in base_prefix and home and home.startswith(b"/"):
         cache = home.decode(sys.getfilesystemencoding(), "surrogateescape") + "/Library/Caches/com.apple.python"
         return cache, bool(environ.get(b"PYTHONDONTWRITEBYTECODE"))
     return None
 
 
-if sys.platform == "darwin":  # before the standard-library imports below; only __future__ precedes it
+if sys.platform == "darwin":  # before the hook's own imports; __future__ and start-up modules come first
     import posix  # loaded at start-up; os is not
 
-    _cache = _apple_bytecode_cache(sys.platform, sys.base_prefix, sys.pycache_prefix, posix.environ)
+    # pycache_prefix exists from Python 3.8; an older one keeps its own cache.
+    _cache = _apple_bytecode_cache(sys.platform, sys.base_prefix, getattr(sys, "pycache_prefix", ""), posix.environ)
     if _cache:
         sys.pycache_prefix, sys.dont_write_bytecode = _cache
 

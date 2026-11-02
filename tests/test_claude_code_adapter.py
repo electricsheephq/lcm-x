@@ -456,6 +456,7 @@ HOME_ONLY = {b"HOME": b"/Users/u"}
     ("darwin", APPLE_PREFIX, None, {**HOME_ONLY, b"PYTHONDONTWRITEBYTECODE": b"1"}, (APPLE_CACHE, True)),
     ("darwin", APPLE_PREFIX, "/a/cache/already/set", HOME_ONLY, None),
     ("darwin", APPLE_PREFIX, None, {}, None),
+    ("darwin", APPLE_PREFIX, None, {b"HOME": b"relative/home"}, None),
     ("darwin", "/Library/Frameworks/Python.framework/Versions/3.12", None, HOME_ONLY, None),
     ("darwin", "/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12", None, HOME_ONLY, None),
     ("linux", "/usr", None, {b"HOME": b"/home/u"}, None),
