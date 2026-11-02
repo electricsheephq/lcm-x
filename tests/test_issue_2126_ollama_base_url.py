@@ -1,6 +1,5 @@
 """Tests for issue #2126: default Ollama base URL uses 127.0.0.1 to avoid IPv6 connect delay on Windows."""
 
-import pytest
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.embedding_provider import (
     OllamaProvider,
