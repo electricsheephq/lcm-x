@@ -417,7 +417,7 @@ These ship with the P2 flip:
 - test_restart_after_shrunk_resend keeps its pin as an upper bound. The ledger-era target is 0 re-stores.
 
 ## 5. Phases (v0.30.0 ceiling 11-18; ships when the gate passes)
-- **P0, refactor moves: NOT prerequisites (M13).** The cycle break (#2037) and the scheduler-family move land in the refactor window after v0.29.2 if they are ready. P1 and P2 do not wait for them; whichever lands second rebases.
+- **P0, refactor moves: NOT prerequisites (M13).** The cycle break (#2037) and the scheduler-family move land in the refactor window, which opens at the v0.29.2-rc1 tag ([process/refactor-window.md](process/refactor-window.md)), if they are ready. P1 and P2 do not wait for them; whichever lands second rebases.
 - **P1, ledger and atomic ingest (M15).**
   - Contents:
     - the ledger schema (docs/process/schema-changes.md);
