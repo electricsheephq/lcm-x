@@ -41,6 +41,7 @@ from .dag import SummaryDAG
 from .db_bootstrap import mark_migration_step_complete
 from .config import embedding_provider_id
 from .embedding_maintenance import run_incremental_embedding_pass
+from .embedding_provider import FastembedProvider
 from .externalize import extract_externalized_refs, load_externalized_payload
 from .store import MessageStore, register_session_purge
 
@@ -992,7 +993,9 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
 
 def _embed_after_drain(home: Path, database: Path, store: MessageStore, config: Any,
                        deadline: Optional[float], before: Optional[int], state: dict) -> tuple[str, int]:
-    """Catch up local vectors in slices, yielding to capture and the run's budget."""
+    """Catch up local vectors in slices, yielding to capture and the run's budget. The chunk model
+    loads before the first slice and the budget, so a slice is embedding only and a record spooled
+    during the load is captured before the first batch."""
     if deadline is not None:
         return "skipped_bounded", 0
     if config is None or not config.embeddings_enabled:
@@ -1006,6 +1009,8 @@ def _embed_after_drain(home: Path, database: Path, store: MessageStore, config: 
         return "skipped_transaction", 0
     if store.connection.execute("SELECT MAX(store_id) FROM messages").fetchone()[0] == before:
         return "skipped_idle", 0
+    if state.get("model_load_s") is None:
+        state["model_load_s"] = _load_chunk_model(database, config)
     end = state.setdefault("capture_budget_end", time.monotonic() + EMBED_BUDGET_S)
     token, vectors = "budget", 0
     try:
@@ -1049,6 +1054,34 @@ def _embed_after_drain(home: Path, database: Path, store: MessageStore, config: 
             or (token == "auto_register_unavailable" and config.embeddings_enabled_explicit)):
         _log_failure(home, "embed", token)
     return token, vectors
+
+
+def _load_chunk_model(database: Path, config: Any) -> Optional[float]:
+    """Load the chunk model when the pass's own read-only discovery finds a chunk to embed, and
+    return the load's seconds. None, with nothing loaded, when no chunk waits, when no chunk
+    profile exists yet (registering one loads the model in a slice of its own), or when the load
+    fails (the pass then reports its own outcome)."""
+    from . import command  # lazy: command imports most of the plugin
+    from .chunking import normalize_content_policy
+
+    try:
+        conn = command._embedding_read_connection(database)
+        try:
+            profile = command._chunk_current_profile(conn)
+            if profile is None or embedding_provider_id(str(profile["provider"])) != "fastembed":
+                return None
+            policy = normalize_content_policy(getattr(config, "embedding_content_policy", "conversational"))
+            _, waiting, _ = command._chunk_pending_rows(conn, str(profile["identity_hash"]), policy, 1,
+                                                        incremental=True)
+        finally:
+            conn.close()
+        if not waiting:
+            return None
+        started = time.monotonic()
+        FastembedProvider(str(profile["model_name"]))._ensure_local()  # cached files only, never a download
+        return time.monotonic() - started
+    except Exception:  # noqa: BLE001 - embedding never changes capture's result
+        return None
 
 
 def remember_session(store: MessageStore, record: dict) -> None:
