@@ -259,7 +259,7 @@ class IdentityAnchorMixin:
             logger.debug("LCM identity-anchor host UID shadow would reject alias edges: count=%d", count)
 
     def _identity_anchor_prematch(self, messages, identity_messages, cursor: int, audit_from: Optional[int] = None,
-                                  *, accepted_prefix: int = 0) -> Dict[str, Any]:
+                                  *, accepted_prefix: int = 0, ledger_pairs=None, ledger_today=None) -> Dict[str, Any]:
         """Rows at or after ``cursor`` recognised as replays of stored occurrences, plus the R3
         remainders to store, the relations to record and the R5 backfills. ``audit_from``: the host
         changed its list before the cursor from there (a positional cursor no longer proves those rows
@@ -276,6 +276,8 @@ class IdentityAnchorMixin:
         if rewritten:  # R6: a rewritten host object is examined like a new row (a merge survivor, ...)
             start = min(start, min(rewritten))
         start = max(start, accepted_prefix)
+        ledger_pairs = ledger_pairs or {}
+        fetch_start = min(start, ledger_today) if ledger_today is not None else start
         if not identity_anchor_enabled() or not self._session_id or start >= n:
             return plan
         stamps = {}
@@ -283,7 +285,7 @@ class IdentityAnchorMixin:
             observed_at = _normalize_observed_at(messages[idx].get("timestamp"))
             if observed_at is not None:
                 stamps[idx] = observed_at
-        wanted = {stamps[idx] for idx in range(start, n) if idx in stamps}
+        wanted = {stamps[idx] for idx in range(fetch_start, n) if idx in stamps}
         if not wanted and start >= cursor:
             return plan
         # #633: nothing stamped from ``start`` on still leaves a changed prefix to audit (an unstamped row).
@@ -293,6 +295,9 @@ class IdentityAnchorMixin:
         ) if wanted else []
         self._load_host_rewrite_overrides(rows)
         plan["stamped_users"] = {int(row["store_id"]) for row in rows if row.get("role") == "user"}
+        canonical_stamps = getattr(rows, "canonical_stamps", None)
+        consumed = {int(row["store_id"]) for row in ledger_pairs.values()}
+        rows = [row for row in rows if int(row["store_id"]) not in consumed]
         by_stamp: dict[float, list] = defaultdict(list)
         for row in rows:
             by_stamp[float(row["observed_at"])].append((row, self._stored_row_forms(row)))
@@ -329,8 +334,7 @@ class IdentityAnchorMixin:
             return Counter((stamps.get(i), identity_at(i)) for i in range(n)  # unstamped: (None, form)
                            if i != idx and (matched_too or i not in matched) and identity_at(i) is not None)
 
-        consumed: set[int] = set()
-        matched: dict[int, list] = {}
+        matched: dict[int, list] = {idx: [row] for idx, row in ledger_pairs.items()}
         emitted = None  # #1000: the view's carriers LCM emitted, still where it emitted them; read once
         carriers = [d for d in (proof.get("emissions") or ()) if isinstance(d, dict) and d.get("kind") == "carrier"
                     ] if proof else []
@@ -346,7 +350,7 @@ class IdentityAnchorMixin:
         # R1: per key, the host view's occurrences consume the stored ones in order; the rest are new.
         forms_of = {id(r): forms for pairs in by_stamp.values() for r, forms in pairs}
         occurrences = [(idx, (stamps[idx], identity_at(idx))) for idx in sorted(stamps)
-                       if stamps[idx] in wanted and identity_at(idx) is not None]
+                       if idx not in ledger_pairs and stamps[idx] in wanted and identity_at(idx) is not None]
         def keys_of(r):
             return {(float(r["observed_at"]), form) for form in forms_of[id(r)]}
         ws_index = None
@@ -372,13 +376,15 @@ class IdentityAnchorMixin:
             return keys
 
         self._observe_alias_uid_conflicts(
-            rows, getattr(rows, "canonical_stamps", None), diag_keys_of, occurrences, identity_messages)
+            rows, canonical_stamps, diag_keys_of, occurrences, identity_messages)
         for store_id, idx in _match_occurrences(rows, keys_of, occurrences).items():
             consumed.add(store_id)
             matched[idx] = [next(r for r, _forms in by_stamp[stamps[idx]] if int(r["store_id"]) == store_id)]
             if idx >= start:
                 plan["replayed"].add(idx)
         for idx in range(start, n if wanted else start):  # nothing stamped: only the #633 audit below
+            if idx in ledger_pairs:
+                continue
             identity = identity_at(idx) if idx in stamps and idx not in plan["replayed"] else None
             if identity is not None and identity[0] == "user":
                 group = emitted_carrier(idx)  # #1000: Hermes 0.21.5 stamps the adopted carrier with its own clock;
@@ -405,7 +411,7 @@ class IdentityAnchorMixin:
                         break
                     self._identity_anchor_take(k, [row], consumed, matched, plan)
         for idx in range(cursor, n):  # a cold restart can have no positional prefix to audit
-            if idx in plan["replayed"] or idx not in stamps or messages[idx].get("role") != "user":
+            if idx in ledger_pairs or idx in plan["replayed"] or idx not in stamps or messages[idx].get("role") != "user":
                 continue
             copies = [row for row, forms in by_stamp.get(stamps.get(idx - 1), ())
                       if int(row["store_id"]) not in consumed and identity_at(idx) in forms]
@@ -428,7 +434,7 @@ class IdentityAnchorMixin:
                     self._identity_anchor_take(idx, recovery, consumed, matched, plan)
         if start < cursor:
             self._identity_anchor_audit(messages, identity_messages, cursor, start, stamps, identity_at, consumed, plan,
-                                        matched)
+                                        matched, excluded=ledger_pairs)
         self._identity_anchor_tool_segments(messages, plan["cursor"], plan["replayed"], matched, plan.get("positional", ()))
         for idx in list(plan["remainders"]):
             if idx in plan["replayed"]:
@@ -443,11 +449,14 @@ class IdentityAnchorMixin:
             for idx in range(plan["cursor"], min(plan["replayed"])):
                 if self._identity_is_lcm_scaffold(identity_messages[idx], verified=True):
                     plan["replayed"].add(idx)
-        plan["matched"] = {**plan.get("matched", {}), **matched}  # read only by the v0.26.0 host-uid shadow
+        # Seeded run pairs support local carried-stamp proof only: the ledger
+        # writer and uid shadow must still see an ordinary unbound prefix.
+        plan["matched"] = {idx: rows for idx, rows in {**plan.get("matched", {}), **matched}.items()
+                           if idx not in ledger_pairs}
         return plan
 
     def _identity_anchor_audit(self, messages, identity_messages, cursor, start, stamps, identity_at, consumed, plan,
-                               matched) -> None:
+                               matched, *, excluded=()) -> None:
         """Rows in ``[start, cursor)`` of a list the host changed before the cursor: a stamped host row,
         or an unstamped user row the host inserted there (#633: a /steer row), that
         no stored occurrence explains (key, witness, alias, or a stored copy of its content -- up to
@@ -490,6 +499,8 @@ class IdentityAnchorMixin:
         missed, deferred, audited = [], [], set()
         inserted = None
         for idx in range(start, cursor):
+            if idx in excluded:
+                continue
             identity = identity_at(idx)
             if idx not in stamps:  # #633: an unstamped user row the host inserted (a /steer), not a rewrite
                 if identity is None or identity[0] != "user":

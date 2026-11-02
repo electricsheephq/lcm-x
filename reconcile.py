@@ -3215,6 +3215,7 @@ class ReconcileMixin:
         self,
         messages: List[Dict[str, Any]],
         cursor: int,
+        *, consumed_store_ids=(),
     ) -> set[int]:
         """Find exact durable tool pairs replayed after a preserved new delta.
 
@@ -3257,6 +3258,7 @@ class ReconcileMixin:
             return set()
         tail_limit = min(max(len(messages) * 4, 64), session_count)
         stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
+        stored_rows = [row for row in stored_rows if row["store_id"] not in consumed_store_ids]
         stored_identity_counts = Counter(
             identity
             for identity in (

@@ -9,7 +9,8 @@ recording the supersedes link remains the caller's job.
 from __future__ import annotations
 
 from bisect import bisect_left
-from collections import defaultdict
+from collections import Counter, defaultdict, deque
+import json
 import struct
 import threading
 import time
@@ -405,6 +406,155 @@ def newest_view(conn, lineage, kind):
     rows = _rows(conn.execute("SELECT * FROM ingest_views WHERE lineage=? AND kind=? ORDER BY view_seq DESC LIMIT 1",
                               (lineage, kind)))
     return rows[0] if rows else None
+
+
+def persisted_lineage(conn, session_id, fallback):
+    """Use the same session lineage preference as the writers."""
+    row = conn.execute("SELECT value FROM ledger_meta WHERE key=?", ("session_lineage:" + str(session_id),)).fetchone()
+    return row[0] if row else fallback
+
+
+# Keep the partial-index predicate verbatim; a subset IN-list forces a sort.
+_COLD_WINDOW = ("SELECT b.*, m.*, b.store_id AS bound_store_id, m.store_id AS row_exists "
+                "FROM occurrence_bindings b LEFT JOIN messages m ON m.store_id=b.store_id "
+                "WHERE b.lineage=? AND b.disposition IN ('stored','migrated','ambiguous') "
+                "AND b.ordinal>? ORDER BY b.ordinal LIMIT ?")
+_COLD_ANCHOR = ("SELECT b.*, m.*, b.store_id AS bound_store_id, m.store_id AS row_exists FROM "
+                "(SELECT * FROM occurrence_bindings INDEXED BY idx_occ_lineage_digest "
+                "WHERE lineage=? AND identity_digest=? LIMIT ?) b "
+                "LEFT JOIN messages m ON m.store_id=b.store_id")
+
+
+def cold_cursor_candidate(conn, *, session_id, attempt, ignored):
+    """Read a bounded, occurrence-proven prefix; never mutate ledger or store.
+
+    The engine owns admission and compares this result with its complete legacy
+    choice. Returned pairs are consumption evidence, not new ledger/uid bindings.
+    """
+    entries, stamps = attempt["entries"], attempt["stamps"]
+    lineage = persisted_lineage(conn, session_id, attempt["lineage"])
+    counts = Counter()
+    ingest = newest_view(conn, lineage, "ingest")
+    emission, reason = emission_candidate(conn, lineage)
+    if reason != "usable":
+        counts["emission_withheld." + reason] += 1
+    if reason == "below_floor" and not conn.execute(
+            "SELECT 1 FROM ledger_meta WHERE key='emission_provenance_floor'").fetchone():
+        counts["emission_no_floor_key"] += 1
+    remaining = 4 * len(entries) + 256
+
+    def read_bindings(sql, params, limit):
+        nonlocal remaining
+        rows = _rows(conn.execute(sql, (*params, limit)))
+        remaining -= len(rows)
+        observations = defaultdict(set)
+        if rows and remaining >= 0:
+            ids = json.dumps([row["occ_id"] for row in rows])
+            for occ, stamp in conn.execute("SELECT occ_id,stamp FROM stamp_observations "
+                                          "WHERE occ_id IN (SELECT value FROM json_each(?))", (ids,)):
+                observations[occ].add(stamp)
+        for row in rows:
+            row["observations"] = observations[row["occ_id"]]
+        return rows
+
+    def eligible(row, entry, stamp, last):
+        if row["disposition"] == "ambiguous":
+            return "ambiguous_disposition"
+        if row["disposition"] not in ("stored", "migrated") or row["ordinal"] is None or row["ordinal"] <= last:
+            return "not_contiguous"
+        if row["row_exists"] is None:
+            return "missing_row"
+        if row["session_id"] != session_id:
+            return "other_session"
+        if row["identity_digest"] != entry.identity_digest:
+            return "not_contiguous"
+        observed = stamp_text(row["observed_at"])
+        if stamp is not None and stamp not in row["observations"]:
+            if row["stamp"] is not None and row["stamp"] != stamp:
+                return "stamp"
+            if observed is not None and observed != stamp:
+                return "observed_at"
+        return None
+
+    def prove(record):
+        nonlocal remaining
+        result = dict(k=0, m=0, pairs={}, kind=record["kind"], view_seq=record["view_seq"])
+        old = decode_entries(record["entries"])
+        size = min(len(entries), len(old))
+        m = common_prefix_len(attempt["chain"][:16 * size], record["prefix_chain"][:16 * size])
+        while m < size:
+            a, b = entries[m], old[m]
+            if (a.identity_digest != b.identity_digest
+                    or a.stamp_digest is not None and b.stamp_digest is not None and a.stamp_digest != b.stamp_digest
+                    or a.uidset_digest is not None and b.uidset_digest is not None and a.uidset_digest != b.uidset_digest):
+                break
+            m += 1
+        result["m"] = m
+        last, anchor, window = 0, True, deque()
+        stop = "record_mismatch" if m < size else "length_end"
+        for i in range(m):
+            entry, ref, stamp = entries[i], old[i], stamp_text(stamps[i])
+            if ref.is_descriptor:
+                # Even exact generated bytes can be a fresh host occurrence.
+                # Check this before ignored rows; no descriptor is proof in P1d.
+                stop = "descriptor"
+                break
+            if ignored[i]:
+                result["k"] = i + 1
+                continue
+            if remaining <= 0 and (anchor or not window):
+                stop = "budget"
+                break
+            row = None
+            if anchor:
+                if ref.ref is not None:
+                    rows = read_bindings(
+                        "SELECT b.*, m.*, b.store_id AS bound_store_id, m.store_id AS row_exists "
+                        "FROM occurrence_bindings b LEFT JOIN messages m ON m.store_id=b.store_id "
+                        "WHERE b.lineage=? AND b.occ_id=? LIMIT ?", (lineage, ref.ref), 1)
+                    row = rows[0] if rows and not eligible(rows[0], entry, stamp, last) else None
+                if row is None:
+                    rows = read_bindings(_COLD_ANCHOR, (lineage, entry.identity_digest), max(0, remaining) + 1)
+                    if remaining < 0:
+                        stop = "budget"
+                        break
+                    rows = [r for r in rows if not eligible(r, entry, stamp, last)]
+                    if len(rows) != 1:
+                        stop = "no_anchor" if not rows else "ambiguous_anchor"
+                        break
+                    row = rows[0]
+                window.clear()
+            else:
+                if not window:
+                    window = deque(read_bindings(_COLD_WINDOW, (lineage, last), min(m - i, remaining)))
+                if not window:
+                    stop = "not_contiguous"
+                    break
+                row = window.popleft()
+                stop = eligible(row, entry, stamp, last)
+                if stop:
+                    break
+                if ref.ref is not None and ref.ref != row["occ_id"]:
+                    stop = "not_contiguous"
+                    break
+            # Contiguity and a NULL eligible stamp prove position, not occurrence.
+            # Every host row needs its own stamp witness or equal known uid sets
+            # on the record's own binding, including continuation rows.
+            if not (stamp is not None and (stamp == row["stamp"] or stamp in row["observations"])
+                    or entry.uidset_digest is not None and entry.uidset_digest == ref.uidset_digest
+                    and ref.ref == row["occ_id"]):
+                stop = "no_occurrence_evidence"
+                break
+            last, anchor = row["ordinal"], False
+            result["pairs"][i] = row
+            result["k"] = i + 1
+            stop = "record_mismatch" if m < size else "length_end"
+        counts["stop." + stop] += 1
+        return result
+
+    runs = [prove(r) for r in (ingest, emission) if r is not None]
+    winner = max(runs, key=lambda r: r["k"], default=dict(k=0, pairs={}))
+    return winner, counts
 
 
 def emission_candidate(conn, lineage):
