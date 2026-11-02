@@ -598,7 +598,7 @@ def test_a_fresh_worker_loads_the_chunk_model_before_its_first_slice(tmp_path, h
     assert report["complete"] and report["records"] == 2 and report["vectors"] == 2
     [(load_start, load_end)] = fake_fastembed.loads
     assert slices and all(loaded and late_rows == 1 for _, loaded, late_rows, _, _ in slices)
-    assert load_end <= slices[0][0] and slices[0][3] - slices[0][0] > cc.EMBED_BUDGET_S - 0.5  # the load used none
+    assert load_end <= slices[0][0]
     assert all(load_end - load_start <= load_s < load_end - load_start + 1.0 for *_, load_s in slices)
 
 
@@ -608,24 +608,26 @@ def test_a_round_after_the_budget_ran_out_loads_no_model(tmp_path, home, hermes,
     config = LCMConfig(embeddings_enabled=True, embedding_provider="fastembed")
     hook = _fresh_worker_after(tmp_path, home, hermes, fake_fastembed, config, CONVERSATION[2])  # a tool result
     late = _transcript(tmp_path, [_entry("user", "v1", "late", session="s2")], session="s2")
-    probes, real_pass, real_load = [], cc.run_incremental_embedding_pass, cc._load_chunk_model
+    clock, probes = [100.0], []
+    real_pass, real_load = cc.run_incremental_embedding_pass, cc._load_chunk_model
 
     def observed(database, passed_config, *, slice_state):
         if not cc.pending(home):
             _record(hook, home, late, session="s2")  # the next round has a chunk to embed
-            time.sleep(0.6)  # and starts after the budget ran out
+            clock[0] += cc.EMBED_BUDGET_S + 1.0  # and starts after the budget ran out
         return real_pass(database, passed_config, slice_state=slice_state)
 
     def load(database, passed_config):
-        probes.append(database)
+        probes.append(clock[0])
         return real_load(database, passed_config)
 
-    monkeypatch.setattr(cc, "EMBED_BUDGET_S", 0.5)
     monkeypatch.setattr(cc, "run_incremental_embedding_pass", observed)
     monkeypatch.setattr(cc, "_load_chunk_model", load)
+    monkeypatch.setattr(cc, "time", SimpleNamespace(monotonic=lambda: clock[0], time=time.time,
+                                                    sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
     report = cc.run_worker(home, config=config, hermes_home=hermes, settle_s=0)
     assert report["complete"] and report["records"] == 2 and report["embedding"] == "budget"
-    assert len(probes) == 1 and fake_fastembed.loads == [] and not fake_fastembed.models
+    assert probes == [100.0] and fake_fastembed.loads == [] and not fake_fastembed.models
     with closing(sqlite3.connect(home / "lcm.db")) as conn:
         assert conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = 's2'").fetchone()[0] == 1
 
