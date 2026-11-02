@@ -442,6 +442,119 @@ def test_a_hook_that_finds_a_worker_running_imports_nothing_it_does_not_need(env
     assert _log(env)[-1]["outcome"] == "worker_running"
 
 
+APPLE_PREFIX = "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9"
+APPLE_CACHE = "/Users/u/Library/Caches/com.apple.python"
+
+
+HOME_ONLY = {b"HOME": b"/Users/u"}
+
+
+@pytest.mark.parametrize(("platform", "base_prefix", "prefix", "environ", "expected"), [
+    ("darwin", APPLE_PREFIX, None, HOME_ONLY, (APPLE_CACHE, False)),
+    ("darwin", "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9", None,
+     HOME_ONLY, (APPLE_CACHE, False)),
+    ("darwin", APPLE_PREFIX, None, {**HOME_ONLY, b"PYTHONDONTWRITEBYTECODE": b"1"}, (APPLE_CACHE, True)),
+    ("darwin", APPLE_PREFIX, "/a/cache/already/set", HOME_ONLY, None),
+    ("darwin", APPLE_PREFIX, None, {}, None),
+    ("darwin", "/Library/Frameworks/Python.framework/Versions/3.12", None, HOME_ONLY, None),
+    ("darwin", "/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12", None, HOME_ONLY, None),
+    ("linux", "/usr", None, {b"HOME": b"/home/u"}, None),
+])
+def test_only_apples_python_gets_its_bytecode_cache_back(hook, platform, base_prefix, prefix, environ, expected):
+    """REGRESSION (#2154): under -I, Apple's system Python loses its bytecode cache, stops writing
+    one and compiles every module the hook imports from source, which doubled the hook's time.
+    Only that Python, with no cache set and a home to put one in, gets back the cache and the
+    writing it has without -I; any other keeps its own."""
+    assert hook._apple_bytecode_cache(platform, base_prefix, prefix, environ) == expected
+
+
+def _worker_running_lane(env, tmp_path) -> tuple[dict, str]:
+    """A hook that reaches the lock probe: a set-up runtime, a worker script and a transcript."""
+    lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(_package(tmp_path))}
+    payload = {"hook_event_name": "UserPromptSubmit", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    Path(env["LCMX_CC_HOME"]).mkdir(parents=True)
+    return lane, json.dumps(payload)
+
+
+def test_any_other_python_keeps_its_own_bytecode_cache(env, tmp_path):
+    """The cache fix leaves a Python that is not Apple's alone (here the one running the tests):
+    run with the registered flags, it reads nothing from and writes nothing to Apple's cache."""
+    lane, payload = _worker_running_lane(env, tmp_path)
+    user = tmp_path / "user"
+    user.mkdir()
+    with open(Path(env["LCMX_CC_HOME"]) / "capture.lock", "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        done = subprocess.run([sys.executable, "-I", "-S", "-v", str(PLUGIN / "bin" / "lcmx_hook.py")], input=payload,
+                              env={**lane, "HOME": str(user)}, capture_output=True, text=True, timeout=60)
+    assert (done.returncode, done.stdout) == (0, "")
+    assert "# code object from" in done.stderr  # the import log is complete
+    assert "com.apple.python" not in done.stderr and not (user / "Library").exists()
+    assert _log(env)[-1]["outcome"] == "worker_running"
+
+
+def test_the_cache_fix_fails_open(env, tmp_path):
+    """Run as if on Apple's Python, a hook whose cache cannot be written (a home it cannot write,
+    under a folder it cannot write) or that has no home still spools and prints nothing: a cache
+    it cannot use only costs the compile."""
+    lane, payload = _worker_running_lane(env, tmp_path)
+    as_apple = ("import sys; sys.platform = 'darwin'; sys.base_prefix = %r; sys.pycache_prefix = None; "
+                "path = sys.argv[1]; sys.argv = [path]; "
+                "exec(compile(open(path).read(), path, 'exec'), {'__name__': '__main__', '__file__': path})"
+                % APPLE_PREFIX)
+    locked = tmp_path / "locked"
+    (locked / "home").mkdir(parents=True)
+    homes = {"unwritable": locked / "home", "missing": locked / "absent"}
+    try:
+        for folder in (locked / "home", locked):
+            folder.chmod(0o500)
+        with open(Path(env["LCMX_CC_HOME"]) / "capture.lock", "a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            runs = {name: subprocess.run([sys.executable, "-I", "-S", "-c", as_apple, str(PLUGIN / "bin" / "lcmx_hook.py")],
+                                         input=payload, env={**lane, "HOME": str(home)}, capture_output=True, text=True,
+                                         timeout=60) for name, home in homes.items()}
+            runs["no home"] = subprocess.run([sys.executable, "-I", "-S", "-c", as_apple,
+                                              str(PLUGIN / "bin" / "lcmx_hook.py")], input=payload, env=lane,
+                                             capture_output=True, text=True, timeout=60)
+    finally:
+        for folder in (locked, locked / "home"):
+            folder.chmod(0o700)
+    assert {name: (done.returncode, done.stdout, done.stderr) for name, done in runs.items()} == {
+        name: (0, "", "") for name in runs}
+    assert [row["outcome"] for row in _log(env)] == ["worker_running"] * 3
+    assert not (locked / "absent").exists() and not (locked / "home" / "Library").exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Apple's system Python exists only on macOS")
+def test_apples_python_reads_its_bytecode_cache_under_the_registered_flags(env, tmp_path):
+    """REGRESSION (#2154): run with the registered -I -S, Apple's system Python compiled json and
+    the rest from source on every start. With a home, the second start reads them from the cache
+    there; with no home, or one it cannot write, the hook still spools and prints nothing."""
+    if subprocess.run(["xcode-select", "-p"], capture_output=True).returncode != 0:
+        pytest.skip("no developer tools, so /usr/bin/python3 is only an installer stub")
+    probe = subprocess.run(["/usr/bin/python3", "-c", "import sys; print(sys.base_prefix)"], capture_output=True,
+                           text=True, timeout=60)
+    if "/Python3.framework/" not in probe.stdout:
+        pytest.skip("/usr/bin/python3 is not Apple's framework Python")
+    lane, payload = _worker_running_lane(env, tmp_path)
+    user, unwritable = tmp_path / "user", tmp_path / "unwritable"
+    user.mkdir()
+    unwritable.mkdir(mode=0o500)
+    argv = ["/usr/bin/python3", "-I", "-S", "-v", str(PLUGIN / "bin" / "lcmx_hook.py")]
+    try:
+        with open(Path(env["LCMX_CC_HOME"]) / "capture.lock", "a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            runs = [subprocess.run(argv, input=payload, env={**lane, "HOME": str(home)}, capture_output=True, text=True,
+                                   timeout=60) for home in (user, user, unwritable)]
+            runs.append(subprocess.run(argv, input=payload, env=lane, capture_output=True, text=True, timeout=60))
+    finally:
+        unwritable.chmod(0o700)
+    assert [(done.returncode, done.stdout) for done in runs] == [(0, "")] * 4
+    loaded = [line for line in runs[1].stderr.splitlines() if line.startswith("# code object from")
+              and "/json/__init__." in line]
+    assert loaded and str(user / "Library" / "Caches" / "com.apple.python") in loaded[0]
+    assert [row["outcome"] for row in _log(env)] == ["worker_running"] * 4
+
+
 def test_only_a_hook_that_can_start_a_worker_probes_the_lock(hook, env, tmp_path, monkeypatch):
     """REGRESSION: the probe holds the lock for an instant, and a hook or a starting worker that
     meets it gives way. A hook with no runtime or worker script that probed could leave another
