@@ -66,6 +66,19 @@ logged without content and capture catches up on a later run.
 | `PreCompact` | Drain synchronously, bounded to 10 s, only when the store lock is free; it never waits for the lock. If a worker holds it, the hook returns at once (`worker_running`) and the holder takes the spooled record. The hook logs `drained` only for a worker-confirmed complete drain, otherwise `drain_bound` (the worker's deadline ended it), `drain_incomplete` (work left for another reason), `drain_failed:<code>` or `drain_timeout`; any of these but a refused store then starts a detached worker for the rest (`+worker`), or leaves it to the worker that has taken the lock since (`+holder`). The drain captures only; it never embeds. The hook kills a drain still running 2 s after its bound. | Bounded, never on the lock |
 | `SessionEnd` | Spool; start a detached drain and return at once. | No |
 
+`PostToolBatch` is registered `async`, so Claude Code does not wait for it (#2141). The other hooks
+stay synchronous:
+- the worker settles a transcript only after an end event (`Stop`, `StopFailure`, `SubagentStop`,
+  `SessionEnd`, `PreCompact`);
+- a later hook copies how the session started from `SessionStart`'s record, so that record is
+  written first;
+- in `-p`, Claude Code kills an async hook still running when the session exits.
+
+An async hook killed while it writes leaves at most a temporary dotfile, which the worker never
+reads. One that finishes after a later hook replaces that hook's record. If that was a `Stop`, the
+worker skips the settle, and the next run's sweep captures any line the settle would have waited
+for.
+
 ### Spool and worker handshake
 
 Two reviews found a lost wake-up: a hook that fires while the worker finishes its last scan sees the
@@ -323,7 +336,10 @@ hook entry handles:
 
 ## Runtime and failure modes
 
-- The hook entry runs on the system `python3` (3.9 or newer, stdlib only). The worker and the MCP
+- The hook entry runs on the system `python3` (3.9 or newer, stdlib only), started with `-I -S`:
+  the user's `PYTHONPATH`, `PYTHONHOME`, user site-packages and `.pth` files never reach it. Each
+  module loads only on the path that needs it, so a hook that finds the worker running loads
+  neither `subprocess` nor `shutil` (#2141). The worker and the MCP
   server need Python 3.11 or newer with LCM-X's dependencies: `LCMX_PYTHON`, else a venv in the
   plugin's data directory (`CLAUDE_PLUGIN_DATA`, which survives plugin updates and is removed on
   uninstall), else `<home>/venv`.
@@ -436,8 +452,8 @@ LCM-X for Claude Code is its own release unit, versioned by the plugin manifest
     - It unpacks the asset with no Hermes, in two runtime modes: a fresh venv of the running
       Python (3.11 or newer), and that Python found on `PATH` and run with `-I -S`.
     - It runs each hook's registered command from `hooks/hooks.json` through the shell, as Claude
-      Code does, on a synthetic transcript. It then waits for the worker those hooks started; it
-      never runs a worker itself.
+      Code does, on a synthetic transcript, and waits for each, `async` ones included. It then
+      waits for the worker those hooks started; it never runs a worker itself.
     - It passes when every hook run logged a started or running worker, no spool record failed,
       `bundle.json` names the commit and core version, and the reader, started from `.mcp.json`,
       finds a planted string and returns its stored source.

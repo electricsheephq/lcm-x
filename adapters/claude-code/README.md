@@ -16,7 +16,8 @@ and recall need the read-only MCP reader (#1216), which lands first. Design:
 claude --plugin-dir adapters/claude-code
 ```
 
-Hooks need the system `python3` (3.9 or newer). Capture and recall need Python 3.11 or newer. The
+Hooks need the system `python3` (3.9 or newer), which they run isolated from your Python settings
+(`-I -S`). Capture and recall need Python 3.11 or newer. The
 plugin looks for one in this order:
 - `LCMX_PYTHON`;
 - a venv in the plugin's data folder, or at `<store home>/venv`;

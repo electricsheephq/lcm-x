@@ -179,9 +179,14 @@ def test_plugin_files_are_consistent(hook):
     servers = json.loads((PLUGIN / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
     assert manifest["name"] == "lcm-x"
     assert set(hooks) == set(hook.EVENTS) - {"PostToolUse"}  # accepted for Grok Build only
-    for entries in hooks.values():
+    for event, entries in hooks.items():
         for entry in entries:
-            assert entry["hooks"][0]["command"].endswith('bin/lcmx_hook.py"')
+            # The shell form, which every host runs: Grok Build's runner is not yet proven to honour
+            # an exec form's args. -I -S skips site and ignores the user's Python settings.
+            assert entry["hooks"][0]["command"] == 'python3 -I -S "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"'
+            # Only PostToolBatch runs in the background: the worker settles on the end events, a fork's
+            # start source rides on SessionStart's record, and -p kills an async hook still running at exit.
+            assert entry["hooks"][0].get("async", False) is (event == "PostToolBatch")
     assert set(servers) == {"lcm-x"}
 
 
@@ -429,6 +434,32 @@ def test_a_hook_that_finds_a_worker_running_imports_nothing_it_does_not_need(env
     imported = {line.rsplit("|", 1)[-1].strip() for line in done.stderr.splitlines() if line.startswith("import time:")}
     assert "json" in imported  # the import log is complete
     assert imported.isdisjoint({"subprocess", "shutil", "typing"})
+    assert _log(env)[-1]["outcome"] == "worker_running"
+
+
+@pytest.mark.parametrize("setting", ["PYTHONPATH", "PYTHONHOME"])
+def test_the_registered_hook_command_ignores_the_users_python_settings(env, tmp_path, setting):
+    """REGRESSION (#2141): Claude Code runs the hook command in the user's environment, where a
+    PYTHONPATH can shadow the standard library and a PYTHONHOME can stop python3 from starting.
+    The registered command runs isolated, so the hook still spools and prints nothing."""
+    hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+    [command] = {entry["hooks"][0]["command"] for entries in hooks.values() for entry in entries}
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    (planted / "json.py").write_text("raise SystemExit('a planted module loaded')\n", encoding="utf-8")
+    python = tmp_path / "bin" / "python3"
+    python.parent.mkdir()
+    python.symlink_to(sys.executable)
+    home = Path(env["LCMX_CC_HOME"])
+    home.mkdir(parents=True)
+    payload = {"hook_event_name": "Stop", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    lane = {**env, "PATH": str(python.parent), "CLAUDE_PLUGIN_ROOT": str(PLUGIN), setting: str(planted)}
+    with open(home / "capture.lock", "a") as handle:  # a worker is running, so the hook starts none
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        done = subprocess.run(["/bin/sh", "-c", command], input=json.dumps(payload), env=lane,
+                              capture_output=True, text=True, timeout=60)
+    assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+    assert len(_spooled(env)) == 1
     assert _log(env)[-1]["outcome"] == "worker_running"
 
 
