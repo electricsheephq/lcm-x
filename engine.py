@@ -7237,175 +7237,176 @@ class LCMEngine(
         """
         if self._store._transaction_owner.owns_connection(self._store._conn):
             raise _SqliteSavepointError("Foreground ingest cannot join an enclosing transaction")
-        self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
-        self._no_progress_ingest_generation = self._ingest_failure_count
-        self._ingest_replay_redaction_changes = {}
-        if not self._session_id:
-            logger.debug("Ingest skipped: no session_id")
-            return self._redact_active_replay_messages(messages)
+        with (getattr(self._store, "_write_lock", None) or nullcontext()):
+            self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
+            self._no_progress_ingest_generation = self._ingest_failure_count
+            self._ingest_replay_redaction_changes = {}
+            if not self._session_id:
+                logger.debug("Ingest skipped: no session_id")
+                return self._redact_active_replay_messages(messages)
 
-        if self._session_ignored or self._session_stateless:
-            logger.debug(
-                "Ingest skipped for %s session %s",
-                "ignored" if self._session_ignored else "stateless",
-                self._session_id,
-            )
-            return self._redact_active_replay_messages(messages)
+            if self._session_ignored or self._session_stateless:
+                logger.debug(
+                    "Ingest skipped for %s session %s",
+                    "ignored" if self._session_ignored else "stateless",
+                    self._session_id,
+                )
+                return self._redact_active_replay_messages(messages)
 
-        sender_capture.try_update(self)
-        try:
-            _get_encoder()  # The first bounded encoder wait must precede BEGIN.
-        except Exception:
-            pass  # Token counting retains its existing estimator fallback.
-        attribution = self._last_ingest_attribution = dict(
-            lock_hold_ms=0.0, rows_written=0, bytes_written=0, busy_snapshot_retry=False,
-            ledger_digest_ms=0.0, ledger_ms=0.0)
-        ledger_prepared = self._prepare_ingest_ledger(messages, attribution)
-        admission_retry = False
-        for attempt in range(2):
-            # Keep the published frontier untouched until COMMIT. Helpers read
-            # and write the attempt-local holder through the legacy properties.
-            pending = copy.copy(self._frontier)
-            pending.commit_proof = copy.deepcopy(pending.commit_proof)
-            pending.oob_rows = set(getattr(self, "_out_of_band_durable_rows", ()))
-            self._pending_ingest_frontier = pending
-            missing = object()
-            snapshots = {name: copy.copy(self.__dict__[name])
-                         if name in self.__dict__ else missing for name in (
-                "_host_rewrite_watch", "_host_rewrite_overrides",
-                "_identity_anchor_versions", "_identity_anchor_text_memo", "_host_uid_counters",
-                "_host_uid_error_logged", "_retired_durable_proof", "_last_ingest_reconciliation",
-                "_pruned_tool_source_generation", "_pruned_tool_source_identities",
-                "_compression_boundary_active_placeholder_digest_budget", "_ignored_message_count",
-                "_ignore_pattern_dropped_count", "_no_progress_public_rows",
-                "_generated_ignored_active_replay_placeholder_message_ids",
-                "_generated_ignored_active_replay_placeholder_messages",
-                "_generated_ignored_active_replay_placeholder_hashes",
-                "_generated_ignored_active_replay_placeholder_hash_counts",
-                "_generated_ignored_active_replay_placeholder_hash_ordinals",
-                "_out_of_band_durable_rows", "_emitted_carriers_seen", "_emitted_carriers_retired",
-                "_pending_session_tails",
-            )}
-            # Stores and host objects are identity-bearing; never deepcopy them.
-            for name in ("_host_rewrite_store", "_pruned_tool_source_store"):
-                snapshots[name] = self.__dict__.get(name, missing)
-            receipts = [(receipt, dict(receipt)) for receipt in getattr(self, "_identity_anchor_recoveries", ())]
-            after_commit = []
-            emission_claim, emission_committed = object(), False
-            prepared = {}
-            tail_registered = self in _PENDING_TAIL_ENGINES
-            held_at = None
+            sender_capture.try_update(self)
             try:
-                if getattr(self, "_identity_anchor_recovery", None):
-                    self._identity_anchor_observe_recovery()
-                with self._store.ingest_atomic(admission_retry=admission_retry):
-                    held_at = _perf_counter()
-                    emission_attempt = self._ingest_ledger_attempt = (
-                        dict(ledger_prepared, stored={}, matched={}, remainders={}, observations=[])
-                        if ledger_prepared is not None else None)
-                    if self._ingest_ledger_attempt is not None:
-                        self._retry_pending_emissions(self._ingest_ledger_attempt, after_commit, emission_claim)
-                    active, finish = self._ingest_messages_transaction(
-                        messages, after_commit, attribution,
-                        prepared=prepared,
-                        allow_session_end_replay_proof=allow_session_end_replay_proof)
-                    if self._ingest_ledger_attempt is not None:
-                        self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
-                emission_committed = True
-                if ledger_prepared is not None:
-                    ingest_ledger.settle_pending_emissions(
-                        emission_claim, completed=emission_attempt["retried_emissions"])
-                attribution["lock_hold_ms"] += (_perf_counter() - held_at) * 1000
-            except BaseException as exc:
-                self._ingest_ledger_attempt = None
-                if held_at is not None:
-                    attribution["lock_hold_ms"] += (_perf_counter() - held_at) * 1000
-                for name, value in snapshots.items():
-                    if value is missing:
-                        self.__dict__.pop(name, None)
-                    else:
-                        self.__dict__[name] = value
-                for receipt, previous in receipts:
-                    receipt.clear()
-                    receipt.update(previous)
-                if not tail_registered:
-                    _PENDING_TAIL_ENGINES.discard(self)
-                attribution.update(rows_written=0, bytes_written=0)
-                if isinstance(exc, Exception) and attempt == 0 and (_is_ingest_busy_error(exc)
-                                                                  or held_at is None and isinstance(exc, sqlite3.Error)):
-                    attribution["busy_snapshot_retry"] = True
-                    admission_retry = held_at is None and _is_ingest_busy_error(exc)
-                    continue
-                if isinstance(exc, Exception) and self._session_end_flush_active and _is_ingest_busy_error(exc):
-                    self._ingest_read_only = exc
-                    frozen_replay = None
-                    read_only_thread = getattr(self._store, "_read_only_ingest_thread", None)
-                    self._store._read_only_ingest_thread = threading.get_ident()
-                    try:
-                        for name, value in snapshots.items():
-                            if value is not missing:
-                                self.__dict__[name] = (value if name in ("_host_rewrite_store", "_pruned_tool_source_store")
-                                                       else copy.copy(value))
-                        self._pending_ingest_frontier = copy.deepcopy(self._frontier)
-                        self._identity_anchor_observe_recovery()
-                        frozen_replay, _finish = self._ingest_messages_transaction(messages, [], attribution,
-                            allow_session_end_replay_proof=allow_session_end_replay_proof)
-                    except Exception:
-                        pass  # Keep the original lock error; the frozen tail is the only result.
-                    finally:
-                        self.__dict__.pop("_ingest_read_only", None)
-                        self._store._read_only_ingest_thread = read_only_thread
-                        for name, value in snapshots.items():
-                            if name != "_pending_session_tails":
-                                if value is missing:
-                                    self.__dict__.pop(name, None)
-                                else:
-                                    self.__dict__[name] = value
-                        for receipt, previous in receipts:
-                            receipt.clear()
-                            receipt.update(previous)
-                    if frozen_replay is not None:
-                        return frozen_replay  # Classification proved there is no tail to freeze.
-                self._frontier.needs_reconcile = True
-                raise  # The existing ingest/compress caller records the failure.
-            finally:
-                # Release claims on uncommitted exits, including busy retries and interrupts.
-                if not emission_committed and ledger_prepared is not None:
-                    ingest_ledger.settle_pending_emissions(emission_claim)
-                self.__dict__.pop("_ingest_ledger_attempt", None)
-                self.__dict__.pop("_pending_ingest_frontier", None)
-                if self._end_attribution is not None:
-                    self._end_attribution.update({"ingest_" + key: value for key, value in attribution.items()})
-            self._frontier.cursor = pending.cursor
-            self._frontier.needs_reconcile = pending.needs_reconcile
-            self._frontier.commit_proof = pending.commit_proof
-            if pending.oob_rows or "_out_of_band_durable_rows" in self.__dict__:
-                self._out_of_band_durable_rows = pending.oob_rows
-            if "protected" in prepared:
-                protected_messages, replay_messages = prepared["protected"], prepared["replay"]
-                active_replay_messages = active  # Keep the public ingest frame's protection observation.
-                _ = protected_messages, replay_messages, active_replay_messages
-            try:
-                logger.debug("LCM attribution phase=ingest lock_hold_ms=%.3f rows_written=%d "
-                             "bytes_written=%d busy_snapshot_retry=%s", attribution["lock_hold_ms"],
-                             attribution["rows_written"], attribution["bytes_written"],
-                             attribution["busy_snapshot_retry"])
+                _get_encoder()  # The first bounded encoder wait must precede BEGIN.
             except Exception:
-                pass  # Diagnostic handlers cannot turn a durable ingest into failure.
-            # Cursor publication precedes every fallible cache operation.
-            for callback in [self._finish_ingest_memory, *after_commit]:
+                pass  # Token counting retains its existing estimator fallback.
+            attribution = self._last_ingest_attribution = dict(
+                lock_hold_ms=0.0, rows_written=0, bytes_written=0, busy_snapshot_retry=False,
+                ledger_digest_ms=0.0, ledger_ms=0.0)
+            ledger_prepared = self._prepare_ingest_ledger(messages, attribution)
+            admission_retry = False
+            for attempt in range(2):
+                # Keep the published frontier untouched until COMMIT. Helpers read
+                # and write the attempt-local holder through the legacy properties.
+                pending = copy.copy(self._frontier)
+                pending.commit_proof = copy.deepcopy(pending.commit_proof)
+                pending.oob_rows = set(getattr(self, "_out_of_band_durable_rows", ()))
+                self._pending_ingest_frontier = pending
+                missing = object()
+                snapshots = {name: copy.copy(self.__dict__[name])
+                             if name in self.__dict__ else missing for name in (
+                    "_host_rewrite_watch", "_host_rewrite_overrides",
+                    "_identity_anchor_versions", "_identity_anchor_text_memo", "_host_uid_counters",
+                    "_host_uid_error_logged", "_retired_durable_proof", "_last_ingest_reconciliation",
+                    "_pruned_tool_source_generation", "_pruned_tool_source_identities",
+                    "_compression_boundary_active_placeholder_digest_budget", "_ignored_message_count",
+                    "_ignore_pattern_dropped_count", "_no_progress_public_rows",
+                    "_generated_ignored_active_replay_placeholder_message_ids",
+                    "_generated_ignored_active_replay_placeholder_messages",
+                    "_generated_ignored_active_replay_placeholder_hashes",
+                    "_generated_ignored_active_replay_placeholder_hash_counts",
+                    "_generated_ignored_active_replay_placeholder_hash_ordinals",
+                    "_out_of_band_durable_rows", "_emitted_carriers_seen", "_emitted_carriers_retired",
+                    "_pending_session_tails",
+                )}
+                # Stores and host objects are identity-bearing; never deepcopy them.
+                for name in ("_host_rewrite_store", "_pruned_tool_source_store"):
+                    snapshots[name] = self.__dict__.get(name, missing)
+                receipts = [(receipt, dict(receipt)) for receipt in getattr(self, "_identity_anchor_recoveries", ())]
+                after_commit = []
+                emission_claim, emission_committed = object(), False
+                prepared = {}
+                tail_registered = self in _PENDING_TAIL_ENGINES
+                held_at = None
                 try:
-                    callback()
+                    if getattr(self, "_identity_anchor_recovery", None):
+                        self._identity_anchor_observe_recovery()
+                    with self._store.ingest_atomic(admission_retry=admission_retry):
+                        held_at = _perf_counter()
+                        emission_attempt = self._ingest_ledger_attempt = (
+                            dict(ledger_prepared, stored={}, matched={}, remainders={}, observations=[])
+                            if ledger_prepared is not None else None)
+                        if self._ingest_ledger_attempt is not None:
+                            self._retry_pending_emissions(self._ingest_ledger_attempt, after_commit, emission_claim)
+                        active, finish = self._ingest_messages_transaction(
+                            messages, after_commit, attribution,
+                            prepared=prepared,
+                            allow_session_end_replay_proof=allow_session_end_replay_proof)
+                        if self._ingest_ledger_attempt is not None:
+                            self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
+                    emission_committed = True
+                    if ledger_prepared is not None:
+                        ingest_ledger.settle_pending_emissions(
+                            emission_claim, completed=emission_attempt["retried_emissions"])
+                    attribution["lock_hold_ms"] += (_perf_counter() - held_at) * 1000
+                except BaseException as exc:
+                    self._ingest_ledger_attempt = None
+                    if held_at is not None:
+                        attribution["lock_hold_ms"] += (_perf_counter() - held_at) * 1000
+                    for name, value in snapshots.items():
+                        if value is missing:
+                            self.__dict__.pop(name, None)
+                        else:
+                            self.__dict__[name] = value
+                    for receipt, previous in receipts:
+                        receipt.clear()
+                        receipt.update(previous)
+                    if not tail_registered:
+                        _PENDING_TAIL_ENGINES.discard(self)
+                    attribution.update(rows_written=0, bytes_written=0)
+                    if isinstance(exc, Exception) and attempt == 0 and (_is_ingest_busy_error(exc)
+                                                                      or held_at is None and isinstance(exc, sqlite3.Error)):
+                        attribution["busy_snapshot_retry"] = True
+                        admission_retry = held_at is None and _is_ingest_busy_error(exc)
+                        continue
+                    if isinstance(exc, Exception) and self._session_end_flush_active and _is_ingest_busy_error(exc):
+                        self._ingest_read_only = exc
+                        frozen_replay = None
+                        read_only_thread = getattr(self._store, "_read_only_ingest_thread", None)
+                        self._store._read_only_ingest_thread = threading.get_ident()
+                        try:
+                            for name, value in snapshots.items():
+                                if value is not missing:
+                                    self.__dict__[name] = (value if name in ("_host_rewrite_store", "_pruned_tool_source_store")
+                                                           else copy.copy(value))
+                            self._pending_ingest_frontier = copy.deepcopy(self._frontier)
+                            self._identity_anchor_observe_recovery()
+                            frozen_replay, _finish = self._ingest_messages_transaction(messages, [], attribution,
+                                allow_session_end_replay_proof=allow_session_end_replay_proof)
+                        except Exception:
+                            pass  # Keep the original lock error; the frozen tail is the only result.
+                        finally:
+                            self.__dict__.pop("_ingest_read_only", None)
+                            self._store._read_only_ingest_thread = read_only_thread
+                            for name, value in snapshots.items():
+                                if name != "_pending_session_tails":
+                                    if value is missing:
+                                        self.__dict__.pop(name, None)
+                                    else:
+                                        self.__dict__[name] = value
+                            for receipt, previous in receipts:
+                                receipt.clear()
+                                receipt.update(previous)
+                        if frozen_replay is not None:
+                            return frozen_replay  # Classification proved there is no tail to freeze.
+                    self._frontier.needs_reconcile = True
+                    raise  # The existing ingest/compress caller records the failure.
+                finally:
+                    # Release claims on uncommitted exits, including busy retries and interrupts.
+                    if not emission_committed and ledger_prepared is not None:
+                        ingest_ledger.settle_pending_emissions(emission_claim)
+                    self.__dict__.pop("_ingest_ledger_attempt", None)
+                    self.__dict__.pop("_pending_ingest_frontier", None)
+                    if self._end_attribution is not None:
+                        self._end_attribution.update({"ingest_" + key: value for key, value in attribution.items()})
+                self._frontier.cursor = pending.cursor
+                self._frontier.needs_reconcile = pending.needs_reconcile
+                self._frontier.commit_proof = pending.commit_proof
+                if pending.oob_rows or "_out_of_band_durable_rows" in self.__dict__:
+                    self._out_of_band_durable_rows = pending.oob_rows
+                if "protected" in prepared:
+                    protected_messages, replay_messages = prepared["protected"], prepared["replay"]
+                    active_replay_messages = active  # Keep the public ingest frame's protection observation.
+                    _ = protected_messages, replay_messages, active_replay_messages
+                try:
+                    logger.debug("LCM attribution phase=ingest lock_hold_ms=%.3f rows_written=%d "
+                                 "bytes_written=%d busy_snapshot_retry=%s", attribution["lock_hold_ms"],
+                                 attribution["rows_written"], attribution["bytes_written"],
+                                 attribution["busy_snapshot_retry"])
+                except Exception:
+                    pass  # Diagnostic handlers cannot turn a durable ingest into failure.
+                # Cursor publication precedes every fallible cache operation.
+                for callback in [self._finish_ingest_memory, *after_commit]:
+                    try:
+                        callback()
+                    except Exception as exc:
+                        self._record_ingest_failure("post-commit cache", exc)
+                if prepared.get("sender_update"):
+                    sender_capture.try_update(self)
+                try:
+                    return finish()
                 except Exception as exc:
-                    self._record_ingest_failure("post-commit cache", exc)
-            if prepared.get("sender_update"):
-                sender_capture.try_update(self)
-            try:
-                return finish()
-            except Exception as exc:
-                self._record_ingest_failure("post-commit replay cache", exc)
-                return active
-        raise AssertionError("unreachable ingest retry state")
+                    self._record_ingest_failure("post-commit replay cache", exc)
+                    return active
+            raise AssertionError("unreachable ingest retry state")
 
     def _ledger_count(self, key, error=None, amount=1, subject="ingest"):
         try:
