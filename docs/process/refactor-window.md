@@ -4,7 +4,7 @@ Structural refactors land on main in a protected window between a GA tag and mai
 A patch release is cut from the GA commit on a maintenance branch, so it never carries the window's refactors.
 
 The v0.29 window opens at the v0.29.2-rc1 tag, which is cut from the v0.29.1 GA commit on the day of the GA, and closes at
-v0.30.0-rc1. Its order: the store → command import-cycle break (#2138) first, then #2037, then #2094 and #2100.
+v0.30.0-rc1. Its order: the store → command import-cycle break (#2138) first, then #2037, then #2094 and #2100, then the dead-helper removal (#2148).
 After the v0.27.0 GA the window was 5 working days, before v0.29 feature work.
 
 ## What may land in the window
