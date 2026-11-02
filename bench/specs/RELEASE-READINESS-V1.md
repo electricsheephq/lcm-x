@@ -454,7 +454,7 @@ The 8 h read of the rc4 install window found 293 duplicate rows and 0 lost rows.
 
   All D5 bars, the final-read wait and the rest of the "anything else means no decision" clause stand. S6 grants no PASS, D5 stays not green, and no other row may cite it. Evidence, a snapshot, a census, a host-row read, a capture, a probe or a check that S6 needs, and that is missing, fails or does not run, means no decision.
 
-[Amendment 5](__COMMENT_URL__) to the D5 pre-registration (2026-11-02, release manager) was adopted before window 3 opened. It amends amendment 4 (with errata E1 to E4) as follows.
+[Amendment 5](https://github.com/electricsheephq/lcm-x/issues/1286#issuecomment-6573329135) to the D5 pre-registration (2026-11-02, release manager) was adopted before window 3 opened. It amends amendment 4 (with errata E1 to E4) as follows.
 
 Window 2's first cold bind of the long-running session stored copies of that session's earlier rows, the #1674 mechanism again, but at a non-zero cursor. The bind logged "LCM identity-anchor recognised 118 replayed rows" at cursor 24, with 1,675 incoming rows. The host-uid shadow logged 1,255 rows stored even though their uid binding named an existing row. S6 covers only a bind at cursor 0 with no positional replay proof (amendment 4, S6 limit 1 and P-S6R's cursor-0 check). So window 2's copies are outside S1 to S6, and under "anything else means no decision", window 2 has no decision. Its read still runs and its raw result stands.
 
@@ -462,7 +462,7 @@ Two windows have now each found a different variant of the same defect. S6 descr
 
 #1674 stays open for v0.30.0 and stays out of v0.29.1, for the reason amendment 4 gives.
 
-This amendment is final before window 3 opens. Its wording was final at __FINAL_REF__ (__FINAL_TIME__), before the window-3 stop step, whose time the window-3 receipt records.
+This amendment is final before window 3 opens. Its wording was final at commit bf728671b in #2153 (2026-11-02T09:11Z), before the window-3 stop step, whose time the window-3 receipt records.
 
 - **Window 2 is void for the ship decision, and its raw result stands.** Its 8 h read is recorded as D5 RAW (its result as read), with no decision under amendment 4: copies outside S1 to S6. None of its counts, reads, duration or activity carry to window 3. The receipts, the GA notes and the owner report disclose window 2's result, and every other failure it showed.
 - **Window 3 starts at a recorded restart of the reference agent on the same rc4 tree** (`59e49bf2f1c0f83e18ec3c613a3e94ca36f366ef`), by window 2's procedure (amendment 4: the stop; the snapshot, census, host-row read and capture with no process holding the store open; the start). Each mention of window 2 in amendment 4 and in the decision row reads as window 3. Exceptions: "window 2" in this amendment, and "the rc4 install window" and "the rc4 install bind" in amendment 4, keep their own meaning.
