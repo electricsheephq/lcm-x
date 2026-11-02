@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sqlite3
@@ -1072,3 +1073,147 @@ def test_reconcile_keeps_original_bytes_and_file_mode(tmp_path):
     # The newest row per checkpointed question survives byte for byte; un-checkpointed and torn rows go.
     assert sidecar.read_bytes() == b'{"question_id":"q0","wall_ms":7}\n{"question_id": "q1", "wall_ms": 6}\n'
     assert sidecar.stat().st_mode & 0o777 == 0o640
+
+
+class BatchSalted(lme.StubEmbedder):
+    """Vectors depend on each text AND its batch, so a batch-membership change is visible."""
+
+    def __init__(self, fail_on=None):
+        super().__init__()
+        self.batches, self.fail_on = [], fail_on
+
+    def embed_documents(self, texts):
+        if len(self.batches) + 1 == self.fail_on:
+            raise RuntimeError("provider stopped")
+        self.batches.append(list(texts))
+        salt = int(hashlib.sha256("\0".join(texts).encode()).hexdigest()[:8], 16) / 2**32
+        return [[value + salt for value in vector] for vector in super().embed_documents(texts)]
+
+
+def test_seeded_resume_from_committed_batches_matches_scratch_build(tmp_path, monkeypatch):
+    monkeypatch.delenv(lme.EMBED_CACHE_ENV, raising=False)
+    monkeypatch.delenv("LCM_D1_BUILD_PARTITION", raising=False)
+    every = 2
+
+    def build(provider, path):
+        return lme.prewarm_embedding_cache(questions(), D1Cache(provider, path, options=OPTIONS, readonly=False), progress_every=every)
+
+    def keys(path):
+        with sqlite3.connect(path) as db:
+            return {row[0] for row in db.execute("SELECT key FROM entries")}
+
+    for name in ("scratch", "stopped", "resumed", "control"):
+        (tmp_path / name).mkdir()
+    scratch = BatchSalted()
+    build(scratch, tmp_path / "scratch/cache.sqlite")
+    batches = scratch.batches
+    assert len(batches) >= 5 and all(len(batch) == every for batch in batches[:3])
+    m1 = seal(tmp_path / "scratch/cache.sqlite")
+
+    stopped = tmp_path / "stopped/cache.sqlite"
+    with pytest.raises(RuntimeError, match="provider stopped"):
+        build(BatchSalted(fail_on=3), stopped)
+    key = D1Cache(lme.StubEmbedder(), stopped, options=OPTIONS, readonly=False).content_sha256
+    assert keys(stopped) == {key(text) for batch in batches[:2] for text in batch}  # two whole batches, nothing of the third
+
+    resumed = tmp_path / "resumed/cache.sqlite"
+    shutil.copyfile(stopped, resumed)
+    provider = BatchSalted()
+    report = build(provider, resumed)
+    assert provider.batches == batches[2:]  # same membership and order for every remaining batch
+    assert report["already_cached"] == 2 * every
+    assert seal(resumed) == m1
+
+    # Negative control: one unit of batch 3 embedded alone changes the resumed manifest.
+    control = tmp_path / "control/cache.sqlite"
+    shutil.copyfile(stopped, control)
+    D1Cache(BatchSalted(), control, options=OPTIONS, readonly=False).embed_documents(batches[2][:1])
+    build(BatchSalted(), control)
+    assert keys(control) == keys(tmp_path / "scratch/cache.sqlite")
+    assert seal(control) != m1
+
+
+def committed_seed(path, role="base", texts=("unit 0", "unit 1", "unit 2")):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    D1Cache(Fake(), path, options={**OPTIONS, "role": role}, readonly=False).embed_documents(list(texts))
+    seal(path)  # A sealed seed is 0o444 and has a manifest the driver must not copy.
+    return path
+
+
+@pytest.mark.parametrize("seeded", [True, False])
+def test_seed_cache_reaches_role_cache_before_preembed(tmp_path, monkeypatch, seeded):
+    cli = driver()
+    monkeypatch.setattr(cli, "pin", lambda _: "a" * 40)
+    seed = committed_seed(tmp_path / "seed" / "embeddings.sqlite")
+    argv = driver_args(tmp_path) + (["--seed-cache", f"base={seed}"] if seeded else [])
+    launched = []
+
+    def fake_run(command, *, env, stdout, **kwargs):
+        role, cache = env["LCM_D1_ROLE"], Path(env[lme.EMBED_CACHE_ENV])
+        if env["LCM_D1_CACHE_MODE"] == "build":
+            if not any(row[0] == role for row in launched):
+                if seeded and role == "base":
+                    assert cache.read_bytes() == seed.read_bytes()
+                    assert cache.stat().st_mode & 0o777 == 0o644
+                    assert not cache.with_suffix(".manifest.json").exists()
+                else:
+                    assert not cache.exists()
+            launched.append((role, "build"))
+            D1Cache(Fake(), cache, options={**OPTIONS, "role": role}, readonly=False).embed_documents([f"unit {i}" for i in range(30)])
+            Path(env["LCM_D1_THREAD_REPORT"]).write_text(json.dumps({"effective_intra_op_threads": 2}))
+            return {"exit_code": 0, "timed_out": False}
+        out = Path(command[command.index("--output") + 1])
+        out.mkdir(parents=True)
+        (out / "per_question_checkpoint.jsonl").write_text('{"question_id":"q0"}\n')
+        (out / "embedding-metrics.jsonl").write_text(json.dumps({"wall_ms": 1, "hits": 1, "misses": 0, "corruptions": 0}) + "\n")
+        return {"exit_code": 0, "timed_out": False}
+
+    monkeypatch.setattr(cli, "run_child", fake_run)
+    assert cli.main(argv) == 0
+    receipt = json.loads((tmp_path / "out/d1-receipt.json").read_text())
+    assert len(launched) == 4 and set(receipt["cache_manifests"]) == {"base", "candidate"}
+    if not seeded:
+        assert "seeds" not in receipt
+        return
+    identity = json.dumps(["stub", lme.StubEmbedder().model_id, {**OPTIONS, "role": "base"}], sort_keys=True, separators=(",", ":"))
+    assert receipt["seeds"] == {"base": {"path": str(seed.resolve()), "sha256": hashlib.sha256(seed.read_bytes()).hexdigest(),
+                                         "bytes": seed.stat().st_size, "entries": 3, "identity": identity}}
+
+
+@pytest.mark.parametrize("bad", [True, False])
+@pytest.mark.parametrize("fault,message", [
+    ("role", "with a --product role"), ("duplicate", "one seed per role"), ("workers", "seeded builds are serial only"),
+    ("missing", "not an existing file"), ("journal", "uncommitted SQLite sidecar"), ("binding", "binding/entries tables"),
+])
+def test_seed_cache_refusals_write_nothing(tmp_path, monkeypatch, capsys, fault, message, bad):
+    cli = driver()
+    monkeypatch.setattr(cli, "pin", lambda _: "a" * 40)
+    monkeypatch.setattr(cli, "run_child", lambda *args, **kwargs: {"exit_code": 7, "timed_out": False})
+    seed = committed_seed(tmp_path / "seed" / "embeddings.sqlite")
+    argv, seeds = driver_args(tmp_path), [f"base={seed}"]
+    if fault == "role":
+        seeds = [f"{'other' if bad else 'base'}={seed}"]
+    elif fault == "duplicate":
+        seeds.append(f"{'base' if bad else 'candidate'}={seed}")
+    elif fault == "workers":
+        argv += ["--build-workers", "2" if bad else "1"]
+    elif fault == "missing" and bad:
+        seeds = [f"base={tmp_path / 'absent.sqlite'}"]
+    elif fault == "journal" and bad:
+        Path(f"{seed}-journal").write_bytes(b"")
+    elif fault == "binding" and bad:
+        bare = tmp_path / "bare.sqlite"
+        with closing(sqlite3.connect(bare)) as db, db:
+            db.execute("CREATE TABLE entries (key TEXT PRIMARY KEY, dim INTEGER, payload BLOB, checksum TEXT)")
+        seeds = [f"base={bare}"]
+    argv += [arg for item in seeds for arg in ("--seed-cache", item)]
+    if bad:
+        with pytest.raises(SystemExit) as exc:
+            cli.main(argv)
+        assert exc.value.code == 2
+        assert message in capsys.readouterr().err
+        assert not (tmp_path / "out").exists() and not (tmp_path / "scratch").exists()
+        return
+    assert cli.main(argv) == 1  # Accepted: the fake build child then fails, and the receipt records the seeds.
+    receipt = json.loads((tmp_path / "out/d1-receipt.json").read_text())
+    assert set(receipt["seeds"]) == ({"base", "candidate"} if fault == "duplicate" else {"base"})
