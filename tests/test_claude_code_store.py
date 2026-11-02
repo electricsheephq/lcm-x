@@ -427,13 +427,14 @@ def _registered(event):
 def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes, case, killed):
     """#2141 runs PostToolBatch async: Claude Code kills an async hook still running when a -p
     session exits, and one can also die in a session that goes on. Wherever the hook dies, before
-    or after it writes its record and starts its worker, the synchronous Stop and SessionEnd hooks
-    that follow lead the worker to every row, and the store matches a run in which no hook died.
+    or after it writes its record, the synchronous Stop and SessionEnd hooks that follow lead the
+    worker to every row, and the store matches a run in which no hook died.
 
     Each hook runs its registered command. A worker holds the lock while the synchronous hooks
     run, so they leave their records to it, and the worker run after them is that holder's rescan.
     The async hook never takes the lock, so its death cannot leave them waiting on it. The worker
-    script it starts is a stub, and a FIFO in place of the hook log stops it just before it exits."""
+    script it starts is a stub, and a FIFO in place of the hook log stops it just before it exits,
+    unless the kill, which waits only for its record, comes first."""
     import signal
     import subprocess
     assert _registered("PostToolBatch").get("async") is True
