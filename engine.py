@@ -1741,6 +1741,7 @@ class LCMEngine(
         self._bound_query_views = None
         self._bound_adaptive_retrieval = None
         self._bound_assertion_extractor = None
+        store = dag = lifecycle = assertions = entities = query_views = adaptive_retrieval = assertion_extractor = None
         try:
             store = MessageStore(
                 db_path,
@@ -1795,6 +1796,12 @@ class LCMEngine(
             self._bound_assertion_extractor = assertion_extractor
             self._storage_bound = True
         except Exception:
+            for obj in (assertion_extractor, adaptive_retrieval, query_views, entities, assertions, lifecycle, dag, store):
+                if obj is not None and hasattr(obj, "close"):
+                    try:
+                        obj.close()
+                    except Exception:
+                        pass
             self._close_storage()
             raise
         self._publish_ingest_context_window()
@@ -5099,12 +5106,12 @@ class LCMEngine(
                     )
 
     def _on_session_start_unlocked(self, session_id: str, **kwargs) -> None:
-        if "hermes_home" in kwargs:
-            self._rebind_storage_for_home(str(kwargs.get("hermes_home") or ""))
         sender_capture.retire(self)
         # The post-LLM hook also binds here under stable engine use, without
         # entering the public wrapper.
         self._retry_session_end_tails()
+        if "hermes_home" in kwargs:
+            self._rebind_storage_for_home(str(kwargs.get("hermes_home") or ""))
         if getattr(self, "_legacy_conversation_ids_store", None) is not self._store:
             try:  # #581: one probe per bound store for legacy unnormalized conversation ids
                 if refresh_legacy_conversation_ids(self._store.connection) is not None:

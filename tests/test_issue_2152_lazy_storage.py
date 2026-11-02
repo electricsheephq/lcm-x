@@ -13,9 +13,7 @@ from pathlib import Path
 import sys
 import types
 
-import pytest
 
-from hermes_lcm import command
 from hermes_lcm.command_doctor import _doctor_text
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
@@ -242,3 +240,28 @@ def test_unused_engine_shutdown_creates_no_database(tmp_path):
     assert not db_file.exists()
     engine.shutdown()
     assert not db_file.exists()
+
+
+def test_sender_capture_on_unbound_engine(tmp_path):
+    """#2152/#2161: sender_capture._key and retire work on an unbound engine without raising NameError."""
+    from hermes_lcm import sender_capture
+
+    home = tmp_path / "sender_unbound"
+    home.mkdir()
+    config = LCMConfig(database_path=str(home / "lcm.db"), embeddings_enabled=False)
+    engine = LCMEngine(config=config, hermes_home=str(home))
+
+    try:
+        assert engine._storage_bound is False
+        # _key must resolve path cleanly using Path without NameError
+        db_key, sess_key = sender_capture._key(engine)
+        assert db_key == str((home / "lcm.db").resolve())
+        assert sess_key == ""
+
+        # retire and snapshot must succeed without error or force-binding storage
+        sender_capture.retire(engine)
+        assert sender_capture.snapshot(engine) is None
+        assert engine._storage_bound is False
+        assert not (home / "lcm.db").exists()
+    finally:
+        engine.shutdown()

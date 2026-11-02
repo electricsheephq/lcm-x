@@ -557,8 +557,6 @@ def _engine_took_slot(ctx, engine, hermes_home: str) -> bool:
     holder = getattr(getattr(ctx, "_manager", None), "_context_engine", unknown)
     if not abandoned and (holder is unknown or holder is engine):
         return True
-    if not _process_serves_home(hermes_home):
-        return False
     elapsed = time.monotonic() - _MODULE_IMPORTED_AT
     if abandoned:
         reason = f"plugin load took {elapsed:.1f} s, over plugins.load_timeout_seconds"
@@ -580,12 +578,13 @@ def _engine_took_slot(ctx, engine, hermes_home: str) -> bool:
             holder_name,
             getattr(holder, "name", None),
         )
-    try:
-        from .inactive_record import write_inactive_record
+    if _process_serves_home(hermes_home):
+        try:
+            from .inactive_record import write_inactive_record
 
-        write_inactive_record(hermes_home, elapsed_s=elapsed, reason=reason)
-    except Exception as exc:
-        logger.warning("LCM-X could not record the inactive state for /lcm doctor: %s", exc)
+            write_inactive_record(hermes_home, elapsed_s=elapsed, reason=reason)
+        except Exception as exc:
+            logger.warning("LCM-X could not record the inactive state for /lcm doctor: %s", exc)
     return False
 
 
