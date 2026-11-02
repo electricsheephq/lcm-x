@@ -482,8 +482,18 @@ _SUPPORTED_LCM_CONFIG_YAML_KEYS = {
 }
 
 
-def _ignored_lcm_config_yaml_keys(cfg: dict[str, Any] | None = None) -> list[str]:
-    cfg = cfg if cfg is not None else _load_hermes_config_yaml()
+def _load_hermes_config_yaml_for_env(env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    env = lcm_env() if env is None else env
+    if env is not os.environ:
+        home = env.get("HERMES_HOME")
+        return _load_hermes_config_yaml(Path(home) / "config.yaml") if home else {}
+    return _load_hermes_config_yaml()
+
+
+def _ignored_lcm_config_yaml_keys(
+    cfg: dict[str, Any] | None = None, *, env: Mapping[str, str] | None = None
+) -> list[str]:
+    cfg = cfg if cfg is not None else _load_hermes_config_yaml_for_env(env)
     lcm_section = cfg.get("lcm") if isinstance(cfg, dict) else None
     if not isinstance(lcm_section, dict):
         return []
@@ -494,13 +504,13 @@ def _ignored_lcm_config_yaml_keys(cfg: dict[str, Any] | None = None) -> list[str
     )
 
 
-def _load_model_thresholds_from_yaml() -> dict[str, float]:
+def _load_model_thresholds_from_yaml(*, env: Mapping[str, str] | None = None) -> dict[str, float]:
     """Read ``lcm.model_thresholds`` from config.yaml.
 
     Returns a dict mapping model-name substrings to threshold fractions.
     Empty dict if not set or invalid.
     """
-    cfg = _load_hermes_config_yaml()
+    cfg = _load_hermes_config_yaml_for_env(env)
     try:
         lcm_section = cfg.get("lcm") or {}
         if not isinstance(lcm_section, dict):
@@ -566,17 +576,21 @@ def _parse_model_thresholds_env(raw: str, *, warnings: list[str] | None = None) 
 _FLOORED_COMPRESSION_THRESHOLD_SOURCE = "config_yaml:compression.threshold(floored)"
 
 
-def _hermes_compression_threshold_with_source(default: float) -> tuple[float, str]:
-    value, source, _warning = _hermes_compression_threshold_with_source_and_warning(default)
+def _hermes_compression_threshold_with_source(
+    default: float, *, env: Mapping[str, str] | None = None
+) -> tuple[float, str]:
+    value, source, _warning = _hermes_compression_threshold_with_source_and_warning(default, env=env)
     return value, source
 
 
-def _hermes_compression_threshold_with_source_and_warning(default: float) -> tuple[float, str, str | None]:
+def _hermes_compression_threshold_with_source_and_warning(
+    default: float, *, env: Mapping[str, str] | None = None
+) -> tuple[float, str, str | None]:
     """Resolve the non-env threshold; an inherited host value is raised to at least ``default`` (#1013).
 
     ``lcm.context_threshold`` is the explicit way to go lower and is not floored.
     """
-    cfg = _load_hermes_config_yaml()
+    cfg = _load_hermes_config_yaml_for_env(env)
     try:
         lcm_section = cfg.get("lcm") or {}
         if isinstance(lcm_section, dict):
@@ -615,11 +629,7 @@ def _lcm_absolute_threshold_tokens_with_source(
     Routed reads use only their resolved home; non-routed reads use the host resolver.
     """
     value, source, warning = default, "default", None
-    if env is not None and env is not os.environ:
-        home = env.get("HERMES_HOME")
-        cfg = _load_hermes_config_yaml(Path(home) / "config.yaml") if home else {}
-    else:
-        cfg = _load_hermes_config_yaml()
+    cfg = _load_hermes_config_yaml_for_env(env)
     lcm_section = cfg.get("lcm") if isinstance(cfg, dict) else None
     raw_yaml = lcm_section.get("context_threshold_tokens") if isinstance(lcm_section, dict) else None
     if raw_yaml not in (None, {}, "{}", "null", "~", ""):
@@ -643,7 +653,9 @@ def _lcm_absolute_threshold_tokens_with_source(
     return value, source, warning
 
 
-def _hermes_auxiliary_compression_timeout_ms(default: int) -> int:
+def _hermes_auxiliary_compression_timeout_ms(
+    default: int, *, env: Mapping[str, str] | None = None
+) -> int:
     """Read Hermes auxiliary.compression.timeout when no LCM override is present.
 
     Hermes uses seconds for the auxiliary compression timeout, while LCM stores
@@ -651,12 +663,14 @@ def _hermes_auxiliary_compression_timeout_ms(default: int) -> int:
     calls from timing out earlier than the host compression route unless
     ``LCM_SUMMARY_TIMEOUT_MS`` is explicitly configured.
     """
-    value, _source = _hermes_auxiliary_compression_timeout_ms_with_source(default)
+    value, _source = _hermes_auxiliary_compression_timeout_ms_with_source(default, env=env)
     return value
 
 
-def _hermes_auxiliary_compression_timeout_ms_with_source(default: int) -> tuple[int, str]:
-    cfg = _load_hermes_config_yaml()
+def _hermes_auxiliary_compression_timeout_ms_with_source(
+    default: int, *, env: Mapping[str, str] | None = None
+) -> tuple[int, str]:
+    cfg = _load_hermes_config_yaml_for_env(env)
     try:
         auxiliary = cfg.get("auxiliary") or {}
         if not isinstance(auxiliary, dict):
@@ -683,11 +697,13 @@ def hermes_auxiliary_compression_max_concurrency(hermes_home: str = "") -> int |
         return None
 
 
-def _lcm_config_string_with_source(env_name: str, yaml_key: str, default: str) -> tuple[str, str]:
-    env_value = lcm_env_get(env_name)
+def _lcm_config_string_with_source(
+    env_name: str, yaml_key: str, default: str, *, env: Mapping[str, str] | None = None
+) -> tuple[str, str]:
+    env_value = lcm_env_get(env_name) if env is None else env.get(env_name)
     if env_value is not None:
         return env_value, "env"
-    cfg = _load_hermes_config_yaml()
+    cfg = _load_hermes_config_yaml_for_env(env)
     try:
         lcm_section = cfg.get("lcm") or {}
         if isinstance(lcm_section, dict):
@@ -709,7 +725,7 @@ def _normalize_reasoning_effort(value: str) -> str:
 
 
 def _lcm_reasoning_effort_with_source(
-    env_name: str, yaml_key: str, default: str
+    env_name: str, yaml_key: str, default: str, *, env: Mapping[str, str] | None = None
 ) -> tuple[str, str, str | None]:
     """Resolve a reasoning-effort setting, ignoring unsupported values.
 
@@ -718,7 +734,7 @@ def _lcm_reasoning_effort_with_source(
     ``lcm_status`` surface, rather than failing the whole config load over one
     misspelled setting.
     """
-    raw, source = _lcm_config_string_with_source(env_name, yaml_key, default)
+    raw, source = _lcm_config_string_with_source(env_name, yaml_key, default, env=env)
     if raw.strip() and not _normalize_reasoning_effort(raw):
         logger.warning(
             "unsupported %s=%r ignored; using the task/provider reasoning default",
@@ -729,8 +745,10 @@ def _lcm_reasoning_effort_with_source(
     return _normalize_reasoning_effort(raw), source, None
 
 
-def _hermes_codex_gpt55_autoraise_with_source(default: bool) -> tuple[bool, str]:
-    cfg = _load_hermes_config_yaml()
+def _hermes_codex_gpt55_autoraise_with_source(
+    default: bool, *, env: Mapping[str, str] | None = None
+) -> tuple[bool, str]:
+    cfg = _load_hermes_config_yaml_for_env(env)
     try:
         compression = cfg.get("compression") or {}
         if not isinstance(compression, dict):
@@ -1515,12 +1533,13 @@ class LCMConfig:
             elif source == f"env:LCM_{field.upper()}":
                 _warn_env_range(field, getattr(c, field), config_source_warnings)
 
-        prefix_yaml = _load_hermes_config_yaml().get("lcm", {})
+        cfg_yaml = _load_hermes_config_yaml_for_env(env)
+        prefix_yaml = cfg_yaml.get("lcm", {}) if isinstance(cfg_yaml, dict) else {}
         for name in ("embedding_query_prefix", "embedding_document_prefix"):
             if isinstance(prefix_yaml, dict) and isinstance(prefix_yaml.get(name), str):
                 setattr(c, name, prefix_yaml[name])
 
-        c.ignored_config_yaml_lcm_keys = _ignored_lcm_config_yaml_keys()
+        c.ignored_config_yaml_lcm_keys = _ignored_lcm_config_yaml_keys(cfg_yaml, env=env)
 
         # Source-tracked fields (provenance recording and/or a computed default)
         # stay explicit; the uniform loop below skips them.
@@ -1573,7 +1592,7 @@ class LCMConfig:
                 "LCM_LEAF_TARGET_RATIO has no effect while the minimum equals the maximum; "
                 "set LCM_LEAF_TARGET_MAX_TOKENS")
         context_default, context_source, floor_warning = _hermes_compression_threshold_with_source_and_warning(
-            c.context_threshold
+            c.context_threshold, env=env
         )
         c.context_threshold, source, warning = _parse_float_env_with_source(
             "LCM_CONTEXT_THRESHOLD",
@@ -1590,14 +1609,14 @@ class LCMConfig:
         # Per-model threshold overrides: load from lcm.model_thresholds in
         # config.yaml, then LCM_MODEL_THRESHOLDS env var (comma-separated
         # key:value pairs). Env overrides config.yaml.
-        c.model_thresholds = _load_model_thresholds_from_yaml()
+        c.model_thresholds = _load_model_thresholds_from_yaml(env=env)
         _raw_env_thresholds = lcm_env_get("LCM_MODEL_THRESHOLDS")
         if _raw_env_thresholds is not None:
             c.model_thresholds = _parse_model_thresholds_env(
                 _raw_env_thresholds, warnings=config_source_warnings
             )
         c.codex_gpt55_autoraise_enabled, source = _hermes_codex_gpt55_autoraise_with_source(
-            c.codex_gpt55_autoraise_enabled
+            c.codex_gpt55_autoraise_enabled, env=env
         )
         _record("codex_gpt55_autoraise_enabled", source)
         c.summary_spend_max_calls, source, warning = _parse_int_env_with_source(
@@ -1616,15 +1635,15 @@ class LCMConfig:
         )
         _record("summary_spend_backoff_seconds", source, warning)
         c.summary_reasoning_effort, source, warning = _lcm_reasoning_effort_with_source(
-            "LCM_SUMMARY_REASONING_EFFORT", "summary_reasoning_effort", c.summary_reasoning_effort
+            "LCM_SUMMARY_REASONING_EFFORT", "summary_reasoning_effort", c.summary_reasoning_effort, env=env
         )
         _record("summary_reasoning_effort", source, warning)
         c.expansion_reasoning_effort, source, warning = _lcm_reasoning_effort_with_source(
-            "LCM_EXPANSION_REASONING_EFFORT", "expansion_reasoning_effort", c.expansion_reasoning_effort
+            "LCM_EXPANSION_REASONING_EFFORT", "expansion_reasoning_effort", c.expansion_reasoning_effort, env=env
         )
         _record("expansion_reasoning_effort", source, warning)
         summary_timeout_default, summary_timeout_source = _hermes_auxiliary_compression_timeout_ms_with_source(
-            c.summary_timeout_ms
+            c.summary_timeout_ms, env=env
         )
         c.summary_timeout_ms, source, warning = _parse_int_env_with_source(
             "LCM_SUMMARY_TIMEOUT_MS",
