@@ -10,15 +10,17 @@ from .search_query import _ASCII_CASE_FOLD, requires_like_fallback, sanitize_fts
 # ADR D6: event/conversation and unknown future namespaces are not bridged.
 _NAMESPACES = ('person', 'user', 'assistant', 'organization', 'project', 'place',
                'object', 'account', 'document')
+_MAX_ENTITY_NAME_CHARS = 256
 
 
 def _name(value):
     text = ' '.join(unicodedata.normalize('NFKC', value).casefold().split())
-    while text and (text[0].isspace() or unicodedata.category(text[0]).startswith('P')):
-        text = text[1:]
-    while text and (text[-1].isspace() or unicodedata.category(text[-1]).startswith('P')):
-        text = text[:-1]
-    return text.strip()
+    start, end = 0, len(text)
+    while start < end and (text[start].isspace() or unicodedata.category(text[start]).startswith('P')):
+        start += 1
+    while end > start and (text[end - 1].isspace() or unicodedata.category(text[end - 1]).startswith('P')):
+        end -= 1
+    return text[start:end].strip()
 
 
 def _time(row):
@@ -104,10 +106,17 @@ def lcm_memory(args, **kwargs):
                           {'entities': [], 'status': 'no_entity_registry_until_e2'})
     name = args.get('name')
     aliases = args.get('aliases', [])
-    if not isinstance(name, str) or not _name(name):
+    if not isinstance(name, str):
         return json.dumps({'error': 'name must be a non-empty string'})
-    if not isinstance(aliases, list) or len(aliases) > 8 or any(
-            not isinstance(a, str) or not _name(a) for a in aliases):
+    if len(name) > _MAX_ENTITY_NAME_CHARS:
+        return json.dumps({'error': f'name must be at most {_MAX_ENTITY_NAME_CHARS} characters'})
+    if not _name(name):
+        return json.dumps({'error': 'name must be a non-empty string'})
+    if not isinstance(aliases, list) or len(aliases) > 8 or any(not isinstance(a, str) for a in aliases):
+        return json.dumps({'error': 'aliases must be an array of at most 8 non-empty strings'})
+    if any(len(a) > _MAX_ENTITY_NAME_CHARS for a in aliases):
+        return json.dumps({'error': f'aliases must be at most {_MAX_ENTITY_NAME_CHARS} characters each'})
+    if any(not _name(a) for a in aliases):
         return json.dumps({'error': 'aliases must be an array of at most 8 non-empty strings'})
     question = args.get('question')
     if question is not None and not isinstance(question, str):
