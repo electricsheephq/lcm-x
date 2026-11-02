@@ -1320,6 +1320,8 @@ class MessageStore:
                 self._conn.executescript(schema)
                 self._identity_anchor_schema_ready = True
                 self._carried_relation_connections.add(self._conn)
+                getattr(self, "_memory_relation_connections", {}).pop(self._conn, None)
+                getattr(self, "_memory_relation_generations", {}).pop(self._conn, None)
 
     # -- #2055 ingest ledger: additive schema with shadow ingest and emission writers --
 
@@ -1686,6 +1688,14 @@ class MessageStore:
         if batched:
             known = getattr(self, '_memory_relation_connections', {})
             self._memory_relation_connections = known
+            generations = getattr(self, '_memory_relation_generations', {})
+            self._memory_relation_generations = generations
+            data_version = None
+            if known.get(conn) is False:
+                data_version = (conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0])
+                if generations.get(conn) != data_version:
+                    known.pop(conn, None)
+                    generations.pop(conn, None)
             available = (conn in self._carried_relation_connections or known.get(conn, False)
                          or conn is self._conn and getattr(self, "_pending_relation_schema", False)
                          and self._transaction_owner.owns_connection(conn))
@@ -1693,8 +1703,13 @@ class MessageStore:
                 available = bool(conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
                 ).fetchone())
-                if not available or not conn.in_transaction:
+                if not available or not conn.in_transaction or not self._transaction_owner.owns_connection(conn):
                     known[conn] = available
+                    if not available:
+                        generations[conn] = (
+                            data_version if data_version is not None
+                            else (conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0])
+                        )
             relation = ('message_relations' if available
                         else '(SELECT NULL AS store_id, NULL AS kind)')
             return {int(r[0]) for r in conn.execute(
@@ -1707,8 +1722,10 @@ class MessageStore:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
             ).fetchone():
                 return set()
-            if conn is self._conn and not conn.in_transaction:
+            if not conn.in_transaction:
                 self._carried_relation_connections.add(conn)
+                getattr(self, "_memory_relation_connections", {}).pop(conn, None)
+                getattr(self, "_memory_relation_generations", {}).pop(conn, None)
         if session_ids:
             # Collect the entire candidate ID set in SQL before session formatting,
             # including neighbors later rejected by the payload budget.
@@ -2106,6 +2123,7 @@ class MessageStore:
             self._identity_anchor_schema_ready = True
             self._carried_relation_connections.add(self._conn)
             getattr(self, "_memory_relation_connections", {}).pop(self._conn, None)
+            getattr(self, "_memory_relation_generations", {}).pop(self._conn, None)
         if getattr(self, "_pending_host_uid_schema", False):
             self._pending_host_uid_schema = False
             self._host_uid_schema_ready = True
