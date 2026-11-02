@@ -417,15 +417,19 @@ def test_the_worker_and_the_reader_start_isolated_on_a_found_python(hook, env, t
                                       "--log-dir", str(home / "logs")])]
 
 
-def test_a_hook_that_finds_a_worker_running_imports_nothing_it_does_not_need(env, tmp_path):
+@pytest.mark.parametrize("mode", ["venv", "found"])
+def test_a_hook_that_finds_a_worker_running_imports_nothing_it_does_not_need(env, tmp_path, mode):
     """A hook pays for its imports before it runs (#2141): typing never loads, and a hook that
-    finds the worker running loads neither subprocess nor shutil. The hook runs as Claude Code
-    starts it, with a Python on PATH, so looking one up would load shutil."""
+    finds the worker running loads no subprocess. The hook runs as Claude Code starts it. With a
+    set-up runtime it loads no shutil either; a Python found on PATH is looked up with shutil
+    before the lock probe, since only a hook that can start a worker may probe."""
     transcript = _transcript(tmp_path)
     home = Path(env["LCMX_CC_HOME"])
     home.mkdir(parents=True)
     payload = {"hook_event_name": "PostToolBatch", "session_id": "s1", "transcript_path": str(transcript)}
     lane = {**env, "PATH": str(Path(sys.executable).parent)}
+    if mode == "venv":
+        lane["LCMX_PYTHON"] = sys.executable
     with open(home / "capture.lock", "a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         done = subprocess.run([sys.executable, "-I", "-S", "-X", "importtime", str(PLUGIN / "bin" / "lcmx_hook.py")],
@@ -433,8 +437,24 @@ def test_a_hook_that_finds_a_worker_running_imports_nothing_it_does_not_need(env
     assert (done.returncode, done.stdout) == (0, "")
     imported = {line.rsplit("|", 1)[-1].strip() for line in done.stderr.splitlines() if line.startswith("import time:")}
     assert "json" in imported  # the import log is complete
-    assert imported.isdisjoint({"subprocess", "shutil", "typing"})
+    assert imported.isdisjoint({"subprocess", "typing"} | ({"shutil"} if mode == "venv" else set()))
     assert _log(env)[-1]["outcome"] == "worker_running"
+
+
+def test_only_a_hook_that_can_start_a_worker_probes_the_lock(hook, env, tmp_path, monkeypatch):
+    """REGRESSION: the probe holds the lock for an instant, and a hook or a starting worker that
+    meets it gives way. A hook with no runtime or worker script that probed could leave another
+    session's records with nobody to drain them, so it returns before the probe."""
+    home = Path(env["LCMX_CC_HOME"])
+    package = tmp_path / "package"  # core, but without the worker script
+    package.mkdir()
+    for name in ("plugin.yaml", "store.py"):
+        (package / name).write_text("", encoding="utf-8")
+    monkeypatch.setattr(hook, "_lock_held", lambda lock: pytest.fail("a hook that starts no worker probed the lock"))
+    lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(package)}
+    for deadline in (0, hook.PRECOMPACT_DEADLINE_S):
+        assert hook.start_worker(home, {**env, "PATH": ""}, deadline_s=deadline) == "runtime_missing"
+        assert hook.start_worker(home, lane, deadline_s=deadline) == "worker_missing"
 
 
 @pytest.mark.parametrize("setting", ["PYTHONPATH", "PYTHONHOME"])

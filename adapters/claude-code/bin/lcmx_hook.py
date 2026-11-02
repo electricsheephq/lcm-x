@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lcmx_runtime  # noqa: E402
 
 # Every hook pays for its imports before it runs: typing serves the annotations only, and
-# subprocess loads only when a worker starts.
+# subprocess loads only once the hook starts a worker or a bounded drain.
 TYPE_CHECKING = False
 if TYPE_CHECKING:
     from typing import Any, Dict, Mapping, Optional, TextIO
@@ -78,7 +78,8 @@ def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[st
         "agent_transcript_path": None,
         "observe_only": False,
         "observed_at": time.time(),
-        # The worker acknowledges each record's seq; a record newer than its ack is pending.
+        # For diagnostics only: nothing orders or acknowledges records by it, so a late async
+        # PostToolBatch record that replaces a newer one is still drained.
         "seq": time.time_ns(),
         # Claude Code's opt-in local GC deletes pre-compaction history from the transcript, so
         # capture cannot be lossless under it; the audit reports such sessions.
@@ -163,12 +164,6 @@ def _lock_held(lock: Path) -> bool:
 
 def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0) -> str:
     """Start one detached drain, or with ``deadline_s`` run a bounded drain and wait for it."""
-    # The record is already spooled. A held lock means a worker that will see it: a detached
-    # worker releases the lock first and rescans the spool after, and a bounded one ends with
-    # the step below, so no record can fall between. Checked first, so a hook that finds a
-    # worker running looks nothing else up.
-    if not deadline_s and _lock_held(home / "capture.lock"):
-        return "worker_running"
     runtime = lcmx_runtime.runtime_command(environ, home)
     if runtime is None:
         return "runtime_missing"
@@ -178,15 +173,19 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0)
     script = package / "scripts" / "lcm_x_capture.py"
     if not script.is_file():
         return "worker_missing"
+    # The record is already spooled. A held lock means a worker that will see it: a detached
+    # worker releases the lock first and rescans the spool after, and a bounded one ends with
+    # the step below, so no record can fall between. A hook never waits on another worker. The
+    # probe itself holds the lock for an instant, and a hook or worker that meets it gives way,
+    # so only a hook that can start a worker probes.
+    if _lock_held(home / "capture.lock"):
+        return "worker_running"
     import subprocess
 
     command = [*runtime, str(script), "worker", "--home", str(home)]
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
              "close_fds": True, "cwd": str(home)}
     if deadline_s:
-        # A hook never waits on another worker: the holder of the lock sees the spooled record.
-        if _lock_held(home / "capture.lock"):
-            return "worker_running"
         try:
             done = subprocess.run(command + ["--deadline", str(deadline_s)], timeout=deadline_s + 2, **quiet)
             # The worker exits 0 only after a completed drain; 5 means its deadline left work pending,
@@ -205,8 +204,6 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0)
             return outcome + "+holder"
         subprocess.Popen(command, start_new_session=True, **quiet)
         return outcome + "+worker"
-    if _lock_held(home / "capture.lock"):  # taken while the runtime was looked up
-        return "worker_running"
     subprocess.Popen(command, start_new_session=True, **quiet)
     return "worker_started"
 

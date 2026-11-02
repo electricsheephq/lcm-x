@@ -416,6 +416,102 @@ def test_capture_cli_drains_the_spool(tmp_path, home, hermes):
                           env=env, capture_output=True, timeout=60).returncode == 2
 
 
+def _registered(event):
+    hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+    [hook] = [hook for group in hooks[event] for hook in group["hooks"]]
+    return hook
+
+
+@pytest.mark.parametrize("killed", ["before_its_record", "after_its_record"])
+@pytest.mark.parametrize("case", ["session_goes_on", "print_mode_exit"])
+def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes, case, killed):
+    """#2141 runs PostToolBatch async: Claude Code kills an async hook still running when a -p
+    session exits, and one can also die in a session that goes on. Wherever the hook dies, before
+    or after it writes its record, the synchronous Stop and SessionEnd hooks that follow lead the
+    worker to every row, and the store matches a run in which no hook died.
+
+    Each hook runs its registered command. A worker holds the lock while the synchronous hooks
+    run, so they start none; the worker run after them stands for that holder's rescan. A FIFO in
+    place of the lock stops the PostToolBatch hook in its probe, just after it writes its record."""
+    import signal
+    import subprocess
+    assert _registered("PostToolBatch").get("async") is True
+    path = _transcript(tmp_path, CONVERSATION[:3])  # the tool batch; the turn's end comes later
+    python = tmp_path / "bin" / "python3"
+    python.parent.mkdir()
+    python.symlink_to(sys.executable)
+    env = {"HOME": str(tmp_path), "PATH": str(python.parent), "LCMX_CC_HOME": str(home),
+           "CLAUDE_CONFIG_DIR": str(tmp_path), "CLAUDE_PLUGIN_ROOT": str(PLUGIN)}
+    home.mkdir()
+    lock = home / "capture.lock"
+
+    def payload(event):
+        return json.dumps({"hook_event_name": event, "session_id": "s1", "transcript_path": str(path)})
+
+    def stored(at):
+        store = _open(at, hermes)
+        try:
+            return [row[1:] for row in _rows(store)]
+        finally:
+            store.close()
+
+    def end_of_turn(*events):
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("".join(json.dumps(entry) + "\n" for entry in CONVERSATION[3:]))
+        with open(lock, "a") as held:  # the running worker
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for event in events:
+                done = subprocess.run(["/bin/sh", "-c", _registered(event)["command"]], input=payload(event),
+                                      env=env, capture_output=True, text=True, timeout=60)
+                assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+        assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
+        return stored(home)
+
+    tool_batch = subprocess.Popen(["/bin/sh", "-c", _registered("PostToolBatch")["command"]], env=env,
+                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  start_new_session=True)  # waits for its payload until it gets one
+
+    def write_its_record():
+        lock.unlink(missing_ok=True)
+        os.mkfifo(lock)
+        tool_batch.stdin.write(payload("PostToolBatch").encode())
+        tool_batch.stdin.close()
+        deadline = time.monotonic() + 30
+        while not any(json.loads(record.read_text(encoding="utf-8"))["event"] == "PostToolBatch"
+                      for record in (home / "spool").glob("*.json")):
+            assert time.monotonic() < deadline, "the hook never wrote its record"
+            time.sleep(0.01)
+
+    def kill():
+        assert tool_batch.poll() is None, "the hook ended before it was killed"
+        os.killpg(tool_batch.pid, signal.SIGKILL)
+        tool_batch.wait(timeout=60)
+        tool_batch.stdin.close()
+        lock.unlink(missing_ok=True)
+
+    if case == "session_goes_on":  # the hook dies, then the turn ends
+        if killed == "after_its_record":
+            write_its_record()
+        kill()
+        captured = end_of_turn("Stop")
+    else:  # the turn ends, and the exit kills the hook, which may write its record last
+        captured = end_of_turn("Stop", "SessionEnd")
+        if killed == "after_its_record":
+            write_its_record()
+        kill()
+    (home / "spool").mkdir(exist_ok=True)
+    (home / "spool" / ".cut.1.tmp").write_text('{"event": "PostTool', encoding="utf-8")  # a write cut short
+    waiting = cc.pending(home)
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]  # any session's next run
+    assert not cc.pending(home)
+    assert waiting is (case == "print_mode_exit" and killed == "after_its_record")  # only a late record waits
+
+    control = tmp_path / "control"
+    _record(_hook(), control, path)
+    assert cc.run_worker(control, hermes_home=hermes, settle_s=0)["complete"]
+    assert captured == stored(home) == stored(control) and len(captured) == 4
+
+
 def _embedding_slice(state, outcome="complete", *, vectors=0, again=False, delay=0.0):
     state.update(vectors_written=vectors, delay=delay, **{"continue": again})
     return dict(state, outcome=outcome)
