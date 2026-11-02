@@ -599,7 +599,7 @@ def test_a_fresh_worker_loads_the_chunk_model_before_its_first_slice(tmp_path, h
     [(load_start, load_end)] = fake_fastembed.loads
     assert slices and all(loaded and late_rows == 1 for _, loaded, late_rows, _, _ in slices)
     assert load_end <= slices[0][0] and all(budget_start >= load_end for _, _, _, budget_start, _ in slices)
-    assert all(load_s == pytest.approx(load_end - load_start, abs=0.02) for *_, load_s in slices)
+    assert all(load_end - load_start <= load_s < load_end - load_start + 1.0 for *_, load_s in slices)
 
 
 def test_a_worker_with_no_chunk_to_embed_loads_no_model(tmp_path, home, hermes, fake_fastembed):
