@@ -210,7 +210,7 @@ export LCM_EMBEDDING_PROVIDER=ollama
 export LCM_EMBEDDING_MODEL=nomic-embed-text
 export LCM_EMBEDDING_QUERY_PREFIX="search_query: "
 export LCM_EMBEDDING_DOCUMENT_PREFIX="search_document: "
-# LCM_OLLAMA_BASE_URL defaults to http://localhost:11434
+# LCM_OLLAMA_BASE_URL defaults to http://127.0.0.1:11434
 /lcm embed warmup && /lcm embed backfill --apply
 ```
 

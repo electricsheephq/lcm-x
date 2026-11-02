@@ -154,7 +154,7 @@ CONFIG_ROWS = (
     ('embedding_query_prefix', 'LCM_EMBEDDING_QUERY_PREFIX', 'str', ''),
     ('embedding_document_prefix', 'LCM_EMBEDDING_DOCUMENT_PREFIX', 'str', ''),
     ('embedding_content_policy', 'LCM_EMBED_CONTENT_POLICY', 'str', 'conversational'),
-    ('ollama_base_url', 'LCM_OLLAMA_BASE_URL', 'str', 'http://localhost:11434'),
+    ('ollama_base_url', 'LCM_OLLAMA_BASE_URL', 'str', 'http://127.0.0.1:11434'),
     ('embedding_base_url', 'LCM_EMBEDDING_BASE_URL', 'str', ''),
     ('embedding_api_key_env', 'LCM_EMBEDDING_API_KEY_ENV', 'str', 'LCM_EMBEDDING_API_KEY'),
 )

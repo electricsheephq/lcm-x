@@ -1372,7 +1372,7 @@ class LCMConfig:
     # conversational (default) | heads | full. Unknown values degrade to the
     # default in the chunker's normalize_content_policy.
     embedding_content_policy: str = "conversational"
-    ollama_base_url: str = "http://localhost:11434"
+    ollama_base_url: str = "http://127.0.0.1:11434"
     embedding_base_url: str = ""
     embedding_api_key_env: str = "LCM_EMBEDDING_API_KEY"
     embedding_query_timeout_s: float = 3.0

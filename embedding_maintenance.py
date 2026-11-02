@@ -248,8 +248,8 @@ def _automatic_chunks_allowed(config: Any, command: Any) -> bool:
         return True  # FastEmbed runs in this process
     # Read the base URL exactly as resolve_provider/OllamaProvider do.
     base_url = str(
-        getattr(config, "ollama_base_url", "http://localhost:11434")
-    ).strip().rstrip("/") or "http://localhost:11434"
+        getattr(config, "ollama_base_url", "http://127.0.0.1:11434")
+    ).strip().rstrip("/") or "http://127.0.0.1:11434"
     return _is_loopback_url(base_url)
 
 
