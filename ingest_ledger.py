@@ -441,7 +441,21 @@ def cold_cursor_candidate(conn, *, session_id, attempt, ignored):
     if reason == "below_floor" and not conn.execute(
             "SELECT 1 FROM ledger_meta WHERE key='emission_provenance_floor'").fetchone():
         counts["emission_no_floor_key"] += 1
-    remaining = 4 * len(entries) + 256
+    def record_match(record):
+        old = decode_entries(record["entries"])
+        size = min(len(entries), len(old))
+        m = common_prefix_len(attempt["chain"][:16 * size], record["prefix_chain"][:16 * size])
+        while m < size:
+            a, b = entries[m], old[m]
+            if (a.identity_digest != b.identity_digest
+                    or a.stamp_digest is not None and b.stamp_digest is not None and a.stamp_digest != b.stamp_digest
+                    or a.uidset_digest is not None and b.uidset_digest is not None and a.uidset_digest != b.uidset_digest):
+                break
+            m += 1
+        return record, old, size, m
+
+    records = [record_match(r) for r in (ingest, emission) if r is not None]
+    remaining = 4 * max((r[3] for r in records), default=0) + 256
 
     def read_bindings(sql, params, limit):
         nonlocal remaining
@@ -476,20 +490,9 @@ def cold_cursor_candidate(conn, *, session_id, attempt, ignored):
                 return "observed_at"
         return None
 
-    def prove(record):
+    def prove(record, old, size, m):
         nonlocal remaining
-        result = dict(k=0, m=0, pairs={}, kind=record["kind"], view_seq=record["view_seq"])
-        old = decode_entries(record["entries"])
-        size = min(len(entries), len(old))
-        m = common_prefix_len(attempt["chain"][:16 * size], record["prefix_chain"][:16 * size])
-        while m < size:
-            a, b = entries[m], old[m]
-            if (a.identity_digest != b.identity_digest
-                    or a.stamp_digest is not None and b.stamp_digest is not None and a.stamp_digest != b.stamp_digest
-                    or a.uidset_digest is not None and b.uidset_digest is not None and a.uidset_digest != b.uidset_digest):
-                break
-            m += 1
-        result["m"] = m
+        result = dict(k=0, m=m, pairs={}, kind=record["kind"], view_seq=record["view_seq"])
         last, anchor, window = 0, True, deque()
         stop = "record_mismatch" if m < size else "length_end"
         for i in range(m):
@@ -552,7 +555,7 @@ def cold_cursor_candidate(conn, *, session_id, attempt, ignored):
         counts["stop." + stop] += 1
         return result
 
-    runs = [prove(r) for r in (ingest, emission) if r is not None]
+    runs = [prove(*r) for r in records]
     winner = max(runs, key=lambda r: r["k"], default=dict(k=0, pairs={}))
     return winner, counts
 

@@ -439,7 +439,7 @@ class IdentityAnchorMixin:
         for idx in list(plan["remainders"]):
             if idx in plan["replayed"]:
                 del plan["remainders"][idx]
-        plan["explained"] = plan["replayed"] - plan.get("positional", set())
+        plan["explained"] = (plan["replayed"] - plan.get("positional", set())) | ledger_pairs.keys()
         plan["replayed"] = {idx for idx in plan["replayed"] if idx >= plan["cursor"]}
         plan["carry"] = [row for idx in plan["replayed"] | set(plan["remainders"]) for row in matched.get(idx, ())]
         plan["carry"] += [row for row, _message in plan.get("ws", ())]  # R1-ws matches the audit proved too

@@ -7338,12 +7338,13 @@ class LCMEngine(
                 if not tail_registered:
                     _PENDING_TAIL_ENGINES.discard(self)
                 attribution.update(rows_written=0, bytes_written=0)
-                if isinstance(exc, Exception) and attempt == 0 and (_is_ingest_busy_error(exc)
+                rollback_ok = self._store._transaction_owner.rollback_failures == rollback_failures
+                if rollback_ok and isinstance(exc, Exception) and attempt == 0 and (_is_ingest_busy_error(exc)
                                                                   or held_at is None and isinstance(exc, sqlite3.Error)):
                     attribution["busy_snapshot_retry"] = True
                     admission_retry = held_at is None and _is_ingest_busy_error(exc)
                     continue
-                if isinstance(exc, Exception) and self._session_end_flush_active and _is_ingest_busy_error(exc):
+                if rollback_ok and isinstance(exc, Exception) and self._session_end_flush_active and _is_ingest_busy_error(exc):
                     self._ingest_read_only = exc
                     frozen_replay = None
                     read_only_thread = getattr(self._store, "_read_only_ingest_thread", None)
@@ -7803,6 +7804,10 @@ class LCMEngine(
             else:
                 winner, delta = ingest_ledger.cold_cursor_candidate(
                     store._conn, session_id=self._session_id, attempt=attempt, ignored=ignored)
+                # A partial tool segment must be replayed with its opening assistant.
+                while 0 < winner["k"] < len(messages) and messages[winner["k"]].get("role") == "tool":
+                    winner["k"] -= 1
+                winner["pairs"] = {idx: row for idx, row in winner["pairs"].items() if idx < winner["k"]}
                 if winner["k"] > today:
                     # Pre-redaction ledger digests plus per-row occurrence evidence replace
                     # the legacy lossy fence / #1511 rewind for this proven run only.
@@ -8043,6 +8048,10 @@ class LCMEngine(
                         if self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)
                     }
                     cursor = self._ingest_cursor = min(new_prefix_occurrences)
+        # Remapping can expose rows the ledger proved: they are no longer a
+        # consumed prefix, so every residual consumer must be able to match them.
+        ledger_run["pairs"] = {idx: row for idx, row in ledger_run["pairs"].items() if idx < cursor}
+        consumed_store_ids = {row["store_id"] for row in ledger_run["pairs"].values()}
         # A restart can preserve a genuinely new row (so the cursor stops early)
         # and still replay exact durable tool pairs AFTER it. Those pairs are
         # matched on their durable ``tool_call_id`` identity, so suppressing
@@ -8056,7 +8065,7 @@ class LCMEngine(
         # has already proven a partial replay.
         replayed_tool_segment_indexes = (
             self._replayed_tool_segment_indexes_after_cursor(
-                reconcile_messages, cursor, consumed_store_ids={r["store_id"] for r in ledger_run["pairs"].values()})
+                reconcile_messages, cursor, **({"consumed_store_ids": consumed_store_ids} if consumed_store_ids else {}))
             if reconciled_existing_session and today > 0 and cursor > 0
             else set()
         )
@@ -8122,7 +8131,7 @@ class LCMEngine(
                                    if idx >= accepted_compaction_prefix
                                    and identity != cached_source_identities[idx]), None)
             try:
-                backfill_cursor = today if ledger_run["k"] else cursor
+                backfill_cursor = min(today, cursor) if ledger_run["k"] else cursor
                 if ((reconciled_existing_session or accepted_compaction_prefix) and backfill_cursor > 0
                         and getattr(self, "_ingest_read_only", None) is None):
                     with self._ingest_evidence():

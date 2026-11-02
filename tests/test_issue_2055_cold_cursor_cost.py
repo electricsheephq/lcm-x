@@ -62,6 +62,8 @@ def test_t10_indexed_candidate_and_whole_ingest_lock_hold(engines, monkeypatch):
             for _ in range(50):
                 engine._ingest_cursor_needs_reconcile = True
                 engine._ingest_messages([dict(row) for row in view])
+                if enabled:
+                    assert engine._last_ingest_reconciliation["k"] == 2000
                 measurements.append(engine._last_ingest_attribution["lock_hold_ms"])
         label = "on" if enabled else "off"
         holds[label], raw_holds[label] = quantiles(measurements), measurements

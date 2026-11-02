@@ -2,6 +2,7 @@
 from collections import Counter
 from copy import deepcopy
 import random
+import sqlite3
 
 import pytest
 
@@ -93,8 +94,15 @@ def test_t2_tool_multiset_excludes_consumed_ids_not_equal_content(engines):
     helper = engine._replayed_tool_segment_indexes_after_cursor
     assert helper(view, 1) == {2, 3}
     assert helper(view, 1, consumed_store_ids={r["store_id"] for r in stored[1:]}) == set()
-    # An out-of-window consumed twin must not cancel an in-window occurrence.
-    assert helper(view, 1, consumed_store_ids={999999}) == {2, 3}
+    # Push a real equal-identity twin outside the helper's 64-row tail.
+    outside = stored[1]["store_id"]
+    engine._ingest_messages([p, *old, *[_m("user", f"padding {i}", 20. + i) for i in range(65)],
+                             *tool_pair(100.)])
+    tail = engine._store.get_session_tail("S", limit=64)
+    assert outside not in {r["store_id"] for r in tail}
+    identity = engine._message_replay_identity(stored[1], stored_row=True)
+    assert any(engine._message_replay_identity(r, stored_row=True) == identity for r in tail)
+    assert helper(view, 1, consumed_store_ids={outside}) == {2, 3}
 
 
 def test_t3_consumed_twin_cannot_be_stolen(engines, monkeypatch):
@@ -338,16 +346,21 @@ def test_t13_ties_keep_legacy_record_and_ingest_wins_record_tie(engines):
     engine = engines()
     view = [_m("user", "P", 1.), _m("assistant", "A", 2.)]
     engine._ingest_messages(view)
+    view = [*view, _m("user", "unproven tail", 3.)]
     attempt = prepare(engine, view)
     with engine._store.atomic(immediate=True):
         ledger.write_view(engine._store._conn, attempt["salt"], attempt["lineage"], "emission", "proposed", attempt["entries"])
         winner, _ = candidate(engine, view)
-        assert winner["kind"] == "ingest"
+        assert winner["kind"] == "ingest" and winner["k"] == 2
         engine._ingest_ledger_attempt = attempt
         prior = engine._last_ingest_reconciliation = {"reason": "keep me"}
         callbacks = []
-        assert engine._ledger_cold_cursor(view, [False] * 2, 2, 2, callbacks)["k"] == 0
+        assert engine._ledger_cold_cursor(view, [False] * 3, 2, 2, callbacks)["k"] == 0
         assert engine._last_ingest_reconciliation is prior
+        for callback in callbacks:
+            callback()
+        assert count(engine, "cold_candidate.not_larger") == 1
+        assert count(engine, "cold_candidate.skipped.complete") == 0
     engine.__dict__.pop("_ingest_ledger_attempt", None)
 
 
@@ -584,6 +597,138 @@ def test_t17_equal_known_uids_prove_a_null_stamped_continuation_on_own_ref(engin
     assert run["k"] == 2 and counters["stop.length_end"] == 1
 
 
+def test_fix1_rewritten_object_interrupted_retry_has_no_surplus_or_binding(engines, monkeypatch):
+    outputs = []
+    for enabled in (False, True):
+        engine = engines(f"rewrite-{enabled}")
+        a, b = _m("user", "A", 10.), _m("user", "B", 10.)
+        engine._ingest_messages([a, b])
+        b["content"] = "A"  # Preserve the object whose old bytes were stored.
+        with monkeypatch.context() as patch:
+            if not enabled:
+                patch.setattr(engine, "_ledger_cold_cursor", lambda *a: dict(k=0, pairs={}))
+            with patch.context() as fault:
+                def interrupt(*a):
+                    raise KeyboardInterrupt("before COMMIT")
+                fault.setattr(engine, "_write_ingest_ledger", interrupt)
+                with pytest.raises(KeyboardInterrupt, match="before COMMIT"):
+                    engine._ingest_messages([b])
+            assert engine._ingest_cursor_needs_reconcile
+            engine._ingest_messages([b])
+        if enabled:
+            assert count(engine, "cold_candidate.used_ingest") == 1
+            assert engine._last_ingest_reconciliation["k"] == 1
+        bindings = [{key: value for key, value in row.items() if key != "lineage"}
+                    for row in sql_rows(engine, "occurrence_bindings")]
+        outputs.append((snapshot(engine), bindings))
+    assert outputs[0] == outputs[1]
+    assert sum(outputs[1][0].values()) == len(outputs[1][1]) == 2
+
+
+def test_fix1_remap_trims_consumed_pairs_and_backfill(engines, monkeypatch):
+    outputs = []
+    for enabled in (False, True):
+        engine = engines(f"remap-{enabled}")
+        view = [_m("user", "P", 1.), _m("user", "X", 2.), _m("assistant", "R", 3.)]
+        engine._ingest_messages(deepcopy(view))
+        backfills, pairs = [], []
+        prematch, backfill = engine._identity_anchor_prematch, engine._identity_anchor_backfill_prefix
+        with monkeypatch.context() as patch:
+            force_today(engine, patch, 2)
+            if not enabled:
+                patch.setattr(engine, "_ledger_cold_cursor", lambda *a: dict(k=0, pairs={}))
+            # Exercise the existing durable-proof occurrence-remapping seam.
+            patch.setattr(engine, "_durable_commit_proof_payload", lambda: {"test": True})
+            patch.setattr(engine, "_cursor_from_durable_commit_proof", lambda *a: 3)
+            patch.setattr(engine, "_remapped_output_metadata", lambda *a: {1: dict(view[1], timestamp=99.)})
+            def observe_backfill(messages, identities, cursor):
+                backfills.append(cursor)
+                return backfill(messages, identities, cursor)
+            def observe_pairs(*a, **kw):
+                pairs.append(set(kw.get("ledger_pairs", ())))
+                return prematch(*a, **kw)
+            patch.setattr(engine, "_identity_anchor_backfill_prefix", observe_backfill)
+            patch.setattr(engine, "_identity_anchor_prematch", observe_pairs)
+            engine._ingest_messages(deepcopy(view))
+        if enabled:
+            assert count(engine, "cold_candidate.used_ingest") == 1
+        bindings = [{key: value for key, value in row.items() if key != "lineage"}
+                    for row in sql_rows(engine, "occurrence_bindings")]
+        outputs.append((snapshot(engine), bindings, backfills))
+        if enabled:
+            assert pairs == [{0}]
+    assert outputs[0] == outputs[1]
+    assert outputs[1][2] == [1]
+
+
+def test_fix1_busy_with_failed_rollback_does_not_retry(engines, monkeypatch):
+    engine = engines()
+    engine._ingest_messages([_m("user", "P", 1.)])
+    view = [_m("user", "P", 1.), _m("assistant", "reply", 2.)]
+    conn, write = engine._store._conn, engine._write_ingest_ledger
+    calls = []
+    class NoRollback(RollbackProxy):
+        def rollback(self):
+            raise RuntimeError("rollback did not run")
+    engine._store._conn = NoRollback(conn)
+    try:
+        with monkeypatch.context() as patch:
+            def busy(*args):
+                calls.append(1)
+                if len(calls) == 1:
+                    raise sqlite3.OperationalError("database is locked")
+                return write(*args)
+            patch.setattr(engine, "_write_ingest_ledger", busy)
+            with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+                engine._ingest_messages(deepcopy(view))
+        assert len(calls) == 1
+        assert conn.in_transaction and engine._ingest_cursor_needs_reconcile
+        assert engine._store._transaction_owner.rollback_failures == 1
+    finally:
+        engine._store._conn = conn
+    engine._ingest_messages(deepcopy(view))
+    assert engine._store.get_session_count("S") == 2
+    assert snapshot(engine) == Counter((m["role"], m["content"], m["timestamp"], None) for m in view)
+
+
+def test_fix1_budget_uses_record_match_not_long_incoming_view(engines):
+    engine = engines()
+    head = _m("user", "repeated", 1.)
+    engine._ingest_messages([head])
+    view = [head, *[_m("assistant", f"new {i}", float(i + 2)) for i in range(1000)]]
+    attempt, conn = prepare(engine, view), engine._store._conn
+    old = prepare(engine, [head, _m("assistant", "diverged", 2.)])
+    with engine._store.atomic(immediate=True):
+        ledger.insert_bindings(conn, attempt["lineage"], [dict(
+            ordinal=(i + 2) * ledger.ORDINAL_STEP, store_id=1,
+            identity_digest=attempt["entries"][0].identity_digest, stamp="1.0", disposition="stored", view_seq=1)
+            for i in range(600)])
+        ledger.write_view(conn, attempt["salt"], attempt["lineage"], "ingest", None, old["entries"])
+    run, counts = candidate(engine, view, attempt=attempt)
+    assert run["m"] == 1 and run["k"] == 0
+    assert counts["stop.budget"] == 1
+
+
+def test_t18_partial_tool_segment_rewinds_to_assistant(engines, monkeypatch):
+    engine = engines()
+    view = [_m("user", "P", 1.), *tool_pair(2.)]
+    engine._ingest_messages(deepcopy(view))
+    projected = [*view[:2], dict(view[2], content="projected result")]
+    attempt = prepare(engine, projected)
+    engine._ingest_ledger_attempt = attempt
+    with engine._store.atomic(immediate=True):
+        run = engine._ledger_cold_cursor(projected, [False] * 3, 0, 3, [])
+    engine.__dict__.pop("_ingest_ledger_attempt", None)
+    assert run["m"] == 2 and run["k"] == 1 and set(run["pairs"]) == {0}
+    force_today(engine, monkeypatch)
+    engine._ingest_messages(deepcopy(projected))
+    added = engine._store.get_session_messages("S")[3:]
+    assert [row["role"] for row in added] == ["assistant", "tool"]
+    assert added[-1]["content"] == "projected result"
+    engine._ingest_messages(deepcopy(projected))
+    assert engine._store.get_session_messages("S")[3:] == added
+
+
 @pytest.mark.parametrize("seed", range(8))
 def test_t1_seeded_restarts_refusals_interrupts_and_twins(engines, monkeypatch, seed):
     """Paired histories: multiset inclusion, no new silent surplus, seam equation.
@@ -627,6 +772,15 @@ def test_t1_seeded_restarts_refusals_interrupts_and_twins(engines, monkeypatch, 
                 patch.setattr(engine, "_identity_anchor_prematch", observe_remap)
             host = [_m("user", "head", 1.)]
             expected = Counter({("user", "head", 1., None): 1})
+            host = [_m("user", "resolved head", 2.)]
+            expected[("user", "resolved head", 2., None)] = 1
+            engine._ingest_messages(deepcopy(host))
+            # A deterministic cold step exercises the candidate in every seed;
+            # the random suffix must not make the no-surplus oracle vacuous.
+            restart(engine)
+            with patch.context() as cold:
+                force_today(engine, cold)
+                engine._ingest_messages(deepcopy(host))
             for step, (event, text) in enumerate(events, 1):
                 if enabled:
                     seam_state.clear()
@@ -679,4 +833,6 @@ def test_t1_seeded_restarts_refusals_interrupts_and_twins(engines, monkeypatch, 
                     assert not ((expected & baseline) - stored), (seed, step, event, "lost occurrence")
                     assert not ((stored - expected) - (baseline - expected)), (seed, step, event, "silent surplus")
             results.append(snapshot(engine))
+            if enabled:
+                assert count(engine, "cold_candidate.used_ingest") + count(engine, "cold_candidate.used_emission") > 0
     assert not ((results[1] - expected) - (results[0] - expected)), "no new silent surplus"
