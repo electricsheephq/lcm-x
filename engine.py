@@ -7805,8 +7805,9 @@ class LCMEngine(
                 winner, delta = ingest_ledger.cold_cursor_candidate(
                     store._conn, session_id=self._session_id, attempt=attempt, ignored=ignored)
                 # A partial tool segment must be replayed with its opening assistant.
-                while 0 < winner["k"] < len(messages) and messages[winner["k"]].get("role") == "tool":
-                    winner["k"] -= 1
+                if 0 < winner["k"] < len(messages) and messages[winner["k"]].get("role") == "tool":
+                    while winner["k"] > 0 and (messages[winner["k"]].get("role") == "tool" or ignored[winner["k"]]):
+                        winner["k"] -= 1
                 winner["pairs"] = {idx: row for idx, row in winner["pairs"].items() if idx < winner["k"]}
                 if winner["k"] > today:
                     # Pre-redaction ledger digests plus per-row occurrence evidence replace

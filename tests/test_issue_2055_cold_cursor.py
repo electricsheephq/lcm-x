@@ -661,18 +661,25 @@ def test_fix1_remap_trims_consumed_pairs_and_backfill(engines, monkeypatch):
     assert outputs[1][2] == [1]
 
 
-def test_fix1_busy_with_failed_rollback_does_not_retry(engines, monkeypatch):
+@pytest.mark.parametrize("session_end", [False, True])
+def test_fix1_busy_with_failed_rollback_does_not_retry(engines, monkeypatch, session_end):
     engine = engines()
     engine._ingest_messages([_m("user", "P", 1.)])
     view = [_m("user", "P", 1.), _m("assistant", "reply", 2.)]
     conn, write = engine._store._conn, engine._write_ingest_ledger
-    calls = []
+    calls, classifications = [], []
+    transaction = engine._ingest_messages_transaction
     class NoRollback(RollbackProxy):
         def rollback(self):
             raise RuntimeError("rollback did not run")
     engine._store._conn = NoRollback(conn)
     try:
         with monkeypatch.context() as patch:
+            patch.setattr(engine, "_session_end_flush_active", session_end)
+            def classify(*args, **kwargs):
+                classifications.append(getattr(engine, "_ingest_read_only", None) is not None)
+                return transaction(*args, **kwargs)
+            patch.setattr(engine, "_ingest_messages_transaction", classify)
             def busy(*args):
                 calls.append(1)
                 if len(calls) == 1:
@@ -682,6 +689,7 @@ def test_fix1_busy_with_failed_rollback_does_not_retry(engines, monkeypatch):
             with pytest.raises(sqlite3.OperationalError, match="database is locked"):
                 engine._ingest_messages(deepcopy(view))
         assert len(calls) == 1
+        assert classifications == [False]  # No frozen, read-only replay after failed rollback.
         assert conn.in_transaction and engine._ingest_cursor_needs_reconcile
         assert engine._store._transaction_owner.rollback_failures == 1
     finally:
@@ -729,6 +737,21 @@ def test_t18_partial_tool_segment_rewinds_to_assistant(engines, monkeypatch):
     assert engine._store.get_session_messages("S")[3:] == added
 
 
+def test_t18_partial_tool_segment_steps_over_ignored_row(engines):
+    engine = engines()
+    assistant, tool = tool_pair(2.)
+    view = [_m("user", "P", 1.), assistant, _m("user", "ignored", 2.5), tool]
+    engine._ingest_messages(deepcopy(view))
+    projected = [*view[:3], dict(tool, content="projected result")]
+    engine._ingest_ledger_attempt = prepare(engine, projected)
+    try:
+        with engine._store.atomic(immediate=True):
+            run = engine._ledger_cold_cursor(projected, [False, False, True, False], 0, 4, [])
+    finally:
+        engine.__dict__.pop("_ingest_ledger_attempt", None)
+    assert run["m"] == 3 and run["k"] == 1 and set(run["pairs"]) == {0}
+
+
 @pytest.mark.parametrize("seed", range(8))
 def test_t1_seeded_restarts_refusals_interrupts_and_twins(engines, monkeypatch, seed):
     """Paired histories: multiset inclusion, no new silent surplus, seam equation.
@@ -770,7 +793,6 @@ def test_t1_seeded_restarts_refusals_interrupts_and_twins(engines, monkeypatch, 
                     return prematch(messages, identities, cursor, *a, **kw)
                 patch.setattr(engine, "_durable_commit_proof_payload", observe_seam)
                 patch.setattr(engine, "_identity_anchor_prematch", observe_remap)
-            host = [_m("user", "head", 1.)]
             expected = Counter({("user", "head", 1., None): 1})
             host = [_m("user", "resolved head", 2.)]
             expected[("user", "resolved head", 2., None)] = 1
@@ -781,6 +803,9 @@ def test_t1_seeded_restarts_refusals_interrupts_and_twins(engines, monkeypatch, 
             with patch.context() as cold:
                 force_today(engine, cold)
                 engine._ingest_messages(deepcopy(host))
+            # Re-deliver the provisional head after the deterministic candidate win.
+            host = [_m("user", "head", 1.), *host]
+            engine._ingest_messages(deepcopy(host))
             for step, (event, text) in enumerate(events, 1):
                 if enabled:
                     seam_state.clear()
