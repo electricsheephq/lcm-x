@@ -5,10 +5,14 @@ Stdlib only and Python 3.9 compatible: hooks run on the system ``python3``.
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 from pathlib import Path
-from typing import List, Mapping, Optional
+
+# Every hook imports this module: typing serves the annotations only, and shutil loads only
+# when a Python is looked up on PATH.
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    from typing import List, Mapping, Optional
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 # One store per harness, so each store has one owning writer: (setting, default directory name).
@@ -56,6 +60,8 @@ def found_python(environ: Mapping[str, str]) -> Optional[Path]:
     """A Python 3.11+ on the hook's ``PATH``: ``python3`` when it is the 3.11+ interpreter running
     this hook, else a versioned name, newest first. Only that ``PATH``'s absolute entries are
     searched: a relative one would name the project folder Claude Code runs the hook in."""
+    import shutil
+
     search = os.pathsep.join(entry for entry in environ.get("PATH", "").split(os.pathsep) if os.path.isabs(entry))
     own = shutil.which("python3", path=search)
     if own and sys.version_info >= (3, 11) and sys.executable and (

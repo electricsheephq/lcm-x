@@ -12,6 +12,7 @@ import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -222,13 +223,13 @@ def test_precompact_reports_the_worker_outcome(hook, env, tmp_path, monkeypatch)
     home = Path(env["LCMX_CC_HOME"])
     home.mkdir(parents=True)
     continued = home / "continued"
-    popen, starts = hook.subprocess.Popen, []
+    popen, starts = subprocess.Popen, []
 
     def counting(*args, **kwargs):  # counts a detached start even if its worker has not run yet
         if kwargs.get("start_new_session"):
             starts.append(args)
         return popen(*args, **kwargs)
-    monkeypatch.setattr(hook.subprocess, "Popen", counting)
+    monkeypatch.setattr(subprocess, "Popen", counting)
     for code, outcome, detached in ((0, "drained", False), (3, "drain_incomplete+worker", True),
                                     (1, "drain_failed:1+worker", True), (2, "drain_failed:2", False),
                                     (4, "worker_running", False), (5, "drain_bound+worker", True)):
@@ -390,7 +391,7 @@ def test_the_worker_and_the_reader_start_isolated_on_a_found_python(hook, env, t
     home = Path(env["LCMX_CC_HOME"])
     home.mkdir(parents=True)
     started = []
-    monkeypatch.setattr(hook.subprocess, "Popen", lambda command, **kwargs: started.append(command))
+    monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: started.append(command))
     lane = {**env, "PATH": str(found.parent), "LCMX_PACKAGE_ROOT": str(package)}
     assert hook.start_worker(home, lane) == "worker_started"
     assert started == [[str(found), "-I", "-S", str(package / "scripts" / "lcm_x_capture.py"), "worker",
@@ -409,6 +410,26 @@ def test_the_worker_and_the_reader_start_isolated_on_a_found_python(hook, env, t
     assert executed == [(str(found), [str(found), "-I", "-S", str(package / "scripts" / "lcm_x_mcp.py"),
                                       "--store", str(home / "lcm.db"), "--hermes-home", str(home),
                                       "--log-dir", str(home / "logs")])]
+
+
+def test_a_hook_that_finds_a_worker_running_imports_nothing_it_does_not_need(env, tmp_path):
+    """A hook pays for its imports before it runs (#2141): typing never loads, and a hook that
+    finds the worker running loads neither subprocess nor shutil. The hook runs as Claude Code
+    starts it, with a Python on PATH, so looking one up would load shutil."""
+    transcript = _transcript(tmp_path)
+    home = Path(env["LCMX_CC_HOME"])
+    home.mkdir(parents=True)
+    payload = {"hook_event_name": "PostToolBatch", "session_id": "s1", "transcript_path": str(transcript)}
+    lane = {**env, "PATH": str(Path(sys.executable).parent)}
+    with open(home / "capture.lock", "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        done = subprocess.run([sys.executable, "-I", "-S", "-X", "importtime", str(PLUGIN / "bin" / "lcmx_hook.py")],
+                              input=json.dumps(payload), env=lane, capture_output=True, text=True, timeout=60)
+    assert (done.returncode, done.stdout) == (0, "")
+    imported = {line.rsplit("|", 1)[-1].strip() for line in done.stderr.splitlines() if line.startswith("import time:")}
+    assert "json" in imported  # the import log is complete
+    assert imported.isdisjoint({"subprocess", "shutil", "typing"})
+    assert _log(env)[-1]["outcome"] == "worker_running"
 
 
 def test_the_reader_names_the_one_setup_step_when_no_python_is_found(env, tmp_path, monkeypatch, capsys):
@@ -430,8 +451,8 @@ def test_a_precompact_drain_never_waits_on_a_held_lock(hook, env, tmp_path, monk
     home = Path(env["LCMX_CC_HOME"])
     home.mkdir(parents=True)
     lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(_package(tmp_path))}
-    monkeypatch.setattr(hook.subprocess, "run", lambda *a, **k: pytest.fail("a held lock must not start a drain"))
-    monkeypatch.setattr(hook.subprocess, "Popen", lambda *a, **k: pytest.fail("the holder takes the record"))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("a held lock must not start a drain"))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("the holder takes the record"))
     with open(home / "capture.lock", "a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         started = time.monotonic()
@@ -452,9 +473,9 @@ def test_a_precompact_drain_cut_at_its_timeout_hands_the_rest_to_a_detached_work
 
     def timed_out(command, *, timeout, **kwargs):
         bounded.append((command, timeout))
-        raise hook.subprocess.TimeoutExpired(command, timeout)
-    monkeypatch.setattr(hook.subprocess, "run", timed_out)
-    monkeypatch.setattr(hook.subprocess, "Popen", lambda command, **kwargs: detached.append(command))
+        raise subprocess.TimeoutExpired(command, timeout)
+    monkeypatch.setattr(subprocess, "run", timed_out)
+    monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: detached.append(command))
     assert hook.start_worker(home, lane, deadline_s=hook.PRECOMPACT_DEADLINE_S) == "drain_timeout+worker"
     assert [timeout for _command, timeout in bounded] == [hook.PRECOMPACT_DEADLINE_S + 2]
     assert "--deadline" in bounded[0][0] and len(detached) == 1 and "--deadline" not in detached[0]
@@ -470,7 +491,7 @@ def test_a_cut_precompact_drain_leaves_the_rest_to_the_worker_that_took_the_lock
     with open(home / "capture.lock", "a") as handle:
         def incomplete_then_taken(command, *, timeout, **kwargs):
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)  # another worker takes the lock meanwhile
-            return hook.subprocess.CompletedProcess(command, 3)
-        monkeypatch.setattr(hook.subprocess, "run", incomplete_then_taken)
-        monkeypatch.setattr(hook.subprocess, "Popen", lambda *a, **k: pytest.fail("the holder takes the rest"))
+            return subprocess.CompletedProcess(command, 3)
+        monkeypatch.setattr(subprocess, "run", incomplete_then_taken)
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("the holder takes the rest"))
         assert hook.start_worker(home, lane, deadline_s=hook.PRECOMPACT_DEADLINE_S) == "drain_incomplete+holder"

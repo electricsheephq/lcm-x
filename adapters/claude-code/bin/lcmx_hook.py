@@ -15,14 +15,18 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, TextIO
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lcmx_runtime  # noqa: E402
+
+# Every hook pays for its imports before it runs: typing serves the annotations only, and
+# subprocess loads only when a worker starts.
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    from typing import Any, Dict, Mapping, Optional, TextIO
 
 MAX_PAYLOAD = 1024 * 1024
 PRECOMPACT_DEADLINE_S = 10
@@ -159,6 +163,12 @@ def _lock_held(lock: Path) -> bool:
 
 def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0) -> str:
     """Start one detached drain, or with ``deadline_s`` run a bounded drain and wait for it."""
+    # The record is already spooled. A held lock means a worker that will see it: a detached
+    # worker releases the lock first and rescans the spool after, and a bounded one ends with
+    # the step below, so no record can fall between. Checked first, so a hook that finds a
+    # worker running looks nothing else up.
+    if not deadline_s and _lock_held(home / "capture.lock"):
+        return "worker_running"
     runtime = lcmx_runtime.runtime_command(environ, home)
     if runtime is None:
         return "runtime_missing"
@@ -168,6 +178,8 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0)
     script = package / "scripts" / "lcm_x_capture.py"
     if not script.is_file():
         return "worker_missing"
+    import subprocess
+
     command = [*runtime, str(script), "worker", "--home", str(home)]
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
              "close_fds": True, "cwd": str(home)}
@@ -193,10 +205,7 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0)
             return outcome + "+holder"
         subprocess.Popen(command, start_new_session=True, **quiet)
         return outcome + "+worker"
-    # The record is already spooled. A held lock means a worker that will see it: a detached
-    # worker releases the lock first and rescans the spool after, and a bounded one ends with
-    # the step above, so no record can fall between.
-    if _lock_held(home / "capture.lock"):
+    if _lock_held(home / "capture.lock"):  # taken while the runtime was looked up
         return "worker_running"
     subprocess.Popen(command, start_new_session=True, **quiet)
     return "worker_started"
