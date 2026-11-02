@@ -76,9 +76,10 @@ stay synchronous:
 
 An async hook killed while it writes leaves at most a temporary dotfile, which the worker never
 reads. One that finishes after a later hook replaces that hook's record. If that was an end event's
-record (`Stop`, `SubagentStop`, `SessionEnd`), the worker skips the settle, and the next run's sweep
-captures any line the settle would have waited for. A test kills the hook before and after it
-writes its record, in a session that goes on and at a `-p` exit, and finds every row stored.
+record, the worker skips the settle, and the next run's sweep captures any line the settle would
+have waited for. The async hook never takes the store lock (step 1 below), so its death never
+leaves a synchronous hook waiting on it. A test kills the hook before and after it writes its
+record, in a session that goes on and at a `-p` exit, and finds every row stored.
 
 ### Spool and worker handshake
 
@@ -89,7 +90,9 @@ lock held and starts nobody. The handshake closes it:
    nanosecond `seq`), then probe the lock. Free: start a detached worker. Held: the holder will see
    the record (step 3). The probe holds the lock for an instant, and a hook or a starting worker
    that meets it gives way, so a hook probes only once it has found a runtime and the worker
-   script: the prober must be able to start the worker itself.
+   script: the prober must be able to start the worker itself. The async `PostToolBatch` hook
+   never probes, since Claude Code may kill it at any point, mid-probe too. It starts a worker on
+   every tool batch, and a worker that finds the lock held exits before it loads any store code.
 2. **Claim by rename:** the worker renames `<key>.json` to `<key>.claimed` before reading it. A hook
    firing meanwhile writes a new `<key>.json` and never touches the claimed file, so no record is
    deleted unread. The worker deletes the claimed file only after that transcript's batch commits. A
@@ -341,8 +344,8 @@ hook entry handles:
 
 - The hook entry runs on the system `python3` (3.9 or newer, stdlib only), started with `-I -S`:
   the user's `PYTHONPATH`, `PYTHONHOME`, user site-packages and `.pth` files never reach it. Each
-  module loads only on the path that needs it: a hook that finds the worker running loads no
-  `subprocess`, and with a set-up runtime no `shutil` either (#2141). The worker and the MCP
+  module loads only on the path that needs it: a synchronous hook that finds the worker running
+  loads no `subprocess`, and with a set-up runtime no `shutil` either (#2141). The worker and the MCP
   server need Python 3.11 or newer with LCM-X's dependencies: `LCMX_PYTHON`, else a venv in the
   plugin's data directory (`CLAUDE_PLUGIN_DATA`, which survives plugin updates and is removed on
   uninstall), else `<home>/venv`.

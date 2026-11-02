@@ -37,6 +37,9 @@ EVENTS = frozenset({
     "SessionStart", "UserPromptSubmit", "PostToolBatch", "PostToolUse", "Stop", "StopFailure",
     "SubagentStop", "PreCompact", "PostCompact", "SessionEnd",
 })
+# Registered "async" in hooks.json: Claude Code does not wait for these and may kill one at any
+# point, so they never probe the store lock (start_worker).
+ASYNC_EVENTS = frozenset({"PostToolBatch"})
 SESSION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 OFF_VALUES = frozenset({"0", "off", "false", "no"})
 
@@ -162,8 +165,9 @@ def _lock_held(lock: Path) -> bool:
     return False
 
 
-def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0) -> str:
-    """Start one detached drain, or with ``deadline_s`` run a bounded drain and wait for it."""
+def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0, probe: bool = True) -> str:
+    """Start one detached drain, or with ``deadline_s`` run a bounded drain and wait for it.
+    Without ``probe`` a worker starts even when one is running; it then exits at once."""
     runtime = lcmx_runtime.runtime_command(environ, home)
     if runtime is None:
         return "runtime_missing"
@@ -177,8 +181,9 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0)
     # worker releases the lock first and rescans the spool after, and a bounded one ends with
     # the step below, so no record can fall between. A hook never waits on another worker. The
     # probe itself holds the lock for an instant, and a hook or worker that meets it gives way,
-    # so only a hook that can start a worker probes.
-    if _lock_held(home / "capture.lock"):
+    # so only a hook that will start a worker probes: one that can, and is not async, since a
+    # killed async hook could hold the probe and start nothing.
+    if probe and _lock_held(home / "capture.lock"):
         return "worker_running"
     import subprocess
 
@@ -258,7 +263,7 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> 
             return 0
         spool(home, record)
         deadline = PRECOMPACT_DEADLINE_S if record["event"] == "PreCompact" else 0
-        outcome = start_worker(home, environ, deadline_s=deadline)
+        outcome = start_worker(home, environ, deadline_s=deadline, probe=record["event"] not in ASYNC_EVENTS)
     except Exception as exc:  # noqa: BLE001 - a hook never fails the session
         outcome = "error:" + type(exc).__name__
     finally:

@@ -5,7 +5,8 @@ The plugin's hook entry (adapters/claude-code/bin/lcmx_hook.py) starts it detach
 PreCompact, waits for it with ``--deadline``. Exit codes: 0 every record drained, 5 a bounded
 run reached its deadline, 3 records left for another reason (a failed record, the store left in
 WAL mode, or another worker took the lock), 4 a bounded run found the lock held and drained
-nothing, 2 the store was refused, 1 an error. Design: docs/claude-code-adapter.md.
+nothing, 2 the store was refused, 1 an error. A worker that finds the lock held at its start exits
+before it loads any store code. Design: docs/claude-code-adapter.md.
 """
 
 from __future__ import annotations
@@ -29,6 +30,24 @@ def _ensure_local_package_importable() -> None:
     pkg.__path__ = [str(PLUGIN_DIR)]
     pkg.__package__ = PACKAGE_NAME
     sys.modules[PACKAGE_NAME] = pkg
+
+
+def _lock_held(home: Path) -> bool:
+    """Whether another worker holds the store lock. Checked before any store code loads, so a
+    worker started while another runs exits at once: the async PostToolBatch hook starts one
+    on every tool batch without probing the lock itself."""
+    import fcntl
+
+    try:
+        with open(home / "capture.lock", "a") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    except OSError:
+        pass  # no store home yet: the worker creates it
+    return False
 
 
 def _run_audit(home: Path, session: str | None) -> int:
@@ -60,6 +79,8 @@ def main(argv: list[str] | None = None) -> int:
     home = args.home.expanduser()
     if not home.is_absolute():
         return 2
+    if _lock_held(home):  # the holder sees every spooled record
+        return 4 if args.deadline is not None else 0
     # The Hermes home is read before the store's own settings replace HERMES_HOME: the
     # writer refuses any store home inside it.
     hermes_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser()

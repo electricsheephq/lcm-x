@@ -179,6 +179,7 @@ def test_plugin_files_are_consistent(hook):
     servers = json.loads((PLUGIN / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
     assert manifest["name"] == "lcm-x"
     assert set(hooks) == set(hook.EVENTS) - {"PostToolUse"}  # accepted for Grok Build only
+    assert hook.ASYNC_EVENTS == {"PostToolBatch"}
     for event, entries in hooks.items():
         for entry in entries:
             # The shell form, which every host runs: Grok Build's runner is not yet proven to honour
@@ -186,7 +187,7 @@ def test_plugin_files_are_consistent(hook):
             assert entry["hooks"][0]["command"] == 'python3 -I -S "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"'
             # Only PostToolBatch runs in the background: the worker settles on the end events, a fork's
             # start source rides on SessionStart's record, and -p kills an async hook still running at exit.
-            assert entry["hooks"][0].get("async", False) is (event == "PostToolBatch")
+            assert entry["hooks"][0].get("async", False) is (event in hook.ASYNC_EVENTS)
     assert set(servers) == {"lcm-x"}
 
 
@@ -419,14 +420,14 @@ def test_the_worker_and_the_reader_start_isolated_on_a_found_python(hook, env, t
 
 @pytest.mark.parametrize("mode", ["venv", "found"])
 def test_a_hook_that_finds_a_worker_running_imports_nothing_it_does_not_need(env, tmp_path, mode):
-    """A hook pays for its imports before it runs (#2141): typing never loads, and a hook that
-    finds the worker running loads no subprocess. The hook runs as Claude Code starts it. With a
-    set-up runtime it loads no shutil either; a Python found on PATH is looked up with shutil
-    before the lock probe, since only a hook that can start a worker may probe."""
+    """A hook pays for its imports before it runs (#2141): typing never loads, and a synchronous
+    hook that finds the worker running loads no subprocess. The hook runs as Claude Code starts
+    it. With a set-up runtime it loads no shutil either; a Python found on PATH is looked up with
+    shutil before the lock probe, since only a hook that can start a worker may probe."""
     transcript = _transcript(tmp_path)
     home = Path(env["LCMX_CC_HOME"])
     home.mkdir(parents=True)
-    payload = {"hook_event_name": "PostToolBatch", "session_id": "s1", "transcript_path": str(transcript)}
+    payload = {"hook_event_name": "UserPromptSubmit", "session_id": "s1", "transcript_path": str(transcript)}
     lane = {**env, "PATH": str(Path(sys.executable).parent)}
     if mode == "venv":
         lane["LCMX_PYTHON"] = sys.executable
@@ -455,6 +456,22 @@ def test_only_a_hook_that_can_start_a_worker_probes_the_lock(hook, env, tmp_path
     for deadline in (0, hook.PRECOMPACT_DEADLINE_S):
         assert hook.start_worker(home, {**env, "PATH": ""}, deadline_s=deadline) == "runtime_missing"
         assert hook.start_worker(home, lane, deadline_s=deadline) == "worker_missing"
+
+
+def test_the_async_hook_starts_a_worker_without_probing_the_lock(hook, env, tmp_path, monkeypatch):
+    """REGRESSION (review of #2154): Claude Code may kill an async hook at any point, also while
+    its probe holds the lock and a Stop or SessionEnd hook that met the probe has left its record
+    to it. So the async PostToolBatch hook never probes: it starts a worker, which exits at once
+    if another holds the lock. The synchronous hooks still probe."""
+    lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(_package(tmp_path))}
+    payload = {"hook_event_name": "PostToolBatch", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    started, probed = [], []
+    monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: started.append(command))
+    monkeypatch.setattr(hook, "_lock_held", lambda lock: probed.append(lock) or True)
+    assert hook.main(io.StringIO(json.dumps(payload)), lane) == 0
+    assert (_log(env)[-1]["outcome"], len(started), probed) == ("worker_started", 1, [])
+    assert hook.main(io.StringIO(json.dumps({**payload, "hook_event_name": "Stop"})), lane) == 0
+    assert (_log(env)[-1]["outcome"], len(started), len(probed)) == ("worker_running", 1, 1)
 
 
 @pytest.mark.parametrize("setting", ["PYTHONPATH", "PYTHONHOME"])

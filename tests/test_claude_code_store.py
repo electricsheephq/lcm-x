@@ -427,12 +427,13 @@ def _registered(event):
 def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes, case, killed):
     """#2141 runs PostToolBatch async: Claude Code kills an async hook still running when a -p
     session exits, and one can also die in a session that goes on. Wherever the hook dies, before
-    or after it writes its record, the synchronous Stop and SessionEnd hooks that follow lead the
-    worker to every row, and the store matches a run in which no hook died.
+    or after it writes its record and starts its worker, the synchronous Stop and SessionEnd hooks
+    that follow lead the worker to every row, and the store matches a run in which no hook died.
 
     Each hook runs its registered command. A worker holds the lock while the synchronous hooks
-    run, so they start none; the worker run after them stands for that holder's rescan. A FIFO in
-    place of the lock stops the PostToolBatch hook in its probe, just after it writes its record."""
+    run, so they leave their records to it, and the worker run after them is that holder's rescan.
+    The async hook never takes the lock, so its death cannot leave them waiting on it. The worker
+    script it starts is a stub, and a FIFO in place of the hook log stops it just before it exits."""
     import signal
     import subprocess
     assert _registered("PostToolBatch").get("async") is True
@@ -440,10 +441,14 @@ def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes
     python = tmp_path / "bin" / "python3"
     python.parent.mkdir()
     python.symlink_to(sys.executable)
+    package = tmp_path / "package"
+    (package / "scripts").mkdir(parents=True)
+    for name in ("plugin.yaml", "store.py", "scripts/lcm_x_capture.py"):
+        (package / name).write_text("", encoding="utf-8")
     env = {"HOME": str(tmp_path), "PATH": str(python.parent), "LCMX_CC_HOME": str(home),
-           "CLAUDE_CONFIG_DIR": str(tmp_path), "CLAUDE_PLUGIN_ROOT": str(PLUGIN)}
+           "CLAUDE_CONFIG_DIR": str(tmp_path), "CLAUDE_PLUGIN_ROOT": str(PLUGIN), "LCMX_PACKAGE_ROOT": str(package)}
     home.mkdir()
-    lock = home / "capture.lock"
+    log = home / "logs" / "hook.log"
 
     def payload(event):
         return json.dumps({"hook_event_name": event, "session_id": "s1", "transcript_path": str(path)})
@@ -458,12 +463,14 @@ def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes
     def end_of_turn(*events):
         with open(path, "a", encoding="utf-8") as handle:
             handle.write("".join(json.dumps(entry) + "\n" for entry in CONVERSATION[3:]))
-        with open(lock, "a") as held:  # the running worker
+        with open(home / "capture.lock", "a") as held:  # the running worker
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
             for event in events:
                 done = subprocess.run(["/bin/sh", "-c", _registered(event)["command"]], input=payload(event),
                                       env=env, capture_output=True, text=True, timeout=60)
                 assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+        outcomes = [json.loads(line)["outcome"] for line in log.read_text(encoding="utf-8").splitlines()]
+        assert outcomes[-len(events):] == ["worker_running"] * len(events)  # left to the holder
         assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
         return stored(home)
 
@@ -472,8 +479,9 @@ def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes
                                   start_new_session=True)  # waits for its payload until it gets one
 
     def write_its_record():
-        lock.unlink(missing_ok=True)
-        os.mkfifo(lock)
+        log.parent.mkdir(exist_ok=True)
+        log.unlink(missing_ok=True)
+        os.mkfifo(log)
         tool_batch.stdin.write(payload("PostToolBatch").encode())
         tool_batch.stdin.close()
         deadline = time.monotonic() + 30
@@ -487,7 +495,8 @@ def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes
         os.killpg(tool_batch.pid, signal.SIGKILL)
         tool_batch.wait(timeout=60)
         tool_batch.stdin.close()
-        lock.unlink(missing_ok=True)
+        if log.is_fifo():
+            log.unlink()
 
     if case == "session_goes_on":  # the hook dies, then the turn ends
         if killed == "after_its_record":
@@ -510,6 +519,24 @@ def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes
     _record(_hook(), control, path)
     assert cc.run_worker(control, hermes_home=hermes, settle_s=0)["complete"]
     assert captured == stored(home) == stored(control) and len(captured) == 4
+
+
+def test_a_worker_started_while_another_holds_the_lock_exits_before_loading_the_store(home):
+    """The async PostToolBatch hook starts a worker on every tool batch, so a worker that finds
+    another holding the lock exits before any store code loads, with the exit codes it had: 0
+    detached, 4 bounded (the holder takes the record)."""
+    import subprocess
+    script = Path(__file__).resolve().parents[1] / "scripts" / "lcm_x_capture.py"
+    home.mkdir()
+    with open(home / "capture.lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for extra, code in (([], 0), (["--deadline", "10"], 4)):
+            done = subprocess.run([sys.executable, "-X", "importtime", str(script), "worker", "--home", str(home),
+                                   *extra], capture_output=True, text=True, timeout=60)
+            imported = {line.rsplit("|", 1)[-1].strip() for line in done.stderr.splitlines()
+                        if line.startswith("import time:")}
+            assert done.returncode == code and "argparse" in imported  # the import log is complete
+            assert not any(name.startswith("hermes_lcm") for name in imported)
 
 
 def _embedding_slice(state, outcome="complete", *, vectors=0, again=False, delay=0.0):
