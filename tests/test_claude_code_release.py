@@ -59,7 +59,8 @@ def test_the_unit_asset_bundles_the_exact_core_commit(tmp_path):
     committed = set(_git("ls-tree", "-r", "--name-only", "HEAD").split())
     imported = _script("claude_code_unit_delta").closure() & committed
     assert {"lcm-x/" + path for path in imported} <= names
-    assert {".claude-plugin/plugin.json", "hooks/hooks.json", "bin/lcmx_hook.py", "lcm-x/plugin.yaml", "lcm-x/LICENSE",
+    assert {".claude-plugin/plugin.json", "hooks/hooks.json", ".grok-plugin/plugin.json", ".grok-plugin/hooks.json",
+            "bin/lcmx_hook.py", "lcm-x/plugin.yaml", "lcm-x/LICENSE",
             "lcm-x/skills/hermes-lcm/references/recall-policy.md", "lcm-x/access_context/inventory.json"} <= names
     assert not any(name.startswith(("lcm-x/tests/", "lcm-x/bench/", "lcm-x/adapters/", "lcm-x/.github/"))
                    for name in names)

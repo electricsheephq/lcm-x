@@ -67,6 +67,15 @@ def environment(home: Path, runtime: str) -> dict[str, str]:
     return env
 
 
+def hook_argv(hook: dict, plugin: Path) -> list[str]:
+    """What Claude Code spawns for a command hook. With ``args`` (the exec form), the command found
+    on PATH and the arguments with ``${CLAUDE_PLUGIN_ROOT}`` substituted, with no shell; without,
+    the command through the shell."""
+    if "args" not in hook:
+        return ["/bin/sh", "-c", hook["command"]]
+    return [hook["command"], *[arg.replace("${CLAUDE_PLUGIN_ROOT}", str(plugin)) for arg in hook["args"]]]
+
+
 class Smoke:
     def __init__(self, home: Path, ref: str, runtime: str) -> None:
         self.home, self.ref = home, ref
@@ -194,7 +203,7 @@ class Smoke:
                 raw = json.dumps(body)
                 for _ in range(count):
                     started = time.monotonic()
-                    done = self.run(["/bin/sh", "-c", hook["command"]], payload=raw, timeout=hook["timeout"])
+                    done = self.run(hook_argv(hook, plugin), payload=raw, timeout=hook["timeout"])
                     wall.append((event, (time.monotonic() - started) * 1000))
                     self.hook_events.append(event)
                     require(not done.stdout and not done.stderr, "hook printed output")

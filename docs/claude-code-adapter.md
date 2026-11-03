@@ -327,6 +327,11 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
 Grok Build runs Claude Code plugins and `~/.claude/settings.json` hooks, with differences the
 hook entry handles:
 
+- Grok reads `.grok-plugin/plugin.json` before `.claude-plugin/plugin.json`, and the `hooks` path
+  it names (`.grok-plugin/hooks.json`) replaces `hooks/hooks.json`. Grok's hook runner drops
+  `args`, so that file holds the same hooks in the shell form
+  (`python3 -I -S "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"`). Grok sets `CLAUDE_PLUGIN_ROOT` for
+  plugin hooks. Until real Grok sessions (R11), only a static check of this layout covers it.
 - Detect Grok by `GROK_SESSION_ID` or camelCase keys (`hookEventName`, `sessionId`) and
   normalise the payload.
 - Grok sessions get their own store home (`~/.lcm-x/grok-build`, `LCMX_GROK_HOME`), so each store
@@ -343,6 +348,11 @@ hook entry handles:
 
 ## Runtime and failure modes
 
+- Claude Code starts the hook in exec form (`hooks/hooks.json`): `python3` found on `PATH`, with
+  `${CLAUDE_PLUGIN_ROOT}` substituted in its arguments and no shell before it, which saves the
+  shell's start (about 4 ms per synchronous hook on the measurement machine, #2141). Grok Build
+  drops `args`, so it has its own hooks file in the shell form (see "Grok Build"). A test keeps the
+  two files the same apart from the command form.
 - The hook entry runs on the system `python3` (3.9 or newer, stdlib only), started with `-I -S`:
   the user's `PYTHONPATH`, `PYTHONHOME`, user site-packages and `.pth` files never reach it. Each
   module loads only on the path that needs it: a synchronous hook that finds the worker running
@@ -462,8 +472,9 @@ LCM-X for Claude Code is its own release unit, versioned by the plugin manifest
   - the CLI smoke (`scripts/claude_code_unit_smoke.py`). It needs #1216 on `main`.
     - It unpacks the asset with no Hermes, in two runtime modes: a fresh venv of the running
       Python (3.11 or newer), and that Python found on `PATH` and run with `-I -S`.
-    - It runs each hook's registered command from `hooks/hooks.json` through the shell, as Claude
-      Code does, on a synthetic transcript, and waits for each, `async` ones included. It then
+    - It runs each hook registered in `hooks/hooks.json` as Claude Code does: in exec form, with
+      `python3` found on `PATH`, `${CLAUDE_PLUGIN_ROOT}` substituted in the arguments and no shell.
+      It runs them on a synthetic transcript and waits for each, `async` ones included. It then
       waits for the worker those hooks started; it never runs a worker itself.
     - It passes when every hook run logged a started or running worker, no spool record failed,
       `bundle.json` names the commit and core version, and the reader, started from `.mcp.json`,
