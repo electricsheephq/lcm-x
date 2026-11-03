@@ -5231,7 +5231,10 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
     # something usable.
     session_id = engine.current_session_id
     # #622: another process of this profile where Hermes did not take LCM-X.
-    inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))
+    inactive_process = inactive_record_notice(
+        getattr(engine, "_hermes_home", ""),
+        pending_record=getattr(engine, "_inactive_load_record", None),
+    )
     inactive_payload = {"inactive_process": inactive_process} if inactive_process else {}
     if not session_id:
         return json.dumps({
@@ -5432,7 +5435,10 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
         })
 
     checks: list[dict] = []
-    inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))
+    inactive_process = inactive_record_notice(
+        getattr(engine, "_hermes_home", ""),
+        pending_record=getattr(engine, "_inactive_load_record", None),
+    )
     checks.append({
         "check": "inactive_process",
         "status": "warn" if inactive_process else "pass",

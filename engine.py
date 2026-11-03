@@ -1100,6 +1100,17 @@ _OVERFLOW_RECOVERY_OVERCAP_NOTE = (
 )
 
 
+def _lazy_storage_property(name: str) -> property:
+    def get(engine):
+        engine._ensure_storage()
+        return engine.__dict__[name]
+
+    def set_(engine, value):
+        engine.__dict__[name] = value
+
+    return property(get, set_)
+
+
 class LCMEngine(
     CompactionMixin,
     ResetStateMixin,
@@ -1172,8 +1183,11 @@ class LCMEngine(
         self._assertion_extraction_last_error = ""
         self._assertion_extraction_last_model = ""
 
-        db_path = self._resolve_db_path(hermes_home)
-        self._bind_storage(db_path, hermes_home)
+        self._db_path = self._resolve_db_path(hermes_home)
+        self._storage_lock = threading.RLock()
+        self._storage_ready = False
+        self._storage_binding = False
+        self._storage_open_warning_logged = False
 
         self._session_id: str = ""
         self._session_platform: str = ""
@@ -1640,6 +1654,42 @@ class LCMEngine(
             name = ""
         return name or str(Path(home or Path(db_path).parent).resolve())
 
+    _store = _lazy_storage_property("_store")
+    _dag = _lazy_storage_property("_dag")
+    _lifecycle = _lazy_storage_property("_lifecycle")
+    _assertions = _lazy_storage_property("_assertions")
+    _entities = _lazy_storage_property("_entities")
+    _query_views = _lazy_storage_property("_query_views")
+    _adaptive_retrieval = _lazy_storage_property("_adaptive_retrieval")
+    _assertion_extractor = _lazy_storage_property("_assertion_extractor")
+
+    def _ensure_storage(self) -> None:
+        """Open once on real use; recursive binder reads share this lock."""
+        with self._storage_lock:
+            if self._storage_ready or self._storage_binding:
+                return
+            if self._stable_use_closed:
+                raise RuntimeError("LCM engine is closed")
+            self._storage_binding = True
+            try:
+                self._bind_storage(self._db_path, self._hermes_home)
+                self._storage_ready = True
+            except Exception as exc:
+                if not self._storage_open_warning_logged:
+                    self._storage_open_warning_logged = True
+                    logger.warning("LCM storage open failed on first use; will retry: %s", exc)
+                raise
+            finally:
+                self._storage_binding = False
+            inactive = self.__dict__.pop("_inactive_load_record", None)
+            if inactive is not None:
+                try:
+                    from .inactive_record import write_inactive_record
+
+                    write_inactive_record(self._hermes_home, **inactive)
+                except Exception:
+                    logger.warning("LCM-X could not record the inactive state", exc_info=True)
+
     def _bind_storage(self, db_path: str | Path, hermes_home: str = "") -> None:
         """Bind store/DAG/lifecycle helpers to one SQLite database."""
         self._assertions = None
@@ -1717,7 +1767,7 @@ class LCMEngine(
             "_entities",
             "_query_views",
         ):
-            helper = getattr(self, attr, None)
+            helper = self.__dict__.get(attr)
             if attr == "_store" and any(
                 tail["store"] is helper for tail in self._pending_session_tails
             ):
@@ -1745,14 +1795,18 @@ class LCMEngine(
 
     def _reset_profile_runtime_state(self) -> None:
         """Clear process-local session state that cannot cross profile homes."""
+        self._storage_open_warning_logged = False
         self._discard_prepared_leaves()  # #787: a configured database path keeps its store across homes
-        self._store.clear_context_windows()
+        store = self.__dict__.get("_store")
+        if store is not None:
+            store.clear_context_windows()
         # R6-4: survival-fit warnings belong to the store they were raised on.
         self._survival_fit_pending_warning, self._survival_fit_warned = None, set()
         self._survival_overhead_observation = None  # #1012 F4: an overhead peak never crosses profile homes
         self.emit_automatic_compaction_status = False
-        if self._adaptive_retrieval is not None:
-            self._adaptive_retrieval.clear()
+        adaptive = self.__dict__.get("_adaptive_retrieval")
+        if adaptive is not None:
+            adaptive.clear()
         self._unregister_active_engine_binding()
         self._session_id = ""
         self._session_platform = ""
@@ -1802,6 +1856,10 @@ class LCMEngine(
         self._reset_session_scoped_runtime_state()
 
     def _rebind_storage_for_home(self, hermes_home: str = "") -> bool:
+        with self._storage_lock:
+            return self._rebind_storage_for_home_unlocked(hermes_home)
+
+    def _rebind_storage_for_home_unlocked(self, hermes_home: str = "") -> bool:
         """Switch SQLite-backed state when a reused engine serves another profile.
 
         Hermes core passes the active ``hermes_home`` on session start.  Older
@@ -1811,6 +1869,14 @@ class LCMEngine(
         """
         if not hermes_home:
             return False
+        db_path = self._resolve_db_path(hermes_home)
+        if not self._storage_ready:
+            if self._db_path == db_path and self._hermes_home == hermes_home:
+                return False
+            self._hermes_home = hermes_home
+            self._db_path = db_path
+            self._reset_profile_runtime_state()
+            return True
         if self._config.database_path:
             current_home = str(self._hermes_home or "")
             current_store_home = str(getattr(getattr(self, "_store", None), "_hermes_home", "") or "")
@@ -1829,10 +1895,14 @@ class LCMEngine(
         if current_db == db_path and str(self._hermes_home or "") == str(hermes_home):
             return False
 
+        # Clear the old profile before an open can fail, so a later retry cannot
+        # publish its session/context window into the newly selected profile.
+        self._reset_profile_runtime_state()
         self._close_storage()
         self._hermes_home = hermes_home
-        self._bind_storage(db_path, hermes_home)
-        self._reset_profile_runtime_state()
+        self._db_path = db_path
+        self._storage_ready = False
+        self._ensure_storage()
         logger.info("LCM rebound storage for Hermes home %s", hermes_home)
         return True
 
@@ -2748,7 +2818,7 @@ class LCMEngine(
 
     def _discard_prepared_leaves(self) -> None:
         """#787: shutdown and storage rebind drop this store's queued preparations and prepared leaves."""
-        store = getattr(self, "_store", None)
+        store = self.__dict__.get("_store")
         if store is not None:
             leaf_prep.discard(store.db_path)
 
@@ -3582,7 +3652,8 @@ class LCMEngine(
                 Path(hermes_home) / "state.db",
                 description=f"hermes_home {hermes_home}",
             )
-        db_path = Path(self._store.db_path)
+        # Path resolution is needed before first use too; it must not open LCM.
+        db_path = Path(self._db_path)
         return _enforce_state_db_containment(
             db_path.parent / "state.db",
             description=f"state database fallback from LCM database {db_path}",
@@ -11453,7 +11524,7 @@ class LCMEngine(
         for engine in tuple(_PENDING_TAIL_ENGINES):
             if engine is self or time.monotonic() >= deadline:
                 continue
-            if not any(t["store"].db_path == self._store.db_path for t in engine._pending_session_tails):
+            if not any(t["store"].db_path == self._db_path for t in engine._pending_session_tails):
                 continue
             # Never wait for a sibling lifecycle (or invert its lock ordering).
             if engine._stable_use_lock.acquire(blocking=False):
@@ -11522,13 +11593,16 @@ class LCMEngine(
                     if tail["messages"]:
                         self._append_ingest_batch(tail)
                     self._pending_session_tails.remove(tail)
-                    if store is self._store and tail["session_id"] == self._session_id:
+                    # Read the bound store without a lazy open (#2152): after a failed
+                    # rebind, opening the new home here would raise out of shutdown's cleanup.
+                    if store is self.__dict__.get("_store") and tail["session_id"] == self._session_id:
                         self._ingest_cursor_needs_reconcile = True
             except (Exception, KeyboardInterrupt):
                 logger.debug("LCM pending session-end retry deferred", exc_info=True)
                 break
             finally:
-                if store is not self._store and not any(t["store"] is store for t in self._pending_session_tails):
+                if (store is not self.__dict__.get("_store")
+                        and not any(t["store"] is store for t in self._pending_session_tails)):
                     store.close()
             if time.monotonic() >= deadline:
                 break
@@ -11622,8 +11696,11 @@ class LCMEngine(
                         "shutdown: compaction still running after %gs; connections left open", wait_s,
                     )
                     return
-            self._shutdown_unlocked(deadline=time.monotonic() + _SESSION_END_SHUTDOWN_TIMEOUT_MS / 1000)
-            self._stable_use_closed = True
+            # Wait for running compaction before taking the storage lock: every lazy
+            # helper read takes it, so holding it here could block that pass (#2101, #2152).
+            with self._storage_lock:
+                self._shutdown_unlocked(deadline=time.monotonic() + _SESSION_END_SHUTDOWN_TIMEOUT_MS / 1000)
+                self._stable_use_closed = True
 
     def _shutdown_unlocked(self, *, deadline: float):
         self._retry_pending_session_tails(
@@ -11634,16 +11711,11 @@ class LCMEngine(
         cleanup = [
             self._unregister_active_engine_binding,
             *(
-                [self._adaptive_retrieval.close]
-                if self._adaptive_retrieval is not None
-                else []
+                helper.close
+                for attr in ("_adaptive_retrieval", "_store", "_dag", "_lifecycle",
+                             "_assertions", "_entities", "_query_views")
+                if (helper := self.__dict__.get(attr)) is not None
             ),
-            self._store.close,
-            self._dag.close,
-            self._lifecycle.close,
-            *([self._assertions.close] if self._assertions is not None else []),
-            *([self._entities.close] if self._entities is not None else []),
-            *([self._query_views.close] if self._query_views is not None else []),
         ]
         failures = []
         for close in cleanup:
