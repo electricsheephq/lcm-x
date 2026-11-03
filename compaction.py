@@ -3157,8 +3157,6 @@ class CompactionMixin:
     ) -> tuple[Literal["next", "break", "continue", "return"], Optional[List[Dict[str, Any]]]]:
         """Advance the committed leaf and choose the next loop transfer."""
         self._last_compacted_store_id = leaf.published_frontier
-        if self._compaction_is_closing():
-            return "return", state.host_messages
         published_ids = set(leaf.source_store_ids)
         escaped = [row for row in leaf.pending_escapes if row[0] in published_ids]
         self._record_retained_escape(escaped)
