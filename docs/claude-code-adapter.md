@@ -350,9 +350,10 @@ hook entry handles:
 
 - Claude Code starts the hook in exec form (`hooks/hooks.json`): `python3` found on `PATH`, with
   `${CLAUDE_PLUGIN_ROOT}` substituted in its arguments and no shell before it, which saves the
-  shell's start (about 4 ms per synchronous hook on the measurement machine, #2141). Grok Build
-  drops `args`, so it has its own hooks file in the shell form (see "Grok Build"). A test keeps the
-  two files the same apart from the command form.
+  shell's start (about 4 ms per synchronous hook on the measurement machine, #2141). The exec form
+  needs Claude Code 2.1.139 or later, the release that added `args`. The adapter is tested on
+  2.1.314 and later. Grok Build drops `args`, so it has its own hooks file in the shell form (see
+  "Grok Build"). A test keeps the two files the same apart from the command form.
 - The hook entry runs on the system `python3` (3.9 or newer, stdlib only), started with `-I -S`:
   the user's `PYTHONPATH`, `PYTHONHOME`, user site-packages and `.pth` files never reach it. Each
   module loads only on the path that needs it: a synchronous hook that finds the worker running
