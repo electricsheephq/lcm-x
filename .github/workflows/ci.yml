@@ -3,17 +3,18 @@ name: CI
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    # release/** are the maintenance branches that release trains are cut on (#2171 item 1).
+    branches: [main, "release/**"]
   pull_request:
-    branches: [main]
+    branches: [main, "release/**"]
   merge_group:
 
 permissions:
   contents: read
 
 # Pull requests share one group per ref, so a new push cancels the older run.
-# Pushes to main and merge-queue runs get a group of their own (run_id), so no
-# run on main is ever cancelled or replaced while pending.
+# Pushes (to main or a release branch) and merge-queue runs get a group of their own
+# (run_id), so no run on those branches is ever cancelled or replaced while pending.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
