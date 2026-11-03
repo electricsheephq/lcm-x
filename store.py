@@ -637,8 +637,8 @@ class MessageStore:
             config = self._ingest_protection_config
             if not config.embeddings_enabled:
                 return
-            from . import command, embedding_maintenance
-            if embedding_maintenance._automatic_chunks_allowed(config, command):
+            from . import embedding_provider
+            if embedding_provider._automatic_chunks_allowed(config):
                 return
             if self._conn.in_transaction and not (getattr(self, "_foreground_ingest_owner", False)
                                                   and self._transaction_owner.owns_connection(self._conn)):

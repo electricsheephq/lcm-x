@@ -4928,7 +4928,7 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
             consent_option = ""
             consent_note = ""
             if "chunk" in stale_tasks:
-                from .command import _is_local_embedding_provider
+                from .embedding_provider import _is_local_embedding_provider
 
                 corpus_option = " --corpus both" if "summary" in stale_tasks else " --corpus chunks"
                 if not _is_local_embedding_provider(provider_id):
