@@ -32,7 +32,10 @@ class Pending:
 
 
 def _key(engine):
-    return str(engine._store.db_path.resolve()), str(engine._session_id)
+    db_path = getattr(engine, "_db_path", None)
+    if db_path is None:  # Existing lightweight host/test adapters expose only a store.
+        db_path = engine._store.db_path
+    return str(db_path.resolve()), str(engine._session_id)
 
 
 def _retire(key, turn_id):
