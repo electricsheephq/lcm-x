@@ -289,6 +289,8 @@ def test_1063_c_other_providers_still_require_warmup(
     monkeypatch.setattr(provider_mod, "probe_provider_availability", forbidden)
     engine = _make_engine(tmp_path, home, provider=provider, register=False)
     try:
+        # Direct worker calls bypass the scheduler's first-use storage open.
+        engine._ensure_storage()
         assert maintenance_mod.run_incremental_embedding_pass(
             engine._config.database_path, engine._config,
         ) == "no_profile"
@@ -329,6 +331,9 @@ def test_1063_d_warmup_bytes_match_base(tmp_path, home, local_fastembed, cached)
 def test_1063_e_manual_and_auto_share_identities(tmp_path, home, local_fastembed, auto_first):
     engine = _local_engine(tmp_path, home)
     try:
+        # Match production: the scheduler opens storage before invoking workers.
+        engine._ensure_storage()
+
         def auto():
             outcome = maintenance_mod.run_incremental_embedding_pass(
                 engine._config.database_path, engine._config,

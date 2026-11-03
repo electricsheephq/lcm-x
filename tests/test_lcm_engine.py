@@ -228,6 +228,7 @@ def test_bypass_host_fallback_never_sends_unknown_model(tmp_path, monkeypatch, c
 def test_shutdown_closes_lifecycle_store(tmp_path):
     config = LCMConfig(database_path=str(tmp_path / "shutdown-lifecycle.db"))
     engine = LCMEngine(config=config)
+    engine.on_session_start("shutdown-lifecycle", platform="cli")
 
     engine.shutdown()
 
@@ -399,6 +400,7 @@ def test_shutdown_waits_for_stable_use_and_is_terminal_and_idempotent(tmp_path):
 def test_shutdown_attempts_all_cleanup_and_remains_retryable_after_failure(tmp_path):
     config = LCMConfig(database_path=str(tmp_path / "retryable-shutdown.db"))
     engine = LCMEngine(config=config)
+    engine.on_session_start("retryable-shutdown", platform="cli")
     attempts = 0
 
     def flaky_close():

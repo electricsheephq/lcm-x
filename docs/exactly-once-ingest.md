@@ -227,7 +227,7 @@ No step reopens an earlier one.
 8. Everything left is NEW, with `possible_replay_of` when a candidate was rejected (E4).
 
 #### 3.4.2 Base and the anchored run
-- **Eligible records:** this lineage's retained vectors (2 ingest, 2 emission), excluding refused emissions.
+- **Eligible records:** this lineage's retained vectors (2 ingest, 2 emission), excluding refused, retry-recovered and below-provenance-floor emission vectors. Emissions must also clear the lineage's recovered high-water mark, as in `emission_candidate` below; when no emission is eligible, P2 uses its history fallback.
 - **Entry match:** two entries match when their identity digests are equal and no known key disagrees. Uid sets that are both known must be equal. Stamps that are both known must be equal, except on a stamp_unreliable lineage.
   - A generated entry whose observed stamp is not yet recorded has a missing stamp, so the host stamping it does not break the run.
 - **The anchored run** is the longest run V[0..k-1] that matches R[j..j+k-1], over eligible records R and offsets j, with k ≥ 1.
@@ -433,7 +433,7 @@ These ship with the P2 flip:
     - the reliability scorer reads relations, so a visible surplus row is told apart from a silent one; `possible_replay_of` writes are deferred to P1h or P2.
   - **Behaviour:** today's classifier keeps deciding. Four fixes take effect at P1, because each one either stores more or skips only on exact evidence:
     1. atomic evidence (class A);
-    2. on a cold start, the anchored run at j = 0 on the durable cursor, or on the newest non-refused emission vector, becomes one more candidate in today's largest-cursor choice (reconcile.py:3091-3125). It never replaces tail matching, so rows stored by a tail retry or an S3 end, which write no vector, are still found (the class B restart family, and a crash between the compress() return and the next ingest);
+    2. on a cold start, the anchored run at j = 0 on the durable cursor, or on the newest non-refused emission vector read through `emission_candidate`, becomes one more candidate in today's largest-cursor choice (reconcile.py:3091-3125). A withheld emission candidate falls back to today's cursor choice. It never replaces tail matching, so rows stored by a tail retry or an S3 end, which write no vector, are still found (the class B restart family, and a crash between the compress() return and the next ingest);
     3. the single exit write and its visible failure path (#2029's exit half, #606, the #534 residuals);
     4. the P1 tail rule (#1440 item 1).
   - It closes the [P1] children in §4.
@@ -553,31 +553,63 @@ entries after BEGIN IMMEDIATE and retries each in its own savepoint before
 classification. The registry lock never spans store or SQLite work. Salt changes
 drop stale entries. Claims exclude concurrent attempts; rollback (including a
 busy retry or interrupt) releases them; successful entries settle immediately after
-COMMIT, while callbacks count recovery. Only the originating engine with the
-same compress-call number receives the recovered handle, provided the entry is
-neither superseded nor refused; other retries count it as unhandled.
+COMMIT, while callbacks count `ledger.emission_retry_ok` and
+`ledger.emission_recovered_provenance_only` once per recovered entry.
 
-A host refusal or adoption before the retry is kept on the pending entry
-(`ledger.emission_signal_deferred`) and applied to its descriptors and emission
-view in the retry's savepoint. Refusal is sticky: adoption cannot overwrite it,
-and a refused entry never restores a handle. A signal arriving between the
-in-savepoint read and publication counts `ledger.emission_signal_late`; it does
-not reach the committed state, though a late refusal recorded on the entry
-still restores no handle.
-A later successful exit write supersedes older pending entries in that lineage.
-It marks them inside its write transaction, so a retry through any store on the
-same database, which reads the mark only inside its own write transaction, sees
-it; a write that does not commit restores the mark under its store's write lock.
-Their retries recover descriptors, including
-any signal, without an emission view, and count
-`ledger.emission_retry_superseded`. Other entries retry oldest first in
-registry order, so within one process emission views stay in emission order,
-unless an older entry's retry fails while a newer entry's retry succeeds.
-Narrow windows remain open and must close before P1d relies on emission
-views or states (#2112): a late refusal that never reaches the committed state,
-a refusal between the settle at COMMIT and publication, a refusal for an entry
-another engine recovered, an entry keyed by a provisional lineage, and that
-partial retry failure, after which the older entry's view is the newer one.
+A retry-recovered emission is provenance only: it inserts the same descriptors,
+but writes no emission view, receives no handle and takes no host signal.
+There are no deferred signals or supersession flags. A signal without a matching
+live handle counts `ledger.emission_signal_unmatched`. Live exit views and their
+handle-scoped signals keep the P1c-1 behavior, including adoption only at the two
+verified boundary continuation exits.
+
+The retry savepoint records `emission_recovered:<lineage>` in `ledger_meta` as the
+numeric maximum of its existing value and the retry's `view_seq`, using the
+persisted session lineage when present. The mark commits or rolls back with the
+descriptors. Shadow-mode `on_session_start` calls ledger setup when an
+already-ready store lacks `emission_provenance_floor`. Setup records it once
+with `INSERT OR IGNORE`, from the current `view_seq` counter, in its own
+transaction, immediately after initializing the counter. Fresh ledgers get 0.
+A store without the key treats the current counter as its floor until it is
+recorded. Ingest, retry and compress add no floor SQL.
+Historical recovered views cannot be distinguished from old live views, so every
+pre-floor emission remains ineligible until a newer live exit write commits.
+
+P1d will read `ingest_ledger.emission_candidate(conn, lineage)`; nothing calls it
+on the operating path yet. It reads the newest emission view, its state, the
+recovered mark and the floor in one SQL statement. It returns that view with
+`usable` only when its state is `proposed` or `adopted` and its sequence exceeds
+both the recovered mark (if any) and the floor. Otherwise it returns no view with
+`none`, `refused`, `withheld_recovered` or `below_floor`; it never falls back to
+an older emission. Before a floor exists, the current sequence is the conservative
+floor. The single statement has a consistent snapshot outside a transaction;
+inside the caller's transaction it also sees that transaction's own retry writes,
+so a same-transaction retry already withholds the candidate. It never reads the
+process registry. Withholding falls back to today's cursor choice and tail matching.
+
+The ten #2112 windows close as follows:
+1. A refusal after retry insertion is unmatched; recovered descriptors have no candidate view.
+2. A refusal between settle and publication cannot find or later acquire a recovered handle.
+3. Recovery by another engine never restores a handle to either engine, so the originator's refusal cannot make recovered data eligible.
+4. Provisional-lineage drift cannot create a view, and the retry mark uses the persisted lineage.
+5. Cross-process retries durably raise the high-water mark, withholding older live candidates without process memory.
+6. Partial failures cannot reorder views because retries write none, and the recovered mark uses a numeric maximum.
+7. An exit-write interrupt registers the payload unless readback finds the emission view and exactly this write's ordered descriptor pairs, then propagates unchanged.
+8. A rollback cannot clear another store's supersession flag because those flags no longer exist.
+9. Publication only counts recovery; it neither reads supersession flags nor restores a handle outside the transaction.
+10. A session reset cannot retain a deferred signal because no pending entry stores one.
+
+After the owner finishes, a non-`Exception` interrupt reads back the emission
+view by lineage and this write's allocated `view_seq`, plus the `ledger_emissions`
+`(output_index, descriptor_digest)` pairs ordered by `output_index`. Only an
+existing view and an exact pair match, including count and order, prove COMMIT;
+a peer's different write at a reused sequence registers the failed payload.
+The read helper uses at most two SELECTs under the store write lock, with no write.
+An open transaction skips readback and leaves the commit state unknown.
+A failed readback, open transaction or unallocated sequence registers conservatively;
+an extra recovered sequence can withhold a candidate, but cannot make a
+recovered emission eligible. The original interrupt always propagates unchanged.
+Ordinary exit writes add no readback or transaction arguments.
 
 Inside the ingest ledger savepoint, a stored row matching a still-pending
 descriptor in this store and lineage gains one `generated_unproven` relation.
