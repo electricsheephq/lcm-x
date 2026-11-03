@@ -15,6 +15,7 @@ and stdout carries nothing but protocol lines (everything else goes to a log fil
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 import copy
 import hashlib
@@ -74,6 +75,14 @@ _QUALIFIED_ID = re.compile(r"([0-9a-f]{32}):(.*)", re.DOTALL)
 _SCALAR_ID_ARGS = ("store_id", "node_id", "session_id", "externalized_ref", "after_store_id")
 _INTEGER_ID_ARGS = frozenset({"store_id", "node_id", "after_store_id"})
 _LIST_ID_ARGS = ("seen_refs", "exclude_session_ids", "externalized_refs")
+# python-dotenv's grammar (Hermes' profile loader parses <home>/.env with it), applied one line at a time.
+_DOTENV_LINE_BREAK = re.compile(r"\r\n|\n|\r")
+_DOTENV_BINDING = re.compile(r"\s*(?:export[^\S\r\n]+)?(?:'([^']+)'|([^=#\s]+))[^\S\r\n]*(=[^\S\r\n]*)?")
+_DOTENV_QUOTED = {  # opening quote -> (quoted value, the escapes it decodes)
+    "'": (re.compile(r"'((?:\\'|[^'])*)'"), re.compile(r"\\[\\']")),
+    '"': (re.compile(r'"((?:\\"|[^"])*)"'), re.compile(r"\\[\\'\"abfnrtv]")),
+}
+_DOTENV_LINE_END = re.compile(r"\s*(?:#.*)?")
 
 
 class ForeignStoreError(ValueError):
@@ -86,27 +95,42 @@ def read_profile_env(hermes_home: str | Path) -> dict[str, str]:
     """Parse ONLY ``LCM_*`` (plus FASTEMBED_CACHE_PATH) assignments from ``<home>/.env``.
 
     The file also holds provider keys; every other line is skipped unparsed, so no other
-    key is ever read into this process, logged or forwarded.
+    key is ever read into this process, logged or forwarded. Each line reads as Hermes'
+    profile loader reads it (python-dotenv's parser; utf-8-sig, else latin-1): its quoting,
+    escapes and comments; a later line overrides an earlier one, a bare key unsets it, and a
+    line that parser rejects sets nothing. Not reproduced: ``${VAR}`` expansion, values
+    spanning lines, and the administrator-managed ``.env`` layer.
     """
     try:
-        text = (Path(hermes_home) / ".env").read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        raw = (Path(hermes_home) / ".env").read_bytes()
+    except OSError:
         return {}
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.removeprefix(codecs.BOM_UTF8).decode("latin-1")
     found: dict[str, str] = {}
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if line.startswith("export "):
-            line = line[len("export "):].lstrip()
-        key, sep, value = line.partition("=")
-        key = key.strip()
-        if not sep or not (key.startswith("LCM_") or key in PROFILE_ENV_EXTRA_KEYS):
+    for line in _DOTENV_LINE_BREAK.split(text):
+        binding = _DOTENV_BINDING.match(line)
+        if binding is None:
             continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
-        else:
-            value = value.split(" #", 1)[0].rstrip()
-        found[key] = value
+        key = binding.group(1) or binding.group(2)
+        if not (key.startswith("LCM_") or key in PROFILE_ENV_EXTRA_KEYS):
+            continue
+        rest = line[binding.end():]
+        if binding.group(3) is None:  # no "=": a bare key unsets it, unless more than a comment follows
+            if _DOTENV_LINE_END.fullmatch(rest):
+                found.pop(key, None)
+            continue
+        quoting = _DOTENV_QUOTED.get(rest[:1])
+        if quoting is None:
+            found[key] = re.sub(r"\s+#.*", "", rest).rstrip()
+            continue
+        pattern, escapes = quoting
+        quoted = pattern.match(rest)
+        if quoted is None or not _DOTENV_LINE_END.fullmatch(rest, quoted.end()):
+            continue  # the loader rejects the line and sets nothing
+        found[key] = escapes.sub(lambda escape: codecs.decode(escape.group(0), "unicode-escape"), quoted.group(1))
     return found
 
 
@@ -262,17 +286,24 @@ class StoreReader:
             return
         dtype = _resolve_storage_dtype(cfg)
         dim = _resolve_store_dim(cfg, len(vector))
-        # The same revision rule the writer's register_profile applies (prescreen tag).
+        # The same rules the writer's register_profile applies: the prescreen tag, and for a profile
+        # with embedding prefixes the prefix digest on the revision and a `<task>+prefix` task.
         prescreen = SimpleNamespace(_write_binary_prescreen=bool(getattr(cfg, "embedding_binary_prescreen", False)))
-        revision = VectorStore._prescreen_revision(prescreen, "", dtype=dtype)
+        suffix = str(getattr(provider, "identity_revision_suffix", "") or "")
+        revision = VectorStore._prescreen_revision(prescreen, "", dtype=dtype) + suffix
         provider_id, model_id = str(provider.provider_id), str(provider.model_id)
-        expected = {task: EmbeddingIdentity.canonical(provider_id, model_id, revision, dim, dtype,
-                                                      _VECTOR_BYTEORDER, task).identity_hash
+        expected = {task: EmbeddingIdentity.canonical(provider_id, model_id, revision, dim, dtype, _VECTOR_BYTEORDER,
+                                                      task + ("+prefix" if suffix else "")).identity_hash
                     for task in ("summary", "chunk")}
         if embedding_provider.default_chunk_model(provider_id, model_id) != model_id:
             expected["chunk"] = None  # a separate chunk model is a cloud (Voyage) path: never matched
         self._expected_identity = expected
         self._provider = provider
+        from .embedding_maintenance import note_local_model_present
+
+        # A warmed local model is present for this process, so the first recall uses it at once
+        # instead of starting a second warmup and serving full text meanwhile.
+        note_local_model_present(cfg)
 
     def _embedding_gate(self, conn: sqlite3.Connection) -> tuple[bool, list[str]]:
         """Vectors only when the store's active identity equals the reader's on every field."""
@@ -280,7 +311,9 @@ class StoreReader:
             return False, []
         if self._provider_problem or self._provider is None:
             return False, [self._provider_problem or "provider_unavailable"]
-        active = active_profile_hashes(conn)
+        active: dict[str, str] = {}
+        for task, identity in active_profile_hashes(conn).items():  # newest first; one active per task
+            active.setdefault(task.removesuffix("+prefix"), identity)
         if not active.get("summary"):
             return False, []  # no corpus; the capability flags say so
         if active["summary"] != self._expected_identity.get("summary") or (
