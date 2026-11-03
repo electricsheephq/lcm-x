@@ -137,12 +137,12 @@ copy-paste setups per agent type. Externalization and temporal rollups are on by
 ## Project status
 
 The latest stable release is
-[`v0.29.0`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.0)
-at `c13dea3783bdbd1aab52d83dff5d009bfade0bd2`, released 2026-10-28 (plugin `hermes-lcm-x`, engine `lcm-x`).
-It turns local semantic recall on by default once its companion plugin is installed,
-returns fuller recall from long messages, and stores retried and stopped turns more
-reliably. See [project status](docs/project-status.md) for the release summary, the
-disclosed qualification decisions and current work.
+[`v0.29.1`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.1)
+at `3a4a08ff501347a79669fab51444c471b09b551d`, released 2026-11-03 (plugin `hermes-lcm-x`, engine `lcm-x`).
+Compaction gets past a row the host still holds, keeps its 10-minute pause, and
+summarises in store order, and a restart after a cleanup pass no longer stores the
+conversation again. See [project status](docs/project-status.md) for the release summary,
+the disclosed qualification decisions and current work.
 It requires Hermes 0.21.3 or newer (#1080). It carries
 the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
@@ -156,8 +156,11 @@ Stable release identity and the continuing `main` development line are
 separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
-The `main` line carries the forward identity `hermes-lcm-x v0.29.1`, which the `v0.29.1-rc1`
-tag carries first, on top of `v0.29.0`. The `v0.29.0` tag carries `hermes-lcm-x v0.29.0`.
+v0.29.1 was cut from the `release/v0.29.x` maintenance branch, not from `main`; v0.29.x
+patch releases are cut from that branch. That branch carries the forward identity
+`hermes-lcm-x v0.29.2`, which the `v0.29.2-rc1` tag carries first, on top of `v0.29.1`
+(the first release train). The `v0.29.1` tag carries `hermes-lcm-x v0.29.1`, and the `main`
+line keeps that identity in `plugin.yaml` until its own next release.
 An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
 The manifest declares 16 tools; runtime discovery advertises 13 by default,
@@ -332,11 +335,11 @@ Expected signals:
 - the normal available-skills index includes `hermes-lcm`; current hosts can
   also resolve the explicit plugin-qualified skill `hermes-lcm-x:hermes-lcm`
 
-On the `main` line, output with all three opt-in flags enabled is:
+On the `release/v0.29.x` line, output with all three opt-in flags enabled is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.29.1 (16 tools)
+  ✓ hermes-lcm-x v0.29.2 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -710,6 +713,7 @@ assistant even when doing so exceeds a configured bound.
 | `LCM_EXPANSION_REASONING_EFFORT` | task/provider default | Expansion synthesis reasoning override with the same supported values and the same ignore-and-report handling; YAML key: `lcm.expansion_reasoning_effort` |
 | `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` | Context budget used by the auxiliary LLM for `lcm_expand_query` |
 | `LCM_SUMMARY_TIMEOUT_MS` | `120000` | Timeout for one summarization call (inherits `auxiliary.compression.timeout` when that is set); the foreground time budget can cut a call shorter |
+| `LCM_SHUTDOWN_COMPACTION_WAIT_S` | `10.0` | Seconds shutdown waits for active compaction after taking the lifecycle lease; on timeout connections stay open for a later shutdown retry. New compactions return the host messages unchanged once shutdown starts. Finite nonnegative float, capped at `86400`; invalid values use the default. |
 | `LCM_SUMMARY_PROMPT_VERSION` | `1` | 1 = today's prompts; 2 = the frontier prompt with the focus directives in the policy and a 3× output ceiling |
 | `LCM_NATIVE_RECOVERY` | `false` | removed in v0.25.0; ignored if set (`true` logs one WARNING each time the plugin loads) |
 | `LCM_SURVIVAL_FIT` | `true` | When compaction cannot bring the returned list under the model window (a publication failure, a sweep deadline, a lock), drop the oldest whole user turns from live context until it fits; an oversized newest turn gets a bounded projection. Nothing is deleted: the rows stay stored and reachable with `lcm_grep` / `lcm_load_session`. Logs `LCM survival fit applied`, warns the user once, and `/lcm doctor` reports `survival_fit` as history without changing its status. The `lcm_doctor` tool returns it in the top-level `survival_fit` field, or null when no fit is recorded |
@@ -1250,7 +1254,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.29.0` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.29.1` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License

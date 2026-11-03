@@ -16,7 +16,7 @@ import pytest
 
 from hermes_lcm import command, config, db_bootstrap, diagnostics
 from hermes_lcm import embedding_provider, externalize, identity_anchor, presets
-from hermes_lcm.engine import LCMEngine
+from hermes_lcm.engine import LCMEngine, _shutdown_compaction_wait_s
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -277,6 +277,8 @@ DYNAMIC_ROWS = (
      (0.0,) * 4 + (1.0, 0.0) + (0.0,) * 8 + (0.5, 1e100)),
     ("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", command._embedding_backfill_batch_size,
      (32,) * 4 + (1, 32) + (32,) * 9 + (1000,)),
+    ("LCM_SHUTDOWN_COMPACTION_WAIT_S", _shutdown_compaction_wait_s,
+     (10.0,) * 4 + (1.0, 0.0) + (10.0,) * 8 + (0.5, 86400.0)),
 )
 
 

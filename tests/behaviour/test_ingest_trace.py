@@ -71,6 +71,15 @@ def test_fixture_scenario_inventory_and_size() -> None:
     assert all(len(json.dumps(trace).encode()) <= 45_000 for trace in data.values())
 
 
+def test_snapshot_rejects_mismatched_binding_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pin_char_counter(monkeypatch)
+    install_clock(monkeypatch)
+    with engine_context(tmp_path, window=200000, embeddings_enabled=False) as engine:
+        engine._db_path = tmp_path / "wrong-profile.db"
+        with pytest.raises(AssertionError, match="storage binding path differs from open store"):
+            snapshot(engine, IngestCanonical(tmp_path, []))
+
+
 def test_first_divergence() -> None:
     assert first_difference(["BEGIN", "row", "COMMIT"], ["BEGIN", "row", "ROLLBACK"]) == (
         "first divergence event 2: expected 'COMMIT', got 'ROLLBACK'")
