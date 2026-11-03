@@ -1175,6 +1175,7 @@ class LCMEngine(
         self._storage_lock = threading.RLock()
         self._storage_ready = False
         self._storage_binding = False
+        self._storage_open_warning_logged = False
 
         self._session_id: str = ""
         self._session_platform: str = ""
@@ -1662,6 +1663,11 @@ class LCMEngine(
             try:
                 self._bind_storage(self._db_path, self._hermes_home)
                 self._storage_ready = True
+            except Exception as exc:
+                if not self._storage_open_warning_logged:
+                    self._storage_open_warning_logged = True
+                    logger.warning("LCM storage open failed on first use; will retry: %s", exc)
+                raise
             finally:
                 self._storage_binding = False
             inactive = self.__dict__.pop("_inactive_load_record", None)
@@ -1778,6 +1784,7 @@ class LCMEngine(
 
     def _reset_profile_runtime_state(self) -> None:
         """Clear process-local session state that cannot cross profile homes."""
+        self._storage_open_warning_logged = False
         self._discard_prepared_leaves()  # #787: a configured database path keeps its store across homes
         store = self.__dict__.get("_store")
         if store is not None:
@@ -1876,12 +1883,14 @@ class LCMEngine(
         if current_db == db_path and str(self._hermes_home or "") == str(hermes_home):
             return False
 
+        # Clear the old profile before an open can fail, so a later retry cannot
+        # publish its session/context window into the newly selected profile.
+        self._reset_profile_runtime_state()
         self._close_storage()
         self._hermes_home = hermes_home
         self._db_path = db_path
         self._storage_ready = False
         self._ensure_storage()
-        self._reset_profile_runtime_state()
         logger.info("LCM rebound storage for Hermes home %s", hermes_home)
         return True
 
@@ -3627,7 +3636,8 @@ class LCMEngine(
                 Path(hermes_home) / "state.db",
                 description=f"hermes_home {hermes_home}",
             )
-        db_path = Path(self._store.db_path)
+        # Path resolution is needed before first use too; it must not open LCM.
+        db_path = Path(self._db_path)
         return _enforce_state_db_containment(
             db_path.parent / "state.db",
             description=f"state database fallback from LCM database {db_path}",

@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -243,3 +244,81 @@ def test_bind_failure_leaves_storage_retryable(preflight, monkeypatch):
     assert engine._storage_ready is True
     assert len(attempts) == 2
     assert len(preflight.binds) == 1
+
+
+def test_rebind_open_failure_clears_old_profile_before_retry(preflight, tmp_path, monkeypatch):
+    engine, _ = preflight.register()
+    engine.on_session_start("old-session", platform="cli", conversation_id="old-conversation")
+    engine.ingest([{"role": "user", "content": "old profile row"}])
+    old_db = engine._store.db_path
+    engine._identity_anchor_recent = ["old-profile-cache"]
+    new_home = tmp_path / "rebound"
+    bind = engine._bind_storage
+
+    def fail_open(*args, **kwargs):
+        raise sqlite3.OperationalError("injected rebind SQLITE_BUSY")
+
+    monkeypatch.setattr(engine, "_bind_storage", fail_open)
+    with pytest.raises(sqlite3.OperationalError, match="injected rebind SQLITE_BUSY"):
+        engine._rebind_storage_for_home(str(new_home))
+    assert engine._hermes_home == str(new_home)
+    assert engine._db_path == new_home / "lcm.db"
+    assert not engine._storage_ready
+    assert not engine._storage_binding
+    assert engine._session_id == engine._foreground_session_id == ""
+    assert engine._conversation_id == engine._foreground_conversation_id == ""
+    assert engine._identity_anchor_recent == []
+    assert not new_home.exists()
+
+    monkeypatch.setattr(engine, "_bind_storage", bind)
+    assert engine._store.db_path == new_home / "lcm.db"
+    assert engine._store.get_context_window_tokens("old-session") == 0
+    assert engine._store.get_session_messages("old-session") == []
+    engine.on_session_start("new-session", platform="cli", hermes_home=str(new_home))
+    engine.ingest([{"role": "user", "content": "new profile row"}])
+    assert [r["content"] for r in engine._store.get_session_messages("new-session")] == ["new profile row"]
+    with sqlite3.connect(old_db) as conn:
+        assert conn.execute("SELECT content FROM messages WHERE session_id = ?", ("old-session",)).fetchall() == [
+            ("old profile row",),
+        ]
+
+
+def test_first_use_failure_warns_once_per_binding_through_post_llm_hook(preflight, monkeypatch, caplog, tmp_path):
+    engine, ctx = preflight.register()
+    assert preflight.connects == []
+
+    def fail_open(*args, **kwargs):
+        raise sqlite3.OperationalError("injected first-use SQLITE_BUSY")
+
+    monkeypatch.setattr(engine, "_bind_storage", fail_open)
+    hook = ctx.hooks["post_llm_call"]
+
+    def turn():
+        hook(context_compressor=engine, session_id="first-use", platform="cli",
+             conversation_history=[{"role": "user", "content": "real turn"}])
+
+    def warnings():
+        return [r for r in caplog.records if r.name == "hermes_lcm.engine"
+                and "LCM storage open failed on first use" in r.getMessage()]
+
+    with caplog.at_level(logging.WARNING):
+        turn()
+        turn()
+        assert len(warnings()) == 1
+        assert warnings()[0].levelno == logging.WARNING
+        assert "injected first-use SQLITE_BUSY" in warnings()[0].getMessage()
+        assert not engine._storage_ready
+        assert engine._rebind_storage_for_home(str(tmp_path / "next-binding"))
+        turn()
+        turn()
+        assert len(warnings()) == 2
+    assert preflight.connects == []
+
+
+def test_state_db_path_before_use_does_not_open_storage(preflight, monkeypatch):
+    engine, _ = preflight.register()
+    engine._hermes_home = ""
+    monkeypatch.setenv("LCM_HERMES_BASE_DIR", str(preflight.home.parent))
+    assert engine._state_db_path() == preflight.home / "state.db"
+    assert preflight.connects == []
+    assert not preflight.home.exists()
