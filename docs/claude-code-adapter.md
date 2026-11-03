@@ -86,11 +86,18 @@ Each hook writes one line to `logs/hook.log` in the home: the event, the session
 its in-process milliseconds (`ms`), without content or paths. For #2164 the line also carries `t0`,
 the wall-clock second the hook's own code began, so a row joins Claude Code's debug line for the same
 run and the gap before `t0` is the start-up of the shell and the interpreter, and `phases`, the
-milliseconds of each step that ran: `imports`, `read` (the payload), `spool`, `runtime` (finding the
-runtime and the worker), `probe` (the lock), `subprocess` (its import), then `start` (a detached
-worker) or `drain` (`PreCompact`'s bounded run, and `start` if a worker takes the rest). A run that
-stops early has only the steps it ran. These are measurements only; nothing reads them to decide
-anything.
+milliseconds of each step that ran, in order:
+- `imports`;
+- `read` (the payload) and `spool`;
+- `runtime` (finding the runtime and the worker) and `probe` (the lock);
+- `subprocess` (its import), then `start` (a detached worker). For `PreCompact` it is instead
+  `drain` (the bounded run) and `recheck` (the lock again), with `start` if a worker takes the rest;
+- `log`, the log's own set-up.
+
+Each step ends when the next begins, and a run that returns early or fails logs the step it was in.
+So the steps after `imports` add up to `ms`; neither counts the writing of the line itself. The steps
+use a monotonic clock, while `t0` and `t` are wall-clock times. These are measurements only: nothing
+reads them to decide anything.
 
 ### Spool and worker handshake
 

@@ -198,19 +198,33 @@ def _lock_held(lock: Path) -> bool:
     return False
 
 
-def _phase(phases: Optional[Dict[str, float]], name: str, since: float) -> float:
-    """Record the milliseconds since ``since`` as one phase of this hook (#2164); return the time now."""
-    now = time.perf_counter()
-    if phases is not None:
-        phases[name] = round((now - since) * 1000, 1)
-    return now
+class _Steps:
+    """The milliseconds each step of one hook run took (#2164). Beginning a step ends the one in
+    progress, so no time falls between two steps, and a run that returns early or fails still
+    logs the step it was in."""
+
+    def __init__(self, imports_ms: float) -> None:
+        self.ms = {"imports": imports_ms}
+        self.name = None
+        self.since = time.perf_counter()
+
+    def begin(self, name: Optional[str]) -> None:
+        now = time.perf_counter()
+        if self.name is not None:
+            self.ms[self.name] = round((now - self.since) * 1000, 1)
+        self.name, self.since = name, now
+
+    def end(self) -> Dict[str, float]:
+        self.begin(None)
+        return self.ms
 
 
 def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0, probe: bool = True,
-                 phases: Optional[Dict[str, float]] = None) -> str:
+                 steps: Optional[_Steps] = None) -> str:
     """Start one detached drain, or with ``deadline_s`` run a bounded drain and wait for it.
     Without ``probe`` a worker starts even when one is running; it then exits at once."""
-    mark = time.perf_counter()
+    steps = _Steps(0.0) if steps is None else steps
+    steps.begin("runtime")
     runtime = lcmx_runtime.runtime_command(environ, home)
     if runtime is None:
         return "runtime_missing"
@@ -220,7 +234,6 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0,
     script = package / "scripts" / "lcm_x_capture.py"
     if not script.is_file():
         return "worker_missing"
-    mark = _phase(phases, "runtime", mark)
     # The record is already spooled. A held lock means a worker that will see it: a detached
     # worker releases the lock first and rescans the spool after, and a bounded one ends with
     # the step below, so no record can fall between. A hook never waits on another worker. The
@@ -228,17 +241,17 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0,
     # so only a hook that will start a worker probes: one that can, and is not async, since a
     # killed async hook could hold the probe and start nothing.
     if probe:
-        held = _lock_held(home / "capture.lock")
-        mark = _phase(phases, "probe", mark)
-        if held:
+        steps.begin("probe")
+        if _lock_held(home / "capture.lock"):
             return "worker_running"
+    steps.begin("subprocess")  # its import, apart from starting the worker
     import subprocess
 
-    mark = _phase(phases, "subprocess", mark)  # its import alone, apart from starting the worker
     command = [*runtime, str(script), "worker", "--home", str(home)]
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
              "close_fds": True, "cwd": str(home)}
     if deadline_s:
+        steps.begin("drain")
         try:
             done = subprocess.run(command + ["--deadline", str(deadline_s)], timeout=deadline_s + 2, **quiet)
             # The worker exits 0 only after a completed drain; 5 means its deadline left work pending,
@@ -248,30 +261,33 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0,
                 done.returncode, "drain_failed:%d" % done.returncode)
         except subprocess.TimeoutExpired:
             outcome = "drain_timeout"  # the batch in flight rolls back; the next drain resumes from the cursor
-        mark = _phase(phases, "drain", mark)
         if outcome in ("drained", "drain_failed:2", "worker_running"):  # 2: the store was refused
             return outcome
         # A bounded worker does not rescan: records left behind, including another session's
         # spooled while it held the lock, go to a detached worker now, or to the worker that has
         # taken the lock since, which rescans after it releases it.
+        steps.begin("recheck")
         if _lock_held(home / "capture.lock"):
             return outcome + "+holder"
+        steps.begin("start")
         subprocess.Popen(command, start_new_session=True, **quiet)
-        _phase(phases, "start", mark)
         return outcome + "+worker"
+    steps.begin("start")
     subprocess.Popen(command, start_new_session=True, **quiet)
-    _phase(phases, "start", mark)
     return "worker_started"
 
 
 def _log(home: Optional[Path], record: Mapping[str, Any], outcome: str, started: float,
-         phases: Optional[Dict[str, float]] = None) -> None:
+         steps: Optional[_Steps] = None) -> None:
     """One line per hook, without content or paths. ``t0`` is when the hook's own code began, so
     the gap from Claude Code's start of the hook is the start-up of the shell and the interpreter;
-    ``phases`` holds the milliseconds of each step that ran (#2164)."""
+    ``phases`` holds the milliseconds of each step that ran, the last being the log's own set-up
+    (#2164)."""
     if home is None:
         return
     try:
+        if steps is not None:
+            steps.begin("log")
         directory = home / "logs"
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         log = directory / "hook.log"
@@ -280,9 +296,9 @@ def _log(home: Optional[Path], record: Mapping[str, Any], outcome: str, started:
         line = {"t": round(time.time(), 3), "event": record.get("event"), "host": record.get("host"),
                 "session": record.get("session_id"), "outcome": outcome,
                 "ms": round((time.monotonic() - started) * 1000, 1)}
-        if phases is not None:
+        if steps is not None:
             line["t0"] = round(_T0_WALL, 3)
-            line["phases"] = phases
+            line["phases"] = steps.end()
         descriptor = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(line) + "\n")
@@ -292,10 +308,10 @@ def _log(home: Optional[Path], record: Mapping[str, Any], outcome: str, started:
 
 def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> int:
     started = time.monotonic()
-    phases: Dict[str, float] = {"imports": _IMPORTS_MS}
-    mark = time.perf_counter()
     if environ.get("LCMX_CAPTURE", "").strip().lower() in OFF_VALUES:
         return 0
+    steps = _Steps(_IMPORTS_MS)
+    steps.begin("read")  # the payload: read, parsed and checked
     record: Dict[str, Any] = {}
     outcome = "error"
     home: Optional[Path] = None
@@ -320,16 +336,15 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> 
         if record["observe_only"]:
             outcome = "observed"  # never spooled, so it cannot replace a pending record
             return 0
-        mark = _phase(phases, "read", mark)  # the payload: read, parsed and checked
+        steps.begin("spool")
         spool(home, record)
-        _phase(phases, "spool", mark)
         deadline = PRECOMPACT_DEADLINE_S if record["event"] == "PreCompact" else 0
         outcome = start_worker(home, environ, deadline_s=deadline, probe=record["event"] not in ASYNC_EVENTS,
-                               phases=phases)
+                               steps=steps)
     except Exception as exc:  # noqa: BLE001 - a hook never fails the session
         outcome = "error:" + type(exc).__name__
     finally:
-        _log(home, record, outcome, started, phases)
+        _log(home, record, outcome, started, steps)
     return 0
 
 
