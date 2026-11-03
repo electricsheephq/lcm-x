@@ -379,6 +379,10 @@ def test_environment_read_inventory():
             "never Hermes profile configuration",
         ("adapters/claude-code/bin/lcmx_mcp.py", "main"):
             "Claude Code plugin launcher: the harness's own variables pick the capture store home",
+        ("mcp_reader.py", "apply_profile_environment"):
+            "lcm-x mcp reader process: replaces its own LCM_* view with the one profile it serves (#1192)",
+        ("mcp_reader.py", "disabled_tool_names"):
+            "lcm-x mcp reader process: LCM_DISABLED_TOOLS from that profile view, parsed as the engine does (#1192)",
         ("docs/process/evidence/1880-persisted-hold/compat_probe.py", "main"):
             "synthetic compatibility proof tool: isolated home and lazy-install controls only",
         ("docs/process/evidence/1880-persisted-hold/cost/cost_probe.py", "main"):

@@ -110,11 +110,13 @@ NON_TURN_PATH_FILES = {
     "inspect_tools.py",  # Explicit lcm_inspect tool handler; read-only metadata.
     "level3_repair.py",  # Explicit repair or read-only doctor scan.
     "maintenance.py",  # Explicit backup, repair or rotation only.
+    "mcp_reader.py",  # Separate read-only `lcm-x mcp` process; never loaded by Hermes.
     "memory_tools.py",  # Default-off, read-only entity cards.
     "occurrence_time.py",  # Retrieval metadata; never durable turn occurrence.
     "preanswer_evidence.py",  # Unwired opt-in pre-answer helper.
     "presets.py",  # Status/dry-run suggestions; no live config mutation.
     "query_view_store.py",  # Default-off query views; optional-schema verification.
+    "readonly_store.py",  # Read-only store views for the `lcm-x mcp` reader only.
     "reasoning.py",  # Explicit computation or default-off pre-answer hook.
     "recall_delivery.py",  # Explicit recall; proactive assembly defaults off.
     "recall_session.py",  # Default-off session delivery for explicit recall only.
