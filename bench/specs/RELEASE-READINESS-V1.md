@@ -413,7 +413,7 @@ fixture requires new comparable measurements; it cannot restamp old results.
 
 **Bars.** All are required, and each is fixed before the run. A bar is never changed after its data has been seen; a needed change is a spec change for the next rc.
 1. 0 lost rows in the rc arm: every host row of the run is stored, or matched under the identity-ledger rules.
-2. Copies: at each cold bind in the rc arm, the replay on the previous GA, from that bind's own inputs, stores every copy the rc stores, in the same order (S7's comparison).
+2. Copies: at each cold bind in the rc arm, the replay on the rc must first reproduce the copies the rc arm stored (P-S6R's validity check); a bind whose replay does not reproduce them leaves D5 without a decision for that rc. The replay on the previous GA, from that bind's own inputs, must then store every copy the rc stores, in the same order (S7's comparison).
 3. Row preservation: every row of the snapshot is present and unchanged in the rc arm's final store (0 missing, 0 identity changes; filled-in observation times are reported).
 4. 0 publication-invariant lines, and no LCM-X traceback that the previous GA arm does not also show.
 5. Doctor, quick_check, integrity and schema: no failed check, and no warning that the previous GA arm does not also show.
@@ -424,7 +424,7 @@ Raw verdicts are recorded separately from any disposition, as in the release-man
 
 **Budget.** At most 4 h of wall time per rc on one host: a qualified bench VM when one is available, otherwise the test Mac outside rows that judge latency.
 
-**Reference-agent canary.** The reference agent still runs each rc for a window the release manager declares, with the same captures and reads as before. Its results are recorded in the receipt and filed as issues, and they never block a GA, with one exception: a confirmed lost row that the rc causes stops the release and goes to the hotfix gate. A confirmed lost row is a host row absent from the store after the window that no recorded pre-existing class explains, and that the previous GA's replay of the same inputs does store. Canary latency is recorded, not judged.
+**Reference-agent canary.** The reference agent still runs each rc for a window the release manager declares, with the same captures and reads as before. Its results are recorded in the receipt and filed as issues, and they never block a GA, with one exception: a confirmed lost row that the rc causes stops the release and goes to the hotfix gate. A confirmed lost row is a host row absent from the store after the window that no class recorded before the window opened explains, and that the previous GA's replay of the same inputs does store. Canary latency is recorded, not judged.
 
 **Implementation boundary.** The runner is a separate change that reuses the D5-B cell, the P-S6R replay driver and the S7 classifier. Until it has merged and passed a dry run on a real snapshot, D5 is `UNRUN` for a v0.29.2 rc. That is not green, and the release waits or carries a disclosed release-manager decision.
 
