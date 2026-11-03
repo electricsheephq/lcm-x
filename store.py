@@ -1401,9 +1401,16 @@ class MessageStore:
                 self._conn.executemany("INSERT OR IGNORE INTO ledger_meta(key, value) VALUES (?, ?)", (
                     ("digest_salt", secrets.token_bytes(32)), ("ledger_format", 1), ("view_seq", 0),
                 ))
+                self._conn.execute("INSERT OR IGNORE INTO ledger_meta(key,value) SELECT 'emission_provenance_floor',value FROM ledger_meta WHERE key='view_seq'")
             self._ingest_ledger_schema_ready = True
             if deleted:
                 logger.warning("ingest ledger salt_missing: cleared ledger rows %s", deleted)
+
+    def emission_provenance_floor_recorded(self) -> bool:
+        """Read an already-ready ledger's floor marker without starting a write."""
+        with self._write_lock:
+            return self._conn.execute(
+                "SELECT 1 FROM ledger_meta WHERE key='emission_provenance_floor'").fetchone() is not None
 
     def ingest_ledger_salt(self) -> bytes | None:
         """Read the store salt without creating a pre-ledger store's schema."""
