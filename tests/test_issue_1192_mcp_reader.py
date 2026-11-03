@@ -738,6 +738,31 @@ def test_t8_explicit_session_reaches_payloads_of_its_rotation_predecessors(fx, m
     assert other["error"] == f"Externalized payload {fx.ref} not found in session s1"
 
 
+def test_t8_node_expansion_keeps_its_sessions_filter_for_payloads(fx, monkeypatch):
+    """REGRESSION: node expansion keeps Hermes' sessions filter in the reader: a tool row of s1 that
+    names s2's payload expands without it, and s2's own row still shows it."""
+    store = MessageStore(fx.db, ingest_protection_config=fx.config, hermes_home=str(fx.home))
+    dag = SummaryDAG(fx.db)
+    try:
+        marker = store.get_batch([fx.s2_tool_id])[fx.s2_tool_id]["content"]
+        assert fx.ref in marker
+        named = store.append("s1", {"role": "tool", "content": marker, "tool_call_id": "call-s1-1",
+                                    "tool_name": "inventory"})
+        crossing = dag.add_node(_node("s1", "An s1 row naming an s2 payload.", [named]),
+                                escalation_level=1, model="mock-summarizer")
+        own = dag.add_node(_node("s2", "The warehouse inventory report.", [fx.s2_tool_id]),
+                           escalation_level=1, model="mock-summarizer")
+    finally:
+        store.close()
+        dag.close()
+    reader = make_reader(fx, monkeypatch)
+    crossed, is_error, _ = call(reader, "lcm_expand", {"node_id": crossing, "session_id": "s1"})
+    assert not is_error and crossed["expanded"][0]["store_id"] == named
+    assert "externalized" not in crossed["expanded"][0]
+    shown, is_error, _ = call(reader, "lcm_expand", {"node_id": own, "session_id": "s2"})
+    assert not is_error and shown["expanded"][0]["externalized"]["session_id"] == "s2"
+
+
 # -- T9: protocol ------------------------------------------------------------------
 
 def test_t9_protocol_session_over_stdio(spawned_fx, tmp_path):
@@ -966,6 +991,60 @@ def test_t10_store_unreadable_at_reread_stays_offline(fx, monkeypatch):
         assert is_error and offline["error"].startswith("store_offline:")
     finally:
         os.rename(away, fx.db)
+    assert sorted(os.listdir(fx.home)) == listing
+
+
+def test_t10_store_unopenable_at_reread_stays_offline(fx, monkeypatch):
+    """REGRESSION: a WAL header without sidecars whose path os.access reports readable but which
+    cannot be opened at the re-read (here a directory in its place) stays store_offline, and the
+    reader creates no file."""
+    _, readonly_store = _reader_modules()
+    reader = make_reader(fx, monkeypatch)
+    stop_agents()
+    for suffix in ("-wal", "-shm"):
+        Path(f"{fx.db}{suffix}").unlink(missing_ok=True)
+    away = fx.db.with_name("lcm.db.restoring")
+    readable = []
+
+    def directory_in_its_place() -> None:
+        os.rename(fx.db, away)
+        fx.db.mkdir()
+        readable.append(os.access(fx.db, os.R_OK))
+
+    monkeypatch.setattr(readonly_store, "_pause_before_header_reread", directory_in_its_place)
+    listing = sorted(os.listdir(fx.home))
+    try:
+        offline, is_error, _ = call(reader, "lcm_grep", {"query": "heron"})
+        assert readable == [True]
+        assert is_error and offline["error"].startswith("store_offline:")
+    finally:
+        fx.db.rmdir()
+        os.rename(away, fx.db)
+    assert sorted(os.listdir(fx.home)) == listing
+
+
+@pytest.mark.parametrize("partial", [b"", b"SQLite for"], ids=["empty", "short"])
+def test_t10_header_short_at_reread_stays_offline(fx, monkeypatch, partial):
+    """REGRESSION: a WAL header without sidecars that a restore has truncated by the re-read (an
+    empty file, or one shorter than the header) stays store_offline, and the reader creates no file."""
+    _, readonly_store = _reader_modules()
+    reader = make_reader(fx, monkeypatch)
+    stop_agents()
+    for suffix in ("-wal", "-shm"):
+        Path(f"{fx.db}{suffix}").unlink(missing_ok=True)
+    away = fx.db.with_name("lcm.db.restoring")
+
+    def restore_begins() -> None:
+        os.rename(fx.db, away)
+        fx.db.write_bytes(partial)
+
+    monkeypatch.setattr(readonly_store, "_pause_before_header_reread", restore_begins)
+    listing = sorted(os.listdir(fx.home))
+    try:
+        offline, is_error, _ = call(reader, "lcm_grep", {"query": "heron"})
+        assert is_error and offline["error"].startswith("store_offline:")
+    finally:
+        os.replace(away, fx.db)
     assert sorted(os.listdir(fx.home)) == listing
 
 

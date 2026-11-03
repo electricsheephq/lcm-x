@@ -74,16 +74,24 @@ def wal_sidecars_missing(db_path: str | Path) -> bool:
     files when the directory is writable (a filesystem write, possibly as the wrong user),
     or fail when it is not. Stock SQLite deletes both when the last connection closes.
     """
+    return _wal_header_state(db_path) is True  # an unreadable or short file opens as before
+
+
+def _wal_header_state(db_path: str | Path) -> bool | None:
+    """True: a WAL header with its -wal or -shm missing. False: a header that opens safely (rollback
+    journal, or WAL with both sidecars). None: the file cannot be read, or its header is short."""
     path = Path(db_path)
     try:
         with path.open("rb") as handle:
             header = handle.read(_WAL_HEADER_OFFSET + 2)
     except OSError:
-        return False
+        return None
+    if len(header) < _WAL_HEADER_OFFSET + 2:
+        return None
     # SQLite takes the WAL path when EITHER format byte (write 18, read 19) is 2 or more,
     # so a mixed (1, 2) header must count as WAL too.
-    if len(header) < _WAL_HEADER_OFFSET + 2 or max(header[_WAL_HEADER_OFFSET:_WAL_HEADER_OFFSET + 2]) < 2:
-        return False  # rollback-journal (or unreadable) store: opens as before
+    if max(header[_WAL_HEADER_OFFSET:_WAL_HEADER_OFFSET + 2]) < 2:
+        return False  # rollback-journal store
     return not (Path(f"{path}-wal").exists() and Path(f"{path}-shm").exists())
 
 
@@ -99,12 +107,13 @@ def _pause_before_header_reread() -> None:
 
 
 def _store_offline(db_path: str | Path) -> bool:
-    """``wal_sidecars_missing``, confirmed by one header re-read after a short pause; a file that
-    cannot be read at the re-read (a restore in progress) stays offline."""
+    """``wal_sidecars_missing``, confirmed by one header re-read after a short pause. Only a re-read
+    that shows a safe header opens the store; a file that cannot be read then, or whose header is
+    short (a restore in progress), stays offline."""
     if not wal_sidecars_missing(db_path):
         return False
     _pause_before_header_reread()
-    return not os.access(db_path, os.R_OK) or wal_sidecars_missing(db_path)
+    return _wal_header_state(db_path) is not False
 
 
 def open_readonly_connection(
