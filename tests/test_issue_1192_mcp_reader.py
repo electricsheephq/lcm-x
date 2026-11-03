@@ -1357,11 +1357,67 @@ def test_t13_quoted_profile_values_drop_their_trailing_comments(tmp_path):
     assert env["LCM_EMBEDDING_MODEL"] == "model # with a hash"
     assert env["LCM_RECALL_QUERY_TIMEOUT_S"] == "30"
     assert env["LCM_SUMMARY_MODEL"] == "plain"
-    assert env["LCM_EMBEDDING_PROVIDER"] == '"ollama" trailing'  # not a quoted value: kept as written
+    assert "LCM_EMBEDDING_PROVIDER" not in env  # text after the closing quote: the loader rejects the line
     disabled = mcp_reader.disabled_tool_names(env)
     assert disabled == {"lcm_expand", "lcm_grep"}
     names = [t["name"] for t in mcp_reader.tool_definitions(disabled)]
     assert disabled.isdisjoint(names) and {"lcm_recall", "lcm_load_session"} <= set(names)
+
+
+def test_t13_profile_lines_parse_as_the_profile_loader_reads_them(tmp_path):
+    """REGRESSION: each line reads as Hermes' profile loader (python-dotenv's parser) reads it, so
+    an escaped quote does not end a quoted value and a prefix keeps the writer's identity. The
+    expected values are python-dotenv 1.2.2's own output for these bytes."""
+    mcp_reader, _ = _reader_modules()
+    lines = [
+        r'LCM_EMBEDDING_QUERY_PREFIX="a\" # b"',
+        r'LCM_EMBEDDING_DOCUMENT_PREFIX="a\" # b" # comment',
+        'LCM_DISABLED_TOOLS="lcm_expand,lcm_grep" # hide expansion and search',
+        "LCM_EMBEDDING_MODEL='model # with a hash'  # the model",
+        r"LCM_SINGLE='it\'s \\ \n'",
+        r'LCM_DOUBLE="tab\there\\ \n end"',
+        "LCM_UNQUOTED=plain\t# tab before the comment",
+        "LCM_HASH=a#b",
+        "export\tLCM_EXPORTED=1",
+        "'LCM_QUOTED_KEY' = spaced",
+        "   LCM_INDENTED = 5   ",
+        "LCM_EMPTY=",
+        'LCM_EMPTY_QUOTED=""',
+        "LCM_UTF8=café",
+        "LCM_OVERRIDDEN=1",
+        "LCM_OVERRIDDEN=2",
+        "LCM_UNSET=1",
+        "LCM_UNSET # unset by a bare key",
+        "LCM_KEPT=1",
+        "LCM_KEPT junk",
+        'LCM_EMBEDDING_PROVIDER="ollama" trailing',
+        "# LCM_COMMENTED=1",
+        'OPENAI_API_KEY="not-read"',
+        "FASTEMBED_CACHE_PATH=/cache # comment",
+        'LCM_UNTERMINATED="abc',
+    ]
+    (tmp_path / ".env").write_bytes(("﻿" + "\n".join(lines)).encode("utf-8"))  # with a BOM
+    assert mcp_reader.read_profile_env(tmp_path) == {
+        "LCM_EMBEDDING_QUERY_PREFIX": 'a" # b',
+        "LCM_EMBEDDING_DOCUMENT_PREFIX": 'a" # b',
+        "LCM_DISABLED_TOOLS": "lcm_expand,lcm_grep",
+        "LCM_EMBEDDING_MODEL": "model # with a hash",
+        "LCM_SINGLE": "it's \\ \\n",
+        "LCM_DOUBLE": "tab\there\\ \n end",
+        "LCM_UNQUOTED": "plain",
+        "LCM_HASH": "a#b",
+        "LCM_EXPORTED": "1",
+        "LCM_QUOTED_KEY": "spaced",
+        "LCM_INDENTED": "5",
+        "LCM_EMPTY": "",
+        "LCM_EMPTY_QUOTED": "",
+        "LCM_UTF8": "café",
+        "LCM_OVERRIDDEN": "2",
+        "LCM_KEPT": "1",
+        "FASTEMBED_CACHE_PATH": "/cache",
+    }
+    (tmp_path / ".env").write_bytes(b"LCM_SUMMARY_MODEL=caf\xe9\n")  # not UTF-8: the loader reads latin-1
+    assert mcp_reader.read_profile_env(tmp_path) == {"LCM_SUMMARY_MODEL": "café"}
 
 
 # -- seams of the read-only construction itself ---------------------------------------
