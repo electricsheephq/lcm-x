@@ -3243,6 +3243,12 @@ class ReconcileMixin:
         nothing. Pinned by ``test_repeated_identical_tool_invocation_is_``
         ``persisted_not_replayed``.
 
+        #2172: reserve copies shown in the host's own prefix before stored
+        copies can prove replay after the cursor, so every suppression is
+        backed by a stored copy the host prefix does not account for.
+        Over-reserving can keep a duplicate. Copies compacted out of the host
+        view are not reserved; that known case is planned for v0.30.0.
+
         #1385: a Hermes salvage placeholder that took a stored row's identity
         matches by construction, not by occurrence. It cannot prove segment
         replay: a fresh same-id call can genuinely return the placeholder text.
@@ -3266,6 +3272,21 @@ class ReconcileMixin:
             )
             if not _has_lossy_redacted_identity(identity)
         )
+        prefix_counts = Counter(
+            identity
+            for identity in (
+                self._message_replay_identity(row)
+                for row in messages[:max(0, cursor)]
+                if str(row.get("role") or "") in {"assistant", "tool"}
+                and not self._matches_ignore_message_patterns(row)
+            )
+            if not _has_lossy_redacted_identity(identity)
+        )
+        # Only assistant/tool identities can match the segment scan. Subtract their
+        # WHOLE prefix even when the stored tail covers less: each suppression is
+        # then backed by a stored copy the prefix does not account for.
+        # Over-reserving can keep a duplicate.
+        stored_identity_counts.subtract(prefix_counts)
         replayed: set[int] = set()
         metadata = None  # Loaded once, only when a borrowed pair binds.
         users = None  # Lazily index both views once per replay scan.

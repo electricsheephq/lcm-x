@@ -194,11 +194,12 @@ def test_t2_the_sweep_on_held_pass_at_the_ceiling(tmp_path, monkeypatch, summari
         engine.shutdown()
 
 
-# -- T3: the ordinary sweep and sweep-held ceiling pass are byte-identical to v0.24.9-rc1 ---------------------------
+# -- T3: the ordinary sweep is byte-identical to v0.24.9-rc1. The sweep-held ceiling pass is an exit fit over the
+# window budget, which #2039 changed on purpose: it now cuts whole turns under the exit cap, so its pin moved. --------
 
 _SWEEP_ON_RC1 = {
     "loop": "092beb472ca7f5c13a48f6e5c1b874c458cb44ad2a3f859b746610cd946c13d9",
-    "held_ceiling": "f8c376d95c36a2bd84394490fb628e3d740a663c625b8d61244178e6656c44fd",
+    "held_ceiling": "fafcb3fbf1fefaa858ca21dcd516b70b6477a6912c73d68182ee6fd3a5a2bdd7",  # #2039 (was f8c376d9)
 }
 
 

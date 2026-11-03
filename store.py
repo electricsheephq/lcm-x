@@ -447,6 +447,22 @@ def delete_session_lineage(conn: sqlite3.Connection, sessions_sql: str, args: tu
         conn.execute(f"DELETE FROM session_lineage WHERE child_session_id IN ({sessions_sql})", args)
 
 
+# Session-scoped tables owned outside core (the Claude Code capture ledger, docs/claude-code-adapter.md)
+# register a purge here. Both session delete paths (``delete_session_messages`` and the doctor clean
+# apply) run every registered purge on their own transaction, with the connection, a query that
+# selects the deleted session ids, and its arguments. Core never imports a registering module.
+_SESSION_PURGES: dict[str, Callable[[sqlite3.Connection, str, tuple], None]] = {}
+
+
+def register_session_purge(name: str, purge: Callable[[sqlite3.Connection, str, tuple], None]) -> None:
+    _SESSION_PURGES[name] = purge  # keyed by name: a reloaded module replaces its purge
+
+
+def run_session_purges(conn: sqlite3.Connection, sessions_sql: str, args: tuple = ()) -> None:
+    for purge in tuple(_SESSION_PURGES.values()):
+        purge(conn, sessions_sql, args)
+
+
 def _database_identity(path: Path, store: object) -> str:
     """#719: the file a store opens, however its path was spelled; ``:memory:`` is one per store."""
     if str(path) == ":memory:":
@@ -895,6 +911,7 @@ class MessageStore:
             delete_host_uid_bindings(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_chunk_inflight(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_session_lineage(self._conn, "SELECT ?", (session_id,))
+            run_session_purges(self._conn, "SELECT ?", (session_id,))
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),

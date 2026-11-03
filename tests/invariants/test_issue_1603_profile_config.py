@@ -375,6 +375,11 @@ def test_environment_read_inventory():
         ("embedding_provider.py", "__init__"): "FASTEMBED_CACHE_PATH: process-wide model download cache",
         ("inactive_record.py", "_process_start"): "LC_ALL=C subprocess for ps process identity, not profile configuration",
         ("__init__.py", "_engine_took_slot"): "HERMES_HOME: process launch identity for inactive-record ownership, not profile configuration",
+        ("adapters/claude-code/bin/lcmx_hook.py", "main"):
+            "Claude Code plugin hook: the harness's own variables (capture switch, config dir, plugin paths), "
+            "never Hermes profile configuration",
+        ("adapters/claude-code/bin/lcmx_mcp.py", "main"):
+            "Claude Code plugin launcher: the harness's own variables pick the capture store home",
         ("mcp_reader.py", "apply_profile_environment"):
             "lcm-x mcp reader process: replaces its own LCM_* view with the one profile it serves (#1192)",
         ("mcp_reader.py", "disabled_tool_names"):
