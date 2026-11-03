@@ -10851,13 +10851,16 @@ class LCMEngine(
                     if tail["messages"]:
                         self._append_ingest_batch(tail)
                     self._pending_session_tails.remove(tail)
-                    if store is self._store and tail["session_id"] == self._session_id:
+                    # Read the bound store without a lazy open (#2152): after a failed
+                    # rebind, opening the new home here would raise out of shutdown's cleanup.
+                    if store is self.__dict__.get("_store") and tail["session_id"] == self._session_id:
                         self._ingest_cursor_needs_reconcile = True
             except (Exception, KeyboardInterrupt):
                 logger.debug("LCM pending session-end retry deferred", exc_info=True)
                 break
             finally:
-                if store is not self._store and not any(t["store"] is store for t in self._pending_session_tails):
+                if (store is not self.__dict__.get("_store")
+                        and not any(t["store"] is store for t in self._pending_session_tails)):
                     store.close()
             if time.monotonic() >= deadline:
                 break

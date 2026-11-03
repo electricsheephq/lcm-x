@@ -322,3 +322,39 @@ def test_state_db_path_before_use_does_not_open_storage(preflight, monkeypatch):
     assert engine._state_db_path() == preflight.home / "state.db"
     assert preflight.connects == []
     assert not preflight.home.exists()
+
+
+@pytest.mark.parametrize("append_fails", [False, True], ids=["tail-drains", "tail-stays-locked"])
+def test_shutdown_after_failed_rebind_with_pending_tail_never_reopens(preflight, tmp_path, monkeypatch, caplog, append_fails):
+    """A pending tail of the old profile plus a failed rebind: shutdown must finish its cleanup without opening the new home."""
+    engine, _ = preflight.register()
+    engine.on_session_start("old-session", platform="cli", conversation_id="old-conversation")
+    engine.ingest([{"role": "user", "content": "old profile row"}])
+    old_store = engine._store
+    engine._pending_session_tails.append({"store": old_store, "session_id": "old-session",
+                                          "messages": [{"role": "user", "content": "tail row"}]})
+    attempts = []
+
+    def fail_open(*args, **kwargs):
+        attempts.append(args)
+        raise sqlite3.OperationalError("injected rebind failure")
+
+    monkeypatch.setattr(engine, "_bind_storage", fail_open)
+    with pytest.raises(sqlite3.OperationalError):
+        engine._rebind_storage_for_home(str(tmp_path / "rebound"))
+    assert len(attempts) == 1 and not engine._storage_ready
+
+    def append(tail):
+        if append_fails:
+            raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(engine, "_trim_replayed_pending_tail", lambda tail: None)
+    monkeypatch.setattr(engine, "_append_ingest_batch", append)
+    caplog.set_level("WARNING")
+    engine.shutdown()
+    assert len(attempts) == 1  # shutdown never retried the failed open
+    assert engine._stable_use_closed is True
+    assert old_store._conn is None  # the old profile's store was still closed
+    unflushed = [r for r in caplog.records if "unflushed=1" in r.getMessage()]
+    assert bool(unflushed) is append_fails
+
