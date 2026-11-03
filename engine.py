@@ -7327,6 +7327,7 @@ class LCMEngine(
             if reconciled_existing_session and cursor > 0
             else set()
         )
+        replayed_tool_segment_indexes -= new_prefix_occurrences
         if replayed_tool_segment_indexes:
             self._last_ingest_reconciliation["replayed_tool_segment_rows"] = len(
                 replayed_tool_segment_indexes
