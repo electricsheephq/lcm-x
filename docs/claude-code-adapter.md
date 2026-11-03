@@ -95,7 +95,8 @@ milliseconds of each step that ran, in order:
 - `log`, the log's own set-up.
 
 Each step ends when the next begins, and a run that returns early or fails logs the step it was in.
-So the steps after `imports` add up to `ms`; neither counts the writing of the line itself. The steps
+So the steps after `imports` add up to about `ms`: each is rounded on its own, and they begin just
+after `ms` starts and end just after it stops. Neither counts the writing of the line itself. The steps
 use a monotonic clock, while `t0` and `t` are wall-clock times. These are measurements only: nothing
 reads them to decide anything.
 

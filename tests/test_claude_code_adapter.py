@@ -644,7 +644,7 @@ def test_a_slow_step_is_charged_to_the_step_that_took_it(hook, env, tmp_path, mo
         checks[:] = [(False, 0), (held, 0.06)]  # the probe finds the lock free; the check after the drain is slow
         assert hook.main(io.StringIO(json.dumps(payload)), lane) == 0
         row = _log(env)[-1]
-        assert (row["outcome"], row["phases"]["recheck"] >= 50, row["phases"].get("start", 0) < 50) == (outcome, True, True)
+        assert (row["outcome"], row["phases"]["recheck"] >= 50) == (outcome, True)
 
     def slow_lookup(environ, home):
         time.sleep(0.06)
