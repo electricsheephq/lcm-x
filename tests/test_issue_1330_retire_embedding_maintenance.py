@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import hermes_lcm.engine as engine_mod
+import hermes_lcm.maintenance_scheduler as maintenance_scheduler
 import hermes_lcm.command as command_mod
 import hermes_lcm.embedding_maintenance as maintenance_mod
 import hermes_lcm.embedding_provider as provider_mod
@@ -179,10 +180,10 @@ def test_interrupted_multichunk_message_resumes(tmp_path, scheduler, monkeypatch
 
 @pytest.fixture
 def scheduler(monkeypatch):
-    scheduler = engine_mod._RollupMaintenanceScheduler(
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(
         kind="incremental embedding", thread_name="lcm-embedding-maintenance",
     )
-    monkeypatch.setattr(engine_mod, "_EMBEDDING_MAINTENANCE_SCHEDULER", scheduler)
+    monkeypatch.setattr(maintenance_scheduler, "_EMBEDDING_MAINTENANCE_SCHEDULER", scheduler)
     return scheduler
 
 
@@ -433,7 +434,7 @@ spec = importlib.util.spec_from_file_location(
 )
 package = importlib.util.module_from_spec(spec)
 sys.modules["hermes_lcm"] = package
-from hermes_lcm import engine, command, embedding_maintenance, embedding_provider
+from hermes_lcm import engine, command, embedding_maintenance, embedding_provider, maintenance_scheduler
 from tests.test_issue_1330_retire_embedding_maintenance import _seed_batches, _SlowBatches
 
 os.environ["LCM_EMBEDDING_BACKFILL_BATCH_SIZE"] = "40"
@@ -446,7 +447,7 @@ def job():
     embedding_maintenance.run_incremental_embedding_pass(config.database_path, config)
     Path(marker + ".pass").write_text(str(provider.completed))
 
-assert engine._EMBEDDING_MAINTENANCE_SCHEDULER.schedule(("exit-test", "embeddings"), job)
+assert maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER.schedule(("exit-test", "embeddings"), job)
 assert started.wait(30)
 """
     result = subprocess.run(

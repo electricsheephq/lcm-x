@@ -60,7 +60,7 @@ non-tool paths that can bypass those handlers: store/compaction/rollup and
 sidecar writes; maintenance, import, schema, and diagnostics; retrieval and
 expansion; auxiliary/lifecycle session state; and host callbacks in
 `engine.py`. The `cron` category is represented by the real
-`_RollupMaintenanceScheduler`; this repository has no separate OS cron entry
+`_RollupMaintenanceScheduler` in `maintenance_scheduler.py`; this repository has no separate OS cron entry
 point, so the scheduler note is the honest boundary rather than an invented
 function.
 
