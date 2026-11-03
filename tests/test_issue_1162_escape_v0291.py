@@ -79,6 +79,7 @@ def test_b5_empty_input_keeps_tool_pairing_repair(tmp_path, summaries, lines, mo
         assert out is not view
         assert not any(m.get("tool_call_id") == "orphan" for m in out)
         assert engine._last_compression_status == "sanitized"
+        assert engine._compress_commit_proof is not None
     finally:
         engine.shutdown()
 
@@ -527,8 +528,8 @@ def test_t8_ordinary_cleanup_control(tmp_path, summaries, lines):
             {"role": "assistant", "content": "<think>internal</think>Visible answer"}]
     try:
         out = engine.compress(view)
-        assert out is not view and len(out) == len(view)
-        assert out[-1]["content"] == "Visible answer"
+        assert out is view and len(out) == len(view)
+        assert out[-1]["content"] == "<think>internal</think>Visible answer"
         assert engine._last_compression_status == "sanitized"
         assert engine._last_compression_noop_reason == "" and not summaries
     finally:

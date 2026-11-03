@@ -11,6 +11,7 @@ import inspect
 import json
 import subprocess
 import textwrap
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ import hermes_lcm.tokens as tokens
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.tokens import count_messages_tokens
+from tests.harness import host_call
 
 PAD = " alpha beta gamma delta" * 30
 HOLD = lcm_engine._SWEEP_BUDGET_HOLD_SECONDS
@@ -110,6 +112,88 @@ def test_t1_below_threshold_automatic_compress_writes_no_leaf_and_still_ingests(
         assert engine._ingest_cursor == len(result) == len(view)  # the cursor indexes the returned list
         assert engine._no_progress_hold is None  # cleanup-only is not a threshold pass
         assert engine._preflight_below_threshold_cleanup_only is False  # the handoff is one-shot
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("content", ["<think>internal</think>visible answer", [
+    {"type": "thinking", "thinking": "internal"}, {"type": "text", "text": "visible answer"}]])
+def test_no_progress_cleanup_keeps_snapshot_across_restart(tmp_path, summaries, content):
+    engine = _engine(tmp_path, deferred_maintenance_enabled=True, critical_budget_pressure_ratio=0.3)
+    view = _view()
+    view[2]["content"] = content
+    rough = count_messages_tokens(view)
+    engine.threshold_tokens, engine.context_length = 100_000, rough * 3
+    assert engine.should_compress_preflight(view)
+    before = deepcopy(view)
+    try:
+        assert engine.compress(view, current_tokens=rough) is view
+        assert view == before  # Hermes's deepcopy comparison, even before removing _db_persisted.
+        rows = engine._store.get_session_messages("S")
+        before = deepcopy(view)
+    finally:
+        engine.shutdown()
+
+    engine = _engine(tmp_path)
+    try:
+        engine.ingest(before)
+        assert engine._store.get_session_messages("S") == rows
+        engine.ingest(before + _turn("next", 1000.0))
+        assert _stored(engine) == len(rows) + 2
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("content, scale, expected", [
+    ("<think>internal</think>visible answer", 3, 3),
+    ([{"type": "thinking", "thinking": "internal"}, {"type": "text", "text": "visible answer"}], 3, 3),
+    ("<think>" + "internal " * 400 + "</think>visible answer", 3.2, 1),
+    ("<think>" + "internal " * 2000 + "</think>visible answer", 3.2, 0),
+], ids=["one-word", "internal-part", "400-words", "2000-words"])
+def test_no_progress_cleanup_three_turn_pacing(tmp_path, summaries, content, scale, expected):
+    engine = _engine(tmp_path, deferred_maintenance_enabled=True, critical_budget_pressure_ratio=0.3)
+    view = _view()
+    view[2]["content"] = content
+    rough = count_messages_tokens(view)
+    engine.threshold_tokens, engine.context_length = 100_000, int(rough * scale)
+    assert engine.should_compress_preflight(view)
+    try:
+        before = deepcopy(view)
+        returned = engine.compress(view, current_tokens=rough)
+        assert view == before and len(returned) == len(view)
+        if returned != before:  # Model the unpatched host's cleanup commit explicitly.
+            engine.on_session_end("S", before)
+            engine.on_session_start("S", boundary_reason="compression", old_session_id="S")
+        view, passes = returned, 0
+        for i in range(3):
+            engine.note_turn_complete()
+            incoming = view + _turn(f"next-{i}", 1000.0 + i)
+            before = deepcopy(incoming)
+            cycle = host_call(engine, incoming)
+            assert incoming == before and len(cycle.view) == len(incoming)
+            if cycle.view != before:
+                engine.on_session_end("S", before)
+                engine.on_session_start("S", boundary_reason="compression", old_session_id="S")
+            view, passes = cycle.view, passes + int(cycle.compressed)
+        print(f"three-turn automatic compress passes={passes}")
+        assert passes == expected  # Pinned to the measured unpatched v0.29.1 count.
+        assert not summaries
+    finally:
+        engine.shutdown()
+
+
+def test_no_progress_cleanup_crossing_threshold_returns_cleaned_list(tmp_path, summaries):
+    engine = _engine(tmp_path, leaf_chunk_tokens=100_000)
+    view = _view(1)
+    view[2]["content"] = "<think>" + "internal " * 400 + "</think>visible answer"
+    clean = engine._sanitize_active_context_messages(view)
+    engine.threshold_tokens = count_messages_tokens(clean) + 1
+    before = deepcopy(view)
+    try:
+        assert count_messages_tokens(clean) < engine.threshold_tokens <= count_messages_tokens(view)
+        result = engine.compress(view, current_tokens=count_messages_tokens(view))
+        assert view == before and result == clean and result is not view
+        assert not summaries
     finally:
         engine.shutdown()
 

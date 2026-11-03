@@ -11,6 +11,7 @@ from hermes_lcm.engine import LCMEngine
 from hermes_lcm.tokens import count_messages_tokens
 from tests.test_active_tool_stubbing import assembled_tool, tool_pair
 from tests.test_issue_651_below_threshold_cleanup_only import _maintenance_engine
+from tests.test_issue_904_hidden_only_no_growth import _restart_replay
 
 
 @pytest.fixture
@@ -136,6 +137,7 @@ def test_deferred_stub_adopted_at_next_threshold_with_identical_stored_rows(engi
     assert assembled_tool(result, "live")["content"] == assembled_tool(immediate_result, "live")["content"]
     assert stored_bytes(deferred) == stored_bytes(immediate) == before
     assert deferred._dag.get_session_node_count(deferred._session_id) == 0
+    _restart_replay(deferred, result, view)
 
 
 @pytest.mark.parametrize("redacted", [True, False], ids=["g-hidden-redaction", "h-plain-stub"])

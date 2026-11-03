@@ -60,6 +60,28 @@ def _compress(instance, host):
     return instance.compress(host, current_tokens=count_messages_tokens(host))
 
 
+def _restart_replay(instance, host, original=None, *, expected_replays=0):
+    if original is not None:
+        instance.on_session_end(instance._session_id, original)
+        instance.on_session_start(instance._session_id, boundary_reason="compression", old_session_id=instance._session_id)
+    before = instance._store.get_session_messages(instance._session_id)
+    instance.shutdown()
+    reader = LCMEngine(config=instance._config, hermes_home=instance._hermes_home)
+    try:
+        reader.on_session_start(instance._session_id, conversation_id=instance._conversation_id, context_length=128_000)
+        reader.ingest(host)
+        after = reader._store.get_session_messages(instance._session_id)
+        assert after[:len(before)] == before
+        assert len(after) == len(before) + expected_replays
+        if expected_replays:
+            # Inherited cold-tail ambiguity: the unpatched base re-stores these exact eight rows.
+            assert [(row["role"], row["content"]) for row in after[len(before):]] == [
+                (row["role"], row["content"]) for row in host]
+        print(f"restart replay rows={len(after) - len(before)} expected={expected_replays}")
+    finally:
+        reader.shutdown()
+
+
 def test_hidden_only_returns_identical_list_and_holds_attempts(engine, caplog):
     instance, summarize = engine
     host = _hidden_view(instance)
@@ -86,6 +108,7 @@ def test_hidden_only_returns_identical_list_and_holds_attempts(engine, caplog):
     assert "USER-" not in caplog.text and "ANSWER-" not in caplog.text
     for observed in (count_messages_tokens(host), instance.threshold_tokens, instance._survival_ceiling() - 1):
         assert not instance.should_compress(observed)
+    _restart_replay(instance, result, expected_replays=8)
 
 
 def test_hidden_only_repairs_missing_tool_result_without_changing_stored_rows(engine):
@@ -116,6 +139,7 @@ def test_hidden_only_repairs_missing_tool_result_without_changing_stored_rows(en
     assert instance._ingest_cursor == len(result)
     assert host == original
     assert instance._store.get_session_messages(instance._session_id) == stored_before
+    _restart_replay(instance, result, host)
 
 
 @pytest.mark.parametrize("options", [{"force": True}, {"bypass_cooldown": True}], ids=["forced", "bypass"])

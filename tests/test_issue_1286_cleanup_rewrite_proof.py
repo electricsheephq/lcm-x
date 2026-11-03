@@ -111,7 +111,7 @@ class Host:
         ]
         self.engine.ingest(self.live)
 
-    def cleanup_pass(self, preflight):
+    def cleanup_pass(self, preflight, force=False):
         """The engine-driven automatic compress() below the threshold, which is cleanup-only. Returns (result, the
         input). ``preflight`` asks through the host's preflight (deferred maintenance under critical pressure).
         Otherwise the engine's own request marker stands in: below the threshold the preflight defers a size-only
@@ -124,9 +124,18 @@ class Host:
         else:
             assert self.engine._mark_below_threshold_maintenance() is True
         before = deepcopy(self.live)
-        result = self.engine.compress(self.live, current_tokens=rough)
+        with pytest.MonkeyPatch.context() as patch:
+            if force:  # A forced, sub-leaf pass still strips reasoning and must commit that rewrite.
+                patch.setattr(self.engine._config, "leaf_chunk_tokens", rough * 10)
+                patch.setattr(self.engine._config, "critical_budget_pressure_ratio", 0)
+            result = self.engine.compress(self.live, current_tokens=rough, force=force)
         assert self.engine._last_compression_status == "sanitized"
-        assert result is not self.live and len(result) == len(before) and result != before
+        assert self.live == before
+        assert len(result) == len(before)
+        if result is self.live:
+            assert result == before and self.engine._compress_commit_proof is None
+        else:
+            assert result != before
         return result, before
 
     def compact(self):
@@ -185,7 +194,7 @@ def _turns(host, variant, n=6):
 
 
 def _commit_cleanup(host, variant):
-    result, before = host.cleanup_pass(preflight=variant == "reasoning")
+    result, before = host.cleanup_pass(preflight=variant == "reasoning", force=variant == "reasoning")
     if variant == "stub":
         assert any(str(m.get("content")).startswith("[Externalized payload: kind=raw_payload;") for m in result)
     else:
@@ -218,7 +227,7 @@ def test_committed_cleanup_rewrite_survives_a_restart(host, variant):
 @pytest.mark.parametrize("variant", ["stub", "reasoning"])
 def test_the_boundary_makes_a_committed_cleanup_proof_durable(host, variant):
     _turns(host, variant)
-    result, before = host.cleanup_pass(preflight=variant == "reasoning")
+    result, before = host.cleanup_pass(preflight=variant == "reasoning", force=variant == "reasoning")
     assert host.engine._compress_commit_proof.get("cleanup_rewrite") is True
     assert host.engine._durable_commit_proof_payload() is None  # durable only on the commit signal
     host.commit_in_place(result, before)
@@ -420,7 +429,7 @@ def test_a_salvaged_commit_survives_a_restart(host):
     for _ in range(3):
         host.tool_turn()
     _turns(host, "reasoning", n=3)
-    result, before = host.cleanup_pass(preflight=True)
+    result, before = host.cleanup_pass(preflight=True, force=True)
     host.commit_in_place(_salvage(result), before)
     assert _HERMES_PRUNED_TOOL_PLACEHOLDER in str(host.live)
     rows = host.stored()
@@ -517,7 +526,7 @@ def _rotate_into_a_child_and_insert_a_steer(host):
     """A cleanup-only list rotated into a compression child, one warm turn, then a steer inserted before the carried
     parent tail (T4). Returns the child's durable proof before the steer is stored."""
     _turns(host, "reasoning")
-    result, before = host.cleanup_pass(preflight=True)
+    result, before = host.cleanup_pass(preflight=True, force=True)
     host.engine.on_session_end(SID, before)
     host.live = result
     host.engine.on_session_start(CHILD, boundary_reason="compression", old_session_id=SID, platform="telegram",
@@ -562,7 +571,7 @@ def test_a_later_cleanup_in_a_compression_child_keeps_the_parent_rows_it_carries
     _rotate_into_a_child_and_insert_a_steer(host)
     host.turn(reply=f"{THINK}reply to T{host.n_turns}{PAD}")
     carried = _carried(host.engine._durable_commit_proof_payload(), SID)
-    result, before = host.cleanup_pass(preflight=True)
+    result, before = host.cleanup_pass(preflight=True, force=True)
     assert THINK not in str(result) and THINK in str(before)
     assert host.engine._compress_commit_proof.get("cleanup_rewrite") is True
     host.commit_in_place(result, before, session_id=CHILD)
@@ -758,7 +767,7 @@ def test_a_full_replay_of_a_reasoned_and_a_plain_answer_keeps_its_proof_durable(
     """Round 7d control: the same stored answers, the host's whole list with the reasoning stripped by the cleanup
     pass. Each answer has its own occurrence, so the proof goes durable and a restart stores only the next turn."""
     _reasoned_then_plain_answer(host)
-    result, before = host.cleanup_pass(preflight=True)
+    result, before = host.cleanup_pass(preflight=True, force=True)
     assert THINK not in str(result) and THINK in str(before)
     assert [m["content"] for m in result if m["role"] == "assistant"] == [ANSWER, ANSWER]
     assert host.engine._compress_commit_proof.get("cleanup_rewrite") is True

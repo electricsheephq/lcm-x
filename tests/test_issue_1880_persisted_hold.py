@@ -681,3 +681,19 @@ def test_r1_committed_condensation_clears_scoped_record(tmp_path):
         assert engine._store.read_metadata_json(KEY) is None
     finally:
         engine.shutdown()
+
+
+def test_representation_only_threshold_hold_survives_restart(tmp_path):
+    engine = _r1_tail_engine(tmp_path)
+    view, _ = _r1_views()
+    view[-1]["content"] = "<think>internal</think>" + view[-1]["content"]
+    try:
+        assert engine.compress(view, current_tokens=10_000) is view
+        assert engine._no_progress_hold[1] == "no_progress"
+        engine.shutdown()
+        engine = _r1_tail_engine(tmp_path)
+        engine.last_prompt_tokens = 10_000
+        engine.ingest(view)
+        assert not engine.should_compress(10_000)
+    finally:
+        engine.shutdown()

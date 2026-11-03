@@ -42,6 +42,7 @@ from .reconcile import (
     _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
     _COMPACTION_COMMIT_PROOF_VERSION,
     _COMPACTION_COMMIT_PROOF_WIRE_VERSION,
+    _PRESERVED_OBJECTIVE_CONTEXT_PREFIX,
     _carrier_emission_key,
     _commit_proof_identity_digest,
     _emission_identity,
@@ -54,6 +55,7 @@ from .reconcile import (
 from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import PhaseSqlTrace, _is_sqlite_locked_error
 from .survival_fit import _RECOVERY_THRESHOLD_SHARE
+from .survival_codec import projection_mark_candidates
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 
 _UNPROVEN_FILTER_EXCLUSION = object()
@@ -777,6 +779,41 @@ class CompactionMixin:
                 )
             ):
                 result = messages
+            if (isinstance(result, list) and result is not messages
+                    and not force and not bypass_cooldown and not self._compress_forced_overflow
+                    and budget.leaves == 0 and not budget.progress and self._stub_first_exit_now is None
+                    and self._last_compression_status in {"sanitized", "noop"}
+                    and len(result) == len(messages)
+                    and all(all(left.get(key) == right.get(key) for key in ("role", "tool_call_id", "tool_calls"))
+                            for left, right in zip(messages, result))
+                    and not self._replay_diff_requests_ingest_cleanup(messages, result)
+                    and not self._replay_diff_requests_ingest_cleanup(result, messages)
+                    and not any(
+                        getattr(self, "_lcm_generated_marker", lambda row: None)(row)
+                        or self._is_replayed_context_scaffold_message(row)
+                        or self._generated_context_carrier_remainder(row) is not None
+                        or (row.get("role") == "tool" and row.get("content") == self._missing_tool_result_stub("")["content"])
+                        or projection_mark_candidates(text_content_for_pattern_matching(row.get("content")) or "", row.get("tool_calls"))
+                        or any(marker in (text_content_for_pattern_matching(row.get("content")) or "")
+                               for marker in (_PRESERVED_OBJECTIVE_CONTEXT_PREFIX, "[LCM overflow recovery] "))
+                        or self._is_context_summary_content(row.get("content")) or row.get("_compressed_summary")
+                        for left, right in zip(messages, result) if left != right for row in (left, right))):
+                host, clean = count_messages_tokens(messages), count_messages_tokens(result)
+                ceiling = self._survival_ceiling()
+                if not (
+                    self.threshold_tokens > 0 and clean < self.threshold_tokens <= host
+                    or self._critical_budget_pressure_reached(observed_tokens=host, messages=messages)
+                    and not self._critical_budget_pressure_reached(observed_tokens=clean, messages=result)
+                    or ceiling is not None and clean < ceiling <= host
+                    or self._should_force_overflow_recovery(observed_tokens=host, messages=messages)
+                    and not self._should_force_overflow_recovery(observed_tokens=clean, messages=result)
+                ):
+                    # #1880: preserve the host prefix unless cleanup clears an automatic trigger.
+                    changed = sum(left != right for left, right in zip(messages, result))
+                    result = messages
+                    self._ingest_cursor = len(messages)
+                    logger.info("LCM no-progress pass kept the host list: representation-only changes (rows=%d changed=%d)",
+                                len(messages), changed)
             reason = self._survival_fit_reason or str(self._last_compression_status or "unknown")
             result = self._survival_fit(messages, result, current_tokens,
                                         summary_failure=budget.summary_failure if not self._survival_fit_reason else "",
