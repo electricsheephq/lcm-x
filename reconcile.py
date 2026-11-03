@@ -3215,7 +3215,7 @@ class ReconcileMixin:
         self,
         messages: List[Dict[str, Any]],
         cursor: int,
-        *, consumed_store_ids=(),
+        *, consumed_store_ids=(), consumed_pairs=None,
     ) -> set[int]:
         """Find exact durable tool pairs replayed after a preserved new delta.
 
@@ -3250,6 +3250,10 @@ class ReconcileMixin:
         Over-reserving can keep a duplicate. Copies compacted out of the host
         view are not reserved; that known case is planned for v0.30.0.
 
+        #2151: ``consumed_pairs`` maps host prefix indexes to the stored rows the
+        ingest record proved for them. Each such row is held back once: by its
+        stored copy when the tail holds it, otherwise by its host copy.
+
         #1385: a Hermes salvage placeholder that took a stored row's identity
         matches by construction, not by occurrence. It cannot prove segment
         replay: a fresh same-id call can genuinely return the placeholder text.
@@ -3263,8 +3267,10 @@ class ReconcileMixin:
         if session_count <= 0:
             return set()
         tail_limit = min(max(len(messages) * 4, 64), session_count)
-        stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
-        stored_rows = [row for row in stored_rows if row["store_id"] not in consumed_store_ids]
+        tail_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
+        consumed_pairs = consumed_pairs or {}
+        consumed = set(consumed_store_ids) | set(consumed_pairs.values())
+        stored_rows = [row for row in tail_rows if row["store_id"] not in consumed]
         stored_identity_counts = Counter(
             identity
             for identity in (
@@ -3274,20 +3280,34 @@ class ReconcileMixin:
             )
             if not _has_lossy_redacted_identity(identity)
         )
+        # #2151 x #2185: a ledger pair whose counted stored copy just left these
+        # counts is already held back once. Subtracting its host copy as well held
+        # it back twice, so an exact replay after the cursor was stored again. A
+        # pair whose stored copy is outside the tail, uncounted, or reads
+        # differently keeps its host reservation below.
+        tail_by_id = {row["store_id"]: row for row in tail_rows}
+        held = {
+            idx for idx, store_id in consumed_pairs.items()
+            if idx < cursor and store_id in tail_by_id
+            and not self._matches_ignore_message_patterns(tail_by_id[store_id], stored_row=True)
+            and self._message_replay_identity(tail_by_id[store_id], stored_row=True)
+            == self._message_replay_identity(messages[idx])
+        }
         prefix_counts = Counter(
             identity
             for identity in (
                 self._message_replay_identity(row)
-                for row in messages[:max(0, cursor)]
-                if str(row.get("role") or "") in {"assistant", "tool"}
+                for idx, row in enumerate(messages[:max(0, cursor)])
+                if idx not in held
+                and str(row.get("role") or "") in {"assistant", "tool"}
                 and not self._matches_ignore_message_patterns(row)
             )
             if not _has_lossy_redacted_identity(identity)
         )
         # Only assistant/tool identities can match the segment scan. Subtract their
-        # WHOLE prefix even when the stored tail covers less: each suppression is
-        # then backed by a stored copy the prefix does not account for.
-        # Over-reserving can keep a duplicate.
+        # WHOLE prefix, less the held pairs, even when the stored tail covers less:
+        # each suppression is then backed by a stored copy the prefix does not
+        # account for. Over-reserving can keep a duplicate.
         stored_identity_counts.subtract(prefix_counts)
         replayed: set[int] = set()
         metadata = None  # Loaded once, only when a borrowed pair binds.

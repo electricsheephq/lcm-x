@@ -8064,7 +8064,7 @@ class LCMEngine(
         # Remapping can expose rows the ledger proved: they are no longer a
         # consumed prefix, so every residual consumer must be able to match them.
         ledger_run["pairs"] = {idx: row for idx, row in ledger_run["pairs"].items() if idx < cursor}
-        consumed_store_ids = {row["store_id"] for row in ledger_run["pairs"].values()}
+        consumed_pairs = {idx: row["store_id"] for idx, row in ledger_run["pairs"].items()}
         # A restart can preserve a genuinely new row (so the cursor stops early)
         # and still replay exact durable tool pairs AFTER it. Those pairs are
         # matched on their durable ``tool_call_id`` identity, so suppressing
@@ -8078,7 +8078,7 @@ class LCMEngine(
         # has already proven a partial replay.
         replayed_tool_segment_indexes = (
             self._replayed_tool_segment_indexes_after_cursor(
-                reconcile_messages, cursor, **({"consumed_store_ids": consumed_store_ids} if consumed_store_ids else {}))
+                reconcile_messages, cursor, **({"consumed_pairs": consumed_pairs} if consumed_pairs else {}))
             if reconciled_existing_session and today > 0 and cursor > 0
             else set()
         )

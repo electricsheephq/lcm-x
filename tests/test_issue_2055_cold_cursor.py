@@ -105,6 +105,71 @@ def test_t2_tool_multiset_excludes_consumed_ids_not_equal_content(engines):
     assert helper(view, 1, consumed_store_ids={outside}) == {2, 3}
 
 
+
+def unstamped_pair():
+    return [{key: value for key, value in m.items() if key != "timestamp"} for m in tool_pair(0.)]
+
+
+@pytest.mark.parametrize("ledger", [True, False])
+@pytest.mark.parametrize("uids", [None, "shadow", "on"])
+def test_t2_ledger_pair_is_held_back_once_before_its_replay(engines, monkeypatch, uids, ledger):
+    """#2151 x #2185: the consumed-id filter and the prefix reservation held one pair back twice."""
+    if uids:
+        monkeypatch.setenv("LCM_HOST_MESSAGE_UID", uids)
+    engine = engines()
+
+    def uid(view, tag):  # Unstamped rows with host UIDs: the record proves the prefix by UID sets.
+        return [dict(m, message_uid=f"{tag}{i}") for i, m in enumerate(view)] if uids else view
+    p = uid([_m("user", "P", None if uids else 1.)], "p")
+    first = uid(unstamped_pair() if uids else tool_pair(2.), "a")
+    replay = uid(unstamped_pair(), "b")
+    engine._ingest_messages([*p, *first, *replay])
+    before = len(engine._store.get_session_messages("S"))
+    force_today(engine, monkeypatch, 1)
+    if not ledger:
+        monkeypatch.setattr(engine, "_ledger_cold_cursor", lambda *a: dict(k=0, pairs={}))
+    engine._ingest_messages(deepcopy([*p, *first, *uid([_m("user", "new", None if uids else 4.)], "n"), *replay]))
+    assert count(engine, "cold_candidate.used_ingest") == int(ledger)
+    assert engine._last_ingest_reconciliation["cursor"] == (3 if ledger else 1)
+    rows = engine._store.get_session_messages("S")
+    assert [(r["role"], r["content"]) for r in rows[before:]] == [("user", "new")]
+
+
+@pytest.mark.parametrize("cold", [True, False])
+def test_t2_lossy_fence_short_of_ledger_stores_only_the_new_row(engines, cold):
+    """The same double hold with no seam: a redacted row stops the legacy fence before the record's k."""
+    engine = engines()
+    engine._config.sensitive_patterns_enabled = True
+    engine._config.sensitive_patterns = ["password_assignment"]
+    p, secret = _m("user", "P", 1.), _m("user", "password=abcdef", 1.5)
+    engine._ingest_messages([p, *tool_pair(2.), secret, *unstamped_pair()])
+    before = len(engine._store.get_session_messages("S"))
+    if cold:
+        restart(engine)
+    engine._ingest_cursor_needs_reconcile = True
+    engine._ingest_messages([p, *tool_pair(2.), secret, _m("user", "new", 4.), *unstamped_pair()])
+    assert count(engine, "cold_candidate.used_ingest") == 1
+    assert engine._last_ingest_reconciliation["cursor"] == 4
+    rows = engine._store.get_session_messages("S")
+    assert [(r["role"], r["content"]) for r in rows[before:]] == [("user", "new")]
+
+
+def test_t2_ledger_pair_out_of_the_tail_keeps_its_host_reservation(engines):
+    engine = engines()
+    p, new = _m("user", "P", 1.), _m("user", "new", 9.)
+    engine._ingest_messages([p, *tool_pair(2.)])
+    pairs = {i: row["store_id"] for i, row in enumerate(engine._store.get_session_messages("S"))}
+    helper = engine._replayed_tool_segment_indexes_after_cursor
+    engine._ingest_messages([p, *tool_pair(2.), *tool_pair(100.)])
+    # The tail holds the pair's stored copy: that copy leaves the counts once,
+    # and the later stored pair proves the replay.
+    assert helper([p, *tool_pair(2.), new, *tool_pair(100.)], 3, consumed_pairs=pairs) == {4, 5}
+    engine._ingest_messages([p, *tool_pair(2.), *tool_pair(100.),
+                             *[_m("user", f"padding {i}", 120. + i) for i in range(65)], *tool_pair(300.)])
+    # Out of the tail's sight, the pair keeps its host reservation, as #2185 does
+    # for every row the record did not pair: a kept duplicate, never a lost row.
+    assert helper([p, *tool_pair(2.), new, *tool_pair(300.)], 3, consumed_pairs=pairs) == set()
+
 def test_t3_consumed_twin_cannot_be_stolen(engines, monkeypatch):
     engine = engines()
     x = _m("user", "x", 10.)
