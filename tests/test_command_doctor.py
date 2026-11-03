@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from hermes_lcm import command, tools  # type: ignore[import-not-found]
+from hermes_lcm import command, tokens, tools  # type: ignore[import-not-found]
 from tests.harness import make_engine
 
 CASES = (
@@ -125,7 +125,8 @@ def _fault(case: str) -> Callable[[str, Any], bool]:
             q == "SELECT COUNT(*) FROM messages WHERE session_id = ?"
         ),
         "orphan_error": lambda q, p: q.startswith(
-            "SELECT * FROM summary_nodes WHERE session_id = ?"
+            "SELECT node_id, session_id, depth, summary, token_count, source_token_count, source_ids, source_type, created_at, earliest_at, latest_at, expand_hint FROM summary_nodes "
+            "WHERE session_id = ?"
         ),
         "quality_error": lambda q, p: q.startswith(
             "SELECT node_id, session_id, depth, token_count, source_token_count"
@@ -143,6 +144,9 @@ def doctor_engine(
     tmp_path: Path, case: str, patch: pytest.MonkeyPatch, *, trace: bool = False
 ) -> Iterator[Any]:
     # No session bind: no background work, host calls, or provider loads.
+    patch.setattr(tokens, "token_counter_status", lambda: {
+        "counter": "char_estimate", "encoding": "", "state": "unavailable",
+    })
     patch.setenv("HERMES_HOME", str(tmp_path / "home"))
     patch.setenv("HERMES_PROFILE", "default")
     engine: Any = make_engine(

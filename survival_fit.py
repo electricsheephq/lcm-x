@@ -63,6 +63,11 @@ _NOTICE_RE = re.compile(r"(?:\n\n)?\[LCM survival fit: \d+ earlier messages \(st
 _RECOVERY_THRESHOLD_SHARE = 0.95  # #608: a recovery attempt's request fits under this share of the threshold
 
 
+def survival_counter_store_key(store: Any) -> str:
+    """#719: one lost-write marker per database file: the identity the store fixed when it opened the file."""
+    return str(getattr(store, "db_identity", None) or store.db_path)
+
+
 def _carries_survival_notice(raw: Any, text: str) -> bool:
     """A system row the fit put its notice in: appended to string content, or as the last text part of
     list content (whose normalized form is JSON, where the separator is escaped)."""
@@ -581,6 +586,11 @@ class SurvivalFitMixin:
         self._last_survival_fit = {"reason": reason, "dropped_rows": count, "notice": notice, "at": time.time(),
                                    **({"cause": cause} if cause else {}),
                                    "uncovered_rows": uncovered, "reached_budget": after <= budget}
+        # Per store: absent means no lost shortened write; False: lost drop-only fit; True: lost projection.
+        lost_by_store = getattr(self, "_survival_counter_write_lost", {})
+        self._survival_counter_write_lost = lost_by_store
+        store_key = survival_counter_store_key(self._store)
+        lost = lost_by_store.get(store_key)
 
         def counted(record):  # runs inside the store's write transaction: concurrent engines add, never overwrite
             record = record if isinstance(record, dict) else {}
@@ -594,11 +604,11 @@ class SurvivalFitMixin:
                     "last_reached_budget": after <= budget,
                     "last_uncovered_rows": uncovered,
                     "last_shortened": shortened,
-                    "ever_shortened": shortened or (record.get("ever_shortened", True) if record else False),
+                    "ever_shortened": shortened or lost is not None or (record.get("ever_shortened", True) if record else False),
                     "unreached_budget_count": int(record.get("unreached_budget_count") or 0) + (after > budget),
                     # fits that projected a row (#601); a record from before the key stays unknown (no key)
                     **({"projected_count": int(record.get("projected_count") or 0) + bool(projected)}
-                       if "projected_count" in record or not record.get("count") else {}),
+                       if lost is not True and ("projected_count" in record or not record.get("count")) else {}),
                     **({"uncovered_fit_count": int(record.get("uncovered_fit_count") or 0)
                        + bool(shortened and uncovered is not None and uncovered > 0)}
                        if "uncovered_fit_count" in record or not record.get("count") else {}),
@@ -609,10 +619,15 @@ class SurvivalFitMixin:
                     **({"count_lost": True} if record.get("count_lost") else {})}  # #618 item 14: kept
 
         try:
-            self._store.update_metadata_json(SURVIVAL_FIT_COUNTER_KEY, counted)
+            if self._store.update_metadata_json(SURVIVAL_FIT_COUNTER_KEY, counted) is None:
+                raise RuntimeError("survival-fit counter was not written")
         except Exception:
+            if shortened:
+                lost_by_store[store_key] = bool(projected) or lost is True
             logger.warning("LCM survival-fit counter write failed (projected=%s); /lcm doctor under-counts survival fits "
                            "for this store", projected, exc_info=True)
+        else:
+            lost_by_store.pop(store_key, None)
         key = str(self._conversation_id or self._session_id or "")
         if shortened and warn_user and key not in self._survival_fit_warned:
             self._survival_fit_warned.add(key)

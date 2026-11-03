@@ -48,6 +48,7 @@ jobs:
             identity_anchor.py
             ingest_content.py
             ingest_integrity.py
+            ingest_ledger.py
             ingest_pem_model.py
             ingest_pem_scan.py
             ingest_persisted.py

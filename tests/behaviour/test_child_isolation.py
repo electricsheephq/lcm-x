@@ -8,6 +8,7 @@ from threading import Barrier
 import pytest
 
 from hermes_lcm import message_patterns
+from hermes_lcm.sqlite_util import _SqliteSavepointError
 from tests.harness import ScriptedSummarizer, assistant, engine_context, pin_char_counter, prose, user
 
 
@@ -364,6 +365,11 @@ def test_store_id_scopes_restore_outer_identity(tmp_path, monkeypatch, site, exi
                     engine._leaf_compaction_candidate_status_once([message])
                 elif site == "dependent_reply":
                     engine._drop_preexisting_generated_ignored_dependent_eof_replies([message], [{"store": "fixture"}])
+                elif message is inner:
+                    # #2077: a foreground ingest never joins another ingest's open transaction, so the
+                    # nested call is refused at admission, before it builds a map or reads a row.
+                    with pytest.raises(_SqliteSavepointError, match="cannot join an enclosing transaction"):
+                        engine._ingest_messages([message])
                 else:
                     with pytest.raises(FinishedIngest):
                         engine._ingest_messages([message])
@@ -378,7 +384,7 @@ def test_store_id_scopes_restore_outer_identity(tmp_path, monkeypatch, site, exi
                 if exit_path == "inner_error":
                     raise RuntimeError("inner scope failed")
             else:
-                if exit_path == "inner_error":
+                if exit_path == "inner_error" and site != "ingest":  # A refused nested ingest never runs its reader.
                     with pytest.raises(RuntimeError, match="inner scope failed"):
                         invoke(inner)
                 else:
@@ -400,8 +406,9 @@ def test_store_id_scopes_restore_outer_identity(tmp_path, monkeypatch, site, exi
             invoke(outer)
         assert engine._current_compress_store_ids_by_message_id is original
         assert original == {999: 999}
-        assert builds == ([outer] if exit_path == "map_error" else [outer, inner])
-        assert reads == ([] if exit_path == "map_error" else [101, 202])
+        refused = site == "ingest"  # #2077: the nested ingest is refused before its scope opens.
+        assert builds == ([outer] if exit_path == "map_error" or refused else [outer, inner])
+        assert reads == ([] if exit_path == "map_error" else [101] if refused else [101, 202])
         if exit_path != "map_error":
             assert maps[id(outer)][303] == 404
 

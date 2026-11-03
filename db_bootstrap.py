@@ -346,6 +346,17 @@ _KNOWN_FEATURE_TABLE_PREFIXES = (
     "summary_node_provenance",  # #441 per-node level/model sidecar, not a derived cache
 )
 
+# #2055 ingest ledger (additive named step ingest_ledger_v1; exact names)
+_KNOWN_FEATURE_TABLE_NAMES = frozenset({
+    "ledger_meta",
+    "occurrence_bindings",
+    "ledger_emissions",
+    "stamp_observations",
+    "ingest_views",
+    "lineage_marks",
+    "session_lineage",  # #1931 additive delegated-child links
+})
+
 # The known opt-in feature families whose derived tables an interim build may
 # have created in an EARLY variant (missing later-added columns/tables). Each is
 # validated by its own final-shape verifier (resolved at call time in
@@ -508,6 +519,8 @@ def classify_version_mismatch(conn: sqlite3.Connection) -> str:
         allowed.update(get_fts_shadow_table_names(fts))
     for table in tables:
         if table in allowed:
+            continue
+        if table in _KNOWN_FEATURE_TABLE_NAMES:
             continue
         if any(table.startswith(prefix) for prefix in _KNOWN_FEATURE_TABLE_PREFIXES):
             continue

@@ -62,7 +62,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_generated_ignored_active_replay_placeholder_hashes",
     "_generated_ignored_active_replay_placeholder_hash_counts",
     "_generated_ignored_active_replay_placeholder_hash_ordinals",
-    "_out_of_band_durable_rows",
+    "_out_of_band_durable_rows", "_pending_ingest_frontier",
     "_foreground_budget", "_ingest_cursor", "_consecutive_ingest_failures",
     "_pruned_tool_source_generation", "_pruned_tool_source_identities", "_pruned_tool_source_store",
 })
@@ -327,7 +327,11 @@ class Logs(logging.Handler):
         self.events, self.canonical = events, canonical
 
     def emit(self, record: logging.LogRecord) -> None:
-        self.events.append(f"log {record.levelname} {self.canonical.text(record.getMessage())}")
+        message = record.getMessage()
+        if str(record.msg).startswith("LCM attribution phase=ingest lock_hold_ms="):
+            args = record.args
+            message = str(record.msg) % (0, args[1], 0, args[3])
+        self.events.append(f"log {record.levelname} {self.canonical.text(message)}")
 
 
 class LiteralPattern:
@@ -359,7 +363,14 @@ def snapshot(engine: Any, canonical: Canonical) -> dict[str, Any]:
     return state
 
 
+def install_ledger_salt(patch: pytest.MonkeyPatch) -> None:
+    """Test-only salt hook: stable SQL blobs without changing production entropy."""
+    store = importlib.import_module("hermes_lcm.store")
+    patch.setattr(store, "secrets", SimpleNamespace(token_bytes=lambda size: b"l" * size))
+
+
 def install_clock(patch: pytest.MonkeyPatch) -> None:
+    install_ledger_salt(patch)
     clock = SimpleNamespace(**{name: getattr(time, name) for name in dir(time) if not name.startswith("__")})
     clock.time = lambda: 1700001000.0
     clock.monotonic = clock.perf_counter = lambda: 1000.0
@@ -601,11 +612,11 @@ def observe(case: Scenario, root: Path) -> Trace:
                 real_recover = reconcile.recover_hermes_persisted_output_with_file_stat
                 recovery_calls = 0
 
-                def recover(text: str | None) -> Any:
+                def recover(text: str | None, **kwargs: Any) -> Any:
                     nonlocal recovery_calls
                     recovery_calls += 1
                     events.append("file recover " + compact(canonical.value(text)))
-                    recovered = real_recover(text)
+                    recovered = real_recover(text, **kwargs)
                     events.append("file result " + compact(canonical.value(recovered)))
                     if recovery_calls == 1 and case.variant in {"vanish", "appear"}:
                         payload = root / "hermes-results" / "payload.txt"

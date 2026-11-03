@@ -46,7 +46,7 @@ tool, even when its flag is enabled. The manifest retains all 16 declarations.
 | `lcm_recent` | Retrieve recent summaries with natural UTC periods. Ready temporal rollups are preferred; missing, stale, disabled, and sub-day windows transparently use leaf summaries instead. |
 | `lcm_load_session` | Load one ordered raw-message transcript page for an explicit `session_id`. This is not search: it returns raw rows in `store_id` order, bounded by `limit`, with per-message content bounded by `max_content_chars`, and continues with `after_store_id` from `next_cursor`. Set `include_exact_ref=true` when rows will feed exact citation or computation; the default response stays byte-compatible. |
 | `lcm_describe` | Inspect the current-session DAG by default, or pass `session_id` to inspect a known node/DAG in another LCM session; a node must belong to the requested session. Previews an `externalized_ref` without loading full content; `externalized_ref` reads a payload of the current session or of a session it replaced at a compression-boundary rotation, and cannot be combined with `session_id`. |
-| `lcm_expand` | Recover source messages, child summaries, or externalized payloads with pagination. `node_id` lookup defaults to the current session; cross-session DAG expansion requires a matching explicit `session_id` (rejected in the other two modes). Use `store_id` to fetch a single raw message regardless of session, suitable for drilling into a cross-session `lcm_grep` result; in `store_id` mode, `include_exact_ref=true` adds the exact returned slice without changing default bytes. `externalized_ref` reads a payload of the current session or of a session it replaced at a compression-boundary rotation. |
+| `lcm_expand` | Recover source messages, child summaries, or externalized payloads with pagination. `node_id` lookup defaults to the current session; cross-session DAG expansion requires a matching explicit `session_id` (also accepted with `externalized_ref`, rejected with `store_id`). Use `store_id` to fetch a single raw message regardless of session, suitable for drilling into a cross-session `lcm_grep` result; in `store_id` mode, `include_exact_ref=true` adds the exact returned slice without changing default bytes. `externalized_ref` reads a payload of the current or explicitly requested session, or of a session it replaced at a compression-boundary rotation. Cross-session `store_id` rows referencing a payload carry `externalized_expand_hint` with the exact call. |
 | `lcm_expand_query` | Retrieve from the active session by default or up to 20 explicit `session_ids`. `output='answer'` runs bounded synthesis; `output='evidence'` returns bounded serialized context without an LLM call. Responses include bounded, tool-extracted `evidence_provenance` for the context supplied to synthesis. |
 | `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. |
 | `lcm_inspect` | Read-only operator inventory for current-session lineage, message/frontier metadata, fresh tail, externalized refs/readability, compaction skip/no-op reasons, and matched ignore/stateless patterns. It returns metadata only; use `lcm_load_session`/`lcm_expand` when you need content. |
@@ -64,14 +64,18 @@ Hermes `session_search` for broad cross-session history outside the LCM database
 
 `lcm_describe` and `lcm_expand` keep their existing current-session behavior when
 `session_id` is omitted. An explicit id must be a non-empty string and must match
-the requested node; `lcm_expand` rejects `session_id` in `store_id` and
-`externalized_ref` modes. `lcm_expand_query` accepts a non-empty list of at most
+the requested node; `lcm_expand` also accepts `session_id` with `externalized_ref`
+but rejects it with `store_id`. `lcm_expand_query` accepts a non-empty list of at most
 20 `session_ids`; omitted means the current session. Explicit `node_ids` are
 admitted only when they belong to one of those sessions. Search results from
 multiple sessions are merged and bounded by `max_results` before context
-expansion. `externalized_ref` inspection and payload hydration read only the
-current session and the sessions it replaced at compression-boundary rotations,
-in every one of these tools.
+expansion. For `externalized_ref` reads, the default is the current session and
+its compression-rotation predecessors; only `lcm_expand(externalized_ref=..., session_id=...)`
+selects another session, which must own the payload or have replaced its owner at a compression-boundary rotation.
+Explicit-session reads require the payload directory (`large_output_externalization_path`, or its
+default) and each ref's resolved payload file to stay inside this Hermes home and outside its
+named profiles, however the path is spelled (symlinks or letter case); otherwise they return the
+not-found error.
 
 `lcm_expand_query(output='evidence')` uses the same `context_max_tokens` budget,
 recursive DAG traversal, raw-hit deduplication, and pagination metadata as answer
@@ -314,6 +318,21 @@ the caveat â€” the same disclosure mechanism as `lcm_grep`'s `degraded_reason` â
 so a caller never mistakes a truncated or approximate arm's contribution to the
 fused ranking for an exhaustive exact one.
 
+With a usable vector corpus, the first full-text arm gets at most a quarter of
+the request budget, so a slow full-text search cannot starve the semantic arms.
+If that capped search expires, the response reports
+`full-text arm capped to preserve semantic recall budget`. When no semantic arm
+then returns a hit, `lcm_recall` runs the full-text arm once more under the
+remaining request deadline (#265). The usual causes are an embedding provider
+that cannot be resolved, and reference-strict summaries that have no surviving
+source messages and yield only drill-down leads. Any other run whose semantic
+arms return nothing qualifies too. The re-run replaces the capped reason. On
+success it reports full-text coverage `ok`. On failure it reports
+`full-text arm unavailable`, plus `timeout` when the failure was timeout-shaped
+(the request deadline expired, or the worker pool was saturated).
+`provenance.fts_rerun: true` marks a response where the re-run happened; the
+key is absent otherwise.
+
 A backlog recorded by the last embedding backfill pass also sets `degraded: true`
 with a `summary semantic index catching up` or `chunk semantic index catching up`
 reason (and remaining rows when known). The record is per corpus and embedding
@@ -399,6 +418,15 @@ rollups remain future work.
 {"period": "date:2026-07-15", "scope": "conversation"}
 ```
 
+### `lcm_expand_query` trust boundary
+
+For `output="answer"`, the operator question and retrieved history occupy separate
+per-call nonce-tagged blocks. The synthesizer treats messages, summaries, tool
+results, and externalized excerpts as untrusted evidence and must never follow
+their instructions. Plain answers remain accepted; a reply that echoes the nonce
+after reasoning is stripped fails closed to the existing degraded response,
+preserving `evidence_provenance` with `synthesis_status="failed"`.
+
 ### `lcm_expand_query` evidence provenance
 
 Every successful, no-match, or structured degraded `lcm_expand_query` response
@@ -449,8 +477,8 @@ Response-level and item-level fields separate four claims:
 offset locators do not provide durable staleness, revision, or database-generation
 detection. Locator presence is therefore not proof of exact replay.
 
-This PR adds no authorization mechanism. `node_id` and `externalized_ref` retain
-their current-session checks; `store_id` remains an intentional cross-session
+This PR adds no authorization mechanism. `node_id` and `externalized_ref` check
+the current or explicitly requested session (including rotation lineage for payloads); `store_id` remains an intentional cross-session
 locator. Hosts/callers must authorize every expansion before invoking it and must
 not treat identifiers as capabilities.
 
@@ -482,7 +510,7 @@ be recovered in deterministic pages.
 - `lcm_expand(node_id=..., session_id=...)` pages immediate sources with `source_offset` and `source_limit`; omit `session_id` for the active-session default
 - `lcm_load_session(session_id=...)` pages ordered raw session rows with `after_store_id` and `next_cursor`; each row includes bounded content plus truncation metadata, and large individual rows can be recovered with `lcm_expand(store_id=...)` using `content_offset`
 - oversized raw messages continue with `content_offset`
-- `lcm_expand(externalized_ref=...)` pages payload content with `content_offset`
+- `lcm_expand(externalized_ref=..., session_id=...)` pages payload content bounded by `max_tokens` with `content_offset`; omit `session_id` for the current-session default
 - `lcm_expand_query` uses `context_max_tokens` for answer or evidence context and reports truncation/pagination hints when needed
 
 ### Searching externalized payloads

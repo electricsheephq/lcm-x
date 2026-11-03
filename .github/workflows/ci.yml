@@ -11,6 +11,13 @@ on:
 permissions:
   contents: read
 
+# Pull requests share one group per ref, so a new push cancels the older run.
+# Pushes to main and merge-queue runs get a group of their own (run_id), so no
+# run on main is ever cancelled or replaced while pending.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   workflow-lint:
     runs-on: ubuntu-latest
@@ -18,7 +25,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install actionlint
-        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+        # Shared shard steps below use GitHub Actions' YAML anchor support.
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
       - name: Lint GitHub Actions workflows
         run: |
@@ -28,6 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 2  # the golden-outcome gate compares the PR's merge commit with its first parent
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -40,14 +50,25 @@ jobs:
       - name: Lint with ruff
         run: ruff check .
 
+      - name: Gate golden outcomes
+        if: github.event_name == 'pull_request'
+        run: |
+          changed=$(git diff --name-only HEAD^1 HEAD -- 'tests/fixtures/*_trace.json')
+          if [[ -n "$changed" ]]; then
+            python scripts/golden_outcome_gate.py --base-ref HEAD^1
+          fi
+
   test:
+    name: test-shard (${{ matrix.python-version }}, ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.11"]
+        shard: [1, 2, 3, 4]
 
-    steps:
+    steps: &test-shard-steps
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -159,15 +180,29 @@ jobs:
       - name: Print linked SQLite version
         run: python -c "import sqlite3; print('sqlite', sqlite3.sqlite_version)"
 
-      - name: Run pytest under low file descriptor limit
+      - name: Collect deterministic test shards
+        env:
+          PYTEST_SHARD_DIR: ${{ runner.temp }}/pytest-shards
+          PYTEST_SHARD_FINGERPRINT: reports/test-${{ matrix.python-version }}/shard-${{ matrix.shard }}/collection.txt
         run: |
           ulimit -n 1024
-          python -m pytest tests/ -q -m "not latency" -n 4 --ignore=tests/test_embedding_privacy.py -o junit_family=xunit1 --junitxml=reports/test-${{ matrix.python-version }}/main.xml
+          python -m pytest tests/ --collect-only -q -m "not latency" --ignore=tests/test_embedding_privacy.py -p no:randomly -p scripts.ci.collect_test_shards
+
+      - name: Run pytest shard under low file descriptor limit
+        run: |
+          ulimit -n 1024
+          python -m pytest @"$RUNNER_TEMP/pytest-shards/shard-${{ matrix.shard }}.txt" -q -m "not latency" -n 4 -o junit_family=xunit1 --junitxml=reports/test-${{ matrix.python-version }}/shard-${{ matrix.shard }}/main.xml
+
+      - name: Run embedding privacy tests alone
+        if: matrix.shard == 1
+        run: |
+          ulimit -n 1024
           # Runs alone: one of its tests asserts a wall-clock budget that
           # parallel load on the runner can exceed.
           python -m pytest tests/test_embedding_privacy.py -q -m "not latency" -o junit_family=xunit1 --junitxml=reports/test-${{ matrix.python-version }}/privacy.xml
 
       - name: Test the upstream ruamel loader
+        if: matrix.shard == 1
         run: |
           pip install ruamel.yaml==0.18.16 PyYAML==6.0.3
           python -m pytest tests/test_config_yaml_loaders.py tests/test_per_model_threshold.py -q -p no:cacheprovider
@@ -182,13 +217,98 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: junit-test-${{ matrix.python-version }}
+          name: junit-test-${{ matrix.python-version }}-shard-${{ matrix.shard }}
           path: reports/
           if-no-files-found: error
 
-  bench-tests:
+  test-312:
+    name: test-shard (${{ matrix.python-version }}, ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+        shard: [1, 2, 3, 4]
+    steps: *test-shard-steps
+
+  test-313:
+    name: test-shard (${{ matrix.python-version }}, ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13"]
+        shard: [1, 2, 3, 4]
+    steps: *test-shard-steps
+
+  test-314:
+    name: test-shard (${{ matrix.python-version }}, ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.14"]
+        shard: [1, 2, 3, 4]
+    steps: *test-shard-steps
+
+  test-311-result:
+    name: test (3.11)
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps: &require-success
+      - name: Require every matrix job to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json, os
+          results = json.loads(os.environ["RESULTS"])
+          assert results and all(job["result"] == "success" for job in results.values()), results
+          PY
+
+  test-312-result:
+    name: test (3.12)
+    needs: test-312
+    if: always()
+    runs-on: ubuntu-latest
+    steps: *require-success
+
+  test-313-result:
+    name: test (3.13)
+    needs: test-313
+    if: always()
+    runs-on: ubuntu-latest
+    steps: *require-success
+
+  test-314-result:
+    name: test (3.14)
+    needs: test-314
+    if: always()
+    runs-on: ubuntu-latest
+    steps: *require-success
+
+  bench-test-root:
+    name: bench-test (${{ matrix.root }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        root:
+          - bench/aml
+          - bench/fmp/tests
+          - bench/instruments/local_catchup/tests
+          - bench/instruments/compaction_probe
+          - bench/instruments/compaction_probe/track_s/decision/tests
+          - bench/instruments/compaction_probe/track_s/scorer/tests
+          - bench/instruments/reliability
+          - bench/instruments/scale389/tests
+          - bench/scoreboard
+          - bench/tools/tests
     env:
       HF_HUB_OFFLINE: "1"
     steps:
@@ -199,27 +319,33 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install --no-deps pytest==9.1.1 pytest-xdist==3.8.0 numpy==2.4.2 httpx==0.28.1 PyYAML==6.0.3 psutil==7.2.2 anyio==4.15.1 certifi==2026.10.19 httpcore==1.0.9 idna==3.20 h11==0.16.0 typing_extensions==4.16.0 iniconfig==2.3.1 packaging==26.3 pluggy==1.7.0 pygments==2.21.0 execnet==2.1.2
-      - name: Run isolated bench test roots
+      - name: Run isolated bench test root
+        id: bench
         env:
           TMPDIR: ${{ runner.temp }}
+          BENCH_ROOT: ${{ matrix.root }}
         shell: bash
         run: |
-          status=0
-          for root in bench/aml bench/fmp/tests bench/instruments/local_catchup/tests bench/instruments/compaction_probe bench/instruments/compaction_probe/track_s/decision/tests bench/instruments/compaction_probe/track_s/scorer/tests bench/instruments/reliability bench/instruments/scale389/tests bench/scoreboard bench/tools/tests; do
-            targets=("$root")
-            if [[ "$root" == bench/instruments/compaction_probe ]]; then targets=("$root"/test*.py); fi
-            python -m pytest "${targets[@]}" -q -n 4 -o junit_family=xunit1 --junitxml="reports/${root//\//-}.xml" || status=1
-          done
-          exit "$status"
+          root="$BENCH_ROOT"
+          echo "artifact=junit-${root//\//-}" >> "$GITHUB_OUTPUT"
+          targets=("$root")
+          if [[ "$root" == bench/instruments/compaction_probe ]]; then targets=("$root"/test*.py); fi
+          python -m pytest "${targets[@]}" -q -n 4 -o junit_family=xunit1 --junitxml="reports/${root//\//-}.xml"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: junit-bench
+          name: ${{ steps.bench.outputs.artifact }}
           path: reports/
           if-no-files-found: error
 
+  bench-tests:
+    needs: bench-test-root
+    if: always()
+    runs-on: ubuntu-latest
+    steps: *require-success
+
   tests-ran:
-    needs: [test, bench-tests]
+    needs: [test, test-312, test-313, test-314, bench-test-root]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -234,10 +360,20 @@ jobs:
           pattern: junit-*
           path: reports/
           merge-multiple: true
+      - name: Require one identical test collection across each version's shards
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          for ver in ("3.11", "3.12", "3.13", "3.14"):
+              prints = {Path(f"reports/test-{ver}/shard-{n}/collection.txt").read_text() for n in range(1, 5)}
+              assert len(prints) == 1, f"{ver}: shard jobs collected different test lists: {sorted(prints)}"
+              print(ver, "collected", prints.pop().strip())
+          PY
       - name: Require executed tests and complete JUnit evidence
         run: >-
           python scripts/ci/check_tests_ran.py
-          --junit reports/test-{3.11,3.12,3.13,3.14}/{main,privacy}.xml
+          --junit reports/test-{3.11,3.12,3.13,3.14}/shard-{1,2,3,4}/main.xml
+          reports/test-{3.11,3.12,3.13,3.14}/privacy.xml
           reports/bench-{aml,fmp-tests,instruments-local_catchup-tests,instruments-compaction_probe,instruments-compaction_probe-track_s-decision-tests,instruments-compaction_probe-track_s-scorer-tests,instruments-reliability,instruments-scale389-tests,scoreboard,tools-tests}.xml
 
   session-end-attribution-cost:

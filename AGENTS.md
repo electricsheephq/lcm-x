@@ -129,7 +129,9 @@ Run `actionlint` when workflows change. Record exact commands and results in the
 - Treat AI and bot output as proposal and evidence by default.
 - Deterministic tooling must re-fetch the live issue, PR head, checks, reviews, threads, and
   authorization immediately before an authorized write.
-- Model output alone cannot close, label, assign, push, approve, or merge.
+- Model output alone cannot close, label, assign, push, approve, or merge. The code owner's
+  delegated release manager (Maintainer And Bot Roles) acts with maintainer authority for the
+  actions that bullet lists, so its decisions there are not model output alone.
 - Automated repair is opt-in and limited to the exact accepted issue and current gate.
 - AI review is recorded evidence, not enforcement. The `land-pr` review obligation is a
   maintainer discipline, not a protected check: it does not authenticate review artifacts, and a
@@ -139,7 +141,8 @@ Run `actionlint` when workflows change. Record exact commands and results in the
   authorizes one exact mutation; never use it for an automatic backlog sweep.
 - Invoking a skill never creates write authority. Routine reversible issue metadata needs one
   exact maintainer authorization and live read-back; public sensitive disclosure and terminal
-  lifecycle actions retain the stronger owner and lifecycle gates in `triage-backlog`.
+  lifecycle actions retain the stronger owner and lifecycle gates in `triage-backlog`, which the
+  release-manager delegation satisfies for the actions it lists.
 - Preserve open executable upstream work as an active continuation. Do not silently turn it into
   an archive-only record, supersede it, or close it while its continuation state is ambiguous.
 
@@ -187,6 +190,22 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   obligation, issue acceptance, or a product/security owner decision.
 - Maintainers own feature acceptance, priority, compatibility decisions, terminal dispositions,
   and releases.
+- Release-manager delegation (recorded by the code owner on 2026-10-29; the code owner revokes
+  or narrows it by editing this bullet; widening this bullet stays with the code owner). The code
+  owner delegates maintainer authority to one
+  release-manager agent that acts through the code owner's own account and decides from data.
+  It covers: issue and feature acceptance, priority and compatibility decisions; triage metadata
+  and milestones; public data-integrity disclosure; issue lifecycle (close as fixed once the issue's own
+  acceptance is met, as duplicate, or as not planned with the reason; reopen); merges through the
+  `land-pr` barrier; rc tags; and GA cuts after the release gate passes. For these actions its
+  decision is the maintainer authorization and the human code-owner approval that this file,
+  CONTRIBUTING.md, `land-pr` and `triage-backlog` require. Each action still re-fetches live state first,
+  leaves an evidence comment, and reads back the result. It decides `REVIEW_SKIPPED` lanes; on a PR
+  it authored it uses the fallback reviewer (a lane from a model other than the author's that meets
+  the `land-pr` review obligation) instead of skipping. It does not cover bypassing checks or
+  the ruleset, force-pushes, deleting `main` or a published tag or release, repository settings,
+  private vulnerability handling, or public security disclosure; those stay with the code owner.
+  Other bots and contributor agents stay proposal-only.
 
 ## Releases are rc-first (RELEASE-READINESS-V1)
 
@@ -204,7 +223,7 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   release notes list them as not run; the minor releases v0.29.0 and v0.30.0 run all phases.
 - The GA commit may differ from the passing rc tree by EXACTLY the release-notes addition
   (mechanically verified: `git diff rcN..GA --name-only` ⊆ `.github/release-notes/`); GA notes
-  link the four phase receipts (A-D; under the tiers, those of the selected rows). A P0/P1 gauntlet finding means fix → new rc → re-run; the only
+  link the four phase receipts (A-D; under the tiers, those of the selected rows). A P0/P1 gauntlet finding means fix → new rc → re-run; the
   exceptions are a Phase B shape or a Phase C publication conflict that the previous GA also
   shows, with the candidate no worse than the base; and a Phase B duplicate-only shape reachable
   only under an injected crash or kill, meeting all five conditions in the spec's differential
@@ -216,6 +235,13 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   these conditions by a reviewer from a different model than the classification's author,
   named in the Phase B receipt. The shape is disclosed at P2 with a tracked fix planned for
   the next patch release. If any condition fails, the normal P0/P1 rule applies and the rc
-  respins. A duplicate on any path without an injected fault still respins.
+  respins. A duplicate on any path without an injected fault still respins. The spec records
+  two exceptions: its v0.29.1-only D5 rc3-window decision, extended to rc4 (#1286's
+  upgrade-time duplicate, probe P-S2; #1674's cold-bind re-store, probes P-S6 and P-S6R, and
+  from amendment 5 its comparison with v0.29.0 on each bind's own inputs, shape S7), and, from
+  v0.29.2 while #1674 is open, a cold-bind copy that the D5 clone run's bar 2 matches against
+  the previous GA (KNOWN under #1674 and disclosed; no other duplicate is covered). From v0.29.2
+  the reference-agent canary is judged only by the spec's canary rule and never triggers this
+  respin.
 - Agents preparing a release produce the rc tag and receipts; the GA cut itself follows the
-  maintainers-own-releases rule above.
+  maintainers-own-releases rule above, which the release-manager delegation meets.

@@ -99,7 +99,7 @@ RAW_READERS = {
     "command.py": {"_env_float", "_embedding_backfill_batch_size", "_preset_suggest_text"},
     "config.py": {
         "_parse_int_env", "_parse_float_env", "_parse_bool_env", "_parse_str_env",
-        "_disabled_tool_names", "host_message_uid_mode", "_parse_int_env_with_source",
+        "_disabled_tool_names", "host_message_uid_mode", "ingest_ledger_mode", "_parse_int_env_with_source",
         "_parse_float_env_with_source", "_hermes_config_path", "_lcm_config_string_with_source",
         "_warn_env_range", "from_env", "containment_base_dir", "companion_enable_command",
     },

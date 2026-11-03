@@ -201,8 +201,10 @@ class PlaceholderLedgerMixin:
             return ordered_hashes
         try:
             payload = json.dumps(ordered_hashes)
-            self._store.write_metadata_json(keys, payload)
-        except Exception:
+            with self._ingest_evidence():
+                self._store.write_metadata_json(keys, payload)
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
             logger.debug("LCM scoped hash metadata write failed", exc_info=True)
         return ordered_hashes
 
@@ -261,8 +263,10 @@ class PlaceholderLedgerMixin:
             serialized = json.dumps(payload, sort_keys=True)
             # skip_unchanged avoids the fsync commit (under synchronous=FULL) when
             # the stored value already matches; this runs on every ingest.
-            self._store.write_metadata_json(count_keys, serialized, skip_unchanged=True)
-        except Exception:
+            with self._ingest_evidence():
+                self._store.write_metadata_json(count_keys, serialized, skip_unchanged=True)
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
             logger.debug("LCM ignored placeholder count metadata write failed", exc_info=True)
 
     def _load_generated_ignored_placeholder_hash_ordinals(
@@ -322,8 +326,10 @@ class PlaceholderLedgerMixin:
             serialized = json.dumps(payload, sort_keys=True)
             # Skip the write (and its fsync commit) when unchanged; see the counts
             # writer above for rationale.
-            self._store.write_metadata_json(ordinal_keys, serialized, skip_unchanged=True)
-        except Exception:
+            with self._ingest_evidence():
+                self._store.write_metadata_json(ordinal_keys, serialized, skip_unchanged=True)
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
             logger.debug("LCM ignored placeholder ordinal metadata write failed", exc_info=True)
 
     def _active_replay_generated_placeholder_digest_budget(self) -> dict[str, int]:

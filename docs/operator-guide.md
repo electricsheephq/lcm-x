@@ -10,7 +10,7 @@ adoption; this file is the operator reference.
 
 - Hermes Agent with the pluggable context engine slot ([PR #7464](https://github.com/NousResearch/hermes-agent/pull/7464))
 - Python 3.11+
-- No required third-party runtime dependencies. `tiktoken` is used if available; otherwise LCM falls back to character-based token estimates. `regex` is used if available to apply timeouts to message ignore patterns; if it is not installed, message-level regex filtering is disabled with a warning rather than running unbounded stdlib `re` matches.
+- No required third-party runtime dependencies. `tiktoken` is used if available; otherwise LCM falls back to character-based token estimates. `/lcm status` and `/lcm doctor` show which one is active (`token_counter: tiktoken` or `token_counter: char_estimate`; `not_loaded` before anything has been counted in the process). `regex` is used if available to apply timeouts to message ignore patterns; if it is not installed, message-level regex filtering is disabled with a warning rather than running unbounded stdlib `re` matches.
 - Images in structured message content (list parts of type `image`, `image_url` or `input_image`, and multimodal tool results) count at the host's per-image price (`agent.image_token_cost`, default 1,500 tokens), not by the characters of the encoded image. Image data inside plain text content counts as text.
 
 ## Install
@@ -118,7 +118,13 @@ self-updater. An install pinned with `--ref <sha>` (outside the catalog) refuses
 `hermes plugins install https://github.com/electricsheephq/lcm-x --force --ref <40-character commit SHA>`
 (the refusal prints that command).
 
-Restart Hermes after updating.
+Restart Hermes after updating — and restart every other long-running process
+that imports Hermes or LCM-X, not only the gateway: for example a separately
+launched web UI, dashboard, or custom runner. This applies after `hermes update`
+as well as after an LCM-X update. A process that keeps running holds the old
+modules in memory and mixes them with the new files on disk the next time it
+imports one lazily. See
+[Troubleshooting](#errors-in-one-process-after-hermes-update-or-an-lcm-x-update).
 
 ### Rollback
 
@@ -424,6 +430,18 @@ After a fresh Hermes restart, `/lcm status` may show `session_id: (unbound)` or
 `threshold_tokens: (uninitialized)`. Send one normal Hermes message first, then
 run `lcm_status` or `/lcm status` again for live per-session fields.
 
+### Errors in one process after `hermes update` or an LCM-X update
+
+If one process fails after an update while others work, for example with
+`ImportError: cannot import name ...`, `TypeError: ... got an unexpected keyword
+argument ...`, or `Context engine '...' not found — falling back to built-in
+compressor`, check how long that process has been running. A process started
+before the update still holds the old Hermes or LCM-X modules in memory and
+mixes them with the new files on disk. Restart that process (and the Hermes
+gateway). This is separate from the
+config case in the [migration section](#migrate-from-hermes-lcm-v023x-and-earlier), where `Context engine 'lcm' not found` means
+`config.yaml` still names the old engine.
+
 ## Configuration
 
 The [generated scalar environment reference](../skills/hermes-lcm/references/configuration.md#generated-scalar-environment-reference) lists every scalar registry key, type, declared default, diagnostic range/choice, and deprecation release. The tables below provide behavior and tuning guidance.
@@ -457,7 +475,7 @@ Useful environment variables:
 | Variable | Default | Use |
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.75` | Fraction of the context window that triggers LCM compaction; the survival fit (`LCM_SURVIVAL_FIT`) protects against overflow, so the trigger does not need to be low for safety |
-| `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall |
+| `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall. Also settable as `lcm.context_threshold_tokens` in config.yaml; the environment variable wins when it holds an integer (`0` turns the YAML value off); an empty or non-integer value falls back to the YAML key. |
 | `LCM_MODEL_THRESHOLDS` | empty | Per-model threshold fractions, for example `"glm-5.3:0.115"`. Each key is matched as a substring of the active route's model name (the longest key wins) and takes priority over `LCM_CONTEXT_THRESHOLD`. Also settable as `lcm.model_thresholds` in config.yaml |
 | `LCM_FRESH_TAIL_COUNT` | `24` | Recent messages protected from compaction |
 | `LCM_FRESH_TAIL_MAX_TOKENS` | `24000` | Token cap for the protected fresh tail; while `LCM_FRESH_TAIL_COUNT` is nonzero it always retains the newest message and complete assistant/tool-result groups (`LCM_FRESH_TAIL_COUNT=0` keeps no fresh tail, whatever the cap). `0` removes the explicit cap (on a window of 50k tokens or more the engine then derives one at half the window) |
@@ -496,6 +514,7 @@ Useful environment variables:
 | `LCM_SURVIVAL_RESERVE` | `0.15` | Share of the model window the survival fit keeps free for the response and host overhead (the fit target is window x (1 - reserve), minus the observed host overhead) |
 | `LCM_HOST_MESSAGE_UID` | `shadow` | `shadow`: on a host that sends `message_uid`, records the row each uid was bound to in the droppable `host_uid_bindings` table and counts agreement with the existing identity matching; ingest, replay and emission are unchanged, and `/lcm doctor` reports `host_uid_*` counts only. `off`: no capture, no table writes, no counts and no log line. Under `shadow` and `on`, canonical uid evidence can also exclude a proven hidden re-ingest copy of an assistant message from leaf summary input (the row stays stored and searchable); `off` disables that. `on` behaves exactly like `shadow`: both record count-only would-reject alias UID-conflict diagnostics in the debug log without changing matching, stored rows, bindings, or ingest writes. `off` performs no UID/binding reads on this diagnostic path. Unknown values behave as `shadow` and log one warning. Bindings are deleted with their messages, and lineage keys are namespaced by Hermes home, so one database shared by several homes keeps them apart |
 | `LCM_SUMMARY_MODEL` | auxiliary | Override summarization model |
+| `LCM_INGEST_LEDGER` | `shadow` | Foreground ingest records bindings, stamp observations and view vectors inside its transaction without changing row decisions. Ordinary isolated ledger failures fail open; busy errors still retry the ingest, and a lost owner transaction or savepoint error still rolls it back. `off` disables setup and ingest ledger work; unknown values mean `shadow` with one warning per process. Tail drain, delegated children and compaction do not write the ledger at P1b-2b. |
 | `LCM_SUMMARY_FALLBACK_MODELS` | empty | Comma-separated summarization models tried after `LCM_SUMMARY_MODEL` or the auxiliary task default fails |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `2` | Consecutive failed summarization calls before a route is skipped temporarily |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `300` | Seconds to skip an open summary route before retrying it |
@@ -839,6 +858,9 @@ agents) so a larger window does not silently delay compaction, lower recall, or
 let long sessions accumulate more noise before LCM intervenes. Leave it at `0`
 to keep ratio-based behavior. When the absolute override is active, Codex
 GPT-5.5 ratio auto-raise is suppressed so the absolute setpoint stays pinned.
+The same pin can be set as `lcm.context_threshold_tokens` in `config.yaml`;
+`LCM_ABSOLUTE_THRESHOLD_TOKENS` takes precedence, and `lcm_status` reports which
+one applied under `config_sources.absolute_threshold_tokens`.
 
 A single fraction scales the trigger with each route's window. That is fine when
 you want each route to use the same share of its window, but on a profile that
@@ -1143,6 +1165,19 @@ context threshold, LCM delegates the compaction call to Hermes' native
 If the native compressor is unavailable, LCM falls back to a deterministic
 head/tail trim as a last-resort safety net, still without writing the bypassed
 session to `lcm.db`.
+
+Delegated subagents (sessions the host's delegate tool starts) are stored under
+their own session ids, with a link to the parent session in `session_lineage`,
+but LCM does not manage their context: no compaction, summaries or context
+rewriting, so the native fallback above still bounds a child's window. Their
+rows are found from the parent by `lcm_grep` with the default
+`session_scope='current'` (the current session plus its delegated subagents), by
+`session_scope='all'`, by `session_scope='session'` with the child's id, and by
+`lcm_recall`; a hit from a child carries `lineage: "subagent of <parent id>"`.
+Auxiliary sessions (background memory review, memory/skills-only toolsets and
+auxiliary model calls such as compaction and titles) stay excluded and store
+nothing. If a child's rows cannot be stored, LCM logs one warning naming the
+child and the reason.
 
 ### Large tool-output handling
 
