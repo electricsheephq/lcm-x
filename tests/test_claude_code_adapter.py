@@ -589,6 +589,34 @@ def test_the_async_hook_starts_a_worker_without_probing_the_lock(hook, env, tmp_
     assert (_log(env)[-1]["outcome"], len(started), len(probed)) == ("worker_running", 1, 1)
 
 
+def test_each_hook_log_line_times_the_steps_that_ran(hook, env, tmp_path, monkeypatch):
+    """#2164: a slow hook run must be split by step, so each log line carries the wall-clock start
+    of the hook's own code (``t0``, to join Claude Code's debug line) and the milliseconds of each
+    step that ran. Measurement only: the outcomes and ``ms`` are as before."""
+    lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(_package(tmp_path))}
+    payload = {"session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    held = []
+    monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: None)
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(command, 0))
+    monkeypatch.setattr(hook, "_lock_held", lambda lock: held[-1])
+    spooled = ["imports", "read", "spool"]
+    runs = [  # event, environment, lock held, outcome, steps
+        ("Stop", lane, False, "worker_started", spooled + ["runtime", "probe", "subprocess", "start"]),
+        ("Stop", lane, True, "worker_running", spooled + ["runtime", "probe"]),
+        ("PostToolBatch", lane, True, "worker_started", spooled + ["runtime", "subprocess", "start"]),
+        ("PreCompact", lane, False, "drained", spooled + ["runtime", "probe", "subprocess", "drain"]),
+        ("Stop", env, False, "runtime_missing", spooled),
+        ("Notification", lane, False, "unsupported_event", ["imports"]),
+    ]
+    for event, environ, lock_held, outcome, steps in runs:
+        held.append(lock_held)
+        assert hook.main(io.StringIO(json.dumps({**payload, "hook_event_name": event})), environ) == 0
+        row = _log(env)[-1]
+        assert (row["outcome"], list(row["phases"])) == (outcome, steps)
+        assert all(type(value) is float and value >= 0 for value in [row["ms"], *row["phases"].values()])
+        assert row["t0"] == round(hook._T0_WALL, 3) <= row["t"]
+
+
 @pytest.mark.parametrize("setting", ["PYTHONPATH", "PYTHONHOME"])
 def test_the_registered_hook_command_ignores_the_users_python_settings(env, tmp_path, setting):
     """REGRESSION (#2141): Claude Code runs the hook command in the user's environment, where a

@@ -12,6 +12,10 @@ Stdlib only and Python 3.9 compatible: hooks run on the system ``python3``.
 from __future__ import annotations
 
 import sys
+import time  # built in and loaded at start-up, like sys: nothing to compile before the bytecode cache is set
+
+_T0 = time.perf_counter()  # the hook's own clock starts here; its log row times each phase from it (#2164)
+_T0_WALL = time.time()
 
 
 def _apple_bytecode_cache(platform: str, base_prefix: str, prefix: Optional[str],
@@ -48,6 +52,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lcmx_runtime  # noqa: E402
+
+_IMPORTS_MS = round((time.perf_counter() - _T0) * 1000, 1)
 
 # Every hook pays for its imports before it runs: typing serves the annotations only, and
 # subprocess loads only once the hook starts a worker or a bounded drain.
@@ -192,9 +198,19 @@ def _lock_held(lock: Path) -> bool:
     return False
 
 
-def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0, probe: bool = True) -> str:
+def _phase(phases: Optional[Dict[str, float]], name: str, since: float) -> float:
+    """Record the milliseconds since ``since`` as one phase of this hook (#2164); return the time now."""
+    now = time.perf_counter()
+    if phases is not None:
+        phases[name] = round((now - since) * 1000, 1)
+    return now
+
+
+def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0, probe: bool = True,
+                 phases: Optional[Dict[str, float]] = None) -> str:
     """Start one detached drain, or with ``deadline_s`` run a bounded drain and wait for it.
     Without ``probe`` a worker starts even when one is running; it then exits at once."""
+    mark = time.perf_counter()
     runtime = lcmx_runtime.runtime_command(environ, home)
     if runtime is None:
         return "runtime_missing"
@@ -204,16 +220,21 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0,
     script = package / "scripts" / "lcm_x_capture.py"
     if not script.is_file():
         return "worker_missing"
+    mark = _phase(phases, "runtime", mark)
     # The record is already spooled. A held lock means a worker that will see it: a detached
     # worker releases the lock first and rescans the spool after, and a bounded one ends with
     # the step below, so no record can fall between. A hook never waits on another worker. The
     # probe itself holds the lock for an instant, and a hook or worker that meets it gives way,
     # so only a hook that will start a worker probes: one that can, and is not async, since a
     # killed async hook could hold the probe and start nothing.
-    if probe and _lock_held(home / "capture.lock"):
-        return "worker_running"
+    if probe:
+        held = _lock_held(home / "capture.lock")
+        mark = _phase(phases, "probe", mark)
+        if held:
+            return "worker_running"
     import subprocess
 
+    mark = _phase(phases, "subprocess", mark)  # its import alone, apart from starting the worker
     command = [*runtime, str(script), "worker", "--home", str(home)]
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
              "close_fds": True, "cwd": str(home)}
@@ -227,6 +248,7 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0,
                 done.returncode, "drain_failed:%d" % done.returncode)
         except subprocess.TimeoutExpired:
             outcome = "drain_timeout"  # the batch in flight rolls back; the next drain resumes from the cursor
+        mark = _phase(phases, "drain", mark)
         if outcome in ("drained", "drain_failed:2", "worker_running"):  # 2: the store was refused
             return outcome
         # A bounded worker does not rescan: records left behind, including another session's
@@ -235,13 +257,18 @@ def start_worker(home: Path, environ: Mapping[str, str], *, deadline_s: int = 0,
         if _lock_held(home / "capture.lock"):
             return outcome + "+holder"
         subprocess.Popen(command, start_new_session=True, **quiet)
+        _phase(phases, "start", mark)
         return outcome + "+worker"
     subprocess.Popen(command, start_new_session=True, **quiet)
+    _phase(phases, "start", mark)
     return "worker_started"
 
 
-def _log(home: Optional[Path], record: Mapping[str, Any], outcome: str, started: float) -> None:
-    """One line per hook, without content or paths."""
+def _log(home: Optional[Path], record: Mapping[str, Any], outcome: str, started: float,
+         phases: Optional[Dict[str, float]] = None) -> None:
+    """One line per hook, without content or paths. ``t0`` is when the hook's own code began, so
+    the gap from Claude Code's start of the hook is the start-up of the shell and the interpreter;
+    ``phases`` holds the milliseconds of each step that ran (#2164)."""
     if home is None:
         return
     try:
@@ -253,6 +280,9 @@ def _log(home: Optional[Path], record: Mapping[str, Any], outcome: str, started:
         line = {"t": round(time.time(), 3), "event": record.get("event"), "host": record.get("host"),
                 "session": record.get("session_id"), "outcome": outcome,
                 "ms": round((time.monotonic() - started) * 1000, 1)}
+        if phases is not None:
+            line["t0"] = round(_T0_WALL, 3)
+            line["phases"] = phases
         descriptor = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(line) + "\n")
@@ -262,6 +292,8 @@ def _log(home: Optional[Path], record: Mapping[str, Any], outcome: str, started:
 
 def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> int:
     started = time.monotonic()
+    phases: Dict[str, float] = {"imports": _IMPORTS_MS}
+    mark = time.perf_counter()
     if environ.get("LCMX_CAPTURE", "").strip().lower() in OFF_VALUES:
         return 0
     record: Dict[str, Any] = {}
@@ -288,13 +320,16 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> 
         if record["observe_only"]:
             outcome = "observed"  # never spooled, so it cannot replace a pending record
             return 0
+        mark = _phase(phases, "read", mark)  # the payload: read, parsed and checked
         spool(home, record)
+        _phase(phases, "spool", mark)
         deadline = PRECOMPACT_DEADLINE_S if record["event"] == "PreCompact" else 0
-        outcome = start_worker(home, environ, deadline_s=deadline, probe=record["event"] not in ASYNC_EVENTS)
+        outcome = start_worker(home, environ, deadline_s=deadline, probe=record["event"] not in ASYNC_EVENTS,
+                               phases=phases)
     except Exception as exc:  # noqa: BLE001 - a hook never fails the session
         outcome = "error:" + type(exc).__name__
     finally:
-        _log(home, record, outcome, started)
+        _log(home, record, outcome, started, phases)
     return 0
 
 
