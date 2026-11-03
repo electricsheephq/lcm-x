@@ -12,6 +12,7 @@ import pytest
 from hermes_lcm.engine_registry import ActiveEngineUseStatus, use_active_lcm_engine
 from hermes_lcm.tokens import count_messages_tokens
 from tests.harness import make_engine, pin_char_counter
+from tests.test_issue_1162_retained_escape import _reorder, _r_id
 
 
 def _engine(tmp_path, monkeypatch):
@@ -225,6 +226,83 @@ def test_timeout_allows_inflight_atomic_publication_to_commit(blocked_pass, monk
         assert _assert_durable_rows(race.engine, race.before) == nodes
     finally:
         release_publication.set()
+
+
+def test_publish_then_close_keeps_committed_leaf_bookkeeping(tmp_path, monkeypatch):
+    """F1: shutdown after publish retains the leaf's escape/rollup/hold writes."""
+    pin_char_counter(monkeypatch)
+    engine, messages = _reorder(tmp_path, False)
+    monkeypatch.setattr(engine, "_summarize_leaf_chunk_with_rescue", lambda chunk, **_kwargs: (
+        chunk, count_messages_tokens(chunk), "Earlier facts retained.", 1, 0))
+    # The first leaf precedes the retained row; the next pass must escape it.
+    messages = engine.compress(messages, current_tokens=10_000)
+    engine.note_turn_complete()
+    retained_id = _r_id(engine)
+    before = engine._store._conn.execute("SELECT * FROM messages ORDER BY store_id").fetchall()
+    published, invalidated, cleared, escaped, completed = [], [], [], [], []
+    publish = engine._publish_leaf_node
+    invalidate = engine._invalidate_rollups_for_published_node
+    clear = engine._clear_persisted_no_progress_hold
+    record = engine._record_retained_escape
+    compress_impl = engine._compress_impl
+
+    def assert_open():
+        assert engine._compaction_inflight == 1
+        assert all(service._conn is not None for service in (
+            engine._store, engine._dag, engine._lifecycle,
+        )), "committed-leaf bookkeeping touched a closed store"
+
+    def publish_then_close(node, **kwargs):
+        result = publish(node, **kwargs)
+        if retained_id in node.source_ids:
+            published.append(node)
+            with engine._compaction_gate:
+                engine._compaction_closing = True
+        return result
+
+    def observed_invalidate(node):
+        if engine._compaction_is_closing():
+            assert_open()
+            invalidated.append(node)
+        return invalidate(node)
+
+    def observed_clear():
+        if engine._compaction_is_closing():
+            assert_open()
+            cleared.append(True)
+        return clear()
+
+    def observed_record(rows):
+        if engine._compaction_is_closing():
+            assert_open()
+            escaped.extend(rows)
+        return record(rows)
+
+    def observed_compress(*args, **kwargs):
+        result = compress_impl(*args, **kwargs)
+        completed.append(result)
+        return result
+
+    monkeypatch.setattr(engine, "_publish_leaf_node", publish_then_close)
+    monkeypatch.setattr(engine, "_invalidate_rollups_for_published_node", observed_invalidate)
+    monkeypatch.setattr(engine, "_clear_persisted_no_progress_hold", observed_clear)
+    monkeypatch.setattr(engine, "_record_retained_escape", observed_record)
+    monkeypatch.setattr(engine, "_compress_impl", observed_compress)
+    try:
+        assert engine.compress(messages, current_tokens=10_000) is messages
+        assert published, "test must close after a real retained-escape publication"
+        assert invalidated == published
+        assert cleared == [True]
+        assert escaped and retained_id in {row[0] for row in escaped}
+        engine._retained_escape_memos = {}  # reload the durable memo, not its cache
+        assert retained_id in engine._retained_escape_memo().values()
+        assert completed == [messages], "closing pass must finish without an exception"
+        assert engine._compaction_inflight == 0
+    finally:
+        engine.shutdown()
+    assert engine._stable_use_closed
+    assert all(service._conn is None for service in (engine._store, engine._dag, engine._lifecycle))
+    assert published[0].node_id in _assert_durable_rows(engine, before)
 
 
 def test_closing_and_closed_compress_are_identity_noops(tmp_path, monkeypatch):
