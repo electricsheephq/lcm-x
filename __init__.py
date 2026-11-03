@@ -488,6 +488,63 @@ def _warn_if_embedding_provider_unavailable(config) -> None:
         logger.debug("LCM embedding provider startup probe failed: %s", exc)
 
 
+def _process_serves_home(hermes_home: str) -> bool:
+    """Whether the current process serves the profile at *hermes_home*.
+
+    Multiplex preflight loads plugins across non-parked profiles under their own
+    home even in a process that will not serve them. Such a process must not
+    write an inactive-slot diagnostic record into a foreign profile's directory.
+    """
+    if not hermes_home:
+        return True
+    try:
+        resolved_home = Path(hermes_home).expanduser().resolve()
+    except Exception:
+        return True
+
+    # Process launch home
+    try:
+        from hermes_constants import get_hermes_home_override
+        override = get_hermes_home_override()
+    except Exception:
+        override = None
+
+    process_home = os.environ.get("HERMES_HOME")
+    if not process_home and override is None:
+        try:
+            from hermes_cli.config import get_hermes_home
+            process_home = str(get_hermes_home())
+        except Exception:
+            process_home = os.path.expanduser("~/.hermes")
+    if not process_home:
+        process_home = os.path.expanduser("~/.hermes")
+
+    try:
+        if resolved_home == Path(process_home).expanduser().resolve():
+            return True
+    except Exception:
+        if str(hermes_home) == str(process_home):
+            return True
+
+    try:
+        from agent import secret_scope
+        serves = getattr(secret_scope, "serves_routed_profile", None)
+        if callable(serves):
+            try:
+                if serves(hermes_home):
+                    return True
+            except TypeError:
+                if serves():
+                    return True
+        multiplex = getattr(secret_scope, "is_multiplex_active", None)
+        if callable(multiplex) and multiplex():
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
 def _engine_took_slot(ctx, engine, hermes_home: str) -> bool:
     """Whether Hermes made *engine* this process's context engine (#622).
 
@@ -521,12 +578,13 @@ def _engine_took_slot(ctx, engine, hermes_home: str) -> bool:
             holder_name,
             getattr(holder, "name", None),
         )
-    try:
-        from .inactive_record import write_inactive_record
+    if _process_serves_home(hermes_home):
+        try:
+            from .inactive_record import write_inactive_record
 
-        write_inactive_record(hermes_home, elapsed_s=elapsed, reason=reason)
-    except Exception as exc:
-        logger.warning("LCM-X could not record the inactive state for /lcm doctor: %s", exc)
+            write_inactive_record(hermes_home, elapsed_s=elapsed, reason=reason)
+        except Exception as exc:
+            logger.warning("LCM-X could not record the inactive state for /lcm doctor: %s", exc)
     return False
 
 

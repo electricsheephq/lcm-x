@@ -2,6 +2,7 @@
 from collections import OrderedDict
 from dataclasses import dataclass, field
 import logging
+from pathlib import Path
 import re
 import threading
 import time
@@ -32,7 +33,15 @@ class Pending:
 
 
 def _key(engine):
-    return str(engine._store.db_path.resolve()), str(engine._session_id)
+    store = getattr(engine, '_bound_store', None)
+    if store is not None:
+        db_path = store.db_path
+    else:
+        db_path = getattr(engine, '_db_path', None)
+        if db_path is None:
+            resolve = getattr(engine, '_resolve_db_path', None)
+            db_path = resolve(getattr(engine, '_hermes_home', '')) if callable(resolve) else Path('lcm.db')
+    return str(Path(db_path).resolve()), str(getattr(engine, '_session_id', ''))
 
 
 def _retire(key, turn_id):

@@ -1160,8 +1160,17 @@ class LCMEngine(
         self._assertion_extraction_last_error = ""
         self._assertion_extraction_last_model = ""
 
-        db_path = self._resolve_db_path(hermes_home)
-        self._bind_storage(db_path, hermes_home)
+        self._db_path = self._resolve_db_path(hermes_home)
+        self._storage_lock = threading.RLock()
+        self._storage_bound = False
+        self._bound_store: Optional[MessageStore] = None
+        self._bound_dag: Optional[SummaryDAG] = None
+        self._bound_lifecycle: Optional[LifecycleStateStore] = None
+        self._bound_assertions = None
+        self._bound_entities = None
+        self._bound_query_views = None
+        self._bound_adaptive_retrieval = None
+        self._bound_assertion_extractor = None
 
         self._session_id: str = ""
         self._session_platform: str = ""
@@ -1568,6 +1577,8 @@ class LCMEngine(
             config=copy.deepcopy(self._config),
             hermes_home=self._hermes_home,
         )
+        if getattr(self, "_db_path", None) is not None:
+            clone._db_path = self._db_path
         clone.model = self.model
         clone.base_url = self.base_url
         clone.api_key = self.api_key
@@ -1628,55 +1639,169 @@ class LCMEngine(
             name = ""
         return name or str(Path(home or Path(db_path).parent).resolve())
 
+    def _ensure_storage(self) -> None:
+        """Idempotently bind storage helpers on first real use."""
+        if getattr(self, "_storage_bound", False):
+            return
+        lock = getattr(self, "_storage_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._storage_lock = lock
+        with lock:
+            if getattr(self, "_storage_bound", False):
+                return
+            db_path = getattr(self, "_db_path", None)
+            if db_path is None:
+                db_path = self._resolve_db_path(self._hermes_home)
+                self._db_path = db_path
+            self._bind_storage(db_path, self._hermes_home)
+
+    @property
+    def _store(self) -> MessageStore:
+        self._ensure_storage()
+        return self._bound_store
+
+    @_store.setter
+    def _store(self, value: MessageStore | None) -> None:
+        self._bound_store = value
+        if value is not None:
+            self._storage_bound = True
+
+    @property
+    def _dag(self) -> SummaryDAG:
+        self._ensure_storage()
+        return self._bound_dag
+
+    @_dag.setter
+    def _dag(self, value: SummaryDAG | None) -> None:
+        self._bound_dag = value
+        if value is not None:
+            self._storage_bound = True
+
+    @property
+    def _lifecycle(self) -> LifecycleStateStore:
+        self._ensure_storage()
+        return self._bound_lifecycle
+
+    @_lifecycle.setter
+    def _lifecycle(self, value: LifecycleStateStore | None) -> None:
+        self._bound_lifecycle = value
+        if value is not None:
+            self._storage_bound = True
+
+    @property
+    def _assertions(self) -> AssertionStore | None:
+        self._ensure_storage()
+        return self._bound_assertions
+
+    @_assertions.setter
+    def _assertions(self, value: AssertionStore | None) -> None:
+        self._bound_assertions = value
+
+    @property
+    def _entities(self) -> EntityStore | None:
+        self._ensure_storage()
+        return self._bound_entities
+
+    @_entities.setter
+    def _entities(self, value: EntityStore | None) -> None:
+        self._bound_entities = value
+
+    @property
+    def _query_views(self) -> QueryViewStore | None:
+        self._ensure_storage()
+        return self._bound_query_views
+
+    @_query_views.setter
+    def _query_views(self, value: QueryViewStore | None) -> None:
+        self._bound_query_views = value
+
+    @property
+    def _adaptive_retrieval(self) -> AdaptiveRetrievalRegistry | None:
+        self._ensure_storage()
+        return self._bound_adaptive_retrieval
+
+    @_adaptive_retrieval.setter
+    def _adaptive_retrieval(self, value: AdaptiveRetrievalRegistry | None) -> None:
+        self._bound_adaptive_retrieval = value
+
+    @property
+    def _assertion_extractor(self) -> ModelAssertionExtractor | None:
+        self._ensure_storage()
+        return self._bound_assertion_extractor
+
+    @_assertion_extractor.setter
+    def _assertion_extractor(self, value: ModelAssertionExtractor | None) -> None:
+        self._bound_assertion_extractor = value
+
     def _bind_storage(self, db_path: str | Path, hermes_home: str = "") -> None:
         """Bind store/DAG/lifecycle helpers to one SQLite database."""
-        self._assertions = None
-        self._entities = None
-        self._query_views = None
-        self._adaptive_retrieval = None
-        self._assertion_extractor = None
+        self._bound_assertions = None
+        self._bound_entities = None
+        self._bound_query_views = None
+        self._bound_adaptive_retrieval = None
+        self._bound_assertion_extractor = None
+        store = dag = lifecycle = assertions = entities = query_views = adaptive_retrieval = assertion_extractor = None
         try:
-            self._store = MessageStore(
+            store = MessageStore(
                 db_path,
                 ingest_protection_config=self._config,
                 hermes_home=hermes_home,
             )
-            self._dag = SummaryDAG(db_path)
+            dag = SummaryDAG(db_path)
             if self._config.temporal_rollups_enabled:
                 # Install the transaction-coupled summary mutation triggers before
                 # this engine can publish or delete a DAG node.
-                initialize_rollup_invalidation_outbox(self._dag)
-            self._lifecycle = LifecycleStateStore(db_path)
-            self._assertions = (
+                initialize_rollup_invalidation_outbox(dag)
+            lifecycle = LifecycleStateStore(db_path)
+            assertions = (
                 AssertionStore(db_path)
                 if bool(getattr(self._config, "assertions_enabled", False))
                 else None
             )
-            self._entities = (EntityStore(db_path, profile_key=lambda: self._entity_profile_key(db_path))
-                if self._config.entities_enabled else None)
-            self._query_views = (
+            entities = (
+                EntityStore(db_path, profile_key=lambda: self._entity_profile_key(db_path))
+                if self._config.entities_enabled
+                else None
+            )
+            query_views = (
                 QueryViewStore(db_path)
                 if bool(getattr(self._config, "query_views_enabled", False))
                 or bool(getattr(self._config, "adaptive_retrieval_enabled", False))
                 else None
             )
-            self._adaptive_retrieval = (
-                AdaptiveRetrievalRegistry(self._query_views)
-                if bool(
-                    getattr(self._config, "adaptive_retrieval_enabled", False)
-                )
+            adaptive_retrieval = (
+                AdaptiveRetrievalRegistry(query_views)
+                if bool(getattr(self._config, "adaptive_retrieval_enabled", False))
                 else None
             )
+            assertion_extractor = None
             if (
-                self._assertions is not None
+                assertions is not None
                 and bool(getattr(self._config, "assertion_extraction_enabled", False))
             ):
-                self._assertion_extractor = ModelAssertionExtractor(
-                    self._assertions,
+                assertion_extractor = ModelAssertionExtractor(
+                    assertions,
                     model=self._assertion_extraction_model(),
                     timeout_seconds=self._assertion_extraction_timeout(),
                 )
+
+            self._bound_store = store
+            self._bound_dag = dag
+            self._bound_lifecycle = lifecycle
+            self._bound_assertions = assertions
+            self._bound_entities = entities
+            self._bound_query_views = query_views
+            self._bound_adaptive_retrieval = adaptive_retrieval
+            self._bound_assertion_extractor = assertion_extractor
+            self._storage_bound = True
         except Exception:
+            for obj in (assertion_extractor, adaptive_retrieval, query_views, entities, assertions, lifecycle, dag, store):
+                if obj is not None and hasattr(obj, "close"):
+                    try:
+                        obj.close()
+                    except Exception:
+                        pass
             self._close_storage()
             raise
         self._publish_ingest_context_window()
@@ -1686,7 +1811,7 @@ class LCMEngine(
 
         Published on bind and on each of the session's own protections, never from update_model(): Hermes calls
         that before binding the next session, and the previous session's late suffix must keep its own window."""
-        store = getattr(self, "_store", None)
+        store = getattr(self, "_bound_store", None)
         session_id = getattr(self, "_session_id", "")
         if store is None or not session_id:  # constructor/pre-bind: no session, no window yet
             return 0
@@ -1695,18 +1820,20 @@ class LCMEngine(
 
     def _close_storage(self) -> None:
         """Best-effort close of currently bound SQLite helpers."""
+        if not getattr(self, "_storage_bound", False):
+            return
         self._discard_prepared_leaves()
         for attr in (
-            "_adaptive_retrieval",
-            "_store",
-            "_dag",
-            "_lifecycle",
-            "_assertions",
-            "_entities",
-            "_query_views",
+            "_bound_adaptive_retrieval",
+            "_bound_store",
+            "_bound_dag",
+            "_bound_lifecycle",
+            "_bound_assertions",
+            "_bound_entities",
+            "_bound_query_views",
         ):
             helper = getattr(self, attr, None)
-            if attr == "_store" and any(
+            if attr == "_bound_store" and any(
                 tail["store"] is helper for tail in self._pending_session_tails
             ):
                 continue  # A profile rebind must not close a pending tail's store.
@@ -1716,6 +1843,15 @@ class LCMEngine(
                     close()
                 except Exception:
                     logger.debug("LCM failed closing %s during profile rebind", attr, exc_info=True)
+        self._bound_store = None
+        self._bound_dag = None
+        self._bound_lifecycle = None
+        self._bound_assertions = None
+        self._bound_entities = None
+        self._bound_query_views = None
+        self._bound_adaptive_retrieval = None
+        self._bound_assertion_extractor = None
+        self._storage_bound = False
 
     def _assertion_extraction_model(self) -> str:
         return str(
@@ -1801,11 +1937,11 @@ class LCMEngine(
             return False
         if self._config.database_path:
             current_home = str(self._hermes_home or "")
-            current_store_home = str(getattr(getattr(self, "_store", None), "_hermes_home", "") or "")
-            if current_home == str(hermes_home) and current_store_home == str(hermes_home):
+            current_store_home = str(getattr(getattr(self, "_bound_store", None), "_hermes_home", "") or "")
+            if current_home == str(hermes_home) and (not getattr(self, "_storage_bound", False) or current_store_home == str(hermes_home)):
                 return False
             self._hermes_home = hermes_home
-            store = getattr(self, "_store", None)
+            store = getattr(self, "_bound_store", None)
             if store is not None:
                 store._hermes_home = hermes_home
             self._reset_profile_runtime_state()
@@ -1813,13 +1949,19 @@ class LCMEngine(
             return True
 
         db_path = self._resolve_db_path(hermes_home)
-        current_db = Path(getattr(getattr(self, "_store", None), "db_path", ""))
+        current_db = Path(getattr(getattr(self, "_bound_store", None), "db_path", "")) if getattr(self, "_storage_bound", False) else getattr(self, "_db_path", None)
         if current_db == db_path and str(self._hermes_home or "") == str(hermes_home):
             return False
 
-        self._close_storage()
-        self._hermes_home = hermes_home
-        self._bind_storage(db_path, hermes_home)
+        if getattr(self, "_storage_bound", False):
+            self._close_storage()
+            self._hermes_home = hermes_home
+            self._db_path = db_path
+            self._bind_storage(db_path, hermes_home)
+        else:
+            self._hermes_home = hermes_home
+            self._db_path = db_path
+
         self._reset_profile_runtime_state()
         logger.info("LCM rebound storage for Hermes home %s", hermes_home)
         return True
@@ -2736,7 +2878,7 @@ class LCMEngine(
 
     def _discard_prepared_leaves(self) -> None:
         """#787: shutdown and storage rebind drop this store's queued preparations and prepared leaves."""
-        store = getattr(self, "_store", None)
+        store = getattr(self, "_bound_store", None)
         if store is not None:
             leaf_prep.discard(store.db_path)
 
@@ -11230,7 +11372,11 @@ class LCMEngine(
         Centralized so the timestamped ``/lcm backup`` slot and the rolling
         ``/lcm rotate apply`` slot share the same directory derivation.
         """
-        db_path = Path(self._store.db_path)
+        store = getattr(self, "_bound_store", None)
+        if store is not None:
+            db_path = Path(store.db_path)
+        else:
+            db_path = Path(getattr(self, "_db_path", None) or self._resolve_db_path(self._hermes_home))
         backup_root = (
             Path(self._hermes_home).expanduser()
             if getattr(self, "_hermes_home", "")
@@ -11244,7 +11390,11 @@ class LCMEngine(
         Centralized so command.py (which writes the backup) and get_status()
         (which reads its mtime to surface last_rotate_at) cannot drift.
         """
-        db_path = Path(self._store.db_path)
+        store = getattr(self, "_bound_store", None)
+        if store is not None:
+            db_path = Path(store.db_path)
+        else:
+            db_path = Path(getattr(self, "_db_path", None) or self._resolve_db_path(self._hermes_home))
         return self.backup_dir() / f"{db_path.stem}-rotate-latest.sqlite3"
 
     def rotate_active_session(
@@ -11431,7 +11581,8 @@ class LCMEngine(
         for engine in tuple(_PENDING_TAIL_ENGINES):
             if engine is self or time.monotonic() >= deadline:
                 continue
-            if not any(t["store"].db_path == self._store.db_path for t in engine._pending_session_tails):
+            cur_db = Path(getattr(self, "_bound_store", None).db_path if getattr(self, "_storage_bound", False) else (getattr(self, "_db_path", None) or self._resolve_db_path(self._hermes_home)))
+            if not any(t["store"].db_path == cur_db for t in engine._pending_session_tails):
                 continue
             # Never wait for a sibling lifecycle (or invert its lock ordering).
             if engine._stable_use_lock.acquire(blocking=False):
@@ -11597,16 +11748,22 @@ class LCMEngine(
         cleanup = [
             self._unregister_active_engine_binding,
             *(
-                [self._adaptive_retrieval.close]
-                if self._adaptive_retrieval is not None
+                [self._bound_adaptive_retrieval.close]
+                if getattr(self, "_bound_adaptive_retrieval", None) is not None
                 else []
             ),
-            self._store.close,
-            self._dag.close,
-            self._lifecycle.close,
-            *([self._assertions.close] if self._assertions is not None else []),
-            *([self._entities.close] if self._entities is not None else []),
-            *([self._query_views.close] if self._query_views is not None else []),
+            *(
+                [
+                    self._bound_store.close,
+                    self._bound_dag.close,
+                    self._bound_lifecycle.close,
+                ]
+                if getattr(self, "_storage_bound", False) and getattr(self, "_bound_store", None) is not None
+                else []
+            ),
+            *([self._bound_assertions.close] if getattr(self, "_bound_assertions", None) is not None else []),
+            *([self._bound_entities.close] if getattr(self, "_bound_entities", None) is not None else []),
+            *([self._bound_query_views.close] if getattr(self, "_bound_query_views", None) is not None else []),
         ]
         failures = []
         for close in cleanup:
