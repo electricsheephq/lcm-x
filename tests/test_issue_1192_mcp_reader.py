@@ -763,6 +763,37 @@ def test_t8_node_expansion_keeps_its_sessions_filter_for_payloads(fx, monkeypatc
     assert not is_error and shown["expanded"][0]["externalized"]["session_id"] == "s2"
 
 
+def test_t8_any_session_reach_runs_the_containment_checks(fx, monkeypatch, tmp_path):
+    """REGRESSION: a lookup with no session filter reaches any session, so it first runs the
+    containment checks Hermes runs for an explicit session: a ref that resolves out of the payload
+    directory is not found, and the directory's own ref still is."""
+    payload_dir = fx.home / DEFAULT_LARGE_OUTPUT_DIRNAME
+    outside = tmp_path / "other-profile"
+    outside.mkdir()
+    planted = outside / "planted.json"
+    planted.write_text((payload_dir / fx.ref).read_text())
+    (payload_dir / "escape.json").symlink_to(planted)
+    reader = make_reader(fx, monkeypatch)
+    escaped, is_error, _ = call(reader, "lcm_expand", {"externalized_ref": "escape.json"})
+    assert is_error and escaped["error"] == "Externalized payload escape.json not found in current session"
+    own, is_error, _ = call(reader, "lcm_expand", {"externalized_ref": fx.ref})
+    assert not is_error and own["session_id"] == "s2"
+
+
+def test_t8_any_session_reach_needs_the_payload_directory_inside_the_profile(fx, monkeypatch, tmp_path):
+    """REGRESSION: as for an explicit session in Hermes, a payload directory configured outside the
+    profile (which Hermes warns about and reads for its current session) serves no cross-session read."""
+    moved = tmp_path / "elsewhere" / DEFAULT_LARGE_OUTPUT_DIRNAME
+    moved.parent.mkdir()
+    os.rename(fx.home / DEFAULT_LARGE_OUTPUT_DIRNAME, moved)
+    with open(fx.home / ".env", "a") as env:
+        env.write(f"LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH={moved}\n")
+    reader = make_reader(fx, monkeypatch)
+    for args in ({"externalized_ref": fx.ref}, {"externalized_ref": fx.ref, "session_id": "s2"}):
+        refused, is_error, _ = call(reader, "lcm_expand", args)
+        assert is_error and refused["error"].startswith(f"Externalized payload {fx.ref} not found"), args
+
+
 # -- T9: protocol ------------------------------------------------------------------
 
 def test_t9_protocol_session_over_stdio(spawned_fx, tmp_path):
