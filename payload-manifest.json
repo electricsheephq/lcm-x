@@ -1,6 +1,6 @@
 {
-  "source_sha": "59e49bf2f1c0f83e18ec3c613a3e94ca36f366ef",
-  "tooling_sha": "59e49bf2f1c0f83e18ec3c613a3e94ca36f366ef",
+  "source_sha": "3a4a08ff501347a79669fab51444c471b09b551d",
+  "tooling_sha": "3a4a08ff501347a79669fab51444c471b09b551d",
   "allowlist_sha256": "83b8bf2418d229639abd5bd72bae468b6263549fa601bb763943864add830f07",
   "builder_version": 2,
   "tooling_dirty": false,
@@ -16,7 +16,7 @@
     {
       "path": "README.md",
       "bytes": 1094,
-      "sha256": "ccd476a9cdde2a9a9fa5aa9aacea315261ac58dc2e3062ae85616706eb9ca255"
+      "sha256": "3892ab1187b83c0234b495e5844e03bcb042b8f57fe0bb9a89891a10ae83d005"
     },
     {
       "path": "__init__.py",
