@@ -622,14 +622,14 @@ def test_1399_retirement_fences_late_insertion_and_rebind_rearms(make_engine, sc
     assert engine.drain_embedding_maintenance(timeout=5)
     ran.clear()
     checked, release = threading.Event(), threading.Event()
-    allowed = maintenance_mod._automatic_chunks_allowed
+    allowed = provider_mod._automatic_chunks_allowed
 
     def pause_after_check(*args):
         checked.set()
         assert release.wait(5)
         return allowed(*args)
 
-    monkeypatch.setattr(maintenance_mod, "_automatic_chunks_allowed", pause_after_check)
+    monkeypatch.setattr(provider_mod, "_automatic_chunks_allowed", pause_after_check)
     worker = threading.Thread(target=engine._schedule_embedding_maintenance)
     worker.start()
     old_owner = engine._embedding_maintenance_owner

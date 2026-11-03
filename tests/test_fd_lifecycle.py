@@ -77,8 +77,8 @@ def test_ingest_compress_shutdown_releases_file_descriptors(tmp_path, monkeypatc
         before = fd_count()
         engine = LCMEngine(config=config, hermes_home=str(tmp_path))
         try:
-            assert fd_count() > before  # The observer sees this engine's open files.
             engine.on_session_start('fd-lifecycle', platform='cli', context_length=200_000)
+            assert fd_count() > before  # First real use opens the engine's files.
             engine.ingest(messages)
             engine.compress(messages, current_tokens=100_000, force=True)
             assert engine._last_compression_status == 'compacted'
