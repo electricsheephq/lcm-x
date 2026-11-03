@@ -228,7 +228,11 @@ def _get_externalized_payload(
     allowed_session_ids: set[str] | None = None,
     require_profile_containment: bool = False,
 ) -> dict[str, Any] | None:
-    if require_profile_containment:
+    # The reader reads any session's payload only when the caller gives no session filter (an explicit
+    # session_id, or node expansion's sessions, filters as in Hermes). That read crosses sessions, so
+    # it first runs the containment checks Hermes runs for an explicit session.
+    any_session = _reader_any_session(engine) and not require_profile_containment and not allowed_session_ids
+    if require_profile_containment or any_session:
         if not engine._hermes_home or not ref or Path(ref).name != ref:
             return None
         try:
@@ -252,8 +256,7 @@ def _get_externalized_payload(
     payload_session_id = payload.get("session_id") or ""
     if require_profile_containment and not payload_session_id:
         return None
-    # An explicit session_id (the caller that requires containment) keeps its filter, as in Hermes.
-    if _reader_any_session(engine) and not require_profile_containment:
+    if any_session:
         return payload
     allowed = allowed_session_ids
     if not allowed:
