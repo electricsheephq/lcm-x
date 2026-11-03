@@ -8,17 +8,40 @@
 # libraries from it, so run it in a sandbox checkout, not one whose .venv you manage. Its
 # environment file and SQLite build live inside that .venv, so checkouts never share them.
 #
-# Usage, from anywhere in the checkout (needs network, python3 >= 3.11 with venv, curl,
-# unzip, gcc, sha256sum):
+# Usage, from anywhere in the checkout (needs network, python3 >= 3.11 with venv/ensurepip,
+# git, curl, unzip, gcc, sha256sum, node):
 #   bash scripts/dev/cloud_setup.sh
 # Then run the printed commands; they start by sourcing the environment file, which
 # non-interactive shells (agents, ssh) do not read from ~/.bashrc.
 set -euo pipefail
+# Resolve a relative PYTHON once, before any cd, so every check uses the same interpreter.
+# Builtins only: no tool has been checked yet. A directory that does not exist leaves PYTHON
+# as given, so the venv check below names it.
+case "${PYTHON:-}" in
+  */*) if py_dir="$(CDPATH='' cd -- "${PYTHON%/*}/" 2>/dev/null && pwd)"; then PYTHON="$py_dir/${PYTHON##*/}"; fi ;;
+esac
+missing=0
+for tool in git curl unzip gcc sha256sum node; do
+  if ! command -v "$tool" > /dev/null 2>&1; then
+    echo "cloud_setup: missing prerequisite: $tool" >&2
+    missing=1
+  fi
+done
+if ! "${PYTHON:-python3}" -c 'import venv, ensurepip' > /dev/null 2>&1; then
+  echo "cloud_setup: missing prerequisite: ${PYTHON:-python3} venv/ensurepip" >&2
+  missing=1
+fi
+# Exit 3 means too old; an interpreter that does not run at all is reported above.
+py_rc=0
+"${PYTHON:-python3}" -c 'import sys; sys.exit(3 if sys.version_info < (3, 11) else 0)' > /dev/null 2>&1 || py_rc=$?
+if [ "$py_rc" = 3 ]; then
+  echo "cloud_setup: missing prerequisite: ${PYTHON:-python3} >= 3.11" >&2
+  missing=1
+fi
+[ "$missing" = 0 ] || exit 1
 repo="$(git rev-parse --show-toplevel)"
 cd "$repo"
 
-"${PYTHON:-python3}" -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
-  || { echo "cloud_setup: Python >= 3.11 is required" >&2; exit 1; }
 want="$("${PYTHON:-python3}" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 # Reuse .venv only when it was made here, on the selected interpreter's Python version, without
 # the system site packages (a system PyYAML would stay importable). Otherwise recreate it; a

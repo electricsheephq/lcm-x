@@ -1,8 +1,8 @@
 # ruff: noqa: F811
 """Diagnostic records observe the existing end/proof decisions without authority."""
-import copy
 import logging
 import sqlite3
+from copy import deepcopy
 
 import pytest
 
@@ -97,12 +97,22 @@ def test_writer_reasons(published, monkeypatch, reason):
     elif reason == "cursor_mismatch":
         engine._ingest_cursor = -1
     elif reason == "identity_noop":
-        host = copy.deepcopy(output)
+        host = output  # the host's own list back; equal copies are pinned in the test below (#1286, #2128)
     elif reason == "construction_error":
         monkeypatch.setattr(engine, "_emission_binding", lambda: 1 / 0)
     engine._record_compress_commit_proof(host, output)
     assert engine._compress_commit_reason == reason
     assert bool(engine._compress_commit_proof) is (reason == "ready")
+
+
+@pytest.mark.parametrize("status", ["compacted", "error", "noop", "sanitized"])
+def test_an_equal_copy_is_an_identity_noop_unless_it_is_a_cleanup_rewrite(published, status):
+    """#2128: a copy with the host list's replay identities is a no-op, as in v0.29.0, unless the pass was a
+    cleanup-only rewrite (status ``sanitized``), whose new public bytes the host commits (#1286)."""
+    engine, _host, output = published
+    engine._last_compression_status = status
+    engine._record_compress_commit_proof(output, deepcopy(output))
+    assert engine._compress_commit_reason == ("ready" if status == "sanitized" else "identity_noop")
 
 
 def test_clone_and_reset_ownership(published):

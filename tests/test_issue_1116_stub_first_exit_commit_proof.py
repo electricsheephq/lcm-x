@@ -321,7 +321,8 @@ def test_stale_proof_from_an_earlier_version_is_retired_on_cold_rebind(stub_firs
 
 def test_a_retry_that_only_skips_a_stale_snapshot_keeps_todays_decision(stub_first_session, caplog, monkeypatch):
     """Only a retry that replays stored rows confirms the retirement. One the no-proof reading takes for a stale
-    no-overlap snapshot leaves today's decision (the batch persisted whole) and the durable proof in force."""
+    no-overlap snapshot leaves today's decision (the batch persisted whole), and the durable proof is re-keyed to
+    that list (#1286)."""
     host = stub_first_session("summary", stub_first=False)
     stale = leave_proof_stale(host, caplog)
     # the seam: only the retry (proof retired) finds no replayed tail and reads the list as a stale snapshot
@@ -334,7 +335,11 @@ def test_a_retry_that_only_skips_a_stale_snapshot_keeps_todays_decision(stub_fir
     recon = host.engine._last_ingest_reconciliation
     assert (recon["action"], recon["reason"]) == ("persisted batch", "persisted ambiguous delta"), recon
     assert getattr(host.engine, "_retired_durable_proof", None) is None
-    assert host.engine._active_emission_proof()["created_at"] == stale["created_at"]
+    # #1286: the batch persisted whole re-keys the durable proof to this list, so the next restart stores nothing again.
+    assert host.engine._active_emission_proof()["created_at"] != stale["created_at"]
+    rows = host.stored_rows()
+    host.cold_rebind()
+    assert host.stored_rows() == rows
 
 
 def test_a_new_user_turn_equal_to_a_summary_is_stored_past_a_stale_proof(stub_first_session, caplog):
