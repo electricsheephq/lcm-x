@@ -359,6 +359,7 @@ def test_environment_read_inventory():
         ("config.py", "containment_base_dir"): "LCM_HERMES_BASE_DIR: operator containment root stays process-wide",
         ("embedding_provider.py", "__init__"): "FASTEMBED_CACHE_PATH: process-wide model download cache",
         ("inactive_record.py", "_process_start"): "LC_ALL=C subprocess for ps process identity, not profile configuration",
+        ("__init__.py", "_engine_took_slot"): "HERMES_HOME: process launch identity for inactive-record ownership, not profile configuration",
         ("docs/process/evidence/1880-persisted-hold/compat_probe.py", "main"):
             "synthetic compatibility proof tool: isolated home and lazy-install controls only",
         ("docs/process/evidence/1880-persisted-hold/cost/cost_probe.py", "main"):
@@ -415,6 +416,9 @@ def test_environment_read_inventory():
             if key == ("embedding_provider.py", "__init__"):
                 call = parents.get(parents.get(node))
                 assert isinstance(call, ast.Call) and ast.literal_eval(call.args[0]) == "FASTEMBED_CACHE_PATH"
+            if key == ("__init__.py", "_engine_took_slot"):
+                call = parents.get(parents.get(node))
+                assert isinstance(call, ast.Call) and ast.literal_eval(call.args[0]) == "HERMES_HOME"
     assert not failures, "\n".join(failures)
     assert seen == set(allowed), "remove stale allowlist entries or check newly unclassified reads"
 
