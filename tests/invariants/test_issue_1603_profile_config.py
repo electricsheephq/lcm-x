@@ -375,6 +375,10 @@ def test_environment_read_inventory():
         ("embedding_provider.py", "__init__"): "FASTEMBED_CACHE_PATH: process-wide model download cache",
         ("inactive_record.py", "_process_start"): "LC_ALL=C subprocess for ps process identity, not profile configuration",
         ("__init__.py", "_engine_took_slot"): "HERMES_HOME: process launch identity for inactive-record ownership, not profile configuration",
+        ("mcp_reader.py", "apply_profile_environment"):
+            "lcm-x mcp reader process: replaces its own LCM_* view with the one profile it serves (#1192)",
+        ("mcp_reader.py", "disabled_tool_names"):
+            "lcm-x mcp reader process: LCM_DISABLED_TOOLS from that profile view, parsed as the engine does (#1192)",
         ("docs/process/evidence/1880-persisted-hold/compat_probe.py", "main"):
             "synthetic compatibility proof tool: isolated home and lazy-install controls only",
         ("docs/process/evidence/1880-persisted-hold/cost/cost_probe.py", "main"):
