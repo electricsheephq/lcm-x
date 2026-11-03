@@ -150,13 +150,17 @@ def _node(session_id, summary, source_ids, *, depth=0, source_type="messages", a
 
 
 def _seed_vectors(db: Path, config: LCMConfig, nodes: dict[int, str], messages: dict[int, str], *,
-                  dim: int = DIM, revision: str = "") -> None:
+                  dim: int = DIM, revision: str = "", suffix: str = "") -> None:
+    """``suffix`` registers the profile as one with embedding prefixes does (``<task>+prefix``)."""
     vs = VectorStore(db, config=config)
+    tag = "+prefix" if suffix else ""
     try:
-        vs.register_profile(MODEL, PROVIDER, dim, revision=revision)
-        vs.register_profile(MODEL, PROVIDER, dim, revision=revision, task="chunk")
-        summary = EmbeddingIdentity.canonical(PROVIDER, MODEL, revision, dim, "float32", "little", "summary")
-        chunk = EmbeddingIdentity.canonical(PROVIDER, MODEL, revision, dim, "float32", "little", "chunk")
+        vs.register_profile(MODEL, PROVIDER, dim, revision=revision, revision_suffix=suffix)
+        vs.register_profile(MODEL, PROVIDER, dim, revision=revision, revision_suffix=suffix, task="chunk")
+        summary = EmbeddingIdentity.canonical(PROVIDER, MODEL, revision + suffix, dim, "float32", "little",
+                                              "summary" + tag)
+        chunk = EmbeddingIdentity.canonical(PROVIDER, MODEL, revision + suffix, dim, "float32", "little",
+                                            "chunk" + tag)
         for node_id, text in nodes.items():
             vs.record_embedding(str(node_id), "summary", MODEL, _hash_vector(text, dim), identity=summary)
         for store_id, text in messages.items():
@@ -169,7 +173,7 @@ def _seed_vectors(db: Path, config: LCMConfig, nodes: dict[int, str], messages: 
 
 
 def build_store(tmp_path: Path, *, vectors: bool = True, dim: int = DIM, revision: str = "",
-                env: str = PROFILE_ENV) -> Fixture:
+                env: str = PROFILE_ENV, suffix: str = "") -> Fixture:
     home = tmp_path / "profile"
     home.mkdir(parents=True)
     (home / ".env").write_text(env)
@@ -211,7 +215,7 @@ def build_store(tmp_path: Path, *, vectors: bool = True, dim: int = DIM, revisio
              n2: "Aurora budget 42k; venue is the old boathouse.",
              n3: "Aurora launch plan: heron logo, 42k budget, boathouse."},
             {sid: text for sid, (_role, text) in zip(s1_ids, texts)},
-            dim=dim, revision=revision,
+            dim=dim, revision=revision, suffix=suffix,
         )
     payload_dir = home / DEFAULT_LARGE_OUTPUT_DIRNAME
     refs = sorted(p.name for p in payload_dir.iterdir()) if payload_dir.is_dir() else []
@@ -591,13 +595,50 @@ def test_t7_matching_identity_uses_vector_arms(fx, monkeypatch, _hash_provider):
     assert "which logo did we choose for Aurora" in _hash_provider.queries
 
 
-@pytest.mark.parametrize("variant", ["dim", "revision"])
+def test_t7_prefix_configured_profile_uses_vector_arms(tmp_path, monkeypatch, _hash_provider):
+    """REGRESSION: a profile with embedding prefixes registers `<task>+prefix` identities, the prefix
+    digest on the revision; the reader builds the same ones, so its vector arms run."""
+    _hash_provider.identity_revision_suffix = "+prefix:0123456789ab"
+    fixture = build_store(tmp_path, suffix="+prefix:0123456789ab")
+    reader = make_reader(fixture, monkeypatch)
+    payload, _, _ = call(reader, "lcm_recall", {"query": "which logo did we choose for Aurora"})
+    assert payload["reader"]["degraded"] == []
+    assert payload["provenance"]["coverage"]["summary"] in {"full", "bounded"}
+    assert payload["provenance"]["coverage"]["chunk"] in {"full", "bounded"}
+
+
+def test_t7_warmed_fastembed_model_is_present_for_the_first_recall(tmp_path, monkeypatch):
+    """REGRESSION: the reader's warmup marks the local model present for its process, so the first
+    recall uses it instead of starting a second warmup and serving full text meanwhile."""
+    import hermes_lcm.embedding_maintenance as embedding_maintenance
+
+    monkeypatch.setattr(embedding_maintenance, "_PREPARE", {})
+
+    class WarmFastembed(embedding_provider.FastembedProvider):
+        def _ensure_local(self, *, allow_download=False):
+            return None
+
+        def embed_query(self, text):
+            return _hash_vector(text, DIM)
+
+    warm = WarmFastembed(MODEL)
+    monkeypatch.setattr(embedding_provider, "resolve_provider", lambda _config, **_kw: warm)
+    env = PROFILE_ENV.replace(f"LCM_EMBEDDING_PROVIDER={PROVIDER}", "LCM_EMBEDDING_PROVIDER=fastembed")
+    reader = make_reader(build_store(tmp_path, env=env), monkeypatch)
+    assert reader.config.embedding_provider == "fastembed"
+    assert embedding_maintenance.local_model_state(reader.config) == ("present", "")
+
+
+@pytest.mark.parametrize("variant", ["dim", "revision", "prefix"])
 def test_t7_identity_mismatch_means_no_vectors(tmp_path, monkeypatch, variant):
-    """REGRESSION: a dim or revision mismatch -> no vectors, degraded flag, no VectorStore built."""
+    """REGRESSION: a dim, revision or prefix mismatch -> no vectors, degraded flag, no VectorStore
+    built (a prefix-registered store with an unprefixed reader is a mismatch, not an empty corpus)."""
     if variant == "dim":
         fixture = build_store(tmp_path, dim=DIM * 2)
-    else:
+    elif variant == "revision":
         fixture = build_store(tmp_path, revision="r2-other-weights")
+    else:
+        fixture = build_store(tmp_path, suffix="+prefix:0123456789ab")
     reader = make_reader(fixture, monkeypatch)
     payload, is_error, _ = call(reader, "lcm_recall", {"query": "which logo did we choose for Aurora"})
     assert not is_error
@@ -1297,6 +1338,30 @@ def test_t13_profile_env_reaches_config_and_nothing_else(fx, monkeypatch):
     assert config.embeddings_enabled is True and config.embedding_provider == PROVIDER
     assert config.large_output_externalization_threshold_chars == 200
     assert os.environ.get("VOYAGE_API_KEY") != NON_LCM_SECRET
+
+
+def test_t13_quoted_profile_values_drop_their_trailing_comments(tmp_path):
+    """REGRESSION: a quoted value followed by an inline comment parses as the quoted value, as the
+    profile's own loader reads it, so a tool the profile disables stays disabled."""
+    mcp_reader, _ = _reader_modules()
+    (tmp_path / ".env").write_text(
+        'LCM_DISABLED_TOOLS="lcm_expand,lcm_grep" # hide expansion and search\n'
+        "LCM_EMBEDDING_MODEL='model # with a hash'  # the model\n"
+        'LCM_RECALL_QUERY_TIMEOUT_S="30"\n'
+        'LCM_SUMMARY_MODEL=plain # unquoted\n'
+        'LCM_EMBEDDING_PROVIDER="ollama" trailing\n',
+        encoding="utf-8",
+    )
+    env = mcp_reader.read_profile_env(tmp_path)
+    assert env["LCM_DISABLED_TOOLS"] == "lcm_expand,lcm_grep"
+    assert env["LCM_EMBEDDING_MODEL"] == "model # with a hash"
+    assert env["LCM_RECALL_QUERY_TIMEOUT_S"] == "30"
+    assert env["LCM_SUMMARY_MODEL"] == "plain"
+    assert env["LCM_EMBEDDING_PROVIDER"] == '"ollama" trailing'  # not a quoted value: kept as written
+    disabled = mcp_reader.disabled_tool_names(env)
+    assert disabled == {"lcm_expand", "lcm_grep"}
+    names = [t["name"] for t in mcp_reader.tool_definitions(disabled)]
+    assert disabled.isdisjoint(names) and {"lcm_recall", "lcm_load_session"} <= set(names)
 
 
 # -- seams of the read-only construction itself ---------------------------------------

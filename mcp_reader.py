@@ -102,8 +102,9 @@ def read_profile_env(hermes_home: str | Path) -> dict[str, str]:
         if not sep or not (key.startswith("LCM_") or key in PROFILE_ENV_EXTRA_KEYS):
             continue
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
+        quoted = re.match(r"""(['"])(.*?)\1\s*(?:#.*)?$""", value)  # a quoted value, then nothing or a comment
+        if quoted:
+            value = quoted.group(2)
         else:
             value = value.split(" #", 1)[0].rstrip()
         found[key] = value
@@ -262,17 +263,24 @@ class StoreReader:
             return
         dtype = _resolve_storage_dtype(cfg)
         dim = _resolve_store_dim(cfg, len(vector))
-        # The same revision rule the writer's register_profile applies (prescreen tag).
+        # The same rules the writer's register_profile applies: the prescreen tag, and for a profile
+        # with embedding prefixes the prefix digest on the revision and a `<task>+prefix` task.
         prescreen = SimpleNamespace(_write_binary_prescreen=bool(getattr(cfg, "embedding_binary_prescreen", False)))
-        revision = VectorStore._prescreen_revision(prescreen, "", dtype=dtype)
+        suffix = str(getattr(provider, "identity_revision_suffix", "") or "")
+        revision = VectorStore._prescreen_revision(prescreen, "", dtype=dtype) + suffix
         provider_id, model_id = str(provider.provider_id), str(provider.model_id)
-        expected = {task: EmbeddingIdentity.canonical(provider_id, model_id, revision, dim, dtype,
-                                                      _VECTOR_BYTEORDER, task).identity_hash
+        expected = {task: EmbeddingIdentity.canonical(provider_id, model_id, revision, dim, dtype, _VECTOR_BYTEORDER,
+                                                      task + ("+prefix" if suffix else "")).identity_hash
                     for task in ("summary", "chunk")}
         if embedding_provider.default_chunk_model(provider_id, model_id) != model_id:
             expected["chunk"] = None  # a separate chunk model is a cloud (Voyage) path: never matched
         self._expected_identity = expected
         self._provider = provider
+        from .embedding_maintenance import note_local_model_present
+
+        # A warmed local model is present for this process, so the first recall uses it at once
+        # instead of starting a second warmup and serving full text meanwhile.
+        note_local_model_present(cfg)
 
     def _embedding_gate(self, conn: sqlite3.Connection) -> tuple[bool, list[str]]:
         """Vectors only when the store's active identity equals the reader's on every field."""
@@ -280,7 +288,9 @@ class StoreReader:
             return False, []
         if self._provider_problem or self._provider is None:
             return False, [self._provider_problem or "provider_unavailable"]
-        active = active_profile_hashes(conn)
+        active: dict[str, str] = {}
+        for task, identity in active_profile_hashes(conn).items():  # newest first; one active per task
+            active.setdefault(task.removesuffix("+prefix"), identity)
         if not active.get("summary"):
             return False, []  # no corpus; the capability flags say so
         if active["summary"] != self._expected_identity.get("summary") or (
