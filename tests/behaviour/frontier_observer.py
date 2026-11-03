@@ -14,7 +14,7 @@ LEGACY_FIELDS: dict[str, str] = {
     for field in dataclasses.fields(holder_type)
     for name, prop in vars(engine_module.LCMEngine).items()
     if isinstance(prop, property) and prop.fget is not None
-    and HOLDER_NAME in prop.fget.__code__.co_names
+    and (HOLDER_NAME in prop.fget.__code__.co_names or "_frontier_holder" in prop.fget.__code__.co_names)
     and field.name in prop.fget.__code__.co_names
 } if holder_type is not None else {}
 

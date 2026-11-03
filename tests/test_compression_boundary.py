@@ -378,7 +378,8 @@ def test_compress_records_no_commit_proof_when_cursor_is_not_trusted(tmp_path, m
         assert engine._compress_commit_proof is None
         engine._ingest_cursor_needs_reconcile = False
 
-        engine._record_compress_commit_proof(compressed, list(compressed))
+        # #1286: a no-progress compress returns the host's own list (compress() substitutes it for an equal copy).
+        engine._record_compress_commit_proof(compressed, compressed)
         assert engine._compress_commit_proof is None
 
         monkeypatch.setattr(engine, "_bypasses_lcm_context_management", lambda: True)

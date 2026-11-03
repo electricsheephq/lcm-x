@@ -1,8 +1,8 @@
 """v0.26.0 slice A: host ``message_uid`` SHADOW bindings (design REVISION 3). After #436 decides an ingest,
 each uid-bearing host dict gets one R3-3 class and the row #436 chose goes to the droppable ``host_uid_bindings``
 table. #1124 reads canonical bindings for store-complete copy exclusions; #1403 also reads them
-as occurrence proof for NULL-stamp audit copies. Every shadow exception is caught, counted and fails
-open. Event counter keys are ``[replay.]class.outcome[.reason]``; ``skipped.no_uid`` stays in memory, so a no-uid
+as occurrence proof for NULL-stamp audit copies. Shadow writes fail open inside foreground savepoints;
+lock contention escapes to the ingest owner. Event counter keys are ``[replay.]class.outcome[.reason]``; ``skipped.no_uid`` stays in memory, so a no-uid
 host writes nothing. The shadow GATE is counted per binding in the table (``first_check`` / ``disagree_seen``),
 so a replayed prefix never inflates it. ``LCM_HOST_MESSAGE_UID=off`` does nothing; ``on`` runs as ``shadow``.
 From the first release, a persisted lineage key is ``<home_tag>:<root>`` (#836): one database shared by several
@@ -74,23 +74,26 @@ def _fmt_counts(counts: dict) -> str:
 class HostUidShadowMixin:
     """Mixed into LCMEngine; reads ``self._store``, ``_state_db_path`` and the reconcile identity helpers."""
 
-    def _host_uid_lineage_key(self, session_id=None) -> tuple:
+    def _host_uid_lineage_key(self, session_id=None, *, require_complete=False) -> tuple:
         """R3-4: ``("<home_tag>:<root>", None)``, the root by Hermes' own walk (``_session_turn_lease_key_on_conn``:
         up while the parent ended by compression and the row is no fork child), else ``(None, "read_error" |
         "unresolved")`` (no state.db, missing row, cycle, over 256 hops). ``home_tag`` (#836) = 16 hex of the
         sha256 of the resolved state.db path. Cached per (state.db, session id): a key, or a missing state.db."""
         session_id = str(self._session_id if session_id is None else session_id or "")
-        cache = self.__dict__.setdefault("_host_uid_lineage_cache", {})
+        cache = {} if require_complete else self.__dict__.setdefault("_host_uid_lineage_cache", {})
         try:
             path = Path(self._state_db_path())
             key = (str(path), session_id)  # keyed by the home too: a profile switch changes the state.db
             if key in cache:
                 return cache[key]
-            found = self._host_uid_read_lineage(path, session_id)
+            found = (self._host_uid_read_lineage(path, session_id, require_complete=True) if require_complete
+                     else self._host_uid_read_lineage(path, session_id))
             if found[0] is not None:  # a resolve error is a read error below, never an exception into ingest
                 tag = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:16]
                 found = (f"{tag}:{found[0]}", None)
         except Exception as exc:  # host DB drift: no root, no binding; counted as an error
+            if require_complete:
+                raise  # Ledger preparation owns its failure; do not change legacy error memory.
             self._host_uid_read_error = exc
             return None, "read_error"
         if found[0] is not None or found is _NO_STATE_DB:
@@ -99,7 +102,7 @@ class HostUidShadowMixin:
                 cache.pop(next(iter(cache)))
         return found
 
-    def _host_uid_read_lineage(self, path: Path, session_id: str) -> tuple:
+    def _host_uid_read_lineage(self, path: Path, session_id: str, *, require_complete=False) -> tuple:
         """One uncached read of the lineage root. Only FileNotFoundError means a missing state.db (unresolved,
         never an error); PermissionError and every other OSError propagate as a read error, never cached."""
         try:
@@ -120,6 +123,8 @@ class HostUidShadowMixin:
                 if current is None or parent_id in seen:  # missing row or a cycle: unresolved
                     break
                 parent = read(parent_id) if parent_id and not _is_fork_child(current) else None
+                if require_complete and parent_id and not _is_fork_child(current) and parent is None:
+                    break
                 if parent is None or parent.get("end_reason") != "compression":
                     root = str(current["id"])
                     break
@@ -233,13 +238,18 @@ class HostUidShadowMixin:
             return
         delta, error = Counter({"skipped.no_uid": capture["no_uid"]}), None
         try:
-            error = self._host_uid_classify(capture, stored_at or {}, set(remainders or ()), delta)
+            with self._ingest_evidence():
+                error = self._host_uid_classify(capture, stored_at or {}, set(remainders or ()), delta)
         except Exception as exc:
-            delta["errors"] += 1
-            error = exc
+            self._raise_ingest_busy(exc)
+            if not (getattr(self, "_ingest_read_only", None) is not None
+                    and str(exc) == "session-end evidence deferred"):
+                delta["errors"] += 1
+                error = exc
         try:
             self._host_uid_count(delta, error)
-        except Exception:  # pragma: no cover - counting never blocks ingest
+        except Exception as exc:  # Shadow counting remains best-effort.
+            self._raise_ingest_busy(exc)
             logger.debug("LCM host-uid count failed")
 
     def _host_uid_classify(self, capture, stored_at: dict, remainders: set, delta: Counter):
@@ -248,7 +258,11 @@ class HostUidShadowMixin:
         delta["skipped.invalid_uid"] += len(capture["entries"]) - len(valid)
         if not valid:
             return None
-        lineage, problem = self._host_uid_lineage_key(capture["session_id"])
+        try:
+            lineage, problem = self._host_uid_lineage_key(capture["session_id"])
+        except Exception as exc:
+            delta["errors"] += 1
+            return exc  # Host ancestry unavailable: preserve the standalone no-binding decision.
         if lineage is None:
             delta[f"skipped.no_lineage_root.{problem}"] += len(valid)
             if problem == "read_error":
@@ -462,6 +476,8 @@ class HostUidShadowMixin:
             return
         counts = self._host_uid_counters = getattr(self, "_host_uid_counters", None) or Counter()
         counts.update(delta)
+        if getattr(self, "_ingest_read_only", None) is not None:
+            return
         durable = {key: value for key, value in delta.items() if key != "skipped.no_uid"}
         if not durable:
             return
@@ -475,11 +491,20 @@ class HostUidShadowMixin:
                     record[key] = value
             return record
 
-        try:  # never inside someone else's transaction: skipped and counted
-            if getattr(self._store._conn, "in_transaction", False):
+        owned = self._store._transaction_owner.owns_connection(self._store._conn)
+        try:
+            if owned:
+                # Same read-modify-write, serialized by the enclosing owner.
+                # update_metadata_json must never issue a nested BEGIN here.
+                with self._ingest_evidence():
+                    value = merged(self._store.read_metadata_json(HOST_UID_COUNTER_KEY))
+                    self._store.write_metadata_json([HOST_UID_COUNTER_KEY], json.dumps(value, sort_keys=True))
+            elif getattr(self._store._conn, "in_transaction", False):
                 raise sqlite3.OperationalError("host-uid tally skipped: the connection is in a transaction")
-            self._store.update_metadata_json(HOST_UID_COUNTER_KEY, merged)
+            else:
+                self._store.update_metadata_json(HOST_UID_COUNTER_KEY, merged)
         except Exception as exc:
+            self._raise_ingest_busy(exc)
             counts["errors"] += 1
             logger.debug("LCM host-uid counter write failed (%s)", type(exc).__name__)
 

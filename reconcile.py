@@ -389,6 +389,22 @@ class _StoreCursorRun:
     stored_tail: List[tuple[str, str, str, str, str]] = field(init=False)
 
 
+def _strip_volatile_host_scaffolding(content: str) -> str:
+    """Strip only the deterministic todo span (#516), then model-switch prefix."""
+    _todo_idx = content.find(_PRESERVED_TODO_CONTEXT_PREFIX)
+    if _todo_idx > 0:
+        _tail = content[_todo_annotation_span(content, _todo_idx):]
+        _rest = _tail[2:] if _tail.startswith("\n\n") else _tail  # one host delimiter, never user newlines
+        if _rest.startswith(_MODEL_SWITCH_NOTIFICATION_PREFIX) and "]" in _rest:  # same rule as below
+            _rest = _rest[_rest.find("]") + 1:].lstrip("\n")
+        content = content[:_todo_idx].rstrip() + ("\n\n" + _rest if _rest.strip() else "")
+    if content.startswith(_MODEL_SWITCH_NOTIFICATION_PREFIX):
+        _bracket_end = content.find("]")
+        if _bracket_end != -1:
+            content = content[_bracket_end + 1:].lstrip("\n")
+    return content
+
+
 class ReconcileMixin:
     @staticmethod
     def _canonicalize_tool_call_identity_value(value: Any) -> Any:
@@ -464,7 +480,9 @@ class ReconcileMixin:
         store = getattr(self, "_store", None)
         if not session_id or store is None:
             return False
-        cache = getattr(self, "_out_of_band_durable_rows", None)
+        pending = getattr(self, "_pending_ingest_frontier", None)
+        cache = pending.oob_rows if pending is not None and hasattr(pending, "oob_rows") else getattr(
+            self, "_out_of_band_durable_rows", None)
         if cache is None:
             cache = set()
             self._out_of_band_durable_rows = cache
@@ -815,8 +833,10 @@ class ReconcileMixin:
                 del watch[store_id]
                 continue
             try:  # best-effort: a failure keeps the watch for the next ingest, never blocks this one
-                self._capture_host_rewrite(store_id, identity, stored, message)
+                with self._ingest_evidence():
+                    self._capture_host_rewrite(store_id, identity, stored, message)
             except Exception as exc:
+                self._raise_ingest_busy(exc)
                 logger.warning("LCM host-rewrite capture for store_id %s failed (%s); retrying next ingest",
                                store_id, type(exc).__name__)
 
@@ -958,13 +978,6 @@ class ReconcileMixin:
         # re-ingest of already-stored messages (duplication bug).  Only the
         # annotation SPAN is cut: a user row the host merged in behind it is
         # new content and keeps the identity distinct (#516).
-        _todo_idx = content.find(_PRESERVED_TODO_CONTEXT_PREFIX)
-        if _todo_idx > 0:
-            _tail = content[_todo_annotation_span(content, _todo_idx):]
-            _rest = _tail[2:] if _tail.startswith("\n\n") else _tail  # one host delimiter, never user newlines
-            if _rest.startswith(_MODEL_SWITCH_NOTIFICATION_PREFIX) and "]" in _rest:  # same rule as below
-                _rest = _rest[_rest.find("]") + 1:].lstrip("\n")
-            content = content[:_todo_idx].rstrip() + ("\n\n" + _rest if _rest.strip() else "")
         # Model-switch notifications are ephemeral host scaffolding: the
         # host prepends "[Note: model was just switched from X to Y...]"
         # to the user's message, then strips the prefix on the next turn.
@@ -972,10 +985,7 @@ class ReconcileMixin:
         # Strip ONLY the prefix (up to and including the closing "]" and
         # trailing newlines) so the user's actual content survives and
         # identity matching works across the switch boundary.
-        if content.startswith(_MODEL_SWITCH_NOTIFICATION_PREFIX):
-            _bracket_end = content.find("]")
-            if _bracket_end != -1:
-                content = content[_bracket_end + 1:].lstrip("\n")
+        content = _strip_volatile_host_scaffolding(content)
         # Out-of-band user messages appended mid-turn are delivery scaffolding
         # ONLY once THIS row is durable with them: the stored row carries them
         # and the replayed row does not, or vice versa.  Stripping a block this
@@ -2716,12 +2726,14 @@ class ReconcileMixin:
         the record as it was (today's carry)."""
         key = self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
         try:
-            payload = self._store.read_metadata_json(key)
-            if isinstance(payload, dict):
-                payload["carry_ranges"] = [list(item) for item in self._coalesce_compression_carry_ranges(carry_ranges)]
-                self._store.write_metadata_json([key], json.dumps(payload, sort_keys=True))
-                logger.info("LCM rewrote the rotation child's carry ranges (%s): store ids %s", reason, store_ids)
-        except Exception:
+            with self._ingest_evidence():
+                payload = self._store.read_metadata_json(key)
+                if isinstance(payload, dict):
+                    payload["carry_ranges"] = [list(item) for item in self._coalesce_compression_carry_ranges(carry_ranges)]
+                    self._store.write_metadata_json([key], json.dumps(payload, sort_keys=True))
+                    logger.info("LCM rewrote the rotation child's carry ranges (%s): store ids %s", reason, store_ids)
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
             logger.debug("LCM carry-range rewrite failed", exc_info=True)
 
     def _cursor_from_host_rewrite_head(self, messages, session_count: int) -> Optional[int]:
@@ -3045,12 +3057,18 @@ class ReconcileMixin:
         messages: List[Dict[str, Any]],
         *,
         allow_session_end_replay_proof: bool = False,
+        session_counts: Optional[list] = None,
     ) -> int:
-        """Infer the in-memory cursor for an existing session after process restart."""
+        """Infer the in-memory cursor for an existing session after process restart.
+
+        ``session_counts`` (#1286), when given, receives the session's stored row count at this bind.
+        """
         if not self._session_id or not messages:
             return 0
 
         session_count = self._store.get_session_count(self._session_id)
+        if session_counts is not None:
+            session_counts.append(session_count)
         run = _StoreCursorRun(
             messages=messages, session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
@@ -3560,7 +3578,9 @@ class ReconcileMixin:
         """Return whether ``message`` is the unique active durable fold."""
         return bool(self._active_folded_tail_identity_overrides([message]))
 
-    def _get_store_id_map_for_messages(self, messages: List[Dict[str, Any]], occurrences=None) -> dict[int, int]:
+    def _get_store_id_map_for_messages(
+        self, messages: List[Dict[str, Any]], occurrences=None, *, exclude_store_ids=frozenset(),
+    ) -> dict[int, int]:
         """Map current raw message objects back to store_ids in stable order.
 
         Matching starts strictly after ``_last_compacted_store_id`` so repeated
@@ -3640,9 +3660,10 @@ class ReconcileMixin:
                     break
                 candidates.extend(page)
                 next_candidate_id = int(page[-1]["store_id"]) + 1
+        # #1286: the re-key's coverage guard passes the stored rows an earlier map already claimed.
         candidates = list({
             int(candidate["store_id"]): candidate for candidate in candidates
-            if int(candidate.get("store_id") or 0) > 0
+            if int(candidate.get("store_id") or 0) > 0 and int(candidate["store_id"]) not in exclude_store_ids
         }.values())
         candidates.sort(key=lambda candidate: int(candidate["store_id"]))
         self._load_host_rewrite_overrides(candidates)

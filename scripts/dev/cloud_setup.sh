@@ -8,17 +8,40 @@
 # libraries from it, so run it in a sandbox checkout, not one whose .venv you manage. Its
 # environment file and SQLite build live inside that .venv, so checkouts never share them.
 #
-# Usage, from anywhere in the checkout (needs network, python3 >= 3.11 with venv, curl,
-# unzip, gcc, sha256sum):
+# Usage, from anywhere in the checkout (needs network, python3 >= 3.11 with venv/ensurepip,
+# git, curl, unzip, gcc, sha256sum, node):
 #   bash scripts/dev/cloud_setup.sh
 # Then run the printed commands; they start by sourcing the environment file, which
 # non-interactive shells (agents, ssh) do not read from ~/.bashrc.
 set -euo pipefail
+# Resolve a relative PYTHON once, before any cd, so every check uses the same interpreter.
+# Builtins only: no tool has been checked yet. A directory that does not exist leaves PYTHON
+# as given, so the venv check below names it.
+case "${PYTHON:-}" in
+  */*) if py_dir="$(CDPATH='' cd -- "${PYTHON%/*}/" 2>/dev/null && pwd)"; then PYTHON="$py_dir/${PYTHON##*/}"; fi ;;
+esac
+missing=0
+for tool in git curl unzip gcc sha256sum node; do
+  if ! command -v "$tool" > /dev/null 2>&1; then
+    echo "cloud_setup: missing prerequisite: $tool" >&2
+    missing=1
+  fi
+done
+if ! "${PYTHON:-python3}" -c 'import venv, ensurepip' > /dev/null 2>&1; then
+  echo "cloud_setup: missing prerequisite: ${PYTHON:-python3} venv/ensurepip" >&2
+  missing=1
+fi
+# Exit 3 means too old; an interpreter that does not run at all is reported above.
+py_rc=0
+"${PYTHON:-python3}" -c 'import sys; sys.exit(3 if sys.version_info < (3, 11) else 0)' > /dev/null 2>&1 || py_rc=$?
+if [ "$py_rc" = 3 ]; then
+  echo "cloud_setup: missing prerequisite: ${PYTHON:-python3} >= 3.11" >&2
+  missing=1
+fi
+[ "$missing" = 0 ] || exit 1
 repo="$(git rev-parse --show-toplevel)"
 cd "$repo"
 
-"${PYTHON:-python3}" -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
-  || { echo "cloud_setup: Python >= 3.11 is required" >&2; exit 1; }
 want="$("${PYTHON:-python3}" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 # Reuse .venv only when it was made here, on the selected interpreter's Python version, without
 # the system site packages (a system PyYAML would stay importable). Otherwise recreate it; a
@@ -40,22 +63,7 @@ export PATH="$repo/.venv/bin:$PATH"
 # pytest run has no PyYAML (config.py falls back to its own parser without it).
 python -m pip install -q PyYAML==6.0.3
 
-# Print the `run:` script of the first step whose name starts with $2, from the composite
-# action or the workflow's `test` job in file $1. A missing step is an error.
-step_script() {
-  python - "$1" "$2" <<'PY'
-import sys
-import yaml
-
-path, prefix = sys.argv[1], sys.argv[2]
-doc = yaml.safe_load(open(path))
-steps = doc["runs"]["steps"] if "runs" in doc else doc["jobs"]["test"]["steps"]
-runs = [step["run"] for step in steps if step.get("name", "").startswith(prefix)]
-if not runs:
-    sys.exit(f"cloud_setup: no step named {prefix!r} in {path}")
-print(runs[0])
-PY
-}
+. "$repo/scripts/dev/ci_step.sh"
 
 # Assign each script first: under `set -e` a failed command substitution inside an argument
 # would not stop the script, and an empty script would "succeed".
@@ -74,14 +82,16 @@ for key in ("version", "url", "sha256"):
 PY
 )"
 
+# GitHub runs a workflow step's script with `bash -e`, and a composite-action step that
+# declares `shell: bash` with `bash -eo pipefail`; each step runs here the same way.
 # 1. CI's test tools. 2. SQLite: CI's build-and-verify step with the action's defaults.
-bash -c "$install"
+bash -e -c "$install"
 : > "$cache/github-env"
-RUNNER_TEMP="$cache" GITHUB_ENV="$cache/github-env" bash -c "$sqlite"
+RUNNER_TEMP="$cache" GITHUB_ENV="$cache/github-env" bash -eo pipefail -c "$sqlite"
 # 3. The hermes-agent ContextEngine stub (agent/ is gitignored).
-bash -c "$stub"
+bash -e -c "$stub"
 # 4. The rollback-reader commits. Without them the old-reader tests fail here (#841).
-if ! bash -c "$rollback"; then
+if ! bash -e -c "$rollback"; then
   echo "cloud_setup: warning: could not fetch the rollback-reader commits; the old-reader tests will fail" >&2
 fi
 # CI's main pytest run has neither YAML library (config.py then uses its own parser); CI's ruamel

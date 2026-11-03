@@ -36,6 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 2  # the golden-outcome gate compares the PR's merge commit with its first parent
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -47,6 +49,14 @@ jobs:
 
       - name: Lint with ruff
         run: ruff check .
+
+      - name: Gate golden outcomes
+        if: github.event_name == 'pull_request'
+        run: |
+          changed=$(git diff --name-only HEAD^1 HEAD -- 'tests/fixtures/*_trace.json')
+          if [[ -n "$changed" ]]; then
+            python scripts/golden_outcome_gate.py --base-ref HEAD^1
+          fi
 
   test:
     name: test-shard (${{ matrix.python-version }}, ${{ matrix.shard }}/4)

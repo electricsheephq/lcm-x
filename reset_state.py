@@ -53,6 +53,8 @@ class ResetStateMixin:
         Proven carry-over paths must restore/advance state from the verified
         source lifecycle after rebinding.
         """
+        # Each boundary exit counts its own outcome (#2055); a reset only drops the handle.
+        self._emission_handle = None
         self._reset_session_counters()
         self._reset_compaction_progress()
         # A commit proof is valid only through the compression handoff of the

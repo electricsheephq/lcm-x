@@ -283,8 +283,9 @@ def test_nested_immediate_reserves_inside_an_empty_scope(message_store: Any, tmp
 def test_host_uid_still_refuses_an_enclosing_transaction(message_store: Any) -> None:
     owner = message_store
     conn: TraceConnection = owner.connection
-    with owner.atomic(immediate=True):
-        owner.write_metadata_json(["pending"], "{}")
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")  # No TransactionOwner: this boundary belongs to the caller.
+        conn.execute("INSERT INTO metadata(key, value) VALUES ('pending', '{}')")
         with pytest.raises(sqlite3.OperationalError, match="host-uid shadow write skipped"):
             owner._host_uid_write(lambda raw: raw.execute("DELETE FROM metadata WHERE key='pending'"))
         assert conn.in_transaction

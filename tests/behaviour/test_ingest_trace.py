@@ -21,6 +21,9 @@ from tests.harness import engine_context, pin_char_counter
 
 @pytest.mark.parametrize("case", SCENARIOS, ids=lambda case: case.name)
 def test_ingest_golden(case: Any, tmp_path: Path) -> None:
+    # P1b-1 regeneration moves BEGIN before classification, collapses evidence
+    # commits into one, and moves cache observations after COMMIT. Fail-open
+    # faults roll back their savepoint; escaping faults roll back the ingest.
     expected: dict[str, list[str]] = json.loads(GOLDEN.read_text())
     payloads: list[str] = []
     actual = observe(case, tmp_path, payloads=payloads)
@@ -66,9 +69,10 @@ def test_fixture_scenario_inventory_and_size() -> None:
     assert len(names) == len(set(names))
     assert set(data) == set(names), TRACE_GUIDANCE
     # Initial, next and cold ingests now each retain their full observer stream.
-    # Parts A/B both add transient ingest observations.
-    assert GOLDEN.stat().st_size <= 3_400_000
-    assert all(len(json.dumps(trace).encode()) <= 45_000 for trace in data.values())
+    # Owned evidence savepoints enlarge the complete observer stream (round up to 100,000 bytes).
+    # P1b-2b's shadow-ledger SQL adds about 140,000 bytes (4,138,779 in all; largest trace 46,288).
+    assert GOLDEN.stat().st_size <= 4_200_000
+    assert all(len(json.dumps(trace).encode()) <= 47_000 for trace in data.values())
 
 
 def test_first_divergence() -> None:

@@ -35,6 +35,10 @@ finally:
 '''
 
 
+# Background maintenance overran a 10 s drain under xdist load on a shared CI runner (#2049).
+# The drain is a precondition, not the property under test; a real hang still fails.
+DRAIN_TIMEOUT = 60
+
 # Columns an invalidation (rollup_store: status='stale', generation+1, lease cleared, error) may change.
 INVALIDATION_FIELDS = {"status", "generation", "lease_expires_at", "lease_nonce", "error"}
 
@@ -70,10 +74,10 @@ def test_shipped_rollups_rollback(
     try:
         bind(engine)
         seed_history(engine, "candidate")
-        assert engine.drain_embedding_maintenance(timeout=10)
+        assert engine.drain_embedding_maintenance(timeout=DRAIN_TIMEOUT)
         rebuild_rollup(engine)
         if policy == "fleet":
-            assert engine.drain_embedding_maintenance(timeout=10)
+            assert engine.drain_embedding_maintenance(timeout=DRAIN_TIMEOUT)
             warmup(engine)
             embed_all(engine)
             assert_complete_vectors(engine)
@@ -140,7 +144,7 @@ def test_shipped_rollups_rollback(
                             "WHERE n.node_id IS NULL OR r.rollup_id IS NULL").fetchone()[0] == 0
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         if policy == "fleet":
-            assert engine.drain_embedding_maintenance(timeout=10)
+            assert engine.drain_embedding_maintenance(timeout=DRAIN_TIMEOUT)
             embed_all(engine)
             assert_complete_vectors(engine)
     finally:

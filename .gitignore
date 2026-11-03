@@ -48,6 +48,8 @@ agent/
 
 # Benchmark outputs
 benchmarks/runs/
+# bench/tools/run_candidate.sh's default run root
+/candidate-runs/
 *.lcm-benchmark-result.json
 
 # Logs

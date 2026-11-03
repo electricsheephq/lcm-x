@@ -44,6 +44,7 @@ def deliver_recall(
     degraded_reasons: list[str],
     timed_out: bool,
     fts_anchor_info: dict[str, Any] | None,
+    fts_rerun: bool = False,
     summary_leads: list[dict[str, Any]],
     limit_cap: int,
     snippet_chars: int,
@@ -207,6 +208,8 @@ def deliver_recall(
             "from_current_session": bool(hit.get("from_current_session")),
             "arms": arms,
         }
+        if hit.get("lineage"):  # #1931: a delegated subagent's hit names its parent session
+            item.update(parent_session_id=hit.get("parent_session_id"), lineage=hit["lineage"])
         if hit.get("kind") == "summary":
             item["node_id"] = hit.get("node_id")
             if hit.get("store_id") is not None:
@@ -353,6 +356,8 @@ def deliver_recall(
     }
     if rerank_enabled() and rerank_scores:
         response["provenance"]["rerank_scores"] = rerank_scores
+    if fts_rerun:
+        response["provenance"]["fts_rerun"] = True
     if fts_anchor_info is not None and len(arm_order) > 1:
         # The anchor only places the hit in the ranked window; answer_ready
         # selection (citation and per-session rules) and the response cap still

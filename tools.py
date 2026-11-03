@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 import math
+import os
 import re
 import sqlite3
 import threading
@@ -175,16 +176,60 @@ def _session_expand_hint(node_id: int, session_id: str) -> str:
     return f"lcm_expand(node_id={node_id}, session_id={session_id!r})"
 
 
+def _externalized_expand_hint(ref: str, session_id: str) -> str:
+    return f"lcm_expand(externalized_ref={ref!r}, session_id={session_id!r})"
+
+
+def _session_and_lineage(engine: "LCMEngine", session_id: str) -> set[str]:
+    lineage = getattr(engine, "_rotation_predecessor_session_ids", None)
+    return {session_id, *(lineage(session_id) if callable(lineage) else [])}
+
+
+def _is_inside_named_profile(path: Path, home: Path) -> bool:
+    profiles = home / "profiles"
+    try:
+        profiles.stat()
+    except FileNotFoundError:
+        return False
+    profile_dirs = (profiles, *profiles.iterdir())
+    for parent in (path, *path.parents):
+        if parent.is_relative_to(home):
+            if any(os.path.samefile(parent, profile) for profile in profile_dirs):
+                return True
+    return False
+
+
 def _get_externalized_payload(
     engine: "LCMEngine",
     ref: str,
     *,
     allowed_session_ids: set[str] | None = None,
+    require_profile_containment: bool = False,
 ) -> dict[str, Any] | None:
+    if require_profile_containment:
+        if not engine._hermes_home or not ref or Path(ref).name != ref:
+            return None
+        try:
+            home = Path(engine._hermes_home).expanduser().resolve()
+            storage_dir = get_large_output_storage_dir(
+                engine._config, hermes_home=engine._hermes_home, create=False
+            ).resolve()
+            payload_path = (storage_dir / ref).resolve()
+            storage_dir.relative_to(home)
+            payload_path.relative_to(storage_dir)
+            if (
+                _is_inside_named_profile(storage_dir, home)
+                or _is_inside_named_profile(payload_path, home)
+            ):
+                return None
+        except (OSError, RuntimeError, ValueError):
+            return None
     payload = load_externalized_payload(ref, config=engine._config, hermes_home=engine._hermes_home)
     if payload is None:
         return None
     payload_session_id = payload.get("session_id") or ""
+    if require_profile_containment and not payload_session_id:
+        return None
     allowed = allowed_session_ids
     if not allowed:
         # #680: a ref written before a compression-boundary rotation stays readable.
@@ -448,6 +493,8 @@ _LCM_RECALL_VALID_INCLUDE = frozenset({"all", "summaries", "verbatim"})
 # budget; hybrid recall reserves the remainder for provider resolution, vector
 # arms, hydration, fusion, and optional reranking.
 _LCM_RECALL_FTS_MAX_BUDGET_FRACTION = 0.25
+# Disclosure for a capped FTS expiry. Removed again when the arm is re-run (#265).
+_LCM_RECALL_FTS_CAPPED_REASON = "full-text arm capped to preserve semantic recall budget"
 # The vector-corpus preflight guards the budget split above, so its own scan
 # must never be able to spend the request budget it exists to protect: a
 # no-match probe over a large fully-orphaned corpus has to exhaust candidates
@@ -1057,6 +1104,27 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
     return _recent.lcm_recent(args, **kwargs)
 
 
+_SUBAGENT_SOURCE = "subagent"  # #1931: the source a delegated subagent's stored rows carry
+
+
+def _annotate_subagent_lineage(engine: "LCMEngine", hits: list[dict[str, Any]]) -> None:
+    """#1931: a hit from a delegated subagent session (its rows carry source 'subagent') names its parent."""
+    hits = [hit for hit in hits if hit.get("source") == _SUBAGENT_SOURCE]
+    parents_of = getattr(getattr(engine, "_store", None), "session_lineage_parents", None)
+    if not hits or not callable(parents_of):
+        return
+    try:
+        parents = parents_of({str(hit.get("session_id") or "") for hit in hits})
+    except Exception as exc:  # lineage is an annotation; a failed read never drops hits
+        logger.debug("LCM subagent lineage read failed: %s", exc)
+        return
+    for hit in hits:
+        parent = parents.get(str(hit.get("session_id") or ""))
+        if parent:
+            hit["parent_session_id"] = parent
+            hit["lineage"] = f"subagent of {parent}"
+
+
 def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     """Search raw messages + summaries with optional cross-session scoping.
 
@@ -1199,36 +1267,44 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         and search_session_id not in excluded_session_ids
     ):
         try:
-            msg_hits = engine._store.search(
-                query,
-                session_id=search_session_id,
-                limit=source_limit,
-                sort=sort,
-                source=source,
-                conversation_id=conversation_id,
-                role=role,
-                time_from=time_from,
-                time_to=time_to,
-                exclude_session_ids=excluded_session_ids,
-                allow_operators=bool(args.get("_allow_operators", False)),
-                **({"stemmed": True} if args.get("_stemmed") else {}),
-                **({"_include_like_excerpt": True} if args.get("mode") == "recall" else {}),
-                **({"agent_operators": True} if args.get("_agent_operators") else {}),
-            )
-            if args.get("mode") != "recall":
-                msg_hits = collapse_duplicate_hits(msg_hits)
-            for hit in msg_hits:
-                if hit.get("session_id") in excluded_session_ids:
-                    continue
-                results.append(
-                    _shape_message_hit(
-                        hit,
-                        current_session_id=current_session_id,
-                        has_current_session=has_current_session,
-                    )
+            # #1931: 'current' also covers the current session's delegated subagents (session_lineage).
+            descendant_ids = [
+                child_id for child_id in (
+                    getattr(engine._store, "session_lineage_descendants", lambda _sid: ())(current_session_id)
+                    if session_scope == "current" and has_current_session else ()
+                ) if child_id not in excluded_session_ids
+            ]
+            for scoped_session_id in (search_session_id, *descendant_ids):
+                msg_hits = engine._store.search(
+                    query,
+                    session_id=scoped_session_id,
+                    limit=source_limit,
+                    sort=sort,
+                    source=source,
+                    conversation_id=conversation_id,
+                    role=role,
+                    time_from=time_from,
+                    time_to=time_to,
+                    exclude_session_ids=excluded_session_ids,
+                    allow_operators=bool(args.get("_allow_operators", False)),
+                    **({"stemmed": True} if args.get("_stemmed") else {}),
+                    **({"_include_like_excerpt": True} if args.get("mode") == "recall" else {}),
+                    **({"agent_operators": True} if args.get("_agent_operators") else {}),
                 )
-                if args.get("mode") == "recall" and "_like_excerpt" in hit:
-                    results[-1]["_like_excerpt"] = hit["_like_excerpt"]
+                if args.get("mode") != "recall":
+                    msg_hits = collapse_duplicate_hits(msg_hits)
+                for hit in msg_hits:
+                    if hit.get("session_id") in excluded_session_ids:
+                        continue
+                    results.append(
+                        _shape_message_hit(
+                            hit,
+                            current_session_id=current_session_id,
+                            has_current_session=has_current_session,
+                        )
+                    )
+                    if args.get("mode") == "recall" and "_like_excerpt" in hit:
+                        results[-1]["_like_excerpt"] = hit["_like_excerpt"]
         except Exception as exc:
             # Grep degrades to whatever the other stages produce, but the
             # failure must reach the PAYLOAD, not just the log: lcm_recall's
@@ -1469,6 +1545,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         result.pop("_sort_rank", None)
         result.pop("_sort_directness", None)
         result.pop("_hybrid_summary_override", None)
+    _annotate_subagent_lineage(engine, results)
 
     response: Dict[str, Any] = {
         "query": query,
@@ -4146,12 +4223,14 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     degraded_reasons: list[str] = (["cpu_limited"] if cpu_limited else []) + local_fallback_reasons
     embedding_query_metrics: list[dict[str, Any]] = []
     timed_out = False
+    fts_capped_expiry = False
+    fts_rerun = False
     provider: Any = None
 
     served_fts_index = "plain"
     # -- FTS arm (the default-on value: works with embeddings disabled) --
     def _run_fts_arm(fallback: bool = False) -> None:
-        nonlocal timed_out, served_fts_index
+        nonlocal timed_out, served_fts_index, fts_capped_expiry
         fts_deadline = deadline
         fts_sub_budget_applied = False
         configured_provider = provider_override or str(
@@ -4225,9 +4304,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 and time.monotonic() < deadline
             )
             if capped_expiry:
-                degraded_reasons.append(
-                    "full-text arm capped to preserve semantic recall budget"
-                )
+                fts_capped_expiry = True
+                degraded_reasons.append(_LCM_RECALL_FTS_CAPPED_REASON)
             else:
                 degraded_reasons.append("full-text arm unavailable")
                 timed_out = timed_out or bool(fts_error.get("timeout"))
@@ -4461,6 +4539,24 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         coverage["chunk"] = "none"
                         degraded_reasons.append(f"chunk arm failed: {exc}")
 
+    # -- FTS re-run (#265). The sub-budget cap is a bet that the semantic arms
+    # will spend the rest of the request. When the capped FTS arm expired and no
+    # semantic arm then produced a hit (provider unusable, or reference-strict
+    # summaries that yielded only non-evidence leads), FTS is again the only arm
+    # that can return evidence, so it runs ONCE more under the REQUEST deadline.
+    # Never runs when a semantic arm has hits, and never past the deadline. As a
+    # fallback run it gets no sub-budget, and a failure is classified like an
+    # uncapped FTS failure, including a worker-capacity timeout before the deadline.
+    if (
+        fts_capped_expiry
+        and not arm_hits.get("summary")
+        and not arm_hits.get("chunk")
+        and time.monotonic() < deadline
+    ):
+        fts_rerun = True
+        degraded_reasons.remove(_LCM_RECALL_FTS_CAPPED_REASON)
+        _run_fts_arm(fallback=True)
+
     ordered, arm_order, arm_weights = fuse_candidates(
         arm_hits, getattr(engine._config, "recall_arm_weights", None)
     )
@@ -4470,6 +4566,11 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     fts_arm_index = arm_order.index("fts") if "fts" in arm_order else None
     now = time.time()
     scope_session_ids = set(_recent._recent_conversation_scope_session_ids(engine))
+    try:  # #1931: the current session's delegated subagents share its scope boost (only child hits need it)
+        if any(entry.get("hit", {}).get("source") == _SUBAGENT_SOURCE for entry in ordered):
+            scope_session_ids.update(engine._store.session_lineage_descendants(str(engine.current_session_id or "")))
+    except Exception as exc:
+        logger.debug("LCM subagent scope read failed: %s", exc)
     ordered = apply_prior(ordered, scope_session_ids, now, scope_bias)
 
     # -- Optional rerank stage (default OFF): a pure rank-REORDER within the top
@@ -4491,6 +4592,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
         )
 
+    _annotate_subagent_lineage(engine, [entry["hit"] for entry in ordered if isinstance(entry.get("hit"), dict)])
     session_delivery = None
     if kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) == "session":
         from .recall_session import deliver_session
@@ -4526,6 +4628,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         degraded_reasons=degraded_reasons,
         timed_out=timed_out,
         fts_anchor_info=fts_anchor_info,
+        fts_rerun=fts_rerun,
         summary_leads=summary_leads,
         limit_cap=_LCM_RECALL_LIMIT_CAP,
         snippet_chars=_LCM_RECALL_SNIPPET_CHARS,
@@ -4555,11 +4658,12 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
     """Expand a summary node, externalized payload, or raw message to its content.
 
     Mode selection (exactly one is required):
-    - ``externalized_ref``: open a stored externalized payload by ref filename (current session only)
+    - ``externalized_ref``: open a stored payload; current session by default, pass ``session_id`` for another
     - ``store_id``: fetch a single raw message by store_id; works across sessions
     - ``node_id``: expand a summary node to its source content (explicit ``session_id`` required cross-session)
 
-    Omitting ``session_id`` preserves current-session node lookup. Carried-over
+    ``session_id`` is valid with ``node_id`` or ``externalized_ref`` only.
+    Omitting it preserves current-session lookup. Carried-over
     current-session nodes may reference raw source rows from the previous session.
     """
     return _expand_tools.lcm_expand(args, **kwargs)
@@ -5084,6 +5188,8 @@ lcm_inspect = _inspect_tools.lcm_inspect
 
 def lcm_status(args: Dict[str, Any], **kwargs) -> str:
     """Quick health overview of the LCM engine for the current session."""
+    from .tokens import token_counter_status
+
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
@@ -5102,6 +5208,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({
             "error": "No active session",
             "runtime_identity": engine.get_runtime_identity(),
+            "token_counter": token_counter_status(),
             "identity_migration": getattr(engine, "identity_migration", None),
             **inactive_payload,
         })
@@ -5261,6 +5368,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         "preset_suggestion": preset_status_payload(engine),
         "ingest_reconciliation": ingest_reconciliation,
         "runtime_identity": runtime_identity,
+        "token_counter": token_counter_status(),
         "identity_migration": full_status.get("identity_migration"),
         "lifecycle": lifecycle,
         "lifecycle_fragmentation": lifecycle_fragmentation,
@@ -5271,6 +5379,8 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
 
 def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     """Run diagnostics on the LCM database and configuration."""
+    from .tokens import token_counter_status
+
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
@@ -5611,6 +5721,8 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
             "status": "fail",
             "detail": str(e),
         })
+
+    checks.append({"check": "token_counter", "status": "pass", "detail": token_counter_status()})
 
     # 5. Source-lineage hygiene
     try:

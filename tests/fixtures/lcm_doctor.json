@@ -197,6 +197,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -456,6 +465,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -667,6 +685,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {
@@ -934,6 +961,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {
@@ -1244,6 +1280,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -1533,6 +1578,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -1808,6 +1862,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -2030,6 +2093,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {
@@ -2300,6 +2372,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -2543,6 +2624,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {
@@ -2845,6 +2935,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -3142,6 +3241,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {
@@ -3454,6 +3562,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -3709,6 +3826,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {
@@ -3990,6 +4116,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "fail",
           "detail": "fixture SQL fault"
@@ -4250,6 +4385,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -4481,6 +4625,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {
@@ -4751,6 +4904,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -5015,6 +5177,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -5270,6 +5441,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {
@@ -5534,6 +5714,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {
@@ -5802,6 +5991,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -6063,6 +6261,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {
@@ -6331,6 +6538,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -6593,6 +6809,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {
@@ -6859,6 +7084,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -7117,6 +7351,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -7372,6 +7615,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {
@@ -7642,6 +7894,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -7909,6 +8170,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -8172,6 +8442,15 @@
           "check": "embedding_provider_health",
           "status": "fail",
           "detail": "fixture helper fault"
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
         },
         {
           "check": "source_lineage_hygiene",
@@ -8441,6 +8720,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -8656,6 +8944,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {
@@ -8923,6 +9220,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {
@@ -9195,6 +9501,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -9459,6 +9774,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {
@@ -9729,6 +10053,15 @@
           }
         },
         {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
+          }
+        },
+        {
           "check": "source_lineage_hygiene",
           "status": "pass",
           "detail": {
@@ -9978,6 +10311,15 @@
           "status": "pass",
           "detail": {
             "reason": "fixture offline probe"
+          }
+        },
+        {
+          "check": "token_counter",
+          "status": "pass",
+          "detail": {
+            "counter": "char_estimate",
+            "encoding": "",
+            "state": "unavailable"
           }
         },
         {

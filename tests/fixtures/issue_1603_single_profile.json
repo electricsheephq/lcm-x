@@ -139,6 +139,7 @@
   },
   "expected": {
     "_embeddings_enabled_supplied": true,
+    "absolute_threshold_tokens": 0,
     "adaptive_retrieval_enabled": false,
     "assertion_extraction_enabled": false,
     "assertion_extraction_max_sources_per_pass": 4,
@@ -156,6 +157,7 @@
       "LCM_LEAF_TARGET_RATIO has no effect while the minimum equals the maximum; set LCM_LEAF_TARGET_MAX_TOKENS"
     ],
     "config_sources": {
+      "absolute_threshold_tokens": "env:LCM_ABSOLUTE_THRESHOLD_TOKENS",
       "codex_gpt55_autoraise_enabled": "default",
       "context_threshold": "env:LCM_CONTEXT_THRESHOLD",
       "expansion_reasoning_effort": "default",

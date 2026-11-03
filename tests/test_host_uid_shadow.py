@@ -799,10 +799,14 @@ def test_f7_capture_failure_leaves_ingest_byte_identical(tmp_path, monkeypatch):
 def test_f7_counter_flush_failure_leaves_ingest_unaffected(tmp_path, monkeypatch):
     off = _run(tmp_path / "off", "off", monkeypatch, _UID_LIST)
 
-    def boom(*_args, **_kwargs):
-        raise sqlite3.OperationalError("database is locked")
+    write = MessageStore.write_metadata_json
 
-    monkeypatch.setattr(MessageStore, "update_metadata_json", boom)
+    def boom(self, keys, *args, **kwargs):
+        if HOST_UID_COUNTER_KEY in keys:
+            raise sqlite3.OperationalError("injected counter I/O error")
+        return write(self, keys, *args, **kwargs)
+
+    monkeypatch.setattr(MessageStore, "write_metadata_json", boom)
     shadow = _run(tmp_path / "shadow", None, monkeypatch, _UID_LIST)
     assert shadow[0] == off[0] and shadow[1] == off[1] and len(shadow[2]) == 3
     assert shadow[3] == {"unbound.agree_new": 3, "errors": 1}
@@ -912,10 +916,14 @@ class _FaultyConn:
                 self._fail = None
                 self._real.execute(sql, params[0])
                 raise sqlite3.OperationalError("injected after the first binding INSERT")
-            self._armed = self._fail == "commit"
+            self._armed = self._armed or self._fail == "commit"
         return self._real.executemany(sql, params)
 
     def execute(self, sql, *args):
+        # The shadow boundary is now RELEASE, while COMMIT belongs to ingest.
+        if self._armed and sql.startswith("RELEASE SAVEPOINT"):
+            self._armed = self._fail = None
+            raise sqlite3.OperationalError("injected at shadow RELEASE")
         if self._fail == "schema_commit" and "CREATE TABLE IF NOT EXISTS host_uid_bindings" in sql:
             self._armed = True
         return self._real.execute(sql, *args)
@@ -1010,6 +1018,7 @@ def _has_table(engine: LCMEngine) -> bool:
 
 @pytest.mark.parametrize("table", ["absent", "present"])
 def test_r4_an_outer_transaction_is_never_committed_or_rolled_back(tmp_path, table):
+    """An unowned SQLite transaction is still refused; explicit owners join below."""
     _state_db(tmp_path, [("S", None, None)])
     engine = _engine(tmp_path)
     conn = engine._store._conn
@@ -1027,6 +1036,29 @@ def test_r4_an_outer_transaction_is_never_committed_or_rolled_back(tmp_path, tab
         conn.rollback()  # the holder decides: its pending row was never committed by the shadow
         assert not conn.execute("SELECT 1 FROM messages WHERE content = 'outer pending'").fetchone()
         assert "u-new" not in [b[1] for b in _bindings(engine)]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("immediate", [False, True])
+def test_r4_explicit_owner_joins_shadow_without_committing_or_rolling_back(tmp_path, immediate):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path)
+    store = engine._store
+    stored = store.append("S", _m("user", "stored" + PAD))
+    message = _m("user", "stored" + PAD, 5., "u-new")
+    try:
+        with pytest.raises(RuntimeError, match="owner rollback"):
+            with store.atomic(immediate=immediate):
+                engine._host_uid_shadow(engine._host_uid_capture([message], [message], 0, 0, None, ()), {0: stored})
+                assert store._conn.in_transaction
+                assert "u-new" in [b[1] for b in _bindings(engine)]
+                assert _durable(engine)
+                with sqlite3.connect(store.db_path) as reader:
+                    assert not reader.execute("SELECT 1 FROM sqlite_master WHERE name='host_uid_bindings'").fetchone()
+                raise RuntimeError("owner rollback")
+        assert not store._conn.in_transaction and not _has_table(engine)
+        assert _durable(engine) == {}
     finally:
         engine.shutdown()
 

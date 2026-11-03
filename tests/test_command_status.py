@@ -11,11 +11,14 @@ from typing import Any
 
 import pytest
 
-from hermes_lcm import command
+from hermes_lcm import command, tokens
 
 
 def status_engine(tmp_path: Path, case: str, monkeypatch: pytest.MonkeyPatch) -> Any:
     """Supply deterministic facts without a provider, lifecycle, or worker."""
+    monkeypatch.setattr(tokens, "token_counter_status", lambda: {
+        "counter": "char_estimate", "encoding": "", "state": "unavailable",
+    })
     status: dict[str, Any] = {}
     bound = case != "cold"
     if bound:
