@@ -473,9 +473,10 @@ LCM-X for Claude Code is its own release unit, versioned by the plugin manifest
   - the CLI smoke (`scripts/claude_code_unit_smoke.py`). It needs #1216 on `main`.
     - It unpacks the asset with no Hermes, in two runtime modes: a fresh venv of the running
       Python (3.11 or newer), and that Python found on `PATH` and run with `-I -S`.
-    - It runs each hook registered in `hooks/hooks.json` as Claude Code does: in exec form, with
-      `python3` found on `PATH`, `${CLAUDE_PLUGIN_ROOT}` substituted in the arguments and no shell.
-      It runs them on a synthetic transcript and waits for each, `async` ones included. It then
+    - It runs the `SessionStart`, `UserPromptSubmit`, `PostToolBatch` (20 times) and `Stop` hooks
+      registered in `hooks/hooks.json` as Claude Code does: in exec form, with `python3` found on
+      `PATH`, `${CLAUDE_PLUGIN_ROOT}` substituted in the arguments and no shell. It runs them on a
+      synthetic transcript and waits for each, `async` ones included. It then
       waits for the worker those hooks started; it never runs a worker itself.
     - It passes when every hook run logged a started or running worker, no spool record failed,
       `bundle.json` names the commit and core version, and the reader, started from `.mcp.json`,

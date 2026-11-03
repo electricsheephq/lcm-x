@@ -16,7 +16,8 @@ and recall need the read-only MCP reader (#1216), which lands first. Design:
 claude --plugin-dir adapters/claude-code
 ```
 
-Hooks need the system `python3` (3.9 or newer), which they run isolated from your Python settings
+Hooks need Claude Code 2.1.139 or later, which runs them without a shell, and the system `python3`
+(3.9 or newer), which they run isolated from your Python settings
 (`-I -S`). Capture and recall need Python 3.11 or newer. The
 plugin looks for one in this order:
 - `LCMX_PYTHON`;

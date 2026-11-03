@@ -86,7 +86,7 @@ def _argv(hook: dict) -> list[str]:
     the command found on PATH and the arguments with ``${CLAUDE_PLUGIN_ROOT}`` substituted, with no
     shell. Without, the command through ``sh -c``, as Grok Build runs it."""
     if "args" not in hook:
-        return ["/bin/sh", "-c", hook["command"]]
+        return ["sh", "-c", hook["command"]]  # Grok Build finds sh on PATH
     return [hook["command"], *[arg.replace("${CLAUDE_PLUGIN_ROOT}", str(PLUGIN)) for arg in hook["args"]]]
 
 
@@ -665,8 +665,8 @@ def test_the_registered_hook_command_ignores_the_users_python_settings(env, tmp_
     home = Path(env["LCMX_CC_HOME"])
     home.mkdir(parents=True)
     payload = {"hook_event_name": "Stop", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
-    lane = {**env, "PATH": str(python.parent), "CLAUDE_PLUGIN_ROOT": str(PLUGIN), setting: str(planted)}
-    for hooks_file in (PLUGIN / "hooks" / "hooks.json", PLUGIN / ".grok-plugin" / "hooks.json"):
+    lane = {**env, "PATH": f"{python.parent}:/bin", "CLAUDE_PLUGIN_ROOT": str(PLUGIN), setting: str(planted)}
+    for runs, hooks_file in enumerate((PLUGIN / "hooks" / "hooks.json", PLUGIN / ".grok-plugin" / "hooks.json"), 1):
         [registered] = _hooks_file(hooks_file)["Stop"][0]["hooks"]
         with open(home / "capture.lock", "a") as handle:  # a worker is running, so the hook starts none
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -674,7 +674,7 @@ def test_the_registered_hook_command_ignores_the_users_python_settings(env, tmp_
                                   capture_output=True, text=True, timeout=60)
         assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
         assert len(_spooled(env)) == 1
-        assert _log(env)[-1]["outcome"] == "worker_running"
+        assert [row["outcome"] for row in _log(env)] == ["worker_running"] * runs  # each form logged its own run
 
 
 def test_the_reader_names_the_one_setup_step_when_no_python_is_found(env, tmp_path, monkeypatch, capsys):
