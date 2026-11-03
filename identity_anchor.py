@@ -42,7 +42,7 @@ from .recognition_matching import (
     _reserve_shown as _reserve_shown,
     _reroute_for_null as _reroute_for_null,
 )
-from .config import _parse_bool_env
+from .config import identity_anchor_enabled
 from .fresh_tail import tool_group_safe_end
 from .message_content import normalize_content_value, text_content_for_pattern_matching
 from .store import _normalize_observed_at
@@ -55,10 +55,6 @@ _RECENT_CAP = 16  # rows this process stored lately: the R5 current-turn window
 _POOL_WINDOW = 256  # store ids either side of a stamp donor searched for a composite's constituents
 _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion diff (quadratic worst case ~40 ms)
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
-
-
-def identity_anchor_enabled() -> bool:
-    return _parse_bool_env("LCM_IDENTITY_ANCHOR", True, unknown=True, true_values=())
 
 
 def _ws_equivalent(stored, identity) -> bool:
