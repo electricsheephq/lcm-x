@@ -7378,6 +7378,13 @@ class LCMEngine(
             prepared = {}
             tail_registered = self in _PENDING_TAIL_ENGINES
             held_at = None
+            rollback_failures = self._store._transaction_owner.rollback_failures
+            published_rollbacks = getattr(self, "_ledger_rollback_failures_published", 0)
+            if rollback_failures > published_rollbacks:
+                after_commit.append(lambda amount=rollback_failures - published_rollbacks:
+                                    self._ledger_count("ledger.rollback_failed", amount=amount))
+            after_commit.append(lambda value=rollback_failures:
+                                setattr(self, "_ledger_rollback_failures_published", value))
             try:
                 if getattr(self, "_identity_anchor_recovery", None):
                     self._identity_anchor_observe_recovery()
@@ -7414,12 +7421,13 @@ class LCMEngine(
                 if not tail_registered:
                     _PENDING_TAIL_ENGINES.discard(self)
                 attribution.update(rows_written=0, bytes_written=0)
-                if isinstance(exc, Exception) and attempt == 0 and (_is_ingest_busy_error(exc)
+                rollback_ok = self._store._transaction_owner.rollback_failures == rollback_failures
+                if rollback_ok and isinstance(exc, Exception) and attempt == 0 and (_is_ingest_busy_error(exc)
                                                                   or held_at is None and isinstance(exc, sqlite3.Error)):
                     attribution["busy_snapshot_retry"] = True
                     admission_retry = held_at is None and _is_ingest_busy_error(exc)
                     continue
-                if isinstance(exc, Exception) and self._session_end_flush_active and _is_ingest_busy_error(exc):
+                if rollback_ok and isinstance(exc, Exception) and self._session_end_flush_active and _is_ingest_busy_error(exc):
                     self._ingest_read_only = exc
                     frozen_replay = None
                     read_only_thread = getattr(self._store, "_read_only_ingest_thread", None)
@@ -7852,6 +7860,62 @@ class LCMEngine(
         ):
             raise error
 
+    def _ledger_cold_cursor(self, messages, ignored, today, session_count, after_commit):
+        """Admit the read-only candidate only after the complete legacy choice."""
+        attempt, store = getattr(self, "_ingest_ledger_attempt", None), self._store
+        delta, winner = Counter(), dict(k=0, pairs={})
+        try:
+            reason = None
+            if attempt is None:
+                reason = "no_attempt"
+            elif getattr(self, "_ingest_read_only", None) is not None:
+                reason = "read_only"
+            elif not store._transaction_owner.owns_connection(store._conn):
+                reason = "not_owner"
+            elif session_count <= 0:
+                reason = "empty_session"
+            elif today >= len(messages):
+                reason = "complete"
+            elif store.ingest_ledger_state() != "ready":
+                reason = "not_ready"
+            elif store.ingest_ledger_salt() != attempt["salt"]:
+                reason = "salt_changed"
+            if reason is not None:
+                delta["skipped." + reason] += 1
+            elif len(attempt["entries"]) != len(messages) or len(ignored) != len(messages):
+                delta["length_mismatch"] += 1
+            else:
+                winner, delta = ingest_ledger.cold_cursor_candidate(
+                    store._conn, session_id=self._session_id, attempt=attempt, ignored=ignored)
+                # A partial tool segment must be replayed with its opening assistant.
+                nxt = next((j for j in range(winner["k"], len(messages)) if not ignored[j]), winner["k"])
+                if 0 < winner["k"] < len(messages) and messages[nxt].get("role") == "tool":
+                    while winner["k"] > 0 and (messages[winner["k"]].get("role") == "tool" or ignored[winner["k"]]):
+                        winner["k"] -= 1
+                winner["pairs"] = {idx: row for idx, row in winner["pairs"].items() if idx < winner["k"]}
+                if winner["k"] > today:
+                    # Pre-redaction ledger digests plus per-row occurrence evidence replace
+                    # the legacy lossy fence / #1511 rewind for this proven run only.
+                    self._record_ingest_reconciliation(
+                        action="advanced cursor", reason="ledger durable cursor (" + (
+                            "ingest vector" if winner["kind"] == "ingest" else "emission view") + ")",
+                        cursor=winner["k"], incoming=len(messages), session_count=session_count,
+                        stored_tail_count=len(winner["pairs"]))
+                    self._last_ingest_reconciliation.update(
+                        ledger_kind=winner["kind"], view_seq=winner["view_seq"], m=winner["m"], k=winner["k"])
+                    delta["used_" + winner["kind"]] += 1
+                else:
+                    delta["not_larger"] += 1
+                    winner = dict(k=0, pairs={})
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
+            delta["skipped.read_failed"] += 1
+            winner = dict(k=0, pairs={})
+        for key, amount in delta.items():
+            after_commit.append(lambda key=key, amount=amount: self._ledger_count(
+                "ledger.cold_candidate." + key, amount=amount))
+        return winner
+
     @contextmanager
     def _ingest_evidence(self, *, classification=False):
         """Keep a fail-open writer's SQL and identity memory within its savepoint."""
@@ -8033,6 +8097,7 @@ class LCMEngine(
         reconciled_existing_session = self._ingest_cursor_needs_reconcile
         reconcile_messages = replay_messages
         bind_session_counts: list = []
+        ledger_run, today = dict(k=0, pairs={}), self._ingest_cursor
         if self._ingest_cursor_needs_reconcile:
             reconcile_messages = self._cold_reader_replay_messages(messages, replay_messages, ignored_original_messages)
             self._ingest_cursor = self._reconcile_ingest_cursor_from_store(
@@ -8040,6 +8105,11 @@ class LCMEngine(
                 allow_session_end_replay_proof=allow_session_end_replay_proof,
                 session_counts=bind_session_counts,
             )
+            today = self._ingest_cursor
+            ledger_run = self._ledger_cold_cursor(
+                reconcile_messages, ignored_original_messages, today,
+                bind_session_counts[0] if bind_session_counts else 0, after_commit)
+            self._ingest_cursor = max(today, ledger_run["k"])
             self._ingest_cursor_needs_reconcile = False
         cursor = min(max(self._ingest_cursor, 0), n)
         durable = None
@@ -8063,6 +8133,10 @@ class LCMEngine(
                         if self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)
                     }
                     cursor = self._ingest_cursor = min(new_prefix_occurrences)
+        # Remapping can expose rows the ledger proved: they are no longer a
+        # consumed prefix, so every residual consumer must be able to match them.
+        ledger_run["pairs"] = {idx: row for idx, row in ledger_run["pairs"].items() if idx < cursor}
+        consumed_pairs = {idx: row["store_id"] for idx, row in ledger_run["pairs"].items()}
         # A restart can preserve a genuinely new row (so the cursor stops early)
         # and still replay exact durable tool pairs AFTER it. Those pairs are
         # matched on their durable ``tool_call_id`` identity, so suppressing
@@ -8075,8 +8149,9 @@ class LCMEngine(
         # the batch-suppression #259 removed. It runs only once reconciliation
         # has already proven a partial replay.
         replayed_tool_segment_indexes = (
-            self._replayed_tool_segment_indexes_after_cursor(reconcile_messages, cursor)
-            if reconciled_existing_session and cursor > 0
+            self._replayed_tool_segment_indexes_after_cursor(
+                reconcile_messages, cursor, **({"consumed_pairs": consumed_pairs} if consumed_pairs else {}))
+            if reconciled_existing_session and today > 0 and cursor > 0
             else set()
         )
         replayed_tool_segment_indexes -= new_prefix_occurrences
@@ -8142,14 +8217,17 @@ class LCMEngine(
                                    if idx >= accepted_compaction_prefix
                                    and identity != cached_source_identities[idx]), None)
             try:
-                if ((reconciled_existing_session or accepted_compaction_prefix) and cursor > 0
+                backfill_cursor = min(today, cursor) if ledger_run["k"] else cursor
+                if ((reconciled_existing_session or accepted_compaction_prefix) and backfill_cursor > 0
                         and getattr(self, "_ingest_read_only", None) is None):
                     with self._ingest_evidence():
                         self._store.backfill_observed_at_many(
-                            self._identity_anchor_backfill_prefix(messages, reconcile_messages, cursor))
+                            self._identity_anchor_backfill_prefix(messages, reconcile_messages, backfill_cursor))
                 # #1403: the accepted output supersedes the stale pre-compaction cache for
                 # this ingest only. The one-shot commit proof has already retired above.
                 accepted = {"accepted_prefix": accepted_compaction_prefix} if accepted_compaction_prefix else {}
+                if ledger_run["k"]:
+                    accepted.update(ledger_pairs=ledger_run["pairs"], ledger_today=today)
                 with self._ingest_evidence(classification=True):
                     anchor_plan = self._identity_anchor_prematch(messages, reconcile_messages, cursor, audit_from, **accepted)
                 anchor_plan["replayed"] -= replayed_tool_segment_indexes
