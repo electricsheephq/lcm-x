@@ -95,7 +95,8 @@ BOOLEAN_POLICIES = {
 # Raw readers are scalar/path/credential readers, not boolean policy escapes.
 # A new inline env reader must be classified rather than bypassing the table.
 RAW_READERS = {
-    "__init__.py": {"_session_context_value", "register"},
+    # _engine_took_slot reads the scalar HERMES_HOME path for inactive records.
+    "__init__.py": {"_session_context_value", "register", "_engine_took_slot"},
     "command.py": {"_env_float", "_embedding_backfill_batch_size", "_preset_suggest_text"},
     "config.py": {
         "_parse_int_env", "_parse_float_env", "_parse_bool_env", "_parse_str_env",
