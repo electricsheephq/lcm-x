@@ -106,7 +106,7 @@ class TransactionOwner:
                     conn.rollback()
                 except Exception:
                     self.rollback_failures += 1
-                    logging.getLogger(__name__).warning("SQLite rollback failed; preserving original exception")
+                    logging.getLogger(__name__).warning("SQLite rollback failed; preserving original exception", exc_info=True)
                 raise exc
             finally:
                 self._active_connection = None

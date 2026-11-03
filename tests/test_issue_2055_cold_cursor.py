@@ -1,6 +1,7 @@
 """P1d: exact ledger prefixes, consume-once consumers, and restart losses."""
 from collections import Counter
 from copy import deepcopy
+from pathlib import Path
 import random
 import sqlite3
 
@@ -8,7 +9,9 @@ import pytest
 
 from hermes_lcm import ingest_ledger as ledger
 from hermes_lcm.dag import SummaryNode
+from tests.test_host_uid_emit_carry import _ContainsPattern
 from tests.test_host_uid_shadow import _engine, _m
+from tests.test_issue_671_stub_first_exit import tool_pair as lookup_pair
 from tests.test_issue_2055_emission_writes import candidate as emission_capture
 from tests.test_issue_2055_ingest_ledger_writes import (
     count, engines as _engines, restart, sql_rows,
@@ -324,7 +327,7 @@ class CommitInterruptProxy:
             raise KeyboardInterrupt("after COMMIT")
 
 
-def test_t7_interrupt_survives_rollback_failure_and_next_ingest(engines, monkeypatch):
+def test_t7_interrupt_survives_rollback_failure_and_next_ingest(engines, monkeypatch, caplog):
     engine = engines()
     engine._ingest_messages([_m("user", "P", 1.)])
     conn, write = engine._store._conn, engine._write_ingest_ledger
@@ -337,6 +340,9 @@ def test_t7_interrupt_survives_rollback_failure_and_next_ingest(engines, monkeyp
             engine._ingest_messages([_m("user", "P", 1.), _m("assistant", "reply", 2.)])
     assert count(engine, "rollback_failed") == 0  # Deferred telemetry survives to the next successful commit.
     assert engine._store._transaction_owner.rollback_failures == 1
+    warning = next(r for r in caplog.records if "SQLite rollback failed" in r.getMessage())
+    assert warning.exc_info and isinstance(warning.exc_info[1], RuntimeError)
+    assert str(warning.exc_info[1]) == "rollback sentinel"
     assert not conn.in_transaction
     engine._store._conn = conn
     assert engine._write_ingest_ledger == write
@@ -802,19 +808,92 @@ def test_t18_partial_tool_segment_rewinds_to_assistant(engines, monkeypatch):
     assert engine._store.get_session_messages("S")[3:] == added
 
 
-def test_t18_partial_tool_segment_steps_over_ignored_row(engines):
+@pytest.mark.parametrize("edited", [False, True])
+def test_t18_partial_tool_segment_steps_over_ignored_row(engines, edited):
     engine = engines()
     assistant, tool = tool_pair(2.)
     view = [_m("user", "P", 1.), assistant, _m("user", "ignored", 2.5), tool]
     engine._ingest_messages(deepcopy(view))
-    projected = [*view[:3], dict(tool, content="projected result")]
+    ignored = dict(view[2], content="ignored v2") if edited else view[2]
+    projected = [*view[:2], ignored, dict(tool, content="projected result")]
     engine._ingest_ledger_attempt = prepare(engine, projected)
     try:
         with engine._store.atomic(immediate=True):
             run = engine._ledger_cold_cursor(projected, [False, False, True, False], 0, 4, [])
     finally:
         engine.__dict__.pop("_ingest_ledger_attempt", None)
-    assert run["m"] == 3 and run["k"] == 1 and set(run["pairs"]) == {0}
+    assert run["m"] == (2 if edited else 3) and run["k"] == 1 and set(run["pairs"]) == {0}
+
+
+@pytest.mark.parametrize("cold", [False, True])
+def test_threads_ignored_boundary_replays_uid_tool_group(engines, monkeypatch, cold):
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "shadow")
+    engine = engines()
+    engine._compiled_ignore_message_patterns = [_ContainsPattern("IGNORED")]
+    call, tool = [dict(row, message_uid=f"row-{i}") for i, row in enumerate(unstamped_pair())]
+    view = [_m("user", "P", 1., uid="p1"), call, _m("user", "IGNORED v1", uid="i1"), tool]
+    engine._ingest_messages(deepcopy(view))
+    before = engine._store.get_session_messages("S")
+    if cold:
+        restart(engine)
+        engine._compiled_ignore_message_patterns = [_ContainsPattern("IGNORED")]
+    engine._ingest_cursor_needs_reconcile = True
+    edited = [view[0], call, _m("user", "IGNORED v2", uid="i2"),
+              dict(tool, content="changed", message_uid="t2")]
+    engine._ingest_messages(deepcopy(edited))
+    rows = engine._store.get_session_messages("S")
+    assert rows[:len(before)] == before
+    assert [(r["role"], r["content"]) for r in rows[len(before):]] == [("assistant", ""), ("tool", "changed")]
+
+
+def borrowed_retry_view():
+    u, q, x = _m("user", "repeat", 10.), _m("user", "Q", 11.), _m("user", "X", 12.)
+    pair = lookup_pair("c", "synthetic long lookup output " * 20, tool_name="lookup")
+    pair[0]["timestamp"], pair[1]["timestamp"] = 13., 14.
+    retry = [q, x, u, *lookup_pair("c", "[Old tool output cleared to save context space]", tool_name="lookup"),
+             *lookup_pair("f0", "new 0"), *lookup_pair("f1", "new 1"), _m("assistant", "final")]
+    return [u, q, x, *pair], retry
+
+
+def test_threads_consumed_filter_preserves_stored_adjacency(engines, monkeypatch):
+    engine = engines()
+    original, retry = borrowed_retry_view()
+    engine._ingest_messages(deepcopy(original))
+    stored = engine._store.get_session_messages("S")
+    monkeypatch.setattr(engine, "_durable_commit_proof_payload", lambda: {"output_metadata": []})
+    helper = engine._replayed_tool_segment_indexes_after_cursor
+    pairs = {0: stored[1]["store_id"], 1: stored[2]["store_id"]}
+    assert helper(retry, 2, consumed_pairs=pairs) == helper(retry, 2) == set()
+
+
+def test_threads_consumed_filter_keeps_fresh_borrowed_pair_on_restart(engines, monkeypatch):
+    engine = engines()
+    original, retry = borrowed_retry_view()
+    engine._ingest_messages(deepcopy(original))
+    engine._ingest_messages(deepcopy(original[1:]))  # Host trimmed U; ledger starts at Q.
+    before = engine._store.get_session_messages("S")
+    restart(engine)
+    monkeypatch.setattr(type(engine), "_durable_commit_proof_payload", lambda self: {"output_metadata": []})
+    force_today(engine, monkeypatch, 1)
+    engine._ingest_messages(deepcopy(retry))
+    assert count(engine, "cold_candidate.used_ingest") == 1
+    assert engine._last_ingest_reconciliation["cursor"] == 2
+    rows = engine._store.get_session_messages("S")
+    assert rows[:len(before)] == before
+    added = rows[len(before):]
+    assert sum(r["role"] == "assistant" and r.get("tool_calls") == retry[3]["tool_calls"] for r in added) == 1
+    assert sum(r["role"] == "tool" and r.get("tool_call_id") == "c" and r["content"] == retry[4]["content"]
+               for r in added) == 1
+
+
+@pytest.mark.parametrize("path", ["docs/operator-guide.md", "skills/hermes-lcm/references/configuration.md"])
+def test_threads_shadow_docs_describe_active_cursor(path):
+    entry = next(line for line in (Path(__file__).parents[1] / path).read_text().splitlines()
+                 if "`LCM_INGEST_LEDGER`" in line)
+    assert "without changing row decisions" not in entry
+    assert "On a cold or reconciled start, `shadow`" in entry
+    assert "can change which incoming rows are stored" in entry
+    assert "restores the legacy cursor choice" in entry
 
 
 @pytest.mark.parametrize("seed", range(8))

@@ -3345,14 +3345,14 @@ class ReconcileMixin:
                            and result_identity[1] != _HERMES_PRUNED_TOOL_PLACEHOLDER)
                 if borrows and users is None:
                     users = ({}, {})
-                    for rows, stored, positions in ((stored_rows, True, users[0]), (messages, False, users[1])):
+                    for rows, stored, positions in ((tail_rows, True, users[0]), (messages, False, users[1])):
                         for pos, row in enumerate(rows):
                             if str(row.get("role") or "") == "user":
                                 key = (_normalize_observed_at(row.get("observed_at" if stored else "timestamp")),
                                        self._message_replay_identity(row, stored_row=stored, allow_pruned_tool_alias=False))
                                 positions.setdefault(key, []).append(pos)
                     protected = _hermes_salvage_protected_positions(messages)
-                if borrows and self._bound_retry_placeholder_replay(messages, index, probe, stored_rows, users, protected):
+                if borrows and self._bound_retry_placeholder_replay(messages, index, probe, tail_rows, users, protected):
                     if metadata is None:
                         try:
                             proof = self._durable_commit_proof_payload()
