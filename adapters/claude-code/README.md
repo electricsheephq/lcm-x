@@ -1,0 +1,45 @@
+# LCM-X for Claude Code
+
+LCM-X memory for Claude Code. The plugin captures every message and tool result of your
+Claude Code sessions into a local, lossless LCM-X store, and gives the agent read-only tools to
+search and read it (`lcm_recall`, `lcm_grep`, `lcm_expand`, `lcm_load_session`, `lcm_describe`).
+Claude Code's own compaction is unchanged, and the plugin adds nothing to the context by itself.
+
+**Status: preview in development (0.1.0-dev).** The hooks record which transcript changed and
+start the capture worker, which writes every message and tool result to the store. The worker
+and recall need the read-only MCP reader (#1216), which lands first. Design:
+[docs/claude-code-adapter.md](../../docs/claude-code-adapter.md).
+
+## Try it from a checkout
+
+```bash
+claude --plugin-dir adapters/claude-code
+```
+
+Hooks need the system `python3` (3.9 or newer). Capture and recall need Python 3.11 or newer. The
+plugin looks for one in this order:
+- `LCMX_PYTHON`;
+- a venv in the plugin's data folder, or at `<store home>/venv`;
+- any Python 3.11+ on `PATH` (`python3.11` to `python3.14`, or a `python3` that is 3.11 or newer),
+  run with the standard library only.
+
+Without one, capture records `runtime_missing`. One step sets it up: install Python 3.11 or newer,
+or run `uv venv --python 3.11 ~/.lcm-x/claude-code/venv`. Vector recall also needs FastEmbed
+installed in that venv, with its model already downloaded; without it, recall uses full-text
+search.
+
+## Settings (environment)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LCMX_CC_HOME` | `~/.lcm-x/claude-code` | Store home: `lcm.db`, payloads, spool, logs |
+| `LCMX_CAPTURE` | on | `off` disables capture |
+| `LCMX_PYTHON` | `<store home>/venv/bin/python` | Runtime interpreter |
+| `LCMX_PACKAGE_ROOT` | the plugin's vendored copy, else this checkout | LCM-X package |
+| `LCMX_GROK_CAPTURE` | off | `1` enables the experimental Grok Build reader |
+| `LCMX_GROK_HOME` | `~/.lcm-x/grok-build` | Store home for Grok Build sessions (one owning harness per store) |
+
+Home settings must be absolute paths; a relative one disables capture and the server says so.
+
+The store lives outside the plugin's folders, so removing or updating the plugin never removes
+your memory. Capture runs on macOS and Linux.

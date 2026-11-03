@@ -35,7 +35,7 @@ from .compaction_policy import (
     resolve_threshold,
     threshold_tokens,
 )
-from .config import LCMConfig, _disabled_tool_names, containment_base_dir, identity_anchor_enabled, ingest_ledger_mode, lcm_env_get, profile_bound
+from .config import LCMConfig, _disabled_tool_names, _parse_float_env, containment_base_dir, identity_anchor_enabled, ingest_ledger_mode, lcm_env_get, profile_bound
 from .dag import SummaryDAG, SummaryNode
 from . import ingest_ledger, sender_capture, survival_codec
 from .diagnostics import _enforce_state_db_containment
@@ -672,8 +672,17 @@ def _quiesce_embedding_maintenance() -> bool:
 
 _SESSION_END_BUSY_TIMEOUT_MS = 50
 _SESSION_END_SHUTDOWN_TIMEOUT_MS = 5000
+_SHUTDOWN_COMPACTION_WAIT_MAX_S = 86400.0
 # Strong references keep an ended engine's only pending copy alive until drained.
 _PENDING_TAIL_ENGINES: set = set()
+
+
+def _shutdown_compaction_wait_s() -> float:
+    """#2101: seconds shutdown waits for in-flight compaction, read on each call."""
+    wait_s = _parse_float_env("LCM_SHUTDOWN_COMPACTION_WAIT_S", 10.0)
+    if not math.isfinite(wait_s) or wait_s < 0:
+        return 10.0
+    return min(wait_s, _SHUTDOWN_COMPACTION_WAIT_MAX_S)  # Condition.wait_for overflows near threading.TIMEOUT_MAX
 
 
 def _flush_pending_tails_at_exit() -> None:
@@ -1091,6 +1100,17 @@ _OVERFLOW_RECOVERY_OVERCAP_NOTE = (
 )
 
 
+def _lazy_storage_property(name: str) -> property:
+    def get(engine):
+        engine._ensure_storage()
+        return engine.__dict__[name]
+
+    def set_(engine, value):
+        engine.__dict__[name] = value
+
+    return property(get, set_)
+
+
 class LCMEngine(
     CompactionMixin,
     ResetStateMixin,
@@ -1138,6 +1158,9 @@ class LCMEngine(
             )
         self._hermes_home = hermes_home
         self._stable_use_lock = threading.Lock()
+        self._compaction_gate = threading.Condition()
+        self._compaction_inflight = 0
+        self._compaction_closing = False
         # #667: node ids a condensation has selected, until it publishes or fails; the level 3 repair skips them.
         self._condensation_inflight_ids: Counter[int] = Counter()
         self._condensation_inflight_lock = threading.Lock()
@@ -1160,8 +1183,11 @@ class LCMEngine(
         self._assertion_extraction_last_error = ""
         self._assertion_extraction_last_model = ""
 
-        db_path = self._resolve_db_path(hermes_home)
-        self._bind_storage(db_path, hermes_home)
+        self._db_path = self._resolve_db_path(hermes_home)
+        self._storage_lock = threading.RLock()
+        self._storage_ready = False
+        self._storage_binding = False
+        self._storage_open_warning_logged = False
 
         self._session_id: str = ""
         self._session_platform: str = ""
@@ -1628,6 +1654,42 @@ class LCMEngine(
             name = ""
         return name or str(Path(home or Path(db_path).parent).resolve())
 
+    _store = _lazy_storage_property("_store")
+    _dag = _lazy_storage_property("_dag")
+    _lifecycle = _lazy_storage_property("_lifecycle")
+    _assertions = _lazy_storage_property("_assertions")
+    _entities = _lazy_storage_property("_entities")
+    _query_views = _lazy_storage_property("_query_views")
+    _adaptive_retrieval = _lazy_storage_property("_adaptive_retrieval")
+    _assertion_extractor = _lazy_storage_property("_assertion_extractor")
+
+    def _ensure_storage(self) -> None:
+        """Open once on real use; recursive binder reads share this lock."""
+        with self._storage_lock:
+            if self._storage_ready or self._storage_binding:
+                return
+            if self._stable_use_closed:
+                raise RuntimeError("LCM engine is closed")
+            self._storage_binding = True
+            try:
+                self._bind_storage(self._db_path, self._hermes_home)
+                self._storage_ready = True
+            except Exception as exc:
+                if not self._storage_open_warning_logged:
+                    self._storage_open_warning_logged = True
+                    logger.warning("LCM storage open failed on first use; will retry: %s", exc)
+                raise
+            finally:
+                self._storage_binding = False
+            inactive = self.__dict__.pop("_inactive_load_record", None)
+            if inactive is not None:
+                try:
+                    from .inactive_record import write_inactive_record
+
+                    write_inactive_record(self._hermes_home, **inactive)
+                except Exception:
+                    logger.warning("LCM-X could not record the inactive state", exc_info=True)
+
     def _bind_storage(self, db_path: str | Path, hermes_home: str = "") -> None:
         """Bind store/DAG/lifecycle helpers to one SQLite database."""
         self._assertions = None
@@ -1705,7 +1767,7 @@ class LCMEngine(
             "_entities",
             "_query_views",
         ):
-            helper = getattr(self, attr, None)
+            helper = self.__dict__.get(attr)
             if attr == "_store" and any(
                 tail["store"] is helper for tail in self._pending_session_tails
             ):
@@ -1733,14 +1795,18 @@ class LCMEngine(
 
     def _reset_profile_runtime_state(self) -> None:
         """Clear process-local session state that cannot cross profile homes."""
+        self._storage_open_warning_logged = False
         self._discard_prepared_leaves()  # #787: a configured database path keeps its store across homes
-        self._store.clear_context_windows()
+        store = self.__dict__.get("_store")
+        if store is not None:
+            store.clear_context_windows()
         # R6-4: survival-fit warnings belong to the store they were raised on.
         self._survival_fit_pending_warning, self._survival_fit_warned = None, set()
         self._survival_overhead_observation = None  # #1012 F4: an overhead peak never crosses profile homes
         self.emit_automatic_compaction_status = False
-        if self._adaptive_retrieval is not None:
-            self._adaptive_retrieval.clear()
+        adaptive = self.__dict__.get("_adaptive_retrieval")
+        if adaptive is not None:
+            adaptive.clear()
         self._unregister_active_engine_binding()
         self._session_id = ""
         self._session_platform = ""
@@ -1790,6 +1856,10 @@ class LCMEngine(
         self._reset_session_scoped_runtime_state()
 
     def _rebind_storage_for_home(self, hermes_home: str = "") -> bool:
+        with self._storage_lock:
+            return self._rebind_storage_for_home_unlocked(hermes_home)
+
+    def _rebind_storage_for_home_unlocked(self, hermes_home: str = "") -> bool:
         """Switch SQLite-backed state when a reused engine serves another profile.
 
         Hermes core passes the active ``hermes_home`` on session start.  Older
@@ -1799,6 +1869,14 @@ class LCMEngine(
         """
         if not hermes_home:
             return False
+        db_path = self._resolve_db_path(hermes_home)
+        if not self._storage_ready:
+            if self._db_path == db_path and self._hermes_home == hermes_home:
+                return False
+            self._hermes_home = hermes_home
+            self._db_path = db_path
+            self._reset_profile_runtime_state()
+            return True
         if self._config.database_path:
             current_home = str(self._hermes_home or "")
             current_store_home = str(getattr(getattr(self, "_store", None), "_hermes_home", "") or "")
@@ -1817,10 +1895,14 @@ class LCMEngine(
         if current_db == db_path and str(self._hermes_home or "") == str(hermes_home):
             return False
 
+        # Clear the old profile before an open can fail, so a later retry cannot
+        # publish its session/context window into the newly selected profile.
+        self._reset_profile_runtime_state()
         self._close_storage()
         self._hermes_home = hermes_home
-        self._bind_storage(db_path, hermes_home)
-        self._reset_profile_runtime_state()
+        self._db_path = db_path
+        self._storage_ready = False
+        self._ensure_storage()
         logger.info("LCM rebound storage for Hermes home %s", hermes_home)
         return True
 
@@ -2736,7 +2818,7 @@ class LCMEngine(
 
     def _discard_prepared_leaves(self) -> None:
         """#787: shutdown and storage rebind drop this store's queued preparations and prepared leaves."""
-        store = getattr(self, "_store", None)
+        store = self.__dict__.get("_store")
         if store is not None:
             leaf_prep.discard(store.db_path)
 
@@ -3296,10 +3378,11 @@ class LCMEngine(
             database_path = Path(raw_database_path).resolve()
             config = copy.deepcopy(self._config)
             from . import command
-            from .embedding_maintenance import _automatic_chunks_allowed, start_local_model_prepare
+            from .embedding_maintenance import start_local_model_prepare
+            from .embedding_provider import _automatic_chunks_allowed
             from .vector_store import VectorStore
 
-            chunks_allowed = _automatic_chunks_allowed(config, command)
+            chunks_allowed = _automatic_chunks_allowed(config)
             schema_key = (database_path, chunks_allowed)
             with _EMBEDDING_SCHEMA_LOCK:
                 if schema_key not in _EMBEDDING_SCHEMA_READY:
@@ -3570,7 +3653,8 @@ class LCMEngine(
                 Path(hermes_home) / "state.db",
                 description=f"hermes_home {hermes_home}",
             )
-        db_path = Path(self._store.db_path)
+        # Path resolution is needed before first use too; it must not open LCM.
+        db_path = Path(self._db_path)
         return _enforce_state_db_containment(
             db_path.parent / "state.db",
             description=f"state database fallback from LCM database {db_path}",
@@ -7295,6 +7379,13 @@ class LCMEngine(
             prepared = {}
             tail_registered = self in _PENDING_TAIL_ENGINES
             held_at = None
+            rollback_failures = self._store._transaction_owner.rollback_failures
+            published_rollbacks = getattr(self, "_ledger_rollback_failures_published", 0)
+            if rollback_failures > published_rollbacks:
+                after_commit.append(lambda amount=rollback_failures - published_rollbacks:
+                                    self._ledger_count("ledger.rollback_failed", amount=amount))
+            after_commit.append(lambda value=rollback_failures:
+                                setattr(self, "_ledger_rollback_failures_published", value))
             try:
                 if getattr(self, "_identity_anchor_recovery", None):
                     self._identity_anchor_observe_recovery()
@@ -7331,12 +7422,13 @@ class LCMEngine(
                 if not tail_registered:
                     _PENDING_TAIL_ENGINES.discard(self)
                 attribution.update(rows_written=0, bytes_written=0)
-                if isinstance(exc, Exception) and attempt == 0 and (_is_ingest_busy_error(exc)
+                rollback_ok = self._store._transaction_owner.rollback_failures == rollback_failures
+                if rollback_ok and isinstance(exc, Exception) and attempt == 0 and (_is_ingest_busy_error(exc)
                                                                   or held_at is None and isinstance(exc, sqlite3.Error)):
                     attribution["busy_snapshot_retry"] = True
                     admission_retry = held_at is None and _is_ingest_busy_error(exc)
                     continue
-                if isinstance(exc, Exception) and self._session_end_flush_active and _is_ingest_busy_error(exc):
+                if rollback_ok and isinstance(exc, Exception) and self._session_end_flush_active and _is_ingest_busy_error(exc):
                     self._ingest_read_only = exc
                     frozen_replay = None
                     read_only_thread = getattr(self._store, "_read_only_ingest_thread", None)
@@ -7769,6 +7861,62 @@ class LCMEngine(
         ):
             raise error
 
+    def _ledger_cold_cursor(self, messages, ignored, today, session_count, after_commit):
+        """Admit the read-only candidate only after the complete legacy choice."""
+        attempt, store = getattr(self, "_ingest_ledger_attempt", None), self._store
+        delta, winner = Counter(), dict(k=0, pairs={})
+        try:
+            reason = None
+            if attempt is None:
+                reason = "no_attempt"
+            elif getattr(self, "_ingest_read_only", None) is not None:
+                reason = "read_only"
+            elif not store._transaction_owner.owns_connection(store._conn):
+                reason = "not_owner"
+            elif session_count <= 0:
+                reason = "empty_session"
+            elif today >= len(messages):
+                reason = "complete"
+            elif store.ingest_ledger_state() != "ready":
+                reason = "not_ready"
+            elif store.ingest_ledger_salt() != attempt["salt"]:
+                reason = "salt_changed"
+            if reason is not None:
+                delta["skipped." + reason] += 1
+            elif len(attempt["entries"]) != len(messages) or len(ignored) != len(messages):
+                delta["length_mismatch"] += 1
+            else:
+                winner, delta = ingest_ledger.cold_cursor_candidate(
+                    store._conn, session_id=self._session_id, attempt=attempt, ignored=ignored)
+                # A partial tool segment must be replayed with its opening assistant.
+                nxt = next((j for j in range(winner["k"], len(messages)) if not ignored[j]), winner["k"])
+                if 0 < winner["k"] < len(messages) and messages[nxt].get("role") == "tool":
+                    while winner["k"] > 0 and (messages[winner["k"]].get("role") == "tool" or ignored[winner["k"]]):
+                        winner["k"] -= 1
+                winner["pairs"] = {idx: row for idx, row in winner["pairs"].items() if idx < winner["k"]}
+                if winner["k"] > today:
+                    # Pre-redaction ledger digests plus per-row occurrence evidence replace
+                    # the legacy lossy fence / #1511 rewind for this proven run only.
+                    self._record_ingest_reconciliation(
+                        action="advanced cursor", reason="ledger durable cursor (" + (
+                            "ingest vector" if winner["kind"] == "ingest" else "emission view") + ")",
+                        cursor=winner["k"], incoming=len(messages), session_count=session_count,
+                        stored_tail_count=len(winner["pairs"]))
+                    self._last_ingest_reconciliation.update(
+                        ledger_kind=winner["kind"], view_seq=winner["view_seq"], m=winner["m"], k=winner["k"])
+                    delta["used_" + winner["kind"]] += 1
+                else:
+                    delta["not_larger"] += 1
+                    winner = dict(k=0, pairs={})
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
+            delta["skipped.read_failed"] += 1
+            winner = dict(k=0, pairs={})
+        for key, amount in delta.items():
+            after_commit.append(lambda key=key, amount=amount: self._ledger_count(
+                "ledger.cold_candidate." + key, amount=amount))
+        return winner
+
     @contextmanager
     def _ingest_evidence(self, *, classification=False):
         """Keep a fail-open writer's SQL and identity memory within its savepoint."""
@@ -7950,6 +8098,7 @@ class LCMEngine(
         reconciled_existing_session = self._ingest_cursor_needs_reconcile
         reconcile_messages = replay_messages
         bind_session_counts: list = []
+        ledger_run, today = dict(k=0, pairs={}), self._ingest_cursor
         if self._ingest_cursor_needs_reconcile:
             reconcile_messages = self._cold_reader_replay_messages(messages, replay_messages, ignored_original_messages)
             self._ingest_cursor = self._reconcile_ingest_cursor_from_store(
@@ -7957,6 +8106,11 @@ class LCMEngine(
                 allow_session_end_replay_proof=allow_session_end_replay_proof,
                 session_counts=bind_session_counts,
             )
+            today = self._ingest_cursor
+            ledger_run = self._ledger_cold_cursor(
+                reconcile_messages, ignored_original_messages, today,
+                bind_session_counts[0] if bind_session_counts else 0, after_commit)
+            self._ingest_cursor = max(today, ledger_run["k"])
             self._ingest_cursor_needs_reconcile = False
         cursor = min(max(self._ingest_cursor, 0), n)
         durable = None
@@ -7980,6 +8134,10 @@ class LCMEngine(
                         if self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)
                     }
                     cursor = self._ingest_cursor = min(new_prefix_occurrences)
+        # Remapping can expose rows the ledger proved: they are no longer a
+        # consumed prefix, so every residual consumer must be able to match them.
+        ledger_run["pairs"] = {idx: row for idx, row in ledger_run["pairs"].items() if idx < cursor}
+        consumed_pairs = {idx: row["store_id"] for idx, row in ledger_run["pairs"].items()}
         # A restart can preserve a genuinely new row (so the cursor stops early)
         # and still replay exact durable tool pairs AFTER it. Those pairs are
         # matched on their durable ``tool_call_id`` identity, so suppressing
@@ -7992,10 +8150,12 @@ class LCMEngine(
         # the batch-suppression #259 removed. It runs only once reconciliation
         # has already proven a partial replay.
         replayed_tool_segment_indexes = (
-            self._replayed_tool_segment_indexes_after_cursor(reconcile_messages, cursor)
-            if reconciled_existing_session and cursor > 0
+            self._replayed_tool_segment_indexes_after_cursor(
+                reconcile_messages, cursor, **({"consumed_pairs": consumed_pairs} if consumed_pairs else {}))
+            if reconciled_existing_session and today > 0 and cursor > 0
             else set()
         )
+        replayed_tool_segment_indexes -= new_prefix_occurrences
         if replayed_tool_segment_indexes:
             self._last_ingest_reconciliation["replayed_tool_segment_rows"] = len(
                 replayed_tool_segment_indexes
@@ -8058,14 +8218,17 @@ class LCMEngine(
                                    if idx >= accepted_compaction_prefix
                                    and identity != cached_source_identities[idx]), None)
             try:
-                if ((reconciled_existing_session or accepted_compaction_prefix) and cursor > 0
+                backfill_cursor = min(today, cursor) if ledger_run["k"] else cursor
+                if ((reconciled_existing_session or accepted_compaction_prefix) and backfill_cursor > 0
                         and getattr(self, "_ingest_read_only", None) is None):
                     with self._ingest_evidence():
                         self._store.backfill_observed_at_many(
-                            self._identity_anchor_backfill_prefix(messages, reconcile_messages, cursor))
+                            self._identity_anchor_backfill_prefix(messages, reconcile_messages, backfill_cursor))
                 # #1403: the accepted output supersedes the stale pre-compaction cache for
                 # this ingest only. The one-shot commit proof has already retired above.
                 accepted = {"accepted_prefix": accepted_compaction_prefix} if accepted_compaction_prefix else {}
+                if ledger_run["k"]:
+                    accepted.update(ledger_pairs=ledger_run["pairs"], ledger_today=today)
                 with self._ingest_evidence(classification=True):
                     anchor_plan = self._identity_anchor_prematch(messages, reconcile_messages, cursor, audit_from, **accepted)
                 anchor_plan["replayed"] -= replayed_tool_segment_indexes
@@ -9523,11 +9686,14 @@ class LCMEngine(
                 with self._condensation_in_flight(to_condense) as fresh:
                     if fresh is None:
                         continue  # a selected node went away before registration (#667): nothing to condense here
-                    source_tokens, summary_tokens, level = self._condense_summary_nodes(
+                    condensed = self._condense_summary_nodes(
                         fresh,
                         focus_topic=focus_topic,
                         force_overflow=force_overflow,
                     )
+                    if condensed is None:
+                        break
+                    source_tokens, summary_tokens, level = condensed
             except SummaryResultRejected:
                 result_rejected = True  # #652: the nodes stay on the frontier
                 break
@@ -9594,7 +9760,7 @@ class LCMEngine(
         focus_topic: Optional[str] = None,
         deadline: Optional[float] = None,
         force_overflow: bool = False,
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int] | None:
         """Persist one same-depth condensation and return source/output tokens and level."""
         if not nodes:
             raise ValueError("condensation requires at least one summary node")
@@ -9635,6 +9801,8 @@ class LCMEngine(
                {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
             verbatim_small_source=True,  # #605 F2
         )
+        if self._compaction_is_closing():
+            return None
         # #1012 F4: a content-filtered group keeps its level 3 truncation, so condensation progresses
         if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow) and \
                 not provenance.get("content_filter_error"):
@@ -9656,6 +9824,8 @@ class LCMEngine(
             latest_at=latest_at,
             expand_hint=self._extract_expand_hint(summary_text),
         )
+        if self._compaction_is_closing():
+            return None
         self._dag.add_node(
             condensed_node, escalation_level=level, model=provenance.get("model", "")
         )
@@ -9743,11 +9913,13 @@ class LCMEngine(
                     if fresh is None:
                         continue  # a selected node went away before registration (#667): select again
                     before = self._summary_frontier_tokens()
-                    self._condense_summary_nodes(
+                    condensed = self._condense_summary_nodes(
                         fresh,
                         focus_topic=focus_topic,
                         deadline=deadline,
                     )
+                    if condensed is None:
+                        return passes, "shutdown"
             except SweepBudgetExhausted as exc:
                 return passes, getattr(exc, "reason", "time_budget_exhausted")  # #605: keep a soft stop
             except SummaryResultRejected:
@@ -11431,7 +11603,7 @@ class LCMEngine(
         for engine in tuple(_PENDING_TAIL_ENGINES):
             if engine is self or time.monotonic() >= deadline:
                 continue
-            if not any(t["store"].db_path == self._store.db_path for t in engine._pending_session_tails):
+            if not any(t["store"].db_path == self._db_path for t in engine._pending_session_tails):
                 continue
             # Never wait for a sibling lifecycle (or invert its lock ordering).
             if engine._stable_use_lock.acquire(blocking=False):
@@ -11500,13 +11672,16 @@ class LCMEngine(
                     if tail["messages"]:
                         self._append_ingest_batch(tail)
                     self._pending_session_tails.remove(tail)
-                    if store is self._store and tail["session_id"] == self._session_id:
+                    # Read the bound store without a lazy open (#2152): after a failed
+                    # rebind, opening the new home here would raise out of shutdown's cleanup.
+                    if store is self.__dict__.get("_store") and tail["session_id"] == self._session_id:
                         self._ingest_cursor_needs_reconcile = True
             except (Exception, KeyboardInterrupt):
                 logger.debug("LCM pending session-end retry deferred", exc_info=True)
                 break
             finally:
-                if store is not self._store and not any(t["store"] is store for t in self._pending_session_tails):
+                if (store is not self.__dict__.get("_store")
+                        and not any(t["store"] is store for t in self._pending_session_tails)):
                     store.close()
             if time.monotonic() >= deadline:
                 break
@@ -11580,13 +11755,31 @@ class LCMEngine(
             self._stable_use_owner_thread = None
             self._stable_use_lock.release()
 
+    def _compaction_is_closing(self) -> bool:
+        with self._compaction_gate:
+            return self._compaction_closing
+
     def shutdown(self):
+        with self._compaction_gate:
+            self._compaction_closing = True
         sender_capture.retire(self)
         with self._exclusive_lifecycle("shutdown"):
             if self._stable_use_closed:
                 return
-            self._shutdown_unlocked(deadline=time.monotonic() + _SESSION_END_SHUTDOWN_TIMEOUT_MS / 1000)
-            self._stable_use_closed = True
+            wait_s = _shutdown_compaction_wait_s()
+            with self._compaction_gate:
+                if not self._compaction_gate.wait_for(
+                    lambda: self._compaction_inflight == 0, timeout=wait_s,
+                ):
+                    logger.warning(
+                        "shutdown: compaction still running after %gs; connections left open", wait_s,
+                    )
+                    return
+            # Wait for running compaction before taking the storage lock: every lazy
+            # helper read takes it, so holding it here could block that pass (#2101, #2152).
+            with self._storage_lock:
+                self._shutdown_unlocked(deadline=time.monotonic() + _SESSION_END_SHUTDOWN_TIMEOUT_MS / 1000)
+                self._stable_use_closed = True
 
     def _shutdown_unlocked(self, *, deadline: float):
         self._retry_pending_session_tails(
@@ -11597,16 +11790,11 @@ class LCMEngine(
         cleanup = [
             self._unregister_active_engine_binding,
             *(
-                [self._adaptive_retrieval.close]
-                if self._adaptive_retrieval is not None
-                else []
+                helper.close
+                for attr in ("_adaptive_retrieval", "_store", "_dag", "_lifecycle",
+                             "_assertions", "_entities", "_query_views")
+                if (helper := self.__dict__.get(attr)) is not None
             ),
-            self._store.close,
-            self._dag.close,
-            self._lifecycle.close,
-            *([self._assertions.close] if self._assertions is not None else []),
-            *([self._entities.close] if self._entities is not None else []),
-            *([self._query_views.close] if self._query_views is not None else []),
         ]
         failures = []
         for close in cleanup:

@@ -29,20 +29,20 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "anchor-remainder": {
-      "outcome_sha": "8efd72d5baa7c41a7fcd9b48c263e631149d8ddea1e7e4fd126c9557ee8a9bd6",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "05b3ad6ff328a93c9fa7e6b86e636409053ebf0c2af377de3f47ab7eb739c1b3",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "anchor-stamp-new-uid": {
-      "outcome_sha": "3709ddbdc9d310cd8eeb28f5885ce625cc5a29191aec9998e2f14e6ba95cdb3c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "0c8fd25f1506416931b253d5b4bcbd8955eb099d81e88752f80a182643e81b5b",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "anchor-stamp-replay": {
       "outcome_sha": "12c9d6da86dbb8cbe1eb8702ba43c71425de46f3f5a85290b190acb37d878e3c",
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "anchor-version": {
-      "outcome_sha": "495c5327d922bd53767e877c46842e07c4322b87b682755ba2a994cb215f9650",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "99f69f016e02be42fae55bf626e54b638204c4bd3f0d44d1ed8b4a2666ad6603",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "anchor-version-ignore": {
       "outcome_sha": "0511ce9778ae264f07b5197c1a210baf96ba66774776c715922d5b79eef5c3a6",
@@ -65,20 +65,20 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "cache-divergent-cache": {
-      "outcome_sha": "199c2b9b466e161e1f2f86e4ce56074ff9fabb067fa0d86c7233238b30884c37",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "1134ecd39d18c06bb75cd0856cdfaa8095cb149884a68fff945ccc797b79707b",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "cache-empty-delta": {
       "outcome_sha": "12c9d6da86dbb8cbe1eb8702ba43c71425de46f3f5a85290b190acb37d878e3c",
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "cache-new-stamp": {
-      "outcome_sha": "763f4bdd2cb7d09a499cd9ecc1a7888bae09e3133ff0129d3ebd2fed6ed10cc3",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "284d99accf670a54967fb8ad8f95baf2367a86f464e99e4fef7f37ab307e775a",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "cache-new-uid": {
-      "outcome_sha": "3709ddbdc9d310cd8eeb28f5885ce625cc5a29191aec9998e2f14e6ba95cdb3c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "0c8fd25f1506416931b253d5b4bcbd8955eb099d81e88752f80a182643e81b5b",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "cache-rewrite": {
       "outcome_sha": "e48cb14212952f1081a3b0b222b6aa1ee9fe30a6cb315fa335e8c8ceeff7fefa",
@@ -165,8 +165,8 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "ignored-changed": {
-      "outcome_sha": "42dcd99b0688d51b3b234d6370b24952ef1a952a8fd58fff3011f790d90fd362",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "2e5787291a7af9c97c6cfe69414f37576d1ecacce2615141569debb553ea2cd7",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "ignored-delta": {
       "outcome_sha": "e8f630f3dd3a0bc1716d41264e9f298f853a5aac2ff61e609d3436be6db40c6b",
@@ -197,8 +197,8 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "marker-changed": {
-      "outcome_sha": "c6dda998e740e8100a22023eca55267ee19a1297699599a46574b5a6a45cb754",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a9c56ae8fa14571a13cfd38a2f74b5bef0d7d588a327ad874293d3d1b4803369",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "marker-delta": {
       "outcome_sha": "353dca9f35ebbbef4019cbd66193ef5da0db54574e810dcc39d44e22b68cb283",
@@ -225,8 +225,8 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "marker-warm": {
-      "outcome_sha": "ba2d1063d732a3283f7af2de38e7bba515864750506562bb20cdb9f5b1afb864",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "8ef7f956f59c0233a268f279aa2d515c62153d02981bc9fa58541383f5231b06",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves stamped re-deliveries of the same assistant and tool rows already stored, so they are not stored again (4 rows instead of 5); every distinct occurrence remains and no row is added"
     },
     "opaque-raw-stub-assistant-1": {
       "outcome_sha": "1d5eab18ed89ed405a4b466e3536f081866150ad9bbc7bdad6235b3e7034da03",
@@ -401,8 +401,8 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "proof-consumed-divergent": {
-      "outcome_sha": "1fa8c2526dba74e532fbd3ebe3238eaee97f0aab7f63556519fd5468cacb5cf4",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "54137bab167c4255248b34b63d8485d0bc77c8d497117f2144c83574f0df0bff",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "proof-consumed-foreign-conversation": {
       "outcome_sha": "2d2f5366b452b02cb22b74773067e4df8e3da1200c9f4387d4638e004d8e3cd4",
@@ -429,20 +429,20 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "proof-consumed-new-stamp": {
-      "outcome_sha": "763f4bdd2cb7d09a499cd9ecc1a7888bae09e3133ff0129d3ebd2fed6ed10cc3",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "284d99accf670a54967fb8ad8f95baf2367a86f464e99e4fef7f37ab307e775a",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "proof-consumed-new-uid": {
-      "outcome_sha": "3709ddbdc9d310cd8eeb28f5885ce625cc5a29191aec9998e2f14e6ba95cdb3c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "0c8fd25f1506416931b253d5b4bcbd8955eb099d81e88752f80a182643e81b5b",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "proof-consumed-repair": {
-      "outcome_sha": "2a7d15bf235bd9f3a1b2853becf2634e6f56d0e4a34f601993972dde48f68cf4",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "462a849d71b683173323c298f2998c8925f29f3839b75628914aa6f768c5d1e3",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "proof-consumed-short": {
-      "outcome_sha": "64336a597d21f789fc52fdf8e59348b7f4c38bc9824664ba7b880bfead912b1d",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "3b60ebb540b6acc48a8d7918819043c82bbe7f33229389a2b44b953f1ce928bb",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "proof-consumed-zero": {
       "outcome_sha": "4331f59e0ea21b29a98c11e4f3c0bf7028bfaf9b58c9ee8bf23ef98087552ed0",
@@ -453,8 +453,8 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "proof-native-divergent": {
-      "outcome_sha": "efe8704bdb79fc0c755a8433d1206fb836dec97c8e515b57b5eaca0ae51a68af",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "ce67651e6094e898c2f82c95d867459492d2787231b68f8d4fc02a00762cb9da",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "proof-native-foreign-conversation": {
       "outcome_sha": "b948f3732569dc6f6a335e370ad4bd5a6c6e004851bac6bd799639d4a8c83810",
@@ -485,12 +485,12 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "proof-native-new-stamp": {
-      "outcome_sha": "763f4bdd2cb7d09a499cd9ecc1a7888bae09e3133ff0129d3ebd2fed6ed10cc3",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "284d99accf670a54967fb8ad8f95baf2367a86f464e99e4fef7f37ab307e775a",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "proof-native-new-uid": {
-      "outcome_sha": "3709ddbdc9d310cd8eeb28f5885ce625cc5a29191aec9998e2f14e6ba95cdb3c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "0c8fd25f1506416931b253d5b4bcbd8955eb099d81e88752f80a182643e81b5b",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "proof-native-remap": {
       "outcome_sha": "ff20ec62360275c81a58a112d12a27894be9364d028134219b18d61b0dd09bc9",
@@ -501,12 +501,12 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "proof-native-repair": {
-      "outcome_sha": "212b791feeddbd2d5ea8396d00a2449403364f86f58468f76aa6823d54300ffd",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "6ec40135e3fd858257f394bc1defc5ecb253d12b2ae9ed6978843ba16f12d975",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "proof-native-short": {
-      "outcome_sha": "9c057a7ef04e8fdb4ac0161a37599db3685a710ee284d1bc22d498525edb0a04",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "76d2a8b9bb83bfe17df691a52121488cb95342bc0d1aca4df16ec2e3e7976f4f",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "proof-native-zero": {
       "outcome_sha": "ab38b157c298ab3b280de44f801d8dad71790ad0e05a85b191a4a197f86a4640",
@@ -517,8 +517,8 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "proof-output-divergent": {
-      "outcome_sha": "d144b6db0bb88c5fbaa2a7eed06b91757ed6a02f2996a234c868dd5e3232fa2a",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "e20457359a4c6f5682a36f5f95a6597646f0fc0b51966123f2ae8bc4062d9bfd",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "proof-output-foreign-conversation": {
       "outcome_sha": "c54e80126a5bc966e459fdf9b46b2c04348bbea164ce43c3939e3e5893042b85",
@@ -545,20 +545,20 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "proof-output-new-stamp": {
-      "outcome_sha": "763f4bdd2cb7d09a499cd9ecc1a7888bae09e3133ff0129d3ebd2fed6ed10cc3",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "284d99accf670a54967fb8ad8f95baf2367a86f464e99e4fef7f37ab307e775a",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "proof-output-new-uid": {
-      "outcome_sha": "3709ddbdc9d310cd8eeb28f5885ce625cc5a29191aec9998e2f14e6ba95cdb3c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "0c8fd25f1506416931b253d5b4bcbd8955eb099d81e88752f80a182643e81b5b",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "proof-output-repair": {
-      "outcome_sha": "37335b5e368bc38778145b0d2413551971dc16856570400c3749e1870f213179",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "f84307aae39d59fb23caaa2bdef1e531003fa822a6dc3a5272b309dc1b689ca7",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "proof-output-short": {
-      "outcome_sha": "86f28a6df479ef59d4d143ac86bcc393c729d13d9d68f51ef46e0302d0a02571",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "bcbfe9605c96e6a4428b017129c1d638eaa638d7096ecd3b0847d0444ce319e9",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "proof-output-zero": {
       "outcome_sha": "16af7586bfee4ded0eb078ce0cd8a9133b1f76eaf76c40e8a7afad52dee545ed",
@@ -593,8 +593,8 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "replay-build-mapped-ignore": {
-      "outcome_sha": "d54ef74dbf2113f6e83c890378a24ef3fe9d4cd6b207182db8f0df38a3bbb701",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "705c4ffa4f898254f7662a813a8ec1a66409ef7062a038052f200dd2fc1adc17",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "replay-build-quarantine-prefix": {
       "outcome_sha": "981187f57076efaef9bd8603a8e0f01afef2c3dcb74fa5e4144a6b79c50bd8f4",
@@ -609,8 +609,8 @@
       "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
     },
     "row-filter-ignored-append-error": {
-      "outcome_sha": "7859a262312ce560392be5e5f2b46e8c9f713bb254a681e26eaaff1100670656",
-      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged. On main this failed ingest also committed an empty message_relations table and the ignored_active_replay_placeholder_hashes metadata key without its rows; now it stores nothing, and after the next ingest the stored tables match main"
+      "outcome_sha": "2b71d9dbacfaa2c179fc52d7420c71ad4c274f99b5f29ec11d2122f00b8e65f9",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "scaffold-metadata": {
       "outcome_sha": "c4915ab52bf90ba8ba842e4f49ac72d1a85b728d86765871684544e9f0488ee8",
@@ -661,8 +661,8 @@
       "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
     },
     "sqlite-prematch": {
-      "outcome_sha": "2764e3094b9bbece23701d352a64b9d51a8f95782c9c9cdde93ea65d181f6566",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "41b68a337512aa9b9d5940e4d07669070a7b6cf904a5955af8b42c1a8f4f33f5",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "sqlite-probe": {
       "outcome_sha": "a9ea8af16a6a360638413ec95c121de5c9e969a97a7ebd904cf2a1d5986ec410",
@@ -701,8 +701,8 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "tools-changed": {
-      "outcome_sha": "b13ecf54cc1e635d01b9a4259b2e8af6be4c101ac661d13ba431eeb6823140ed",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "eb401f8a9d8cdf0d6a88d1b3072b846136bb3880fc04f85c5632f2076a920703",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves stamped re-deliveries of the same assistant and tool rows already stored, so they are not stored again (7 rows instead of 9); every distinct occurrence remains and no row is added"
     },
     "tools-delta": {
       "outcome_sha": "0c1c64cbb04be8a8f335ae71901105a9e9ad04c741769c00083209fdcbf6b052",
@@ -725,16 +725,16 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "tools-suffix": {
-      "outcome_sha": "1744867d0b0a515b7bb427a50c87d098165396bb5d4e10fcf7ac2f7c744af989",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "c5ee95318464128985136e6654bb6d95bd2d54ae82b47d3360629dad55c6fe0c",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves stamped re-deliveries of the same assistant and tool rows already stored, so they are not stored again (5 rows instead of 6); every distinct occurrence remains and no row is added"
     },
     "tools-warm": {
-      "outcome_sha": "f2e432c20ab432faed0ddaee99599a0f4767db3d2d1a4d0366fbaafff3b89586",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "f272e15a34f5c06fd46de7c472f323c704e3186f1dec47d308f05cda8ed8a080",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves stamped re-deliveries of the same assistant and tool rows already stored, so they are not stored again (4 rows instead of 6); every distinct occurrence remains and no row is added"
     },
     "turns-changed": {
-      "outcome_sha": "d6793986bc31efc812e1ee3d6437f84532360bb62ba6a96a43246a0437f6e4c0",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "9312c4cfc107410ffee0e8694b3b4d6ac6c6a15f2f2b47a7368bba6ba8fb5cc3",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "turns-delta": {
       "outcome_sha": "2fc4f6b5ae8400e12c556e445af46b87d7a4af0e32094018b076091d6da5f96a",
@@ -765,20 +765,20 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "uid-bindings-new": {
-      "outcome_sha": "d50bfb965e5b46d8974fb1216dbcf2762d7f89e2c3b9afefd275bb7e0c9c33c6",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "ea2d64a4b71ae4c8eb8e3eef4688ab701c1a9c74269b5a5bbacc5fd41635e399",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves an unstamped re-delivery of the same row with the same host uid already stored, so they are not stored again (1 rows instead of 2); every distinct occurrence remains and no row is added"
     },
     "uid-bindings-new-occurrence": {
-      "outcome_sha": "2111425b453f6974832ec4e97450fa30b105838fabef467e0e9a6a4aebad49e6",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "96106697daa621091437f94972c970b83473a24095f354cd8b0dcd90925be97b",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "uid-bindings-replay": {
       "outcome_sha": "98723e792401a6d4d624ef178deb9838bfea789f519ac202232b70578e26fecb",
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "whitespace-changed": {
-      "outcome_sha": "6febd4d72882d9d8f5feedffc1d4ce20ceb68d853fb3a6b800217f0dfcd8b46b",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "bdf9c6bd98658b98c69b2f88920f5e7932445b9e76943c51c58cd6bfefe2841e",
+      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "whitespace-delta": {
       "outcome_sha": "6f54eb8e02acbde772db17c82a4599de5811a2f16046243569c602135b6576b7",

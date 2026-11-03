@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from hermes_lcm import command, embedding_maintenance, recall_delivery, tools
+from hermes_lcm import command, embedding_maintenance, embedding_provider, recall_delivery, tools
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.vector_store import VectorStore
 from tests.test_issue_1014_incremental_embedding import FakeProvider, _make_engine
@@ -199,7 +199,7 @@ def test_uncertain_rows_name_operator_retry(engine, task):
 @pytest.mark.parametrize("batch", [False, True])
 def test_remote_chunk_ingest_marks_backlog_until_manual_backfill(engine, batch):
     engine._config.ollama_base_url = "http://192.0.2.1:11434"
-    assert not embedding_maintenance._automatic_chunks_allowed(engine._config, command)
+    assert not embedding_provider._automatic_chunks_allowed(engine._config)
     backfill(engine, "chunk", limit=100)
     assert recall(engine, "chunk")["degraded"] is False
     message = {"role": "user", "content": "cobalt later " + "detail " * 60}
@@ -453,7 +453,7 @@ def test_atomic_ingest_defers_backlog_mark_until_outer_commit(engine, abort):
 @pytest.mark.parametrize("atomic", [True, False])
 def test_backlog_policy_error_preserves_ingest(engine, monkeypatch, caplog, atomic):
     engine._config.embedding_provider = "voyage"
-    assert not embedding_maintenance._automatic_chunks_allowed(engine._config, command)
+    assert not embedding_provider._automatic_chunks_allowed(engine._config)
     store = engine._store
     assert not store._conn.in_transaction
     message = {"role": "user", "content": "cobalt survives backlog policy error"}
@@ -462,7 +462,7 @@ def test_backlog_policy_error_preserves_ingest(engine, monkeypatch, caplog, atom
         raise RuntimeError("simulated backlog policy error")
 
     with monkeypatch.context() as patch:
-        patch.setattr(embedding_maintenance, "_automatic_chunks_allowed", fail_policy)
+        patch.setattr(embedding_provider, "_automatic_chunks_allowed", fail_policy)
         with caplog.at_level("DEBUG", logger="hermes_lcm.store"):
             with store.atomic() if atomic else nullcontext():
                 sid = store.append("seed", message)
