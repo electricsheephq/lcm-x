@@ -816,6 +816,7 @@ def test_condensed_publication_does_not_schedule_a_pass(tmp_path, home, monkeypa
     [
         ("http://10.1.2.3:11434", False),
         ("https://ollama.example.com", False),
+        ("http://127.0.0.1:11434", True),
         ("http://127.0.0.2:11434/", True),
         ("http://[::1]:11434", True),
         ("http://localhost:11434", True),
