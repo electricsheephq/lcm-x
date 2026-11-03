@@ -43,8 +43,8 @@ Home settings must be absolute paths; a relative one disables capture and the se
 
 A `reader-override.json` in the store home makes the server start another reader in place of the
 plain one, and hands it the plain reader's command. Anything wrong with the file starts the plain
-reader. The plugin never writes that file; its format and fallbacks are in the design doc's Recall
-surface section.
+reader, and so does a file or command that another user could have written. The plugin never writes
+that file; its format and fallbacks are in the design doc's Recall surface section.
 
 The store lives outside the plugin's folders, so removing or updating the plugin never removes
 your memory. Capture runs on macOS and Linux.

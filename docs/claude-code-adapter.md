@@ -286,6 +286,10 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
     `version` other than 1, an empty `command`, or a first item that is relative, missing or not
     executable. The same holds when starting the command fails with an OS error, such as a script
     whose interpreter is gone.
+  - Another local user must not be able to choose the command. So the plain reader also starts when
+    the file is not owned by the user the server runs as, or when `command`'s first item is owned
+    by anyone but that user or root (root owns system interpreters), or when either one is
+    writable by group or others.
   - Once started, the override owns recall. The plugin does not supervise it; falling back to
     `LCMX_LOCAL_READER_CMD` on its own failures is the override's job. The file is read only when
     the plain reader could start; otherwise the server reports the missing setup step as before.

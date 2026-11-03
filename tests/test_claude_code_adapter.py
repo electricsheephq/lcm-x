@@ -471,6 +471,7 @@ def _plain_reader(env, tmp_path, runtime=(sys.executable,)):
 def _write_override(env, spec):
     path = Path(env["LCMX_CC_HOME"]) / "reader-override.json"
     path.write_text(spec if isinstance(spec, str) else json.dumps(spec), encoding="utf-8")
+    path.chmod(0o644)  # whatever the umask: a group-writable file would not be used
 
 
 @pytest.mark.parametrize("runtime", ["set_up", "found"])
@@ -513,6 +514,10 @@ def test_a_valid_reader_override_starts_instead_of_the_plain_reader(start_reader
     ("device", "not a regular file"),
     pytest.param("no_permission", "could not be read",
                  marks=pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")),
+    ("other_owner", "not owned by this user"),
+    ("group_writable", "writable by group or others"),
+    ("other_writable", "writable by group or others"),
+    ("command_other_writable", '"command[0]" is writable by group or others'),
 ])
 def test_a_bad_reader_override_starts_the_plain_reader(start_reader, env, tmp_path, monkeypatch, capsys, case,
                                                        reason):
@@ -520,6 +525,8 @@ def test_a_bad_reader_override_starts_the_plain_reader(start_reader, env, tmp_pa
     reader = str(_executable(tmp_path / "override" / "reader"))
     idle = tmp_path / "override" / "idle"
     idle.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")  # no execute bit
+    loose = _executable(tmp_path / "override" / "loose")
+    loose.chmod(0o757)  # anyone may rewrite it
     monkeypatch.chdir(tmp_path)  # so the relative command names a real executable
     specs = {
         "malformed": '{"version": 1, "command": [',
@@ -534,6 +541,7 @@ def test_a_bad_reader_override_starts_the_plain_reader(start_reader, env, tmp_pa
         "relative": {"version": 1, "command": ["override/reader"]},
         "missing": {"version": 1, "command": [str(tmp_path / "override" / "missing")]},
         "not_executable": {"version": 1, "command": [str(idle)]},
+        "command_other_writable": {"version": 1, "command": [str(loose)]},
     }
     path = Path(env["LCMX_CC_HOME"]) / "reader-override.json"
     if case == "directory":
@@ -543,12 +551,50 @@ def test_a_bad_reader_override_starts_the_plain_reader(start_reader, env, tmp_pa
     elif case == "no_permission":
         _write_override(env, {"version": 1, "command": [reader]})
         path.chmod(0)
+    elif case == "other_owner":  # a test cannot chown, so the launcher runs as another user instead
+        _write_override(env, {"version": 1, "command": [reader]})
+        uid = os.geteuid()
+        monkeypatch.setattr(os, "geteuid", lambda: uid + 1)
+    elif case in ("group_writable", "other_writable"):
+        _write_override(env, {"version": 1, "command": [reader]})
+        path.chmod(0o620 if case == "group_writable" else 0o602)
     else:
         _write_override(env, specs[case])
     plain = _plain_reader(env, tmp_path)
     assert start_reader() == ("plain", plain[0], plain, None)
     (line,) = capsys.readouterr().err.splitlines()
     assert reason in line and line.endswith("; starting the plain reader")
+
+
+_SH = Path("/bin/sh")
+
+
+@pytest.mark.skipif(not (_SH.is_file() and _SH.stat().st_uid == 0), reason="needs a root-owned /bin/sh")
+def test_a_reader_override_may_name_a_root_owned_interpreter(start_reader, env, capsys):
+    """A command[0] that root owns, as system interpreters are, still starts."""
+    _write_override(env, {"version": 1, "command": [str(_SH), "-c", "exit 0"]})
+    assert start_reader()[:3] == ("override", str(_SH), [str(_SH), "-c", "exit 0"])
+    assert capsys.readouterr().err == ""
+
+
+def test_untrusted_names_the_other_writers_a_file_could_have():
+    """The ownership and mode rule both ways, on stat results a test cannot make for real (a file
+    another non-root user owns)."""
+    spec = importlib.util.spec_from_file_location("lcmx_mcp_under_test", PLUGIN / "bin" / "lcmx_mcp.py")
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+
+    def info(mode, uid):
+        return os.stat_result((stat.S_IFREG | mode, 0, 0, 1, uid, 0, 0, 0, 0, 0))
+
+    assert launcher.untrusted(info(0o644, 501), (501,)) == ""
+    assert launcher.untrusted(info(0o644, 502), (501,)) == "not owned by this user"
+    assert launcher.untrusted(info(0o644, 0), (501,)) == "not owned by this user"
+    assert launcher.untrusted(info(0o755, 0), (501, 0)) == ""
+    assert launcher.untrusted(info(0o755, 502), (501, 0)) == "not owned by this user or root"
+    assert launcher.untrusted(info(0o664, 501), (501,)) == "writable by group or others"
+    assert launcher.untrusted(info(0o646, 501), (501,)) == "writable by group or others"
+    assert launcher.untrusted(info(0o775, 0), (501, 0)) == "writable by group or others"
 
 
 # Each program the launcher ends up running appends [which, argv] to LCMX_TEST_RECORD.

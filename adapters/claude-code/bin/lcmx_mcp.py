@@ -6,6 +6,9 @@ and it replaces itself with the LCM-X runtime interpreter.
 A valid ``reader-override.json`` in the store home names a command to start instead, which gets
 the plain reader's argv in ``LCMX_LOCAL_READER_CMD``. Anything else about that file, or a command
 that does not start, starts the plain reader. The plugin never writes the file.
+
+Only a file this user owns can choose the command, and only a command this user or root owns can
+start; neither may be writable by group or others, so another local user cannot run code as this one.
 """
 from __future__ import annotations
 
@@ -23,6 +26,15 @@ OVERRIDE = "reader-override.json"
 READER_CMD = "LCMX_LOCAL_READER_CMD"
 
 
+def untrusted(info: os.stat_result, owners: Tuple[int, ...]) -> str:
+    """Why another user could have written this file ("" when only an owner in ``owners`` could)."""
+    if info.st_uid not in owners:
+        return "not owned by this user" if len(set(owners)) == 1 else "not owned by this user or root"
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return "writable by group or others"
+    return ""
+
+
 def reader_override(path: Path) -> Tuple[Optional[List[str]], str]:
     """The command the override file names, else None and why it is not used ("" for no file)."""
     try:
@@ -32,8 +44,12 @@ def reader_override(path: Path) -> Tuple[Optional[List[str]], str]:
     except OSError as error:
         return None, "could not be read (%s)" % (error.strerror or error)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):  # a FIFO or a device can block or never end
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):  # a FIFO or a device can block or never end
             return None, "not a regular file"
+        reason = untrusted(info, (os.geteuid(),))
+        if reason:
+            return None, reason
         os.set_blocking(fd, True)
         with open(fd, "rb", closefd=False) as handle:
             text = handle.read()
@@ -61,6 +77,12 @@ def reader_override(path: Path) -> Tuple[Optional[List[str]], str]:
         return None, '"command[0]" is not an absolute path'
     if not (os.path.isfile(command[0]) and os.access(command[0], os.X_OK)):
         return None, '"command[0]" is missing or not executable'
+    try:
+        reason = untrusted(os.stat(command[0]), (os.geteuid(), 0))  # root owns system interpreters
+    except OSError:
+        return None, '"command[0]" is missing or not executable'
+    if reason:
+        return None, '"command[0]" is ' + reason
     return command, ""
 
 
