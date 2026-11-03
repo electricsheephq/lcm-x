@@ -3,10 +3,11 @@ name: CI
 on:
   workflow_dispatch:
   push:
-    # release/** are the maintenance branches that release trains are cut on (#2171 item 1).
-    branches: [main, "release/**"]
+    # release/vX.Y.x are the maintenance branches that release trains are cut on (#2171 item 1).
+    # The narrow pattern keeps PR head branches such as release/v0.29.1-ga-notes from running twice.
+    branches: [main, "release/v*.x"]
   pull_request:
-    branches: [main, "release/**"]
+    branches: [main, "release/v*.x"]
   merge_group:
 
 permissions:
