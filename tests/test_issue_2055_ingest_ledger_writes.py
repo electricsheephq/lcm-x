@@ -254,7 +254,7 @@ def test_07_fail_open_and_owner_propagation(engines, monkeypatch, caplog, failur
 
 
 def test_08_read_only_drain_and_delegate_exclusions(engines):
-    """Lock-in: these paths leave existing ledger tables unchanged, even on Part A."""
+    """Queue is read-only; a decided drain writes a binding but no view; delegates stay excluded."""
     engine = engines()
     baseline = ledger_state(engine)
     locker = sqlite3.connect(engine._store.db_path)
@@ -268,7 +268,11 @@ def test_08_read_only_drain_and_delegate_exclusions(engines):
         locker.close()
     engine._retry_pending_session_tails()
     assert [r["content"] for r in engine._store.get_session_messages("S")] == ["frozen"]
-    assert ledger_state(engine) == baseline
+    bindings = sql_rows(engine, "occurrence_bindings")
+    assert len(bindings) == 1
+    assert bindings[0]["disposition"] == "stored" and bindings[0]["stamp"] == "10.0"
+    assert sql_rows(engine, "ingest_views") == baseline["ingest_views"]
+    baseline = ledger_state(engine)
     assert engine._append_delegate_child_rows("child", [_m("user", "child row", 20.)],
         {"parent_session_id": "S", "source": "parent_frame", "child_subagent_id": "", "parent_subagent_id": "", "child_role": ""}) == 1
     assert engine._store.get_session_messages("child")[0]["content"] == "child row"

@@ -347,8 +347,9 @@ def test_shutdown_after_failed_rebind_with_pending_tail_never_reopens(preflight,
     def append(tail):
         if append_fails:
             raise sqlite3.OperationalError("database is locked")
+        return []
 
-    monkeypatch.setattr(engine, "_trim_replayed_pending_tail", lambda tail: None)
+    monkeypatch.setattr(engine, "_match_pending_tail", lambda tail: (0, 0, None, "no_ledger", "end", 0))
     monkeypatch.setattr(engine, "_append_ingest_batch", append)
     caplog.set_level("WARNING")
     engine.shutdown()

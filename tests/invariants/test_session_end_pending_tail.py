@@ -12,8 +12,9 @@ from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
 
-@pytest.fixture
-def engine(tmp_path):
+@pytest.fixture(params=["off", "shadow"])
+def engine(tmp_path, monkeypatch, request):
+    monkeypatch.setenv("LCM_INGEST_LEDGER", request.param)
     instance = LCMEngine(config=LCMConfig(
         database_path=str(tmp_path / "pending.db"), embeddings_enabled=False,
         temporal_rollups_enabled=False,
