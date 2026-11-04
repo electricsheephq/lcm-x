@@ -7338,7 +7338,7 @@ class LCMEngine(
             if lineage is None:
                 return provisional
             memo = (store.db_identity, salt, sid)
-            if memo in getattr(self, "_ledger_adopted", ()):
+            if persisted and memo in getattr(self, "_ledger_adopted", ()):
                 return lineage
             with _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
                 if any(conn.execute(f"SELECT 1 FROM {table} WHERE lineage=? LIMIT 1", (provisional,)).fetchone()
