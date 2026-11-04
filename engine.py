@@ -11325,6 +11325,8 @@ class LCMEngine(
                     disposition="composite_part" if remainder is not None else "stored", key_rank=None, view_seq=seq)
                     for sid, ordinal, entry, stamp, remainder in zip(ids, ordinals, frozen["entries"],
                                                                    frozen["stamps"], frozen["remainder"])])
+            if respace:
+                after_commit.append(lambda: self._ledger_count("ledger.respaced"))
         except BaseException as exc:
             if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
                     or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):

@@ -159,6 +159,18 @@ def test_salt_change_falls_back(engines):
     assert count(engine, "tail.retry.fallback.salt_changed") == 1
 
 
+def test_tail_respace_is_counted(engines):
+    engine = engines()
+    queue(engine)
+    head = engine._store._conn.execute("SELECT max(ordinal) FROM occurrence_bindings").fetchone()[0]
+    # Foreign rows bound right after the head leave the retry no integer midpoint.
+    replay(engine, [{**row, "message_uid": "foreign-" + row["message_uid"]} for row in history()[2:]],
+           ordinals=[head + 1, head + 2])
+    engine._retry_pending_session_tails()
+    assert contents(engine) == ["A", "B", "C", "D", "C", "D"]
+    assert count(engine, "respaced") == 1
+
+
 @pytest.mark.parametrize("failure", ["corrupt_view", "busy"])
 def test_unreadable_ledger_keeps_positional_rule(engines, monkeypatch, failure):
     engine = engines()
