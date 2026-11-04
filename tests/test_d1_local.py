@@ -890,6 +890,8 @@ class SaltedFake(BatchFake):
     ("aprime_no_lookups", "the A-prime pre-embed looked up no units"),
     ("aprime_zero_units", "the A-prime pre-embed looked up no units"),
     ("aprime_uncovered", "the A-prime pre-embed looked up units the plan does not cover"),
+    ("aprime_repeat", "the A-prime pre-embed looked up units the plan does not cover"),
+    ("aprime_short_hits", "the A-prime pre-embed looked up units the plan does not cover"),
     ("part_launch", "preembed-part-1 failed to launch: OSError: no such interpreter"),
     ("plan_launch", "preembed-plan failed to launch: OSError: no such interpreter"),
     ("verify_launch", "OSError: no such interpreter"),
@@ -919,6 +921,8 @@ def test_partition_proof_failure_refuses_seal_with_reason(tmp_path, monkeypatch,
             Path(env.get("LCM_D1_LOOKUP_LOG") or env["LCM_D1_DISPATCH_LOG"]).touch()
         if hit and fault == "aprime_uncovered" and name == "preembed-aa":
             units = UNITS + ["a unit the build never saw"]
+        if hit and fault == "aprime_repeat" and name == "preembed-aa":
+            units = UNITS + UNITS[:10]  # every lookup hits, but A-prime looks up more units than the plan built
         provider = SaltedFake() if hit and fault == "salted" and name == "preembed-verify" else BatchFake()
         if hit and fault == "merge_identity" and name == "preembed-part-1":
             env = dict(env, LCM_D1_ROLE="other")
@@ -926,6 +930,11 @@ def test_partition_proof_failure_refuses_seal_with_reason(tmp_path, monkeypatch,
             env = dict(env, LCM_D1_VERIFY_CALLS=json.dumps(json.loads(env["LCM_D1_VERIFY_CALLS"])[:-1]))
         if not (hit and fault == "aprime_no_lookups" and name == "preembed-aa"):
             fake_build_child(env, units, provider)
+        if hit and fault == "aprime_short_hits" and name == "preembed-aa":
+            log = Path(env["LCM_D1_LOOKUP_LOG"])
+            rows = [json.loads(line) for line in log.read_text().splitlines()]
+            rows[0]["hits"] -= 1  # a miss that sent nothing: only the hits check can catch it
+            log.write_text("".join(json.dumps(row) + "\n" for row in rows))
         if hit and fault == "stray_row" and name == "preembed-part-0":
             with closing(sqlite3.connect(env[lme.EMBED_CACHE_ENV])) as db, db:
                 db.execute("INSERT INTO entries VALUES ('stray', 64, x'00', 'x')")
@@ -951,6 +960,10 @@ def test_partition_proof_failure_refuses_seal_with_reason(tmp_path, monkeypatch,
         assert (proofs["candidate"]["aprime_units"], proofs["candidate"]["aprime_dispatches"]) == (30, 1)
     if fault == "aprime_uncovered":
         assert proofs["candidate"]["aprime_units"] == 31
+    if fault == "aprime_repeat":
+        assert proofs["candidate"]["aprime_units"] == 40
+    if fault == "aprime_short_hits":
+        assert proofs["candidate"]["aprime_units"] == 30
     if fault in {"part_launch", "plan_launch"}:
         assert any(row["role"] == "candidate" and row["exit_code"] == 1 for row in receipt["preembed"])
 
