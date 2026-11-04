@@ -314,3 +314,63 @@ def test_replay_committed_between_pretrim_and_begin(engines, monkeypatch, bound)
     assert fired == [True]
     assert contents(engine) == ["A", "B", "C", "D"]
     assert not engine._pending_session_tails
+
+
+def end_view(engine, view):
+    locker = sqlite3.connect(engine._store.db_path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        engine.on_session_end("S", copy.deepcopy(view))
+    finally:
+        locker.rollback()
+        locker.close()
+    [tail] = engine._pending_session_tails
+    return tail
+
+
+def ordinals(engine):
+    """Content -> the ordinals of its bindings, in store order."""
+    result = {}
+    for row in engine._store.get_session_messages("S"):
+        result.setdefault(row["content"], []).extend(
+            b["ordinal"] for b in sql_rows(engine, "occurrence_bindings") if b["store_id"] == row["store_id"])
+    return result
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_inserted_tail_keeps_positional_rule(engines, committed):
+    """An end view inserts C before the stored D, so C's host predecessor is B, not the last store row."""
+    engine = engines()
+    view = history()
+    engine.ingest(copy.deepcopy([view[0], view[1], view[3]]))
+    tail = end_view(engine, view)
+    assert [m["content"] for m in tail["messages"]] == ["C"]
+    bound = ordinals(engine)
+    if committed:
+        # Another ingest commits C first, between B and D, where the ordinary writer places it.
+        replay(engine, [view[2]], ordinals=[(bound["B"][0] + bound["D"][0]) // 2])
+    engine._retry_pending_session_tails()
+    assert not engine._pending_session_tails
+    assert sorted(contents(engine)) == ["A", "B", "C", "D"]
+    # The retry never binds C after D: it leaves its own row unbound for an exact re-bind.
+    assert all(bound["B"][0] < o < bound["D"][0] for o in ordinals(engine)["C"])
+    assert len(ordinals(engine)["C"]) == int(committed)
+    assert count(engine, "tail.queued.inserted") == 1 and "ledger" not in tail
+    assert count(engine, "tail.retry.fallback.no_ledger") == 1
+
+
+def test_end_after_an_inserted_row_binds_after_the_logical_last(engines):
+    """The last store row C was inserted before D, so an appended tail row follows D, not C."""
+    engine = engines()
+    view = [*history(), _m("user", "E", 5., "E")]
+    engine.ingest(copy.deepcopy([view[0], view[1], view[3]]))
+    engine.ingest(copy.deepcopy(view[:4]))
+    assert contents(engine) == ["A", "B", "D", "C"]
+    bound = ordinals(engine)
+    assert bound["B"][0] < bound["C"][0] < bound["D"][0]
+    tail = end_view(engine, view)
+    assert [m["content"] for m in tail["messages"]] == ["E"]
+    engine._retry_pending_session_tails()
+    assert contents(engine) == ["A", "B", "D", "C", "E"]
+    assert ordinals(engine)["E"][0] > bound["D"][0]
+    assert count(engine, "tail.retry.ledger_match") == 1 and count(engine, "tail.queued.inserted") == 0

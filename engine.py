@@ -8511,7 +8511,11 @@ class LCMEngine(
                 self.__dict__["_frozen_tail_reached"] = True
                 frozen = getattr(self, "_frozen_ledger_prepared", None)
                 indexes = [idx for idx, _row in messages_to_store_with_index]
-                if frozen is not None and all(idx < len(frozen["entries"]) for idx in indexes):
+                usable = frozen is not None and all(idx < len(frozen["entries"]) for idx in indexes)
+                # Only rows that end the host view follow the session's last bound row. An inserted tail freezes
+                # no evidence, so it keeps today's positional rule and its rows wait for an exact re-bind.
+                inserted = usable and indexes != list(range(len(frozen["entries"]) - len(indexes), len(frozen["entries"])))
+                if usable and not inserted:
                     pending["ledger"] = {**{key: frozen[key] for key in ("salt", "lineage", "resolved")},
                         "entries": [frozen["entries"][idx] for idx in indexes],
                         "stamps": [frozen["stamps"][idx] for idx in indexes],
@@ -8525,6 +8529,8 @@ class LCMEngine(
                     self._pending_session_tails.append(pending)
                     if getattr(self, "_ingest_read_only", None) is not None:
                         self._ledger_count("ledger.tail.queued.warm")
+                        if inserted:
+                            self._ledger_count("ledger.tail.queued.inserted")
                 maintenance_scheduler._PENDING_TAIL_ENGINES.add(self)
             raise
         if senders is not None:
@@ -11248,14 +11254,14 @@ class LCMEngine(
                     "WITH head AS (SELECT b.ordinal FROM occurrence_bindings b JOIN messages m USING(store_id) "
                     "WHERE b.lineage=? AND m.session_id=? AND b.store_id<=? "
                     "AND b.disposition IN ('stored','migrated','ambiguous') "
-                    "ORDER BY (b.store_id=?) DESC,b.ordinal DESC LIMIT 1) "
+                    "ORDER BY b.ordinal DESC LIMIT 1) "
                     "SELECT b.*,h.head_ordinal,o.stamp AS observed_stamp "
                     "FROM (SELECT (SELECT ordinal FROM head) AS head_ordinal) h "
                     "LEFT JOIN occurrence_bindings b ON b.lineage=? "
                     "AND b.store_id IN (SELECT value FROM json_each(?)) "
                     "AND b.disposition IN ('stored','migrated','ambiguous','composite_part') "
                     "LEFT JOIN stamp_observations o ON o.occ_id=b.occ_id",
-                    (lineage, tail["session_id"], tail["after_store_id"], tail["after_store_id"], lineage,
+                    (lineage, tail["session_id"], tail["after_store_id"], lineage,
                      json.dumps([r["store_id"] for r in rows]))))
                 last = records[0]["head_ordinal"]
                 for record in records:
