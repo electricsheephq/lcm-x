@@ -41,7 +41,7 @@ def no_egress(monkeypatch):
 @pytest.mark.parametrize("provider", ["voyage", "openai-compatible", "ollama", "siliconflow"])
 @pytest.mark.parametrize("warmed", [False, True])
 def test_cloud_unset_enable_is_inert(tmp_path, monkeypatch, no_egress, provider, warmed):
-    from hermes_lcm import engine as engine_module
+    from hermes_lcm import maintenance_scheduler
 
     monkeypatch.delenv("LCM_EMBEDDINGS_ENABLED", raising=False)
     monkeypatch.setenv("LCM_EMBEDDING_PROVIDER", provider)
@@ -69,7 +69,7 @@ def test_cloud_unset_enable_is_inert(tmp_path, monkeypatch, no_egress, provider,
             )
             assert isinstance(result, dict), result
     queued = []
-    monkeypatch.setattr(engine_module._EMBEDDING_MAINTENANCE_SCHEDULER, "schedule",
+    monkeypatch.setattr(maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER, "schedule",
                         lambda key, callback, **kwargs: queued.append(callback))
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
     try:

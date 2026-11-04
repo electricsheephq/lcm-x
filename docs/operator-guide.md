@@ -328,13 +328,18 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.29.1` is the forward identity of the next patch release: the `v0.29.1-rc1`
-tag carries it first, the gauntlet runs at the last rc tag, and the GA tree must be
-that rc tree plus the GA release-notes file. The rollback target for this candidate
-is `v0.29.0`; it adds no schema change. The current stable release is
+and tag. The current stable release is
+[v0.29.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.1)
+at `3a4a08ff501347a79669fab51444c471b09b551d` (2026-11-03); see [project status](project-status.md).
+The rollback target for v0.29.1 is `v0.29.0`; it adds no schema change. Take a
+SQLite-safe backup first, and compare ordered raw messages and summary provenance
+through upgrade, rollback and re-upgrade. v0.29.0 does not read the compaction
+escape record that v0.29.1 keeps in the existing session metadata.
+
+For the previous release,
 [v0.29.0](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.0)
-at `c13dea3783bdbd1aab52d83dff5d009bfade0bd2` (2026-10-28); see [project status](project-status.md).
-The rollback target for v0.29.0 is `v0.28.1`. Take a SQLite-safe backup first, and
+at `c13dea3783bdbd1aab52d83dff5d009bfade0bd2` (2026-10-28),
+the rollback target is `v0.28.1`. Take a SQLite-safe backup first, and
 compare ordered raw messages and summary provenance through upgrade, rollback and
 re-upgrade. After a rollback to v0.28.1, the three chunk embedding triggers stay in
 the database and SQLite keeps running them; prefixed vectors use their own task names
@@ -514,7 +519,7 @@ Useful environment variables:
 | `LCM_SURVIVAL_RESERVE` | `0.15` | Share of the model window the survival fit keeps free for the response and host overhead (the fit target is window x (1 - reserve), minus the observed host overhead) |
 | `LCM_HOST_MESSAGE_UID` | `shadow` | `shadow`: on a host that sends `message_uid`, records the row each uid was bound to in the droppable `host_uid_bindings` table and counts agreement with the existing identity matching; ingest, replay and emission are unchanged, and `/lcm doctor` reports `host_uid_*` counts only. `off`: no capture, no table writes, no counts and no log line. Under `shadow` and `on`, canonical uid evidence can also exclude a proven hidden re-ingest copy of an assistant message from leaf summary input (the row stays stored and searchable); `off` disables that. `on` behaves exactly like `shadow`: both record count-only would-reject alias UID-conflict diagnostics in the debug log without changing matching, stored rows, bindings, or ingest writes. `off` performs no UID/binding reads on this diagnostic path. Unknown values behave as `shadow` and log one warning. Bindings are deleted with their messages, and lineage keys are namespaced by Hermes home, so one database shared by several homes keeps them apart |
 | `LCM_SUMMARY_MODEL` | auxiliary | Override summarization model |
-| `LCM_INGEST_LEDGER` | `shadow` | Foreground ingest records bindings, stamp observations and view vectors inside its transaction without changing row decisions. Ordinary isolated ledger failures fail open; busy errors still retry the ingest, and a lost owner transaction or savepoint error still rolls it back. `off` disables setup and ingest ledger work; unknown values mean `shadow` with one warning per process. Tail drain, delegated children and compaction do not write the ledger at P1b-2b. |
+| `LCM_INGEST_LEDGER` | `shadow` | Foreground ingest records bindings, stamp observations and view vectors inside its transaction. On a cold or reconciled start, `shadow` also uses the ledger's occurrence-proven prefix as a cursor candidate. It can only move the cursor forward past rows proven stored or skipped by `LCM_IGNORE_MESSAGE_PATTERNS`, so it can change which incoming rows are stored. Ordinary isolated ledger failures fail open; busy errors still retry the ingest, and a lost owner transaction or savepoint error still rolls it back. `off` disables setup, ledger writes and the candidate, and restores the legacy cursor choice; unknown values mean `shadow` with one warning per process. Tail drain, delegated children and compaction do not write the ledger at P1b-2b. |
 | `LCM_SUMMARY_FALLBACK_MODELS` | empty | Comma-separated summarization models tried after `LCM_SUMMARY_MODEL` or the auxiliary task default fails |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `2` | Consecutive failed summarization calls before a route is skipped temporarily |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `300` | Seconds to skip an open summary route before retrying it |
@@ -1536,6 +1541,83 @@ existing float32 corpus without re-registering and re-running
 `/lcm embed backfill --apply` against the new identity. A local-derive
 migration path (computing sign-bits/quantization from already-stored float32
 vectors, no provider re-call) is planned but not yet built.
+
+## Use LCM-X memory from Claude Code (read-only)
+
+`scripts/lcm_x_mcp.py` (`lcm-x mcp`) lets Claude Code read a Hermes profile's
+LCM-X memory while Hermes keeps running. It is a stdio MCP server over ONE store
+and serves five tools with their production schemas and outputs: `lcm_recall`,
+`lcm_grep`, `lcm_expand`, `lcm_load_session` and `lcm_describe`.
+
+Register it with the Hermes venv Python (3.10 or newer; an older interpreter
+exits with one line saying so):
+
+```bash
+claude mcp add lcm-x -- <hermes-venv-python> <plugin_dir>/scripts/lcm_x_mcp.py \
+  --store <path/to/lcm.db> --hermes-home <HERMES_HOME> [--log-dir <dir>]
+```
+
+`--store` is the profile's `lcm.db` (it can live outside `HERMES_HOME` when
+`LCM_DATABASE_PATH` moves it). `--hermes-home` is that profile's home: the server
+resolves externalized payloads against it and reads its configuration from it.
+
+What it reads:
+
+- the store, opened `mode=ro` with a new connection for each tool call, so no read
+  snapshot outlives a call and Hermes' WAL checkpoints keep progressing;
+- the profile's externalized payload files (read only, never created);
+- `<HERMES_HOME>/.env`, of which it parses only `LCM_*` lines and
+  `FASTEMBED_CACHE_PATH`. Provider API keys and every other line are never read
+  into the server, logged or forwarded. The `LCM_*` settings of the shell that
+  started the server are ignored, including `LCM_HERMES_BASE_DIR`.
+  `LCM_DISABLED_TOOLS` from the profile hides those tools.
+
+What it never does: write the store. It runs no migrations, FTS repair or
+integrity scan, stem backfill, embedding-table creation, marker write or
+checkpoint, and it never goes through Hermes' tool dispatch (which ingests).
+The test suite runs a full five-tool sweep under a SQLite authorizer on every
+connection the server opens and requires zero main-database writes.
+
+Behaviour without an active session:
+
+- `lcm_grep` defaults to `session_scope='all'` (or `'session'` when a `session_id`
+  is given);
+- `lcm_expand`/`lcm_describe` with a `node_id` but no `session_id` resolve the
+  node in its own session;
+- externalized payloads (by `externalized_ref`, or attached to a `store_id`
+  expansion) resolve from any session of the store.
+
+Result flags. Every result is the production JSON object prefixed with
+`store_uuid` and a `reader` object:
+
+| Field | Meaning |
+| --- | --- |
+| `store_uuid` | The store's id. Hermes does not stamp one, so for a Hermes store it is derived from the file's identity (its path, device and inode), with `store_uuid_source: derived`. It stays the same while the file stays in place; a copy, a move to another volume or a restore that replaces the file gets a new id, so ids a client qualified with the old one are refused as `foreign_store` (bare ids still work). A store whose writer stamped an id in its metadata reports that id, with `store_uuid_source: metadata`. |
+| `reader.degraded` | `embedding_identity_mismatch`: the store's active embedding identity (provider, model, revision, dimension, dtype) differs from the reader's model. `provider_unavailable`: no local model is cached (the server never downloads one), or the profile uses a cloud provider, which the reader never calls. Either way only full text answers. |
+| `reader.tokenizer` | `estimate` while the tokenizer is not loaded (the server waits up to 30 s at start); content cut by token budget can then differ from Hermes' cut. |
+| `reader.capabilities` | Optional parts of the store: FTS indexes, the stem index, embeddings, chunk vectors, the summary provenance sidecar, lifecycle state. A missing one degrades that feature instead of failing the call. |
+
+Ids in tool arguments (`store_id`, `node_id`, `session_id`, `externalized_ref`,
+`after_store_id`, and the entries of `seen_refs`, `exclude_session_ids` and
+`externalized_refs`) may be bare or prefixed `<store_uuid>:`. A prefix naming
+another store is refused with a `foreign_store` error.
+
+Errors:
+
+- `store_offline`: the store is in WAL mode and its `-wal` or `-shm` file is gone
+  (its writer stopped on a system that removes them). The server checks this from the
+  database header before opening, reading it once more about 50 ms later because a
+  writer may switch the store to rollback journal mode as it exits, and does not open
+  the store, because a read-only open would recreate the files. Retry once the writer
+  has written to the store; the next call retries. Residual race:
+  a reader that opens in the instant the agent stops may recreate the two empty
+  coordination files; the agent's next start handles them.
+- `schema_refused`: the store is stamped newer than this plugin, is below schema
+  v5, or lacks a required core table. Nothing is opened for write.
+
+Logs go to `lcm-x-mcp-<pid>.log` under `--log-dir` (default `$TMPDIR`): one
+metadata line per call (tool, argument hash, latency, size); the server itself
+never logs argument text or `.env` values. Stdout carries only protocol lines.
 
 ## Import and backfill
 
