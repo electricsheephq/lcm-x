@@ -5161,17 +5161,38 @@ class LCMEngine(
         off_current_recorded_prefix_count = 0
         off_current_bypass_prefix_count = 0
         off_current_bypass_prefix_truncated = False
+        off_current_cold_tail_eligible = bool(off_current_normal_conversation_id) and not (
+            self._has_lcm_bypass_lineage_session(session_id))
+        off_current_source = (
+            self._lcm_session_last_normal_platform.get(session_id)
+            or self._lcm_session_last_platform.get(session_id, self._session_platform))
+
+        def queue_off_current_busy_tail(exc):
+            if not off_current_cold_tail_eligible or not _is_ingest_busy_error(exc):
+                return False
+            self._queue_cold_session_tail(messages, session_id=session_id,
+                conversation_id=off_current_normal_conversation_id, source=off_current_source, error=exc)
+            self._ledger_count("ledger.tail.busy_at_end")
+            logger.warning(
+                "LCM session-end raw-message ingest skipped due to SQLite lock; "
+                "retry pending at the next session start or shutdown: %s unflushed=%d", exc, len(messages))
+            return True
+
         if off_current_lineage:
             (
                 off_current_bypass_prefix_count,
                 off_current_bypass_prefix_truncated,
             ) = self._matching_lcm_bypass_prefix_evidence(session_id, messages)
         if off_current_lineage and off_current_normal_conversation_id:
-            off_current_store_prefix_count = self._session_end_store_prefix_count(
-                session_id,
-                messages,
-                conversation_id=off_current_normal_conversation_id,
-            )
+            try:
+                off_current_store_prefix_count = self._session_end_store_prefix_count(
+                    session_id, messages, conversation_id=off_current_normal_conversation_id,
+                    raise_busy=off_current_cold_tail_eligible,
+                )
+            except Exception as exc:
+                if queue_off_current_busy_tail(exc):
+                    return
+                raise
             off_current_recorded_prefix_count = self._matching_lcm_normal_prefix_count(
                 session_id,
                 messages,
@@ -5191,7 +5212,9 @@ class LCMEngine(
                     limit=off_current_recorded_prefix_count + 1,
                     conversation_id=off_current_normal_conversation_id,
                 )
-            except Exception:
+            except Exception as exc:
+                if queue_off_current_busy_tail(exc):
+                    return
                 logger.debug("LCM off-current recorded-prefix row-count probe failed", exc_info=True)
                 stored_normal_rows = []
             if len(stored_normal_rows) == off_current_recorded_prefix_count:
@@ -5255,15 +5278,15 @@ class LCMEngine(
             prefix_count = off_current_prefix_count
             suffix = messages[prefix_count:]
             if suffix:
-                self._append_off_current_session_end_suffix(
-                    session_id,
-                    suffix,
-                    source=(
-                        self._lcm_session_last_normal_platform.get(session_id)
-                        or self._lcm_session_last_platform.get(session_id, self._session_platform)
-                    ),
-                    conversation_id=off_current_normal_conversation_id,
-                )
+                try:
+                    self._append_off_current_session_end_suffix(
+                        session_id, suffix, source=off_current_source,
+                        conversation_id=off_current_normal_conversation_id,
+                    )
+                except Exception as exc:
+                    if queue_off_current_busy_tail(exc):
+                        return
+                    raise
             try:
                 state = self._lifecycle.get_by_conversation(off_current_normal_conversation_id)
                 frontier_store_id = state.current_frontier_store_id if state is not None else 0
@@ -6863,6 +6886,9 @@ class LCMEngine(
             matched += 1
         return result
 
+    def _current_binding_stores_nothing(self) -> bool:
+        return not self._session_id or self._session_ignored or self._session_stateless
+
     def _ingest_messages(
         self,
         messages: List[Dict[str, Any]],
@@ -6888,16 +6914,15 @@ class LCMEngine(
         self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
         self._no_progress_ingest_generation = self._ingest_failure_count
         self._ingest_replay_redaction_changes = {}
-        if not self._session_id:
-            logger.debug("Ingest skipped: no session_id")
-            return self._redact_active_replay_messages(messages)
-
-        if self._session_ignored or self._session_stateless:
-            logger.debug(
-                "Ingest skipped for %s session %s",
-                "ignored" if self._session_ignored else "stateless",
-                self._session_id,
-            )
+        if self._current_binding_stores_nothing():
+            if not self._session_id:
+                logger.debug("Ingest skipped: no session_id")
+            else:
+                logger.debug(
+                    "Ingest skipped for %s session %s",
+                    "ignored" if self._session_ignored else "stateless",
+                    self._session_id,
+                )
             return self._redact_active_replay_messages(messages)
 
         sender_capture.try_update(self)
@@ -7028,14 +7053,8 @@ class LCMEngine(
                             receipt.clear()
                             receipt.update(previous)
                     if frozen_replay is None and not self.__dict__.get("_frozen_tail_reached"):
-                        tail = dict(kind="cold", store=self._store, session_id=self._session_id,
-                                    conversation_id=self._conversation_id, source=self._session_platform,
-                                    view=copy.deepcopy(messages))
-                        if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
-                            self._pending_session_tails.append(tail)
-                            self._ledger_count("ledger.tail.queued.cold." + type(frozen_error).__name__)
-                        logger.warning("LCM session-end cold tail retry pending (%s)", type(frozen_error).__name__)
-                        maintenance_scheduler._PENDING_TAIL_ENGINES.add(self)
+                        self._queue_cold_session_tail(messages, session_id=self._session_id,
+                            conversation_id=self._conversation_id, source=self._session_platform, error=frozen_error)
                     if frozen_replay is not None:
                         return frozen_replay  # Classification proved there is no tail to freeze.
                 self._frontier.needs_reconcile = True
@@ -11242,6 +11261,15 @@ class LCMEngine(
             message.get("observed_at") if stored else _normalize_observed_at(message.get("timestamp")),
         )
 
+    def _queue_cold_session_tail(self, view, *, session_id, conversation_id, source, error):
+        tail = dict(kind="cold", store=self._store, session_id=session_id,
+                    conversation_id=conversation_id, source=source, view=copy.deepcopy(view))
+        if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
+            self._pending_session_tails.append(tail)
+            self._ledger_count("ledger.tail.queued.cold." + type(error).__name__)
+        logger.warning("LCM session-end cold tail retry pending (%s)", type(error).__name__)
+        maintenance_scheduler._PENDING_TAIL_ENGINES.add(self)
+
     @staticmethod
     def _tail_key(tail):
         if tail.get("kind") == "cold":
@@ -11374,9 +11402,10 @@ class LCMEngine(
         if tail["store"] is not self.__dict__.get("_store"):
             self._ledger_count("ledger.tail.cold_store_unbound")
             return False
-        if (not sibling and tail["session_id"] == self._session_id
+        same = (not sibling and tail["session_id"] == self._session_id
                 and _normalize_conversation_id_value(tail["conversation_id"]) ==
-                    _normalize_conversation_id_value(self._conversation_id)):
+                    _normalize_conversation_id_value(self._conversation_id))
+        if same and not self._current_binding_stores_nothing():
             went_on = tail.get("went_on", False)  # Set by every later ingest but an earlier end's retry.
             stored = self._cold_tail_stored(tail, stamps=True)
             if stored is not None and stored >= len(tail["view"]):
@@ -11397,7 +11426,9 @@ class LCMEngine(
             # The host can still rewrite this view, so the next ingest finds its own cursor.
             self._ingest_cursor_needs_reconcile = True
             return True
-        return self._retry_cold_tail_s3(tail)
+        # Another session, or this one under a binding that stores nothing: the S3 route. This session keeps its stamp
+        # check, so a retyped row never stands for the view's own.
+        return self._retry_cold_tail_s3(tail, stamps=same)
 
     def _cold_tail_stored(self, tail, *, stamps=False):
         """How many of the view's rows the session's stored prefix holds, or None when they differ.

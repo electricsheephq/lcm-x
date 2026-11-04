@@ -4,11 +4,13 @@ import copy
 import inspect
 import logging
 import sqlite3
+import time
 
 import pytest
 
 from hermes_lcm import maintenance_scheduler
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.session_patterns import compile_session_patterns
 from hermes_lcm.store import MessageStore
 from tests.invariants.test_p1e_decided_tails import contents, history, queue, replay
 from tests.test_issue_2055_ingest_ledger_writes import count, engines as engines, restart, sql_rows
@@ -39,6 +41,192 @@ def queue_cold(engine, monkeypatch, view=None, *, read="get_session_count", erro
     assert tail["kind"] == "cold" and tail["view"] == view
     assert engine in maintenance_scheduler._PENDING_TAIL_ENGINES
     return tail
+
+
+def off_current_end(engine):
+    engine.on_session_start("S1", platform="cli", context_length=200_000, conversation_id="conv1")
+    view = history()
+    engine.ingest(copy.deepcopy(view[:2]))
+    engine.on_session_start("S2", platform="api", context_length=200_000, conversation_id="conv2")
+    assert engine._lcm_session_last_normal_conversation_id["S1"] == "conv1"
+    return view
+
+
+def fail_end_read(engine, *, error=sqlite3.OperationalError, recorded_probe=False):
+    read = engine._store.get_range
+
+    def failed(session_id, *args, **kwargs):
+        if session_id == "S1" and (not recorded_probe or kwargs.get("limit") == 3):
+            raise error("database is busy" if issubclass(error, sqlite3.Error) else "injected prefix failure")
+        return read(session_id, *args, **kwargs)
+
+    return failed
+
+
+def assert_off_current_cold_retry(engine, view, monkeypatch, caplog):
+    assert [row["content"] for row in engine._store.get_session_messages("S1")] == ["A", "B"]
+    assert not engine._store.get_session_messages("S2")
+    assert len(engine._pending_session_tails) == 1
+    tail = engine._pending_session_tails[0]
+    assert (tail["kind"], tail["session_id"], tail["conversation_id"], tail["source"]) == (
+        "cold", "S1", "conv1", "cli")
+    assert tail["view"] == view and tail["view"] is not view and tail["view"][0] is not view[0]
+    assert engine in maintenance_scheduler._PENDING_TAIL_ENGINES
+    assert count(engine, "tail.queued.cold.OperationalError") == count(engine, "tail.busy_at_end") == 1
+    assert "retry pending" in caplog.text and "SQLite lock" in caplog.text
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_ingest_messages", lambda *a, **k: pytest.fail("cold current route"))
+        patch.setattr(engine._lifecycle, "finalize_session", lambda *a, **k: pytest.fail("retry finalized"))
+        engine._retry_pending_session_tails()
+        engine._retry_pending_session_tails()
+    rows = engine._store.get_session_messages("S1")
+    assert [row["content"] for row in rows] == ["A", "B", "C", "D"]
+    assert all(row["conversation_id"] == "conv1" and row["source"] == "cli" for row in rows)
+    assert engine._session_id == "S2" and engine._conversation_id == "conv2"
+    assert not engine._store.get_session_messages("S2") and not engine._pending_session_tails
+
+
+@pytest.mark.parametrize("recorded_probe", [False, True])
+def test_off_current_end_lock_queues_cold_tail(engines, monkeypatch, caplog, recorded_probe):
+    engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
+    view = off_current_end(engine)
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "get_range", fail_end_read(engine, recorded_probe=recorded_probe))
+        patch.setattr(engine._lifecycle, "finalize_session", lambda *a, **k: pytest.fail("queued end finalized"))
+        engine.on_session_end("S1", view)
+    assert_off_current_cold_retry(engine, view, monkeypatch, caplog)
+
+
+def test_off_current_end_busy_append_queues_cold_tail(engines, monkeypatch, caplog):
+    engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
+    view = off_current_end(engine)
+
+    def busy(*args, **kwargs):
+        raise sqlite3.OperationalError("database is busy")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_append_off_current_session_end_suffix", busy)
+        patch.setattr(engine._lifecycle, "finalize_session", lambda *a, **k: pytest.fail("queued end finalized"))
+        engine.on_session_end("S1", view)
+    assert_off_current_cold_retry(engine, view, monkeypatch, caplog)
+
+
+@pytest.mark.parametrize("binding", ["ignored", "stateless"])
+@pytest.mark.parametrize("origin", ["off_current", "current"])
+def test_cold_tail_retry_after_an_ignored_or_stateless_rebind_keeps_the_rows(
+    engines, monkeypatch, binding, origin,
+):
+    engine = engines(sessions=[("S", None, None), ("S1", None, None), ("S2", None, None)])
+    if origin == "off_current":
+        view = off_current_end(engine)
+        with monkeypatch.context() as patch:
+            patch.setattr(engine._store, "get_range", fail_end_read(engine))
+            engine.on_session_end("S1", copy.deepcopy(view))
+    else:
+        view = history()
+        queue_cold(engine, monkeypatch, view)
+    assert len(engine._pending_session_tails) == 1
+    tail = engine._pending_session_tails[0]
+    session, conversation = tail["session_id"], tail["conversation_id"]
+    assert tail["kind"] == "cold" and tail["view"] == view
+    assert [row["content"] for row in engine._store.get_session_messages(session)] == ["A", "B"]
+
+    pattern_kind = "ignore" if binding == "ignored" else "stateless"
+    monkeypatch.setattr(engine._config, f"{pattern_kind}_session_patterns", [session])
+    monkeypatch.setattr(engine, f"_compiled_{pattern_kind}_session_patterns", compile_session_patterns([session]))
+    deferred = count(engine, "tail.retry.deferred")
+    locker = sqlite3.connect(engine._store.db_path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        # Session start retries before binding. Keep the view pending until the filtered rebind finishes.
+        engine.on_session_start(session, platform="cli", context_length=200_000, conversation_id=conversation)
+        assert engine._pending_session_tails == [tail]
+        assert count(engine, "tail.retry.deferred") == deferred + 1
+    finally:
+        locker.rollback()
+        locker.close()
+    assert engine._session_id == session and engine._conversation_id == conversation
+    assert engine._session_ignored is (binding == "ignored")
+    assert engine._session_stateless is (binding == "stateless")
+    engine._retry_pending_session_tails()
+    engine._retry_pending_session_tails()
+    rows = engine._store.get_session_messages(session)
+    assert [row["content"] for row in rows] == ["A", "B", "C", "D"]
+    assert all(row["conversation_id"] == conversation for row in rows)
+    assert not engine._pending_session_tails
+
+
+def filtered_rebind(engine, monkeypatch, tail, binding):
+    """Resume the tail's session ignored or stateless; the start's own retry is busy, so the tail stays pending."""
+    session, conversation = tail["session_id"], tail["conversation_id"]
+    kind = "ignore" if binding == "ignored" else "stateless"
+    monkeypatch.setattr(engine._config, f"{kind}_session_patterns", [session])
+    monkeypatch.setattr(engine, f"_compiled_{kind}_session_patterns", compile_session_patterns([session]))
+    locker = sqlite3.connect(engine._store.db_path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        engine.on_session_start(session, platform="cli", context_length=200_000, conversation_id=conversation)
+        assert engine._pending_session_tails == [tail]
+    finally:
+        locker.rollback()
+        locker.close()
+    assert engine._session_ignored is (binding == "ignored")
+    assert engine._session_stateless is (binding == "stateless")
+
+
+@pytest.mark.parametrize("binding", ["ignored", "stateless"])
+def test_retyped_row_after_the_end_stays_pending_after_a_filtered_rebind(engines, monkeypatch, binding):
+    engine = engines()
+    tail = queue_cold(engine, monkeypatch, [*history(), _m("user", "Q", 5.)])
+    # The session undid Q and the user sent the same text again before the retry.
+    engine.ingest(copy.deepcopy([*history(), _m("user", "Q", 6.)]))
+    assert tail.get("went_on") is True
+    filtered_rebind(engine, monkeypatch, tail, binding)
+    engine._retry_pending_session_tails()
+    assert contents(engine) == ["A", "B", "C", "D", "Q"]
+    # As under a storing binding, Q@5 is another occurrence: kept and counted, never taken as stored by Q@6.
+    assert engine._pending_session_tails == [tail] and count(engine, "tail.cold_unmatched") >= 1
+
+
+@pytest.mark.parametrize("binding", ["ignored", "stateless"])
+def test_restamped_row_stays_pending_after_a_filtered_rebind(engines, monkeypatch, binding):
+    engine = engines()
+    # No host ids: the later stamp alone makes B a new occurrence (test_restamped_row_is_a_new_occurrence_not_covered).
+    tail = queue_cold(engine, monkeypatch, [_m("user", "A", 995.), _m("user", "B", 1010.)],
+                      stored=[_m("user", "A", 995.), _m("user", "B", 1000.)])
+    assert not tail.get("went_on")
+    filtered_rebind(engine, monkeypatch, tail, binding)
+    engine._retry_pending_session_tails()
+    # The binding stores nothing, so B@1010 stays pending and counted; B@1000 never stands for it.
+    assert contents(engine) == ["A", "B"]
+    assert engine._pending_session_tails == [tail] and count(engine, "tail.cold_unmatched") >= 1
+
+
+def test_off_current_end_lock_bypass_lineage_unchanged(engines, monkeypatch):
+    engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
+    view = off_current_end(engine)
+    engine._mark_lcm_bypass_lineage_session("S1", platform="cron")
+    fallback = []
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "get_range", fail_end_read(engine))
+        patch.setattr(engine, "_end_host_fallback_compressor_for_session", lambda *a, **k: fallback.append((a, k)))
+        engine.on_session_end("S1", view)
+    assert fallback == [(("S1", view), {"current_session_bypasses": False})]
+    assert not engine._pending_session_tails and count(engine, "tail.busy_at_end") == 0
+    assert [row["content"] for row in engine._store.get_session_messages("S1")] == ["A", "B"]
+
+
+def test_off_current_end_non_busy_prefix_error_unchanged(engines, monkeypatch):
+    engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
+    view = off_current_end(engine)
+    fallback = []
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "get_range", fail_end_read(engine, error=ValueError))
+        patch.setattr(engine, "_end_host_fallback_compressor_for_session", lambda *a, **k: fallback.append((a, k)))
+        engine.on_session_end("S1", view)
+    assert fallback == [(("S1", view), {"current_session_bypasses": False})]
+    assert not engine._pending_session_tails and count(engine, "tail.busy_at_end") == 0
+    assert [row["content"] for row in engine._store.get_session_messages("S1")] == ["A", "B"]
 
 
 @pytest.mark.parametrize("error", [sqlite3.OperationalError, ValueError])
@@ -302,7 +490,8 @@ def test_cold_start_of_an_earlier_end_is_not_progress_for_a_later_one(engines, m
         locker.close()
     assert [tail["kind"] for tail in engine._pending_session_tails] == ["cold", "cold"]
     # The first tail's cold start stores an older view than the second's, which still needs its own cold start.
-    engine._retry_pending_session_tails()
+    # A wide deadline: both retries share the default 50 ms budget, which a slow runner can spend on the first.
+    engine._retry_pending_session_tails(deadline=time.monotonic() + 5)
     assert contents(engine) == ["A", "B", "C", "D", "E"] and not engine._pending_session_tails
 
 
