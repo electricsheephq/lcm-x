@@ -111,6 +111,102 @@ def test_cold_tail_retried_after_other_ingests(engines, monkeypatch):
     assert not engine._pending_session_tails
 
 
+def longer(stamped):
+    stamp = (lambda value: value) if stamped else (lambda value: None)
+    return [*history(stamped), _m("user", "E", stamp(5.), "E"), _m("assistant", "F", stamp(6.), "F")], stamp
+
+
+@pytest.mark.parametrize("stamped", [True, False])
+@pytest.mark.parametrize("then", ["ingest", "end"])
+def test_cold_view_stored_by_later_ingests_is_not_stored_again(engines, monkeypatch, stamped, then):
+    engine = engines()
+    queue_cold(engine, monkeypatch, history(stamped))
+    view, stamp = longer(stamped)
+    engine.ingest(copy.deepcopy(view))
+    view.append(_m("user", "G", stamp(7.), "G"))
+    if then == "ingest":
+        engine._retry_pending_session_tails()
+        engine.ingest(copy.deepcopy(view))
+    else:
+        engine.on_session_end("S", copy.deepcopy(view))
+    assert contents(engine) == ["A", "B", "C", "D", "E", "F", "G"]
+    assert not engine._pending_session_tails
+
+
+@pytest.mark.parametrize("stamped", [True, False])
+def test_resumed_session_stores_the_cold_view_once(engines, monkeypatch, stamped):
+    old = engines()
+    queue_cold(old, monkeypatch, history(stamped))
+    resumed = LCMEngine(config=old._config, hermes_home=old._hermes_home)
+    try:
+        locker = sqlite3.connect(old._store.db_path, isolation_level=None)
+        locker.execute("BEGIN IMMEDIATE")
+        try:  # The resumed engine's sibling retry defers behind the lock.
+            resumed.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")
+        finally:
+            locker.rollback()
+            locker.close()
+        assert len(old._pending_session_tails) == 1
+        resumed.ingest(longer(stamped)[0])
+        old._retry_pending_session_tails(exiting=True)  # the ended engine's exit drain
+    finally:
+        resumed.shutdown()
+    assert contents(old) == ["A", "B", "C", "D", "E", "F"]
+    assert not old._pending_session_tails
+
+
+def test_cold_start_from_an_older_view_reconciles_the_next_ingest(engines, monkeypatch):
+    engine = engines()
+    queue_cold(engine, monkeypatch)
+    # The host rewrote the turn after B (an undo), so the stored prefix no longer matches the queued view.
+    live = [*history()[:2], _m("user", "X", 5., "X"), _m("assistant", "Y", 6., "Y"), _m("user", "Z", 7., "Z")]
+    engine.ingest(copy.deepcopy(live))
+    engine._retry_pending_session_tails()
+    assert not engine._pending_session_tails and engine._ingest_cursor_needs_reconcile
+    stored = contents(engine)
+    engine.ingest(copy.deepcopy([*live, _m("assistant", "W", 8., "W")]))
+    assert contents(engine) == [*stored, "W"]
+    assert {"A", "B", "C", "D", "X", "Y", "Z"} <= set(stored)
+
+
+def test_frozen_run_after_a_rolled_back_append_queues_cold(engines, monkeypatch):
+    engine = engines()
+    engine.ingest(copy.deepcopy(history()[:2]))
+    store = engine._store
+    atomic, append, read = store.ingest_atomic, engine._append_ingest_batch, store.get_session_count
+    calls = {"atomic": 0, "append": 0}
+
+    def busy_second_begin(**kwargs):
+        calls["atomic"] += 1
+        if calls["atomic"] == 2:
+            raise sqlite3.OperationalError("database is locked")
+        return atomic(**kwargs)
+
+    def busy_first_append(batch):
+        calls["append"] += 1
+        if calls["append"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return append(batch)
+
+    def busy_frozen_read(*args, **kwargs):
+        if engine.__dict__.get("_ingest_read_only") is not None:
+            raise sqlite3.OperationalError("database is locked")
+        return read(*args, **kwargs)
+
+    engine._ingest_cursor_needs_reconcile = True
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "ingest_atomic", busy_second_begin)
+        patch.setattr(engine, "_append_ingest_batch", busy_first_append)
+        patch.setattr(store, "get_session_count", busy_frozen_read)
+        engine.on_session_end("S", copy.deepcopy(history()))
+    # The first attempt reached append and its warm queue rolled back; the second failed at BEGIN and its
+    # frozen run at the reconcile read, before any append.
+    assert calls == {"atomic": 2, "append": 1}
+    assert [tail["kind"] for tail in engine._pending_session_tails] == ["cold"]
+    engine._retry_pending_session_tails()
+    assert contents(engine) == ["A", "B", "C", "D"]
+
+
 @pytest.mark.parametrize("case", ["unreplayed", "covered", "longer_store", "mismatch_kept"])
 def test_cold_off_current_s3(engines, monkeypatch, caplog, case):
     engine = engines()

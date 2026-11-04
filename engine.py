@@ -7006,6 +7006,8 @@ class LCMEngine(
                                                        else copy.copy(value))
                         self._pending_ingest_frontier = copy.deepcopy(self._frontier)
                         self._identity_anchor_observe_recovery()
+                        # An earlier attempt's warm queue rolled back with it: only this run's append counts.
+                        self.__dict__["_frozen_tail_reached"] = False
                         self._frozen_ledger_prepared = ledger_prepared
                         frozen_replay, _finish = self._ingest_messages_transaction(messages, [], attribution,
                             allow_session_end_replay_proof=allow_session_end_replay_proof)
@@ -11367,28 +11369,41 @@ class LCMEngine(
         if (not sibling and tail["session_id"] == self._session_id
                 and _normalize_conversation_id_value(tail["conversation_id"]) ==
                     _normalize_conversation_id_value(self._conversation_id)):
+            stored = self._cold_tail_stored(tail)
+            if stored is not None and stored >= len(tail["view"]):
+                return True  # Later ingests stored the whole view; a cold start from it would store rows again.
             self._session_end_flush_active = False
             self._ingest_cursor_needs_reconcile = True
             self._ingest_messages(tail["view"], allow_session_end_replay_proof=False, no_view=True)
+            # The view can be older than the live session: the next ingest finds its own cursor again.
+            self._ingest_cursor_needs_reconcile = True
             return True
         return self._retry_cold_tail_s3(tail)
 
-    def _retry_cold_tail_s3(self, tail):
+    def _cold_tail_stored(self, tail):
+        """How many of the view's rows the session's stored prefix holds, or None when they differ."""
         view, session = tail["view"], tail["session_id"]
         conversation = _normalize_conversation_id_value(tail["conversation_id"])
+        stored = tail["store"].get_range(session, limit=len(view) + 1, conversation_id=conversation)
+        if any(self._session_end_prefix_compare_identity(row, session_id=session) !=
+               self._session_end_prefix_compare_identity(message, session_id=session)
+               for row, message in zip(stored, view)):
+            return None
+        return len(stored)
+
+    def _retry_cold_tail_s3(self, tail):
+        view, session = tail["view"], tail["session_id"]
         with tail["store"].ingest_atomic():
-            stored = tail["store"].get_range(session, limit=len(view) + 1, conversation_id=conversation)
-            if any(self._session_end_prefix_compare_identity(row, session_id=session) !=
-                   self._session_end_prefix_compare_identity(message, session_id=session)
-                   for row, message in zip(stored, view)):
+            stored = self._cold_tail_stored(tail)
+            if stored is None:
                 self._ledger_count("ledger.tail.cold_unmatched")
                 if not tail.get("unmatched_warned"):
                     logger.warning("LCM session-end cold tail prefix mismatch; retry pending")
                     tail["unmatched_warned"] = True
                 return False
-            if len(stored) < len(view):
-                self._append_off_current_session_end_suffix(session, view[len(stored):],
-                    source=tail["source"], conversation_id=conversation)
+            if stored < len(view):
+                self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
+                    conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
         return True
 
     def _retry_pending_session_tails(self, *, deadline: float | None = None, exiting: bool = False,
