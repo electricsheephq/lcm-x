@@ -171,6 +171,14 @@ def test_tail_respace_is_counted(engines):
     assert count(engine, "respaced") == 1
 
 
+def test_plain_tail_retry_counts_no_respace(engines):
+    engine = engines()
+    queue(engine)
+    engine._retry_pending_session_tails()
+    assert contents(engine) == ["A", "B", "C", "D"]
+    assert count(engine, "respaced") == 0
+
+
 @pytest.mark.parametrize("failure", ["corrupt_view", "busy"])
 def test_unreadable_ledger_keeps_positional_rule(engines, monkeypatch, failure):
     engine = engines()
