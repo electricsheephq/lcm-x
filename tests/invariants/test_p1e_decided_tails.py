@@ -159,6 +159,32 @@ def test_salt_change_falls_back(engines):
     assert count(engine, "tail.retry.fallback.salt_changed") == 1
 
 
+@pytest.mark.parametrize("failure", ["corrupt_view", "busy"])
+def test_unreadable_ledger_keeps_positional_rule(engines, monkeypatch, failure):
+    engine = engines()
+    queue(engine)
+    ids = replay(engine, history()[2:])
+    deferred = count(engine, "tail.retry.deferred")
+    if failure == "corrupt_view":
+        engine._store._conn.execute("UPDATE ingest_views SET entries=X'00' WHERE view_seq=("
+                                    "SELECT view_seq FROM occurrence_bindings WHERE store_id=?)", (ids[0],))
+        engine._store._conn.commit()
+    else:
+        def busy(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+        monkeypatch.setattr(ledger, "persisted_lineage", busy)
+    engine._retry_pending_session_tails()
+    if failure == "busy":
+        # A busy read still defers the retry; it never falls back to the positional rule.
+        assert len(engine._pending_session_tails) == 1
+        assert count(engine, "tail.retry.deferred") == deferred + 1
+        monkeypatch.undo()
+        engine._retry_pending_session_tails()
+    assert contents(engine) == ["A", "B", "C", "D"]
+    assert not engine._pending_session_tails
+    assert count(engine, "tail.retry.fallback.read_failed") == (1 if failure == "corrupt_view" else 0)
+
+
 def test_store_rebound_reads_ledger_from_tail_store(engines, tmp_path, monkeypatch):
     engine = engines()
     tail = queue(engine)

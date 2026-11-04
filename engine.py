@@ -11237,31 +11237,44 @@ class LCMEngine(
         rule = ("off" if ingest_ledger_mode() == "off" else "no_ledger" if frozen is None else
                 "not_ready" if store.ingest_ledger_state() != "ready" else
                 "salt_changed" if store.ingest_ledger_salt() != frozen["salt"] else "digest")
-        bound, last, candidates = {}, None, set()
+        bound, last, candidates, uids = {}, None, set(), {}
         if rule == "digest":
             conn, salt = store._conn, frozen["salt"]
-            lineage = ingest_ledger.persisted_lineage(conn, tail["session_id"], frozen["lineage"])
-            has_uid = any(e.uidset_digest is not None for e in frozen["entries"])
-            records = ingest_ledger._rows(conn.execute(
-                "WITH head AS (SELECT b.ordinal FROM occurrence_bindings b JOIN messages m USING(store_id) "
-                "WHERE b.lineage=? AND m.session_id=? AND b.store_id<=? "
-                "AND b.disposition IN ('stored','migrated','ambiguous') "
-                "ORDER BY (b.store_id=?) DESC,b.ordinal DESC LIMIT 1) "
-                "SELECT b.*,h.head_ordinal,o.stamp AS observed_stamp,v.entries AS uid_entries "
-                "FROM (SELECT (SELECT ordinal FROM head) AS head_ordinal) h "
-                "LEFT JOIN occurrence_bindings b ON b.lineage=? "
-                "AND b.store_id IN (SELECT value FROM json_each(?)) "
-                "AND b.disposition IN ('stored','migrated','ambiguous','composite_part') "
-                "LEFT JOIN stamp_observations o ON o.occ_id=b.occ_id "
-                "LEFT JOIN ingest_views v ON ? AND v.lineage=b.lineage AND v.view_seq=b.view_seq AND v.kind='ingest'",
-                (lineage, tail["session_id"], tail["after_store_id"], tail["after_store_id"], lineage,
-                 json.dumps([r["store_id"] for r in rows]), has_uid)))
-            last = records[0]["head_ordinal"]
-            for record in records:
-                if record["occ_id"] is not None:
-                    item = bound.setdefault(record["store_id"], {}).setdefault(record["occ_id"], record)
-                    item.setdefault("observations", set()).add(record["observed_stamp"])
-                    candidates.add(record["identity_digest"])
+            owned = conn.in_transaction
+            try:
+                lineage = ingest_ledger.persisted_lineage(conn, tail["session_id"], frozen["lineage"])
+                records = ingest_ledger._rows(conn.execute(
+                    "WITH head AS (SELECT b.ordinal FROM occurrence_bindings b JOIN messages m USING(store_id) "
+                    "WHERE b.lineage=? AND m.session_id=? AND b.store_id<=? "
+                    "AND b.disposition IN ('stored','migrated','ambiguous') "
+                    "ORDER BY (b.store_id=?) DESC,b.ordinal DESC LIMIT 1) "
+                    "SELECT b.*,h.head_ordinal,o.stamp AS observed_stamp "
+                    "FROM (SELECT (SELECT ordinal FROM head) AS head_ordinal) h "
+                    "LEFT JOIN occurrence_bindings b ON b.lineage=? "
+                    "AND b.store_id IN (SELECT value FROM json_each(?)) "
+                    "AND b.disposition IN ('stored','migrated','ambiguous','composite_part') "
+                    "LEFT JOIN stamp_observations o ON o.occ_id=b.occ_id",
+                    (lineage, tail["session_id"], tail["after_store_id"], tail["after_store_id"], lineage,
+                     json.dumps([r["store_id"] for r in rows]))))
+                last = records[0]["head_ordinal"]
+                for record in records:
+                    if record["occ_id"] is not None:
+                        item = bound.setdefault(record["store_id"], {}).setdefault(record["occ_id"], record)
+                        item.setdefault("observations", set()).add(record["observed_stamp"])
+                        candidates.add(record["identity_digest"])
+                if any(e.uidset_digest is not None for e in frozen["entries"]):
+                    # Read and decode each binding's own view once, however many bindings share it.
+                    seqs = sorted({r["view_seq"] for r in records if r["occ_id"] is not None and r["view_seq"] is not None})
+                    for seq, entries in conn.execute(
+                            "SELECT view_seq,entries FROM ingest_views WHERE lineage=? AND kind='ingest' "
+                            "AND view_seq IN (SELECT value FROM json_each(?))", (lineage, json.dumps(seqs))):
+                        for e in ingest_ledger.decode_entries(entries) if entries else ():
+                            uids.setdefault((seq, e.ref), e.uidset_digest)
+            except Exception as exc:
+                if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or owned and not conn.in_transaction:
+                    raise
+                # The ledger is advisory here, as for the cold cursor: an unreadable one keeps today's rule.
+                rule, bound, last, candidates, uids = "read_failed", {}, None, set(), {}
         covered, last_id, stop = 0, tail["after_store_id"], "end"
         for i, (message, row) in enumerate(zip(tail["messages"], rows)):
             if row["conversation_id"] != conversation_id:
@@ -11270,8 +11283,7 @@ class LCMEngine(
             bindings = list(bound.get(row["store_id"], {}).values())
             if rule == "digest" and len(bindings) == 1:
                 b, entry, remainder = bindings[0], frozen["entries"][i], frozen["remainder"][i]
-                uid = next((e.uidset_digest for e in ingest_ledger.decode_entries(b["uid_entries"])
-                            if e.ref == b["occ_id"]), None) if b["uid_entries"] else None
+                uid = uids.get((b["view_seq"], b["occ_id"]))
                 stamp = None if remainder is not None else frozen["stamps"][i]
                 matches = ((last is None or b["ordinal"] > last)
                     and (b["disposition"] == "composite_part") == (remainder is not None)
