@@ -1,6 +1,7 @@
 """P1e PR-B: raw cold tails preserve final messages and session ownership (I1/I2)."""
 
 import copy
+import inspect
 import logging
 import sqlite3
 
@@ -10,7 +11,7 @@ from hermes_lcm import maintenance_scheduler
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.store import MessageStore
 from tests.invariants.test_p1e_decided_tails import contents, history, queue, replay
-from tests.test_issue_2055_ingest_ledger_writes import count, engines as engines, sql_rows
+from tests.test_issue_2055_ingest_ledger_writes import count, engines as engines, restart, sql_rows
 from tests.test_host_uid_shadow import _m
 from tests.test_host_uid_emit_carry import _ContainsPattern
 
@@ -217,6 +218,78 @@ def test_session_that_rewrote_the_view_after_a_cold_start_loses_nothing(engines,
     # Unstamped, the next ingest cannot place C and D, so it stores them again (#2203): duplication, never loss.
     assert contents(engine) == ["A", "B", "C", "D", "Q1", "Q2", *([] if stamped else ["C", "D"]), "E", "F"]
     assert not engine._pending_session_tails
+
+
+def ignoring(engine):
+    engine._config.ignore_message_patterns = ["^ignore$"]
+    engine._compiled_ignore_message_patterns = [_ContainsPattern("ignore")]
+    return engine
+
+
+@pytest.mark.parametrize("stamped", [True, False])
+def test_frozen_run_that_moved_its_own_cursor_is_not_taken_for_progress(engines, monkeypatch, stamped):
+    engine = ignoring(engines())
+    # The ignored row sits inside the stored prefix, so a prefix compare can never match this view.
+    view = [history(stamped)[0], _m("user", "ignore", 1.5 if stamped else None), *history(stamped)[1:]]
+    engine.ingest(copy.deepcopy(view[:3]))
+    restart(engine)  # a resumed session: its cursor is reconciled at the next ingest
+    tail_read = engine._store.get_session_tail
+
+    def locked_before_append(*args, **kwargs):
+        if any(frame.function == "_store_ingest_rows" for frame in inspect.stack()[1:4]):
+            raise sqlite3.OperationalError("database is locked")
+        return tail_read(*args, **kwargs)
+
+    locker = sqlite3.connect(engine._store.db_path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        with monkeypatch.context() as patch:
+            # The frozen run reconciles its own cursor, then fails before its append.
+            patch.setattr(engine._store, "get_session_tail", locked_before_append)
+            engine.on_session_end("S", copy.deepcopy(view))
+    finally:
+        locker.rollback()
+        locker.close()
+    assert [tail["kind"] for tail in engine._pending_session_tails] == ["cold"]
+    engine._retry_pending_session_tails()
+    assert contents(engine) == ["A", "B", "C", "D"] and not engine._pending_session_tails
+
+
+def test_restart_whose_retry_waited_is_not_taken_for_progress(engines, monkeypatch):
+    engine = ignoring(engines())
+    view = [history()[0], _m("user", "ignore", 1.5), *history()[1:]]
+    queue_cold(engine, monkeypatch, view, stored=view[:3])
+    locker = sqlite3.connect(engine._store.db_path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        restart(engine)  # the start's retry waits on the lock; the rebind restarts the cursor
+    finally:
+        locker.rollback()
+        locker.close()
+    assert [tail["kind"] for tail in engine._pending_session_tails] == ["cold"]
+    engine._retry_pending_session_tails()
+    assert contents(engine) == ["A", "B", "C", "D"] and not engine._pending_session_tails
+
+
+@pytest.mark.parametrize("stamped", [True, False])
+def test_session_that_went_on_then_restarted_before_the_retry_repeats_nothing(engines, monkeypatch, stamped):
+    engine = engines()
+    stamp = (lambda value: value) if stamped else (lambda value: None)
+    queue_cold(engine, monkeypatch, [*history(stamped), _m("user", "Q1", stamp(5.), "Q1"),
+                                     _m("assistant", "Q2", stamp(6.), "Q2")])
+    live = [*history(stamped), _m("user", "E", stamp(7.), "E")]  # Q1 and Q2 undone
+    engine.ingest(copy.deepcopy(live))
+    locker = sqlite3.connect(engine._store.db_path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        restart(engine)  # the start's retry waits on the lock; the rebind asks for a reconcile again
+    finally:
+        locker.rollback()
+        locker.close()
+    engine._retry_pending_session_tails()
+    engine.ingest(copy.deepcopy([*live, _m("assistant", "F", stamp(8.), "F")]))
+    assert contents(engine) == ["A", "B", "C", "D", "E", "F"]
+    assert [tail["kind"] for tail in engine._pending_session_tails] == ["cold"]  # Q1 and Q2 stay queued
 
 
 def test_restamped_row_is_a_new_occurrence_not_covered(engines, monkeypatch):

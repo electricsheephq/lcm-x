@@ -7029,7 +7029,7 @@ class LCMEngine(
                     if frozen_replay is None and not self.__dict__.get("_frozen_tail_reached"):
                         tail = dict(kind="cold", store=self._store, session_id=self._session_id,
                                     conversation_id=self._conversation_id, source=self._session_platform,
-                                    view=copy.deepcopy(messages), cursor=self._ingest_cursor)
+                                    view=copy.deepcopy(messages))
                         if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
                             self._pending_session_tails.append(tail)
                             self._ledger_count("ledger.tail.queued.cold." + type(frozen_error).__name__)
@@ -11369,15 +11369,18 @@ class LCMEngine(
         if (not sibling and tail["session_id"] == self._session_id
                 and _normalize_conversation_id_value(tail["conversation_id"]) ==
                     _normalize_conversation_id_value(self._conversation_id)):
+            # The failed end left a reconcile pending; a later ingest or compaction clears it. The tail keeps that
+            # the session went on, so a rebind or another failure that asks for a reconcile again cannot hide it.
+            went_on = tail["went_on"] = tail.get("went_on", False) or not self._ingest_cursor_needs_reconcile
             stored = self._cold_tail_stored(tail, stamps=True)
             if stored is not None and stored >= len(tail["view"]):
                 # Later ingests stored the whole view. As after a warm retry, the next ingest finds its cursor again.
                 self._ingest_cursor_needs_reconcile = True
                 return True
-            if (self._ingest_cursor, self._ingest_cursor_needs_reconcile) != (tail.get("cursor"), True):
-                # The session ingested after this end, so the view can be older than its history. A cold start
-                # would move the live cursor: as for another session, only a matching stored prefix gets the
-                # view's missing rows. Stamps count here too, so a retyped row never stands for the view's own.
+            if went_on:
+                # The view can be older than the session's history. A cold start would move the live cursor: as for
+                # another session, only a matching stored prefix gets the view's missing rows. Stamps count here
+                # too, so a retyped row never stands for the view's own.
                 if not self._retry_cold_tail_s3(tail, stamps=True):
                     return False
                 self._ingest_cursor_needs_reconcile = True
