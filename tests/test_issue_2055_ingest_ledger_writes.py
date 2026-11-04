@@ -249,7 +249,9 @@ def test_07_fail_open_and_owner_propagation(engines, monkeypatch, caplog, failur
             assert count(engine, key) == 1
             assert sum("ledger." + key in r.getMessage() for r in caplog.records) == 1
             assert all(not sql_rows(engine, table) for table in TABLES)
-            assert engine._store._conn.execute("SELECT 1 FROM ledger_meta WHERE key LIKE 'session_lineage:%'").fetchone() is None
+            # P1f: adoption commits independently of a later writer-savepoint failure.
+            persisted = engine._store._conn.execute("SELECT value FROM ledger_meta WHERE key='session_lineage:S'").fetchone()
+            assert persisted == ((engine._host_uid_lineage_key()[0],) if failure == "integrity" else None)
     assert calls and not engine._store._conn.in_transaction
 
 

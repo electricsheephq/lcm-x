@@ -357,10 +357,67 @@ def write_view(conn, salt, lineage, kind, state, entries, *, view_seq=None, prec
     chain = prefix_chain(salt, entries) if precomputed_chain is None else precomputed_chain
     seq = next_view_seq(conn) if view_seq is None else view_seq
     conn.execute("INSERT INTO ingest_views VALUES (?,?,?,?,?,?)", (lineage, seq, kind, state, encoded, chain))
+    _prune_views(conn, lineage, kind)
+    return seq
+
+
+def _prune_views(conn, lineage, kind):
     conn.execute("DELETE FROM ingest_views WHERE lineage=? AND kind=? AND view_seq NOT IN "
                  "(SELECT view_seq FROM ingest_views WHERE lineage=? AND kind=? ORDER BY view_seq DESC LIMIT 2)",
                  (lineage, kind, lineage, kind))
-    return seq
+
+
+def merge_provisional(conn, provisional, lineage):
+    """Re-key without changing occurrence identity; the caller owns the savepoint and relations."""
+    _require_owner(conn)
+    kept = "AND disposition IN ('stored','migrated','ambiguous') ORDER BY ordinal"
+    target = _rows(conn.execute("SELECT * FROM occurrence_bindings WHERE lineage=? " + kept, (lineage,)))
+    source = _rows(conn.execute("SELECT * FROM occurrence_bindings WHERE lineage=? " + kept, (provisional,)))
+    keyed, pairs = defaultdict(deque), []
+    for row in target:
+        if row["stamp"] is not None:
+            keyed[row["stamp"], row["identity_digest"]].append(row["store_id"])
+    for row in source:
+        matches = keyed[row["stamp"], row["identity_digest"]] if row["stamp"] is not None else ()
+        if matches and matches[0] != row["store_id"]:
+            pairs.append((row["store_id"], matches.popleft()))
+    digests = {r["identity_digest"] for r in target}
+    result = dict(pairs=pairs, unstamped_skipped=sum(r["stamp"] is None and r["identity_digest"] in digests for r in source))
+    result["late"] = bool(conn.execute(
+        "SELECT 1 FROM occurrence_bindings b JOIN messages m USING(store_id) WHERE b.lineage=? "
+        "AND b.disposition IN ('stored','migrated','ambiguous') AND b.store_id> "
+        "(SELECT min(store_id) FROM occurrence_bindings WHERE lineage=?) "
+        "AND m.session_id=? LIMIT 1", (lineage, provisional, provisional.removeprefix("provisional:"))).fetchone())
+    olds = [r[0] for r in conn.execute("SELECT DISTINCT ordinal FROM occurrence_bindings "
+                                     "WHERE lineage=? AND ordinal IS NOT NULL ORDER BY ordinal", (provisional,))]
+    maximum = conn.execute("SELECT max(ordinal) FROM occurrence_bindings WHERE lineage=?", (lineage,)).fetchone()[0]
+    new, respace = plan_ordinals([maximum] if maximum is not None else [], [Placement(maximum, None)] * len(olds))
+    if respace:
+        raise LedgerError("signed 64-bit ordinal space exhausted")
+    result["bindings"] = conn.execute("SELECT count(*) FROM occurrence_bindings WHERE lineage=?", (provisional,)).fetchone()[0]
+    conn.executemany("UPDATE occurrence_bindings SET lineage=?,ordinal=? WHERE lineage=? AND ordinal=?",
+                     [(lineage, ordinal, provisional, old) for old, ordinal in zip(olds, new)])
+    for table, name in (("occurrence_bindings", None), ("stamp_observations", "observations"),
+                        ("ledger_emissions", "emissions"), ("ingest_views", "views")):
+        moved = conn.execute(f"UPDATE {table} SET lineage=? WHERE lineage=?", (lineage, provisional)).rowcount
+        if name:
+            result[name] = moved
+    for kind in ("ingest", "emission"):
+        _prune_views(conn, lineage, kind)
+    conn.execute("INSERT INTO lineage_marks(lineage,legacy_proof_digest,max_leaf_id,stamp_policy) "
+                 "SELECT ?,legacy_proof_digest,max_leaf_id,stamp_policy FROM lineage_marks WHERE lineage=? "
+                 "ON CONFLICT(lineage) DO UPDATE SET "
+                 "legacy_proof_digest=coalesce(lineage_marks.legacy_proof_digest,excluded.legacy_proof_digest), "
+                 "max_leaf_id=coalesce(lineage_marks.max_leaf_id,excluded.max_leaf_id), "
+                 "stamp_policy=CASE WHEN 'stamp_unreliable' IN (lineage_marks.stamp_policy,excluded.stamp_policy) "
+                 "THEN 'stamp_unreliable' ELSE 'normal' END", (lineage, provisional))
+    conn.execute("DELETE FROM lineage_marks WHERE lineage=?", (provisional,))
+    conn.execute("INSERT INTO ledger_meta(key,value) SELECT ?,value FROM ledger_meta WHERE key=? "
+                 "ON CONFLICT(key) DO UPDATE SET value=CAST(max(CAST(ledger_meta.value AS INTEGER),CAST(excluded.value AS INTEGER)) AS TEXT)",
+                 ("emission_recovered:" + lineage, "emission_recovered:" + provisional))
+    conn.execute("DELETE FROM ledger_meta WHERE key=?", ("emission_recovered:" + provisional,))
+    conn.execute("INSERT OR REPLACE INTO ledger_meta(key,value) VALUES (?,?)", ("adopted_from:" + provisional, lineage))
+    return result
 
 
 def add_stamp_observation(conn, lineage, occ_id, stamp, kind, view_seq, source="ledger"):

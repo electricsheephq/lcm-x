@@ -6961,6 +6961,9 @@ class LCMEngine(
                     if self._ingest_ledger_attempt is not None and no_view:
                         self._ingest_ledger_attempt["no_view"] = True
                     if self._ingest_ledger_attempt is not None:
+                        emission_attempt["lineage"] = self._ledger_adopt(self._store, self._session_id,
+                            emission_attempt["resolved"], emission_attempt["salt"], after_commit) or emission_attempt["lineage"]
+                        emission_attempt["adopted"] = True
                         self._retry_pending_emissions(self._ingest_ledger_attempt, after_commit, emission_claim)
                     active, finish = self._ingest_messages_transaction(
                         messages, after_commit, attribution,
@@ -7273,10 +7276,13 @@ class LCMEngine(
             with self._emission_owner(salt) as (conn, _reason):
                 if conn is None:
                     return
-                moved, _views = ingest_ledger.set_emission_state(conn, handle.lineage, handle.view_seq, new_state)
+                lineage = ingest_ledger.persisted_lineage(conn, handle.session_id, handle.lineage)
+                moved, _views = ingest_ledger.set_emission_state(conn, lineage, handle.view_seq, new_state)
+                if not moved and lineage != handle.lineage:
+                    moved, _views = ingest_ledger.set_emission_state(conn, handle.lineage, handle.view_seq, new_state)
                 states = [] if moved else conn.execute(
-                    "SELECT DISTINCT state FROM ledger_emissions WHERE lineage=? AND view_seq=?",
-                    (handle.lineage, handle.view_seq)).fetchall()
+                    "SELECT DISTINCT state FROM ledger_emissions WHERE lineage IN (?,?) AND view_seq=?",
+                    (lineage, handle.lineage, handle.view_seq)).fetchall()
             if moved:
                 self._ledger_count("ledger.emission_" + new_state, amount=moved)
             elif new_state == "refused" and ("adopted",) in states:
@@ -7318,6 +7324,47 @@ class LCMEngine(
         finally:
             attribution["ledger_digest_ms"] += (_perf_counter() - started) * 1000
 
+    def _ledger_adopt(self, store, sid, resolved, salt, after_commit):
+        """Adopt at transaction start; publish the memo and counts only after COMMIT."""
+        conn, provisional = store._conn, ingest_ledger.lineage_key(None, sid)
+        persisted, result = None, None
+        flag = getattr(store, "_pending_relation_schema", False)
+        try:
+            if (ingest_ledger_mode() == "off" or store.ingest_ledger_state() != "ready"
+                    or getattr(self, "_ingest_read_only", None) is not None or store.ingest_ledger_salt() != salt):
+                return None
+            persisted = ingest_ledger.persisted_lineage(conn, sid, None)
+            lineage = persisted or resolved
+            if lineage is None:
+                return provisional
+            memo = (store.db_identity, salt, sid)
+            if memo in getattr(self, "_ledger_adopted", ()):
+                return lineage
+            with _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
+                if any(conn.execute(f"SELECT 1 FROM {table} WHERE lineage=? LIMIT 1", (provisional,)).fetchone()
+                       for table in ("occurrence_bindings", "ingest_views", "ledger_emissions")):
+                    result = ingest_ledger.merge_provisional(conn, provisional, lineage)
+                    store.add_message_relations([[(p, "possible_replay_of", target, None, None)] for p, target in result["pairs"]])
+                if not persisted:
+                    conn.execute("INSERT INTO ledger_meta(key,value) VALUES (?,?)", ("session_lineage:" + str(sid), lineage))
+        except BaseException as exc:
+            store._pending_relation_schema = flag
+            if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
+                    or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                raise
+            after_commit.append(lambda exc=exc: self._ledger_count("ledger.lineage_merge_failed", exc))
+            return persisted or provisional
+        if result is not None:
+            after_commit.append(lambda: self._ledger_count("ledger.lineage_merged"))
+            for key in ("bindings", "views", "emissions", "unstamped_skipped", "late"):
+                after_commit.append(lambda key=key, n=result[key]: self._ledger_count("ledger.lineage_merge." + key, amount=n))
+            after_commit.append(lambda n=len(result["pairs"]): self._ledger_count("ledger.lineage_merge.replay_pairs", amount=n))
+
+        def adopted():
+            self.__dict__.setdefault("_ledger_adopted", set()).add(memo)
+        after_commit.append(adopted)
+        return lineage
+
     def _write_ingest_ledger(self, attempt, after_commit, attribution):
         store, conn = self._store, self._store._conn
         try:
@@ -7330,6 +7377,8 @@ class LCMEngine(
             self._raise_ingest_busy(exc)
             self._ledger_count("ledger.prepare_failed", exc)
             return
+        if not attempt.get("adopted"):
+            attempt["lineage"] = self._ledger_adopt(store, self._session_id, attempt["resolved"], attempt["salt"], after_commit) or attempt["lineage"]
         started, delta = _perf_counter(), Counter()
         pending_relation_schema = getattr(store, "_pending_relation_schema", False)
 
@@ -7351,8 +7400,8 @@ class LCMEngine(
                            if idx in attempt["stored"]}
                 flagged = set(markers)
                 if ingest_ledger.has_pending(store.db_identity):
-                    digests = ingest_ledger.pending_emission_digests((store.db_identity, attempt["salt"]),
-                                                                   lineage, attempt.get("retried_emissions", ()))
+                    digests = set().union(*(ingest_ledger.pending_emission_digests((store.db_identity, attempt["salt"]),
+                        key, attempt.get("retried_emissions", ())) for key in {lineage, ingest_ledger.lineage_key(None, self._session_id)}))
                     flagged.update(idx for idx in attempt["stored"]
                                    if attempt["entries"][idx].identity_digest in digests)
                 if flagged:
@@ -7405,8 +7454,6 @@ class LCMEngine(
                     if stamp not in stamps and len(stamps) < 4:
                         observations.append((sid, kind, stamp))
                         stamps.add(stamp)
-                if not persisted and attempt["resolved"] is not None:
-                    conn.execute("INSERT INTO ledger_meta(key,value) VALUES (?,?)", (key, lineage))
                 if pending or observations or not same or changed_ref:
                     seq = ingest_ledger.next_view_seq(conn)
                     if respace:
@@ -11347,9 +11394,6 @@ class LCMEngine(
         try:
             with _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
                 lineage = ingest_ledger.persisted_lineage(conn, tail["session_id"], frozen["lineage"])
-                if frozen["resolved"] is not None:
-                    conn.execute("INSERT OR IGNORE INTO ledger_meta(key,value) VALUES (?,?)",
-                                 ("session_lineage:" + str(tail["session_id"]), lineage))
                 right = conn.execute("SELECT min(ordinal) FROM occurrence_bindings WHERE lineage=? AND ordinal>? "
                     "AND disposition IN ('stored','migrated','ambiguous')", (lineage, left)).fetchone()[0]
                 ordinals, respace = ingest_ledger.plan_ordinals(ingest_ledger.lineage_ordinals(conn, lineage),
@@ -11458,8 +11502,12 @@ class LCMEngine(
                     after_commit, ids = [], []
                     if tail["messages"]:
                         with store.ingest_atomic():
-                            covered, last_id, left, rule, _stop, candidates = self._match_pending_tail(tail)
-                            batch = self._slice_tail(tail, covered)
+                            adopted_tail = tail
+                            if (frozen := tail.get("ledger")) is not None:
+                                lineage = self._ledger_adopt(store, tail["session_id"], frozen["resolved"], frozen["salt"], after_commit)
+                                adopted_tail = {**tail, "ledger": {**frozen, "lineage": lineage or frozen["lineage"]}}
+                            covered, last_id, left, rule, _stop, candidates = self._match_pending_tail(adopted_tail)
+                            batch = self._slice_tail(adopted_tail, covered)
                             ids = self._append_ingest_batch(batch) if batch["messages"] else []
                             if ids and rule == "digest":
                                 self._write_tail_bindings(batch, ids, left, after_commit)

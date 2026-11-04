@@ -142,7 +142,7 @@ In order:
    - occurrence bindings, including any re-spacing;
    - the ingest view vector;
    - the store mark, when it changed;
-   - the relations: composite (forward composite_part is today's `composite` relation), split, supersedes, possible_replay_of, generated_unproven and adopted_from;
+   - the relations: composite (forward composite_part is today's `composite` relation), split, supersedes, possible_replay_of and generated_unproven; `adopted_from:<P>` is a `ledger_meta` key pointing to L;
    - uid canonical, revision and constituent bindings;
    - stamp observations;
    - the anchor carry metadata;
@@ -166,7 +166,7 @@ Rules:
 - Each ingest counts its lock-hold time, rows classified, rank-5 DP cells, bytes written, cost fallbacks and re-spacings. These are the §5 instruments.
 
 P1 shadow notes (P1b-2b, `LCM_INGEST_LEDGER=shadow`, default; `off` preserves Part A's SQL stream):
-- **X1:** all ledger writes use one strict SAVEPOINT inside `MessageStore.ingest_atomic`; ordinary isolated failures fail open, while busy errors, cancellation and integrity loss keep owner semantics.
+- **X1:** ledger batches use strict SAVEPOINTs inside `MessageStore.ingest_atomic`; adoption has its own savepoint before emission retries and classification. Ordinary isolated failures fail open, while busy errors, cancellation and integrity loss keep owner semantics.
 - **X2:** existing vector bits are stamp 1, uidset 2, descriptor 4, unbound 8.
 - **X3:** the frozen-tail drain and delegated-child S3 path write no ledger rows; their unbound rows await P1g.
 - **X4:** `key_rank` is NULL; ranks are P2.
@@ -177,9 +177,9 @@ P1 shadow notes (P1b-2b, `LCM_INGEST_LEDGER=shadow`, default; `off` preserves Pa
 - **X9:** `plan_ordinals` places new rows in view order between pre-existing same-lineage neighbours; crossed bounds skip the ledger batch, and respacing is atomic and logged at INFO.
 - **X10:** `MessageStore.ingest_atomic` owns the transaction; ledger setup occurs separately at session start.
 - **X11:** no store-mark advancement until P1g proves coverage of earlier unbound rows, including failed ledger batches, drain and S3 writes.
-- **X12:** missing named non-fork ancestry is provisional only for the ledger, bypasses the legacy cache, and is never persisted; persisted complete lineage wins over later unresolved or drifting lookups.
+- **X12:** missing named non-fork ancestry is provisional only for the ledger, bypasses the legacy cache, and is never persisted; persisted complete lineage wins over later unresolved or drifting lookups. P1f adopts provisional history at transaction start, before the cold cursor's first resolved turn.
 - **X13:** an ingest vector carries a ref only for a row that this ingest stores or that the identity anchor matches to exactly one binding. A prefix row the anchor does not match, as on an ordinary append, is unbound in the new vector. Carrying refs across a verified prefix is new matching, left to the cold-start cursor reader, which needs it before it reads a vector.
-- **X14:** the persisted lineage is keyed by session id, as the store keys session rows. A store shared by two Hermes homes that reuse one session id keeps the first home's lineage and counts `ledger.lineage_drift`; P1f revisits the key.
+- **X14:** the persisted lineage remains keyed by session id, as the store keys session rows. A store shared by two Hermes homes that reuse one session id keeps the first home's lineage and counts `ledger.lineage_drift`; P1f retains this key and adds the `adopted_from:<P>` forwarding record.
 - **R3/R17 deviation:** skip an equal-prefix-chain ingest vector when no new binding, observation or newly resolved ref changes it; an unavailable mapping alone does not invalidate the prior vector. This avoids per-turn write load on no-op turns.
 - Preparation hashes the full raw view before BEGIN, including absorbed uids, and records `ledger_digest_ms`; the savepoint records `ledger_ms` within lock hold. Latency on real hosts remains unproven.
 
@@ -202,7 +202,7 @@ The pieces:
   - After a restart the process mark is gone, but the stored-byte recognizer still flags these rows. It reads existing byte shapes; it adds no emitted bytes or carrier tag. A carrier's marker is its leading summary header.
   - The shapes, in precedence order, are: leading summary header plus `[Expand for details:`, objective scaffold prefix, overflow recovery prefix, LCM's full recall header inside `<relevant-memories>`, an exact tool-result stub, survival projection text or bounded-call notice, then user-only summary/scaffold/recovery parts joined after `"\n\n"`. Leading checks use the first text part for structured content. System rows are excluded; the bare recall tag and other mid-row markers do not match. Projection marks are the exception: LCM emits them inside a row, so they match anywhere in the text, and a row that quotes one (for example `lcm_grep` output) is flagged as visible doubt, never lost.
   - A user row carrying these marker bytes is stored and flagged, never lost. Stored NEW applies only where today's classifier stores: exact cursor evidence, DAG-verified scaffolds and verified recovery projections keep their existing skips.
-  - `possible_replay_of` is deferred to P1h or P2; P1c-2b does no DAG or descriptor lookup on ingest.
+  - P1f writes one-time merge `possible_replay_of` pairs (§3.8); per-ingest and tail relations remain deferred to P1h or P2. P1c-2b does no DAG or descriptor lookup on ingest.
   - The recognizer reads the protected payload and the remainder it was protected from, so a generated row large enough for whole-row externalization is still flagged.
   - Accepted gaps: ledger off, `ledger.write_failed` (the savepoint rolls the relation back), not-ready or read-only stores, session-end tail stores (P1e), mid-row markers outside the joined rule, and the externalized form of the over-cap tool-result stub (an `[Externalized tool output: …]` reference, not a recognized shape).
 - **Adoption.** The emission becomes adopted on the host's boundary signal (engine.py:4444) or when an incoming view anchors on it.
@@ -357,15 +357,15 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
 ### 3.8 Lineage (A8)
 - **Key.** A lineage's key is the persisted host_uid key `<home_tag>:<root>` (host_uid.py:77).
   - It is fixed per session at first resolution and never re-derived.
-  - A partial chain is never cached. This fixes identity_anchor.py:99-110, where a missing child row caches the short chain.
-- **Provisional lineage.** While the key is unresolved, writes go under a provisional session-scoped lineage P. When the key resolves to L, P merges into L inside one ingest transaction, in five steps (L4-4, Astra 11):
+  - The ledger key lookup already bypasses the legacy cache (host_uid.py:83). The separate partial-chain cache at identity_anchor.py:96 and :102 remains deferred to P2.
+- **Provisional lineage.** While the key is unresolved, writes go under a provisional session-scoped lineage P. Once a resolved or persisted key L is known and P has bindings, views or emissions, P merges into L at the start of the ingest transaction, before emission retries and the cold cursor, in its own savepoint (L4-4, Astra 11):
   1. Re-read L's key, marks and view_seq inside the lock.
-  2. Classify P's rows against L's ledger by §3.4, with L's history as the base. A P row that replays an L occurrence keeps both stored rows, and P's copy gets `possible_replay_of` to L's.
-  3. Give EVERY retained P occurrence, matched or not, a fresh ordinal after L's max, in P's order; occ_ids and relations are unchanged, so UNIQUE (lineage, ordinal) holds. Re-key P's vectors to L; P's newest becomes L's cursor when it is newer.
-  4. A uid with a canonical binding in both: L's stays canonical, and P's becomes a revision with `possible_replay_of`. Nothing is deleted.
-  5. Set max_store_id and max_leaf_id to the larger value, recompute legacy_proof_digest from the merged proof keys, and record `adopted_from` (the #1520 mechanism). The same merge corrects ownership invented on a cold post-turn ingest (#1250).
-- **At P1 the merge binds only:** step 2 uses migration's byte-exact, consume-once matching and writes relations only; every occurrence of P, replayed or not, is re-keyed to L with a fresh ordinal (step 3), together with every reference to it; view_seq is store-global, so "newer" in step 3 is defined.
-- **Fork child.** It starts a new lineage with a parent link (by occ_id). While the parent lineage is provisional, the link stays provisional. A missing parent stays provisional and never becomes a root (L4-8).
+  2. At P1, pair kept P and L bindings by equal non-NULL stamp and identity_digest, consuming L matches once in P ordinal order. Keep both stored rows and write `possible_replay_of` from P's copy to L's. Unstamped digest twins get no relation and are counted.
+  3. Give each distinct non-NULL P ordinal a fresh ordinal after L's max, in P's order; occ_ids, refs and relations are unchanged, so UNIQUE (lineage, ordinal) holds. Re-key bindings, observations, emissions and vectors; keep the newest two vectors per kind. view_seq is store-global, so P's newest becomes L's cursor when it is newer.
+  4. At P1 this is a no-op: legacy `host_uid_bindings` retains its own key. Canonical uid/revision merging moves to P2.
+  5. Keep L's max_store_id (P1g re-scans once), coalesce L's legacy_proof_digest and max_leaf_id with P's, and keep stamp_unreliable if either side has it. Merge emission_recovered by numeric maximum and record `ledger_meta['adopted_from:' + P] = L` (the #1520 record). Ownership repair (#1250) remains deferred.
+- **Failure and restart.** Ordinary merge failures roll back only the adoption savepoint and count `ledger.lineage_merge_failed`; without a persisted key the batch stays under P. Busy errors, cancellation and owner integrity loss propagate. The per-store/salt/session memo is set only after COMMIT. Late adoption appends P's ordinals and counts `ledger.lineage_merge.late`; it never discards stored history.
+- **Fork child.** It starts a new lineage. The parent link by occ_id moves to P2; while the parent lineage is provisional, that link will stay provisional. A missing named non-fork parent stays provisional and never becomes a root (L4-8).
 - The host's view model is not declared (M7).
 
 ### 3.9 Readers (A5, A12a)
@@ -431,7 +431,7 @@ These ship with the P2 flip:
     - the P1 tail rule (§3.5);
     - stamp observations;
     - the per-ingest counters (§3.2);
-    - the reliability scorer reads relations, so a visible surplus row is told apart from a silent one; `possible_replay_of` writes are deferred to P1h or P2.
+    - the reliability scorer reads relations, so a visible surplus row is told apart from a silent one; P1f writes merge `possible_replay_of` pairs, while per-ingest and tail writes remain deferred to P1h or P2.
   - **Behaviour:** today's classifier keeps deciding. Four fixes take effect at P1, because each one either stores more or skips only on exact evidence:
     1. atomic evidence (class A);
     2. on a cold start, the anchored run at j = 0 on the durable cursor, or on the newest non-refused emission vector read through `emission_candidate`, becomes one more candidate in today's largest-cursor choice (reconcile.py:3091-3125). A withheld emission candidate falls back to today's cursor choice. It never replaces tail matching, so rows stored by a tail retry or an S3 end, which write no vector, are still found (the class B restart family, and a crash between the compress() return and the next ingest);
@@ -626,4 +626,4 @@ skips get no relation. A fail-open rollback (`ledger.write_failed`), ledger off,
 a store that is not ready, read-only or has a changed salt still skips relations.
 Session-end tail stores (P1e), mid-row markers outside the joined rule and the
 externalized over-cap tool-result stub remain accepted gaps. The process mark is lost on restart; the byte recognizer is not.
-`possible_replay_of` is deferred to P1h or P2.
+P1f writes merge `possible_replay_of` pairs (§3.8); per-ingest and tail relations remain deferred to P1h or P2.
