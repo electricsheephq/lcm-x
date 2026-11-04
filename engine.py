@@ -5379,7 +5379,8 @@ class LCMEngine(
                     )
                     return
                 except Exception as exc:
-                    if _is_sqlite_locked_error(exc):
+                    if _is_ingest_busy_error(exc):
+                        self._ledger_count("ledger.tail.busy_at_end")
                         logger.warning(
                             "LCM session-end raw-message ingest skipped due to SQLite lock after short wait; "
                             "%s: %s unflushed=%d",
@@ -7000,11 +7001,13 @@ class LCMEngine(
                                                        else copy.copy(value))
                         self._pending_ingest_frontier = copy.deepcopy(self._frontier)
                         self._identity_anchor_observe_recovery()
+                        self._frozen_ledger_prepared = ledger_prepared
                         frozen_replay, _finish = self._ingest_messages_transaction(messages, [], attribution,
                             allow_session_end_replay_proof=allow_session_end_replay_proof)
                     except Exception:
                         pass  # Keep the original lock error; the frozen tail is the only result.
                     finally:
+                        self.__dict__.pop("_frozen_ledger_prepared", None)
                         self.__dict__.pop("_ingest_read_only", None)
                         self._store._read_only_ingest_thread = read_only_thread
                         for name, value in snapshots.items():
@@ -8501,16 +8504,33 @@ class LCMEngine(
         try:
             store_ids = self._append_ingest_batch(batch)
         except Exception as exc:
-            if self._session_end_flush_active and _is_sqlite_locked_error(exc):
+            if self._session_end_flush_active and _is_ingest_busy_error(exc):
                 # Freeze the already filtered/protected rows, not the host's
                 # mutable history or the next session's ingest cursor.
-                pending = {**batch, "after_store_id": pending_after_store_id}
+                pending = {**batch, "kind": "warm", "after_store_id": pending_after_store_id}
+                self.__dict__["_frozen_tail_reached"] = True
+                frozen = getattr(self, "_frozen_ledger_prepared", None)
+                indexes = [idx for idx, _row in messages_to_store_with_index]
+                usable = frozen is not None and all(idx < len(frozen["entries"]) for idx in indexes)
+                # Only rows that end the host view follow the session's last bound row. An inserted tail freezes
+                # no evidence, so it keeps today's positional rule and its rows wait for an exact re-bind.
+                inserted = usable and indexes != list(range(len(frozen["entries"]) - len(indexes), len(frozen["entries"])))
+                if usable and not inserted:
+                    pending["ledger"] = {**{key: frozen[key] for key in ("salt", "lineage", "resolved")},
+                        "entries": [frozen["entries"][idx] for idx in indexes],
+                        "stamps": [frozen["stamps"][idx] for idx in indexes],
+                        "remainder": [ingest_ledger.identity_digest(frozen["salt"], row) if idx in sender_excluded else None
+                                      for idx, row in messages_to_store_with_index]}
                 for key in ("messages", "estimates", "metadata_messages"):
                     pending[key] = copy.deepcopy(pending[key])
                 if "senders" in pending:
                     pending["senders"] = copy.deepcopy(pending["senders"])
-                if not any(old == pending for old in self._pending_session_tails):
+                if not any(self._tail_key(old) == self._tail_key(pending) for old in self._pending_session_tails):
                     self._pending_session_tails.append(pending)
+                    if getattr(self, "_ingest_read_only", None) is not None:
+                        self._ledger_count("ledger.tail.queued.warm")
+                        if inserted:
+                            self._ledger_count("ledger.tail.queued.inserted")
                 maintenance_scheduler._PENDING_TAIL_ENGINES.add(self)
             raise
         if senders is not None:
@@ -11196,25 +11216,131 @@ class LCMEngine(
             message.get("observed_at") if stored else _normalize_observed_at(message.get("timestamp")),
         )
 
-    def _trim_replayed_pending_tail(self, tail: dict) -> None:
-        # Stored ids are normalized; compare the captured id the same way.
+    @staticmethod
+    def _tail_key(tail):
+        return (tail.get("kind", "warm"), tail["store"].db_path, *(tail[key] for key in (
+            "session_id", "conversation_id", "after_store_id", "messages", "metadata_messages")))
+
+    @staticmethod
+    def _slice_tail(tail, n):
+        result = dict(tail)
+        for key in ("messages", "estimates", "metadata_messages", "senders"):
+            if key in tail:
+                result[key] = tail[key][n:]
+        if "ledger" in tail:
+            result["ledger"] = {**tail["ledger"], **{key: tail["ledger"][key][n:]
+                                for key in ("entries", "stamps", "remainder")}}
+        return result
+
+    def _match_pending_tail(self, tail):
+        """Pure committed-prefix proof in store space; resolve the head after any respacing."""
+        store, frozen = tail["store"], tail.get("ledger")
         conversation_id = _normalize_conversation_id_value(tail["conversation_id"])
-        rows = tail["store"].get_range(
+        rows = store.get_range(
             tail["session_id"], start_id=tail["after_store_id"] + 1,
             conversation_id=conversation_id, limit=len(tail["messages"]),
         )
-        covered = 0
-        for message, row in zip(tail["messages"], rows):
+        bound, last, candidates, uids = {}, None, set(), {}
+        conn = store._conn
+        owned = conn.in_transaction
+        try:
+            rule = ("off" if ingest_ledger_mode() == "off" else "no_ledger" if frozen is None else
+                    "not_ready" if store.ingest_ledger_state() != "ready" else
+                    "salt_changed" if store.ingest_ledger_salt() != frozen["salt"] else "digest")
+            if rule == "digest":
+                salt = frozen["salt"]
+                lineage = ingest_ledger.persisted_lineage(conn, tail["session_id"], frozen["lineage"])
+                records = ingest_ledger._rows(conn.execute(
+                    "WITH head AS (SELECT b.ordinal FROM occurrence_bindings b JOIN messages m USING(store_id) "
+                    "WHERE b.lineage=? AND m.session_id=? AND b.store_id<=? "
+                    "AND b.disposition IN ('stored','migrated','ambiguous') "
+                    "ORDER BY b.ordinal DESC LIMIT 1) "
+                    "SELECT b.*,h.head_ordinal,o.stamp AS observed_stamp "
+                    "FROM (SELECT (SELECT ordinal FROM head) AS head_ordinal) h "
+                    "LEFT JOIN occurrence_bindings b ON b.lineage=? "
+                    "AND b.store_id IN (SELECT value FROM json_each(?)) "
+                    "AND b.disposition IN ('stored','migrated','ambiguous','composite_part') "
+                    "LEFT JOIN stamp_observations o ON o.occ_id=b.occ_id",
+                    (lineage, tail["session_id"], tail["after_store_id"], lineage,
+                     json.dumps([r["store_id"] for r in rows]))))
+                last = records[0]["head_ordinal"]
+                for record in records:
+                    if record["occ_id"] is not None:
+                        item = bound.setdefault(record["store_id"], {}).setdefault(record["occ_id"], record)
+                        item.setdefault("observations", set()).add(record["observed_stamp"])
+                        candidates.add(record["identity_digest"])
+                if any(e.uidset_digest is not None for e in frozen["entries"]):
+                    # Read and decode each binding's own view once, however many bindings share it.
+                    seqs = sorted({r["view_seq"] for r in records if r["occ_id"] is not None and r["view_seq"] is not None})
+                    for seq, entries in conn.execute(
+                            "SELECT view_seq,entries FROM ingest_views WHERE lineage=? AND kind='ingest' "
+                            "AND view_seq IN (SELECT value FROM json_each(?))", (lineage, json.dumps(seqs))):
+                        for e in ingest_ledger.decode_entries(entries) if entries else ():
+                            uids.setdefault((seq, e.ref), e.uidset_digest)
+        except Exception as exc:
+            if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or owned and not conn.in_transaction:
+                raise
+            # The ledger is advisory here, as for the cold cursor: an unreadable one keeps today's rule.
+            rule, bound, last, candidates, uids = "read_failed", {}, None, set(), {}
+        covered, last_id, stop = 0, tail["after_store_id"], "end"
+        for i, (message, row) in enumerate(zip(tail["messages"], rows)):
             if row["conversation_id"] != conversation_id:
+                stop = "conversation"
                 break
-            if self._pending_row_identity(message) != self._pending_row_identity(row, stored=True):
+            bindings = list(bound.get(row["store_id"], {}).values())
+            if rule == "digest" and len(bindings) == 1:
+                b, entry, remainder = bindings[0], frozen["entries"][i], frozen["remainder"][i]
+                uid = uids.get((b["view_seq"], b["occ_id"]))
+                stamp = None if remainder is not None else frozen["stamps"][i]
+                # A row's own host stamp identifies it wherever another view placed it: the ordinal floor only
+                # keeps unstamped twins from covering a tail row.
+                matches = ((last is None or b["ordinal"] > last or stamp is not None)
+                    and (b["disposition"] == "composite_part") == (remainder is not None)
+                    and b["identity_digest"] == (remainder if remainder is not None else entry.identity_digest)
+                    and (ingest_ledger.stamp_digest(salt, b["stamp"]) == ingest_ledger.stamp_digest(salt, stamp)
+                         or stamp is not None and stamp in b["observations"])
+                    and not (uid is not None and entry.uidset_digest is not None and uid != entry.uidset_digest))
+                if matches:
+                    last = b["ordinal"] if last is None else max(last, b["ordinal"])
+            else:
+                matches = self._pending_row_identity(message) == self._pending_row_identity(row, stored=True)
+            if not matches:
+                stop = "identity"
                 break
             covered += 1
-            tail["after_store_id"] = row["store_id"]
-        for key in ("messages", "estimates", "metadata_messages"):
-            tail[key] = tail[key][covered:]
-        if "senders" in tail:
-            tail["senders"] = tail["senders"][covered:]
+            last_id = row["store_id"]
+        n_candidates = sum((r if r is not None else e.identity_digest) in candidates
+                           for e, r in zip(frozen["entries"][covered:], frozen["remainder"][covered:])) if rule == "digest" else 0
+        return covered, last_id, last, rule, stop, n_candidates
+
+    def _write_tail_bindings(self, tail, ids, left, after_commit):
+        store, frozen = tail["store"], tail["ledger"]
+        conn = store._conn
+        try:
+            with _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
+                lineage = ingest_ledger.persisted_lineage(conn, tail["session_id"], frozen["lineage"])
+                if frozen["resolved"] is not None:
+                    conn.execute("INSERT OR IGNORE INTO ledger_meta(key,value) VALUES (?,?)",
+                                 ("session_lineage:" + str(tail["session_id"]), lineage))
+                right = conn.execute("SELECT min(ordinal) FROM occurrence_bindings WHERE lineage=? AND ordinal>? "
+                    "AND disposition IN ('stored','migrated','ambiguous')", (lineage, left)).fetchone()[0]
+                ordinals, respace = ingest_ledger.plan_ordinals(ingest_ledger.lineage_ordinals(conn, lineage),
+                    [ingest_ledger.Placement(left, right)] * len(ids))
+                ingest_ledger.apply_respace(conn, lineage, respace)
+                seq = ingest_ledger.next_view_seq(conn)
+                ingest_ledger.insert_bindings(conn, lineage, [dict(ordinal=ordinal, store_id=sid,
+                    identity_digest=remainder if remainder is not None else entry.identity_digest,
+                    stamp=None if remainder is not None else stamp,
+                    disposition="composite_part" if remainder is not None else "stored", key_rank=None, view_seq=seq)
+                    for sid, ordinal, entry, stamp, remainder in zip(ids, ordinals, frozen["entries"],
+                                                                   frozen["stamps"], frozen["remainder"])])
+            if respace:
+                after_commit.append(lambda: self._ledger_count("ledger.respaced"))
+        except BaseException as exc:
+            if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
+                    or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                raise
+            after_commit.append(lambda exc=exc: self._ledger_count("ledger.write_failed", exc))
 
     def _retry_pending_session_tails(self, *, deadline: float | None = None, exiting: bool = False) -> None:
         """Drain under the lifecycle lock, sharing one busy-wait budget."""
@@ -11228,15 +11354,33 @@ class LCMEngine(
                 with _temporary_sqlite_busy_timeout(
                     [store._conn], max(0, int((deadline - time.monotonic()) * 1000)),
                 ):
-                    self._trim_replayed_pending_tail(tail)
+                    covered, last_id, left, rule, _stop, candidates = self._match_pending_tail(tail)
+                    # This prefix is already committed, even if admission below fails.
+                    tail.update(self._slice_tail(tail, covered), after_store_id=last_id)
+                    self._ledger_count("ledger.tail.retry.replay_rows", amount=covered)
+                    after_commit, ids = [], []
                     if tail["messages"]:
-                        self._append_ingest_batch(tail)
+                        with store.ingest_atomic():
+                            covered, last_id, left, rule, _stop, candidates = self._match_pending_tail(tail)
+                            batch = self._slice_tail(tail, covered)
+                            ids = self._append_ingest_batch(batch) if batch["messages"] else []
+                            if ids and rule == "digest":
+                                self._write_tail_bindings(batch, ids, left, after_commit)
+                        after_commit.append(lambda n=covered: self._ledger_count("ledger.tail.retry.replay_rows", amount=n))
+                    after_commit.extend([
+                        lambda n=len(ids): self._ledger_count("ledger.tail.retry.stored_rows", amount=n),
+                        lambda n=candidates: self._ledger_count("ledger.tail.retry.candidates_unmarked", amount=n),
+                        lambda rule=rule: self._ledger_count("ledger.tail.retry." + (
+                            "ledger_match" if rule == "digest" else "fallback." + rule))])
+                    for callback in after_commit:
+                        callback()
                     self._pending_session_tails.remove(tail)
                     # Read the bound store without a lazy open (#2152): after a failed
                     # rebind, opening the new home here would raise out of shutdown's cleanup.
                     if store is self.__dict__.get("_store") and tail["session_id"] == self._session_id:
                         self._ingest_cursor_needs_reconcile = True
             except (Exception, KeyboardInterrupt):
+                self._ledger_count("ledger.tail.retry.deferred")
                 logger.debug("LCM pending session-end retry deferred", exc_info=True)
                 break
             finally:
@@ -11253,6 +11397,7 @@ class LCMEngine(
     def _warn_unflushed_session_tails(self, reason: str) -> None:
         remaining = sum(len(tail["messages"]) for tail in self._pending_session_tails)
         if remaining:
+            self._ledger_count("ledger.tail.unflushed", amount=remaining)
             logger.warning(
                 "LCM session-end raw-message ingest skipped due to %s after shutdown retry; "
                 "final messages may be absent from the plugin-local store unflushed=%d", reason, remaining,
