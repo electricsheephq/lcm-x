@@ -281,6 +281,15 @@ def test_reset_after_the_end_is_not_taken_for_progress(engines, monkeypatch):
     assert contents(engine) == ["A", "B", "C", "D"] and not engine._pending_session_tails
 
 
+def test_ingest_that_stores_nothing_after_the_end_is_not_progress(engines, monkeypatch):
+    engine = ignoring(engines())
+    view = [history()[0], _m("user", "ignore", 1.5), *history()[1:]]
+    queue_cold(engine, monkeypatch, view, stored=view[:3])
+    engine.ingest(copy.deepcopy(view[:3]))  # an older list (#2205): it commits and stores nothing
+    engine._retry_pending_session_tails()
+    assert contents(engine) == ["A", "B", "C", "D"] and not engine._pending_session_tails
+
+
 def test_cold_start_of_an_earlier_end_is_not_progress_for_a_later_one(engines, monkeypatch):
     engine = ignoring(engines())
     view = [history()[0], _m("user", "ignore", 1.5), *history()[1:]]

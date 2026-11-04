@@ -7051,13 +7051,14 @@ class LCMEngine(
             self._frontier.cursor = pending.cursor
             self._frontier.needs_reconcile = pending.needs_reconcile
             self._frontier.commit_proof = pending.commit_proof
-            # The session ingested after these ends, so their views can be older than its history. A retried tail's
-            # own view is older than those of the ends queued after it.
-            for tail in self.__dict__.get("_pending_session_tails", ()):
-                if tail is retried_tail:
-                    break
-                if tail.get("kind") == "cold" and tail["store"] is self._store and tail["session_id"] == self._session_id:
-                    tail["went_on"] = True
+            # The session stored rows after these ends, so their views can be older than its history. A retried tail's
+            # own view is older than those of the ends queued after it. An ingest that stored nothing changed no history.
+            if attribution["rows_written"]:
+                for tail in self.__dict__.get("_pending_session_tails", ()):
+                    if tail is retried_tail:
+                        break
+                    if tail.get("kind") == "cold" and tail["store"] is self._store and tail["session_id"] == self._session_id:
+                        tail["went_on"] = True
             if pending.oob_rows or "_out_of_band_durable_rows" in self.__dict__:
                 self._out_of_band_durable_rows = pending.oob_rows
             if "protected" in prepared:
@@ -11377,7 +11378,7 @@ class LCMEngine(
         if (not sibling and tail["session_id"] == self._session_id
                 and _normalize_conversation_id_value(tail["conversation_id"]) ==
                     _normalize_conversation_id_value(self._conversation_id)):
-            went_on = tail.get("went_on", False)  # Set by every later ingest but an earlier end's retry.
+            went_on = tail.get("went_on", False)  # Set by every later ingest that stored rows, but an earlier end's retry.
             stored = self._cold_tail_stored(tail, stamps=True)
             if stored is not None and stored >= len(tail["view"]):
                 # Later ingests stored the whole view. As after a warm retry, the next ingest finds its cursor again.
