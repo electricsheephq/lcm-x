@@ -271,6 +271,41 @@ def test_restart_whose_retry_waited_is_not_taken_for_progress(engines, monkeypat
     assert contents(engine) == ["A", "B", "C", "D"] and not engine._pending_session_tails
 
 
+def test_reset_after_the_end_is_not_taken_for_progress(engines, monkeypatch):
+    engine = ignoring(engines())
+    view = [history()[0], _m("user", "ignore", 1.5), *history()[1:]]
+    queue_cold(engine, monkeypatch, view, stored=view[:3])
+    # Hermes /new: the reset drops the reconcile the failed end asked for, then the next start retries the tail.
+    engine.on_session_reset()
+    engine.on_session_start("S2", platform="cli", context_length=200_000, conversation_id="conv")
+    assert contents(engine) == ["A", "B", "C", "D"] and not engine._pending_session_tails
+
+
+def test_cold_start_of_an_earlier_end_is_not_progress_for_a_later_one(engines, monkeypatch):
+    engine = ignoring(engines())
+    view = [history()[0], _m("user", "ignore", 1.5), *history()[1:]]
+    engine.ingest(copy.deepcopy(view[:3]))
+    restart(engine)
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    locker = sqlite3.connect(engine._store.db_path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(engine._store, "get_session_count", locked)
+            for end in (view, [*view, _m("user", "E", 5.)]):
+                engine.on_session_end("S", copy.deepcopy(end))
+    finally:
+        locker.rollback()
+        locker.close()
+    assert [tail["kind"] for tail in engine._pending_session_tails] == ["cold", "cold"]
+    # The first tail's cold start stores an older view than the second's, which still needs its own cold start.
+    engine._retry_pending_session_tails()
+    assert contents(engine) == ["A", "B", "C", "D", "E"] and not engine._pending_session_tails
+
+
 @pytest.mark.parametrize("stamped", [True, False])
 def test_session_that_went_on_then_restarted_before_the_retry_repeats_nothing(engines, monkeypatch, stamped):
     engine = engines()
@@ -290,6 +325,33 @@ def test_session_that_went_on_then_restarted_before_the_retry_repeats_nothing(en
     engine.ingest(copy.deepcopy([*live, _m("assistant", "F", stamp(8.), "F")]))
     assert contents(engine) == ["A", "B", "C", "D", "E", "F"]
     assert [tail["kind"] for tail in engine._pending_session_tails] == ["cold"]  # Q1 and Q2 stay queued
+
+
+def test_second_cold_tail_sees_an_ingest_committed_before_the_drain(engines, monkeypatch):
+    engine = engines()
+    engine.ingest(copy.deepcopy(history()[:2]))
+    restart(engine)
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    locker = sqlite3.connect(engine._store.db_path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(engine._store, "get_session_count", locked)
+            for view in (history(), [*history(), _m("user", "Q", 5.)]):
+                engine.on_session_end("S", copy.deepcopy(view))
+    finally:
+        locker.rollback()
+        locker.close()
+    assert [tail["kind"] for tail in engine._pending_session_tails] == ["cold", "cold"]
+    # The user sent Q again before any retry, and the session ingested it. Retrying the first tail asks for a
+    # reconcile again, which must not hide that from the second.
+    engine.ingest(copy.deepcopy([*history(), _m("user", "Q", 6.)]))
+    engine._retry_pending_session_tails()
+    assert contents(engine) == ["A", "B", "C", "D", "Q"]
+    assert [tail["view"][-1]["timestamp"] for tail in engine._pending_session_tails] == [5.]
 
 
 def test_restamped_row_is_a_new_occurrence_not_covered(engines, monkeypatch):
