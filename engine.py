@@ -5161,17 +5161,38 @@ class LCMEngine(
         off_current_recorded_prefix_count = 0
         off_current_bypass_prefix_count = 0
         off_current_bypass_prefix_truncated = False
+        off_current_cold_tail_eligible = bool(off_current_normal_conversation_id) and not (
+            self._has_lcm_bypass_lineage_session(session_id))
+        off_current_source = (
+            self._lcm_session_last_normal_platform.get(session_id)
+            or self._lcm_session_last_platform.get(session_id, self._session_platform))
+
+        def queue_off_current_busy_tail(exc):
+            if not off_current_cold_tail_eligible or not _is_ingest_busy_error(exc):
+                return False
+            self._queue_cold_session_tail(messages, session_id=session_id,
+                conversation_id=off_current_normal_conversation_id, source=off_current_source, error=exc)
+            self._ledger_count("ledger.tail.busy_at_end")
+            logger.warning(
+                "LCM session-end raw-message ingest skipped due to SQLite lock after short wait; "
+                "retry pending at the next session start or shutdown: %s unflushed=%d", exc, len(messages))
+            return True
+
         if off_current_lineage:
             (
                 off_current_bypass_prefix_count,
                 off_current_bypass_prefix_truncated,
             ) = self._matching_lcm_bypass_prefix_evidence(session_id, messages)
         if off_current_lineage and off_current_normal_conversation_id:
-            off_current_store_prefix_count = self._session_end_store_prefix_count(
-                session_id,
-                messages,
-                conversation_id=off_current_normal_conversation_id,
-            )
+            try:
+                off_current_store_prefix_count = self._session_end_store_prefix_count(
+                    session_id, messages, conversation_id=off_current_normal_conversation_id,
+                    raise_busy=off_current_cold_tail_eligible,
+                )
+            except Exception as exc:
+                if queue_off_current_busy_tail(exc):
+                    return
+                raise
             off_current_recorded_prefix_count = self._matching_lcm_normal_prefix_count(
                 session_id,
                 messages,
@@ -5191,7 +5212,9 @@ class LCMEngine(
                     limit=off_current_recorded_prefix_count + 1,
                     conversation_id=off_current_normal_conversation_id,
                 )
-            except Exception:
+            except Exception as exc:
+                if queue_off_current_busy_tail(exc):
+                    return
                 logger.debug("LCM off-current recorded-prefix row-count probe failed", exc_info=True)
                 stored_normal_rows = []
             if len(stored_normal_rows) == off_current_recorded_prefix_count:
@@ -5255,15 +5278,15 @@ class LCMEngine(
             prefix_count = off_current_prefix_count
             suffix = messages[prefix_count:]
             if suffix:
-                self._append_off_current_session_end_suffix(
-                    session_id,
-                    suffix,
-                    source=(
-                        self._lcm_session_last_normal_platform.get(session_id)
-                        or self._lcm_session_last_platform.get(session_id, self._session_platform)
-                    ),
-                    conversation_id=off_current_normal_conversation_id,
-                )
+                try:
+                    self._append_off_current_session_end_suffix(
+                        session_id, suffix, source=off_current_source,
+                        conversation_id=off_current_normal_conversation_id,
+                    )
+                except Exception as exc:
+                    if queue_off_current_busy_tail(exc):
+                        return
+                    raise
             try:
                 state = self._lifecycle.get_by_conversation(off_current_normal_conversation_id)
                 frontier_store_id = state.current_frontier_store_id if state is not None else 0
@@ -7028,14 +7051,8 @@ class LCMEngine(
                             receipt.clear()
                             receipt.update(previous)
                     if frozen_replay is None and not self.__dict__.get("_frozen_tail_reached"):
-                        tail = dict(kind="cold", store=self._store, session_id=self._session_id,
-                                    conversation_id=self._conversation_id, source=self._session_platform,
-                                    view=copy.deepcopy(messages))
-                        if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
-                            self._pending_session_tails.append(tail)
-                            self._ledger_count("ledger.tail.queued.cold." + type(frozen_error).__name__)
-                        logger.warning("LCM session-end cold tail retry pending (%s)", type(frozen_error).__name__)
-                        maintenance_scheduler._PENDING_TAIL_ENGINES.add(self)
+                        self._queue_cold_session_tail(messages, session_id=self._session_id,
+                            conversation_id=self._conversation_id, source=self._session_platform, error=frozen_error)
                     if frozen_replay is not None:
                         return frozen_replay  # Classification proved there is no tail to freeze.
                 self._frontier.needs_reconcile = True
@@ -11241,6 +11258,15 @@ class LCMEngine(
             message.get("tool_name"),
             message.get("observed_at") if stored else _normalize_observed_at(message.get("timestamp")),
         )
+
+    def _queue_cold_session_tail(self, view, *, session_id, conversation_id, source, error):
+        tail = dict(kind="cold", store=self._store, session_id=session_id,
+                    conversation_id=conversation_id, source=source, view=copy.deepcopy(view))
+        if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
+            self._pending_session_tails.append(tail)
+            self._ledger_count("ledger.tail.queued.cold." + type(error).__name__)
+        logger.warning("LCM session-end cold tail retry pending (%s)", type(error).__name__)
+        maintenance_scheduler._PENDING_TAIL_ENGINES.add(self)
 
     @staticmethod
     def _tail_key(tail):

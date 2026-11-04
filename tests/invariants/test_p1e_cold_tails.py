@@ -41,6 +41,101 @@ def queue_cold(engine, monkeypatch, view=None, *, read="get_session_count", erro
     return tail
 
 
+def off_current_end(engine):
+    engine.on_session_start("S1", platform="cli", context_length=200_000, conversation_id="conv1")
+    view = history()
+    engine.ingest(copy.deepcopy(view[:2]))
+    engine.on_session_start("S2", platform="api", context_length=200_000, conversation_id="conv2")
+    assert engine._lcm_session_last_normal_conversation_id["S1"] == "conv1"
+    return view
+
+
+def fail_end_read(engine, *, error=sqlite3.OperationalError, recorded_probe=False):
+    read = engine._store.get_range
+
+    def failed(session_id, *args, **kwargs):
+        if session_id == "S1" and (not recorded_probe or kwargs.get("limit") == 3):
+            raise error("database is busy" if issubclass(error, sqlite3.Error) else "injected prefix failure")
+        return read(session_id, *args, **kwargs)
+
+    return failed
+
+
+def assert_off_current_cold_retry(engine, view, monkeypatch, caplog):
+    assert [row["content"] for row in engine._store.get_session_messages("S1")] == ["A", "B"]
+    assert not engine._store.get_session_messages("S2")
+    assert len(engine._pending_session_tails) == 1
+    tail = engine._pending_session_tails[0]
+    assert (tail["kind"], tail["session_id"], tail["conversation_id"], tail["source"]) == (
+        "cold", "S1", "conv1", "cli")
+    assert tail["view"] == view and tail["view"] is not view and tail["view"][0] is not view[0]
+    assert engine in maintenance_scheduler._PENDING_TAIL_ENGINES
+    assert count(engine, "tail.queued.cold.OperationalError") == count(engine, "tail.busy_at_end") == 1
+    assert "retry pending" in caplog.text and "SQLite lock" in caplog.text
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_ingest_messages", lambda *a, **k: pytest.fail("cold current route"))
+        patch.setattr(engine._lifecycle, "finalize_session", lambda *a, **k: pytest.fail("retry finalized"))
+        engine._retry_pending_session_tails()
+        engine._retry_pending_session_tails()
+    rows = engine._store.get_session_messages("S1")
+    assert [row["content"] for row in rows] == ["A", "B", "C", "D"]
+    assert all(row["conversation_id"] == "conv1" and row["source"] == "cli" for row in rows)
+    assert engine._session_id == "S2" and engine._conversation_id == "conv2"
+    assert not engine._store.get_session_messages("S2") and not engine._pending_session_tails
+
+
+@pytest.mark.parametrize("recorded_probe", [False, True])
+def test_off_current_end_lock_queues_cold_tail(engines, monkeypatch, caplog, recorded_probe):
+    engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
+    view = off_current_end(engine)
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "get_range", fail_end_read(engine, recorded_probe=recorded_probe))
+        patch.setattr(engine._lifecycle, "finalize_session", lambda *a, **k: pytest.fail("queued end finalized"))
+        engine.on_session_end("S1", view)
+    assert_off_current_cold_retry(engine, view, monkeypatch, caplog)
+
+
+def test_off_current_end_busy_append_queues_cold_tail(engines, monkeypatch, caplog):
+    engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
+    view = off_current_end(engine)
+
+    def busy(*args, **kwargs):
+        raise sqlite3.OperationalError("database is busy")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_append_off_current_session_end_suffix", busy)
+        patch.setattr(engine._lifecycle, "finalize_session", lambda *a, **k: pytest.fail("queued end finalized"))
+        engine.on_session_end("S1", view)
+    assert_off_current_cold_retry(engine, view, monkeypatch, caplog)
+
+
+def test_off_current_end_lock_bypass_lineage_unchanged(engines, monkeypatch):
+    engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
+    view = off_current_end(engine)
+    engine._mark_lcm_bypass_lineage_session("S1", platform="cron")
+    fallback = []
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "get_range", fail_end_read(engine))
+        patch.setattr(engine, "_end_host_fallback_compressor_for_session", lambda *a, **k: fallback.append((a, k)))
+        engine.on_session_end("S1", view)
+    assert fallback == [(("S1", view), {"current_session_bypasses": False})]
+    assert not engine._pending_session_tails and count(engine, "tail.busy_at_end") == 0
+    assert [row["content"] for row in engine._store.get_session_messages("S1")] == ["A", "B"]
+
+
+def test_off_current_end_non_busy_prefix_error_unchanged(engines, monkeypatch):
+    engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
+    view = off_current_end(engine)
+    fallback = []
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "get_range", fail_end_read(engine, error=ValueError))
+        patch.setattr(engine, "_end_host_fallback_compressor_for_session", lambda *a, **k: fallback.append((a, k)))
+        engine.on_session_end("S1", view)
+    assert fallback == [(("S1", view), {"current_session_bypasses": False})]
+    assert not engine._pending_session_tails and count(engine, "tail.busy_at_end") == 0
+    assert [row["content"] for row in engine._store.get_session_messages("S1")] == ["A", "B"]
+
+
 @pytest.mark.parametrize("error", [sqlite3.OperationalError, ValueError])
 def test_1805_locked_count_read_queues_cold_tail(engines, monkeypatch, caplog, error):
     engine = engines()

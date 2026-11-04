@@ -25,6 +25,7 @@ from .ingest_protection import (
     restore_ingest_payload_placeholders,
 )
 from .message_content import normalize_content_value, text_content_for_pattern_matching
+from .sqlite_util import _is_ingest_busy_error
 from .tokens import count_message_tokens
 
 # Preserve the logger name used before this behavior-neutral extraction so
@@ -159,6 +160,7 @@ class PrefixMatchingMixin:
         messages: List[Dict[str, Any]],
         *,
         conversation_id: str | None = None,
+        raise_busy: bool = False,
     ) -> Optional[int]:
         try:
             stored_messages = self._store.get_range(
@@ -166,7 +168,9 @@ class PrefixMatchingMixin:
                 limit=max(1, len(messages)),
                 conversation_id=conversation_id,
             )
-        except Exception:
+        except Exception as exc:
+            if raise_busy and _is_ingest_busy_error(exc):
+                raise
             logger.debug("LCM session-end prefix check failed", exc_info=True)
             return None
         if not stored_messages:
