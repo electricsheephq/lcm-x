@@ -155,11 +155,3 @@ def _clean_active_assistant_message(msg: Dict[str, Any]) -> Dict[str, Any] | Non
     cleaned = dict(msg)
     cleaned["content"] = cleaned_content
     return cleaned
-
-
-def _should_drop_active_assistant_message(msg: Dict[str, Any]) -> bool:
-    if msg.get("role") != "assistant":
-        return False
-    if msg.get("tool_calls"):
-        return False
-    return _clean_active_assistant_message(msg) is None
