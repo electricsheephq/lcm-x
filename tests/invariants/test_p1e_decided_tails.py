@@ -374,3 +374,21 @@ def test_end_after_an_inserted_row_binds_after_the_logical_last(engines):
     assert contents(engine) == ["A", "B", "D", "C", "E"]
     assert ordinals(engine)["E"][0] > bound["D"][0]
     assert count(engine, "tail.retry.ledger_match") == 1 and count(engine, "tail.queued.inserted") == 0
+
+
+@pytest.mark.parametrize("end", ["dropped", "reordered", "in_order"])
+def test_stamped_row_another_view_placed_below_the_head_is_not_stored_twice(engines, end):
+    """Another writer whose view puts E before the stored D commits E between C and D before the retry."""
+    engine = engines()
+    view = [*history(), _m("user", "E", 5., "E")]
+    if end != "in_order":
+        engine.ingest(copy.deepcopy([view[0], view[1], view[3]]))  # C is inserted later, so the last store row is C
+    engine.ingest(copy.deepcopy(view[:4]))
+    # The end view either omits D or keeps it before E; both freeze E alone, above the session's last row.
+    tail = end_view(engine, view[:3] + view[4:] if end == "dropped" else view)
+    assert [m["content"] for m in tail["messages"]] == ["E"]
+    bound = ordinals(engine)
+    replay(engine, [view[4]], ordinals=[(bound["C"][0] + bound["D"][0]) // 2])
+    engine._retry_pending_session_tails()
+    assert contents(engine).count("E") == 1
+    assert count(engine, "tail.retry.ledger_match") == 1

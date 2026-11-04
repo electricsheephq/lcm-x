@@ -11292,14 +11292,16 @@ class LCMEngine(
                 b, entry, remainder = bindings[0], frozen["entries"][i], frozen["remainder"][i]
                 uid = uids.get((b["view_seq"], b["occ_id"]))
                 stamp = None if remainder is not None else frozen["stamps"][i]
-                matches = ((last is None or b["ordinal"] > last)
+                # A row's own host stamp identifies it wherever another view placed it: the ordinal floor only
+                # keeps unstamped twins from covering a tail row.
+                matches = ((last is None or b["ordinal"] > last or stamp is not None)
                     and (b["disposition"] == "composite_part") == (remainder is not None)
                     and b["identity_digest"] == (remainder if remainder is not None else entry.identity_digest)
                     and (ingest_ledger.stamp_digest(salt, b["stamp"]) == ingest_ledger.stamp_digest(salt, stamp)
                          or stamp is not None and stamp in b["observations"])
                     and not (uid is not None and entry.uidset_digest is not None and uid != entry.uidset_digest))
                 if matches:
-                    last = b["ordinal"]
+                    last = b["ordinal"] if last is None else max(last, b["ordinal"])
             else:
                 matches = self._pending_row_identity(message) == self._pending_row_identity(row, stored=True)
             if not matches:
