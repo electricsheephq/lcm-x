@@ -155,18 +155,34 @@ def test_resumed_session_stores_the_cold_view_once(engines, monkeypatch, stamped
     assert not old._pending_session_tails
 
 
-def test_cold_start_from_an_older_view_reconciles_the_next_ingest(engines, monkeypatch):
+def test_ignored_row_view_falls_back_to_cold_start_without_duplicates(engines, monkeypatch):
     engine = engines()
-    queue_cold(engine, monkeypatch)
-    # The host rewrote the turn after B (an undo), so the stored prefix no longer matches the queued view.
-    live = [*history()[:2], _m("user", "X", 5., "X"), _m("assistant", "Y", 6., "Y"), _m("user", "Z", 7., "Z")]
+    engine._config.ignore_message_patterns = ["^ignore$"]
+    engine._compiled_ignore_message_patterns = [_ContainsPattern("ignore")]
+    # An ignored row is never stored, so the stored prefix differs from the view position by position and the
+    # retry takes the cold-start ingest even though later ingests stored the view.
+    view = [*history()[:2], _m("user", "ignore", 2.5), *history()[2:]]
+    queue_cold(engine, monkeypatch, view)
+    live = [*view, _m("user", "E", 5., "E"), _m("assistant", "F", 6., "F")]
     engine.ingest(copy.deepcopy(live))
     engine._retry_pending_session_tails()
-    assert not engine._pending_session_tails and engine._ingest_cursor_needs_reconcile
-    stored = contents(engine)
-    engine.ingest(copy.deepcopy([*live, _m("assistant", "W", 8., "W")]))
-    assert contents(engine) == [*stored, "W"]
-    assert {"A", "B", "C", "D", "X", "Y", "Z"} <= set(stored)
+    assert not engine._pending_session_tails
+    engine.ingest(copy.deepcopy([*live, _m("user", "G", 7., "G")]))
+    assert contents(engine) == ["A", "B", "C", "D", "E", "F", "G"]
+
+
+@pytest.mark.parametrize("stamped", [True, pytest.param(False, marks=pytest.mark.xfail(
+    strict=True, reason="#2203: an unstamped cold view the session rewrote is stored again"))])
+def test_cold_view_after_the_session_rewrote_its_history(engines, monkeypatch, stamped):
+    engine = engines()
+    stamp = (lambda value: value) if stamped else (lambda value: None)
+    queue_cold(engine, monkeypatch, [*history(stamped), _m("user", "Q", stamp(5.), "Q")])
+    # The same session undid Q and went on before the retry ran.
+    live = [*history(stamped), _m("user", "E", stamp(6.), "E"), _m("assistant", "F", stamp(7.), "F")]
+    engine.ingest(copy.deepcopy(live))
+    engine._retry_pending_session_tails()
+    engine.ingest(copy.deepcopy([*live, _m("user", "G", stamp(8.), "G")]))
+    assert contents(engine) == ["A", "B", "C", "D", "E", "F", "Q", "G"]
 
 
 def test_frozen_run_after_a_rolled_back_append_queues_cold(engines, monkeypatch):

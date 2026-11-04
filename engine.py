@@ -11375,8 +11375,6 @@ class LCMEngine(
             self._session_end_flush_active = False
             self._ingest_cursor_needs_reconcile = True
             self._ingest_messages(tail["view"], allow_session_end_replay_proof=False, no_view=True)
-            # The view can be older than the live session: the next ingest finds its own cursor again.
-            self._ingest_cursor_needs_reconcile = True
             return True
         return self._retry_cold_tail_s3(tail)
 
