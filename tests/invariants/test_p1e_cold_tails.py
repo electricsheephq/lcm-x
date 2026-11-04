@@ -4,6 +4,7 @@ import copy
 import inspect
 import logging
 import sqlite3
+import time
 
 import pytest
 
@@ -153,6 +154,52 @@ def test_cold_tail_retry_after_an_ignored_or_stateless_rebind_keeps_the_rows(
     assert [row["content"] for row in rows] == ["A", "B", "C", "D"]
     assert all(row["conversation_id"] == conversation for row in rows)
     assert not engine._pending_session_tails
+
+
+def filtered_rebind(engine, monkeypatch, tail, binding):
+    """Resume the tail's session ignored or stateless; the start's own retry is busy, so the tail stays pending."""
+    session, conversation = tail["session_id"], tail["conversation_id"]
+    kind = "ignore" if binding == "ignored" else "stateless"
+    monkeypatch.setattr(engine._config, f"{kind}_session_patterns", [session])
+    monkeypatch.setattr(engine, f"_compiled_{kind}_session_patterns", compile_session_patterns([session]))
+    locker = sqlite3.connect(engine._store.db_path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        engine.on_session_start(session, platform="cli", context_length=200_000, conversation_id=conversation)
+        assert engine._pending_session_tails == [tail]
+    finally:
+        locker.rollback()
+        locker.close()
+    assert engine._session_ignored is (binding == "ignored")
+    assert engine._session_stateless is (binding == "stateless")
+
+
+@pytest.mark.parametrize("binding", ["ignored", "stateless"])
+def test_retyped_row_after_the_end_stays_pending_after_a_filtered_rebind(engines, monkeypatch, binding):
+    engine = engines()
+    tail = queue_cold(engine, monkeypatch, [*history(), _m("user", "Q", 5.)])
+    # The session undid Q and the user sent the same text again before the retry.
+    engine.ingest(copy.deepcopy([*history(), _m("user", "Q", 6.)]))
+    assert tail.get("went_on") is True
+    filtered_rebind(engine, monkeypatch, tail, binding)
+    engine._retry_pending_session_tails()
+    assert contents(engine) == ["A", "B", "C", "D", "Q"]
+    # As under a storing binding, Q@5 is another occurrence: kept and counted, never taken as stored by Q@6.
+    assert engine._pending_session_tails == [tail] and count(engine, "tail.cold_unmatched") >= 1
+
+
+@pytest.mark.parametrize("binding", ["ignored", "stateless"])
+def test_restamped_row_stays_pending_after_a_filtered_rebind(engines, monkeypatch, binding):
+    engine = engines()
+    # No host ids: the later stamp alone makes B a new occurrence (test_restamped_row_is_a_new_occurrence_not_covered).
+    tail = queue_cold(engine, monkeypatch, [_m("user", "A", 995.), _m("user", "B", 1010.)],
+                      stored=[_m("user", "A", 995.), _m("user", "B", 1000.)])
+    assert not tail.get("went_on")
+    filtered_rebind(engine, monkeypatch, tail, binding)
+    engine._retry_pending_session_tails()
+    # The binding stores nothing, so B@1010 stays pending and counted; B@1000 never stands for it.
+    assert contents(engine) == ["A", "B"]
+    assert engine._pending_session_tails == [tail] and count(engine, "tail.cold_unmatched") >= 1
 
 
 def test_off_current_end_lock_bypass_lineage_unchanged(engines, monkeypatch):
@@ -443,7 +490,8 @@ def test_cold_start_of_an_earlier_end_is_not_progress_for_a_later_one(engines, m
         locker.close()
     assert [tail["kind"] for tail in engine._pending_session_tails] == ["cold", "cold"]
     # The first tail's cold start stores an older view than the second's, which still needs its own cold start.
-    engine._retry_pending_session_tails()
+    # A wide deadline: both retries share the default 50 ms budget, which a slow runner can spend on the first.
+    engine._retry_pending_session_tails(deadline=time.monotonic() + 5)
     assert contents(engine) == ["A", "B", "C", "D", "E"] and not engine._pending_session_tails
 
 

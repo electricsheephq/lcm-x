@@ -11402,9 +11402,10 @@ class LCMEngine(
         if tail["store"] is not self.__dict__.get("_store"):
             self._ledger_count("ledger.tail.cold_store_unbound")
             return False
-        if (not sibling and not self._current_binding_stores_nothing() and tail["session_id"] == self._session_id
+        same = (not sibling and tail["session_id"] == self._session_id
                 and _normalize_conversation_id_value(tail["conversation_id"]) ==
-                    _normalize_conversation_id_value(self._conversation_id)):
+                    _normalize_conversation_id_value(self._conversation_id))
+        if same and not self._current_binding_stores_nothing():
             went_on = tail.get("went_on", False)  # Set by every later ingest but an earlier end's retry.
             stored = self._cold_tail_stored(tail, stamps=True)
             if stored is not None and stored >= len(tail["view"]):
@@ -11425,7 +11426,9 @@ class LCMEngine(
             # The host can still rewrite this view, so the next ingest finds its own cursor.
             self._ingest_cursor_needs_reconcile = True
             return True
-        return self._retry_cold_tail_s3(tail)
+        # Another session, or this one under a binding that stores nothing: the S3 route. This session keeps its stamp
+        # check, so a retyped row never stands for the view's own.
+        return self._retry_cold_tail_s3(tail, stamps=same)
 
     def _cold_tail_stored(self, tail, *, stamps=False):
         """How many of the view's rows the session's stored prefix holds, or None when they differ.
