@@ -5174,7 +5174,7 @@ class LCMEngine(
                 conversation_id=off_current_normal_conversation_id, source=off_current_source, error=exc)
             self._ledger_count("ledger.tail.busy_at_end")
             logger.warning(
-                "LCM session-end raw-message ingest skipped due to SQLite lock after short wait; "
+                "LCM session-end raw-message ingest skipped due to SQLite lock; "
                 "retry pending at the next session start or shutdown: %s unflushed=%d", exc, len(messages))
             return True
 
@@ -6886,6 +6886,9 @@ class LCMEngine(
             matched += 1
         return result
 
+    def _current_binding_stores_nothing(self) -> bool:
+        return not self._session_id or self._session_ignored or self._session_stateless
+
     def _ingest_messages(
         self,
         messages: List[Dict[str, Any]],
@@ -6911,16 +6914,15 @@ class LCMEngine(
         self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
         self._no_progress_ingest_generation = self._ingest_failure_count
         self._ingest_replay_redaction_changes = {}
-        if not self._session_id:
-            logger.debug("Ingest skipped: no session_id")
-            return self._redact_active_replay_messages(messages)
-
-        if self._session_ignored or self._session_stateless:
-            logger.debug(
-                "Ingest skipped for %s session %s",
-                "ignored" if self._session_ignored else "stateless",
-                self._session_id,
-            )
+        if self._current_binding_stores_nothing():
+            if not self._session_id:
+                logger.debug("Ingest skipped: no session_id")
+            else:
+                logger.debug(
+                    "Ingest skipped for %s session %s",
+                    "ignored" if self._session_ignored else "stateless",
+                    self._session_id,
+                )
             return self._redact_active_replay_messages(messages)
 
         sender_capture.try_update(self)
@@ -11400,7 +11402,7 @@ class LCMEngine(
         if tail["store"] is not self.__dict__.get("_store"):
             self._ledger_count("ledger.tail.cold_store_unbound")
             return False
-        if (not sibling and tail["session_id"] == self._session_id
+        if (not sibling and not self._current_binding_stores_nothing() and tail["session_id"] == self._session_id
                 and _normalize_conversation_id_value(tail["conversation_id"]) ==
                     _normalize_conversation_id_value(self._conversation_id)):
             went_on = tail.get("went_on", False)  # Set by every later ingest but an earlier end's retry.

@@ -9,6 +9,7 @@ import pytest
 
 from hermes_lcm import maintenance_scheduler
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.session_patterns import compile_session_patterns
 from hermes_lcm.store import MessageStore
 from tests.invariants.test_p1e_decided_tails import contents, history, queue, replay
 from tests.test_issue_2055_ingest_ledger_writes import count, engines as engines, restart, sql_rows
@@ -107,6 +108,51 @@ def test_off_current_end_busy_append_queues_cold_tail(engines, monkeypatch, capl
         patch.setattr(engine._lifecycle, "finalize_session", lambda *a, **k: pytest.fail("queued end finalized"))
         engine.on_session_end("S1", view)
     assert_off_current_cold_retry(engine, view, monkeypatch, caplog)
+
+
+@pytest.mark.parametrize("binding", ["ignored", "stateless"])
+@pytest.mark.parametrize("origin", ["off_current", "current"])
+def test_cold_tail_retry_after_an_ignored_or_stateless_rebind_keeps_the_rows(
+    engines, monkeypatch, binding, origin,
+):
+    engine = engines(sessions=[("S", None, None), ("S1", None, None), ("S2", None, None)])
+    if origin == "off_current":
+        view = off_current_end(engine)
+        with monkeypatch.context() as patch:
+            patch.setattr(engine._store, "get_range", fail_end_read(engine))
+            engine.on_session_end("S1", copy.deepcopy(view))
+    else:
+        view = history()
+        queue_cold(engine, monkeypatch, view)
+    assert len(engine._pending_session_tails) == 1
+    tail = engine._pending_session_tails[0]
+    session, conversation = tail["session_id"], tail["conversation_id"]
+    assert tail["kind"] == "cold" and tail["view"] == view
+    assert [row["content"] for row in engine._store.get_session_messages(session)] == ["A", "B"]
+
+    pattern_kind = "ignore" if binding == "ignored" else "stateless"
+    monkeypatch.setattr(engine._config, f"{pattern_kind}_session_patterns", [session])
+    monkeypatch.setattr(engine, f"_compiled_{pattern_kind}_session_patterns", compile_session_patterns([session]))
+    deferred = count(engine, "tail.retry.deferred")
+    locker = sqlite3.connect(engine._store.db_path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        # Session start retries before binding. Keep the view pending until the filtered rebind finishes.
+        engine.on_session_start(session, platform="cli", context_length=200_000, conversation_id=conversation)
+        assert engine._pending_session_tails == [tail]
+        assert count(engine, "tail.retry.deferred") == deferred + 1
+    finally:
+        locker.rollback()
+        locker.close()
+    assert engine._session_id == session and engine._conversation_id == conversation
+    assert engine._session_ignored is (binding == "ignored")
+    assert engine._session_stateless is (binding == "stateless")
+    engine._retry_pending_session_tails()
+    engine._retry_pending_session_tails()
+    rows = engine._store.get_session_messages(session)
+    assert [row["content"] for row in rows] == ["A", "B", "C", "D"]
+    assert all(row["conversation_id"] == conversation for row in rows)
+    assert not engine._pending_session_tails
 
 
 def test_off_current_end_lock_bypass_lineage_unchanged(engines, monkeypatch):
