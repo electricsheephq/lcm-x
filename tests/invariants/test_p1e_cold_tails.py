@@ -4,6 +4,7 @@ import copy
 import inspect
 import logging
 import sqlite3
+import time
 
 import pytest
 
@@ -302,7 +303,8 @@ def test_cold_start_of_an_earlier_end_is_not_progress_for_a_later_one(engines, m
         locker.close()
     assert [tail["kind"] for tail in engine._pending_session_tails] == ["cold", "cold"]
     # The first tail's cold start stores an older view than the second's, which still needs its own cold start.
-    engine._retry_pending_session_tails()
+    # A wide deadline: both retries share the default 50 ms budget, which a slow runner can spend on the first.
+    engine._retry_pending_session_tails(deadline=time.monotonic() + 5)
     assert contents(engine) == ["A", "B", "C", "D", "E"] and not engine._pending_session_tails
 
 
