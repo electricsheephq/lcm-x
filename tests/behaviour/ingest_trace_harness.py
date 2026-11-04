@@ -83,7 +83,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_host_uid_lineage_cache", "_engine_uids_pending", "_engine_uids_recorded",
     "_pending_ingest_frontier", "_last_ingest_attribution", "_end_attribution", "_ingest_read_only",
     "_ingest_ledger_attempt", "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
-    "_ledger_rollback_failures_published", "_frozen_ledger_prepared",
+    "_ledger_rollback_failures_published", "_frozen_ledger_prepared", "_frozen_tail_reached",
     "_compress_calls", "_emission_handle",
 })
 Trace = list[str]
@@ -348,6 +348,7 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
         register(observed_attribute(engine, name))
     for name in sorted(OBSERVED_ATTRIBUTES - {"_last_ingest_attribution", "_ingest_ledger_attempt",
                                             "_frozen_ledger_prepared",  # Transient attempt, cleared before return.
+                                            "_frozen_tail_reached",  # Queue-decision flag; pending tails retain the outcome.
                                             "_compress_calls", "_emission_handle",
                                             "_ledger_rollback_failures_published",
                                             "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned"}):
