@@ -11234,14 +11234,15 @@ class LCMEngine(
             tail["session_id"], start_id=tail["after_store_id"] + 1,
             conversation_id=conversation_id, limit=len(tail["messages"]),
         )
-        rule = ("off" if ingest_ledger_mode() == "off" else "no_ledger" if frozen is None else
-                "not_ready" if store.ingest_ledger_state() != "ready" else
-                "salt_changed" if store.ingest_ledger_salt() != frozen["salt"] else "digest")
         bound, last, candidates, uids = {}, None, set(), {}
-        if rule == "digest":
-            conn, salt = store._conn, frozen["salt"]
-            owned = conn.in_transaction
-            try:
+        conn = store._conn
+        owned = conn.in_transaction
+        try:
+            rule = ("off" if ingest_ledger_mode() == "off" else "no_ledger" if frozen is None else
+                    "not_ready" if store.ingest_ledger_state() != "ready" else
+                    "salt_changed" if store.ingest_ledger_salt() != frozen["salt"] else "digest")
+            if rule == "digest":
+                salt = frozen["salt"]
                 lineage = ingest_ledger.persisted_lineage(conn, tail["session_id"], frozen["lineage"])
                 records = ingest_ledger._rows(conn.execute(
                     "WITH head AS (SELECT b.ordinal FROM occurrence_bindings b JOIN messages m USING(store_id) "
@@ -11270,11 +11271,11 @@ class LCMEngine(
                             "AND view_seq IN (SELECT value FROM json_each(?))", (lineage, json.dumps(seqs))):
                         for e in ingest_ledger.decode_entries(entries) if entries else ():
                             uids.setdefault((seq, e.ref), e.uidset_digest)
-            except Exception as exc:
-                if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or owned and not conn.in_transaction:
-                    raise
-                # The ledger is advisory here, as for the cold cursor: an unreadable one keeps today's rule.
-                rule, bound, last, candidates, uids = "read_failed", {}, None, set(), {}
+        except Exception as exc:
+            if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or owned and not conn.in_transaction:
+                raise
+            # The ledger is advisory here, as for the cold cursor: an unreadable one keeps today's rule.
+            rule, bound, last, candidates, uids = "read_failed", {}, None, set(), {}
         covered, last_id, stop = 0, tail["after_store_id"], "end"
         for i, (message, row) in enumerate(zip(tail["messages"], rows)):
             if row["conversation_id"] != conversation_id:

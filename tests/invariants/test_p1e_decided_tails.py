@@ -179,7 +179,7 @@ def test_plain_tail_retry_counts_no_respace(engines):
     assert count(engine, "respaced") == 0
 
 
-@pytest.mark.parametrize("failure", ["corrupt_view", "busy"])
+@pytest.mark.parametrize("failure", ["corrupt_view", "corrupt_salt", "busy"])
 def test_unreadable_ledger_keeps_positional_rule(engines, monkeypatch, failure):
     engine = engines()
     queue(engine)
@@ -188,6 +188,9 @@ def test_unreadable_ledger_keeps_positional_rule(engines, monkeypatch, failure):
     if failure == "corrupt_view":
         engine._store._conn.execute("UPDATE ingest_views SET entries=X'00' WHERE view_seq=("
                                     "SELECT view_seq FROM occurrence_bindings WHERE store_id=?)", (ids[0],))
+        engine._store._conn.commit()
+    elif failure == "corrupt_salt":
+        engine._store._conn.execute("UPDATE ledger_meta SET value='not-bytes' WHERE key='digest_salt'")
         engine._store._conn.commit()
     else:
         def busy(*args, **kwargs):
@@ -202,7 +205,7 @@ def test_unreadable_ledger_keeps_positional_rule(engines, monkeypatch, failure):
         engine._retry_pending_session_tails()
     assert contents(engine) == ["A", "B", "C", "D"]
     assert not engine._pending_session_tails
-    assert count(engine, "tail.retry.fallback.read_failed") == (1 if failure == "corrupt_view" else 0)
+    assert count(engine, "tail.retry.fallback.read_failed") == (0 if failure == "busy" else 1)
 
 
 def test_store_rebound_reads_ledger_from_tail_store(engines, tmp_path, monkeypatch):
