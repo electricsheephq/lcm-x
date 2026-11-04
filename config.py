@@ -280,6 +280,10 @@ def ingest_ledger_mode() -> str:
     return raw if raw in ("off", "shadow") else "shadow"
 
 
+def identity_anchor_enabled() -> bool:
+    return _parse_bool_env("LCM_IDENTITY_ANCHOR", True, unknown=True, true_values=())
+
+
 def _parse_int_env_with_source(
     key: str,
     default: int,
@@ -643,19 +647,15 @@ def _lcm_absolute_threshold_tokens_with_source(
     return value, source, warning
 
 
-def _hermes_auxiliary_compression_timeout_ms(default: int) -> int:
+def _hermes_auxiliary_compression_timeout_ms_with_source(default: int) -> tuple[int, str]:
     """Read Hermes auxiliary.compression.timeout when no LCM override is present.
 
     Hermes uses seconds for the auxiliary compression timeout, while LCM stores
     the summary timeout in milliseconds. Aligning the default keeps LCM summary
     calls from timing out earlier than the host compression route unless
-    ``LCM_SUMMARY_TIMEOUT_MS`` is explicitly configured.
+    ``LCM_SUMMARY_TIMEOUT_MS`` is explicitly configured. Returns the value in
+    milliseconds and its source.
     """
-    value, _source = _hermes_auxiliary_compression_timeout_ms_with_source(default)
-    return value
-
-
-def _hermes_auxiliary_compression_timeout_ms_with_source(default: int) -> tuple[int, str]:
     cfg = _load_hermes_config_yaml()
     try:
         auxiliary = cfg.get("auxiliary") or {}

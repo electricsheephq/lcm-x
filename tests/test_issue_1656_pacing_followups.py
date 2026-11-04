@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_lcm import command, embedding_maintenance as maintenance, engine as engines
+from hermes_lcm import maintenance_scheduler
 from hermes_lcm.dag import SummaryNode
 from tests.test_issue_1014_incremental_embedding import FakeProvider
 from tests.test_issue_1586_local_pacing import Clock
@@ -89,7 +90,7 @@ def test_summary_budget_still_stops_later_batches(local_store, monkeypatch, main
 @pytest.fixture
 def clock_scheduler(monkeypatch):
     clock = Clock()
-    scheduler = engines._RollupMaintenanceScheduler(max_pending_jobs=1, kind="incremental embedding")
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(max_pending_jobs=1, kind="incremental embedding")
     # Drive the real worker synchronously; timed condition waits advance only the fake clock.
     scheduler._worker = SimpleNamespace(is_alive=lambda: True)
     waits = []
@@ -101,6 +102,7 @@ def clock_scheduler(monkeypatch):
         clock.now += timeout
 
     monkeypatch.setattr(engines, "time", clock)
+    monkeypatch.setattr(maintenance_scheduler, "time", clock)
     monkeypatch.setattr(scheduler._condition, "wait", wait)
     yield scheduler, clock
     scheduler.quiesce(0)

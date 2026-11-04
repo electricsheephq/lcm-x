@@ -346,7 +346,9 @@ def test_t5_unknown_host_shape_is_treated_as_active(tmp_path, monkeypatch, caplo
 
 def _engine(db: Path, **overrides) -> LCMEngine:
     config = LCMConfig(database_path=str(db), **overrides)
-    return LCMEngine(config=config, hermes_home=str(db.parent / "home"))
+    engine = LCMEngine(config=config, hermes_home=str(db.parent / "home"))
+    engine._ensure_storage()  # These probes exercise bootstrap, now deferred until use.
+    return engine
 
 
 def _seed(db: Path, **overrides) -> LCMEngine:
