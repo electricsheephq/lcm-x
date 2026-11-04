@@ -2,6 +2,7 @@
 
 import copy
 import sqlite3
+from contextlib import contextmanager
 
 import pytest
 
@@ -228,3 +229,39 @@ def test_retry_bindings_contiguous_for_cold_cursor(engines):
     result, _counts = ledger.cold_cursor_candidate(engine._store._conn, session_id="S", attempt=attempt,
                                                   ignored=[False] * len(view))
     assert result["k"] == len(view)
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_replay_committed_between_pretrim_and_begin(engines, monkeypatch, bound):
+    """#1440 item 1: another writer commits the tail's replay after the pre-trim and before BEGIN IMMEDIATE.
+
+    The retry must re-match inside its transaction, so the replayed rows are covered and stored once.
+    """
+    engine = engines()
+    queue(engine)
+    store = engine._store
+    atomic, fired = store.ingest_atomic, []
+
+    @contextmanager
+    def racing(**kwargs):
+        if not fired:
+            fired.append(True)
+            if bound:
+                with monkeypatch.context() as inner:
+                    inner.setattr(store, "ingest_atomic", atomic)
+                    replay(engine, history()[2:])
+            else:
+                other = MessageStore(store.db_path)
+                try:
+                    for row in history()[2:]:
+                        other.append("S", row, source="cli", conversation_id="conv")
+                finally:
+                    other.close()
+        with atomic(**kwargs):
+            yield
+
+    monkeypatch.setattr(store, "ingest_atomic", racing)
+    engine._retry_pending_session_tails()
+    assert fired == [True]
+    assert contents(engine) == ["A", "B", "C", "D"]
+    assert not engine._pending_session_tails
