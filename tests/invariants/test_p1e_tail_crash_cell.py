@@ -1,4 +1,4 @@
-"""Decided rows only: crash before commit, after commit, and process-death resume (I1/I2)."""
+"""Session-end tails: crash before commit, after commit, and process-death resume (I1/I2)."""
 
 from contextlib import contextmanager
 import os
@@ -10,6 +10,7 @@ import pytest
 
 from hermes_lcm.engine import LCMEngine
 from tests.invariants.test_p1e_decided_tails import contents, history, queue, replay
+from tests.invariants.test_p1e_cold_tails import queue_cold
 from tests.test_issue_2055_ingest_ledger_writes import count, engines as engines
 from tests.test_host_uid_shadow import _m
 
@@ -23,7 +24,7 @@ class CrashOnRemove(list):
         raise Crash("after COMMIT, before removal")
 
 
-# One warm kind; PR-B adds cold rows. Cover every between/route/stamp axis without a Cartesian gauntlet.
+# Cover every between/route/stamp axis without a Cartesian gauntlet.
 CELLS = [
     ("none", "next", True), ("partial", "next", False), ("full+new", "next", True),
     ("foreign", "off-current", False), ("other-session", "sibling", True), ("none", "shutdown", False),
@@ -160,3 +161,82 @@ def test_m9_window_is_counted(engines, caplog):
     finally:
         locker.rollback()
         locker.close()
+
+
+@pytest.mark.parametrize("between,route,stamped", CELLS)
+@pytest.mark.parametrize("point", ["before_commit", "after_commit"])
+def test_cold_crash_cell(engines, monkeypatch, between, route, stamped, point):
+    engine = engines()
+    view = history(stamped)
+    queue_cold(engine, monkeypatch, view)
+    if between == "partial":
+        replay(engine, view[2:3])
+    elif between == "full+new":
+        replay(engine, [*view[2:], _m("user", "new", 8. if stamped else None)])
+    elif between in {"foreign", "other-session"}:
+        replay(engine, view[2:], session="other" if between == "other-session" else "S",
+               conversation="foreign")
+    # Select the retry route before injecting the crash, as well as on recovery.
+    if route in {"off-current", "shutdown"}:
+        engine._session_id = "next"
+    atomic = engine._store.ingest_atomic
+
+    @contextmanager
+    def interrupted(**kwargs):
+        with atomic(**kwargs):
+            yield
+            raise Crash("before COMMIT")
+
+    with monkeypatch.context() as patch:
+        if point == "before_commit":
+            patch.setattr(engine._store, "ingest_atomic", interrupted)
+        else:
+            patch.setattr(engine, "_pending_session_tails", CrashOnRemove(engine._pending_session_tails))
+        # The current route reads that a full replay holds the whole view, so it opens no transaction.
+        if between == "full+new" and route == "next" and point == "before_commit":
+            engine._retry_pending_session_tails()
+        else:
+            with pytest.raises(Crash):
+                engine._retry_pending_session_tails(sibling=route == "sibling")
+    if point == "before_commit":
+        own = [r["content"] for r in engine._store.get_session_messages("S") if r["conversation_id"] == "conv"]
+        assert own == ["A", "B"] + (["C"] if between == "partial" else
+                                      ["C", "D", "new"] if between == "full+new" else [])
+    if route == "next":
+        engine.on_session_start("next", platform="cli")
+    elif route == "off-current":
+        engine._session_id = "next"
+        engine._retry_pending_session_tails()
+    elif route == "sibling":
+        sibling = LCMEngine(config=engine._config, hermes_home=engine._hermes_home)
+        try:
+            sibling.on_session_start("next", platform="cli")
+        finally:
+            sibling.shutdown()
+    else:
+        engine._retry_pending_session_tails(exiting=True)
+    own = [r["content"] for r in engine._store.get_session_messages("S") if r["conversation_id"] == "conv"]
+    assert own == ["A", "B", "C", "D"] + (["new"] if between == "full+new" else [])
+    assert not engine._pending_session_tails
+
+
+@pytest.mark.parametrize("point", ["before_commit", "after_commit"])
+@pytest.mark.parametrize("stamped", [True, False])
+def test_cold_subprocess_crash_resume(engines, tmp_path, point, stamped):
+    root = tmp_path / "child"
+    root.mkdir()
+    script = SUBPROCESS.replace(
+        "queue(engine, history(stamped))",
+        "from tests.invariants.test_p1e_cold_tails import queue_cold\nqueue_cold(engine, patch, history(stamped))")
+    env = {**os.environ, "LCM_INGEST_LEDGER": "shadow", "LCM_HOST_MESSAGE_UID": "off"}
+    result = subprocess.run([sys.executable, "-c", script, str(root), point, str(stamped)],
+                            env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == (91 if point == "before_commit" else 92), result.stderr
+    from tests.test_host_uid_shadow import _engine
+    fresh = _engine(root)
+    try:
+        assert contents(fresh) == (["A", "B", "C"] if point == "before_commit" else ["A", "B", "C", "D"])
+        fresh.ingest(history(stamped))
+        assert contents(fresh) == ["A", "B", "C", "D"]
+    finally:
+        fresh.shutdown()

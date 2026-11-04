@@ -5004,6 +5004,7 @@ class LCMEngine(
             if self._stable_use_closed:
                 return
             with self._session_end_diagnostic(messages, started, time.perf_counter(), admission_started):
+                self._frozen_tail_reached = False
                 self._retry_session_end_tails()
                 try:
                     self._on_session_end_unlocked(session_id, messages)
@@ -6867,6 +6868,8 @@ class LCMEngine(
         messages: List[Dict[str, Any]],
         *,
         allow_session_end_replay_proof: bool = False,
+        no_view: bool = False,
+        retried_tail: Dict[str, Any] | None = None,
     ) -> List[Dict[str, Any]]:
         """Persist new messages to the store.
 
@@ -6955,6 +6958,8 @@ class LCMEngine(
                     emission_attempt = self._ingest_ledger_attempt = (
                         dict(ledger_prepared, stored={}, matched={}, remainders={}, observations=[])
                         if ledger_prepared is not None else None)
+                    if self._ingest_ledger_attempt is not None and no_view:
+                        self._ingest_ledger_attempt["no_view"] = True
                     if self._ingest_ledger_attempt is not None:
                         self._retry_pending_emissions(self._ingest_ledger_attempt, after_commit, emission_claim)
                     active, finish = self._ingest_messages_transaction(
@@ -6991,7 +6996,10 @@ class LCMEngine(
                     continue
                 if rollback_ok and isinstance(exc, Exception) and self._session_end_flush_active and _is_ingest_busy_error(exc):
                     self._ingest_read_only = exc
+                    # An earlier attempt's warm queue rolled back with it: only this run's append counts.
+                    self.__dict__["_frozen_tail_reached"] = False
                     frozen_replay = None
+                    frozen_error = None
                     read_only_thread = getattr(self._store, "_read_only_ingest_thread", None)
                     self._store._read_only_ingest_thread = threading.get_ident()
                     try:
@@ -7004,8 +7012,8 @@ class LCMEngine(
                         self._frozen_ledger_prepared = ledger_prepared
                         frozen_replay, _finish = self._ingest_messages_transaction(messages, [], attribution,
                             allow_session_end_replay_proof=allow_session_end_replay_proof)
-                    except Exception:
-                        pass  # Keep the original lock error; the frozen tail is the only result.
+                    except Exception as error:
+                        frozen_error = error
                     finally:
                         self.__dict__.pop("_frozen_ledger_prepared", None)
                         self.__dict__.pop("_ingest_read_only", None)
@@ -7019,6 +7027,15 @@ class LCMEngine(
                         for receipt, previous in receipts:
                             receipt.clear()
                             receipt.update(previous)
+                    if frozen_replay is None and not self.__dict__.get("_frozen_tail_reached"):
+                        tail = dict(kind="cold", store=self._store, session_id=self._session_id,
+                                    conversation_id=self._conversation_id, source=self._session_platform,
+                                    view=copy.deepcopy(messages))
+                        if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
+                            self._pending_session_tails.append(tail)
+                            self._ledger_count("ledger.tail.queued.cold." + type(frozen_error).__name__)
+                        logger.warning("LCM session-end cold tail retry pending (%s)", type(frozen_error).__name__)
+                        maintenance_scheduler._PENDING_TAIL_ENGINES.add(self)
                     if frozen_replay is not None:
                         return frozen_replay  # Classification proved there is no tail to freeze.
                 self._frontier.needs_reconcile = True
@@ -7034,6 +7051,13 @@ class LCMEngine(
             self._frontier.cursor = pending.cursor
             self._frontier.needs_reconcile = pending.needs_reconcile
             self._frontier.commit_proof = pending.commit_proof
+            # The session ingested after these ends, so their views can be older than its history. A retried tail's
+            # own view is older than those of the ends queued after it.
+            for tail in self.__dict__.get("_pending_session_tails", ()):
+                if tail is retried_tail:
+                    break
+                if tail.get("kind") == "cold" and tail["store"] is self._store and tail["session_id"] == self._session_id:
+                    tail["went_on"] = True
             if pending.oob_rows or "_out_of_band_durable_rows" in self.__dict__:
                 self._out_of_band_durable_rows = pending.oob_rows
             if "protected" in prepared:
@@ -7398,9 +7422,11 @@ class LCMEngine(
                         entries[idx] = entries[idx]._replace(ref=None if idx in attempt["remainders"] else occ)
                     for sid, kind, stamp in observations:
                         ingest_ledger.add_stamp_observation(conn, lineage, by_store[sid][0][0], stamp, kind, seq)
-                    ingest_ledger.write_view(conn, attempt["salt"], lineage, "ingest", None, entries,
-                                             view_seq=seq, precomputed_chain=attempt["chain"])
-                    delta.update({"ledger.bindings_written": len(rows), "ledger.views_written": 1})
+                    if not attempt.get("no_view"):
+                        ingest_ledger.write_view(conn, attempt["salt"], lineage, "ingest", None, entries,
+                                                 view_seq=seq, precomputed_chain=attempt["chain"])
+                        delta["ledger.views_written"] += 1
+                    delta["ledger.bindings_written"] += len(rows)
         except BaseException as exc:
             store._pending_relation_schema = pending_relation_schema
             if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
@@ -11188,7 +11214,7 @@ class LCMEngine(
             # Never wait for a sibling lifecycle (or invert its lock ordering).
             if engine._stable_use_lock.acquire(blocking=False):
                 try:
-                    engine._retry_pending_session_tails(deadline=deadline)
+                    engine._retry_pending_session_tails(deadline=deadline, sibling=True)
                 finally:
                     engine._stable_use_lock.release()
 
@@ -11218,6 +11244,8 @@ class LCMEngine(
 
     @staticmethod
     def _tail_key(tail):
+        if tail.get("kind") == "cold":
+            return ("cold", tail["store"].db_path, tail["session_id"], tail["conversation_id"], tail["view"])
         return (tail.get("kind", "warm"), tail["store"].db_path, *(tail[key] for key in (
             "session_id", "conversation_id", "after_store_id", "messages", "metadata_messages")))
 
@@ -11342,7 +11370,68 @@ class LCMEngine(
                 raise
             after_commit.append(lambda exc=exc: self._ledger_count("ledger.write_failed", exc))
 
-    def _retry_pending_session_tails(self, *, deadline: float | None = None, exiting: bool = False) -> None:
+    def _retry_cold_tail(self, tail, *, sibling):
+        if tail["store"] is not self.__dict__.get("_store"):
+            self._ledger_count("ledger.tail.cold_store_unbound")
+            return False
+        if (not sibling and tail["session_id"] == self._session_id
+                and _normalize_conversation_id_value(tail["conversation_id"]) ==
+                    _normalize_conversation_id_value(self._conversation_id)):
+            went_on = tail.get("went_on", False)  # Set by every later ingest but an earlier end's retry.
+            stored = self._cold_tail_stored(tail, stamps=True)
+            if stored is not None and stored >= len(tail["view"]):
+                # Later ingests stored the whole view. As after a warm retry, the next ingest finds its cursor again.
+                self._ingest_cursor_needs_reconcile = True
+                return True
+            if went_on:
+                # The view can be older than the session's history. A cold start would move the live cursor: as for
+                # another session, only a matching stored prefix gets the view's missing rows. Stamps count here
+                # too, so a retyped row never stands for the view's own.
+                if not self._retry_cold_tail_s3(tail, stamps=True):
+                    return False
+                self._ingest_cursor_needs_reconcile = True
+                return True
+            self._session_end_flush_active = False
+            self._ingest_cursor_needs_reconcile = True
+            self._ingest_messages(tail["view"], allow_session_end_replay_proof=False, no_view=True, retried_tail=tail)
+            # The host can still rewrite this view, so the next ingest finds its own cursor.
+            self._ingest_cursor_needs_reconcile = True
+            return True
+        return self._retry_cold_tail_s3(tail)
+
+    def _cold_tail_stored(self, tail, *, stamps=False):
+        """How many of the view's rows the session's stored prefix holds, or None when they differ.
+
+        With ``stamps``, a known host stamp that differs from the stored row's is a different occurrence."""
+        view, session = tail["view"], tail["session_id"]
+        conversation = _normalize_conversation_id_value(tail["conversation_id"])
+        stored = tail["store"].get_range(session, limit=len(view) + 1, conversation_id=conversation)
+        for row, message in zip(stored, view):
+            if (self._session_end_prefix_compare_identity(row, session_id=session) !=
+                    self._session_end_prefix_compare_identity(message, session_id=session)):
+                return None
+            stamp, seen = _normalize_observed_at(message.get("timestamp")), _normalize_observed_at(row.get("observed_at"))
+            if stamps and None not in (stamp, seen) and stamp != seen:
+                return None
+        return len(stored)
+
+    def _retry_cold_tail_s3(self, tail, *, stamps=False):
+        view, session = tail["view"], tail["session_id"]
+        with tail["store"].ingest_atomic():
+            stored = self._cold_tail_stored(tail, stamps=stamps)
+            if stored is None:
+                self._ledger_count("ledger.tail.cold_unmatched")
+                if not tail.get("unmatched_warned"):
+                    logger.warning("LCM session-end cold tail prefix mismatch; retry pending")
+                    tail["unmatched_warned"] = True
+                return False
+            if stored < len(view):
+                self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
+                    conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
+        return True
+
+    def _retry_pending_session_tails(self, *, deadline: float | None = None, exiting: bool = False,
+                                     sibling: bool = False) -> None:
         """Drain under the lifecycle lock, sharing one busy-wait budget."""
         if not self._pending_session_tails:
             return
@@ -11350,10 +11439,18 @@ class LCMEngine(
             deadline = time.monotonic() + _SESSION_END_BUSY_TIMEOUT_MS / 1000
         for tail in list(self._pending_session_tails):
             store = tail["store"]
+            committed = False
             try:
                 with _temporary_sqlite_busy_timeout(
                     [store._conn], max(0, int((deadline - time.monotonic()) * 1000)),
                 ):
+                    if tail.get("kind") == "cold":
+                        if self._retry_cold_tail(tail, sibling=sibling):
+                            committed = True
+                            self._pending_session_tails.remove(tail)
+                        if time.monotonic() >= deadline:
+                            break
+                        continue
                     covered, last_id, left, rule, _stop, candidates = self._match_pending_tail(tail)
                     # This prefix is already committed, even if admission below fails.
                     tail.update(self._slice_tail(tail, covered), after_store_id=last_id)
@@ -11366,7 +11463,9 @@ class LCMEngine(
                             ids = self._append_ingest_batch(batch) if batch["messages"] else []
                             if ids and rule == "digest":
                                 self._write_tail_bindings(batch, ids, left, after_commit)
+                        committed = True
                         after_commit.append(lambda n=covered: self._ledger_count("ledger.tail.retry.replay_rows", amount=n))
+                    committed = True
                     after_commit.extend([
                         lambda n=len(ids): self._ledger_count("ledger.tail.retry.stored_rows", amount=n),
                         lambda n=candidates: self._ledger_count("ledger.tail.retry.candidates_unmarked", amount=n),
@@ -11379,10 +11478,17 @@ class LCMEngine(
                     # rebind, opening the new home here would raise out of shutdown's cleanup.
                     if store is self.__dict__.get("_store") and tail["session_id"] == self._session_id:
                         self._ingest_cursor_needs_reconcile = True
-            except (Exception, KeyboardInterrupt):
-                self._ledger_count("ledger.tail.retry.deferred")
-                logger.debug("LCM pending session-end retry deferred", exc_info=True)
-                break
+            except (Exception, KeyboardInterrupt) as exc:
+                if committed and tail in self._pending_session_tails:
+                    self._pending_session_tails.remove(tail)
+                    if store is self.__dict__.get("_store") and tail["session_id"] == self._session_id:
+                        self._ingest_cursor_needs_reconcile = True
+                if isinstance(exc, KeyboardInterrupt) or _is_ingest_busy_error(exc):
+                    self._ledger_count("ledger.tail.retry.deferred")
+                    logger.debug("LCM pending session-end retry deferred", exc_info=True)
+                    break
+                self._ledger_count("ledger.tail.retry_failed")
+                logger.warning("LCM pending session-end retry failed (%s); retry pending", type(exc).__name__)
             finally:
                 if (store is not self.__dict__.get("_store")
                         and not any(t["store"] is store for t in self._pending_session_tails)):
@@ -11395,7 +11501,8 @@ class LCMEngine(
             maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
 
     def _warn_unflushed_session_tails(self, reason: str) -> None:
-        remaining = sum(len(tail["messages"]) for tail in self._pending_session_tails)
+        remaining = sum(len(tail["view"] if tail.get("kind") == "cold" else tail["messages"])
+                        for tail in self._pending_session_tails)
         if remaining:
             self._ledger_count("ledger.tail.unflushed", amount=remaining)
             logger.warning(
