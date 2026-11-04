@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
-from .config import host_message_uid_mode
+from .config import host_message_uid_mode, identity_anchor_enabled
 # Keep this facade: runtime callers and patch seams resolve projection here.
 from .emission_projection import (
     EmissionProjectionEntry as EmissionProjectionEntry,
@@ -44,7 +44,6 @@ from .externalize import (
     find_externalized_tool_result_content_for_call,
     load_externalized_payload,
 )
-from .identity_anchor import identity_anchor_enabled
 from .ingest_protection import (
     _add_inline_persisted_output_generation_metadata,
     _add_inline_persisted_output_identity_metadata,
@@ -1396,9 +1395,6 @@ class ReconcileMixin:
 
     # -- Session-end full-history proof (consumed ONLY by current-session
     #    full-history session-end ingest) --
-
-    def _session_end_replay_snapshot_metadata_key(self) -> str:
-        return self._replay_snapshot_metadata_key(_SESSION_END_REPLAY_METADATA_PREFIX)
 
     def _load_session_end_replay_snapshot_digests(self) -> list[str]:
         return self._load_replay_snapshot_digests(_SESSION_END_REPLAY_METADATA_PREFIX)
@@ -3057,12 +3053,18 @@ class ReconcileMixin:
         messages: List[Dict[str, Any]],
         *,
         allow_session_end_replay_proof: bool = False,
+        session_counts: Optional[list] = None,
     ) -> int:
-        """Infer the in-memory cursor for an existing session after process restart."""
+        """Infer the in-memory cursor for an existing session after process restart.
+
+        ``session_counts`` (#1286), when given, receives the session's stored row count at this bind.
+        """
         if not self._session_id or not messages:
             return 0
 
         session_count = self._store.get_session_count(self._session_id)
+        if session_counts is not None:
+            session_counts.append(session_count)
         run = _StoreCursorRun(
             messages=messages, session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
@@ -3209,6 +3211,7 @@ class ReconcileMixin:
         self,
         messages: List[Dict[str, Any]],
         cursor: int,
+        *, consumed_store_ids=(), consumed_pairs=None,
     ) -> set[int]:
         """Find exact durable tool pairs replayed after a preserved new delta.
 
@@ -3237,6 +3240,16 @@ class ReconcileMixin:
         nothing. Pinned by ``test_repeated_identical_tool_invocation_is_``
         ``persisted_not_replayed``.
 
+        #2172: reserve copies shown in the host's own prefix before stored
+        copies can prove replay after the cursor, so every suppression is
+        backed by a stored copy the host prefix does not account for.
+        Over-reserving can keep a duplicate. Copies compacted out of the host
+        view are not reserved; that known case is planned for v0.30.0.
+
+        #2151: ``consumed_pairs`` maps host prefix indexes to the stored rows the
+        ingest record proved for them. Each such row is held back once: by its
+        stored copy when the tail holds it, otherwise by its host copy.
+
         #1385: a Hermes salvage placeholder that took a stored row's identity
         matches by construction, not by occurrence. It cannot prove segment
         replay: a fresh same-id call can genuinely return the placeholder text.
@@ -3250,7 +3263,10 @@ class ReconcileMixin:
         if session_count <= 0:
             return set()
         tail_limit = min(max(len(messages) * 4, 64), session_count)
-        stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
+        tail_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
+        consumed_pairs = consumed_pairs or {}
+        consumed = set(consumed_store_ids) | set(consumed_pairs.values())
+        stored_rows = [row for row in tail_rows if row["store_id"] not in consumed]
         stored_identity_counts = Counter(
             identity
             for identity in (
@@ -3260,6 +3276,35 @@ class ReconcileMixin:
             )
             if not _has_lossy_redacted_identity(identity)
         )
+        # #2151 x #2185: a ledger pair whose counted stored copy just left these
+        # counts is already held back once. Subtracting its host copy as well held
+        # it back twice, so an exact replay after the cursor was stored again. A
+        # pair whose stored copy is outside the tail, uncounted, or reads
+        # differently keeps its host reservation below.
+        tail_by_id = {row["store_id"]: row for row in tail_rows}
+        held = {
+            idx for idx, store_id in consumed_pairs.items()
+            if idx < cursor and store_id in tail_by_id
+            and not self._matches_ignore_message_patterns(tail_by_id[store_id], stored_row=True)
+            and self._message_replay_identity(tail_by_id[store_id], stored_row=True)
+            == self._message_replay_identity(messages[idx])
+        }
+        prefix_counts = Counter(
+            identity
+            for identity in (
+                self._message_replay_identity(row)
+                for idx, row in enumerate(messages[:max(0, cursor)])
+                if idx not in held
+                and str(row.get("role") or "") in {"assistant", "tool"}
+                and not self._matches_ignore_message_patterns(row)
+            )
+            if not _has_lossy_redacted_identity(identity)
+        )
+        # Only assistant/tool identities can match the segment scan. Subtract their
+        # WHOLE prefix, less the held pairs, even when the stored tail covers less:
+        # each suppression is then backed by a stored copy the prefix does not
+        # account for. Over-reserving can keep a duplicate.
+        stored_identity_counts.subtract(prefix_counts)
         replayed: set[int] = set()
         metadata = None  # Loaded once, only when a borrowed pair binds.
         users = None  # Lazily index both views once per replay scan.
@@ -3296,14 +3341,14 @@ class ReconcileMixin:
                            and result_identity[1] != _HERMES_PRUNED_TOOL_PLACEHOLDER)
                 if borrows and users is None:
                     users = ({}, {})
-                    for rows, stored, positions in ((stored_rows, True, users[0]), (messages, False, users[1])):
+                    for rows, stored, positions in ((tail_rows, True, users[0]), (messages, False, users[1])):
                         for pos, row in enumerate(rows):
                             if str(row.get("role") or "") == "user":
                                 key = (_normalize_observed_at(row.get("observed_at" if stored else "timestamp")),
                                        self._message_replay_identity(row, stored_row=stored, allow_pruned_tool_alias=False))
                                 positions.setdefault(key, []).append(pos)
                     protected = _hermes_salvage_protected_positions(messages)
-                if borrows and self._bound_retry_placeholder_replay(messages, index, probe, stored_rows, users, protected):
+                if borrows and self._bound_retry_placeholder_replay(messages, index, probe, tail_rows, users, protected):
                     if metadata is None:
                         try:
                             proof = self._durable_commit_proof_payload()
@@ -3572,7 +3617,9 @@ class ReconcileMixin:
         """Return whether ``message`` is the unique active durable fold."""
         return bool(self._active_folded_tail_identity_overrides([message]))
 
-    def _get_store_id_map_for_messages(self, messages: List[Dict[str, Any]], occurrences=None) -> dict[int, int]:
+    def _get_store_id_map_for_messages(
+        self, messages: List[Dict[str, Any]], occurrences=None, *, exclude_store_ids=frozenset(),
+    ) -> dict[int, int]:
         """Map current raw message objects back to store_ids in stable order.
 
         Matching starts strictly after ``_last_compacted_store_id`` so repeated
@@ -3652,9 +3699,10 @@ class ReconcileMixin:
                     break
                 candidates.extend(page)
                 next_candidate_id = int(page[-1]["store_id"]) + 1
+        # #1286: the re-key's coverage guard passes the stored rows an earlier map already claimed.
         candidates = list({
             int(candidate["store_id"]): candidate for candidate in candidates
-            if int(candidate.get("store_id") or 0) > 0
+            if int(candidate.get("store_id") or 0) > 0 and int(candidate["store_id"]) not in exclude_store_ids
         }.values())
         candidates.sort(key=lambda candidate: int(candidate["store_id"]))
         self._load_host_rewrite_overrides(candidates)

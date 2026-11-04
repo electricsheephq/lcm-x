@@ -61,7 +61,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_ingest_cursor", "_ingest_cursor_needs_reconcile", "_last_compacted_store_id",
     "_ingest_replay_redaction_changes",
     "_compress_commit_proof", "_last_emission_descriptors", "_compress_occurrences", "_compress_run",
-    "_config", "_hermes_home", "_store", "_dag", "_lifecycle", "_host_rewrite_store",
+    "_config", "_hermes_home", "_db_path", "_store", "_dag", "_lifecycle", "_host_rewrite_store",
     "_host_rewrite_overrides", "_host_rewrite_watch", "_last_active_replay_messages",
     "_last_active_replay_source_identities", "_last_ingest_reconciliation", "_retired_durable_proof",
     "_compiled_ignore_message_patterns", "_compression_boundary_ingest_pending",
@@ -83,6 +83,8 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_host_uid_lineage_cache", "_engine_uids_pending", "_engine_uids_recorded",
     "_pending_ingest_frontier", "_last_ingest_attribution", "_end_attribution", "_ingest_read_only",
     "_ingest_ledger_attempt", "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
+    "_ledger_rollback_failures_published",
+    "_compress_calls", "_emission_handle",
 })
 Trace = list[str]
 Message = dict[str, Any]
@@ -324,6 +326,9 @@ def recovery_receipts(engine: Any, value: Any) -> Any:
 
 def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
     state: dict[str, Any] = {}
+    # #2152: path-only state lookup uses binding metadata. Check it against the
+    # real store at every snapshot, without duplicating it into frozen outcomes.
+    assert Path(engine._db_path) == Path(engine._store.db_path), "storage binding path differs from open store"
     # Match address-keyed ledgers to the actual retained message objects before
     # serializing a set/map. These labels preserve sharing, never addresses.
     def register(value: Any) -> None:
@@ -342,8 +347,12 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
     for name in sorted(OBSERVED_ATTRIBUTES - {"_store", "_dag", "_lifecycle", "_host_rewrite_store"}):
         register(observed_attribute(engine, name))
     for name in sorted(OBSERVED_ATTRIBUTES - {"_last_ingest_attribution", "_ingest_ledger_attempt",
+                                            "_compress_calls", "_emission_handle",
+                                            "_ledger_rollback_failures_published",
                                             "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned"}):
         value = observed_attribute(engine, name)
+        if name == "_db_path":
+            continue  # Observed by the binding assertion above.
         if name in {"_store", "_host_rewrite_store"}:
             value = {"present": value is not None}
         elif name == "_dag":
@@ -881,6 +890,12 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                         if isinstance(v, (list, tuple)):
                             return [argument(x) for x in v]
                         return v
+                    if name == "write_metadata_json" and len(args) > 1 and isinstance(args[1], str) and any(
+                            str(key).startswith("compaction_commit_proof:") for key in args[0]):
+                        # #1286: a proof the ingest writes (the re-key) is checksummed by its occurrence
+                        # snapshot with the sandbox path inside, like the proof read before the ingest.
+                        canonical.path_hashes[hashlib.sha256(args[1].encode()).hexdigest()] = hashlib.sha256(
+                            json.dumps(canonical.value(json.loads(args[1])), sort_keys=True).encode()).hexdigest()
                     emit("store " + name, argument([args, kwargs]))
                     callback = kwargs.get("metadata_factory")
                     if callback is not None:
