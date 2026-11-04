@@ -500,30 +500,6 @@ class SummaryDAG:
                 ).fetchall()
         return [self._row_to_node(r) for r in rows]
 
-    def get_session_node_ids_below_depth(
-        self, session_id: str, min_depth: int | None
-    ) -> List[int]:
-        """All node ids for a session that a reset would delete, UNBOUNDED.
-
-        ``min_depth=None`` returns every node id (the retain=0 case); otherwise it
-        returns ids with ``depth < min_depth``. Unlike :meth:`get_session_nodes`
-        (which caps at ``limit=1000``), this returns the complete set so
-        deletion-driven rollup staleness covers every removed node, not just the
-        first 1000.
-        """
-        with self._db_lock:
-            if min_depth is None:
-                rows = self._conn.execute(
-                    "SELECT node_id FROM summary_nodes WHERE session_id = ?",
-                    (session_id,),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT node_id FROM summary_nodes WHERE session_id = ? AND depth < ?",
-                    (session_id, min_depth),
-                ).fetchall()
-        return [int(r[0]) for r in rows if r[0] is not None]
-
     def count_at_depth(self, session_id: str, depth: int) -> int:
         """Count nodes at a specific depth for a session."""
         with self._db_lock:
