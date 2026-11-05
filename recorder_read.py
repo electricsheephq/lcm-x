@@ -40,10 +40,17 @@ class RecordingError(ValueError):
 
 
 def _blob(root: Path, sha: str, verify: bool):
-    data = (root / "blobs" / sha[:2] / sha).read_bytes()
+    try:
+        data = (root / "blobs" / sha[:2] / sha).read_bytes()
+    except OSError as exc:
+        raise RecordingError("blob_missing") from exc
     if verify and hashlib.sha256(data).hexdigest() != sha:
-        raise RecordingError(f"blob {sha} does not match its hash")
-    return json.loads(data)
+        raise RecordingError("blob_mismatch")
+    try:
+        return json.loads(data)
+    except (ValueError, UnicodeError) as exc:
+        raise RecordingError("blob_torn") from exc
+
 
 
 class _Decoder:
@@ -146,6 +153,8 @@ def read(proc, *, checkpoint=None, verify=True) -> dict:
         sealed = next((e for e in raw if e.get("kind") == "checkpoint_sealed" and e["hours"] == checkpoint), None)
         if sealed is None:
             raise RecordingError(f"no sealed checkpoint +{checkpoint}h")
+        if sealed["through"] >= end:
+            raise RecordingError(f"checkpoint crosses {cause} at seq {end}")
         if sealed["through"] + 1 < end:
             end, cause = sealed["through"] + 1, "checkpoint"
     prefix = [e for e in raw if max(_seqs(e)) < end]
@@ -154,9 +163,16 @@ def read(proc, *, checkpoint=None, verify=True) -> dict:
                    + [(e["seq_exit"], 1, e) for e in prefix if "seq_exit" in e], key=lambda s: (s[0], s[1]))
     for _seq, phase, event in slots:
         names = ("result", "exception") if phase else [k for k in event if k not in ("result", "exception")]
-        for name in names:
-            if name in event:
-                event[name] = decoder.value(event[name])
+        try:
+            for name in names:
+                if name in event:
+                    event[name] = decoder.value(event[name])
+        except RecordingError as exc:
+            end, cause = min(_seqs(event)), str(exc)
+            if sealed is not None and sealed["through"] >= end:
+                raise RecordingError(f"checkpoint crosses {cause} at seq {end}") from exc
+            break
+    prefix = [e for e in prefix if max(_seqs(e)) < end]
     by_seq = {e.get("seq_enter", e.get("seq")): e for e in prefix}
     events = sorted(prefix, key=lambda e: min(_seqs(e)))
     for event in events:

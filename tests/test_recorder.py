@@ -1125,7 +1125,535 @@ def test_turn_path_budget(lab):
     rec.writer.drain(300)
     numbers["writer_turn_complete_s_per_turn"] = (time.monotonic() - started) / 5
     print("RECORDER BUDGET", json.dumps(numbers, sort_keys=True))
+    assert rec.stopped is None, "budget samples must all be recorded"
     assert numbers["steady_median_ms"] <= 5 * scale and numbers["steady_p99_ms"] <= 25 * scale
     assert numbers["equal_strings_median_ms"] <= 20 * scale and numbers["equal_strings_p99_ms"] <= 60 * scale
     assert numbers["edited_median_ms"] <= 5 * scale
     assert numbers["first_view_ms"] <= 60 * scale and numbers["turn_complete_clones_max_ms"] <= 60 * scale
+
+
+# FIX-PACKET-L3-1-r1 regressions: each test names its review finding.
+@needs312
+@pytest.mark.parametrize("interloper", ["other_session", "bg"])
+def test_fix_r1_01_sessions_cross_root(lab, interloper):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    ctx.offered.on_session_start("X", platform="cli")
+    state_row(lab.host.home, "X")
+    if interloper == "other_session":
+        ctx.offered.on_session_start("Y", platform="cli")
+    else:
+        rec.session = ""
+        rec._before_root(None, "bg", None, {}, None)
+    ctx.offered.on_session_start("X", platform="cli")
+    rec.writer.drain(5)
+    events = recorder_module_events(rec)
+    assert any(e["kind"] == "sessions" and isinstance(e["rows"].get("X"), list) for e in events)
+
+
+@needs312
+def test_fix_r1_02_idle_engine_attribute_write(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    clone = ctx.offered.clone_for_agent()
+    clone.threshold_tokens = 100
+    ctx.offered.get_status()
+    a_proto, z_clone = ctx.offered, clone
+    def hook():
+        if a_proto is not None:
+            z_clone.threshold_tokens = 555
+    ctx.register_hook("attr_write", hook)
+    hook()
+    clone.get_status()
+    rec.writer.drain(5)
+    assert any(e["kind"] == "attrs" and e["values"].get("threshold_tokens") == 555
+               for e in recorder_module_events(rec))
+
+
+@needs312
+def test_fix_r1_02_nested_engine_is_busy(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    clone = ctx.offered.clone_for_agent()
+    token = rec._token(clone)
+    def nested(self):
+        assert rec.busy[token] > 0
+    lab.mp.setattr(type(clone), "get_status", nested)
+    rec._watch(nested.__code__, "engine", "get_status")
+    a_proto, z_clone = ctx.offered, clone
+    def hook():
+        if a_proto is not None:
+            z_clone.get_status()
+    ctx.register_hook("nested_busy", hook)
+    hook()
+
+
+@needs312
+def test_fix_r1_03_ended_sessions_release_views(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    for n in range(12):
+        sid = f"ended-{n}"
+        ctx.offered.on_session_start(sid, platform="cli")
+        ctx.offered.on_turn_complete([{"role": "user", "content": sid}])
+        ctx.offered.on_session_end(sid, [])
+        assert sid not in rec.views
+    assert len(rec.rows) == 0
+
+
+@needs312
+def test_fix_r1_03_gone_engine_releases_views_and_attrs(lab):
+    import weakref
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    clone = ctx.offered.clone_for_agent()
+    import types
+    rec.session = "gone"
+    rec.cur = types.SimpleNamespace(engine=clone, views=0)
+    rec._copy([{"role": "user", "content": "gone"}], [])
+    rec.cur = None
+    rec.pre_llm, rec.pre_llm_session = tuple(rec.rows), "gone"
+    token, ref = rec._token(clone), weakref.ref(clone)
+    del clone
+    gc.collect()
+    ctx.offered.get_status()
+    assert ref() is None
+    assert "gone" not in rec.views and token not in rec.attr_base
+    assert not rec.rows and not rec.pre_llm
+
+
+@needs312
+def test_fix_r1_03_views_are_bounded(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    for n in range(300):
+        rec.session = str(n)
+        rec._copy([{"role": "user", "content": str(n)}], [])
+    assert len(rec.views) <= 256
+
+
+@needs312
+def test_fix_r1_04_env_before_first_root(lab):
+    module, ctx = lab.load(lab.home())
+    lab.mp.setenv("LCM_CONTEXT_THRESHOLD", "0.73")
+    ctx.offered.get_status()
+    rec = _recorder()
+    rec.writer.drain(5)
+    assert any(e["kind"] == "env" and e["values"].get("LCM_CONTEXT_THRESHOLD") == "0.73"
+               for e in recorder_module_events(rec))
+
+
+@needs312
+def test_fix_r1_05_finalizer_does_not_wait_for_lock(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    done = threading.Event()
+    def gone():
+        rec._gone(999)
+        done.set()
+    with rec.lock:
+        thread = threading.Thread(target=gone, daemon=True)
+        thread.start()
+        returned = done.wait(0.5)
+    thread.join(2)
+    assert returned
+    ctx.offered.get_status()
+    rec.writer.drain(5)
+    assert any(e["kind"] == "engine_gone" and e["engine"] == 999 for e in recorder_module_events(rec))
+
+
+@needs312
+def test_fix_r1_05_logging_outside_recorder_lock(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    recorder_module = importlib.import_module(module.__name__ + ".recorder")
+    observed = []
+    class Handler(logging.Handler):
+        def emit(self, record):
+            observed.append(rec.lock._is_owned())
+    handler = Handler()
+    recorder_module.logger.addHandler(handler)
+    try:
+        with rec.lock:
+            rec.lose("probe")
+        rec.writer.drain(5)
+        rec.writer.sync = True
+        rec.cap("probe")
+        rec.writer.drain(5)
+        assert observed and not any(observed)
+    finally:
+        recorder_module.logger.removeHandler(handler)
+
+
+@needs312
+@pytest.mark.parametrize("mode", ["stop", "failed_exit", "failed_copy", "unwind"])
+def test_fix_r1_06_exit_releases_stack_and_engine(lab, mode):
+    import weakref
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    clone = ctx.offered.clone_for_agent()
+    ref = weakref.ref(clone)
+    real_exit, real_copy = rec._exit, rec._copy
+    def boom(*args):
+        raise RuntimeError("injected exit")
+    def root(self):
+        if mode in ("stop", "unwind"):
+            rec.stopped = "probe"
+        elif mode == "failed_exit":
+            rec._exit = boom
+        else:
+            rec._copy = boom
+        if mode == "unwind":
+            raise ValueError("host")
+    lab.mp.setattr(type(clone), "get_status", root)
+    rec._watch(root.__code__, "engine", "get_status")
+    if mode == "unwind":
+        with pytest.raises(ValueError):
+            clone.get_status()
+    else:
+        clone.get_status()
+    rec._exit, rec._copy = real_exit, real_copy
+    assert rec._stack() == []
+    del clone
+    gc.collect()
+    assert ref() is None
+    rec.stopped = None
+    ctx.offered.should_compress(1)
+    rec.writer.drain(5)
+    assert [e for e in recorder_module_events(rec) if e.get("name") == "should_compress"][-1]["parent_seq"] is None
+
+
+@needs312
+def test_fix_r1_07_atexit_timeout_stops_admission(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rec.writer.drain(5)
+    entered, release = threading.Event(), threading.Event()
+    def seal():
+        entered.set()
+        release.wait(5)
+        rec._emit({"kind": "checkpoint_sealed", "hours": 24, "through": rec.last_seq}, single=True)
+    rec.writer.offer(("call", seal))
+    assert entered.wait(2)
+    try:
+        rec._atexit()
+        assert not rec.writer.sync
+        done = threading.Event()
+        thread = threading.Thread(target=lambda: (ctx.offered.get_status(), done.set()), daemon=True)
+        thread.start()
+        assert done.wait(0.5)
+        status = json.loads((rec.proc / "STATUS.json").read_text())
+        assert status["end_state"] == "exit_timeout" and not rec.writer.sync
+    finally:
+        release.set()
+
+
+@needs312
+def test_fix_r1_08_sync_cap_is_single(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rec.writer.drain(5)
+    rec.writer.sync = True
+    rec.max_bytes = 0
+    rec.cap("test")
+    assert [e["kind"] for e in recorder_module_events(rec)].count("cap") == 1
+
+
+@needs312
+def test_fix_r1_09_writer_system_exit_stops_and_reports(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    def boom():
+        raise SystemExit("writer probe")
+    rec.writer.offer(("call", boom))
+    rec.writer.join(2)
+    assert rec.writer.dead is not None and rec.stopped is not None
+    status = json.loads((rec.proc / "STATUS.json").read_text())
+    assert status["end_state"] != "running" and status["first_cause"]["cause"] == "writer:SystemExit"
+
+
+@needs312
+def test_fix_r1_10_queue_charges_slots_and_strings(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    big = [None] * 1_000_000
+    assert rm._cost(big) >= 8_000_000
+    assert rm._cost("x" * 100_000) >= 100_000
+    rec.writer.drain(5)
+    stall = threading.Event()
+    rec.writer.stall = stall
+    lab.mp.setattr(rm, "MAX_QUEUE_BYTES", 16_000_000)
+    try:
+        for _ in range(5):
+            rec._emit({"kind": "large", "value": list(big)}, single=True)
+        assert rec.stopped == "gap"
+    finally:
+        stall.set()
+
+
+@needs312
+def test_fix_r1_11_payload_rewrite_after_pin_and_mode(lab):
+    home = prepared_home(lab, "pin-rewrite")
+    payloads = home / "lcm-large-outputs"
+    payloads.mkdir(exist_ok=True)
+    source = payloads / "payload.json"
+    source.write_text('{"content":"before"}')
+    source.chmod(0o644)
+    module = load_plugin(REPO, prefix="hermes_lcm_rec")
+    lab.modules.append(module)
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    original = rm.Recorder._monitor_on
+    def monitor(self):
+        replacement = source.with_suffix(".tmp")
+        replacement.write_text('{"content":"after"}')
+        replacement.replace(source)
+        original(self)
+    lab.mp.setattr(rm.Recorder, "_monitor_on", monitor)
+    prepare(module)
+    lab.host.home = home
+    lab.mp.setenv("LCM_RECORDER_ENABLED", "1")
+    lab.mp.setenv("LCM_RECORDER_DIR", str(home / "lcm-recorder"))
+    ctx = FakeCtx()
+    module.register(ctx)
+    lab.engines.append(ctx.offered)
+    rec = _recorder()
+    rec.writer.drain(5)
+    captured = rec.proc / "snapshot" / "large-outputs" / source.name
+    manifest = json.loads((rec.proc / "snapshot" / "large-outputs.manifest.json").read_text())
+    assert captured.read_text() == '{"content":"before"}'
+    assert captured.stat().st_mode & 0o777 == 0o600
+    assert manifest[0]["sha256"] == hashlib.sha256(captured.read_bytes()).hexdigest()
+
+
+@needs312
+@pytest.mark.parametrize("damage", ["missing", "torn", "mismatch"])
+def test_fix_r1_12_blob_damage_cuts_prefix(lab, damage):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    before = rec.last_seq
+    rec._emit({"kind": "probe_blob", "body": rm.Blob("unique damaged body")}, single=True)
+    rec.writer.drain(5)
+    event = next(e for e in recorder_module_events(rec) if e["kind"] == "probe_blob")
+    sha = event["body"]["$b"]
+    blob = rec.root / "blobs" / sha[:2] / sha
+    if damage == "missing":
+        blob.unlink()
+    else:
+        blob.write_bytes(b'"torn' if damage == "torn" else b'"other"')
+    reading = importlib.import_module(module.__name__ + ".recorder_read").read(rec.proc, verify=damage != "torn")
+    assert reading["prefix_end"] == before and reading["cause"] == "blob_" + damage
+
+
+@needs312
+def test_fix_r1_12_checkpoint_past_hole_rejected(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    hole = rec._next()
+    rec._emit({"kind": "checkpoint_sealed", "hours": 24, "through": hole}, single=True)
+    rec.writer.drain(5)
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    with pytest.raises(reader.RecordingError):
+        reader.read(rec.proc, checkpoint=24)
+
+
+@needs312
+def test_fix_r1_12_blob_fsynced_before_reference(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    rec.writer.drain(5)
+    synced = []
+    real = os.fsync
+    lab.mp.setattr(os, "fsync", lambda fd: (synced.append(os.fstat(fd).st_size), real(fd))[-1])
+    with rec.writer.io:
+        rec.writer._blob(rm.Blob("durable unique blob"))
+        assert len(synced) >= 1
+
+
+@needs312
+@pytest.mark.parametrize("backing_present", [True, False])
+def test_fix_r1_13_persisted_output_input_replayed_without_file(lab, backing_present):
+    lab.mp.setattr(time, "time", lambda: FROZEN)
+    lab.mp.setattr(time, "time_ns", lambda: int(FROZEN * 1e9))
+    gmtime = time.gmtime
+    lab.mp.setattr(time, "gmtime", lambda *args: gmtime(*args) if args else gmtime(FROZEN))
+    home = prepared_home(lab, "persisted-home")
+    backing = home / "cache" / "spillover" / "result.txt"
+    backing.parent.mkdir(parents=True)
+    content = "persisted result " * 100
+    if backing_present:
+        backing.write_text(content)
+    marker = (f"<persisted-output>\nOutput too large ({len(content)} characters).\nFull output saved to: {backing}"
+              "\nPreview (first 9 chars):\npersisted\n...\n</persisted-output>")
+    module, ctx = lab.load(home)
+    ctx.offered.on_session_start("persisted", platform="cli")
+    ctx.hooks["post_llm_call"][0](session_id="persisted", platform="cli", conversation_history=[
+        {"role": "user", "content": "read result"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "persist", "type": "function",
+         "function": {"name": "terminal", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "persist", "content": marker}])
+    ctx.offered.shutdown()
+    rec = lab.stop()
+    events = recorder_module_events(rec)
+    assert any(e["kind"] == "input" and e.get("path") == str(backing) for e in events)
+    backing.unlink(missing_ok=True)
+    recorded = {"home": home, "proc": rec.proc}
+    rep, diffs = _replay(recorded, lab.tmp, "replay-persisted")
+    assert not rep.diffs
+    assert not rep.inputs and not diffs
+
+
+@needs312
+def test_fix_r1_14_replay_database_paths_are_isolated(lab):
+    home = lab.home()
+    lab.mp.setenv("LCM_DATABASE_PATH", str(home / "custom.db"))
+    lab.mp.setenv("LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH", str(home / "custom-payloads"))
+    module, ctx = lab.load(home)
+    ctx.offered.on_session_start("isolated", platform="cli")
+    ctx.hooks["post_llm_call"][0](session_id="isolated", platform="cli", conversation_history=[
+        {"role": "user", "content": "original stays intact"}])
+    ctx.offered.shutdown()
+    rec = lab.stop()
+    original = home / "custom.db"
+    before = original.read_bytes(), original.stat().st_mtime_ns
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "replay-paths", prepare=prepare)
+    assert (original.read_bytes(), original.stat().st_mtime_ns) == before
+    assert Path(rep.engines[1]._db_path).resolve() == rep.store.resolve()
+    assert rep.store.is_relative_to(lab.tmp / "replay-paths")
+
+
+@needs312
+def test_fix_r1_14_replay_rejects_escaping_paths_before_register(lab):
+    module, ctx = lab.load(lab.home())
+    rec = lab.stop()
+    def mutate(recording, reader):
+        recording["process_start"]["env"]["LCM_DATABASE_PATH"] = str(lab.tmp / "escape.db")
+    with pytest.raises(ValueError, match="outside replay home"):
+        replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "rejected", mutate=mutate, prepare=prepare)
+
+
+@needs312
+def test_fix_r1_15_replay_effective_yaml_configuration(lab):
+    home = lab.home()
+    (home / "config.yaml").write_text("lcm:\n  context_threshold: 0.73\nauxiliary:\n  compression:\n    max_concurrency: 7\n")
+    module, ctx = lab.load(home)
+    ctx.offered.get_status()
+    rec = lab.stop()
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "replay-config", prepare=prepare)
+    assert rep.engines[1]._config.context_threshold == 0.73
+    assert (rep.state.path.parent / "config.yaml").exists()
+    assert not rep.diffs
+
+
+@needs312
+def test_fix_r1_fork_child_stops_without_inherited_lock(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    with rec.lock:
+        held = threading.Event()
+        def fork_child():
+            pid = os.fork()
+            if pid == 0:
+                if rec.stopped != "fork":
+                    os._exit(1)
+                ctx.offered.get_status()
+                rec._atexit()
+                os._exit(0)
+            _, status = os.waitpid(pid, 0)
+            held.status = status
+            held.set()
+        thread = threading.Thread(target=fork_child, daemon=True)
+        thread.start()
+        assert held.wait(2)
+    assert held.status == 0
+
+
+@needs312
+def test_fix_r1_c9_dead_writer_drain_is_immediate(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rec.writer.drain(5)
+    rec.writer.dead = OSError("dead")
+    start = time.monotonic()
+    assert rec.writer.drain(0.5) is False
+    assert time.monotonic() - start < 0.1
+
+
+@needs312
+def test_fix_r1_c9_start_failure_stops_writer(lab):
+    module = load_plugin(REPO, prefix="hermes_lcm_rec")
+    lab.modules.append(module)
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    writers = []
+    original = rm._Writer.start
+    def start(self):
+        writers.append(self)
+        original(self)
+    def boom(self, *args):
+        raise RuntimeError("start probe")
+    lab.mp.setattr(rm._Writer, "start", start)
+    lab.mp.setattr(rm.Recorder, "_resolve", boom)
+    lab.mp.setenv("LCM_RECORDER_ENABLED", "1")
+    module.register(FakeCtx())
+    assert writers
+    writers[0].join(1)
+    assert not writers[0].is_alive()
+
+
+def test_fix_r1_c9_existing_directory_mode_unchanged(tmp_path):
+    import recorder
+    target = tmp_path / "user-dir"
+    target.mkdir(mode=0o755)
+    recorder._mkdir(target)
+    assert target.stat().st_mode & 0o777 == 0o755
+    created = recorder._mkdir(target / "created")
+    assert created.stat().st_mode & 0o777 == 0o700
+
+
+@needs312
+def test_fix_r1_c6_epoch_reroll_recorded(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    def reroll(self):
+        self._compaction_telemetry_counter_epoch = "rerolled"
+    lab.mp.setattr(type(ctx.offered), "get_status", reroll)
+    rec._watch(reroll.__code__, "engine", "get_status")
+    ctx.offered.get_status()
+    rec.writer.drain(5)
+    assert any(e["kind"] == "attrs" and e["values"].get("_compaction_telemetry_counter_epoch") == "rerolled"
+               for e in recorder_module_events(rec))
+
+
+def test_fix_r1_c10_docs_match_secret_segments_and_epoch():
+    text = (REPO / "docs" / "recorder.md").read_text()
+    assert "whole\n`_`-separated segment" in text
+    assert "one regenerated inside" not in text
+
+
+@needs312
+def test_fix_r1_n1_payload_copies_are_private(lab):
+    home = lab.home()
+    payload = home / "lcm-large-outputs" / "public.json"
+    payload.parent.mkdir()
+    payload.write_text('{}')
+    payload.chmod(0o644)
+    module, ctx = lab.load(home)
+    rec = _recorder()
+    rec.writer.drain(5)
+    assert (rec.proc / "snapshot" / "large-outputs" / payload.name).stat().st_mode & 0o777 == 0o600
+
+
+@needs312
+def test_fix_r1_15_config_file_changes_replayed(lab):
+    home = lab.home()
+    config = home / "config.yaml"
+    config.write_text("auxiliary:\n  compression:\n    max_concurrency: 7\n")
+    module, ctx = lab.load(home)
+    config.write_text("auxiliary:\n  compression:\n    max_concurrency: 19\n")
+    ctx.offered.get_status()
+    rec = lab.stop()
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "replay-config-changes", prepare=prepare)
+    config_module = importlib.import_module(rep.module.__name__ + ".config")
+    assert config_module.hermes_auxiliary_compression_max_concurrency(rep.state.path.parent) == 19

@@ -35,7 +35,7 @@ PluginManager) adds its engine to the same recording.
 - **State the engine reads from the host:** engine attributes Hermes assigns between calls, `LCM_*` environment
   changes, config file paths with hash and mtime, the `sessions` rows LCM reads from Hermes's `state.db`, the
   `/lcm` task-local context, auxiliary-agent frames LCM inspects, and per-engine seeds (the compaction telemetry
-  epoch).
+  epoch), and persisted-output read outcomes (path, generation stat, hash and content blob).
 - **At start:** a snapshot of `lcm.db` pinned at one transaction, a copy of the large-output payload directory with a
   manifest, the plugin's git SHA when readable, Python and host versions.
 
@@ -50,14 +50,15 @@ PluginManager) adds its engine to the same recording.
 ```
 
 Each Hermes process gets its own directory. Two directories on the same database whose wall-time ranges overlap are
-flagged `overlap` by the reader. A separate writer thread does all disk work; the host's thread only copies values.
+flagged `overlap` by the reader. The initial payload copy finishes before monitoring starts; a separate writer
+thread writes queued events while the host's turn thread copies values.
 
 ## Privacy
 
 Recordings are local files only and hold message content. Directories are created 0700 and files 0600. A profile
 backup that copies `$HERMES_HOME` copies the recording too. Secrets are not written: the values passed to
-`update_model(api_key=..., base_url=...)`, `session_db`, and any `LCM_*` key or config field whose name contains
-KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL or AUTH are recorded only as set or unset.
+`update_model(api_key=..., base_url=...)`, `session_db`, and any `LCM_*` key or config field whose name has a whole
+`_`-separated segment matching KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL or AUTH are recorded only as set or unset.
 
 ## Limits, coverage and the replayable prefix
 
@@ -69,13 +70,16 @@ KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL or AUTH are recorded only as set or uns
   (`unsupported`), a lost observation, a root stack mismatch, or a recorder failure (`recorder.failed`; the failure
   never reaches the engine or Hermes). `STATUS.json` names the first cause and its seq.
 - **Replayable prefix:** the reader returns events up to the first missing seq or the first coverage end, whichever
-  comes first. Everything before it is complete.
+  comes first. A missing, torn or hash-mismatched blob cuts the prefix before its event with a `blob_*` cause.
+  Everything before it is complete; a checkpoint crossing a hole or damaged blob is rejected.
 - **Checkpoints:** at +24, +72 and +144 hours, between roots, the recorder backs up `lcm.db` and writes a
   `checkpoint_sealed` event with the seq it covers. Reading with a checkpoint returns the prefix through that seq, and
   a replay of it must match the backup, without needing an exit.
 - **Ended without exit:** Hermes ends its gateway and CLI with `os._exit`, so atexit never runs and a recording
   normally ends as "ended without exit". That is a normal end; the sealed checkpoints are the comparison points. When
-  atexit does run, the recorder writes `exit_begin` and records the exit flushes synchronously.
+  atexit does run, the recorder writes `exit_begin` and records the exit flushes synchronously after a successful
+  drain. A drain timeout stops admission with `exit_timeout` in status. Recording stops in a forked child (`fork`)
+  before it can wait on inherited locks; the parent recording continues.
 
 ## Declared gaps (not failures)
 
@@ -90,12 +94,12 @@ KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL or AUTH are recorded only as set or uns
 - A `state.db` change committed while a root runs is seen at the next root's entry.
 - Tails pending when a Hermes process exits are not drained or recorded (#2253).
 - Sessions marked `aux_context` (auxiliary agents) are excluded from the day-1 check.
-- Engine-generated identifiers are recorded once per engine (the compaction telemetry epoch); one regenerated inside
-  a root (an in-root session reset) and per-call ids (lease and request ids) are not.
+- The compaction telemetry epoch is seeded per engine and a re-rolled epoch is recorded at root exit.
+  Per-call ids (lease and request ids) are not recorded.
 
 ## Reading and replaying
 
 `recorder_read.read(proc_dir, checkpoint=None)` returns the prefix, its end and cause, the events with nesting, and the
 snapshot paths. `tests/recorder_replay.py` is a mini-replayer: it loads the plugin against a fake Hermes context,
 restores the snapshot, drives the recorded roots in order on one thread per recorded thread, serves recorded summary
-attempts, and compares every root's return and the in-scope tables.
+attempts and persisted-output inputs, restores the recorded effective configuration in the replay home, and compares every root's return and the in-scope tables.

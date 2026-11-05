@@ -194,7 +194,6 @@ def _sha256_file(path: Path) -> str:
 
 def _mkdir(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(path, 0o700)
     return path
 
 
@@ -254,7 +253,7 @@ class _StateDb:
         return [list(row) for row in rows]
 
     def changes(self, session_ids):
-        """Rows of the sessions' lineage chains that differ from their last recorded outcome."""
+        """All sessions rows that differ from their last recorded outcome."""
         had = self.conn is not None
         try:
             if not self._connect():
@@ -267,17 +266,11 @@ class _StateDb:
             if version == self.version:
                 return None
             self.version = version
-            out, pending, seen = {}, list(session_ids), set()
-            while pending and len(seen) < 256:
-                sid = pending.pop()
-                if not sid or sid in seen:
-                    continue
-                seen.add(sid)
-                row = self._row(sid)
-                if row != self.last.get(sid, "no_row"):
-                    out[sid] = self.last[sid] = row
-                if isinstance(row, list) and row[2]:
-                    pending.append(row[2])
+            rows = self.conn.execute(f"SELECT {', '.join(SESSION_COLUMNS)} FROM sessions").fetchall()
+            now = {row[0]: list(row) for row in rows}
+            out = {sid: now.get(sid, "no_row") for sid in now.keys() | self.last.keys()
+                   if now.get(sid, "no_row") != self.last.get(sid, "no_row")}
+            self.last = now
             return out or None
         except Exception:
             changed = {sid: "read_error" for sid in session_ids if sid and self.last.get(sid) != "read_error"}
@@ -286,11 +279,11 @@ class _StateDb:
 
 
 class _Entry:
-    __slots__ = ("frame", "code", "rec", "engine", "root", "name", "t0", "views")
+    __slots__ = ("frame", "code", "rec", "engine", "root", "name", "t0", "views", "touched")
 
     def __init__(self, frame, code, rec, engine, root, name):
         self.frame, self.code, self.rec, self.engine, self.root, self.name = frame, code, rec, engine, root, name
-        self.t0, self.views = clock(), 0
+        self.t0, self.views, self.touched = clock(), 0, set()
 
 
 class _Writer(threading.Thread):
@@ -311,12 +304,14 @@ class _Writer(threading.Thread):
         self.stall = None  # tests hold the writer on an Event
 
     def offer(self, item, nbytes=256, force=False) -> bool:
+        if self.dead is not None or self.closed:
+            return False
         if self.sync:
             with self.io:
                 self._process(item)
             return True
         with self.cv:
-            if not force and (self.events >= MAX_QUEUE_EVENTS or self.bytes >= MAX_QUEUE_BYTES):
+            if not force and (self.events >= MAX_QUEUE_EVENTS or (self.events and self.bytes + nbytes > MAX_QUEUE_BYTES)):
                 return False
             self.items.append((item, nbytes))
             self.events += 1
@@ -325,11 +320,27 @@ class _Writer(threading.Thread):
         return True
 
     def drain(self, timeout: float) -> bool:
+        if self.dead is not None or self.closed:
+            return False
+        self.rec._flush_gone()
         done = threading.Event()
         self.offer(("sync", done), 0, force=True)
         return done.wait(timeout)
 
     def run(self):
+        try:
+            self._run()
+        except BaseException as exc:
+            self.rec.writer_failed(("run", None), exc)
+            self.closed = True
+            try:
+                self.rec.write_status()
+            except BaseException:
+                pass
+        finally:
+            self.rec._log_pending()
+
+    def _run(self):
         while not self.closed:
             with self.cv:
                 if not self.items:
@@ -343,6 +354,7 @@ class _Writer(threading.Thread):
                 with self.cv:
                     self.events -= 1
                     self.bytes -= item[1]
+            self.rec._log_pending()
             with self.io:
                 try:
                     self._tick()
@@ -374,6 +386,7 @@ class _Writer(threading.Thread):
                 item[1]()
             elif kind == "sync":
                 self._tick(force=True)
+                self.rec._log_pending()
                 item[1].set()
         except Exception as exc:
             self.rec.writer_failed(item, exc)
@@ -391,6 +404,8 @@ class _Writer(threading.Thread):
                 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 with os.fdopen(fd, "wb") as handle:
                     handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
                 os.replace(tmp, path)
                 self.total_bytes += len(data)
             self.known_blobs.add(sha)
@@ -451,7 +466,11 @@ class Recorder:
         self.by_content: dict = {}
         self.row_ids = itertools.count(1)
         self.views: dict = {}
+        self.view_owners: dict = {}
+        self.gone = deque()
+        self.warnings = deque()
         self.pre_llm = ()
+        self.pre_llm_session = ""
         self.attr_base: dict = {}
         self.busy = Counter()
         self.inflight = 0
@@ -492,16 +511,22 @@ class Recorder:
         home = str(engine.__dict__.get("_hermes_home") or "")
         state_path = Path(engine._state_db_path())
         self.state_db = _StateDb(state_path)
-        self._emit({"kind": "process_start", **self._process_facts(engine, home, state_path)}, single=True)
+        facts = self._process_facts(engine, home, state_path)
+        self.env_digest = hash(json.dumps(plain(facts["env"]), sort_keys=True))
+        self._emit({"kind": "process_start", **facts}, single=True)
         self.opened = True
         self._seed(self.engines[engine], engine)
         payload_dir = self._payload_dir(engine)
+        self._capture_payloads(payload_dir)
         self.writer.offer(("call", lambda: self._snapshot(pinned, payload_dir)), force=True)
         self._monitor_on()
         self.capture_ctx(ctx)
         atexit.register(self._atexit)
+        os.register_at_fork(after_in_child=self._fork_child)
 
     def add(self, ctx, engine):
+        if self.stopped is not None:
+            return
         with self.lock:
             self._token(engine)
             self._resolve(type(engine))
@@ -555,9 +580,9 @@ class Recorder:
         base = Path(home).expanduser().resolve() if home else Path("~/.hermes").expanduser().resolve()
         return base / "lcm-large-outputs"
 
-    def _snapshot(self, pinned, payload_dir: Path):
-        snap = self.proc / "snapshot"
-        result = _backup(pinned, snap / "lcm.db")
+    def _capture_payloads(self, payload_dir):
+        snap = _mkdir(self.proc / "snapshot")
+        result = {}
         manifest, size = [], 0
         if payload_dir.is_dir():
             files = sorted(p for p in payload_dir.rglob("*") if p.is_file())
@@ -571,9 +596,10 @@ class Recorder:
                     rel = path.relative_to(payload_dir)
                     _mkdir((out / rel).parent)
                     shutil.copy2(path, out / rel)
-                    st = path.stat()
+                    os.chmod(out / rel, 0o600)
+                    st = (out / rel).stat()
                     manifest.append({"name": str(rel), "size": st.st_size, "mode": st.st_mode, "uid": st.st_uid,
-                                     "gid": st.st_gid, "mtime_ns": st.st_mtime_ns, "sha256": _sha256_file(path)})
+                                     "gid": st.st_gid, "mtime_ns": st.st_mtime_ns, "sha256": _sha256_file(out / rel)})
                 result["payloads"] = "ok"
         else:
             result["payloads"] = "absent"
@@ -581,7 +607,10 @@ class Recorder:
         fd = os.open(snap / "large-outputs.manifest.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as handle:
             json.dump(manifest, handle, sort_keys=True)
-        self.snapshot = result
+        self.payload_snapshot = result
+
+    def _snapshot(self, pinned, payload_dir: Path):
+        self.snapshot = {**_backup(pinned, self.proc / "snapshot" / "lcm.db"), **self.payload_snapshot}
         self.write_status()
 
     def _monitor_on(self):
@@ -638,6 +667,8 @@ class Recorder:
             for name in ATEXIT_ROOTS:
                 if module is not None and callable(getattr(module, name, None)):
                     self._watch(getattr(module, name).__code__, "atexit", name)
+        persisted = importlib.import_module(package + ".ingest_persisted")
+        self._watch(persisted.recover_hermes_persisted_output_with_file_stat.__code__, "input", "persisted_output")
         self.packages[package] = sys.modules.get(package + ".sender_capture")
 
     # -- ctx capture -----------------------------------------------------------------------------------
@@ -703,10 +734,7 @@ class Recorder:
             self._emit({"kind": "seed", "engine": token, "values": values}, single=True)
 
     def _gone(self, token):
-        try:
-            self._emit({"kind": "engine_gone", "engine": token}, single=True)
-        except BaseException:
-            self.failed("engine_gone")
+        self.gone.append(token)
 
     def _thread_token(self) -> int:
         thread = threading.current_thread()
@@ -747,24 +775,29 @@ class Recorder:
 
     def _on_return(self, code, offset, value):
         try:
-            if self.stopped is None:
-                self._exit(code, sys._getframe(1), "return", value)
+            self._exit(code, sys._getframe(1), "return", value)
         except KeyboardInterrupt:
             self.failed("PY_RETURN", interrupted=True)
             raise
         except BaseException as exc:
             self.failed("PY_RETURN", exc)
+        finally:
+            self._pop(code, sys._getframe(1))
+            self.cur = None
         return None
 
     def _on_unwind(self, code, offset, exc):
         try:
-            if id(code) in self.roots and self.stopped is None:
+            if id(code) in self.roots:
                 self._exit(code, sys._getframe(1), "raise", exc)
         except KeyboardInterrupt:
             self.failed("PY_UNWIND", interrupted=True)
             raise
         except BaseException as error:
             self.failed("PY_UNWIND", error)
+        finally:
+            self._pop(code, sys._getframe(1))
+            self.cur = None
         return None
 
     def _enter(self, code, frame):
@@ -773,6 +806,8 @@ class Recorder:
             return
         kind, name, shared, _code = info
         loc = frame.f_locals
+        if kind == "input" and not frame.f_globals["_is_hermes_persisted_output_marker"](loc.get("text")):
+            return
         stack = self._stack()
         parent = next((e for e in reversed(stack) if e.rec is not None), None)
         if any(e.rec is None for e in stack):
@@ -785,7 +820,7 @@ class Recorder:
             if shared:
                 name = next((v.__name__ for n in code.co_freevars if callable(v := loc.get(n))
                              and hasattr(v, "__name__")), name)
-        elif kind in ("summary", "atexit"):
+        elif kind in ("summary", "atexit", "input"):
             engine = parent.engine if parent is not None else None
         else:
             name, engine = self._callback(code, loc, name)
@@ -810,6 +845,9 @@ class Recorder:
                    **self._identity(engine)}
             marks = []
             entry = _Entry(frame, code, rec, engine, root, name)
+            (stack[0] if stack else entry).touched.add(etoken)
+            if kind == "input":
+                rec["path"] = frame.f_globals["_persisted_output_saved_path"](loc.get("text"))
             self.cur = entry
             if kind in ("summary", "bg"):
                 rec["args"] = self._summary_args(loc)
@@ -824,28 +862,38 @@ class Recorder:
             if marks:
                 self._unsupported(rec, marks)
             if kind == "hook" and name == "pre_llm_call":
+                self.pre_llm_session = self.session
                 self.pre_llm = tuple(id(m) for m in (loc.get("payload") or {}).get("conversation_history") or ())
             stack.append(entry)
             self.cur = None
             if root:
                 self.inflight += 1
-                self.busy[etoken] += 1
+            self.busy[etoken] += 1
 
-    def _exit(self, code, frame, status, value):
+    def _pop(self, code, frame):
         stack = self._stack()
         index = next((i for i in range(len(stack) - 1, -1, -1)
                       if stack[i].frame is frame and stack[i].code is code), None)
         if index is None:
+            return []
+        entries = stack[index:]
+        del stack[index:]
+        for entry in entries:
+            if entry.rec is not None:
+                self._close(entry)
+        return entries
+
+    def _exit(self, code, frame, status, value):
+        entries = self._pop(code, frame)
+        if not entries or self.stopped is not None:
             return
+        entry = entries[0]
         with self.lock:
-            for orphan in stack[index + 1:]:
+            for orphan in entries[1:]:
                 if orphan.rec is not None:
                     orphan.rec.update(status="stack_mismatch", seq_exit=self._next())
                     self._emit(orphan.rec)
                     self.lose("stack_mismatch", orphan.rec["seq_enter"])
-                    self._close(orphan)
-            del stack[index + 1:]
-            entry = stack.pop()
             if entry.rec is None:
                 return
             rec = entry.rec
@@ -854,8 +902,14 @@ class Recorder:
             marks = []
             if status == "return":
                 rec["status"] = "return"
-                rec["result"] = self._summary_result(value, entry.t0) if rec["kind"] in ("summary", "bg") \
-                    else self._copy(value, marks)
+                if rec["kind"] == "input":
+                    rec["result"] = {"outcome": "ok" if value is not None else "unavailable",
+                                     "stat": value[1] if value else None,
+                                     "sha256": hashlib.sha256(value[0].encode()).hexdigest() if value else None,
+                                     "content": Blob(value[0]) if value else None}
+                else:
+                    rec["result"] = self._summary_result(value, entry.t0) if rec["kind"] in ("summary", "bg") \
+                        else self._copy(value, marks)
             else:
                 rec["status"] = "raise"
                 rec["exception"] = _exception(value)
@@ -869,7 +923,6 @@ class Recorder:
             self.cur = None
             self._emit(rec)
             if entry.root:
-                self._close(entry)
                 self._after_root(entry)
         if entry.root and entry.name in _SYNC_ROOTS and self.stopped is None:
             self.writer.drain(2.0)
@@ -877,7 +930,7 @@ class Recorder:
     def _close(self, entry):
         if entry.root:
             self.inflight -= 1
-            self.busy[entry.rec.get("engine")] -= 1
+        self.busy[entry.rec.get("engine")] -= 1
 
     def _callback(self, code, loc, name):
         regs = self.callbacks.get(id(code)) or []
@@ -990,6 +1043,10 @@ class Recorder:
                 self._index(row)
             ids.append(oid)
         self.views.setdefault(session, deque(maxlen=2)).append(ids)
+        if self.cur is not None and self.cur.engine is not None:
+            self.view_owners.setdefault(session, set()).add(self._token(self.cur.engine))
+        while len(self.views) > 256:
+            self._drop_view(next(iter(self.views)))
         if self.cur is not None:
             self.cur.views += 1
         return View(ops)
@@ -998,6 +1055,13 @@ class Recorder:
         content = row[2].get("content")
         if type(content) is str:
             self.by_content[id(content)] = id(row[1])
+
+    def _drop_view(self, session):
+        self.views.pop(session, None)
+        self.view_owners.pop(session, None)
+        if session == self.pre_llm_session:
+            self.pre_llm = ()
+            self.pre_llm_session = ""
 
     def _retain(self):
         keep = set(self.pre_llm)
@@ -1046,18 +1110,22 @@ class Recorder:
     # -- state captures --------------------------------------------------------------------------------
     def _attrs(self, engine) -> dict:
         d = engine.__dict__
-        return {n: _base(d[n]) for n in HOST_ATTRS if n in d}
+        return {n: _base(d[n]) for n in HOST_ATTRS + SEED_ATTRS if n in d}
 
-    def _before_root(self, engine, kind, code, loc, frame):
+    def _diff_attrs(self, touched=()):
         for other, token in list(self.engines.items()):
             if self.busy[token]:
                 continue
             now, base = self._attrs(other), self.attr_base.get(token, {})
-            changed = {n: self._attr_value(other.__dict__.get(n, _MISSING)) for n in set(now) | set(base)
+            names = set(SEED_ATTRS) if token in touched else set(now) | set(base)
+            changed = {n: self._attr_value(other.__dict__.get(n, _MISSING)) for n in names
                        if not _same(now.get(n, _MISSING), base.get(n, _MISSING))}
             if changed:
                 self._emit({"kind": "attrs", "engine": token, "values": changed}, single=True)
             self.attr_base[token] = now
+
+    def _before_root(self, engine, kind, code, loc, frame):
+        self._diff_attrs()
         env = self._env_values(self.engine)
         digest = hash(json.dumps(plain(env), sort_keys=True))
         if digest != self.env_digest:
@@ -1103,12 +1171,25 @@ class Recorder:
             if stamp is not None:
                 try:
                     package = type(engine).__module__.rpartition(".")[0]
-                    reader = sys.modules[package + ".config"].hermes_auxiliary_compression_max_concurrency
+                    config_module = sys.modules[package + ".config"]
+                    values = config_module._load_hermes_config_yaml(path)
+                    values = {k: values[k] for k in ("lcm", "compression", "auxiliary") if k in values}
+                    if "auxiliary" in values:
+                        values["auxiliary"] = {"compression": (values["auxiliary"] or {}).get("compression", {})}
+                    entry["values"] = self._config_values(values)
+                    reader = config_module.hermes_auxiliary_compression_max_concurrency
                     entry["auxiliary.compression.max_concurrency"] = reader(home)
                 except Exception:
                     pass
             changed[str(path)] = entry
         return changed if changed or not initial else {}
+
+    def _config_values(self, value):
+        if isinstance(value, dict):
+            return {k: Tag("set", bool(v)) if is_secret_name(k) else self._config_values(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._config_values(v) for v in value]
+        return self._copy(value, [])
 
     def _command_context(self, engine) -> dict:
         values = {}
@@ -1156,10 +1237,10 @@ class Recorder:
         return found
 
     def _after_root(self, entry):
-        for other, token in list(self.engines.items()):
-            if not self.busy[token]:
-                self.attr_base[token] = self._attrs(other)
-        if entry.views:
+        self._diff_attrs(entry.touched)
+        if entry.name == "on_session_end":
+            self._drop_view(entry.rec.get("session") or "")
+        if entry.views or entry.name == "on_session_end":
             self._retain()
         if self.inflight == 0 and self.checkpoints and clock() - self.started >= self.checkpoints[0] * 3600:
             self._checkpoint(self.checkpoints.pop(0))
@@ -1186,8 +1267,27 @@ class Recorder:
         self.writer.offer(("call", seal), force=True)
 
     # -- events, coverage, failures --------------------------------------------------------------------
+    def _flush_gone(self):
+        with self.lock:
+            tokens = []
+            while self.gone:
+                token = self.gone.popleft()
+                tokens.append(token)
+                self.attr_base.pop(token, None)
+                self.busy.pop(token, None)
+                for session, owners in list(self.view_owners.items()):
+                    owners.discard(token)
+                    if not owners:
+                        self._drop_view(session)
+            if tokens:
+                self._retain()
+            for token in tokens:
+                self._emit({"kind": "engine_gone", "engine": token}, single=True)
+
     def _emit(self, rec, single=False):
         with self.lock:
+            if self.gone:
+                self._flush_gone()
             if single:
                 rec["seq"] = self._next()
             rec.update(v=FORMAT_VERSION, pid=os.getpid(), lost=self.lost)
@@ -1210,8 +1310,17 @@ class Recorder:
         self.counters["recorder.coverage_lost"] += 1
         if self.first_cause is None:
             self.first_cause = {"cause": cause, "seq": seq if seq is not None else self.last_seq}
-            logger.warning("LCM recorder: replayable coverage ended (%s at seq %s); recording continues for "
-                           "diagnosis. Restart the gateway to start a new epoch.", cause, self.first_cause["seq"])
+            self.warnings.append(("LCM recorder: replayable coverage ended (%s at seq %s); recording continues for "
+                                  "diagnosis. Restart the gateway to start a new epoch.", cause, self.first_cause["seq"]))
+
+    def _log_pending(self):
+        if not self.lock._is_owned():
+            while True:
+                try:
+                    warning = self.warnings.popleft()
+                except IndexError:
+                    break
+                logger.warning(*warning)
 
     def failed(self, where, exc=None, interrupted=False):
         try:
@@ -1226,7 +1335,7 @@ class Recorder:
         self.counters["recorder.failed"] += 1
         seq = item[1].get("seq", item[1].get("seq_enter")) if item[0] == "event" else None
         self.lose(f"writer:{type(exc).__name__}", seq)
-        if isinstance(exc, OSError):
+        if isinstance(exc, OSError) or not isinstance(exc, Exception):
             self.writer.dead = exc
             self.stopped = self.stopped or "writer_failed"
             self.end_state = "writer_failed"
@@ -1235,10 +1344,11 @@ class Recorder:
         with self.lock:
             if self.stopped is not None:
                 return
+            self.stopped = self.end_state = "cap"
             self.writer._append({"kind": "cap", "reason": reason, "seq": self._next(), "v": FORMAT_VERSION,
                                  "pid": os.getpid(), "lost": self.lost})
-            self.stopped = self.end_state = "cap"
-            logger.warning("LCM recorder: stopped at the size cap or the disk floor (%s)", reason)
+            self.warnings.append(("LCM recorder: stopped at the size cap or the disk floor (%s)", reason))
+        self._log_pending()
 
     def write_status(self):
         status = {"v": FORMAT_VERSION, "pid": os.getpid(), "last_seq": self.last_seq, "lost": self.lost,
@@ -1256,13 +1366,22 @@ class Recorder:
         os.replace(tmp, self.proc / "STATUS.json")
 
     def _atexit(self):
+        if self.stopped == "fork":
+            return
         try:
             self._emit({"kind": "exit_begin"}, single=True)
             self.end_state = "exit_begin"
-            self.writer.drain(2.0)
-            self.writer.sync = True
+            if self.writer.drain(2.0):
+                self.writer.sync = True
+            else:
+                self.stopped = self.end_state = "exit_timeout"
+                self.lose("exit_timeout")
+                self.write_status()
         except BaseException:
             self.failed("atexit")
+
+    def _fork_child(self):
+        self.stopped = self.end_state = "fork"
 
     def shutdown_for_tests(self):
         mon = sys.monitoring
@@ -1310,24 +1429,19 @@ def _flat_items(loc):
 
 def _cost(rec) -> int:
     def walk(value):
+        size = sys.getsizeof(value)
         if isinstance(value, Blob):
-            return 256 + 64 * _containers(value.copy)
+            return size + walk(value.copy)
         if isinstance(value, View):
-            return 32 * len(value.ops) + sum(walk(op[2]) for op in value.ops if len(op) > 2)
+            return size + walk(value.ops)
+        if isinstance(value, Tag):
+            return size + walk(value.value)
         if isinstance(value, dict):
-            return 64 + sum(walk(v) for v in value.values())
+            return size + sum(walk(k) + walk(v) for k, v in value.items())
         if isinstance(value, (list, tuple)):
-            return 64 + sum(walk(v) for v in value)
-        return 0
+            return size + sum(walk(v) for v in value)
+        return size
     return 256 + walk(rec)
-
-
-def _containers(value) -> int:
-    if isinstance(value, dict):
-        return 1 + sum(_containers(v) for v in value.values())
-    if isinstance(value, (list, tuple)):
-        return 1 + sum(_containers(v) for v in value)
-    return 0
 
 
 def _exception(exc) -> dict:
@@ -1403,6 +1517,10 @@ def install(ctx, engine) -> None:
             recorder.start(ctx, engine)
         except BaseException:
             slot.recorder = None
+            if recorder is not None:
+                recorder.writer.closed = True
+                with recorder.writer.cv:
+                    recorder.writer.cv.notify()
             for info in recorder.roots.values() if recorder is not None else ():
                 mon.set_local_events(tool, info[3], 0)
             mon.set_events(tool, 0)

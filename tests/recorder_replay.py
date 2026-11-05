@@ -226,6 +226,7 @@ class Replayer:
         self.compared = 0
         self.pool = defaultdict(deque)
         self.root_attempts = deque()
+        self.inputs = deque(e for e in recording["events"] if e.get("kind") == "input")
         for event in recording["events"]:
             if event.get("kind") == "summary":
                 self.pool[self._key(event["args"])].append(event)
@@ -256,6 +257,18 @@ class Replayer:
         return attempt_module.SummaryAttempt(
             text=result["text"], error=stand_in_error(result["error"]), route=dict(result["route"] or {}),
             contract=result["contract"] or "", timing=attempt_module.SummaryTiming(started, ended, installed))
+
+    def persisted_output(self, text, *, hermes_home=None):
+        persisted = importlib.import_module(self.module.__name__ + ".ingest_persisted")
+        if not persisted._is_hermes_persisted_output_marker(text):
+            return None
+        if not self.inputs:
+            raise AssertionError("replay: no recorded persisted-output input")
+        event = self.inputs.popleft()
+        if text != event["args"]["text"]:
+            raise AssertionError("replay: persisted-output input differs")
+        result = event["result"]
+        return (result["content"], result["stat"]) if result["outcome"] == "ok" else None
 
     # -- values -------------------------------------------------------------------------------------
     def value(self, raw, key=None):
@@ -293,8 +306,12 @@ class Replayer:
     def home(self, recorded):
         if recorded == self.rec["process_start"]["hermes_home"]:
             return str(self.state.path.parent)
+        if recorded in self.rec["process_start"].get("replay_homes", {}):
+            target = Path(self.rec["process_start"]["replay_homes"][recorded])
+            target.mkdir(parents=True, exist_ok=True)
+            return str(target)
         if recorded not in self.homes:
-            target = self.state.path.parent.parent / f"home-{len(self.homes) + 1}"
+            target = self.state.path.parent / f"home-{len(self.homes) + 1}"
             target.mkdir(parents=True, exist_ok=True)
             self.homes[recorded] = str(target)
         return self.homes[recorded]
@@ -387,8 +404,10 @@ class Replayer:
                 os.environ.pop(key)
             for key, value in event["values"].items():
                 if isinstance(value, str) and key != "HERMES_HOME":
-                    os.environ[key] = value
+                    os.environ[key] = _env_value(key, value, self.rec["process_start"], self.state.path.parent)
             os.environ["LCM_RECORDER_ENABLED"] = "0"
+        elif kind == "config_files":
+            _config_files(event["files"], self.rec["process_start"], self.state.path.parent, self.reader)
         elif kind == "sessions":
             self.state.apply(event["rows"])
         elif kind == "engine_gone":
@@ -477,27 +496,46 @@ def replay(proc, *, plugin_root, workdir, host_path=None, checkpoint=None, mutat
     start = recording["process_start"]
     home = Path(home) if home is not None else workdir / "home"
     home.mkdir(parents=True)
+    config_homes = {str(Path(path).parent) for e in recording["events"] for path in e.get("files", {})}
+    start["replay_homes"] = {path: str(home / f"profile-{i}") for i, path in enumerate(sorted(config_homes))
+                             if path != start["hermes_home"]}
     db = home / Path(start["db_path"]).name
     if recording["snapshot"] is not None:
         shutil.copy2(recording["snapshot"], db)
+    start["payload_dir"] = (recording["status"].get("snapshot") or {}).get("payload_dir", "")
     if recording["payloads"].is_dir():
         shutil.copytree(recording["payloads"], home / "lcm-large-outputs")
     state = _StateServer(home / "state.db")
     state.full(start["sessions"])
     if host_path is not None and str(host_path) not in sys.path:
         sys.path.insert(0, str(host_path))
+    replay_env = {key: _env_value(key, value, start, home)
+        for key, value in (start.get("env") or {}).items() if isinstance(value, str) and key != "HERMES_HOME"}
     saved_env = {k: v for k, v in os.environ.items() if k.startswith("LCM_")}
     for key in saved_env:
         os.environ.pop(key)
-    for key, value in (start.get("env") or {}).items():
-        if isinstance(value, str) and key != "HERMES_HOME":
-            os.environ[key] = value
+    os.environ.update(replay_env)
     os.environ["LCM_RECORDER_ENABLED"] = "0"
     threads = _Threads()
     module = None
     try:
         with HostModules(home) as host:
             module = load_plugin(plugin_root)
+            _config_files(start.get("config_files") or {}, start, home, reader)
+            config_module = importlib.import_module(module.__name__ + ".config")
+            original_from_env = config_module.LCMConfig.from_env
+            effective = original_from_env()
+            for key, value in start["config"].items():
+                if not isinstance(value, reader.Ref):
+                    if key in ("database_path", "large_output_externalization_path") and value:
+                        value = _replay_path(value, start, home)
+                    setattr(effective, key, value)
+            for path in (effective.database_path or db, effective.large_output_externalization_path or home / "lcm-large-outputs",
+                         state.path):
+                _inside_home(path, home)
+            first_config = [effective]
+            config_module.LCMConfig.from_env = classmethod(
+                lambda cls: first_config.pop() if first_config else original_from_env())
             if prepare is not None:
                 prepare(module)
             host_uid = importlib.import_module(module.__name__ + ".host_uid")
@@ -506,6 +544,9 @@ def replay(proc, *, plugin_root, workdir, host_path=None, checkpoint=None, mutat
             ctx = FakeCtx()
             replayer = Replayer(recording, module, ctx, reader, state)
             escalation._invoke_summary_attempt = replayer.summary
+            for name in ("ingest_persisted", "ingest_protection", "engine", "reconcile"):
+                persisted = importlib.import_module(module.__name__ + "." + name)
+                persisted.recover_hermes_persisted_output_with_file_stat = replayer.persisted_output
             module.register(ctx)
             replayer.engines[1] = ctx.offered
             replayer.run(host, threads=threads)
@@ -517,6 +558,60 @@ def replay(proc, *, plugin_root, workdir, host_path=None, checkpoint=None, mutat
         for key in [k for k in os.environ if k.startswith("LCM_")]:
             os.environ.pop(key)
         os.environ.update(saved_env)
+
+
+def _inside_home(path, home):
+    path = Path(path).expanduser().resolve()
+    if not path.is_relative_to(Path(home).resolve()):
+        raise ValueError("path resolves outside replay home")
+    return str(path)
+
+
+def _replay_path(value, start, home):
+    path = Path(value).expanduser().resolve()
+    mappings = [(start["db_path"], home / Path(start["db_path"]).name),
+                (start.get("payload_dir"), home / "lcm-large-outputs"), (start["hermes_home"], home),
+                *[(old, Path(new)) for old, new in start.get("replay_homes", {}).items()]]
+    for source, dest in mappings:
+        if source and path.is_relative_to(Path(source).expanduser().resolve()):
+            return _inside_home(dest / path.relative_to(Path(source).expanduser().resolve()), home)
+    return _inside_home(path, home)
+
+
+def _env_value(key, value, start, home):
+    if key in ("LCM_DATABASE_PATH", "LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH"):
+        return _replay_path(value, start, home) if value else value
+    if Path(value).is_absolute():
+        try:
+            return _replay_path(value, start, home)
+        except ValueError:
+            pass
+    return value
+
+
+def _config_files(files, start, home, reader):
+    import yaml
+    def clean(value):
+        if isinstance(value, reader.Ref):
+            return None
+        if isinstance(value, dict):
+            return {k: clean(v) for k, v in value.items() if not isinstance(v, reader.Ref)}
+        if isinstance(value, list):
+            return [clean(v) for v in value]
+        if isinstance(value, str) and Path(value).is_absolute():
+            try:
+                return _replay_path(value, start, home)
+            except ValueError:
+                pass
+        return value
+    for source, entry in files.items():
+        target = Path(_replay_path(source, start, home))
+        if entry.get("state") == "absent":
+            target.unlink(missing_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            values = clean(entry.get("values") or {})
+            target.write_text(yaml.safe_dump(values))
 
 
 class _TagShim:
