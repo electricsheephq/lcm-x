@@ -149,6 +149,15 @@ def test_anchor_disagreement_wins(engines, other_index):
     assert mark(engine) == ids[-1]
 
 
+def test_anchor_match_on_own_row_binds(engines):
+    engine = engines()
+    view = history(2)
+    ids = unbound(engine, view)
+    write(engine, view, matched={0: ids[0]})
+    assert not count(engine, "rebind.skipped.anchor_disagree")
+    assert {b["store_id"] for b in migrated(engine)} == set(ids)
+
+
 def test_unstamped_left_unbound(engines):
     engine = engines()
     view = [_m("user", "untimed", None), history()[1]]
