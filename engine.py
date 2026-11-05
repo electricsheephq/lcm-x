@@ -11455,13 +11455,13 @@ class LCMEngine(
         return (tail["store"] is self.__dict__.get("_store")
                 and tail["hermes_home"] == str(self._hermes_home or ""))
 
-    def _retry_cold_tail(self, tail, *, sibling):
+    def _retry_cold_tail(self, tail, *, sibling, deadline=None):
         tail.pop("kept_on_conflict", None)
         if not self._cold_tail_is_bound(tail):
             if tail["store"]._conn is None:
                 self._ledger_count("ledger.tail.cold_store_unbound")
                 return False
-            return self._retry_cold_tail_s3(tail, stamps=True, hermes_home=tail["hermes_home"])
+            return self._retry_cold_tail_s3(tail, stamps=True, hermes_home=tail["hermes_home"], deadline=deadline)
         same = (not sibling and tail["session_id"] == self._session_id
                 and _normalize_conversation_id_value(tail["conversation_id"]) ==
                     _normalize_conversation_id_value(self._conversation_id))
@@ -11478,7 +11478,7 @@ class LCMEngine(
                 # The view can be older than the session's history. A cold start would move the live cursor: as for
                 # another session, only a matching stored prefix gets the view's missing rows. Stamps count here
                 # too, so a retyped row never stands for the view's own.
-                if not self._retry_cold_tail_s3(tail, stamps=True):
+                if not self._retry_cold_tail_s3(tail, stamps=True, deadline=deadline):
                     return False
                 self._ingest_cursor_needs_reconcile = True
                 return True
@@ -11488,7 +11488,7 @@ class LCMEngine(
             self._ingest_messages(tail["view"], allow_session_end_replay_proof=False, no_view=True, retried_tail=tail)
             # The host can still rewrite this view, so the next ingest finds its own cursor.
             self._ingest_cursor_needs_reconcile = True
-            if conflict is not None and not self._cold_tail_conflict_placed(tail, conflict):
+            if conflict is not None and not self._cold_tail_conflict_placed(tail, conflict, deadline=deadline):
                 tail["kept_on_conflict"] = True
                 self._ledger_count("ledger.tail.cold_unmatched")
                 if not tail.get("unmatched_warned"):
@@ -11498,7 +11498,7 @@ class LCMEngine(
             return True
         # Another session, or this one under a binding that stores nothing: the S3 route. This session keeps its stamp
         # check, so a retyped row never stands for the view's own.
-        return self._retry_cold_tail_s3(tail, stamps=same)
+        return self._retry_cold_tail_s3(tail, stamps=same, deadline=deadline)
 
     def _cold_tail_one_conflict(self, tail):
         """Return the sole unexplained user stamp conflict in an identity-matching prefix."""
@@ -11521,7 +11521,7 @@ class LCMEngine(
             return None
         return index, message, stamp
 
-    def _cold_tail_conflict_placed(self, tail, conflict):
+    def _cold_tail_conflict_placed(self, tail, conflict, *, deadline=None):
         """Find the occurrence throughout the tail's own session and conversation."""
         _, message, stamp = conflict
         session, home, start = tail["session_id"], tail["hermes_home"], 0
@@ -11534,6 +11534,8 @@ class LCMEngine(
                    self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home) == identity
                    for row in rows):
                 return True
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
             start = rows[-1]["store_id"] + 1
         return False
 
@@ -11554,7 +11556,7 @@ class LCMEngine(
                 return None
         return len(stored)
 
-    def _retry_cold_tail_s3(self, tail, *, stamps=False, hermes_home=None):
+    def _retry_cold_tail_s3(self, tail, *, stamps=False, hermes_home=None, deadline=None):
         view, session = tail["view"], tail["session_id"]
         ids = []
         with tail["store"].ingest_atomic():
@@ -11564,7 +11566,7 @@ class LCMEngine(
                 if stored < len(view):
                     self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
                         conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
-                if self._cold_tail_conflict_placed(tail, conflict):
+                if self._cold_tail_conflict_placed(tail, conflict, deadline=deadline):
                     return True
                 stored = None
             if stored is None:
@@ -11599,7 +11601,7 @@ class LCMEngine(
                     [store._conn], max(0, int((deadline - time.monotonic()) * 1000)),
                 ):
                     if tail.get("kind") == "cold":
-                        if self._retry_cold_tail(tail, sibling=sibling):
+                        if self._retry_cold_tail(tail, sibling=sibling, deadline=deadline):
                             committed = True
                             self._pending_session_tails.remove(tail)
                         if time.monotonic() >= deadline:

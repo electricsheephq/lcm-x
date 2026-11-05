@@ -1519,3 +1519,66 @@ def test_exit_count_with_another_threads_write_lock_keeps_the_whole_view(engines
         assert not holder.is_alive() and not errors
         assert engine._pending_session_tails == [tail]
         assert committed_rows(store.db_path, "S") == before
+
+
+@pytest.mark.parametrize("route", ["same_session", "stamps_off"])
+@pytest.mark.parametrize("expired", [True, False], ids=["expired", "generous"])
+def test_cold_conflict_placement_scan_obeys_drain_deadline(engines, monkeypatch, caplog, route, expired):
+    engine = engines()
+    queued, resent = cold_resend_views()
+    with resumed_cold_resend(engine, monkeypatch, queued, resent) as (tail, _):
+        store = tail["store"]
+        with store.ingest_atomic():
+            for i in range(1000):
+                store.append("S", _m("assistant", f"padding-{i}", 10. + i), source="cli", conversation_id="conv")
+            store.append("S", queued[-1], source="cli", conversation_id="conv")
+        before = committed_rows(store.db_path, "S")
+        assert len(before) == 1006
+        pages, read, scan = [], store.get_range, engine._cold_tail_conflict_placed
+
+        def observed_read(*args, **kwargs):
+            rows = read(*args, **kwargs)
+            pages.append(len(rows))
+            return rows
+
+        def observed_scan(*args, **kwargs):
+            with monkeypatch.context() as patch:
+                patch.setattr(store, "get_range", observed_read)
+                return scan(*args, **kwargs)
+
+        caplog.clear()
+        deadline = time.monotonic() - 1. if expired else time.monotonic() + 30.
+        with monkeypatch.context() as patch:
+            patch.setattr(engine, "_cold_tail_conflict_placed", observed_scan)
+            engine._retry_pending_session_tails(deadline=deadline, sibling=route == "stamps_off")
+        warning = [record for record in caplog.records if record.levelno >= logging.WARNING]
+        if expired:
+            assert pages == [1000]
+            assert engine._pending_session_tails == [tail]
+            assert count(engine, "tail.cold_unmatched") == 1
+            assert len(warning) == 1 and "retry pending" in warning[0].getMessage()
+            assert engine in maintenance_scheduler._PENDING_TAIL_ENGINES
+        else:
+            assert pages == [1000, 6]
+            assert not engine._pending_session_tails
+            assert count(engine, "tail.cold_unmatched") == 0 and not warning
+            assert engine not in maintenance_scheduler._PENDING_TAIL_ENGINES
+        assert committed_rows(store.db_path, "S") == before
+
+
+def test_repeated_cold_start_retry_after_storing_absent_suffix_adds_nothing(engines, monkeypatch, caplog):
+    engine = engines()
+    queued, resent = cold_resend_views()
+    queued.append(_m("assistant", "absent reply", 5.5))
+    with resumed_cold_resend(engine, monkeypatch, queued, resent) as (tail, _):
+        caplog.clear()
+        engine._retry_pending_session_tails(deadline=time.monotonic() + 30.)
+        rows = committed_rows(tail["store"].db_path, "S")
+        assert [row["content"] for row in rows] == ["A", "B", "C", "D", "Q", "absent reply"]
+        assert engine._pending_session_tails == [tail]
+        for _ in range(2):
+            engine._retry_pending_session_tails(deadline=time.monotonic() + 30.)
+            assert engine._pending_session_tails == [tail]
+            assert committed_rows(tail["store"].db_path, "S") == rows
+        assert count(engine, "tail.cold_unmatched") == 3
+        assert sum("conflicting stamp unplaced" in record.getMessage() for record in caplog.records) == 1
