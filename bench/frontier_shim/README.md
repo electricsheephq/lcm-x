@@ -71,6 +71,15 @@ exception text are never included. FMP traces and leased-home rollouts are
 separate, sensitive raw artifacts; rollouts stay enabled for identity and quota
 readback. Record leased-home disk growth during smoke and pilot; prune nothing.
 
+Operator cautions:
+- Stop the harness stage before the shim. After SIGTERM, a request already
+  waiting for a slot can still start one Codex call (up to 540 seconds).
+- A record with no rollout returns 503, and without rollouts the weekly brake
+  cannot fire. If the call log shows one, stop the stage and check the leased
+  home before resuming.
+- A second SIGTERM or SIGINT is ignored. SIGKILL is the only hard stop, and it
+  orphans a running Codex child.
+
 ## Release-manager-only five-question real-lanes smoke (not run by this lane)
 
 Prerequisites: Parts A2/B have supplied a **scratch harness copy**, the five
