@@ -273,6 +273,46 @@ def plan_ordinals(existing, placements):
     return result, {old: new for old, new in zip(original, positions) if old != new}
 
 
+def plan_rebinds(store, conversation_id, session_id, salt, attempt, mark):
+    """Plan exact own-session pairs, including bound hits in the uniqueness test."""
+    want, skipped = defaultdict(list), Counter()
+    for i, entry in enumerate(attempt["entries"]):
+        if i in attempt["stored"]:
+            continue
+        stamp = attempt["stamps"][i]
+        if stamp is None:
+            skipped["unstamped"] += 1
+        else:
+            want[stamp, entry.identity_digest].append(i)
+    if len(want) > 4096:
+        return dict(pairs=[], skipped=Counter(too_large=1), too_large=True)
+    rows = store.find_rows_by_observed_at(conversation_id, [session_id], [float(s) for s, _ in want])
+    keyed = defaultdict(list)
+    for row in rows:
+        if rows.canonical_stamps.get(row["store_id"]) == row["observed_at"]:
+            keyed[stamp_text(row["observed_at"]), identity_digest(salt, row)].append(row["store_id"])
+    bound = {r[0] for r in store._conn.execute(
+        "SELECT store_id FROM occurrence_bindings WHERE store_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(sorted({r["store_id"] for r in rows})),))}
+    pairs = []
+    for key, indexes in want.items():
+        hits = keyed.get(key, ())
+        if not hits:
+            continue
+        if len(indexes) != 1 or len(hits) != 1:
+            skipped["ambiguous"] += len(indexes)
+            continue
+        i, sid = indexes[0], hits[0]
+        if sid in bound or sid <= (mark or 0):
+            skipped["already_bound"] += 1
+        elif (attempt["matched"].get(i) not in (None, sid)
+              or any(j != i and value == sid for j, value in attempt["matched"].items())):
+            skipped["anchor_disagree"] += 1
+        else:
+            pairs.append((i, sid))
+    return dict(pairs=sorted(pairs, key=lambda pair: pair[1]), skipped=skipped, too_large=False)
+
+
 def lineage_key(host_uid_key: str | None, session_id: str) -> str:
     """Use the resolved key (the host lookup's first value), never cache it here."""
     if host_uid_key and host_uid_key.startswith("provisional:"):

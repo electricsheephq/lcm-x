@@ -83,7 +83,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_host_uid_lineage_cache", "_engine_uids_pending", "_engine_uids_recorded",
     "_pending_ingest_frontier", "_last_ingest_attribution", "_end_attribution", "_ingest_read_only",
     "_ingest_ledger_attempt", "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
-    "_ledger_rollback_failures_published", "_ledger_adopted", "_frozen_ledger_prepared", "_frozen_tail_reached",
+    "_ledger_rollback_failures_published", "_ledger_adopted", "_ledger_rebind_too_large", "_frozen_ledger_prepared", "_frozen_tail_reached",
     "_compress_calls", "_emission_handle",
 })
 Trace = list[str]
@@ -352,6 +352,7 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
                                             "_compress_calls", "_emission_handle",
                                             "_ledger_rollback_failures_published",
                                             "_ledger_adopted",  # Commit-only optimization; observed in the attribute stream.
+                                            "_ledger_rebind_too_large",  # In-process cap memo; observed, not a durable outcome.
                                             "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned"}):
         value = observed_attribute(engine, name)
         if name == "_db_path":

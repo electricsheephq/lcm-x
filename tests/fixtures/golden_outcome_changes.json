@@ -89,72 +89,72 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "durable-end-allow-end": {
-      "outcome_sha": "0e77bec217ec02734e46b39d5089152ce50b60790f78d3a2780e8b71dc26bdef",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "5e47d65e4e76e40e3767d1841a0d7e58967cbde27b85dedd67debf2d4442f010",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "durable-end-delta": {
       "outcome_sha": "2fc4f6b5ae8400e12c556e445af46b87d7a4af0e32094018b076091d6da5f96a",
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "durable-end-full": {
-      "outcome_sha": "0e77bec217ec02734e46b39d5089152ce50b60790f78d3a2780e8b71dc26bdef",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "5e47d65e4e76e40e3767d1841a0d7e58967cbde27b85dedd67debf2d4442f010",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "durable-end-new-uid": {
-      "outcome_sha": "b146775f3083cd2fbcbbee599db7cb82c9c1224cd63f3facb65cf18a04e2526d",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "d658e705f82edb9c2db11af29e4a82544782064d0bfbed5592190a93460e3301",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "durable-metadata-conflict": {
       "outcome_sha": "1d73ee4822d8f1eab9f0117530c63fe26dd6fa8b8bc514c152e69656cb37aa8b",
       "reason": "#1286: a warm ingest stores a row out of host order, so the durable commit proof is re-keyed (two metadata writes: the proof and the host occurrence snapshot) and the later cold bind proves its cursor from it; the re-key's store reads add two host-rewrite cache entries; no return or alias outcome changed"
     },
     "durable-v2-allow-end": {
-      "outcome_sha": "4a50c398cb1026a014036d2a12d052468fb33f95339269d020fee89a3c81beee",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "5a4d2099d8089b9198faad7df5bd2e8fd14b0c76c8ab62df65fab9303286e504",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "durable-v2-delta": {
       "outcome_sha": "26b40c1f2bf7c76820e8d93b7a707b47c7a3363be99ee326ce1fe13e309f4198",
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "durable-v2-full": {
-      "outcome_sha": "4a50c398cb1026a014036d2a12d052468fb33f95339269d020fee89a3c81beee",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "5a4d2099d8089b9198faad7df5bd2e8fd14b0c76c8ab62df65fab9303286e504",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "durable-v2-new-uid": {
-      "outcome_sha": "936ffebd7b95bd6bef668ade320b30ccd13802125bf3003b0553e288ac85f4f9",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "af9e532a860e2e8f6cd593c5073797071ee7ecdcee0636311fd595843592a5ba",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "durable-v3-allow-end": {
-      "outcome_sha": "61e86d395657e48c7c5469b7ce34633ce64d5a3aa3a61afd74aea1f101ab67de",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "4ee11357a7adb6c0991029a5a9fa5518213b4be42a1854b773b961854c628924",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "durable-v3-delta": {
       "outcome_sha": "0d2e232c77a238016cf646541715e40ea1534605c9f0bc0eb4be6dc1de687f02",
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "durable-v3-full": {
-      "outcome_sha": "61e86d395657e48c7c5469b7ce34633ce64d5a3aa3a61afd74aea1f101ab67de",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "4ee11357a7adb6c0991029a5a9fa5518213b4be42a1854b773b961854c628924",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "durable-v3-new-uid": {
-      "outcome_sha": "14fea8573cadc03f4c0273db9cd65c351d1d744bdd86a24803247b5bdf73398c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "2153bca9754eccd10af1005d63cc54c5d06c5104e9348141325fce2e19552f23",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "durable-v4-allow-end": {
-      "outcome_sha": "d8f09b8f8a162ab9e882725dbcebe2a1213a131c959ba7a8fc471e708a032c8f",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "3ad9cf82a1cd2c98a702d474f968ab694ca0e3427565f665b627fffcdbd1c0a2",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "durable-v4-delta": {
       "outcome_sha": "68710f3c72326f79a84b5d9d12fde24bb6e84a31f2304c0b33d69ff03cf2380b",
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "durable-v4-full": {
-      "outcome_sha": "d8f09b8f8a162ab9e882725dbcebe2a1213a131c959ba7a8fc471e708a032c8f",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "3ad9cf82a1cd2c98a702d474f968ab694ca0e3427565f665b627fffcdbd1c0a2",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "durable-v4-new-uid": {
-      "outcome_sha": "f9f9b928213d9ec3d145f16a43c3b6321260ce53adaf7e829c716dace222278e",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "0a5704aeb5d26a82860e9ce38b1b865a446aefaf107bc42f0fdf43ae15c28ca7",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "empty-all-ordinals": {
       "outcome_sha": "ee6153c1df98fa617f1af800f7c328f47da3ea5d0368fccc6df7b266fd9ec604",
@@ -173,24 +173,24 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "ignored-full": {
-      "outcome_sha": "7bb879ba5b8e7b7e830fadc0eb20f8f9660705d1c765690f94f1f8e2e3519211",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "58a614908fdf239f03135b8dcbc7fa39b3e908662707509a789ef114a539e992",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "ignored-new": {
       "outcome_sha": "c46b6a943ff59b3722d9f873d30c7ec251bb48bbbb796c470babf13f31265431",
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "ignored-prefix": {
-      "outcome_sha": "8e33bbe2dfd2e224c196d0a336e7996b51f3551ed0096041b39e8673a9f68bfb",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "43b9d840b6321bd0dfbe95caec1123a6d480c1312ac478c3959aa56ae58e04bb",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state; the cold cursor avoids repeating ignore-pattern accounting"
     },
     "ignored-rewrite": {
-      "outcome_sha": "62e5731d823156842e5d1d324ac8b057f5fe3757c96a2a69dceda1090abeccf0",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "d8d5382e7623ec7ca7b88d34ded57eef447154ec26568a370a3545177cf37c1a",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "ignored-suffix": {
-      "outcome_sha": "d6785c9d193e38e1cf67375ac016297c85dce4d8bc7413e9d61a22e42c147577",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a3f7b22d38fa9f7fabb1047bbd625a5001790fb79cf2096510578ee1fd912ff7",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
     },
     "ignored-warm": {
       "outcome_sha": "627d3b776dac73070d0768f6a15e41487b0c3847ec8e34db7e16959588e76e3e",
@@ -201,28 +201,28 @@
       "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
     },
     "marker-delta": {
-      "outcome_sha": "353dca9f35ebbbef4019cbd66193ef5da0db54574e810dcc39d44e22b68cb283",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "5e50f6a7a69ea280e535a75e0d10726857f9be9ba24b63dd52e47476963367d9",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state; the cold cursor avoids one duplicate persisted-output tool row; all distinct row payloads remain"
     },
     "marker-full": {
-      "outcome_sha": "976deacf7e8b87a42115f6b662eba6d13afe145eca34e1f6e3b3d82ddd50836b",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "07fb332c63b3e3b70f6a6fd95bf2cccea747f0cc90daa95bcfc20b223741c06a",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state; the cold cursor avoids one duplicate persisted-output tool row; all distinct row payloads remain"
     },
     "marker-new": {
       "outcome_sha": "359e6ad7c0294bba0c98d40562bc6be3e1418cee28b2d6d6bfa843ca5a48c803",
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "marker-prefix": {
-      "outcome_sha": "d88827044c14188d766f5b0fcc96d3acac502f7ad3b902975ba71bb473bf4277",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "37afc547f414443ed972e483023ae37ae845a51dcd62ea7720956046a46fc139",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
     },
     "marker-rewrite": {
-      "outcome_sha": "728011472f07b7753f35c0c5aa933628655561db9d33c2e1d21682b42c8a680a",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "fd7216c4ad033add5c9496162e6a3ee5ec8b1a5a1086475e8d1141f3a6f958af",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state; the cold cursor avoids one duplicate persisted-output tool row; all distinct row payloads remain"
     },
     "marker-suffix": {
-      "outcome_sha": "ac89e15112f10da29abd9ad64845aa5d08f7e87a5e51fb131feb65aa17a7c755",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "ea7b83cfd48a1ee2571e4b7fadc5225bd0164a64ec13ed905444baa4e884899b",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state; the cold cursor avoids one duplicate persisted-output tool row; all distinct row payloads remain"
     },
     "marker-warm": {
       "outcome_sha": "8ef7f956f59c0233a268f279aa2d515c62153d02981bc9fa58541383f5231b06",
@@ -581,16 +581,16 @@
       "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
     },
     "reconcile-tool-after-new": {
-      "outcome_sha": "e3c1327bfc997b086d9a4a7cac9c6bb9e2f3e5359a2d8557358b14f119092d13",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "2991ea58eb142f621e513dace8a4ff3ebfb90a18863e6f6aef5a51c039a55c71",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
     },
     "repeated-equal-occurrences": {
       "outcome_sha": "6c9ca3d51c8850c00c16ef49d814db811c715f68f328e6f8cccee8365991fa3b",
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "repeated-tool-id": {
-      "outcome_sha": "14d595579063940d261252aab97b1a14a505843fd279992bfdb1071cfcfe5729",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "b6927d0dc3ec9ecb9dc1a357ff714efce5a22038dc74590098ba0f45f5398ef8",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
     },
     "replay-build-mapped-ignore": {
       "outcome_sha": "705c4ffa4f898254f7662a813a8ec1a66409ef7062a038052f200dd2fc1adc17",
@@ -645,8 +645,8 @@
       "reason": "P1e PR-A (#1440): a queued session-end tail now carries kind and its frozen ledger evidence; no other outcome changed"
     },
     "sqlite-durable": {
-      "outcome_sha": "43eaf4b0f0f8d2c75d7fb204fa7c9d59eb255d7ebb123d5eef1b5cd6115a8092",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "85fb46d00198bd22b91d5c164ddeb5903d69bdbcb69b7ed870ca4675bdf30aa7",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "sqlite-locked": {
       "outcome_sha": "635c618292d0be5fe516ffeafc4b980bd321f017f6043e314b1c887afc9e38a7",
@@ -705,24 +705,24 @@
       "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves stamped re-deliveries of the same assistant and tool rows already stored, so they are not stored again (7 rows instead of 9); every distinct occurrence remains and no row is added"
     },
     "tools-delta": {
-      "outcome_sha": "0c1c64cbb04be8a8f335ae71901105a9e9ad04c741769c00083209fdcbf6b052",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "ac4852cc168100d6d24441397cec3ddaac37695198069e13e2fb9cee0bcb3458",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
     },
     "tools-full": {
-      "outcome_sha": "ea01ed4c9a7cd1216edffbc216fb9be79338a62a5aa17b9cc9be6cbb59b91cc7",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "12c85096f619e11daee01565c1133b60c663d0d43bfe25ea8ec1a91a679c9c96",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
     },
     "tools-new": {
       "outcome_sha": "f300a7e059328c9a46dea32458ae6e90d8674e195ce1387323da96b0432c0034",
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "tools-prefix": {
-      "outcome_sha": "f1896ee1c3ff77e2e5fa5b8c73bdeab3e25067e5f22aa0de2ec765005285c19d",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "1a98c2d697aba9b381a6319d646a896b528678286c467c2bed522d5276db68c9",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
     },
     "tools-rewrite": {
-      "outcome_sha": "1209f86f1f0a12b1dc945dae17a24ecfa377378acc3ed9e31b20c5c33224587f",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "3a217a7b9b236116b7dd5a2caa1e5466d86d1c4f71c1aa4b74e334e1cd91ffdb",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
     },
     "tools-suffix": {
       "outcome_sha": "c5ee95318464128985136e6654bb6d95bd2d54ae82b47d3360629dad55c6fe0c",
@@ -741,24 +741,24 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "turns-full": {
-      "outcome_sha": "0e77bec217ec02734e46b39d5089152ce50b60790f78d3a2780e8b71dc26bdef",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "5e47d65e4e76e40e3767d1841a0d7e58967cbde27b85dedd67debf2d4442f010",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "turns-new": {
       "outcome_sha": "5623eaef3bdf620323e0f109e7751f551d6b39624b7b793a4fa98821544c5df7",
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "turns-prefix": {
-      "outcome_sha": "2e6ab8ceceade23f4ae24e6caeb3e3190e33f971151c292f357d091138a64258",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "592e434a16fee0d3b418db6998f81902ed751af801ddafd4bf5143887c14e162",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
     },
     "turns-rewrite": {
-      "outcome_sha": "ace738b9edb593e843ca96d8ce7a50bf7fcba23bb4ad2febfe055d00788fc39d",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "cb58a1b3167e686d25298f7ffff5b70117d0ee0e41e8008831a27b63799a8769",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "turns-suffix": {
-      "outcome_sha": "20014c2e61b80467d2ff82c807b0f1c2fd096ffbe0b7445d5425cb6d7abd6581",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "440389d6c4bf519220c02ca4169038e735b48ecded1ac2f1be16de8a7a0ea3ba",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
     },
     "turns-warm": {
       "outcome_sha": "12c9d6da86dbb8cbe1eb8702ba43c71425de46f3f5a85290b190acb37d878e3c",
@@ -785,24 +785,24 @@
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "whitespace-full": {
-      "outcome_sha": "58fadd706e836d5cc8d9226b8fc7e1dc0ccfcb8a60a4c069412db50cc71a704f",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "9ae13effe5d0f82e1a370531812c310c4c9a6d284e9874db74146adf6465ba6b",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "whitespace-new": {
       "outcome_sha": "fc561790bebde706a91e89bc6ce7614299356da69eef02d58f4111085ae6541c",
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     },
     "whitespace-prefix": {
-      "outcome_sha": "f9eebc240f419ddfed8183cafd58232517594640e127488979d16bce64a4aff9",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "66a7d66d500fa6ec2b6a0f5944a6f9d9c3bc21527cbdfa9a4c539a0da0ef863b",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
     },
     "whitespace-rewrite": {
-      "outcome_sha": "5cfef677a6de268d596dc208d016347400c90f7b77e7f2c8f7207390dea88285",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "4a5f0e6d97f60a34140017ba2e0af8f7a2597baba43b81c941e952cc537b504a",
+      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
     },
     "whitespace-suffix": {
-      "outcome_sha": "1fcdbe737f2abde8790e80ef222a0fa38766decafa8a83b41d867b47d5194886",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "996aca9fe335cf1631f2a58578b89756157245de43c297436f31ff27a8fa30b2",
+      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
     },
     "whitespace-warm": {
       "outcome_sha": "489a4f0037919e5b1d52091a36bb2899734904748c90824e88d093c63f3d6df6",

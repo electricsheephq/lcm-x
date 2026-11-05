@@ -7433,6 +7433,13 @@ class LCMEngine(
                     groups = [[(attempt["stored"][idx], "generated_unproven", None, None, None)] for idx in sorted(flagged)]
                     delta["ledger.generated_unproven_rows"] += store.add_message_relations(groups)
                 delta.update("ledger.marker_rows." + kind for kind in markers.values())
+                mark, session_top, lag = conn.execute(
+                    "SELECT mark,max(store_id),count(m.store_id) FILTER (WHERE NOT EXISTS "
+                    "(SELECT 1 FROM occurrence_bindings b WHERE b.store_id=m.store_id)) FROM "
+                    "(SELECT (SELECT max_store_id FROM lineage_marks WHERE lineage=?) AS mark) "
+                    "LEFT JOIN messages m ON m.session_id=? AND m.store_id>coalesce(mark,0) "
+                    "AND m.store_id NOT IN (SELECT value FROM json_each(?))",
+                    (lineage, self._session_id, json.dumps(sorted(attempt["stored"].values())))).fetchone()
                 ids = set(attempt["matched"].values()) | {sid for sid, _kind, _stamp in attempt["observations"]}
                 by_store = {}
                 for sid, occ, ordinal in conn.execute(
@@ -7479,6 +7486,7 @@ class LCMEngine(
                     if stamp not in stamps and len(stamps) < 4:
                         observations.append((sid, kind, stamp))
                         stamps.add(stamp)
+                seq, rebind_ok = None, True
                 if pending or observations or not same or changed_ref:
                     seq = ingest_ledger.next_view_seq(conn)
                     if respace:
@@ -7494,11 +7502,67 @@ class LCMEngine(
                         entries[idx] = entries[idx]._replace(ref=None if idx in attempt["remainders"] else occ)
                     for sid, kind, stamp in observations:
                         ingest_ledger.add_stamp_observation(conn, lineage, by_store[sid][0][0], stamp, kind, seq)
-                    if not attempt.get("no_view"):
-                        ingest_ledger.write_view(conn, attempt["salt"], lineage, "ingest", None, entries,
-                                                 view_seq=seq, precomputed_chain=attempt["chain"])
-                        delta["ledger.views_written"] += 1
                     delta["ledger.bindings_written"] += len(rows)
+                memo = (store.db_identity, attempt["salt"], self._session_id)
+                if lag:
+                    rebind_ok = memo not in getattr(self, "_ledger_rebind_too_large", ())
+                    if rebind_ok:
+                        flag, rebind_delta = getattr(store, "_pending_relation_schema", False), Counter()
+                        delta["ledger.rebind.runs"] += 1
+                        try:
+                            with _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
+                                plan = ingest_ledger.plan_rebinds(store, str(self._conversation_id or ""),
+                                    self._session_id, attempt["salt"], attempt, mark)
+                                kept = list(conn.execute("SELECT store_id,ordinal FROM occurrence_bindings WHERE lineage=? "
+                                    "AND disposition IN ('stored','migrated','ambiguous') ORDER BY store_id", (lineage,))) if plan["pairs"] else []
+                                pairs, placements, last = [], [], (0, 0)
+                                for i, sid in plan["pairs"]:
+                                    left = next((o for s, o in reversed(kept) if s < sid), None)
+                                    right = next((o for s, o in kept if s > sid), None)
+                                    bounds = (left or 0, right if right is not None else 1 << 63)
+                                    if bounds[0] >= bounds[1] or any(a < b for a, b in zip(bounds, last)):
+                                        plan["skipped"]["crossed"] += 1
+                                        continue
+                                    pairs.append((i, sid))
+                                    placements.append(ingest_ledger.Placement(left, right))
+                                    last = bounds
+                                rebind_seq = seq if seq is not None else ingest_ledger.next_view_seq(conn) if plan["pairs"] else None
+                                refs = []
+                                if pairs:
+                                    labels, mapping = ingest_ledger.plan_ordinals(ingest_ledger.lineage_ordinals(conn, lineage), placements)
+                                    if mapping:
+                                        ingest_ledger.apply_respace(conn, lineage, mapping)
+                                        rebind_delta["ledger.respaced"] += 1
+                                    refs = ingest_ledger.insert_bindings(conn, lineage, [dict(ordinal=o, store_id=sid,
+                                        identity_digest=entries[i].identity_digest, stamp=attempt["stamps"][i],
+                                        disposition="migrated", key_rank=None, tag=None, view_seq=rebind_seq)
+                                        for (i, sid), o in zip(pairs, labels)])
+                            for (i, _sid), occ in zip(pairs, refs):
+                                entries[i] = entries[i]._replace(ref=occ)
+                            if plan["pairs"]:
+                                seq = rebind_seq
+                            rebind_delta.update({"ledger.rebind.skipped." + k: n for k, n in plan["skipped"].items()})
+                            rebind_delta["ledger.rebind.bound"] += len(pairs)
+                            delta.update(rebind_delta)
+                            rebind_ok = not plan["too_large"]
+                            if not rebind_ok:
+                                self.__dict__.setdefault("_ledger_rebind_too_large", set()).add(memo)
+                        except BaseException as exc:
+                            store._pending_relation_schema = flag
+                            if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
+                                    or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                                raise
+                            delta["ledger.rebind_failed"] += 1
+                            rebind_ok = False
+                    delta["ledger.rebind.residual"] += lag - rebind_delta.get("ledger.rebind.bound", 0) if rebind_ok else lag
+                if seq is not None and not attempt.get("no_view"):
+                    ingest_ledger.write_view(conn, attempt["salt"], lineage, "ingest", None, entries,
+                                             view_seq=seq, precomputed_chain=attempt["chain"])
+                    delta["ledger.views_written"] += 1
+                target = max(mark or 0, session_top or 0, *attempt["stored"].values())
+                if rebind_ok and not attempt.get("no_view") and target != (mark or 0):
+                    ingest_ledger.update_store_mark(conn, lineage, target)
+                    delta["ledger.store_mark_advanced"] += 1
         except BaseException as exc:
             store._pending_relation_schema = pending_relation_schema
             if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
