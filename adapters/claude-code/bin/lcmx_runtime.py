@@ -44,8 +44,9 @@ def claude_projects_root(environ: Mapping[str, str]) -> Optional[Path]:
 
 def relative(environ: Mapping[str, str], setting: str) -> bool:
     """Whether a path setting is relative. A hook checks paths from the project folder Claude Code
-    runs it in, while the worker and the reader run in the store home, so a relative
-    ``LCMX_PYTHON`` or ``LCMX_PACKAGE_ROOT`` cannot name one file for both: it is refused."""
+    runs it in, the worker runs in the store home, and the reader in whatever folder Claude Code
+    starts it in, so a relative ``LCMX_PYTHON`` or ``LCMX_PACKAGE_ROOT`` names no one file for all
+    of them: it is refused."""
     configured = environ.get(setting)
     return bool(configured) and not Path(configured).expanduser().is_absolute()
 
