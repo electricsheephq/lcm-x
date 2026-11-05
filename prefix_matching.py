@@ -318,7 +318,7 @@ class PrefixMatchingMixin:
         *,
         source: str,
         conversation_id: str,
-        store=None, hermes_home=None,
+        store=None, hermes_home=None, context_window_tokens=None,
     ) -> list[int]:
         if not session_id or not suffix:
             return []
@@ -342,7 +342,8 @@ class PrefixMatchingMixin:
             session_id=session_id,
             config=self._config,
             hermes_home=self._hermes_home if hermes_home is None else hermes_home,
-            context_window_tokens=store.get_context_window_tokens(session_id),
+            context_window_tokens=(store.get_context_window_tokens(session_id)
+                                   if context_window_tokens is None else context_window_tokens),
         )
         host_uids = self._host_uid_capture(kept, kept, 0, 0, None, (), session_id=session_id,
             **(dict(store=store) if hermes_home is not None else {}))  # v0.26.0 shadow
