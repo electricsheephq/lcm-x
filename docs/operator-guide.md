@@ -1612,8 +1612,8 @@ Result flags. Every result is the production JSON object prefixed with
 | Field | Meaning |
 | --- | --- |
 | `store_uuid` | The store's id. Hermes does not stamp one, so for a Hermes store it is derived from the file's identity (its path, device and inode), with `store_uuid_source: derived`. It stays the same while the file stays in place; a copy, a move to another volume or a restore that replaces the file gets a new id, so ids a client qualified with the old one are refused as `foreign_store` (bare ids still work). A store whose writer stamped an id in its metadata reports that id, with `store_uuid_source: metadata`. |
-| `reader.degraded` | `embedding_identity_mismatch`: the store's active embedding identity (provider, model, revision, dimension, dtype) differs from the reader's model. `provider_unavailable`: no local model is cached (the server never downloads one), or the profile uses a cloud provider, which the reader never calls. Either way only full text answers. |
-| `reader.tokenizer` | `estimate` while the tokenizer is not loaded (the server waits up to 30 s at start); content cut by token budget can then differ from Hermes' cut. |
+| `reader.degraded` | `embedding_identity_mismatch`: the store's active embedding identity (provider, model, revision, dimension, dtype) differs from the reader's model. `provider_unavailable`: no local model is cached (the server never downloads one), the profile uses a cloud provider, which the reader never calls, or the model is still warming up after the server started. Either way only full text answers. |
+| `reader.tokenizer` | `estimate` while the tokenizer is not loaded; content cut by token budget can then differ from Hermes' cut. The server answers at once and loads the tokenizer and the query model in the background, so its first calls can be `estimate` and `provider_unavailable`. |
 | `reader.capabilities` | Optional parts of the store: FTS indexes, the stem index, embeddings, chunk vectors, the summary provenance sidecar, lifecycle state. A missing one degrades that feature instead of failing the call. |
 
 Ids in tool arguments (`store_id`, `node_id`, `session_id`, `externalized_ref`,
