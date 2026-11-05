@@ -6,7 +6,7 @@ Tracker: #1993 (v0.30.0, "nothing lost"). Status: reviewed; ready for phase P1 (
 - Finding ids from those reviews (A1-A12, L1-1 to L5-10, "Astra n") stay in parentheses for traceability. The review record itself is not published. In §5a, A and C mark the Codex and Claude reviewers' findings.
 - In §1 and §5, C1-C4 name the three commit points and the injected-crash cells built on them.
 - E1-E7 are this design's rules (§2) and M1-M16 its decisions (§6). I-numbers (for example I1 and I5) are the invariants in [docs/invariants.md](invariants.md).
-- File and line references are at commit 0eb6e8736ac0361341b3f29ebfb8e30e5b4dabc5 (v0.29.1-rc2), the tree this design reads.
+- File and line references are at commit da6f6d4aa37ee5a0a70321391ebb2baaaedde9b4 (main on 2026-11-05), where every one was re-checked. The design was first written against v0.29.1-rc2 (0eb6e8736ac0361341b3f29ebfb8e30e5b4dabc5).
 
 ## 1. Problem
 - `messages` has no identity key (store.py:522-540). Exactly-once is an in-memory decision made before the INSERT.
