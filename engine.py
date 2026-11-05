@@ -11563,8 +11563,9 @@ class LCMEngine(
             if stored is not None and not stamps and conflict is not None:
                 if stored < len(view):
                     self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
-                        conversation_id=_normalize_conversation_id_value(tail["conversation_id"]),
-                        **(dict(store=tail["store"], hermes_home=hermes_home) if hermes_home is not None else {}))
+                        conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
+                if self._cold_tail_conflict_placed(tail, conflict):
+                    return True
                 stored = None
             if stored is None:
                 if conflict is not None:
@@ -11653,16 +11654,21 @@ class LCMEngine(
             if time.monotonic() >= deadline:
                 break
         if exiting:
-            self._warn_unflushed_session_tails("SQLite lock")
+            self._warn_unflushed_session_tails("SQLite lock", deadline=deadline)
         elif not self._pending_session_tails:
             maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
 
-    def _cold_tail_absent_count(self, tail):
+    def _cold_tail_absent_count(self, tail, *, deadline=None):
         """Count absent occurrences once, matching known stamps before untimed rows."""
         session, home, start = tail["session_id"], tail["hermes_home"], 0
         conversation = _normalize_conversation_id_value(tail["conversation_id"])
         stored = Counter()
-        while rows := tail["store"].get_range(session, start_id=start, limit=1000, conversation_id=conversation):
+        while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("session-end exit count deadline expired")
+            rows = tail["store"].get_range(session, start_id=start, limit=1000, conversation_id=conversation)
+            if not rows:
+                break
             stored.update((self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home),
                            _normalize_observed_at(row.get("observed_at"))) for row in rows
                           if _normalize_conversation_id_value(row.get("conversation_id")) == conversation)
@@ -11680,15 +11686,18 @@ class LCMEngine(
         return missing + sum(max(0, amount - available[identity]) for (identity, stamp), amount in wanted.items()
                              if stamp is None)
 
-    def _warn_unflushed_session_tails(self, reason: str) -> None:
+    def _warn_unflushed_session_tails(self, reason: str, *, deadline=None) -> None:
         counts = {}
         for tail in self._pending_session_tails:
             why, remaining = reason, len(tail["view"] if tail.get("kind") == "cold" else tail["messages"])
-            if tail.get("kind") == "cold" and tail.get("kept_on_conflict"):
+            if (tail.get("kind") == "cold" and tail.get("kept_on_conflict")
+                    and tail["store"]._write_lock.acquire(blocking=False)):
                 try:
-                    why, remaining = "stamp conflict", self._cold_tail_absent_count(tail)
+                    why, remaining = "stamp conflict", self._cold_tail_absent_count(tail, deadline=deadline)
                 except Exception:
                     pass  # A still-busy or unreadable store retains the conservative exit count.
+                finally:
+                    tail["store"]._write_lock.release()
             counts[why] = counts.get(why, 0) + remaining
         for why, remaining in counts.items():
             if not remaining:

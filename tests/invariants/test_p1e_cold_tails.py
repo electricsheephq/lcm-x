@@ -4,6 +4,7 @@ import copy
 import inspect
 import logging
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -1441,3 +1442,80 @@ def test_kept_conflict_exit_count_reads_the_session_once(engines, monkeypatch, c
     assert engine._pending_session_tails == [tail] and count(engine, "tail.unflushed") == 1
     assert "stamp conflict" in caplog.text and "unflushed=1" in caplog.text
     assert committed_rows(store.db_path, "S") == before
+
+
+def test_placed_conflict_on_the_stamps_off_route_is_covered(engines, monkeypatch, caplog):
+    engine = engines()
+    queued, resent = cold_resend_views()
+    with resumed_cold_resend(engine, monkeypatch, queued, resent) as (tail, _):
+        with tail["store"].ingest_atomic():
+            tail["store"].append("S", queued[-1], source="cli", conversation_id="conv")
+        before = committed_rows(tail["store"].db_path, "S")
+        caplog.clear()
+        engine._retry_pending_session_tails(sibling=True)
+        assert not engine._pending_session_tails
+        assert count(engine, "tail.cold_unmatched") == 0
+        assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+        assert engine not in maintenance_scheduler._PENDING_TAIL_ENGINES
+        assert committed_rows(tail["store"].db_path, "S") == before
+
+
+def test_expired_exit_count_deadline_keeps_the_whole_view_without_reading(engines, monkeypatch, caplog):
+    engine = engines()
+    with resumed_cold_resend(engine, monkeypatch, *cold_resend_views()) as (tail, _):
+        engine._retry_pending_session_tails(sibling=True)
+        assert tail.get("kept_on_conflict")
+        before = committed_rows(tail["store"].db_path, "S")
+
+        def unread(*args, **kwargs):
+            pytest.fail("expired exit count read the stored range")
+
+        caplog.clear()
+        with monkeypatch.context() as patch:
+            patch.setattr(tail["store"], "get_range", unread)
+            engine._warn_unflushed_session_tails("SQLite lock", deadline=time.monotonic() - 1.)
+        assert count(engine, "tail.unflushed") == len(tail["view"])
+        assert f"unflushed={len(tail['view'])}" in caplog.text
+        assert engine._pending_session_tails == [tail]
+        assert committed_rows(tail["store"].db_path, "S") == before
+
+
+def test_exit_count_with_another_threads_write_lock_keeps_the_whole_view(engines, monkeypatch, caplog):
+    engine = engines()
+    queued, resent = cold_resend_views()
+    with resumed_cold_resend(engine, monkeypatch, queued, resent) as (tail, _):
+        engine._retry_pending_session_tails(sibling=True)
+        assert tail.get("kept_on_conflict")
+        store = tail["store"]
+        before = committed_rows(store.db_path, "S")
+        held, release = threading.Event(), threading.Event()
+        errors = []
+
+        def hold_uncommitted_occurrence():
+            try:
+                with store.ingest_atomic():
+                    store.append("S", queued[-1], source="cli", conversation_id="conv")
+                    held.set()
+                    release.wait(2.)
+                    raise ValueError("roll back the test occurrence")
+            except ValueError:
+                pass
+            except BaseException as exc:
+                errors.append(exc)
+
+        holder = threading.Thread(target=hold_uncommitted_occurrence)
+        holder.start()
+        try:
+            assert held.wait(1.)
+            caplog.clear()
+            engine._warn_unflushed_session_tails("lifecycle lock")
+            warning = [r.getMessage() for r in caplog.records if "after shutdown retry" in r.getMessage()]
+            assert len(warning) == 1 and f"unflushed={len(tail['view'])}" in warning[0]
+            assert count(engine, "tail.unflushed") == len(tail["view"])
+            assert committed_rows(store.db_path, "S") == before
+        finally:
+            release.set()
+            holder.join(timeout=3.)
+        assert not holder.is_alive() and not errors
+        assert engine._pending_session_tails == [tail]
+        assert committed_rows(store.db_path, "S") == before
