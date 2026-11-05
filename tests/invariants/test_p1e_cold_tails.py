@@ -5,16 +5,19 @@ import inspect
 import logging
 import sqlite3
 import time
+from pathlib import Path
 
 import pytest
 
 from hermes_lcm import maintenance_scheduler
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.externalize import get_large_output_storage_dir, load_externalized_payload, extract_externalized_ref
+from hermes_lcm.host_uid import HOST_UID_COUNTER_KEY
 from hermes_lcm.session_patterns import compile_session_patterns
 from hermes_lcm.store import MessageStore
 from tests.invariants.test_p1e_decided_tails import contents, history, queue, replay
 from tests.test_issue_2055_ingest_ledger_writes import count, engines as engines, restart, sql_rows
-from tests.test_host_uid_shadow import _m
+from tests.test_host_uid_shadow import _m, _state_db
 from tests.test_host_uid_emit_carry import _ContainsPattern
 
 
@@ -109,6 +112,184 @@ def test_off_current_end_busy_append_queues_cold_tail(engines, monkeypatch, capl
         patch.setattr(engine._lifecycle, "finalize_session", lambda *a, **k: pytest.fail("queued end finalized"))
         engine.on_session_end("S1", view)
     assert_off_current_cold_retry(engine, view, monkeypatch, caplog)
+
+
+def committed_rows(path, session):
+    with sqlite3.connect(path) as reader:
+        reader.row_factory = sqlite3.Row
+        return [dict(row) for row in reader.execute(
+            "SELECT * FROM messages WHERE session_id=? ORDER BY store_id", (session,))]
+
+
+def home_rebound_cold_tail(engines, monkeypatch, *, shared=False, origin="current", large=False, reused_uid=False):
+    engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "shadow")
+    home = Path(engine._hermes_home)
+    other_home = home.parent / "other-home"
+    other_home.mkdir()
+    _state_db(other_home, [("S1", "other-root", None), ("other-root", None, "compression"),
+                           ("S2", None, None)])
+    if not shared:
+        engine._config.database_path = ""
+    engine.on_session_start("S1", platform="cli", conversation_id="conv1")
+    view = [_m("user", "A1", 1., "a1"), _m("assistant", "A2", 2., "a2"),
+            _m("user", "A3", 3., "a3")]
+    if reused_uid:
+        view[-1]["message_uid"] = "a1"
+    if large:
+        view[1]["tool_calls"] = [{"id": "call", "type": "function",
+                                  "function": {"name": "shell", "arguments": "{}"}}]
+        view.insert(2, _m("tool", "large output " * 4000, 2.5, "tool-result",
+                          tool_call_id="call", tool_name="shell"))
+    engine.ingest(copy.deepcopy(view[:1]))
+    store = engine._store
+    if origin == "off_current":
+        engine.on_session_start("S2", platform="api", conversation_id="conv2")
+
+    def failed(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    locker = sqlite3.connect(store.db_path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "get_range" if origin == "off_current" else "get_session_count", failed)
+            engine._ingest_cursor_needs_reconcile = True
+            engine.on_session_end("S1", copy.deepcopy(view))
+        assert len(engine._pending_session_tails) == 1
+        tail = engine._pending_session_tails[0]
+        assert tail["kind"] == "cold" and tail["view"] == view
+        deferred = count(engine, "tail.retry.deferred")
+        rebind = engine._rebind_storage_for_home
+
+        def unlocked_rebind(new_home):
+            # The pre-bind retry has already observed the lock. A shared DB's lifecycle bind needs it free.
+            locker.rollback()
+            return rebind(new_home)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(engine, "_rebind_storage_for_home", unlocked_rebind)
+            engine.on_session_start("S2", hermes_home=str(other_home), platform="api", conversation_id="conv2")
+        assert count(engine, "tail.retry.deferred") == deferred + 1
+        assert engine._pending_session_tails == [tail] and store._conn is not None
+    finally:
+        locker.rollback()
+        locker.close()
+    assert (engine._store is store) is shared
+    return engine, tail, view, home, other_home
+
+
+@pytest.mark.parametrize("origin", ["current", "off_current"])
+@pytest.mark.parametrize("reused_uid", [False, True])
+def test_cold_tail_after_home_rebind_is_stored_in_its_own_store(engines, monkeypatch, origin, reused_uid):
+    engine, tail, view, home, _ = home_rebound_cold_tail(
+        engines, monkeypatch, origin=origin, reused_uid=reused_uid)
+    store = tail["store"]
+    active_watch, active_overrides = engine._host_rewrite_state()
+    with sqlite3.connect(store.db_path) as reader:
+        before = reader.execute("SELECT count(*) FROM occurrence_bindings").fetchone()[0]
+    foreign_reads = []
+    read = engine._store.read_metadata_json_many
+
+    def observed(*args, **kwargs):
+        foreign_reads.append(args)
+        return read(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "read_metadata_json_many", observed)
+        engine._retry_pending_session_tails()
+        engine._retry_pending_session_tails()
+    assert not foreign_reads
+    if reused_uid:
+        assert engine._host_rewrite_store is engine._store
+        assert engine._host_rewrite_watch is active_watch and engine._host_rewrite_overrides is active_overrides
+    assert [r["content"] for r in committed_rows(store.db_path, "S1")] == [m["content"] for m in view]
+    assert not committed_rows(engine._store.db_path, "S1")
+    assert not committed_rows(engine._store.db_path, "S2")
+    assert not engine._pending_session_tails and count(engine, "tail.cold_detached_stored") == 1
+    assert count(engine, "tail.cold_store_unbound") == 0 and store._conn is None
+    with sqlite3.connect(store.db_path) as reader:
+        assert reader.execute("SELECT count(*) FROM occurrence_bindings").fetchone()[0] == before
+        bindings = reader.execute("SELECT lineage_key, uid FROM host_uid_bindings ORDER BY rowid").fetchall()
+        assert [uid for _, uid in bindings] == [m["message_uid"] for m in view]
+        assert {key for key, _ in bindings} == {engine._host_uid_lineage_key("S1", hermes_home=str(home))[0]}
+        assert reader.execute("SELECT value FROM metadata WHERE key=?", (HOST_UID_COUNTER_KEY,)).fetchone()
+    assert engine._store.read_metadata_json(HOST_UID_COUNTER_KEY) is None
+
+
+@pytest.mark.parametrize("origin", ["current", "off_current"])
+def test_shared_store_home_rebind_retries_under_the_tail_home(engines, monkeypatch, origin):
+    engine, tail, view, home, other_home = home_rebound_cold_tail(
+        engines, monkeypatch, shared=True, origin=origin, large=True)
+    engine._retry_pending_session_tails()
+    engine._retry_pending_session_tails()
+    rows = committed_rows(tail["store"].db_path, "S1")
+    ref = extract_externalized_ref(rows[2]["content"])
+    assert ref
+    assert load_externalized_payload(ref, config=engine._config, hermes_home=str(home))["content"] == view[2]["content"]
+    assert get_large_output_storage_dir(engine._config, str(home), create=False).exists()
+    assert not get_large_output_storage_dir(engine._config, str(other_home), create=False).exists()
+    assert [r["content"] for r in rows if r["role"] != "tool"] == ["A1", "A2", "A3"]
+    assert not committed_rows(engine._store.db_path, "S2")
+    assert not engine._pending_session_tails and count(engine, "tail.cold_detached_stored") == 1
+    assert engine._store._conn is not None
+    with sqlite3.connect(engine._store.db_path) as reader:
+        keys = {row[0] for row in reader.execute("SELECT lineage_key FROM host_uid_bindings")}
+    assert keys == {engine._host_uid_lineage_key("S1", hermes_home=str(home))[0]}
+
+
+def test_detached_cold_tail_with_a_stamp_conflict_is_kept_and_counted(engines, monkeypatch):
+    engine, tail, _, _, _ = home_rebound_cold_tail(engines, monkeypatch)
+    store = tail["store"]
+    with sqlite3.connect(store.db_path) as writer:
+        writer.execute("UPDATE messages SET observed_at='99.0' WHERE session_id='S1'")
+    engine._retry_pending_session_tails()
+    assert [r["content"] for r in committed_rows(store.db_path, "S1")] == ["A1"]
+    assert engine._pending_session_tails == [tail] and count(engine, "tail.cold_unmatched") == 1
+    assert count(engine, "tail.cold_store_unbound") == count(engine, "tail.cold_detached_stored") == 0
+    assert not committed_rows(engine._store.db_path, "S1") and store._conn is not None
+
+
+def test_exit_drain_stores_a_detached_cold_tail(engines, monkeypatch):
+    engine, tail, view, _, _ = home_rebound_cold_tail(engines, monkeypatch)
+    engine._retry_pending_session_tails(exiting=True)
+    assert [r["content"] for r in committed_rows(tail["store"].db_path, "S1")] == [m["content"] for m in view]
+    assert not engine._pending_session_tails and count(engine, "tail.unflushed") == 0
+    assert count(engine, "tail.cold_detached_stored") == 1 and tail["store"]._conn is None
+    assert not committed_rows(engine._store.db_path, "S1")
+
+
+def test_off_current_partial_suffix_commit_then_lock(engines, monkeypatch):
+    engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
+    view = off_current_end(engine)
+    append = engine._append_off_current_session_end_suffix
+
+    def partial(session, suffix, **kwargs):
+        append(session, suffix[:1], **kwargs)
+        raise sqlite3.OperationalError("database is locked")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_append_off_current_session_end_suffix", partial)
+        engine.on_session_end("S1", copy.deepcopy(view))
+    assert [r["content"] for r in committed_rows(engine._store.db_path, "S1")] == ["A", "B", "C"]
+    assert len(engine._pending_session_tails) == 1 and engine._pending_session_tails[0]["kind"] == "cold"
+    engine._retry_pending_session_tails()
+    engine._retry_pending_session_tails()
+    assert [r["content"] for r in committed_rows(engine._store.db_path, "S1")] == ["A", "B", "C", "D"]
+    assert not engine._pending_session_tails
+
+
+def test_resumed_s1_after_an_off_current_tail(engines, monkeypatch):
+    engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
+    view = off_current_end(engine)
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "get_range", fail_end_read(engine))
+        engine.on_session_end("S1", copy.deepcopy(view))
+    assert len(engine._pending_session_tails) == 1 and engine._pending_session_tails[0]["kind"] == "cold"
+    engine.on_session_start("S1", platform="cli", conversation_id="conv1")
+    engine.ingest(copy.deepcopy(view))
+    assert [r["content"] for r in committed_rows(engine._store.db_path, "S1")] == ["A", "B", "C", "D"]
+    assert not engine._pending_session_tails
 
 
 @pytest.mark.parametrize("binding", ["ignored", "stateless"])
@@ -690,8 +871,10 @@ def test_sibling_cold_uses_s3(engines, monkeypatch, tmp_path, route):
             try:
                 patch.setattr(engine, "_store", rebound)
                 engine._retry_pending_session_tails()
-                assert engine._pending_session_tails == [tail]
-                assert count(engine, "tail.cold_store_unbound") == 1
+                assert not engine._pending_session_tails
+                assert count(engine, "tail.cold_store_unbound") == 0
+                assert [r["content"] for r in committed_rows(tail["store"].db_path, "S")] == ["A", "B", "C", "D"]
+                assert tail["store"]._conn is None
                 assert not rebound.get_session_messages("S")
             finally:
                 rebound.close()

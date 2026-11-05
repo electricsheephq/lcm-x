@@ -736,9 +736,10 @@ class ReconcileMixin:
             pos = content.find("\n\n---\n\n", pos + 7)
         return None
 
-    def _stored_row_forms(self, row: Dict[str, Any]) -> set:
+    def _stored_row_forms(self, row: Dict[str, Any], *, store=None, hermes_home=None) -> set:
         """A stored row's admissible identities: exact and its host-rewrite override form."""
-        forms = (self._message_replay_identity(row, stored_row=True, with_host_rewrite=h) for h in (False, True))
+        forms = (self._message_replay_identity(row, stored_row=True, with_host_rewrite=h,
+                 store=store, hermes_home=hermes_home) for h in (False, True))
         forms = set(forms)
         if row.get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER:
             forms.add(self._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False))
@@ -758,35 +759,37 @@ class ReconcileMixin:
             for form in forms
         )
 
-    def _host_rewrite_state(self):
+    def _host_rewrite_state(self, *, store=None):
         """Per bound store: watch {store_id: (identity, stored content, [objects])},
         overrides {store_id: payload or None}."""
+        if store is not None and store is not self._store:
+            return store.__dict__.setdefault("_detached_host_rewrite_state", ({}, {}))
         if getattr(self, "_host_rewrite_store", None) is not self._store:
             self._host_rewrite_store, self._host_rewrite_watch, self._host_rewrite_overrides = self._store, {}, {}
         return self._host_rewrite_watch, self._host_rewrite_overrides
 
-    def _load_host_rewrite_overrides(self, rows) -> None:
+    def _load_host_rewrite_overrides(self, rows, *, store=None) -> None:
         """Batch-load the overrides of the stored user rows a matcher is about to read."""
-        overrides = self._host_rewrite_state()[1]
+        overrides = self._host_rewrite_state(store=store)[1]
         wanted = {store_id for store_id in (int(row.get("store_id") or 0) for row in rows if row.get("role") == "user")
                   if store_id and store_id not in overrides}  # never copy the whole cache per row (#581 cost)
         if wanted:
             keys = {f"{_HOST_REWRITE_IDENTITY_METADATA_PREFIX}:{store_id}": store_id for store_id in wanted}
-            found = self._store.read_metadata_json_many(list(keys))
+            found = (self._store if store is None else store).read_metadata_json_many(list(keys))
             overrides.update({store_id: found.get(key) for key, store_id in keys.items()})
-            self._bound_host_rewrite_overrides(wanted)
+            self._bound_host_rewrite_overrides(wanted, store=store)
 
-    def _bound_host_rewrite_overrides(self, keep) -> None:
+    def _bound_host_rewrite_overrides(self, keep, *, store=None) -> None:
         """Evict the oldest cached overrides past the cap, never those this call loaded or set."""
-        overrides = self._host_rewrite_state()[1]
+        overrides = self._host_rewrite_state(store=store)[1]
         excess = len(overrides) - _HOST_REWRITE_OVERRIDE_CACHE_CAP
         for store_id in [key for key in overrides if key not in keep][: max(0, excess)]:
             del overrides[store_id]
 
-    def _host_rewrite_override_content(self, row: Dict[str, Any]) -> Optional[str]:
+    def _host_rewrite_override_content(self, row: Dict[str, Any], *, store=None) -> Optional[str]:
         """The host form's protected content, while the stored content is unchanged."""
-        self._load_host_rewrite_overrides([row])
-        override = self._host_rewrite_state()[1].get(int(row.get("store_id") or 0))
+        self._load_host_rewrite_overrides([row], **(dict(store=store) if store is not None else {}))
+        override = self._host_rewrite_state(store=store)[1].get(int(row.get("store_id") or 0))
         stored = normalize_content_value(row.get("content")) or ""
         if isinstance(override, dict) and override.get("stored_sha256") == hashlib.sha256(stored.encode()).hexdigest():
             return override.get("content") if isinstance(override.get("content"), str) else None
@@ -942,7 +945,7 @@ class ReconcileMixin:
 
     def _message_replay_identity(
         self, msg: Dict[str, Any], *, stored_row: bool = False, with_host_rewrite: bool = False,
-        strip_carrier: bool = True, allow_pruned_tool_alias: bool = True,
+        strip_carrier: bool = True, allow_pruned_tool_alias: bool = True, store=None, hermes_home=None,
     ) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
         content = normalize_content_value(msg.get("content")) or ""
@@ -957,9 +960,9 @@ class ReconcileMixin:
         strip_payload = False
         # Opt-in: only occurrence/position-bound consumers read the override (#498).
         if stored_row and with_host_rewrite and role == "user":
-            override_content = self._host_rewrite_override_content(msg)
+            override_content = self._host_rewrite_override_content(msg, **(dict(store=store) if store is not None else {}))
             content = content if override_content is None else override_content
-            override = self._host_rewrite_state()[1].get(int(msg.get("store_id") or 0))
+            override = self._host_rewrite_state(store=store)[1].get(int(msg.get("store_id") or 0))
             strip_payload = override_content is not None and bool(override.get("strip_payload"))
         # A host-merged LCM summary carrier (#483) is identified by the real row
         # glued behind its DAG-verified summary prefix. Stored rows keep FULL
@@ -1091,15 +1094,16 @@ class ReconcileMixin:
             session_id = str(msg.get("session_id") or self._session_id or "")
             content = self._restore_ingest_payload_placeholders_in_content_identity(
                 content,
-                session_id=session_id,
+                session_id=session_id, **(dict(hermes_home=hermes_home) if hermes_home is not None else {}),
             )
-            tool_calls = self._restore_ingest_payload_placeholders_in_value(tool_calls, session_id=session_id)
+            tool_calls = self._restore_ingest_payload_placeholders_in_value(tool_calls, session_id=session_id,
+                **(dict(hermes_home=hermes_home) if hermes_home is not None else {}))
         ref = extract_externalized_ref(content)
         if ref and "quarantined_assistant_output" not in content:
             payload = load_externalized_payload(
                 ref,
                 config=self._config,
-                hermes_home=self._hermes_home,
+                hermes_home=self._hermes_home if hermes_home is None else hermes_home,
             )
             if payload is not None and isinstance(payload.get("content"), str):
                 content = payload["content"].strip() if strip_payload else payload["content"]
