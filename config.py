@@ -829,6 +829,7 @@ _ENV_CHOICES = {
 ENV_FIELD_DEPRECATIONS: dict[str, tuple[str, str]] = {
     "cache_friendly_condensation_enabled": ("v0.28.0", "v0.30.0"),
     "large_output_transcript_gc_enabled": ("v0.28.0", "v0.30.0"),
+    "deferred_maintenance_enabled": ("v0.30.0", "v0.31.0"),
 }
 
 

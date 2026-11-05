@@ -38,17 +38,19 @@ def test_reference_diagnostic_choices():
     }
 
 
-@pytest.mark.parametrize("key", (
-    "LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED", "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED",
+@pytest.mark.parametrize("key,removal", (
+    ("LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED", "v0.30.0"),
+    ("LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED", "v0.30.0"),
+    ("LCM_DEFERRED_MAINTENANCE_ENABLED", "v0.31.0"),
 ))
-def test_reference_deprecation_warning_bytes(monkeypatch, key):
+def test_reference_deprecation_warning_bytes(monkeypatch, key, removal):
     for name in tuple(config.os.environ):
         if name.startswith("LCM_"):
             monkeypatch.delenv(name)
     monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda: {})
     monkeypatch.setenv(key, "true")
     assert config.LCMConfig.from_env().config_source_warnings == [
-        f"deprecated: {key} is set; this experiment is removed in v0.30.0 (#1246). "
+        f"deprecated: {key} is set; this experiment is removed in {removal} (#1246). "
         "Until then it behaves as before."
     ]
 
