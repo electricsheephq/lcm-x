@@ -20,7 +20,8 @@ python -m bench.frontier_shim.server --root "$R1_SHIM_STATE" \
 
 The bind address is always **127.0.0.1**, default port 8765 (`--port` changes only
 the port). `POST /v1/chat/completions` accepts any bearer key, including a dummy
-key, and requires `Content-Type: application/json` (415 otherwise). Messages must have system/user roles and string content; streaming and
+key, and requires `Content-Type: application/json` (415 otherwise). Requests with
+an `Origin` header, or a `Host` other than `127.0.0.1:<port>` or `localhost:<port>`, get 403. Messages must have system/user roles and string content; streaming and
 additional generation controls are rejected. Responses include assistant text,
 the model FMP reads back, and only reported token fields. Missing usage fields
 remain absent, including total tokens if FMP reports no total; no zero or total
@@ -72,8 +73,12 @@ separate, sensitive raw artifacts; rollouts stay enabled for identity and quota
 readback. Record leased-home disk growth during smoke and pilot; prune nothing.
 
 Operator cautions:
-- Stop the harness stage before the shim. After SIGTERM, queued and new requests
-  get 503 `shutting_down`; calls already running finish (up to 540 seconds).
+- Stop the harness stage before the shim. After SIGTERM, requests waiting for a
+  slot get 503, new connections are refused once the server stops accepting, and
+  calls already running finish (up to 540 seconds).
+- If the receipt write fails after a call, the client gets 503 and no receipt is
+  written, so a client retry repeats the call without a matching request hash.
+  Requests refused with 400, 403 or 415 are not logged.
 - A record with no rollout returns 503, and without rollouts the weekly brake
   cannot fire. If the call log shows one, stop the stage and check the leased
   home before resuming.

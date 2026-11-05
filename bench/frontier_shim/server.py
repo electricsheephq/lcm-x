@@ -162,6 +162,10 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def answer(self):
+        # Local clients only: a page rebinding its hostname to 127.0.0.1 sends its own Host, and browsers send Origin.
+        port = self.server.server_address[1]
+        if "Origin" in self.headers or self.headers.get("Host") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            return 403, {}, encode(error("forbidden"))
         # A cross-origin page cannot send this type without a preflight, and OPTIONS is never answered.
         if self.headers.get_content_type() != "application/json":
             return 415, {}, encode(error("unsupported_media_type"))

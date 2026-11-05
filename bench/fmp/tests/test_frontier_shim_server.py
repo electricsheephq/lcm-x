@@ -272,6 +272,15 @@ def post(shim, headers, handle=None):
             worker.join(timeout=5)
 
 
+@pytest.mark.parametrize("extra", [{"Origin": "http://127.0.0.1:1"}, {"Origin": "null"},
+                                   {"Host": "rebound.example:8765"}])
+def test_browser_or_foreign_host_requests_are_403_without_dispatch(lane, extra):
+    shim, backend = lane
+    assert post(shim, {"Content-Type": "application/json", **extra}) == (403, server.error("forbidden"))
+    backend.call.assert_not_called()
+    assert not shim.log.exists()
+
+
 @pytest.mark.parametrize("headers", [{}, {"Content-Type": "text/plain"},
                                      {"Content-Type": "application/x-www-form-urlencoded"}])
 def test_non_json_content_type_is_415_without_dispatch(lane, headers):
