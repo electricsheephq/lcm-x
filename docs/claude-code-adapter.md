@@ -340,8 +340,9 @@ hook entry handles:
   for long paths; never the newest session as a guess.
 - The end-of-session `Stop` (reason not `end_turn`) and `SessionEnd` (1.5 s budget) are
   observe-only: logged, never spooled, so they cannot replace a pending record.
-- The Grok reader (`updates.jsonl`) is experimental and off (`LCMX_GROK_CAPTURE=1` enables it)
-  until a real-session proof shows tool results are complete, `/compact` and `/rewind` never
+- The Grok reader (`updates.jsonl`) is not in this release, so the hook refuses every Grok event
+  (`grok_capture_off`) and spools nothing; no setting enables it. It lands only after a
+  real-session proof shows tool results are complete, `/compact` and `/rewind` never
   rewrite the file, and event ids are stable. Without stable ids, uid = session, line index and
   line digest; a rewritten file starts a new generation.
 
@@ -357,7 +358,10 @@ hook entry handles:
   Python back the cache and the writing it has without `-I`; any other Python keeps its own. The worker and the MCP
   server need Python 3.11 or newer with LCM-X's dependencies: `LCMX_PYTHON`, else a venv in the
   plugin's data directory (`CLAUDE_PLUGIN_DATA`, which survives plugin updates and is removed on
-  uninstall), else `<home>/venv`.
+  uninstall), else `<home>/venv`. A relative `LCMX_PYTHON` or `LCMX_PACKAGE_ROOT` is refused, as
+  a relative home is: the hook checks paths from the project folder, while the worker runs in the
+  store home. Hooks then record `runtime_missing` or `package_missing`, records wait in the spool,
+  and the server names the setting.
   - **Zero steps** when a Python 3.11+ exists. Without `LCMX_PYTHON` or a venv, the plugin finds
     one on the hook's `PATH`: the hook's own `python3` if it is 3.11+, else `python3.14` down to
     `python3.11`. Only absolute `PATH` entries are searched: a relative one would name the project

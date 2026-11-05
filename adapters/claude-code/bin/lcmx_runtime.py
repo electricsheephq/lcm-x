@@ -42,8 +42,19 @@ def claude_projects_root(environ: Mapping[str, str]) -> Optional[Path]:
     return base / "projects" if base.is_absolute() else None
 
 
+def relative(environ: Mapping[str, str], setting: str) -> bool:
+    """Whether a path setting is relative. A hook checks paths from the project folder Claude Code
+    runs it in, while the worker and the reader run in the store home, so a relative
+    ``LCMX_PYTHON`` or ``LCMX_PACKAGE_ROOT`` cannot name one file for both: it is refused."""
+    configured = environ.get(setting)
+    return bool(configured) and not Path(configured).expanduser().is_absolute()
+
+
 def runtime_python(environ: Mapping[str, str], home: Path) -> Optional[Path]:
-    """The Python 3.11+ interpreter with LCM-X's dependencies, if one is set up."""
+    """The Python 3.11+ interpreter with LCM-X's dependencies, if one is set up; None when
+    ``LCMX_PYTHON`` is relative."""
+    if relative(environ, "LCMX_PYTHON"):
+        return None
     configured = environ.get("LCMX_PYTHON")
     candidates = [Path(configured).expanduser()] if configured else []
     plugin_data = environ.get("CLAUDE_PLUGIN_DATA")
@@ -77,16 +88,22 @@ def found_python(environ: Mapping[str, str]) -> Optional[Path]:
 def runtime_command(environ: Mapping[str, str], home: Path) -> Optional[List[str]]:
     """How to run the worker and the reader. A set-up interpreter (``LCMX_PYTHON`` or a venv) runs
     as it is, so optional dependencies such as FastEmbed load. Otherwise a found Python 3.11+ runs
-    with the standard library only (``-I -S``), so nothing installed in it, Hermes included, loads."""
+    with the standard library only (``-I -S``), so nothing installed in it, Hermes included, loads.
+    A relative ``LCMX_PYTHON`` gives None: no found Python stands in for the one it names."""
     python = runtime_python(environ, home)
     if python is not None:
         return [str(python)]
+    if relative(environ, "LCMX_PYTHON"):
+        return None
     found = found_python(environ)
     return [str(found), *ISOLATED] if found is not None else None
 
 
 def package_root(environ: Mapping[str, str]) -> Optional[Path]:
-    """The LCM-X package: a vendored copy in the plugin, or the checkout holding the plugin."""
+    """The LCM-X package: a vendored copy in the plugin, or the checkout holding the plugin; None
+    when ``LCMX_PACKAGE_ROOT`` is relative."""
+    if relative(environ, "LCMX_PACKAGE_ROOT"):
+        return None
     configured = environ.get("LCMX_PACKAGE_ROOT")
     candidates = [Path(configured).expanduser()] if configured else []
     candidates += [PLUGIN_ROOT / "lcm-x", PLUGIN_ROOT.parents[1]]
