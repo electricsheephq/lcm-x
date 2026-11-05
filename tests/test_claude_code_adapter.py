@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -617,12 +618,18 @@ def _launch(env, tmp_path):
 
 def test_a_reader_override_runs_and_its_reader_command_starts_the_plain_reader(env, tmp_path):
     """The real exec: the override's process starts, and the argv it gets in LCMX_LOCAL_READER_CMD
-    starts the plain reader, as the override's own fallback would."""
+    starts the plain reader, as the override's own fallback would. The command is a script this
+    test owns: the interpreter running the tests can be group-writable, as on CI's runners, and
+    the launcher refuses such a command."""
     Path(env["LCMX_CC_HOME"]).mkdir(parents=True)
     override = tmp_path / "override.py"
     override.write_text(_RECORDER % "override" + "command = json.loads(os.environ['LCMX_LOCAL_READER_CMD'])\n"
                         "os.execv(command[0], command)\n", encoding="utf-8")
-    _write_override(env, {"version": 1, "command": [sys.executable, str(override), "--flag"]})
+    python = tmp_path / "bin" / "python"
+    python.parent.mkdir()
+    python.write_text('#!/bin/sh\nexec %s "$@"\n' % shlex.quote(sys.executable), encoding="utf-8")
+    python.chmod(0o755)
+    _write_override(env, {"version": 1, "command": [str(python), str(override), "--flag"]})
     result, started = _launch(env, tmp_path)
     assert (result.returncode, result.stderr) == (0, "")
     assert started == [["override", [str(override), "--flag"]], ["plain", _plain_reader(env, tmp_path)[1:]]]
