@@ -3889,19 +3889,6 @@ class TestSummaryDAG:
         ))
         assert len(dag.get_session_nodes("s1")) == 3
 
-    def test_count_at_depth(self, dag):
-        for i in range(4):
-            dag.add_node(SummaryNode(
-                session_id="s1", depth=0, summary=f"D0-{i}",
-                token_count=10, source_ids=[i], source_type="messages",
-            ))
-        dag.add_node(SummaryNode(
-            session_id="s1", depth=1, summary="D1",
-            token_count=20, source_ids=[1, 2, 3, 4], source_type="nodes",
-        ))
-        assert dag.count_at_depth("s1", 0) == 4
-        assert dag.count_at_depth("s1", 1) == 1
-
     def test_search(self, dag):
         dag.add_node(SummaryNode(
             session_id="s1", depth=0,

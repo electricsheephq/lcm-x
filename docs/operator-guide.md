@@ -733,8 +733,6 @@ Summary nodes carry no conversation-family key at this layer, so a rollup does
 not automatically span sessions across a `/new` rotation; after a rotation,
 retained higher-depth summaries are carried into the new session and remain
 retrievable, but per-period rollup rows are rebuilt under the new session scope.
-Build-cursor state is tracked per `(period_kind, scope)` so multiple scopes
-sharing one database never share a cursor.
 
 With `LCM_ENABLE_SLASH_COMMAND=true`, operators can inspect the current
 foreground session and request a bounded synchronous rebuild:
@@ -760,10 +758,10 @@ summarization.
 
 `lcm_inspect` always includes a `temporal_rollups` block with the enabled flag,
 ready/stale/building/failed counts for each period kind, oldest stale age,
-last-build cursors, and the last error. `/lcm rollups` renders the same data as a
+and the last error. `/lcm rollups` renders the same data as a
 table. Both paths are read-only and make no LLM calls. When the feature is off
 or its tables are empty, the block remains present with zero counts and null
-age/cursor/error values so monitoring consumers do not need a second schema.
+age/error values so monitoring consumers do not need a second schema.
 
 LCM is lossless by default: durable messages, FTS rows, summaries, and payloads
 remain untouched unless `LCM_SENSITIVE_PATTERNS_ENABLED=true` is explicitly set.

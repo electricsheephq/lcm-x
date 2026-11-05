@@ -472,10 +472,6 @@ def normalize_search_sort(sort: str | None) -> str:
     return normalized if normalized in {"recency", "relevance", "hybrid"} else "recency"
 
 
-def build_snippet(text: str, terms: List[str], width: int = 80) -> str:
-    return build_snippet_with_span(text, terms, width)[0]
-
-
 def build_snippet_with_span(text: str, terms: List[str], width: int = 80) -> tuple[str, int, int]:
     """Return the legacy preview and its undecorated source span."""
     content = (text or "")

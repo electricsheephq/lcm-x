@@ -50,8 +50,6 @@ def _assert_zero_shape(block, *, enabled):
             for kind in ("day", "week", "month")
         },
         "oldest_stale_age_seconds": None,
-        "last_build_cursors": {kind: None for kind in ("day", "week", "month")},
-        "last_built_at": {kind: None for kind in ("day", "week", "month")},
         "last_error": None,
     }
 
@@ -70,7 +68,7 @@ def test_lcm_inspect_rollup_block_is_zeroed_when_feature_is_off(engine):
     _assert_zero_shape(block, enabled=False)
 
 
-def test_lcm_inspect_reports_counts_cursor_stale_age_and_last_error(engine):
+def test_lcm_inspect_reports_counts_stale_age_and_last_error(engine):
     store = RollupStore(engine._dag.db_path)
     try:
         _ready(store, "day", "2026-07-15", engine.current_session_id)
@@ -82,7 +80,6 @@ def test_lcm_inspect_reports_counts_cursor_stale_age_and_last_error(engine):
             "month", "2026-07-01", engine.current_session_id
         )
         store.mark_failed(failed_token, "mocked summary failure")
-        store.set_cursor("day", "2026-07-15", engine.current_session_id, built_at="2026-07-15T12:00:00+00:00")
         store.connection.commit()
 
         block = json.loads(lcm_tools.lcm_inspect({}, engine=engine))["temporal_rollups"]
@@ -91,8 +88,6 @@ def test_lcm_inspect_reports_counts_cursor_stale_age_and_last_error(engine):
         assert block["counts"]["week"]["stale"] == 1
         assert block["counts"]["month"]["failed"] == 1
         assert block["oldest_stale_age_seconds"] >= 0
-        assert block["last_build_cursors"]["day"] == "2026-07-15"
-        assert block["last_built_at"]["day"] == "2026-07-15T12:00:00+00:00"
         assert block["last_error"] == "mocked summary failure"
     finally:
         store.close()

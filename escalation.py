@@ -673,10 +673,6 @@ def _check_summary_contract(content: str, nonce: str, max_tokens: int) -> tuple[
     return body, "", tuple(tolerated)
 
 
-def _unwrap_summary_contract(content: str, nonce: str, max_tokens: int) -> str:
-    return _check_summary_contract(content, nonce, max_tokens)[0]
-
-
 def _call_llm_for_summary(prompt: str, max_tokens: int,
                            model: str = "", timeout: float | None = None,
                            reasoning_effort: str = "") -> Optional[str]:

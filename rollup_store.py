@@ -470,34 +470,6 @@ class RollupStore:
             )
         return int(cur.rowcount or 0)
 
-    def upsert_stale(self, period_kind: str, period_start: str, scope: str) -> int:
-        """Durably seed a single ``stale`` row for one period.
-
-        Used by ``/lcm rollups rebuild`` to queue every requested target before
-        the per-pass build budget is applied, so unattempted targets remain
-        durably ``stale`` (not absent) and get built by later maintenance. Does
-        not disturb a row that is currently ``building``.
-        """
-        targets = self._expand_stale_targets([(period_kind, period_start, scope)])
-        with self._write_transaction():
-            affected = 0
-            for target_kind, target_start, target_scope in targets:
-                cur = self._conn.execute(
-                    """
-                    INSERT INTO lcm_rollups(period_kind, period_start, scope, status)
-                    VALUES(?, ?, ?, 'stale')
-                    ON CONFLICT(period_kind, period_start, scope) DO UPDATE SET
-                        status = 'stale',
-                        generation = lcm_rollups.generation + 1,
-                        lease_expires_at = NULL,
-                        lease_nonce = ''
-                    WHERE lcm_rollups.status != 'building'
-                    """,
-                    (target_kind, target_start, target_scope),
-                )
-                affected += int(cur.rowcount or 0)
-        return affected
-
     @classmethod
     def _expand_stale_targets(
         cls, targets: Sequence[tuple[str, str, str]]
@@ -527,8 +499,8 @@ class RollupStore:
         a mid-batch failure leave some targets seeded and others absent (e.g. a
         missing month with no row); seeding them together makes the batch
         atomic — a failure on any target rolls the whole seed back so no target
-        is left half-queued (maintainer #391 D2). Per-target semantics match
-        :meth:`upsert_stale`: a currently-``building`` row is left untouched, and
+        is left half-queued (maintainer #391 D2). For each target, a
+        currently-``building`` row is left untouched, and
         a conflicting seed advances ``generation`` to supersede an in-flight
         build.
         """
@@ -752,91 +724,6 @@ class RollupStore:
             (period_kind, start, end, scope),
         ).fetchall()
         return [self._row_to_rollup(row) for row in rows]
-
-    def get_cursor(self, period_kind: str, scope: str = "") -> str | None:
-        row = self._conn.execute(
-            "SELECT last_build_cursor FROM lcm_rollup_state WHERE period_kind = ? AND scope = ?",
-            (period_kind, scope),
-        ).fetchone()
-        return str(row["last_build_cursor"]) if row and row["last_build_cursor"] is not None else None
-
-    def set_cursor(
-        self,
-        period_kind: str,
-        cursor: str | None,
-        scope: str = "",
-        *,
-        built_at: str | None = None,
-    ) -> None:
-        with self._write_transaction():
-            self._conn.execute(
-                """
-                INSERT INTO lcm_rollup_state(period_kind, scope, last_build_cursor, last_built_at)
-                VALUES(?, ?, ?, ?)
-                ON CONFLICT(period_kind, scope) DO UPDATE SET
-                    last_build_cursor = excluded.last_build_cursor,
-                    last_built_at = excluded.last_built_at
-                """,
-                (period_kind, scope, cursor, built_at or self._now()),
-            )
-
-    def purge_rollups_for_sources(self, node_ids: Sequence[int]) -> int:
-        """Invalidate rollups built from now-purged source nodes.
-
-        The affected periods are re-seeded ``stale`` (generation advanced, so an
-        in-flight build cannot publish purged content) rather than hard-deleted:
-        a deleted row at/before the build cursor would leave the cursor advanced
-        with no pending row, so the window would never be rebuilt. Re-staling
-        leaves a durable pending row that maintenance rebuilds from whatever
-        sources remain (or clears via :meth:`resolve_no_source` if none do). The
-        rollups' stale source rows are dropped and repopulated on rebuild.
-        Returns the number of periods re-staled.
-        """
-        unique_node_ids = list(dict.fromkeys(int(node_id) for node_id in node_ids))
-        if not unique_node_ids:
-            return 0
-        with self._write_transaction():
-            self._conn.execute(
-                "CREATE TEMP TABLE IF NOT EXISTS lcm_rollup_purge_nodes "
-                "(node_id INTEGER PRIMARY KEY) WITHOUT ROWID"
-            )
-            self._conn.execute("DELETE FROM temp.lcm_rollup_purge_nodes")
-            self._conn.executemany(
-                "INSERT INTO temp.lcm_rollup_purge_nodes(node_id) VALUES(?)",
-                ((node_id,) for node_id in unique_node_ids),
-            )
-            cur = self._conn.execute(
-                """
-                UPDATE lcm_rollups
-                SET status = 'stale',
-                    generation = generation + 1,
-                    summary = NULL,
-                    token_count = NULL,
-                    source_fingerprint = NULL,
-                    error = NULL,
-                    lease_expires_at = NULL,
-                    lease_nonce = ''
-                WHERE rollup_id IN (
-                    SELECT source.rollup_id
-                    FROM lcm_rollup_sources source
-                    JOIN temp.lcm_rollup_purge_nodes purged
-                      ON purged.node_id = source.node_id
-                )
-                """,
-            )
-            affected = int(cur.rowcount or 0)
-            self._conn.execute(
-                """
-                DELETE FROM lcm_rollup_sources
-                WHERE rollup_id IN (
-                    SELECT source.rollup_id
-                    FROM lcm_rollup_sources source
-                    JOIN temp.lcm_rollup_purge_nodes purged
-                      ON purged.node_id = source.node_id
-                )
-                """
-            )
-        return affected
 
     def close(self) -> None:
         conn = getattr(self, "_conn", None)

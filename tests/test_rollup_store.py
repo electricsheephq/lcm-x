@@ -322,57 +322,6 @@ def test_rollup_unique_constraint_is_kind_start_scope(rollup_store):
     rollup_store.connection.commit()
 
 
-def test_cursor_round_trip(rollup_store):
-    assert rollup_store.get_cursor("day") is None
-
-    rollup_store.set_cursor("day", "2026-07-15", built_at="2026-07-16T00:00:00Z")
-    assert rollup_store.get_cursor("day") == "2026-07-15"
-    state = rollup_store.connection.execute(
-        "SELECT last_build_cursor, last_built_at FROM lcm_rollup_state WHERE period_kind = 'day'"
-    ).fetchone()
-    assert tuple(state) == ("2026-07-15", "2026-07-16T00:00:00Z")
-
-    rollup_store.set_cursor("day", "2026-07-16")
-    assert rollup_store.get_cursor("day") == "2026-07-16"
-
-
-def test_purge_rollups_for_sources_restales_affected_windows(rollup_store):
-    first = _ready_rollup(
-        rollup_store, "day", "2026-07-15", source_node_ids=[1, 2]
-    )
-    second = _ready_rollup(
-        rollup_store, "day", "2026-07-16", source_node_ids=[2, 3]
-    )
-    kept = _ready_rollup(
-        rollup_store, "day", "2026-07-17", source_node_ids=[4]
-    )
-
-    # A hard delete at/before the build cursor would orphan the window (cursor
-    # advanced, no pending row -> never rebuilt). Purge instead re-stales the
-    # affected periods so maintenance rebuilds them from remaining sources.
-    assert rollup_store.purge_rollups_for_sources([2, 2]) == 2
-
-    first_row = rollup_store.get_rollup("day", "2026-07-15", "global")
-    second_row = rollup_store.get_rollup("day", "2026-07-16", "global")
-    kept_row = rollup_store.get_rollup("day", "2026-07-17", "global")
-    assert first_row["status"] == "stale" and first_row["summary"] is None
-    assert second_row["status"] == "stale" and second_row["summary"] is None
-    # Generation advanced so an in-flight build cannot publish purged content.
-    assert first_row["generation"] == 1 and second_row["generation"] == 1
-    # The rollup with no purged source is left untouched (still ready).
-    assert kept_row["status"] == "ready"
-    assert kept_row["source_node_ids"] == [4]
-    # Affected rollups' source rows are cleared (repopulated on rebuild); only the
-    # kept rollup's sources remain.
-    remaining_sources = rollup_store.connection.execute(
-        "SELECT rollup_id, node_id FROM lcm_rollup_sources ORDER BY rollup_id, node_id"
-    ).fetchall()
-    assert [tuple(row) for row in remaining_sources] == [(kept, 4)]
-    assert {first, second}.isdisjoint({kept})
-    assert rollup_store.purge_rollups_for_sources([]) == 0
-    assert rollup_store.purge_rollups_for_sources([999]) == 0
-
-
 def test_invalidation_mid_build_supersedes_old_mark_ready(rollup_store):
     scope = "conversation:conv-1"
     token = rollup_store.upsert_building("day", "2026-07-15", scope)
@@ -407,20 +356,6 @@ def test_reclaim_stale_building_reclaims_expired_lease_and_blocks_publish(rollup
     assert rollup_store.get_rollup("day", "2026-07-15", scope)["status"] == "stale"
 
 
-def test_upsert_stale_seeds_missing_rows_and_leaves_building_alone(rollup_store):
-    scope = "conversation:conv-1"
-
-    assert rollup_store.upsert_stale("month", "2026-07-01", scope) == 1
-    seeded = rollup_store.get_rollup("month", "2026-07-01", scope)
-    assert seeded["status"] == "stale"
-    assert seeded["summary"] is None
-
-    # A currently-building row is not disturbed by an upsert_stale.
-    rollup_store.upsert_building("day", "2026-07-15", scope)
-    rollup_store.upsert_stale("day", "2026-07-15", scope)
-    assert rollup_store.get_rollup("day", "2026-07-15", scope)["status"] == "building"
-
-
 def test_stale_aggregates_for_day_targets_week_and_month_only(rollup_store):
     scope = "conversation:conv-1"
     day_id = _ready_rollup(rollup_store, "day", "2026-07-15", scope)
@@ -437,15 +372,6 @@ def test_stale_aggregates_for_day_targets_week_and_month_only(rollup_store):
     assert statuses[day_id] == "ready"
     assert statuses[week_id] == "stale"
     assert statuses[month_id] == "stale"
-
-
-def test_cursor_state_is_per_scope(rollup_store):
-    rollup_store.set_cursor("day", "cursor-a", "scope-a")
-    rollup_store.set_cursor("day", "cursor-b", "scope-b")
-
-    assert rollup_store.get_cursor("day", "scope-a") == "cursor-a"
-    assert rollup_store.get_cursor("day", "scope-b") == "cursor-b"
-    assert rollup_store.get_cursor("day", "scope-missing") is None
 
 
 def test_temporal_rollup_config_defaults_are_inert():
@@ -478,7 +404,7 @@ def test_claim_advances_generation_so_racing_claims_get_distinct_leases(rollup_s
     # Two builders racing the same stale period must get DISTINCT tokens so only
     # the latest claimant can publish (maintainer #387 blocker 1).
     scope = "conversation:conv-1"
-    rollup_store.upsert_stale("day", "2026-07-15", scope)
+    rollup_store.upsert_stale_many([("day", "2026-07-15", scope)])
     first = rollup_store.upsert_building("day", "2026-07-15", scope)
     second = rollup_store.upsert_building("day", "2026-07-15", scope)
 
@@ -614,28 +540,15 @@ def test_resolve_no_source_cannot_delete_a_published_row_at_same_generation(roll
     assert rollup_store.get_rollup("day", "2026-07-15", scope)["status"] == "ready"
 
 
-def test_rebuild_claim_preserves_lineage_and_purge_still_restales(rollup_store):
-    # Maintainer #387 A2 repro: upsert_building cleared lcm_rollup_sources at claim
-    # time, so a concurrent purge-by-node found ZERO affected rollups and did not
-    # re-stale, letting the in-flight build publish deleted-node content. The
-    # claim must keep the prior lineage queryable until mark_ready swaps it.
+def test_rebuild_claim_preserves_lineage(rollup_store):
+    # The claim must keep the prior lineage queryable until mark_ready swaps it.
     scope = "conversation:conv-1"
     token = rollup_store.upsert_building("day", "2026-07-15", scope)
     assert rollup_store.mark_ready(token, "v1", 3, [10, 11], "fp1") is True
 
-    rebuild = rollup_store.upsert_building("day", "2026-07-15", scope)
+    rollup_store.upsert_building("day", "2026-07-15", scope)
     # The last-known-good lineage survives the claim (queryable).
     assert rollup_store.get_rollup("day", "2026-07-15", scope)["source_node_ids"] == [10, 11]
-
-    # A concurrent purge of node 11 still sees the rollup via its retained lineage
-    # and re-stales it (advancing generation).
-    assert rollup_store.purge_rollups_for_sources([11]) == 1
-    restaled = rollup_store.get_rollup("day", "2026-07-15", scope)
-    assert restaled["status"] == "stale"
-
-    # The superseded rebuild can no longer publish the now-purged content.
-    assert rollup_store.mark_ready(rebuild, "v2 with purged node", 3, [10, 11], "fp2") is False
-    assert rollup_store.get_rollup("day", "2026-07-15", scope)["status"] == "stale"
 
 
 def test_mark_ready_atomically_swaps_sources_and_status(rollup_store):
@@ -748,16 +661,6 @@ def test_deleted_token_never_authorizes_a_reused_rollup_identity(rollup_store):
     with pytest.raises(ValueError, match="unknown rollup_id"):
         rollup_store.mark_ready(old, "zombie", 1, [99], "old")
     assert rollup_store.get_rollup("week", "2026-07-13", "scope-b")["status"] == "building"
-
-
-def test_purge_source_ids_above_sqlite_bind_limit_is_sql_bounded(rollup_store):
-    rollup_id = _ready_rollup(
-        rollup_store, "day", "2026-07-15", source_node_ids=[250_001]
-    )
-    assert rollup_store.purge_rollups_for_sources(range(1, 250_002)) == 1
-    row = rollup_store.get_rollup("day", "2026-07-15", "global")
-    assert row["rollup_id"] == rollup_id
-    assert row["status"] == "stale"
 
 
 def test_failure_timestamp_is_terminal_time_not_claim_time(rollup_store):

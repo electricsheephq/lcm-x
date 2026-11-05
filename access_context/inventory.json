@@ -719,29 +719,6 @@
     }
   },
   {
-    "id": "expansion-preanswer-baseline-refs",
-    "category": "expansion",
-    "module": "preanswer_evidence.py",
-    "entry_point": "build_preanswer_evidence",
-    "authority_requirement": "read_scoped",
-    "discloses": [
-      "existence",
-      "content"
-    ],
-    "notes": "Caller-supplied pre-answer baseline refs name exact store spans that are read and injected into model context; the generated path is gated by lcm_recall, so the supplied path needs its own authorization. Entry point names the current in-tree ingress; the authorization hook in hook.sites lands with the wiring slices (slice 5 of the extraction train).",
-    "hook": {
-      "required": true,
-      "sites": [
-        "preanswer_evidence.py:authorize_supplied_baseline_refs"
-      ]
-    },
-    "target_binding": {
-      "args": [
-        "baseline_refs"
-      ]
-    }
-  },
-  {
     "id": "sessions-auxiliary-mixin",
     "category": "sessions",
     "module": "aux_session.py",

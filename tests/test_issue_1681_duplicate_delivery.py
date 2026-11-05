@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from hermes_lcm import adaptive_retrieval, evidence_compiler, host_evidence
-from hermes_lcm import evidence_pack, preanswer_evidence, retrieval_core, tools
+from hermes_lcm import adaptive_retrieval, evidence_compiler
+from hermes_lcm import evidence_pack, retrieval_core, tools
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG
 from hermes_lcm.store import MessageStore
@@ -321,7 +321,7 @@ def test_duplicate_free_bytes_match_main(engine, monkeypatch):
     assert duplicate_free_responses(engine, monkeypatch) == golden
 
 
-@pytest.mark.parametrize("consumer", ["pack", "compiler", "host", "preanswer", "adaptive", "baseline"])
+@pytest.mark.parametrize("consumer", ["pack", "compiler", "adaptive", "baseline"])
 def test_structured_consumers_preserve_duplicate_ids(engine, consumer):
     first, second = append(engine, "I read 5 pages."), append(engine, "I read 5 pages.")
     hit = {"store_id": first, "content": "I read 5 pages.", "content_offset": 0,
@@ -329,14 +329,12 @@ def test_structured_consumers_preserve_duplicate_ids(engine, consumer):
     if consumer == "pack":
         packed = json.loads(evidence_pack.build_evidence_pack({"question": "What did I read?", "baseline_refs": [hit]}, engine=engine))
         result = packed["evidence"][0]
-    elif consumer in {"compiler", "host"}:
+    elif consumer == "compiler":
         prepared = evidence_compiler.prepare_evidence_selector("What did I read?", baseline_refs=[hit])
         assert prepared["selector_request"]["baseline_evidence"][0]["duplicate_store_ids"] == [second]
         proposal = {"version": "evidence-selector-v1", "selections": [{"claim_id": "a", "facet": "answer", "exact_ref": hit["exact_ref"], "quote": hit["quote"]}], "missing_facets": []}
         compiled = evidence_compiler.compile_evidence("What did I read?", engine=engine, baseline_refs=[hit], enabled=True, selector=lambda _: proposal)
-        result = (host_evidence._context_payload(compiled) if consumer == "host" else compiled)["evidence"][0]
-    elif consumer == "preanswer":
-        result = preanswer_evidence._automatic_candidate(hit, engine=engine, plan=SimpleNamespace(operation="sum"))
+        result = compiled["evidence"][0]
     elif consumer == "adaptive":
         result = adaptive_retrieval._extract_exact_evidence({"hits": [hit]}, engine=engine)[0].public_dict()
     else:
