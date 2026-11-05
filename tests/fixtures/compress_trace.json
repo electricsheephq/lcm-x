@@ -132,7 +132,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=65598ef4f2b416777694879288312b2ad9bf2e1cc6fb09050322326d0d559af7"
+"attrs count=145 sha256=a8e3bed3fb4c52f4328314581fd1044b4fb4acf332876e7b9e3b0a55a82651b4"
 ],
 "below-threshold-cleanup-only": [
 "compress attempt=1",
@@ -262,7 +262,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=730943c16bdfb59848233ae24de7b0c00a53d8c8e8836be6bb6462864ce592c0"
+"attrs count=145 sha256=1f28ac4c19173dda2d7bd00afede10649361bb24cdc714942cdb35c997daef9e"
 ],
 "boundary-cleanup-only": [
 "compress attempt=1",
@@ -392,7 +392,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=490a38722c5564549a392a302c8300d4ef10441ccb2a18ff2f2aac06150298a1"
+"attrs count=145 sha256=7ee2b1be594e99f645ed2999a41d3c8f3f6a1f00f56fb41d1a14ce33a8a73f6c"
 ],
 "budget-exhausted-before-leaf": [
 "compress attempt=1",
@@ -545,7 +545,7 @@
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_turn_paced=true",
 "attr _sweep_budget_hold_until=1715.0",
-"attrs count=146 sha256=2d5b14a47996a951a0888f106a003e9cd3120fb530bf6dfc65d00ae94895238c"
+"attrs count=145 sha256=d89ba3c047a1f54fe2ab13860fc481419caf60d2bb107dbc1043d8da8bda405d"
 ],
 "budget-partial-pass": [
 "compress attempt=1",
@@ -719,7 +719,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=08fd885d0353f70a996a9a17e44c83902660ba5ada1ca89ddd4bb930b4b9707a"
+"attrs count=145 sha256=7ea68db1f64ba161fed03f20011fd52369e048aab22d060b6d84ba8e1bb77083"
 ],
 "child-session-bypass": [
 "compress attempt=1",
@@ -742,7 +742,7 @@
 "attr _last_compression_status=\"running\"",
 "attr _pending_emission_candidates=[]",
 "attr compression_count=1",
-"attrs count=146 sha256=7b045af03e3cc7f280233bdc6339d7f8eb25e3cfd445b171a54375b762365c89"
+"attrs count=145 sha256=01a034bed48b9331c438e3c611771d514f89ddefee7ec43bdfa16adbbfbe96b1"
 ],
 "child-session-forced": [
 "compress attempt=1",
@@ -765,7 +765,7 @@
 "attr _last_compression_status=\"running\"",
 "attr _pending_emission_candidates=[]",
 "attr compression_count=1",
-"attrs count=146 sha256=7b045af03e3cc7f280233bdc6339d7f8eb25e3cfd445b171a54375b762365c89"
+"attrs count=145 sha256=01a034bed48b9331c438e3c611771d514f89ddefee7ec43bdfa16adbbfbe96b1"
 ],
 "child-with-cached-usage": [
 "compress attempt=1",
@@ -788,7 +788,7 @@
 "attr _last_compression_status=\"running\"",
 "attr _pending_emission_candidates=[]",
 "attr compression_count=1",
-"attrs count=146 sha256=7b045af03e3cc7f280233bdc6339d7f8eb25e3cfd445b171a54375b762365c89"
+"attrs count=145 sha256=01a034bed48b9331c438e3c611771d514f89ddefee7ec43bdfa16adbbfbe96b1"
 ],
 "child-without-usage": [
 "compress attempt=1",
@@ -811,7 +811,7 @@
 "attr _last_compression_status=\"running\"",
 "attr _pending_emission_candidates=[]",
 "attr compression_count=1",
-"attrs count=146 sha256=7b045af03e3cc7f280233bdc6339d7f8eb25e3cfd445b171a54375b762365c89"
+"attrs count=145 sha256=01a034bed48b9331c438e3c611771d514f89ddefee7ec43bdfa16adbbfbe96b1"
 ],
 "condensation-levels": [
 "compress attempt=1",
@@ -992,7 +992,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=9589d70bd3038f2895c0823424f7c43f42e0450ce85eb4bb5b6df1a48002e600"
+"attrs count=145 sha256=e804f1fd5a463b7bab254781ce936e28547cff10add5a4a747074b5af9a8de71"
 ],
 "condensation-publication-locked": [
 "compress attempt=1",
@@ -1161,7 +1161,7 @@
 "attr _store_complete_order={}",
 "attr _survival_fit_reason=\"sqlite_publication_locked\"",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=eb1bed97295ef407f8f521d92b9d5e084a2a7caac55a5f7ea73392334c56c261"
+"attrs count=145 sha256=b97aa3d362e552a91ef70eed82d8d79f8d69197504be164cd0b183878cc30c3b"
 ],
 "condensation-spends-soft-budget": [
 "compress attempt=1",
@@ -1309,7 +1309,7 @@
 "attr _pending_emission_candidates=sha12/len=fc146730afef/464",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=3340d3c8cd9fbf23058e7fc6b7d9d2d8b941a4f11c3e2255f182519005df8503"
+"attrs count=145 sha256=39798c273a4824c9e41230c4322a875752ae753b5f0210c7b2873bdc5da4652b"
 ],
 "context-length-rescue": [
 "compress attempt=1",
@@ -1481,7 +1481,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=974142ccde3454a8535e3dad8cd58e3766dde4b21a3b9edc1e28be64ad693114"
+"attrs count=145 sha256=b2d9065e6258bdecd7f70e64841b02d405a41bf9520fc3dd9156a1fe0d52afc2"
 ],
 "deadline-checkpoint-10": [
 "compress attempt=1",
@@ -1626,7 +1626,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=146 sha256=04880d2d808e9df46b8263878cdb4073177fdf1c10b9215200784c0c00fcc12d"
+"attrs count=145 sha256=0c0c12036b513d633ce8598f64de518a6e2ab284f5bdea82323e77192e379c90"
 ],
 "deadline-checkpoint-4": [
 "compress attempt=1",
@@ -1763,7 +1763,7 @@
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=146 sha256=4a23ccc759dc550b218fa899f98a788191536f00ac5692800d19440fb3083ee5"
+"attrs count=145 sha256=7053a72898e3c1139651df3ea9a13b570e0bdf21dcf2a758e60f250376775a71"
 ],
 "deadline-checkpoint-6": [
 "compress attempt=1",
@@ -1900,7 +1900,7 @@
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=146 sha256=4a23ccc759dc550b218fa899f98a788191536f00ac5692800d19440fb3083ee5"
+"attrs count=145 sha256=7053a72898e3c1139651df3ea9a13b570e0bdf21dcf2a758e60f250376775a71"
 ],
 "deadline-checkpoint-8": [
 "compress attempt=1",
@@ -2038,7 +2038,7 @@
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=146 sha256=7db179fb759fa822398d71a5a9c8fc7bf6bf534ab27c88817533ecbc92d2132e"
+"attrs count=145 sha256=b3251b3e93c36cf043e71765be6d8334e669889b9ffd445f7a469bd7d80dc23a"
 ],
 "deadline-hidden-backlog-read": [
 "compress attempt=1",
@@ -2101,7 +2101,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=146 sha256=2545d012cf3dd88099a536a79a4257fa042afe7ff2250bf0c2ba0f8a6cdf85d9"
+"attrs count=145 sha256=03df629de74d5a5ce5fb61b97998ed34297706cf43dfc6823a712abe02fc8c37"
 ],
 "default-sweep-target": [
 "compress attempt=1",
@@ -2320,7 +2320,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=bda4f607aba714025d1734aa9d852af6ea0b9521b06e65ebd4b6213f60f35263"
+"attrs count=145 sha256=4cfde873a178b5e1bb5b31f8d152f2d94450e75b80af076adbc42dcd82458a7b"
 ],
 "deferred-critical-small-backlog": [
 "compress attempt=1",
@@ -2474,7 +2474,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=541bcf710d2dea2a6174c499a6d37c7ecb98135fbb1cec88e9658a5d5c20aff9"
+"attrs count=145 sha256=9240801fc79315f5c690b81e348328d78a59f55142da4831669eda8025c72406"
 ],
 "deferred-maintenance": [
 "compress attempt=1",
@@ -2642,7 +2642,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=dbd45d4ee80e3011b3caa6feedaf77d61921a98354987d486bda547efc140c04"
+"attrs count=145 sha256=d3ee4073077a09e16f6f6da06f67429efa87e2c8003ad4231529a758bc23a6ae"
 ],
 "dependent-nonreply-barrier": [
 "non-reply role: both fingerprints absent despite persisted ledger; generated=False",
@@ -2735,7 +2735,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=d34b0858ed6ab38483a6d88db16579b62a9b6768ffb4b8cc651efe2142a1f0b2"
+"attrs count=145 sha256=5121045d7dd29216412692496905872bb5f86a0004d509ee79ab1e301374a86e"
 ],
 "dependent-only-leaf": [
 "compress attempt=1",
@@ -2823,7 +2823,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=5e4e5cd2336299b1726c3d573d24d872ef7d846c50ca88419ec90598576e4307"
+"attrs count=145 sha256=6f12c40e5f2b49c290a354bc41d3ca43b687b31acd3e0f86add4058c25215ede"
 ],
 "dynamic-below-minimum": [
 "compress attempt=1",
@@ -2958,7 +2958,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=4050e63ceae4d9e8ef18a532e989c6c961873f09a002c3b0e211cf3f1db0fbfe"
+"attrs count=145 sha256=9b76394e47b17ca4a4230f89a30f892a4c4194a6e8aac661b0e9e334179103ba"
 ],
 "dynamic-below-minimum-no-fit": [
 "compress attempt=1",
@@ -3094,7 +3094,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=c05ddecf723f74765fa23e768be39ca818b07435aeb2329ffe926d9e3fcfa943"
+"attrs count=145 sha256=24dca60e98e0c954ae25598f416145876d0a5ddf04725706a21b116ac114f45d"
 ],
 "dynamic-forced-overflow": [
 "compress attempt=1",
@@ -3246,7 +3246,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=891fad785d9de21cb79c7f27861d21dd5d9df64e846546e6152d031145e19795"
+"attrs count=145 sha256=25f11a279c6df7b97ca7ec55f0cd97ae3c0c79b9ae4b6c5533cc11dc87041a33"
 ],
 "dynamic-fresh-tail-yield": [
 "compress attempt=1",
@@ -3421,7 +3421,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=58f09ff31060c3228c8a3057738c17d93917b19856de44febdf912ced49e932d"
+"attrs count=145 sha256=3671d9e00a1c1ec234e612ecdd852daa119adba6d5d803bdb98215c2c81679ba"
 ],
 "dynamic-leaf-passes": [
 "compress attempt=1",
@@ -3615,7 +3615,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=7b59438fdd8b84621ba91d48aed881483f0421492cb0fcf8b56adaa85795a8f5"
+"attrs count=145 sha256=05f68a46b719656e01903fd93ddaba6c64a9c4cc02422c00f5b99b1ea2813337"
 ],
 "dynamic-raw-drained": [
 "compress attempt=1",
@@ -3751,7 +3751,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=9c133a9d28e9a24b6b8c884a7dea663182df245328ff34eec3f934c37b9b79f8"
+"attrs count=145 sha256=60fb434c1eff5992d577c783ef89e473d1c190f1b0e6f7dafe3b72b75a30e35a"
 ],
 "dynamic-small-backlog-yields": [
 "compress attempt=1",
@@ -3905,7 +3905,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=5d22049f3eafc5f5af8ed114f46dcab244fa714f03e17d10db6e65466e01bb95"
+"attrs count=145 sha256=fb8c2480e6fa2627b0621e224f107d9ad7e673515f806f1683afc3f9783a8b2d"
 ],
 "dynamic-threshold-reached": [
 "compress attempt=1",
@@ -4069,7 +4069,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=961c5edacc6ecfbfc8d1ea5cea7efb99145e9aa0f432d420c51076afd66232d1"
+"attrs count=145 sha256=edbcd842dd414cf31d3255e4f18fd0c7fca8da7c1254594ca0f6d2f8bb2720fc"
 ],
 "empty": [
 "compress attempt=1",
@@ -4088,7 +4088,7 @@
 "attr _last_compression_noop_reason=\"empty message list\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=146 sha256=8d419fc5372c7acb11d58b9bed1b92f8a5f4af55f0767af72c1a0ef016b7b474"
+"attrs count=145 sha256=3f8d5db95f8ff0231721f580fe68e382e48d79d331ab52cd943f8ed5058bbd12"
 ],
 "escalation-level-three": [
 "compress attempt=1",
@@ -4254,7 +4254,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=ee4feccf6a9f1392e265ea76188677b02c39a6e433d118f981b02196cf49057b"
+"attrs count=145 sha256=dfd9e9a317df7b1d624f7223d7462c47064545901ab86230c8e6ea919eb80d83"
 ],
 "escalation-level-two": [
 "compress attempt=1",
@@ -4420,7 +4420,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=6efdc5883cb86d74ce6c6059a70b903af4a15e14ff80711ca4dfa5f64bf39d73"
+"attrs count=145 sha256=3e51678414182768207565cc0a96dd3450269970d3ade729d244c197c47b6e81"
 ],
 "escalation-rejected-keeps-backlog": [
 "compress attempt=1",
@@ -4570,7 +4570,7 @@
 "attr _store_complete_excluded=[]",
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=7a515ed060b5aa81b2e4adc7bb7324ab4f96afb30f1d6a67da9685d61c2522a8"
+"attrs count=145 sha256=a8ce75456e072d9ce30e33e32a33736a2f49e3d3013f8aa9f3e2f99bbd31faba"
 ],
 "explicit-focus": [
 "compress attempt=1",
@@ -4734,7 +4734,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=d34b0858ed6ab38483a6d88db16579b62a9b6768ffb4b8cc651efe2142a1f0b2"
+"attrs count=145 sha256=5121045d7dd29216412692496905872bb5f86a0004d509ee79ab1e301374a86e"
 ],
 "externalized-payloads": [
 "compress attempt=1",
@@ -4923,189 +4923,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=38d48f3d51ed96b90b5ff442b58213aa97509c17bb0bffcfbcdf9ab8e5bab5c3"
-],
-"externalized-transcript-gc": [
-"compress attempt=1",
-"leaf_prep before {\"chain\":[],\"counters\":{}}",
-"sql BEGIN IMMEDIATE",
-"sql shape=1 conn=_legacy_conversation_ids_store SAVEPOINT lcm_ingest",
-"sql #1",
-"sql shape=2 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_conversation_observed ON messages(conversation_id, observed_at)",
-"sql #2",
-"sql shape=3 conn=_legacy_conversation_ids_store CREATE TABLE IF NOT EXISTS message_relations ( relation_id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL, kind TEXT NOT NULL, related_store_id INTEGER, ordinal INTEGER, observed_at REAL, created_at REAL )",
-"sql #3",
-"sql shape=4 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_relations_store ON message_relations(store_id, kind)",
-"sql #4",
-"sql shape=5 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_relations_related ON message_relations(related_store_id, kind)",
-"sql #5",
-"sql shape=6 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_relations_observed ON message_relations(kind, observed_at)",
-"sql #6",
-"sql shape=7 conn=_legacy_conversation_ids_store RELEASE SAVEPOINT lcm_ingest",
-"sql #7",
-"sql #1",
-"sql #7",
-"log hermes_lcm.engine DEBUG \"Ingest: session=%s cursor=%d incoming=%d\"",
-"sql shape=8 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, NULL)",
-"sql #8 sha12/len=c16b5c22dc9f/334 x5",
-"sql shape=9 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?, NULL, NULL, NULL, ?, ?, ?, ?, ?,?)",
-"sql #9 sha12/len=c56f7879c7d4/1593 x5",
-"sql #8 sha12/len=5928522868b9/1578 x5",
-"sql #9 sha12/len=c6ad471721fc/1593 x5",
-"sql #8 sha12/len=2eff5a55ac17/1578 x5",
-"sql #9 sha12/len=f0309bfb39c5/1593 x5",
-"sql #8 sha12/len=7a04e6343cca/1578 x5",
-"sql #9 sha12/len=4e9862a77994/1593 x5",
-"sql #8 sha12/len=f5e2163a2704/1578 x5",
-"sql #9 sha12/len=586e9da16a25/1593 x5",
-"sql #8 sha12/len=e7eca4415696/1578 x5",
-"sql #9 sha12/len=fbafdba73649/1593 x5",
-"sql #8 sha12/len=e55e8e0b11b8/1578 x5",
-"sql #9 sha12/len=d70bd8f892d7/1593 x5",
-"sql #8 sha12/len=aa51efc18eb8/1578 x5",
-"sql #9 sha12/len=ada5b0ec14fb/1593 x5",
-"sql #8 sha12/len=7201fd996872/1578 x5",
-"sql shape=10 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?, NULL,?, NULL, ?, ?, ?, ?, NULL, NULL)",
-"sql #10 sha12/len=5cdddd83da37/1993 x5",
-"sql shape=11 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?,?, NULL,?, ?, ?, ?, ?, NULL, NULL)",
-"sql #11 sha12/len=db65aff40b32/544 x5",
-"sql #10 sha12/len=01e91e2a831b/1993 x5",
-"sql #11 sha12/len=4360cc28f70b/544 x5",
-"sql #10 sha12/len=74c09db82e2d/1993 x5",
-"sql #11 sha12/len=82caa050f36a/544 x5",
-"sql #10 sha12/len=73304c755288/1993 x5",
-"sql #11 sha12/len=508f4ab7b1bf/544 x5",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql shape=12 conn=_legacy_conversation_ids_store INSERT INTO metadata(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-"sql #12 sha12/len=1b14ec7cbf0e/149",
-"sql #7",
-"sql #1",
-"sql #12 sha12/len=f0485d7a6f55/151",
-"sql #7",
-"log hermes_lcm.engine DEBUG \"Ingested %d messages into LCM store\"",
-"sql #1",
-"sql shape=13 conn=_legacy_conversation_ids_store UPDATE ledger_meta SET value=CAST(value AS INTEGER)+? WHERE key=?",
-"sql #13 sha12/len=72e21a1157bd/74",
-"sql shape=14 conn=_legacy_conversation_ids_store INSERT INTO occurrence_bindings(lineage, ordinal,store_id,identity_digest,stamp,disposition,tag,key_rank,view_seq) VALUES (?,?,?,x?,NULL,?,NULL,NULL,?)",
-"sql #14 sha12/len=4a90529dc6ae/192",
-"sql shape=15 conn=_legacy_conversation_ids_store INSERT INTO occurrence_bindings(lineage, ordinal,store_id,identity_digest,stamp,disposition,tag,key_rank,view_seq) VALUES (?,?,?,x?,?,?,NULL,NULL,?)",
-"sql #15 sha12/len=001ba7015f17/194",
-"sql #14 sha12/len=611509717526/192",
-"sql #15 sha12/len=d65dfe6b30c1/194",
-"sql #14 sha12/len=a1d92edfb122/192",
-"sql #15 sha12/len=2e1ada6d29da/194",
-"sql #14 sha12/len=876149873878/192",
-"sql #15 sha12/len=dbc9cec6eb8b/194",
-"sql #14 sha12/len=65d30844a35a/192",
-"sql #15 sha12/len=6e5d10728549/197",
-"sql #14 sha12/len=a808829591d1/195",
-"sql #15 sha12/len=7c31095ca015/197",
-"sql #14 sha12/len=cf226747b725/195",
-"sql #15 sha12/len=8794d893727b/197",
-"sql #14 sha12/len=4c2aaa91dc9b/195",
-"sql #15 sha12/len=b0358daa8160/197",
-"sql #14 sha12/len=f254d9795e73/195",
-"sql #14 sha12/len=d59c3497d570/195",
-"sql #14 sha12/len=e8952583f30d/195",
-"sql #14 sha12/len=b54a112e4b9d/195",
-"sql #14 sha12/len=22fd7daad6de/195",
-"sql #14 sha12/len=ebb6923d2f5a/195",
-"sql #14 sha12/len=f6fd2e71c826/195",
-"sql #14 sha12/len=4d29f5188e7b/195",
-"sql #14 sha12/len=f4c7d9143b35/195",
-"sql shape=16 conn=_legacy_conversation_ids_store INSERT INTO ingest_views VALUES (?,?,?,NULL,x?,x?)",
-"sql #16 sha12/len=5664f349973d/3725",
-"sql shape=17 conn=_legacy_conversation_ids_store DELETE FROM ingest_views WHERE lineage=?AND kind=?AND view_seq NOT IN (SELECT view_seq FROM ingest_views WHERE lineage=?AND kind=?ORDER BY view_seq DESC LIMIT ?)",
-"sql #17 sha12/len=310b0f9decf1/203",
-"sql shape=18 conn=_legacy_conversation_ids_store INSERT INTO lineage_marks(lineage,max_store_id) VALUES (?,?) ON CONFLICT(lineage) DO UPDATE SET max_store_id=excluded.max_store_id WHERE lineage_marks.max_store_id IS NOT excluded.max_store_id",
-"sql #18 sha12/len=966912535247/207",
-"sql #7",
-"sql COMMIT",
-"log hermes_lcm.engine DEBUG \"LCM attribution phase=ingest lock_hold_ms=%.3f rows_written=%d bytes_written=%d busy_snapshot_retry=%s\"",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=52614d71143e/151",
-"sql COMMIT",
-"log hermes_lcm.engine INFO \"LCM leaf summary input: input_tokens=%d source_tokens=%d messages=%d\"",
-"call 1 model=trace-model level=1 budget=4000 timeout=115.0 in=efa3b2278376/27611",
-"log hermes_lcm.escalation DEBUG \"L1 summarization succeeded (%d tokens)\"",
-"sql BEGIN IMMEDIATE",
-"sql shape=19 conn=_dag INSERT INTO summary_nodes (session_id, depth, summary, token_count, source_token_count, source_ids, source_type, created_at, earliest_at, latest_at, expand_hint) VALUES (?, ?,?, ?, ?,?,?, ?, ?, ?,?)",
-"sql #19 sha12/len=98474755f43c/388 x3",
-"sql shape=20 conn=_dag INSERT OR REPLACE INTO summary_node_provenance (node_id, escalation_level, model, created_at) VALUES (?, ?,?, ?)",
-"sql #20 sha12/len=bd12465197ec/135",
-"sql shape=21 conn=_dag UPDATE lcm_lifecycle_state SET current_frontier_store_id = MAX(current_frontier_store_id, ?), updated_at = ? WHERE conversation_id =?AND current_session_id =?",
-"sql #21 sha12/len=2f2071fe77c6/191",
-"sql COMMIT",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=4702b2b116a4/157",
-"sql COMMIT",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=7e464c565523/237",
-"sql COMMIT",
-"sql BEGIN IMMEDIATE",
-"sql shape=22 conn=_legacy_conversation_ids_store UPDATE messages SET content =?, token_estimate = ? WHERE store_id = ?",
-"sql #22 sha12/len=db5a3f44df60/192 x7",
-"sql COMMIT",
-"sql BEGIN IMMEDIATE",
-"sql #22 sha12/len=e585135b3862/192 x7",
-"sql COMMIT",
-"sql BEGIN IMMEDIATE",
-"sql #22 sha12/len=111793fff4d3/192 x7",
-"sql COMMIT",
-"log hermes_lcm.compaction INFO \"LCM leaf compaction finished in %.1fms\"",
-"log hermes_lcm.compaction INFO \"LCM compaction #%d: %d messages \u2192 %d (%d leaf pass%s, %d\u2192%d tokens%s, %d DAG nodes%s%s)%s\"",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=646e8a426c74/484",
-"sql COMMIT",
-"return sha12/len=b8d8a264a201/5437",
-"leaf_prep after {\"chain\":[],\"counters\":{}}",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=97af61271bc1/305",
-"sql COMMIT",
-"assemble",
-"message system 6a97437a05d4/508",
-"message user 67e4e8b1c7a0/112",
-"message user 69e6fa69ef3f/1444",
-"message assistant b61a04d6dd7e/1600",
-"message tool b3f7e026a84f/1600",
-"attr _compress_escaped=[]",
-"attr _compress_forced_overflow=false",
-"attr _compress_hidden_rows_consumed=0",
-"attr _compress_host_rows_consumed=22",
-"attr _compress_occurrences=null",
-"attr _compress_run=sha12/len=06d177b483f1/444",
-"attr _dag=sha12/len=ad06d604fc3e/394",
-"attr _foreground_budget=sha12/len=fec1f19f1573/375",
-"attr _ingest_cursor=4",
-"attr _last_compacted_store_id=23",
-"attr _last_compression_status=\"compacted\"",
-"attr _last_leaf_content_filter_error=false",
-"attr _last_leaf_level_3_verbatim=false",
-"attr _last_leaf_summary_model=\"\"",
-"attr _lifecycle=sha12/len=674382ee1de7/392",
-"attr _no_progress_ingest_generation=0",
-"attr _no_progress_observed_tokens=3000",
-"attr _no_progress_public_rows=sha12/len=89f408cf8108/34823",
-"attr _pending_emission_candidates=sha12/len=37741e1df74c/449",
-"attr _store=sha12/len=22cd35c8b281/35244",
-"attr _store_complete_blocked=null",
-"attr _store_complete_copy_exclusion_proofs={}",
-"attr _store_complete_cut=false",
-"attr _store_complete_empty_reason=\"\"",
-"attr _store_complete_escaped=[]",
-"attr _store_complete_excluded=[]",
-"attr _store_complete_order={}",
-"attr _survival_pass_observed=true",
-"attr compression_count=1",
-"attrs count=146 sha256=e4c90c17c9fadb33da473b2ecd8e43afea2a0cc94afb9f92eb1dfd3f4f7eb2ba"
+"attrs count=145 sha256=96971472917834aa3d10fabec042bb10f32d99459f8aa7c4da9c51838fc43b7d"
 ],
 "finish-callable-telemetry": [
 "compress attempt=1",
@@ -5312,7 +5130,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=15c85423e095137f0833c9036fc2f2aa8d1dad201b19d5380d2e780bc22e9595"
+"attrs count=145 sha256=fc987fb69fe610ba65cf93e5d9e6d0618fa210896e70ba68d6522b0c914155b6"
 ],
 "finish-condensation-lock": [
 "compress attempt=1",
@@ -5483,7 +5301,7 @@
 "attr _store_complete_order={}",
 "attr _survival_fit_reason=\"sqlite_publication_locked\"",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=eb1bed97295ef407f8f521d92b9d5e084a2a7caac55a5f7ea73392334c56c261"
+"attrs count=145 sha256=b97aa3d362e552a91ef70eed82d8d79f8d69197504be164cd0b183878cc30c3b"
 ],
 "finish-condensation-nonlock-error": [
 "compress attempt=1",
@@ -5653,184 +5471,7 @@
 "attr _store_complete_excluded=[]",
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=e68232dc7635c8c1293ab052ab70b4cecf85aaac6228a7c3d9c04ae42c4310d1"
-],
-"finish-gc-lock": [
-"compress attempt=1",
-"leaf_prep before {\"chain\":[],\"counters\":{}}",
-"sql BEGIN IMMEDIATE",
-"sql shape=1 conn=_legacy_conversation_ids_store SAVEPOINT lcm_ingest",
-"sql #1",
-"sql shape=2 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_conversation_observed ON messages(conversation_id, observed_at)",
-"sql #2",
-"sql shape=3 conn=_legacy_conversation_ids_store CREATE TABLE IF NOT EXISTS message_relations ( relation_id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL, kind TEXT NOT NULL, related_store_id INTEGER, ordinal INTEGER, observed_at REAL, created_at REAL )",
-"sql #3",
-"sql shape=4 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_relations_store ON message_relations(store_id, kind)",
-"sql #4",
-"sql shape=5 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_relations_related ON message_relations(related_store_id, kind)",
-"sql #5",
-"sql shape=6 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_relations_observed ON message_relations(kind, observed_at)",
-"sql #6",
-"sql shape=7 conn=_legacy_conversation_ids_store RELEASE SAVEPOINT lcm_ingest",
-"sql #7",
-"sql #1",
-"sql #7",
-"log hermes_lcm.engine DEBUG \"Ingest: session=%s cursor=%d incoming=%d\"",
-"sql shape=8 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, NULL)",
-"sql #8 sha12/len=c16b5c22dc9f/334 x5",
-"sql shape=9 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?, NULL, NULL, NULL, ?, ?, ?, ?, ?,?)",
-"sql #9 sha12/len=c56f7879c7d4/1593 x5",
-"sql #8 sha12/len=5928522868b9/1578 x5",
-"sql #9 sha12/len=c6ad471721fc/1593 x5",
-"sql #8 sha12/len=2eff5a55ac17/1578 x5",
-"sql #9 sha12/len=f0309bfb39c5/1593 x5",
-"sql #8 sha12/len=7a04e6343cca/1578 x5",
-"sql #9 sha12/len=4e9862a77994/1593 x5",
-"sql #8 sha12/len=f5e2163a2704/1578 x5",
-"sql #9 sha12/len=586e9da16a25/1593 x5",
-"sql #8 sha12/len=e7eca4415696/1578 x5",
-"sql #9 sha12/len=fbafdba73649/1593 x5",
-"sql #8 sha12/len=e55e8e0b11b8/1578 x5",
-"sql #9 sha12/len=d70bd8f892d7/1593 x5",
-"sql #8 sha12/len=aa51efc18eb8/1578 x5",
-"sql #9 sha12/len=ada5b0ec14fb/1593 x5",
-"sql #8 sha12/len=7201fd996872/1578 x5",
-"sql shape=10 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?, NULL,?, NULL, ?, ?, ?, ?, NULL, NULL)",
-"sql #10 sha12/len=5cdddd83da37/1993 x5",
-"sql shape=11 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?,?, NULL,?, ?, ?, ?, ?, NULL, NULL)",
-"sql #11 sha12/len=db65aff40b32/544 x5",
-"sql #10 sha12/len=01e91e2a831b/1993 x5",
-"sql #11 sha12/len=4360cc28f70b/544 x5",
-"sql #10 sha12/len=74c09db82e2d/1993 x5",
-"sql #11 sha12/len=82caa050f36a/544 x5",
-"sql #10 sha12/len=73304c755288/1993 x5",
-"sql #11 sha12/len=508f4ab7b1bf/544 x5",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql shape=12 conn=_legacy_conversation_ids_store INSERT INTO metadata(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-"sql #12 sha12/len=1b14ec7cbf0e/149",
-"sql #7",
-"sql #1",
-"sql #12 sha12/len=f0485d7a6f55/151",
-"sql #7",
-"log hermes_lcm.engine DEBUG \"Ingested %d messages into LCM store\"",
-"sql #1",
-"sql shape=13 conn=_legacy_conversation_ids_store UPDATE ledger_meta SET value=CAST(value AS INTEGER)+? WHERE key=?",
-"sql #13 sha12/len=72e21a1157bd/74",
-"sql shape=14 conn=_legacy_conversation_ids_store INSERT INTO occurrence_bindings(lineage, ordinal,store_id,identity_digest,stamp,disposition,tag,key_rank,view_seq) VALUES (?,?,?,x?,NULL,?,NULL,NULL,?)",
-"sql #14 sha12/len=4a90529dc6ae/192",
-"sql shape=15 conn=_legacy_conversation_ids_store INSERT INTO occurrence_bindings(lineage, ordinal,store_id,identity_digest,stamp,disposition,tag,key_rank,view_seq) VALUES (?,?,?,x?,?,?,NULL,NULL,?)",
-"sql #15 sha12/len=001ba7015f17/194",
-"sql #14 sha12/len=611509717526/192",
-"sql #15 sha12/len=d65dfe6b30c1/194",
-"sql #14 sha12/len=a1d92edfb122/192",
-"sql #15 sha12/len=2e1ada6d29da/194",
-"sql #14 sha12/len=876149873878/192",
-"sql #15 sha12/len=dbc9cec6eb8b/194",
-"sql #14 sha12/len=65d30844a35a/192",
-"sql #15 sha12/len=6e5d10728549/197",
-"sql #14 sha12/len=a808829591d1/195",
-"sql #15 sha12/len=7c31095ca015/197",
-"sql #14 sha12/len=cf226747b725/195",
-"sql #15 sha12/len=8794d893727b/197",
-"sql #14 sha12/len=4c2aaa91dc9b/195",
-"sql #15 sha12/len=b0358daa8160/197",
-"sql #14 sha12/len=f254d9795e73/195",
-"sql #14 sha12/len=d59c3497d570/195",
-"sql #14 sha12/len=e8952583f30d/195",
-"sql #14 sha12/len=b54a112e4b9d/195",
-"sql #14 sha12/len=22fd7daad6de/195",
-"sql #14 sha12/len=ebb6923d2f5a/195",
-"sql #14 sha12/len=f6fd2e71c826/195",
-"sql #14 sha12/len=4d29f5188e7b/195",
-"sql #14 sha12/len=f4c7d9143b35/195",
-"sql shape=16 conn=_legacy_conversation_ids_store INSERT INTO ingest_views VALUES (?,?,?,NULL,x?,x?)",
-"sql #16 sha12/len=5664f349973d/3725",
-"sql shape=17 conn=_legacy_conversation_ids_store DELETE FROM ingest_views WHERE lineage=?AND kind=?AND view_seq NOT IN (SELECT view_seq FROM ingest_views WHERE lineage=?AND kind=?ORDER BY view_seq DESC LIMIT ?)",
-"sql #17 sha12/len=310b0f9decf1/203",
-"sql shape=18 conn=_legacy_conversation_ids_store INSERT INTO lineage_marks(lineage,max_store_id) VALUES (?,?) ON CONFLICT(lineage) DO UPDATE SET max_store_id=excluded.max_store_id WHERE lineage_marks.max_store_id IS NOT excluded.max_store_id",
-"sql #18 sha12/len=966912535247/207",
-"sql #7",
-"sql COMMIT",
-"log hermes_lcm.engine DEBUG \"LCM attribution phase=ingest lock_hold_ms=%.3f rows_written=%d bytes_written=%d busy_snapshot_retry=%s\"",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=52614d71143e/151",
-"sql COMMIT",
-"log hermes_lcm.engine INFO \"LCM leaf summary input: input_tokens=%d source_tokens=%d messages=%d\"",
-"call 1 model=trace-model level=1 budget=4000 timeout=115.0 in=efa3b2278376/27611",
-"sql shape=19 conn=_legacy_conversation_ids_store CREATE TEMP TRIGGER lock_gc BEFORE UPDATE OF content ON messages BEGIN SELECT RAISE(ABORT,?); END",
-"sql #19 sha12/len=0fe14e4b36ef/116",
-"log hermes_lcm.escalation DEBUG \"L1 summarization succeeded (%d tokens)\"",
-"sql BEGIN IMMEDIATE",
-"sql shape=20 conn=_dag INSERT INTO summary_nodes (session_id, depth, summary, token_count, source_token_count, source_ids, source_type, created_at, earliest_at, latest_at, expand_hint) VALUES (?, ?,?, ?, ?,?,?, ?, ?, ?,?)",
-"sql #20 sha12/len=98474755f43c/388 x3",
-"sql shape=21 conn=_dag INSERT OR REPLACE INTO summary_node_provenance (node_id, escalation_level, model, created_at) VALUES (?, ?,?, ?)",
-"sql #21 sha12/len=bd12465197ec/135",
-"sql shape=22 conn=_dag UPDATE lcm_lifecycle_state SET current_frontier_store_id = MAX(current_frontier_store_id, ?), updated_at = ? WHERE conversation_id =?AND current_session_id =?",
-"sql #22 sha12/len=2f2071fe77c6/191",
-"sql COMMIT",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=4702b2b116a4/157",
-"sql COMMIT",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=7e464c565523/237",
-"sql COMMIT",
-"sql BEGIN IMMEDIATE",
-"sql shape=23 conn=_legacy_conversation_ids_store UPDATE messages SET content =?, token_estimate = ? WHERE store_id = ?",
-"sql #23 sha12/len=db5a3f44df60/192 x3",
-"sql ROLLBACK",
-"log hermes_lcm.compaction WARNING \"LCM summary publication could not finish; preserving replay-safe context (reason=%s, code=%s, name=%s, detail=%s)\"",
-"return sha12/len=b8d8a264a201/5437",
-"telemetry hook: concrete class method, callable, no instance shadow",
-"lock after committed leaf: returned committed context and aligned cursor",
-"leaf_prep after {\"chain\":[],\"counters\":{}}",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=97af61271bc1/305",
-"sql COMMIT",
-"assemble",
-"message system 6a97437a05d4/508",
-"message user 67e4e8b1c7a0/112",
-"message user 69e6fa69ef3f/1444",
-"message assistant b61a04d6dd7e/1600",
-"message tool b3f7e026a84f/1600",
-"attr _compress_escaped=[]",
-"attr _compress_forced_overflow=false",
-"attr _compress_hidden_rows_consumed=0",
-"attr _compress_host_rows_consumed=22",
-"attr _compress_occurrences=null",
-"attr _compress_run=sha12/len=06d177b483f1/444",
-"attr _dag=sha12/len=ad06d604fc3e/394",
-"attr _foreground_budget=sha12/len=fec1f19f1573/375",
-"attr _ingest_cursor=4",
-"attr _last_compacted_store_id=23",
-"attr _last_compression_noop_reason=\"summary publication blocked by SQLite lock\"",
-"attr _last_compression_status=\"error\"",
-"attr _last_leaf_content_filter_error=false",
-"attr _last_leaf_level_3_verbatim=false",
-"attr _last_leaf_summary_model=\"\"",
-"attr _lifecycle=sha12/len=674382ee1de7/392",
-"attr _no_progress_ingest_generation=0",
-"attr _no_progress_observed_tokens=3000",
-"attr _no_progress_public_rows=sha12/len=89f408cf8108/34823",
-"attr _pending_emission_candidates=sha12/len=37741e1df74c/449",
-"attr _store=sha12/len=acd66f87830b/35604",
-"attr _store_complete_blocked=null",
-"attr _store_complete_copy_exclusion_proofs={}",
-"attr _store_complete_cut=false",
-"attr _store_complete_empty_reason=\"\"",
-"attr _store_complete_escaped=[]",
-"attr _store_complete_excluded=[]",
-"attr _store_complete_order={}",
-"attr _survival_fit_reason=\"sqlite_publication_locked\"",
-"attr _survival_pass_observed=true",
-"attrs count=146 sha256=850055150fce563b887e2b72b93e139a019608af843a9cee5d9329b25dee989e"
+"attrs count=145 sha256=f3de4b1894d41ead1522a9180bc92ea4f62ac7309677ae0ffce48ce291f3d0b2"
 ],
 "finish-post-drain-read-error": [
 "compress attempt=1",
@@ -6050,7 +5691,7 @@
 "attr _store_complete_excluded=[]",
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=cfb1b97960299ab6fab91a1b7a526ff8190aa8dd8d809cbefbf85570dafca289"
+"attrs count=145 sha256=28235629a93f85157d6cb51b78278be78a5ecbdcb4126e02800c077419d7d094"
 ],
 "finish-promoted-keys": [
 "compress attempt=1",
@@ -6168,7 +5809,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=dcec0a1b73068738b7e3013884f780149826a7f57d9ca2ecf992c652239b11c1"
+"attrs count=145 sha256=f91197fe752948732514ff553f6c7aadf7da3e153b1af034e1bd52326d73bb49"
 ],
 "finish-repeat-condensation-skipped": [
 "compress attempt=1",
@@ -6380,7 +6021,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=543ed50e0fc363fbd8f25df7a3354b1db03d47801875323a1d483cfa369935c0"
+"attrs count=145 sha256=577c5b27ace96e5ee8f195e8992738768d1dae9b357f546bdc3442755d65803e"
 ],
 "forced-overflow": [
 "compress attempt=1",
@@ -6530,7 +6171,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=c47f15d78ca16dbe2040939e2fa51da6d795252dd9d03ec5c7cdf7a63aba42a2"
+"attrs count=145 sha256=268c5d969d05065b0b5cdee72fcb93dcb5966f618ef968b9ecf5d9651dadb910"
 ],
 "fresh-tail-protected": [
 "compress attempt=1",
@@ -6624,7 +6265,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=ea1402633a11/3476",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=c4301f129012ec1f670657cfea803b602c11cf89f5ec6002f25a1207c3e748d1"
+"attrs count=145 sha256=85af5e711c5b57f238d6af6cdb7eb58e586a82c080026001dc2abc084df7044e"
 ],
 "fresh-tail-yield": [
 "compress attempt=1",
@@ -6791,7 +6432,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=5902f21e66cbfb2924c1490d0ec625f825429b6a218dc321e8b25104ed56bfe8"
+"attrs count=145 sha256=33aa67b5da4e8963de31b6b246fe47bb1a3d7c632702547e2c0c279905154c38"
 ],
 "generated-dependent-replies": [
 "compress attempt=1",
@@ -6904,7 +6545,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=b1f115d7bf57e3c588b38afbd223b0d88086e05eda289a50325dd469c8321b81"
+"attrs count=145 sha256=8cd171b26a59c1781dd830007f990cfbfa6c89b9a622c170363d5ec64d6c4aaa"
 ],
 "hidden-owned-backlog": [
 "compress attempt=1",
@@ -6992,7 +6633,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=e14db0fd6e131eb8ca0c6e2b2ef8b91396dd73e0b806c7056ba5580d3f2f352a"
+"attrs count=145 sha256=c1d874549186bc91b275cbcf322a61ae970b564914b0ac58f1ac123d12436b3d"
 ],
 "hold-fit-only": [
 "compress attempt=1",
@@ -7124,7 +6765,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=c598e7240ffe6dc6e6a9c65e8a223fd9845b2b8a2ed5363cc56d728a75d50e05"
+"attrs count=145 sha256=45ec439e8f442e216656ac0dec4744a2cb8fe21c92a482cec308209bd597110c"
 ],
 "hung-primary-leaves-fallback": [
 "compress attempt=1",
@@ -7275,7 +6916,7 @@
 "attr _store_complete_excluded=[]",
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=83aa6f6a16dba977ce28b2e9d5f804f46b2f8bb78ecb6064442753972a4564d5"
+"attrs count=145 sha256=77986071f1b1956ec2eaef6319b0a16f5b4681a5b46dba9a6ae3802bec8024e9"
 ],
 "identity-anchor": [
 "compress attempt=1",
@@ -7439,7 +7080,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=309d0978de816f02d0b00f630d6b3073083e6db576971651cd38f2f03d3c2429"
+"attrs count=145 sha256=540eeb6f0e48c20d3fbb9429d62f3b578d91b61bc3ac4d78696db71afadac9a6"
 ],
 "identity-anchor-disabled": [
 "compress attempt=1",
@@ -7583,7 +7224,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=d34b0858ed6ab38483a6d88db16579b62a9b6768ffb4b8cc651efe2142a1f0b2"
+"attrs count=145 sha256=5121045d7dd29216412692496905872bb5f86a0004d509ee79ab1e301374a86e"
 ],
 "ignored-bypass-missing": [
 "compress attempt=1",
@@ -7646,7 +7287,7 @@
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: ignored session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=146 sha256=b75f07e465d8e6e7873268a66b4c678f301c9e1989be25f73f87c67bc2f7ddcb"
+"attrs count=145 sha256=0e81bdd29b6509860523479b05763d1290dd2e667c3f46ba8a0c9dad9d007c43"
 ],
 "ignored-bypass-negative": [
 "compress attempt=1",
@@ -7709,7 +7350,7 @@
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: ignored session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=146 sha256=b75f07e465d8e6e7873268a66b4c678f301c9e1989be25f73f87c67bc2f7ddcb"
+"attrs count=145 sha256=0e81bdd29b6509860523479b05763d1290dd2e667c3f46ba8a0c9dad9d007c43"
 ],
 "ignored-bypass-zero": [
 "compress attempt=1",
@@ -7772,7 +7413,7 @@
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: ignored session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=146 sha256=b75f07e465d8e6e7873268a66b4c678f301c9e1989be25f73f87c67bc2f7ddcb"
+"attrs count=145 sha256=0e81bdd29b6509860523479b05763d1290dd2e667c3f46ba8a0c9dad9d007c43"
 ],
 "ignored-dependent-tail-eof": [
 "compress attempt=1",
@@ -7842,7 +7483,7 @@
 "attr _no_progress_public_rows=sha12/len=a1311241116e/3987",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=ba5d37a327199328c8a0cc6499f32152694dfbd63118d6384df971c84e4b5a03"
+"attrs count=145 sha256=4022733657a818ce5395171918650512f160cb5b6cdc9d4d6aac8cff1d8ddfaf"
 ],
 "ignored-message-dependents": [
 "compress attempt=1",
@@ -8017,7 +7658,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=a042c1a669af8a8af0a0da5b25a0567232d755f45fc1b808c679c06e3e9f195d"
+"attrs count=145 sha256=b2f0767e82bf571198d869c82f6165c79cf055c37df18a773cda2a04515b5c40"
 ],
 "ignored-tail-nondict-barrier": [
 "compress attempt=1",
@@ -8032,7 +7673,7 @@
 "attr _foreground_budget=sha12/len=a4ce1981038b/351",
 "attr _last_compression_status=\"running\"",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=53b7d139451bfcc3ecacad051cd72518cfcbc910681150f58fbdfa35e2d84e29"
+"attrs count=145 sha256=2e4a276ae984678353598e5709db64201a8437ccbaf91a6b42f347baf03ecf66"
 ],
 "ignored-tail-unanchored-eof": [
 "compress attempt=1",
@@ -8100,7 +7741,7 @@
 "attr _no_progress_public_rows=sha12/len=919971a2eae2/3917",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=9fc1f1607b85446f12a90ad85ae2651a22a0016ce0999cbe426acb0242e1ee3c"
+"attrs count=145 sha256=50698c92551770eb76e72237bb409f1da719b7e072b081b2fb88631cbc83ac90"
 ],
 "ignored-tail-unknown-role": [
 "compress attempt=1",
@@ -8233,7 +7874,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=9193dec4898fc83357ca90961bca3d8c75af45db9af7d156870444f277c445a7"
+"attrs count=145 sha256=bab4b891b18c1f7491557124b1e68d1da2e65750b55fcbdcbb3b8e9376cd32dd"
 ],
 "ignored-unknown-role": [
 "compress attempt=1",
@@ -8361,7 +8002,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=51d9f672cae4e8cbb4132530392c6cd1f38f389e2079cd125fc1c0bc38e69476"
+"attrs count=145 sha256=91d9e97279b0bf4be2a5459e08efcd68e6cab1e95b74861d468d9a23faa17228"
 ],
 "leaf-automatic-no-sweep": [
 "compress attempt=1",
@@ -8525,7 +8166,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=3e88151c7fb6cbfbd2452314347b21701e6d0ca40550ee0f6735353c8bf76e8b"
+"attrs count=145 sha256=52e320beff26e15e77d8b21f5d37540efa4106ee046b5249039d6901bb40656b"
 ],
 "leaf-no-host-token-count": [
 "compress attempt=1",
@@ -8688,7 +8329,7 @@
 "attr _store_complete_excluded=[]",
 "attr _store_complete_order={}",
 "attr compression_count=1",
-"attrs count=146 sha256=c6656b2bc3371de247223570c49d4ed9cca4846693a0d74ec665cfcd3da7b536"
+"attrs count=145 sha256=acef4be5a1242e049bb3d6f445b2540b30d6c9e64de3e50907e9bf6511fbae4e"
 ],
 "leaf-pass": [
 "compress attempt=1",
@@ -8852,7 +8493,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=d34b0858ed6ab38483a6d88db16579b62a9b6768ffb4b8cc651efe2142a1f0b2"
+"attrs count=145 sha256=5121045d7dd29216412692496905872bb5f86a0004d509ee79ab1e301374a86e"
 ],
 "leaf-phase-budget-after-leaf": [
 "compress attempt=1",
@@ -9029,7 +8670,7 @@
 "attr _sweep_budget_hold_turn_paced=true",
 "attr _sweep_budget_hold_until=1715.0",
 "attr compression_count=1",
-"attrs count=146 sha256=71486f85027469865156a38710c7960ad36f1460e8f9b6a5ac2f11ff52775e82"
+"attrs count=145 sha256=98704f465a7b5bc9e09cfa7549e863fff8b977492a70ecfca04ba86487fff9d8"
 ],
 "leaf-phase-data-error-after": [
 "compress attempt=1",
@@ -9204,7 +8845,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=84fece2030dd4553b2b34190b0d8ce6e5ed0cf20af2c3495c17de9af55affc5b"
+"attrs count=145 sha256=567d50a8e554abaf9eba23cefa15d77fbc9d2dfcd85d0311a094b1b200320e03"
 ],
 "leaf-phase-data-error-before": [
 "compress attempt=1",
@@ -9350,7 +8991,7 @@
 "attr _store_complete_excluded=[]",
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=57c2da4e1c90d7a4cce4c78cba47ca41aec94f77b42427b002bdfa75e949eabd"
+"attrs count=145 sha256=4da1a04e4f0df4cc6dac6d692e4bc9bc820f3a722c96efe00b6552c4b5550840"
 ],
 "leaf-phase-dependent": [
 "compress attempt=1",
@@ -9443,7 +9084,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=5c8062f38858a643281814e25f0a8136addb6a5201b81d7895659cb5900341ec"
+"attrs count=145 sha256=2e65f8d4d2a5f2e80184f09db851bff4711b1c86ec28a044a22a9db8f3953dc8"
 ],
 "leaf-phase-lineage-moved": [
 "compress attempt=1",
@@ -9597,7 +9238,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",0]]",
-"attrs count=146 sha256=5ace018c54e6cafe8b630edd0bd642a815ccf4f6994a75223c055c483cd2b896"
+"attrs count=145 sha256=9b241904e9ec6df030879fc79908d1f5117e29c7da9572c7aa8576200ee6a451"
 ],
 "leaf-phase-no-call-stop": [
 "compress attempt=1",
@@ -9741,7 +9382,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=146 sha256=b6007e6e5bfc27d0a9f16005882b83555e4b642d23143d1ec80b8db4f2b0f99a"
+"attrs count=145 sha256=ce4ae68b7fed4e62904f7a5f560caa92b7ffc382fb951edc742760925634968e"
 ],
 "leaf-phase-raise-cleanup": [
 "compress attempt=1",
@@ -9883,7 +9524,7 @@
 "attr _store_complete_excluded=[]",
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=c9c467343e4162c3dc05dcfd1401e5176380d2b0d19ecc38f3279f7d537ce258"
+"attrs count=145 sha256=c4ba07707cce8f94cf35a1168f4fe4301388b7ae4aaefb50715110ff55fc21f8"
 ],
 "leaf-phase-rescue-keeps": [
 "compress attempt=1",
@@ -9997,7 +9638,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=8e667442af3abafda905455d4b20272ec492d6e3dcf0a5342895caee0a7b6943"
+"attrs count=145 sha256=4feb3208a8493a2291f8831c5c40d9336aaee423d219f4cb7e824b7e5cd48232"
 ],
 "leaf-phase-rescue-loses": [
 "compress attempt=1",
@@ -10131,7 +9772,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",52]]",
-"attrs count=146 sha256=a61bcad9e7e3eb2635f77285e1b9d963f2cf6357c1b0527cecdbe2ae5392791b"
+"attrs count=145 sha256=a25e55fda64e46effa877102d1c14d26d57121abaf7ec9291d6806c2dea5b32a"
 ],
 "leaf-phase-soft-extraction": [
 "compress attempt=1",
@@ -10357,7 +9998,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=9c90e8571f8d94662e95a677d3b104959f7496b50ba426c68c21079463d1690f"
+"attrs count=145 sha256=494127574a07f9073fc5ecbb546732a3d41943a7b141db5e1f13c82bdc68430d"
 ],
 "legacy-filtered-backlog": [
 "compress attempt=1",
@@ -10489,7 +10130,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=e1b95c57b227ad4fd35f546d3922501dfbe904006f097ce7ee2223fd64fea5e2"
+"attrs count=145 sha256=ae0aaa5ef97ab52f10c64e47b868666439aa5f164799802961a53642358c8b10"
 ],
 "legacy-filtered-eof-dependents": [
 "compress attempt=1",
@@ -10618,7 +10259,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=4bb13fb5df34db681b63ac04c0c7038ea5177872bf4d7c93646ce56827f78a07"
+"attrs count=145 sha256=3308cb7a401090920f5118c1708c780104642c2aa9fd8df9f1c00f925aeffb42"
 ],
 "legacy-filtered-tail-dependents": [
 "compress attempt=1",
@@ -10747,7 +10388,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=8fa264b7d104980a11ce2b8c13f08e5eaee8f18b8256cb6e6c486dda80bfa9de"
+"attrs count=145 sha256=bba86927ba1e8b606de679feef962f32fc9fad7399a0334575467d7bcd40bcaf"
 ],
 "lifecycle-publication-conflict": [
 "compress attempt=1",
@@ -10903,7 +10544,7 @@
 "attr _store_complete_order={}",
 "attr _survival_fit_reason=\"publication_invariant_conflict\"",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=39b6e59f5f5fef1959c27f45e02f5439a4968828e0405843b4040f41f0a49f7f"
+"attrs count=145 sha256=366b753b512b0d6903b0a5cd713c21b79352a9d3bdddac80e374bbae058e99b2"
 ],
 "no-system-prompt": [
 "compress attempt=1",
@@ -11056,7 +10697,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=165600605a6acb03e85a3fb031ffc290f3af448158184a30b0636db481b53f8e"
+"attrs count=145 sha256=ae1a163ae93515059ec0f1f8755dd4026703d371415ea4414931dce6a29ef258"
 ],
 "objective-anchor": [
 "compress attempt=1",
@@ -11157,7 +10798,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=25ee3a20c4e0/15841",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=ec6e6b0d96b634e7065534bece92d7ba5d77cc8fb73a1283efb96598c77c1c30"
+"attrs count=145 sha256=bc46f36e5b896a4715e391e96ebd796b60c74a0fe26d51a831d093b71f72d402"
 ],
 "objective-cap-too-small": [
 "compress attempt=1",
@@ -11273,7 +10914,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=bb18d5d4bbeb82b126eae7bc5825eb242bbf46af4eea43ae659257182db25ab3"
+"attrs count=145 sha256=d95b91d56c29ee3acb143dfcb14c590c5e27003128475b280c489bd1105f668d"
 ],
 "objective-without-cap": [
 "compress attempt=1",
@@ -11374,7 +11015,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=25ee3a20c4e0/15841",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=c90a5e5134a4aa43cbbb7a8bc2af9cb4fc4409670a948be7f69d32c1ff5dcb45"
+"attrs count=145 sha256=6c69df002fb45b8bd48c17a39ff283ac7b75286c0f1b8984b6ab202cd3699e5b"
 ],
 "optional-extraction-host-unavailable": [
 "compress attempt=1",
@@ -11552,7 +11193,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=a26dda66296738331b4c3e981927fa09792ba03ef260533e9ab6725290ea3c82"
+"attrs count=145 sha256=fdac7bda54c83f0861b889c614f236ba526626371c28f4592cfac0e0acda4cd9"
 ],
 "persisted-volatile-no-pattern": [
 "compress attempt=1",
@@ -11681,7 +11322,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=25d2ff4bfe72bb484be3bb48f02cd062d110bbd486393f18eac0ba5cf9f6c001"
+"attrs count=145 sha256=511f73ffd4f35b0a671f60f83a85efbcf0904086087e154fc31750a21a8b4037"
 ],
 "post-leaf-condensation-rejected": [
 "compress attempt=1",
@@ -11890,7 +11531,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=ba1533927f7bf411c6048639d254d4649439307eb4a8cfaf6f199b066c4fbff8"
+"attrs count=145 sha256=6609a13d092d9e26ee47e7aee203e8e063dd8274ae3450a11e1dfa54e2cc58a0"
 ],
 "post-leaf-publication-conflict": [
 "compress attempt=1",
@@ -12071,7 +11712,7 @@
 "attr _store_complete_order={}",
 "attr _survival_fit_reason=\"publication_invariant_conflict\"",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=d1424e6d60277fa28a2b86928e46e5861514c8dbdc72464e136f35ece833cf14"
+"attrs count=145 sha256=a76b0a28c3d5ef105bd4694e4711b83ee20f525b3481ce3622943d5e81f49465"
 ],
 "pre-leaf-condensation-rejected": [
 "compress attempt=1",
@@ -12224,7 +11865,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=146 sha256=a3a96e01063f50526156b65c8b113cd61fc1d7210c527b34452f42324e4eb7f1"
+"attrs count=145 sha256=22cec507e77eb23ec5255cb24fb29f671973008c8ec138bf802a5d58c955b102"
 ],
 "pre-leaf-frontier-read-error": [
 "compress attempt=1",
@@ -12369,7 +12010,7 @@
 "attr _pending_emission_candidates=sha12/len=fc146730afef/464",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=63968b157f584cafb2a0f277b7d4f76f6831c74012e020ca9f534a067815e48f"
+"attrs count=145 sha256=d3da400b8c9c6dbe1afef3e83b4ffc75fb4257b4c69b3334101a8bf7c00fe4ab"
 ],
 "pre-leaf-publication-locked": [
 "compress attempt=1",
@@ -12515,7 +12156,7 @@
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_fit_reason=\"sqlite_publication_locked\"",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=007151ba2b7b5264afa1de2c82cb47e04660882bea505be43cc3180ac834cc9a"
+"attrs count=145 sha256=b47ab46bf09a0e24fb92912273afd0a4ee7c99301dc29c6808ef80c4a7200c73"
 ],
 "prepared-leaf-promotion": [
 "compress attempt=1",
@@ -12630,7 +12271,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=dcec0a1b73068738b7e3013884f780149826a7f57d9ca2ecf992c652239b11c1"
+"attrs count=145 sha256=f91197fe752948732514ff553f6c7aadf7da3e153b1af034e1bd52326d73bb49"
 ],
 "prepared-leaf-route-rejected": [
 "compress attempt=1",
@@ -12723,7 +12364,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=a87ae5cca7aeb8d9b00aa9cf50a7eb48906522855ea449eb010eda0648e916b9"
+"attrs count=145 sha256=3672f355cf6850924bf15230490bb468848353f1b9e79f7c6724a685043aeea6"
 ],
 "provider-aborted": [
 "compress attempt=1",
@@ -12864,7 +12505,7 @@
 "attr _store_complete_excluded=[]",
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=c9c467343e4162c3dc05dcfd1401e5176380d2b0d19ecc38f3279f7d537ce258"
+"attrs count=145 sha256=c4ba07707cce8f94cf35a1168f4fe4301388b7ae4aaefb50715110ff55fc21f8"
 ],
 "publish-advance-deferred-short": [
 "compress attempt=1",
@@ -12960,7 +12601,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=269248e29b049c7b44f50b6c06ecabf31bcd4d8ae62e6e443fbb158808708df1"
+"attrs count=145 sha256=990c5f9b6fcb4a1e2f7222a568ebf0a653bd4e762f6d77b22ee26eb7e82a220d"
 ],
 "publish-advance-dynamic-empty": [
 "compress attempt=1",
@@ -13100,199 +12741,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=07fbfd7bb593025ee61667c9dbad226b545d4f2f2c2368f84b8faffd2036be10"
-],
-"publish-advance-gc-nonlock": [
-"compress attempt=1",
-"leaf_prep before {\"chain\":[],\"counters\":{}}",
-"sql BEGIN IMMEDIATE",
-"sql shape=1 conn=_legacy_conversation_ids_store SAVEPOINT lcm_ingest",
-"sql #1",
-"sql shape=2 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_conversation_observed ON messages(conversation_id, observed_at)",
-"sql #2",
-"sql shape=3 conn=_legacy_conversation_ids_store CREATE TABLE IF NOT EXISTS message_relations ( relation_id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL, kind TEXT NOT NULL, related_store_id INTEGER, ordinal INTEGER, observed_at REAL, created_at REAL )",
-"sql #3",
-"sql shape=4 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_relations_store ON message_relations(store_id, kind)",
-"sql #4",
-"sql shape=5 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_relations_related ON message_relations(related_store_id, kind)",
-"sql #5",
-"sql shape=6 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_relations_observed ON message_relations(kind, observed_at)",
-"sql #6",
-"sql shape=7 conn=_legacy_conversation_ids_store RELEASE SAVEPOINT lcm_ingest",
-"sql #7",
-"sql #1",
-"sql #7",
-"log hermes_lcm.engine DEBUG \"Ingest: session=%s cursor=%d incoming=%d\"",
-"sql shape=8 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, NULL)",
-"sql #8 sha12/len=c16b5c22dc9f/334 x5",
-"sql shape=9 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?, NULL, NULL, NULL, ?, ?, ?, ?, ?,?)",
-"sql #9 sha12/len=c56f7879c7d4/1593 x5",
-"sql #8 sha12/len=5928522868b9/1578 x5",
-"sql #9 sha12/len=c6ad471721fc/1593 x5",
-"sql #8 sha12/len=2eff5a55ac17/1578 x5",
-"sql #9 sha12/len=f0309bfb39c5/1593 x5",
-"sql #8 sha12/len=7a04e6343cca/1578 x5",
-"sql #9 sha12/len=4e9862a77994/1593 x5",
-"sql #8 sha12/len=f5e2163a2704/1578 x5",
-"sql #9 sha12/len=586e9da16a25/1593 x5",
-"sql #8 sha12/len=e7eca4415696/1578 x5",
-"sql #9 sha12/len=fbafdba73649/1593 x5",
-"sql #8 sha12/len=e55e8e0b11b8/1578 x5",
-"sql #9 sha12/len=d70bd8f892d7/1593 x5",
-"sql #8 sha12/len=aa51efc18eb8/1578 x5",
-"sql #9 sha12/len=ada5b0ec14fb/1593 x5",
-"sql #8 sha12/len=7201fd996872/1578 x5",
-"sql shape=10 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?, NULL,?, NULL, ?, ?, ?, ?, NULL, NULL)",
-"sql #10 sha12/len=5cdddd83da37/1993 x5",
-"sql shape=11 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?,?, NULL,?, ?, ?, ?, ?, NULL, NULL)",
-"sql #11 sha12/len=db65aff40b32/544 x5",
-"sql #10 sha12/len=01e91e2a831b/1993 x5",
-"sql #11 sha12/len=4360cc28f70b/544 x5",
-"sql #10 sha12/len=74c09db82e2d/1993 x5",
-"sql #11 sha12/len=82caa050f36a/544 x5",
-"sql #10 sha12/len=73304c755288/1993 x5",
-"sql #11 sha12/len=508f4ab7b1bf/544 x5",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql shape=12 conn=_legacy_conversation_ids_store INSERT INTO metadata(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-"sql #12 sha12/len=1b14ec7cbf0e/149",
-"sql #7",
-"sql #1",
-"sql #12 sha12/len=f0485d7a6f55/151",
-"sql #7",
-"log hermes_lcm.engine DEBUG \"Ingested %d messages into LCM store\"",
-"sql #1",
-"sql shape=13 conn=_legacy_conversation_ids_store UPDATE ledger_meta SET value=CAST(value AS INTEGER)+? WHERE key=?",
-"sql #13 sha12/len=72e21a1157bd/74",
-"sql shape=14 conn=_legacy_conversation_ids_store INSERT INTO occurrence_bindings(lineage, ordinal,store_id,identity_digest,stamp,disposition,tag,key_rank,view_seq) VALUES (?,?,?,x?,NULL,?,NULL,NULL,?)",
-"sql #14 sha12/len=4a90529dc6ae/192",
-"sql shape=15 conn=_legacy_conversation_ids_store INSERT INTO occurrence_bindings(lineage, ordinal,store_id,identity_digest,stamp,disposition,tag,key_rank,view_seq) VALUES (?,?,?,x?,?,?,NULL,NULL,?)",
-"sql #15 sha12/len=001ba7015f17/194",
-"sql #14 sha12/len=611509717526/192",
-"sql #15 sha12/len=d65dfe6b30c1/194",
-"sql #14 sha12/len=a1d92edfb122/192",
-"sql #15 sha12/len=2e1ada6d29da/194",
-"sql #14 sha12/len=876149873878/192",
-"sql #15 sha12/len=dbc9cec6eb8b/194",
-"sql #14 sha12/len=65d30844a35a/192",
-"sql #15 sha12/len=6e5d10728549/197",
-"sql #14 sha12/len=a808829591d1/195",
-"sql #15 sha12/len=7c31095ca015/197",
-"sql #14 sha12/len=cf226747b725/195",
-"sql #15 sha12/len=8794d893727b/197",
-"sql #14 sha12/len=4c2aaa91dc9b/195",
-"sql #15 sha12/len=b0358daa8160/197",
-"sql #14 sha12/len=f254d9795e73/195",
-"sql #14 sha12/len=d59c3497d570/195",
-"sql #14 sha12/len=e8952583f30d/195",
-"sql #14 sha12/len=b54a112e4b9d/195",
-"sql #14 sha12/len=22fd7daad6de/195",
-"sql #14 sha12/len=ebb6923d2f5a/195",
-"sql #14 sha12/len=f6fd2e71c826/195",
-"sql #14 sha12/len=4d29f5188e7b/195",
-"sql #14 sha12/len=f4c7d9143b35/195",
-"sql shape=16 conn=_legacy_conversation_ids_store INSERT INTO ingest_views VALUES (?,?,?,NULL,x?,x?)",
-"sql #16 sha12/len=5664f349973d/3725",
-"sql shape=17 conn=_legacy_conversation_ids_store DELETE FROM ingest_views WHERE lineage=?AND kind=?AND view_seq NOT IN (SELECT view_seq FROM ingest_views WHERE lineage=?AND kind=?ORDER BY view_seq DESC LIMIT ?)",
-"sql #17 sha12/len=310b0f9decf1/203",
-"sql shape=18 conn=_legacy_conversation_ids_store INSERT INTO lineage_marks(lineage,max_store_id) VALUES (?,?) ON CONFLICT(lineage) DO UPDATE SET max_store_id=excluded.max_store_id WHERE lineage_marks.max_store_id IS NOT excluded.max_store_id",
-"sql #18 sha12/len=966912535247/207",
-"sql #7",
-"sql COMMIT",
-"log hermes_lcm.engine DEBUG \"LCM attribution phase=ingest lock_hold_ms=%.3f rows_written=%d bytes_written=%d busy_snapshot_retry=%s\"",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=52614d71143e/151",
-"sql COMMIT",
-"log hermes_lcm.engine INFO \"LCM leaf summary input: input_tokens=%d source_tokens=%d messages=%d\"",
-"call 1 model=trace-model level=1 budget=4000 timeout=115.0 in=efa3b2278376/27611",
-"sql shape=19 conn=_legacy_conversation_ids_store CREATE TEMP TRIGGER fail_gc BEFORE UPDATE OF content ON messages BEGIN SELECT RAISE(ABORT,?); END",
-"sql #19 sha12/len=0c3a63f80aaa/116",
-"log hermes_lcm.escalation DEBUG \"L1 summarization succeeded (%d tokens)\"",
-"sql BEGIN IMMEDIATE",
-"sql shape=20 conn=_dag INSERT INTO summary_nodes (session_id, depth, summary, token_count, source_token_count, source_ids, source_type, created_at, earliest_at, latest_at, expand_hint) VALUES (?, ?,?, ?, ?,?,?, ?, ?, ?,?)",
-"sql #20 sha12/len=98474755f43c/388 x3",
-"sql shape=21 conn=_dag INSERT OR REPLACE INTO summary_node_provenance (node_id, escalation_level, model, created_at) VALUES (?, ?,?, ?)",
-"sql #21 sha12/len=bd12465197ec/135",
-"sql shape=22 conn=_dag UPDATE lcm_lifecycle_state SET current_frontier_store_id = MAX(current_frontier_store_id, ?), updated_at = ? WHERE conversation_id =?AND current_session_id =?",
-"sql #22 sha12/len=2f2071fe77c6/191",
-"sql COMMIT",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=4702b2b116a4/157",
-"sql COMMIT",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=7e464c565523/237",
-"sql COMMIT",
-"sql BEGIN IMMEDIATE",
-"sql shape=23 conn=_legacy_conversation_ids_store UPDATE messages SET content =?, token_estimate = ? WHERE store_id = ?",
-"sql #23 sha12/len=db5a3f44df60/192 x3",
-"raise IntegrityError message=\"fixture gc failure\"",
-"publication probes {\"finish\":{\"estimated_active_tokens\":0,\"leaf_passes\":1,\"max_leaf_passes\":1,\"prep_low_water\":0,\"sweep_stop_reason\":\"\"},\"insert\":1,\"order\":[\"stage\"],\"promoted\":0,\"publish\":1,\"rejected\":[],\"revalidate\":0,\"stage\":1,\"summaries\":1}",
-"publication pass limits [[0,1,1]]",
-"leaf_prep after {\"chain\":[],\"counters\":{}}",
-"sql #12 sha12/len=5e58b7d9d9f8/305",
-"sql COMMIT",
-"assemble",
-"message system 6a97437a05d4/508",
-"message user 67e4e8b1c7a0/112",
-"message user 3966be03c944/1267",
-"message assistant 7a468e7d082c/1266",
-"message user f6149929fcde/1267",
-"message assistant 1d3aa33ccd2c/1266",
-"message user d932be6f1500/1267",
-"message assistant 5112d3181a5e/1266",
-"message user 4915f154ddd8/1267",
-"message assistant 55698fcd55cb/1266",
-"message user 6c12f191db5f/1267",
-"message assistant 63393eb669ff/1266",
-"message user d403af208259/1267",
-"message assistant 23e7a56837ee/1266",
-"message user 848f65aa4811/1267",
-"message assistant 7c6b372997fd/1266",
-"message user a036540eca3b/1267",
-"message assistant 6b538db6f203/2867",
-"message tool bcce3339fb2a/1600",
-"message assistant 39d750999ced/1600",
-"message tool d7f780e71d6a/1600",
-"message assistant 757877fd0e12/1600",
-"message tool b418dd6b02ab/1600",
-"message assistant b61a04d6dd7e/1600",
-"message tool b3f7e026a84f/1600",
-"attr _compress_escaped=[]",
-"attr _compress_forced_overflow=false",
-"attr _compress_hidden_rows_consumed=0",
-"attr _compress_host_rows_consumed=22",
-"attr _compress_occurrences=null",
-"attr _compress_run=sha12/len=06d177b483f1/444",
-"attr _dag=sha12/len=ad06d604fc3e/394",
-"attr _foreground_budget=sha12/len=fec1f19f1573/375",
-"attr _ingest_cursor=25",
-"attr _last_compacted_store_id=23",
-"attr _last_compression_status=\"running\"",
-"attr _last_leaf_content_filter_error=false",
-"attr _last_leaf_level_3_verbatim=false",
-"attr _last_leaf_summary_model=\"\"",
-"attr _lifecycle=sha12/len=674382ee1de7/392",
-"attr _no_progress_ingest_generation=0",
-"attr _no_progress_observed_tokens=3000",
-"attr _no_progress_public_rows=sha12/len=89f408cf8108/34823",
-"attr _pending_emission_candidates=sha12/len=37741e1df74c/449",
-"attr _store=sha12/len=acd66f87830b/35604",
-"attr _store_complete_blocked=null",
-"attr _store_complete_copy_exclusion_proofs={}",
-"attr _store_complete_cut=false",
-"attr _store_complete_empty_reason=\"\"",
-"attr _store_complete_escaped=[]",
-"attr _store_complete_excluded=[]",
-"attr _store_complete_order={}",
-"attr _survival_pass_observed=true",
-"attrs count=146 sha256=91fe70146d8d42b2808888480b4b24e70d2d46de7d0101db949fe38c59fdcc71"
+"attrs count=145 sha256=7625272e14949d4d164bff30b4490f91c258224fddd2fef544bae4bbc176c50d"
 ],
 "publish-advance-hidden-drain": [
 "compress attempt=1",
@@ -13443,7 +12892,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=909df3a550f0be2820465ef24433bd0c389e7c5ec61adb8437625dd45108455f"
+"attrs count=145 sha256=3730da870ff00feeb579fcce19d9d58d22ed8a1754f4fe184b93b863a62cf294"
 ],
 "publish-advance-nonlock": [
 "compress attempt=1",
@@ -13594,7 +13043,7 @@
 "attr _store_complete_excluded=[]",
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=5b87d48b5818e8cb9ecd8a8b90f312ed9d53e9922761432d48e196bee36d1b0d"
+"attrs count=145 sha256=1a302e293661999bcba77f93f987a4b5dc3b933f850166172e4da30d36384fbc"
 ],
 "publish-advance-promote-continue": [
 "compress attempt=1",
@@ -13719,7 +13168,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=187b09b1ab3f6b9bfcab0804fb74235f24569d336ab55641f6f68517ad78d643"
+"attrs count=145 sha256=175abb9360960498257c8b841746b15fdca0feeda29cfadcb1abd9b0a25cb42f"
 ],
 "publish-advance-promote-low": [
 "compress attempt=1",
@@ -13813,7 +13262,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=1254ad2c67bafa4ea94a3a5c9f49647172f6298fba22179e745b155ba90ebb05"
+"attrs count=145 sha256=e6d09bcdfc4c58280d943027ce2005b01f10a02c4a8037f3da034aeeb733e573"
 ],
 "publish-advance-publish-binding": [
 "compress attempt=1",
@@ -13893,7 +13342,7 @@
 "attr _store_complete_order={}",
 "attr _survival_fit_reason=\"lifecycle_binding_changed\"",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=01bc0b758498cf5e8758a5e501e767edca2cb6f0118265a74a84b36fc9a7a66f"
+"attrs count=145 sha256=93e289c25aaf753e97fd9fc27f549c8a08de7790e1c2ac478d58077e7494b3d1"
 ],
 "publish-advance-publish-coverage": [
 "compress attempt=1",
@@ -13992,7 +13441,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=30ef957b9dff31a4311aead7824b07b6244e8394bad1368444ebedf586d8b8d9"
+"attrs count=145 sha256=871a5d04338b1504ab4ef80bdf8a7f9a2b7d25204f0a8375647a63193ac7740b"
 ],
 "publish-advance-publish-fence": [
 "compress attempt=1",
@@ -14072,7 +13521,7 @@
 "attr _store_complete_order={}",
 "attr _survival_fit_reason=\"publication_invariant_conflict\"",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=4c6f006bac05efe74daa4115cd6299a02a98fd2fdc63917da4eef660feba0592"
+"attrs count=145 sha256=0e2b6dde84e445bdb314f65334de76a2e11f650d1e2bf231b45fe7300014fbaf"
 ],
 "publish-advance-publish-frontier": [
 "compress attempt=1",
@@ -14152,7 +13601,7 @@
 "attr _store_complete_order={}",
 "attr _survival_fit_reason=\"publication_invariant_conflict\"",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=4c6f006bac05efe74daa4115cd6299a02a98fd2fdc63917da4eef660feba0592"
+"attrs count=145 sha256=0e2b6dde84e445bdb314f65334de76a2e11f650d1e2bf231b45fe7300014fbaf"
 ],
 "publish-advance-publish-retry": [
 "compress attempt=1",
@@ -14284,7 +13733,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=187b09b1ab3f6b9bfcab0804fb74235f24569d336ab55641f6f68517ad78d643"
+"attrs count=145 sha256=175abb9360960498257c8b841746b15fdca0feeda29cfadcb1abd9b0a25cb42f"
 ],
 "publish-advance-publish-route": [
 "compress attempt=1",
@@ -14384,7 +13833,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=a87ae5cca7aeb8d9b00aa9cf50a7eb48906522855ea449eb010eda0648e916b9"
+"attrs count=145 sha256=3672f355cf6850924bf15230490bb468848353f1b9e79f7c6724a685043aeea6"
 ],
 "replayed-summary-scaffold": [
 "compress attempt=1",
@@ -14602,7 +14051,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=2",
-"attrs count=146 sha256=95d9ff1adb812bce1f1ae0da6bbb0aa745765be2cca3de153162cf3ab978b80c"
+"attrs count=145 sha256=8d3ab1fa72e5666db1a51cf885103f06d54579ad7cf826001c48fcd6515c47fb"
 ],
 "resume-after-interruption": [
 "compress attempt=1",
@@ -14846,7 +14295,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=cb474c3f9e7288e709254e5596c91db40716d1d6796e005f4ebfd58c35c1e581"
+"attrs count=145 sha256=7d5395571a34a85db9685948a91a90ffedde03071cf439e768354ccfc70dc96a"
 ],
 "resume-commit-wide-tail": [
 "compress attempt=1",
@@ -14901,7 +14350,7 @@
 "attr _no_progress_proof_fingerprint=null",
 "attr _pending_emission_candidates=sha12/len=80ce4269865e/3211",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=c8da7efa338fc6e7eb170d38828fe262f5a2c6ebe346d6980bf5a9669468a910"
+"attrs count=145 sha256=f62deff066d97d55e6556202ae94e1011c8b82d0e35637301c8be834b33ee877"
 ],
 "resume-unadopted-commit": [
 "compress attempt=1",
@@ -15126,7 +14575,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=2",
-"attrs count=146 sha256=ff4cab82af9912cdfeec46b929c6ed55e15d8d9e15f818b2a7420bf9802f1774"
+"attrs count=145 sha256=eb0b0b812f367da866cf0a53409307c6e9b0c2cd6b674f09671a53ca7a5258f6"
 ],
 "retained-tail-occurrence": [
 "compress attempt=1",
@@ -15238,7 +14687,7 @@
 "attr _store_complete_excluded=[]",
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=28aab6702cdd416ec0d01eb404584959b735451e700f1dfff6d843c14ae012e4"
+"attrs count=145 sha256=c86f0a60235f1297324f5bf6036779768b74af1c28ff4fa863572960f1bbb10d"
 ],
 "retained-tail-occurrence-escape": [
 "compress attempt=1",
@@ -15401,7 +14850,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=2",
-"attrs count=146 sha256=54607fb884b6972ec68909176a28bd6dc82988730fb5ac21f31de374220cfd4f"
+"attrs count=145 sha256=a4d1219311cd330ba7becefa994dcbd2f98df3704c00fe792b42815dc72e9b28"
 ],
 "route-unavailable": [
 "compress attempt=1",
@@ -15544,7 +14993,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=146 sha256=b6007e6e5bfc27d0a9f16005882b83555e4b642d23143d1ec80b8db4f2b0f99a"
+"attrs count=145 sha256=ce4ae68b7fed4e62904f7a5f560caa92b7ffc382fb951edc742760925634968e"
 ],
 "route-unavailable-adopt-commit": [
 "compress attempt=1",
@@ -15766,7 +15215,7 @@
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
 "attr compression_count=1",
-"attrs count=146 sha256=9326214da53ff8970e7caa94403e0ae4609ebafdbad3e5ae013ed434ac8b2571"
+"attrs count=145 sha256=8b264208c1b2f13852f755f6baceba14d0d4fa748afe86ad6ea74f780236eb6c"
 ],
 "route-unavailable-full-tail": [
 "compress attempt=1",
@@ -15859,7 +15308,7 @@
 "attr _store=sha12/len=ea1402633a11/3476",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=146 sha256=9f2fefeb939de7d54046a7e23a25ad978de6fa998fcd3b85fd0c24720065ef5f"
+"attrs count=145 sha256=b5a306f1fa5dd56c6dae4d9623eafd70c2de23806dbbaefb2949d556f62bf377"
 ],
 "selection-deferred-critical-False": [
 "compress attempt=1",
@@ -16018,7 +15467,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=f55f98ba5e02db33651a5e836b117f7cff9b389120934844f242c6703f262ad2"
+"attrs count=145 sha256=12b5fd8d52eaf384661c11081c7a1328312c27bb29cba55f0025406cc5f1e412"
 ],
 "selection-deferred-critical-True": [
 "compress attempt=1",
@@ -16177,7 +15626,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=e56b43c8f2fc09d4e344601fd6dabe1bfa1b20d50c91bddce20000a5685d202a"
+"attrs count=145 sha256=2d3170e9b82da4b17f20595a387f616c864df52cb39d4247116f9ddf7a599aca"
 ],
 "selection-empty-filtered": [
 "compress attempt=1",
@@ -16244,7 +15693,7 @@
 "attr _no_progress_public_rows=sha12/len=d6453683c669/1491",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=9baaea5c9c84ca6bdcf28ed3d45bda854ab061509c2c6018081b3030833ddbf7"
+"attrs count=145 sha256=b25a4fe070e061842d985cb323f11b5a9581cdcf11bcf872aca5a00c3b6bc103"
 ],
 "selection-objective-sweep": [
 "compress attempt=1",
@@ -16348,7 +15797,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=25ee3a20c4e0/15841",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=ea80925296d47d480f4eb8f83666e847e87a1b4fd9688a57b927b178f2c0c60d"
+"attrs count=145 sha256=1e0d6c9736f522199e74c38f1c3369bf1e0a631eb1528072c799919304e12544"
 ],
 "selection-prepared-hidden": [
 "compress attempt=1",
@@ -16437,7 +15886,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=325dda163189b029bf887beb487267c7da2da8c582a63ec0c327fc9323f5fcff"
+"attrs count=145 sha256=1f2cefb01ada586662beec7fd05898756d56c9362625a3f8b3cd8452594168aa"
 ],
 "selection-prepared-input-price-change": [
 "compress attempt=1",
@@ -16535,7 +15984,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=259ed82edfb36ae877eea9dcd6370d8a6bc6721ac8f85d4b3598da421fa136e8"
+"attrs count=145 sha256=e02f8a50cf4371a80d21328068a6ea6810095bdaf6242c320d57e3c19ff76f7f"
 ],
 "selection-prepared-match": [
 "compress attempt=1",
@@ -16659,7 +16108,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=187b09b1ab3f6b9bfcab0804fb74235f24569d336ab55641f6f68517ad78d643"
+"attrs count=145 sha256=175abb9360960498257c8b841746b15fdca0feeda29cfadcb1abd9b0a25cb42f"
 ],
 "selection-prepared-no-call": [
 "compress attempt=1",
@@ -16731,7 +16180,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=146 sha256=6748ac49d8557db65d1e194cad480b59ce7b86d40a6d9ecc1d8f1ea2a9dc1bae"
+"attrs count=145 sha256=2500ac2eb8fde12aa584bf26f089038c799976b9e735635409784cda8360689a"
 ],
 "selection-prepared-overflow": [
 "compress attempt=1",
@@ -16810,7 +16259,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=7029b483fd31fc04b05d5bbb56b68077430427ffd3fe0a444073af7abd00aa6e"
+"attrs count=145 sha256=d6a8f9d14ef26497afeb93838ed9f18bb829e1f5aa275450ec0a891e694064a7"
 ],
 "selection-prepared-split": [
 "compress attempt=1",
@@ -16907,7 +16356,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=eb59dd2508615d81d51d9d50082eaaef7e70af096a46bad5a4fd6ae1e30a0485"
+"attrs count=145 sha256=b4ac1b63f22453774d771d787f2e4499626554249fad08df6dd1da6b19ff74fe"
 ],
 "selection-pressure-sweep": [
 "compress attempt=1",
@@ -17107,7 +16556,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=526fe26b4146d2559e77be7455e852b73691c298f579dc612c1c0a3b87e7d76c"
+"attrs count=145 sha256=ae23bd57e40ac09ed20580dffc251d95e5d0cbaafaded1e66c2df767136e22f3"
 ],
 "selection-unattributed": [
 "compress attempt=1",
@@ -17269,7 +16718,7 @@
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",15]]",
 "attr compression_count=1",
-"attrs count=146 sha256=8bcc7ab0747bd75dfa62feb41be7be2f4704cf3c0d45f1f1038862ba796f8615"
+"attrs count=145 sha256=4aec1262bac66dbcb0aa38d98c535e76e667bf3bdb5a6e80c0f38ac8113062e1"
 ],
 "single-below-minimum-no-fit": [
 "compress attempt=1",
@@ -17405,7 +16854,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=f8618c558404/25548",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=62afc158bba59fd7e8a03fcfc4f1f69ae42d23d7d4fa8867bee102e0439c0f44"
+"attrs count=145 sha256=55f5d284efad3b7e669d249af781bd671b8ff09f27d257a9134b0800a16ff32d"
 ],
 "single-small-backlog-yields": [
 "compress attempt=1",
@@ -17559,7 +17008,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=e2fba96242761a6b137ade42084ea50fe1cb3c358e38413ea3381562304a4478"
+"attrs count=145 sha256=d3e7fc276e3a363466be32646aa0f4772ae3de3e4c18687e566f2823fb8615e8"
 ],
 "stateless-bypass-missing": [
 "compress attempt=1",
@@ -17622,7 +17071,7 @@
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: stateless session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=146 sha256=824fb409bb0733c3de0dbe52dbc62bd7601f709c408861162750da7201067557"
+"attrs count=145 sha256=3f28b9588ede65d156fe6d4c2bd63381584e13da6c68db5bae3646f5adaa403f"
 ],
 "stateless-bypass-negative": [
 "compress attempt=1",
@@ -17685,7 +17134,7 @@
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: stateless session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=146 sha256=824fb409bb0733c3de0dbe52dbc62bd7601f709c408861162750da7201067557"
+"attrs count=145 sha256=3f28b9588ede65d156fe6d4c2bd63381584e13da6c68db5bae3646f5adaa403f"
 ],
 "stateless-bypass-zero": [
 "compress attempt=1",
@@ -17748,7 +17197,7 @@
 "attr _last_compression_noop_reason=\"LCM bypassed below threshold: stateless session\"",
 "attr _last_compression_status=\"noop\"",
 "attr _pending_emission_candidates=[]",
-"attrs count=146 sha256=824fb409bb0733c3de0dbe52dbc62bd7601f709c408861162750da7201067557"
+"attrs count=145 sha256=3f28b9588ede65d156fe6d4c2bd63381584e13da6c68db5bae3646f5adaa403f"
 ],
 "stop-hang-False-False-False": [
 "compress attempt=1",
@@ -17902,7 +17351,7 @@
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_turn_paced=true",
 "attr _sweep_budget_hold_until=1715.0",
-"attrs count=146 sha256=2d5b14a47996a951a0888f106a003e9cd3120fb530bf6dfc65d00ae94895238c"
+"attrs count=145 sha256=d89ba3c047a1f54fe2ab13860fc481419caf60d2bb107dbc1043d8da8bda405d"
 ],
 "stop-hang-False-False-True": [
 "compress attempt=1",
@@ -18054,7 +17503,7 @@
 "attr _store_complete_excluded=[]",
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=83aa6f6a16dba977ce28b2e9d5f804f46b2f8bb78ecb6064442753972a4564d5"
+"attrs count=145 sha256=77986071f1b1956ec2eaef6319b0a16f5b4681a5b46dba9a6ae3802bec8024e9"
 ],
 "stop-hang-False-True-False": [
 "compress attempt=1",
@@ -18187,7 +17636,7 @@
 "attr _store_complete_excluded=[]",
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=1fe2b664fdcf53bb5725fef69406465f6916b9558e5c113a61ffea7ee358afec"
+"attrs count=145 sha256=466a47c0b6dddf5a6ebc73bac9c6d54eb19d80a6c8381bfc1812e0f32de87d7e"
 ],
 "stop-hang-False-True-True": [
 "compress attempt=1",
@@ -18320,7 +17769,7 @@
 "attr _store_complete_excluded=[]",
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=ffa23a350c50e4aa6353a11b8d4fd4937d31c46e574b4a8dfa1f7a816fefe361"
+"attrs count=145 sha256=e3222731350d3488e02b7318d6a5dae80d96c313c773ce444edab67df510f83c"
 ],
 "stop-hang-True-False-False": [
 "compress attempt=1",
@@ -18375,7 +17824,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _sweep_budget_hold_turn_paced=false",
 "attr _sweep_budget_hold_until=2131.0",
-"attrs count=146 sha256=66656bde01b73c2bea606949423e3d4fc1c229eb3c2ffcd274e89d117f60482b"
+"attrs count=145 sha256=4a9f1608af3e795b5238741f3aa06302501df9d48653ea77f207d7e09ac6b0d0"
 ],
 "stop-hang-True-False-True": [
 "compress attempt=1",
@@ -18428,7 +17877,7 @@
 "message assistant 5af94fa49bf3/1266",
 "attr _foreground_budget=sha12/len=958f78f7b178/442",
 "attr _pending_emission_candidates=[]",
-"attrs count=146 sha256=9a19015c2d8af39e625d70ce5912f287803d6409abf88ac828baa561154a6f3f"
+"attrs count=145 sha256=86adaafd95fb6fbbc4e677a63c4a0c3543bc9218ff4a6d2a4d17287dab805a2e"
 ],
 "stop-hang-True-True-False": [
 "compress attempt=1",
@@ -18473,7 +17922,7 @@
 "attr _no_progress_observed_tokens=250000",
 "attr _pending_emission_candidates=[]",
 "attr _sweep_budget_hold_turn_paced=false",
-"attrs count=146 sha256=3b4ff4150d1c4b4d01e4a59224ecea93d4d17d09b9fa1936a0629f932da42d1a"
+"attrs count=145 sha256=8bd563b0af1a3a01a297d437513eac4093ce5ab49607b5d1a8102ea2e9b34d25"
 ],
 "stop-hang-True-True-True": [
 "compress attempt=1",
@@ -18517,7 +17966,7 @@
 "attr _last_overflow_recovery_failed=true",
 "attr _no_progress_observed_tokens=250000",
 "attr _pending_emission_candidates=[]",
-"attrs count=146 sha256=d5f7cfb9610756ae3525c4b485770853ec8f2a9855dd9f7ee1487efbc3252382"
+"attrs count=145 sha256=d0b5aa54a72dfae81b2317ddf5d6fb2c18fa5b3fd4b57071587a838fe5215f8c"
 ],
 "stop-overflow-no-leaf": [
 "compress attempt=1",
@@ -18607,7 +18056,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=ea1402633a11/3476",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=a9a2474c5bb4247ee11f8ee46e37c7d32a04b08845e5c23f5383b495e4290ace"
+"attrs count=145 sha256=2f7d062718ee7ac9b902ef15135fd0bef59f7e6ad38bba32c4c2c7ef2907cf8b"
 ],
 "stop-reason-cleared": [
 "compress attempt=1",
@@ -18709,7 +18158,7 @@
 "attr _no_progress_public_rows=sha12/len=3dace5636f07/21060",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=3bc79486eb6a5b219e2b3121f2272860fdd0243d2af18d38f9a2f32fd17bf403"
+"attrs count=145 sha256=08566082e1b6e1fbd753c0b1ab201f0d5ca2d0c48298a4bcf5341fcbff5b7f28"
 ],
 "stop-reason-retained": [
 "compress attempt=1",
@@ -18857,7 +18306,7 @@
 "attr _store_complete_excluded=[]",
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=2448a327ed3923caa172f9f935ff50e84ca59604e9c6125f280f68f58e199c54"
+"attrs count=145 sha256=f7ea12824e91239b673787ebb8416e7146f9da2c2b7c96beae96ff0c3f490767"
 ],
 "stop-reason-retained-escape": [
 "compress attempt=1",
@@ -19050,7 +18499,7 @@
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",4]]",
 "attr compression_count=1",
-"attrs count=146 sha256=706fecf61f44734dfa59e23036ea5400a666dc021e4ea00ce81f128bd0c2eab4"
+"attrs count=145 sha256=e3dcda41c64225231213f0b1d210bba5536a612e1ce32c4ed3b9287538f2bff1"
 ],
 "stop-reason-unattributed": [
 "compress attempt=1",
@@ -19213,7 +18662,7 @@
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",15]]",
 "attr compression_count=1",
-"attrs count=146 sha256=230eec36d7d06cd8d15ff75a4abc55c71bdfc5538887a8d10a511220a48877cc"
+"attrs count=145 sha256=c4864dd1e75e5cdc316ae7780a9312b0db9c6a76f29b7281682b0fc87e15c96f"
 ],
 "stop-refused-restore": [
 "compress attempt=1",
@@ -19325,7 +18774,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1300.0",
-"attrs count=146 sha256=9ed07f9c1fbdc66fda5a6fdc8992c4b9535d3892a49e2ba0620ffacd3f877c0f"
+"attrs count=145 sha256=446f3e9b2b2d3690cf664836023098e78635980cbf494327c509ca516e499164"
 ],
 "stop-rejection-after-leaf": [
 "compress attempt=1",
@@ -19500,7 +18949,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=8a3ed3310ebde9cbcfdbe6b0d9a342192974de5db5bf6fa9c4901ea94dbc2145"
+"attrs count=145 sha256=bb1dbd906a26c3b0083216ec0230dc387eb524fac038a1e7d70d487588943b6d"
 ],
 "stop-resumed-anchor": [
 "compress attempt=1",
@@ -19565,7 +19014,7 @@
 "attr _no_progress_proof_fingerprint=null",
 "attr _pending_emission_candidates=sha12/len=7d75449c34c6/416",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=6ac9a57c67a67425c6cfe8a837bf549a2a3f9a0aeb505b06cffdc429b24bfb06"
+"attrs count=145 sha256=b06676fdacf5513305f8b4ed2549a86ceb284a5357bc976ee5334a241ea9a69d"
 ],
 "stop-route-after-leaf": [
 "compress attempt=1",
@@ -19736,7 +19185,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=1a356b471fc629d01c8a223a06a9779ccc3d65740aec63d998cfc6b846f03dee"
+"attrs count=145 sha256=82469f3736672b5ba1faeb8709d302b49681ff92fbd9ab3e9d18c310171c065e"
 ],
 "stop-scaffold-equal": [
 "compress attempt=1",
@@ -19835,7 +19284,7 @@
 "attr _no_progress_public_rows=sha12/len=cfd1777acbed/20979",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=a333e7f56006922662b584bf056166281ce1950418e2cfe7e1af0b69185ddc15"
+"attrs count=145 sha256=1a7dd5dbdfaca8790b38d6930218a9cfeb453ea89cbcb1c4d0a2352f6623d524"
 ],
 "stub-first-exit": [
 "compress attempt=1",
@@ -19992,7 +19441,7 @@
 "attr _store=sha12/len=acd66f87830b/35604",
 "attr _stub_first_exit_now=sha12/len=fd265c889784/84",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=4c2eb8aee52977a31895917e99efa8d04ce79ebf927f2e518474e9708c0fe8d9"
+"attrs count=145 sha256=1e7c8822f7c555827084cb5ca3fbc05b89e4ca151aa4e4b0fe777ae6937c67e6"
 ],
 "sweep-budget-entry": [
 "compress attempt=1",
@@ -20129,7 +19578,7 @@
 "attr _store=sha12/len=78abcdec3f42/25548",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=146 sha256=d457ca01d7915ee3a3b6409ee4ba2e9224f94d3817f4da9790fce4be109aa1a3"
+"attrs count=145 sha256=6040ef34cc31e077c3869b4593ad818b4a6dc6efe01fa8eae93e4a47ce4ddb74"
 ],
 "sweep-drain-condense": [
 "compress attempt=1",
@@ -20333,7 +19782,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=918b2c195d62b46581155d137710dd7dc35e3ada68400faeb33b317ae42c25ba"
+"attrs count=145 sha256=20016aac254e494385e51ca8877ddc25e1dc047c41b230b6dd75e053ffe8b96c"
 ],
 "sweep-fresh-tail-yield": [
 "compress attempt=1",
@@ -20532,7 +19981,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=526fe26b4146d2559e77be7455e852b73691c298f579dc612c1c0a3b87e7d76c"
+"attrs count=145 sha256=ae23bd57e40ac09ed20580dffc251d95e5d0cbaafaded1e66c2df767136e22f3"
 ],
 "sweep-pass-budget": [
 "compress attempt=1",
@@ -20969,7 +20418,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=efcb22d6da5318569b57f433d93b0757eb86df9ab46dab5d3f5f6c32ec43948f"
+"attrs count=145 sha256=c11c434bb625cb1e184a2d480afc918dc59770fe9c87603c94d1021a085ad0e5"
 ],
 "sweep-pre-leaf-condensation": [
 "compress attempt=1",
@@ -21188,7 +20637,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=e9e737df14ea9a106982b05255f106bb3d83602833b58b37ca41aed6c18855c7"
+"attrs count=145 sha256=0415b8922c3306417125686b65b123187dea8a077d399f87a451da9a88dafffe"
 ],
 "sweep-stub-first-exit": [
 "compress attempt=1",
@@ -21346,7 +20795,7 @@
 "attr _store=sha12/len=acd66f87830b/35604",
 "attr _stub_first_exit_now=sha12/len=fd265c889784/84",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=71e60b93054b7076cb80022232327ffdd48217c735f571082ccd0f83d255ad15"
+"attrs count=145 sha256=7b6a1cab3a04cb1755963beec4f4ec4c61a1cd2488a4e772cb16b78be1ed84f3"
 ],
 "sweep-tail-drained": [
 "compress attempt=1",
@@ -21441,7 +20890,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _store=sha12/len=ea1402633a11/3476",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=0edcf6cdbf2d6b995d782ecc132fb65ac251ed4af8cab45e4b466e79c4133a29"
+"attrs count=145 sha256=5198d9ef72a379e263ea99ace0f3d898bbfb0b7ae3899a4eb47da2a9254f04c0"
 ],
 "tool-pair-groups": [
 "compress attempt=1",
@@ -21630,182 +21079,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=69ab4c3d61e2de27d417854326270fd3957671ebf13b0bf9df0e449d780171f4"
-],
-"transcript-gc-locked": [
-"compress attempt=1",
-"leaf_prep before {\"chain\":[],\"counters\":{}}",
-"sql BEGIN IMMEDIATE",
-"sql shape=1 conn=_legacy_conversation_ids_store SAVEPOINT lcm_ingest",
-"sql #1",
-"sql shape=2 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_conversation_observed ON messages(conversation_id, observed_at)",
-"sql #2",
-"sql shape=3 conn=_legacy_conversation_ids_store CREATE TABLE IF NOT EXISTS message_relations ( relation_id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL, kind TEXT NOT NULL, related_store_id INTEGER, ordinal INTEGER, observed_at REAL, created_at REAL )",
-"sql #3",
-"sql shape=4 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_relations_store ON message_relations(store_id, kind)",
-"sql #4",
-"sql shape=5 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_relations_related ON message_relations(related_store_id, kind)",
-"sql #5",
-"sql shape=6 conn=_legacy_conversation_ids_store CREATE INDEX IF NOT EXISTS idx_msg_relations_observed ON message_relations(kind, observed_at)",
-"sql #6",
-"sql shape=7 conn=_legacy_conversation_ids_store RELEASE SAVEPOINT lcm_ingest",
-"sql #7",
-"sql #1",
-"sql #7",
-"log hermes_lcm.engine DEBUG \"Ingest: session=%s cursor=%d incoming=%d\"",
-"sql shape=8 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, NULL)",
-"sql #8 sha12/len=c16b5c22dc9f/334 x5",
-"sql shape=9 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?, NULL, NULL, NULL, ?, ?, ?, ?, ?,?)",
-"sql #9 sha12/len=c56f7879c7d4/1593 x5",
-"sql #8 sha12/len=5928522868b9/1578 x5",
-"sql #9 sha12/len=c6ad471721fc/1593 x5",
-"sql #8 sha12/len=2eff5a55ac17/1578 x5",
-"sql #9 sha12/len=f0309bfb39c5/1593 x5",
-"sql #8 sha12/len=7a04e6343cca/1578 x5",
-"sql #9 sha12/len=4e9862a77994/1593 x5",
-"sql #8 sha12/len=f5e2163a2704/1578 x5",
-"sql #9 sha12/len=586e9da16a25/1593 x5",
-"sql #8 sha12/len=e7eca4415696/1578 x5",
-"sql #9 sha12/len=fbafdba73649/1593 x5",
-"sql #8 sha12/len=e55e8e0b11b8/1578 x5",
-"sql #9 sha12/len=d70bd8f892d7/1593 x5",
-"sql #8 sha12/len=aa51efc18eb8/1578 x5",
-"sql #9 sha12/len=ada5b0ec14fb/1593 x5",
-"sql #8 sha12/len=7201fd996872/1578 x5",
-"sql shape=10 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?, NULL,?, NULL, ?, ?, ?, ?, NULL, NULL)",
-"sql #10 sha12/len=5cdddd83da37/1993 x5",
-"sql shape=11 conn=_legacy_conversation_ids_store INSERT INTO messages (session_id, source, conversation_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, ingested_at, observed_at, observed_at_source) VALUES (?,?,?,?,?,?, NULL,?, ?, ?, ?, ?, NULL, NULL)",
-"sql #11 sha12/len=db65aff40b32/544 x5",
-"sql #10 sha12/len=01e91e2a831b/1993 x5",
-"sql #11 sha12/len=4360cc28f70b/544 x5",
-"sql #10 sha12/len=74c09db82e2d/1993 x5",
-"sql #11 sha12/len=82caa050f36a/544 x5",
-"sql #10 sha12/len=73304c755288/1993 x5",
-"sql #11 sha12/len=508f4ab7b1bf/544 x5",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql #7",
-"sql #1",
-"sql shape=12 conn=_legacy_conversation_ids_store INSERT INTO metadata(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-"sql #12 sha12/len=1b14ec7cbf0e/149",
-"sql #7",
-"sql #1",
-"sql #12 sha12/len=f0485d7a6f55/151",
-"sql #7",
-"log hermes_lcm.engine DEBUG \"Ingested %d messages into LCM store\"",
-"sql #1",
-"sql shape=13 conn=_legacy_conversation_ids_store UPDATE ledger_meta SET value=CAST(value AS INTEGER)+? WHERE key=?",
-"sql #13 sha12/len=72e21a1157bd/74",
-"sql shape=14 conn=_legacy_conversation_ids_store INSERT INTO occurrence_bindings(lineage, ordinal,store_id,identity_digest,stamp,disposition,tag,key_rank,view_seq) VALUES (?,?,?,x?,NULL,?,NULL,NULL,?)",
-"sql #14 sha12/len=4a90529dc6ae/192",
-"sql shape=15 conn=_legacy_conversation_ids_store INSERT INTO occurrence_bindings(lineage, ordinal,store_id,identity_digest,stamp,disposition,tag,key_rank,view_seq) VALUES (?,?,?,x?,?,?,NULL,NULL,?)",
-"sql #15 sha12/len=001ba7015f17/194",
-"sql #14 sha12/len=611509717526/192",
-"sql #15 sha12/len=d65dfe6b30c1/194",
-"sql #14 sha12/len=a1d92edfb122/192",
-"sql #15 sha12/len=2e1ada6d29da/194",
-"sql #14 sha12/len=876149873878/192",
-"sql #15 sha12/len=dbc9cec6eb8b/194",
-"sql #14 sha12/len=65d30844a35a/192",
-"sql #15 sha12/len=6e5d10728549/197",
-"sql #14 sha12/len=a808829591d1/195",
-"sql #15 sha12/len=7c31095ca015/197",
-"sql #14 sha12/len=cf226747b725/195",
-"sql #15 sha12/len=8794d893727b/197",
-"sql #14 sha12/len=4c2aaa91dc9b/195",
-"sql #15 sha12/len=b0358daa8160/197",
-"sql #14 sha12/len=f254d9795e73/195",
-"sql #14 sha12/len=d59c3497d570/195",
-"sql #14 sha12/len=e8952583f30d/195",
-"sql #14 sha12/len=b54a112e4b9d/195",
-"sql #14 sha12/len=22fd7daad6de/195",
-"sql #14 sha12/len=ebb6923d2f5a/195",
-"sql #14 sha12/len=f6fd2e71c826/195",
-"sql #14 sha12/len=4d29f5188e7b/195",
-"sql #14 sha12/len=f4c7d9143b35/195",
-"sql shape=16 conn=_legacy_conversation_ids_store INSERT INTO ingest_views VALUES (?,?,?,NULL,x?,x?)",
-"sql #16 sha12/len=5664f349973d/3725",
-"sql shape=17 conn=_legacy_conversation_ids_store DELETE FROM ingest_views WHERE lineage=?AND kind=?AND view_seq NOT IN (SELECT view_seq FROM ingest_views WHERE lineage=?AND kind=?ORDER BY view_seq DESC LIMIT ?)",
-"sql #17 sha12/len=310b0f9decf1/203",
-"sql shape=18 conn=_legacy_conversation_ids_store INSERT INTO lineage_marks(lineage,max_store_id) VALUES (?,?) ON CONFLICT(lineage) DO UPDATE SET max_store_id=excluded.max_store_id WHERE lineage_marks.max_store_id IS NOT excluded.max_store_id",
-"sql #18 sha12/len=966912535247/207",
-"sql #7",
-"sql COMMIT",
-"log hermes_lcm.engine DEBUG \"LCM attribution phase=ingest lock_hold_ms=%.3f rows_written=%d bytes_written=%d busy_snapshot_retry=%s\"",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=52614d71143e/151",
-"sql COMMIT",
-"log hermes_lcm.engine INFO \"LCM leaf summary input: input_tokens=%d source_tokens=%d messages=%d\"",
-"call 1 model=trace-model level=1 budget=4000 timeout=115.0 in=efa3b2278376/27611",
-"sql shape=19 conn=_legacy_conversation_ids_store CREATE TEMP TRIGGER lock_gc BEFORE UPDATE OF content ON messages BEGIN SELECT RAISE(ABORT,?); END",
-"sql #19 sha12/len=0fe14e4b36ef/116",
-"log hermes_lcm.escalation DEBUG \"L1 summarization succeeded (%d tokens)\"",
-"sql BEGIN IMMEDIATE",
-"sql shape=20 conn=_dag INSERT INTO summary_nodes (session_id, depth, summary, token_count, source_token_count, source_ids, source_type, created_at, earliest_at, latest_at, expand_hint) VALUES (?, ?,?, ?, ?,?,?, ?, ?, ?,?)",
-"sql #20 sha12/len=98474755f43c/388 x3",
-"sql shape=21 conn=_dag INSERT OR REPLACE INTO summary_node_provenance (node_id, escalation_level, model, created_at) VALUES (?, ?,?, ?)",
-"sql #21 sha12/len=bd12465197ec/135",
-"sql shape=22 conn=_dag UPDATE lcm_lifecycle_state SET current_frontier_store_id = MAX(current_frontier_store_id, ?), updated_at = ? WHERE conversation_id =?AND current_session_id =?",
-"sql #22 sha12/len=2f2071fe77c6/191",
-"sql COMMIT",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=4702b2b116a4/157",
-"sql COMMIT",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=7e464c565523/237",
-"sql COMMIT",
-"sql BEGIN IMMEDIATE",
-"sql shape=23 conn=_legacy_conversation_ids_store UPDATE messages SET content =?, token_estimate = ? WHERE store_id = ?",
-"sql #23 sha12/len=db5a3f44df60/192 x3",
-"sql ROLLBACK",
-"log hermes_lcm.compaction WARNING \"LCM summary publication could not finish; preserving replay-safe context (reason=%s, code=%s, name=%s, detail=%s)\"",
-"return sha12/len=b8d8a264a201/5437",
-"leaf_prep after {\"chain\":[],\"counters\":{}}",
-"sql BEGIN IMMEDIATE",
-"sql #12 sha12/len=97af61271bc1/305",
-"sql COMMIT",
-"assemble",
-"message system 6a97437a05d4/508",
-"message user 67e4e8b1c7a0/112",
-"message user 69e6fa69ef3f/1444",
-"message assistant b61a04d6dd7e/1600",
-"message tool b3f7e026a84f/1600",
-"attr _compress_escaped=[]",
-"attr _compress_forced_overflow=false",
-"attr _compress_hidden_rows_consumed=0",
-"attr _compress_host_rows_consumed=22",
-"attr _compress_occurrences=null",
-"attr _compress_run=sha12/len=06d177b483f1/444",
-"attr _dag=sha12/len=ad06d604fc3e/394",
-"attr _foreground_budget=sha12/len=fec1f19f1573/375",
-"attr _ingest_cursor=4",
-"attr _last_compacted_store_id=23",
-"attr _last_compression_noop_reason=\"summary publication blocked by SQLite lock\"",
-"attr _last_compression_status=\"error\"",
-"attr _last_leaf_content_filter_error=false",
-"attr _last_leaf_level_3_verbatim=false",
-"attr _last_leaf_summary_model=\"\"",
-"attr _lifecycle=sha12/len=674382ee1de7/392",
-"attr _no_progress_ingest_generation=0",
-"attr _no_progress_observed_tokens=3000",
-"attr _no_progress_public_rows=sha12/len=89f408cf8108/34823",
-"attr _pending_emission_candidates=sha12/len=37741e1df74c/449",
-"attr _store=sha12/len=acd66f87830b/35604",
-"attr _store_complete_blocked=null",
-"attr _store_complete_copy_exclusion_proofs={}",
-"attr _store_complete_cut=false",
-"attr _store_complete_empty_reason=\"\"",
-"attr _store_complete_escaped=[]",
-"attr _store_complete_excluded=[]",
-"attr _store_complete_order={}",
-"attr _survival_fit_reason=\"sqlite_publication_locked\"",
-"attr _survival_pass_observed=true",
-"attrs count=146 sha256=850055150fce563b887e2b72b93e139a019608af843a9cee5d9329b25dee989e"
+"attrs count=145 sha256=dcd71f5dd742481abd1d3a20889d71520c917d47052efd6e99434252bc7cd37e"
 ],
 "unattributed-rotated-history": [
 "compress attempt=1",
@@ -21963,7 +21237,7 @@
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",15]]",
 "attr compression_count=1",
-"attrs count=146 sha256=163966776219e6eda008ea45e14695d5b13e0b5642deb4aebe75696377faa80e"
+"attrs count=145 sha256=a8779b6eb055c156d638d547260f47d1a9f3dfa66e5ff81cf9d08b1b3ca73bb4"
 ],
 "unknown-window-default-target": [
 "compress attempt=1",
@@ -22128,7 +21402,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=805dcb146becca11387ef07ece649162e0bacf11354ed5ad2365d9cf90de50b0"
+"attrs count=145 sha256=b4812360e97e9230e1ce4ac84b2e5e07204d74d9f556788603fea17ce28d3bb9"
 ],
 "unthresholded-default-target": [
 "compress attempt=1",
@@ -22292,6 +21566,6 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=7d47fcb7226e6fc335d10eebfce4a52d0005ce184abdacf4655e59dbbb0b5a6a"
+"attrs count=145 sha256=c8770beb3febd9ed3464f6bfd771196ba22ca040cff8547b62756d9a0f8c13f9"
 ]
 }

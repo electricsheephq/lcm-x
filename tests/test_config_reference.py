@@ -39,8 +39,6 @@ def test_reference_diagnostic_choices():
 
 
 @pytest.mark.parametrize("key,removal", (
-    ("LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED", "v0.30.0"),
-    ("LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED", "v0.30.0"),
     ("LCM_DEFERRED_MAINTENANCE_ENABLED", "v0.31.0"),
 ))
 def test_reference_deprecation_warning_bytes(monkeypatch, key, removal):

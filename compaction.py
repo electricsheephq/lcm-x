@@ -2838,9 +2838,7 @@ class CompactionMixin:
             else:
                 state.condensation_passes = self._maybe_condense(
                     focus_topic=focus_topic,
-                    leaf_compacted_this_turn=True,
                     force_overflow=state.force_overflow,
-                    critical_budget_pressure=state.critical_budget_pressure,
                 )
         except Exception as exc:
             if not _is_sqlite_locked_error(exc):
@@ -3219,34 +3217,6 @@ class CompactionMixin:
             state.prep_freed += count_messages_tokens(leaf.source_lookup_chunk) - count_tokens(leaf.summary_text)
         state.level3_leaves += leaf.level == 3
         state.estimated_active_tokens = max(0, state.estimated_active_tokens - leaf.source_tokens + leaf.summary_tokens)
-        if (
-            getattr(self._config, "large_output_transcript_gc_enabled", False)
-            and leaf.source_store_ids
-        ):
-            committed_context = self._assemble_committed_compaction_context(
-                state.working_messages,
-                state.anchor_source_messages,
-                state.recovery_assembly_cap,
-            )
-            try:
-                self._maybe_gc_compacted_tool_results(
-                    leaf.compacted_chunk,
-                    leaf.source_store_ids,
-                )
-            except Exception as exc:
-                if not _is_sqlite_locked_error(exc):
-                    raise
-                return "return", self._fail_open_after_publication_failure(
-                    committed_context,
-                    exc,
-                    compress_started=state._compress_started,
-                    threshold_full_sweep_active=state.threshold_full_sweep_active,
-                    recovery_assembly_cap=state.recovery_assembly_cap,
-                    leaf_passes=state.leaf_passes,
-                    condensation_passes=state.pre_leaf_condensation_passes,
-                    context_is_assembled=True,
-                )
-
         if leaf.prepared is not None:
             if state.estimated_active_tokens <= state.prep_low_water:  # design §4.4, D-10: the leaf path stops at L
                 state.sweep_stop_reason = "prepared_leaves_promoted"

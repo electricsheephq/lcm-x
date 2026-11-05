@@ -808,5 +808,23 @@
       "outcome_sha": "489a4f0037919e5b1d52091a36bb2899734904748c90824e88d093c63f3d6df6",
       "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
     }
+  },
+  "compress": {
+    "externalized-transcript-gc": {
+      "outcome_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "reason": "#1246 v0.30.0 removes transcript GC behavior and its writer/lock scenario."
+    },
+    "finish-gc-lock": {
+      "outcome_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "reason": "#1246 v0.30.0 removes transcript GC behavior and its writer/lock scenario."
+    },
+    "publish-advance-gc-nonlock": {
+      "outcome_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "reason": "#1246 v0.30.0 removes transcript GC behavior and its writer/lock scenario."
+    },
+    "transcript-gc-locked": {
+      "outcome_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "reason": "#1246 v0.30.0 removes transcript GC behavior and its writer/lock scenario."
+    }
   }
 }
