@@ -91,6 +91,23 @@ def _get_encoder():
     return _encoder if _encoder_ready else None
 
 
+def start_encoder_load() -> None:
+    """Start the background load without waiting for it (#2179).
+
+    A server that must answer at once calls this before it serves: no later
+    caller is then the first, so none waits _ENCODER_FIRST_WAIT_S; each uses
+    the estimator until the load finishes.
+    """
+    global _encoder_thread
+    with _encoder_lock:
+        if _encoder_ready or _encoder_thread is not None:
+            return
+        _encoder_thread = threading.Thread(
+            target=_encoder_loader, name="lcm-tiktoken-load", daemon=True
+        )
+        _encoder_thread.start()
+
+
 def token_counter_status() -> Dict[str, str]:
     """Report the active counter (#615) without starting or waiting on its load."""
     with _encoder_lock:
