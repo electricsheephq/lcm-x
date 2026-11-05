@@ -78,7 +78,9 @@ Operator cautions:
   calls already running finish (up to 540 seconds).
 - If the receipt write fails after a call, the client gets 503 and no receipt is
   written, so a client retry repeats the call without a matching request hash.
-  Requests refused with 400, 403 or 415 are not logged.
+  Requests refused before the shim reads them (403, 415, and 400 for bad framing)
+  are not logged; every other request, including a rejected one, gets a receipt,
+  so receipt counts are not model-call counts.
 - A record with no rollout returns 503, and without rollouts the weekly brake
   cannot fire. If the call log shows one, stop the stage and check the leased
   home before resuming.
