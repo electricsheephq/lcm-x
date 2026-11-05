@@ -403,12 +403,14 @@ The interrupted or SQLite-lock raw-flush warning includes `unflushed=N`: the pen
 before the final ingest attempt, without message content. The outer ingest/finalize warning includes
 the same field only when ingest has not finished. The session-end SQLite busy timeout stays 50 ms.
 When a lock skip keeps the rows in memory, the warning says `retry pending at the next session start
-or shutdown`: the same process retries them at the next session start or session end, and for up to
-5 s at shutdown or process exit. If rows remain after that, a warning ending `after shutdown retry;
+or end in this process, at engine shutdown, or at a normal interpreter exit (not os._exit)` and names
+the session (`session=<id>`): the same process retries them at the next session start or session end,
+and for up to 5 s at engine shutdown or a normal interpreter exit. If rows remain after that, a warning ending `after shutdown retry;
 final messages may be absent from the plugin-local store unflushed=N` gives the rows still
 unflushed. Resuming the same session and ingesting its full history also recovers the tail without
-duplicates. An abrupt exit, or another process holding the write lock for the whole shutdown bound,
-can still leave the tail absent (#1160).
+duplicates. An abrupt exit, a host that leaves through `os._exit` without calling the engine's shutdown (the
+Hermes gateway until NousResearch/hermes-agent#87328; #2253), or another process holding the write
+lock for the whole shutdown bound, can still leave the tail absent (#1160).
 
 ### `hermes plugins` shows `lcm-x (not found)` but LCM tools exist
 

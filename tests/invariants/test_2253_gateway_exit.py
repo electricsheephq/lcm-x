@@ -3,7 +3,8 @@
 The Hermes gateway ends each agent's session, closes the agent and leaves through ``os._exit``. Until the host calls the
 context engine's ``shutdown()`` at teardown (NousResearch/hermes-agent#87328), the tail a busy session end kept in
 memory is neither retried, stored nor reported in that process. The first case pins that named limit (§3.5 M9); the
-second shows that the engine's existing drain stores the tail once the host makes the call.
+second shows that the engine's existing drain stores the tail once the host makes the call; the third shows that a
+normal interpreter exit drains it through ``atexit`` even when the host never calls ``shutdown()``.
 """
 
 import os
@@ -36,11 +37,13 @@ print("pending", len(engine._pending_session_tails), file=sys.stderr, flush=True
 if exit_style == "engine_shutdown":
     engine.shutdown()
 sys.stderr.flush()
+if exit_style == "normal_exit":
+    sys.exit(0)
 os._exit(0)
 '''
 
 
-@pytest.mark.parametrize("exit_style", ["gateway_today", "engine_shutdown"])
+@pytest.mark.parametrize("exit_style", ["gateway_today", "engine_shutdown", "normal_exit"])
 def test_busy_end_tail_at_hard_exit(engines, tmp_path, exit_style):
     root = tmp_path / "child"
     root.mkdir()
@@ -57,7 +60,7 @@ def test_busy_end_tail_at_hard_exit(engines, tmp_path, exit_style):
     finally:
         fresh.shutdown()
     if exit_style == "gateway_today":
-        # No shutdown drain and no exit report: the tail is missing until a host resume of S.
+        # No shutdown or atexit drain and no exit report: the tail is missing until a host resume of S.
         assert stored == ["A", "B"]
         assert "after shutdown retry" not in result.stderr
     else:

@@ -50,7 +50,7 @@ def _locked_flush(engine, caplog):
         locker.execute("ROLLBACK")
         locker.close()
     assert ("retry pending at the next session start or end in this process, "
-            "or at engine shutdown if the host calls it") in caplog.text
+            "at engine shutdown, or at a normal interpreter exit (not os._exit)") in caplog.text
     assert "session=S unflushed=" in caplog.text
     assert "may be absent" not in caplog.text
     assert _contents(engine) == [message["content"] for message in messages[:2]]
