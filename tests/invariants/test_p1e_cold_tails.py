@@ -346,6 +346,41 @@ def test_exit_drain_stores_a_detached_cold_tail(engines, monkeypatch):
     assert not committed_rows(engine._store.db_path, "S1")
 
 
+@pytest.mark.parametrize("reused_uid", [False, True])
+def test_shutdown_after_a_failed_rebind_stores_the_detached_tail_without_reopening(engines, monkeypatch, reused_uid):
+    """A detached retry reads only the tail's store, so shutdown after a failed rebind never retries the open (#2152)."""
+    engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "shadow")
+    engine._config.database_path = ""
+    engine.on_session_start("S1", platform="cli", conversation_id="conv1")
+    view = [_m("user", "A1", 1., "a1"), _m("assistant", "A2", 2., "a2"),
+            _m("user", "A3", 3., "a1" if reused_uid else "a3")]
+    engine.ingest(copy.deepcopy(view[:1]))
+    store = engine._store
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "get_session_count", locked)
+        engine._ingest_cursor_needs_reconcile = True
+        engine.on_session_end("S1", copy.deepcopy(view))
+    assert [tail["kind"] for tail in engine._pending_session_tails] == ["cold"]
+    attempts = []
+
+    def failed_open(*args, **kwargs):
+        attempts.append(args)
+        raise sqlite3.OperationalError("injected rebind failure")
+
+    monkeypatch.setattr(engine, "_bind_storage", failed_open)
+    with pytest.raises(sqlite3.OperationalError):
+        engine._rebind_storage_for_home(str(Path(engine._hermes_home).parent / "other-home"))
+    engine.shutdown()
+    assert [r["content"] for r in committed_rows(store.db_path, "S1")] == ["A1", "A2", "A3"]
+    assert len(attempts) == 1 and not engine._pending_session_tails
+    assert count(engine, "tail.cold_detached_stored") == 1
+
+
 def test_off_current_partial_suffix_commit_then_lock(engines, monkeypatch):
     engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
     view = off_current_end(engine)

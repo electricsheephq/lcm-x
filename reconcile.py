@@ -767,10 +767,11 @@ class ReconcileMixin:
     def _host_rewrite_state(self, *, store=None):
         """Per bound store: watch {store_id: (identity, stored content, [objects])},
         overrides {store_id: payload or None}."""
-        if store is not None and store is not self._store:
+        if store is not None and store is not self._bound_store_unopened():
             return store.__dict__.setdefault("_detached_host_rewrite_state", ({}, {}))
-        if getattr(self, "_host_rewrite_store", None) is not self._store:
-            self._host_rewrite_store, self._host_rewrite_watch, self._host_rewrite_overrides = self._store, {}, {}
+        store = self._store if store is None else store  # a passed store never opens storage (#2152)
+        if getattr(self, "_host_rewrite_store", None) is not store:
+            self._host_rewrite_store, self._host_rewrite_watch, self._host_rewrite_overrides = store, {}, {}
         return self._host_rewrite_watch, self._host_rewrite_overrides
 
     def _load_host_rewrite_overrides(self, rows, *, store=None) -> None:

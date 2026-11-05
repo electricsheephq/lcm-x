@@ -243,7 +243,7 @@ class HostUidShadowMixin:
             with self._ingest_evidence(**target):
                 error = self._host_uid_classify(capture, stored_at or {}, set(remainders or ()), delta, store=store, hermes_home=hermes_home)
         except Exception as exc:
-            self._raise_ingest_busy(exc)
+            self._raise_ingest_busy(exc, **target)
             if not (getattr(self, "_ingest_read_only", None) is not None
                     and str(exc) == "session-end evidence deferred"):
                 delta["errors"] += 1
@@ -251,7 +251,7 @@ class HostUidShadowMixin:
         try:
             self._host_uid_count(delta, error, **target)
         except Exception as exc:  # Shadow counting remains best-effort.
-            self._raise_ingest_busy(exc)
+            self._raise_ingest_busy(exc, **target)
             logger.debug("LCM host-uid count failed")
 
     def _host_uid_classify(self, capture, stored_at: dict, remainders: set, delta: Counter, *, store=None, hermes_home=None):
@@ -516,7 +516,7 @@ class HostUidShadowMixin:
             else:
                 store.update_metadata_json(HOST_UID_COUNTER_KEY, merged)
         except Exception as exc:
-            self._raise_ingest_busy(exc)
+            self._raise_ingest_busy(exc, **target)
             counts["errors"] += 1
             logger.debug("LCM host-uid counter write failed (%s)", type(exc).__name__)
 

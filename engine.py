@@ -7509,10 +7509,11 @@ class LCMEngine(
         self._compression_boundary_stored_placeholder_digest_counts = {}
         self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
 
-    def _raise_ingest_busy(self, error):
-        if self._store._transaction_owner.owns_connection(self._store._conn) and (
+    def _raise_ingest_busy(self, error, *, store=None):
+        store = self._store if store is None else store  # a detached cold tail's own store (#2210)
+        if store._transaction_owner.owns_connection(store._conn) and (
             isinstance(error, _SqliteSavepointError) or _is_ingest_busy_error(error, require_code=True)
-            or isinstance(error, sqlite3.Error) and not self._store._conn.in_transaction
+            or isinstance(error, sqlite3.Error) and not store._conn.in_transaction
         ):
             raise error
 
@@ -11310,7 +11311,7 @@ class LCMEngine(
         )
 
     def _queue_cold_session_tail(self, view, *, session_id, conversation_id, source, error):
-        tail = dict(kind="cold", store=self._store, hermes_home=str(self._hermes_home), session_id=session_id,
+        tail = dict(kind="cold", store=self._store, hermes_home=str(self._hermes_home or ""), session_id=session_id,
                     conversation_id=conversation_id, source=source, view=copy.deepcopy(view))
         if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
             self._pending_session_tails.append(tail)
@@ -11709,3 +11710,7 @@ class LCMEngine(
                 logger.warning("LCM shutdown cleanup failed", exc_info=True)
         if failures:
             raise failures[0]
+
+    def _bound_store_unopened(self):
+        """The bound store object, read without a lazy open (#2152): a failed rebind stays failed."""
+        return self.__dict__.get("_store")
