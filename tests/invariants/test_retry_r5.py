@@ -11,6 +11,15 @@ pytest.importorskip("hypothesis")
 from tests.invariants.test_exactly_once_machine import RestartMachine
 
 
+def _compress(state):
+    """Compact, and check that it ran: the host now holds the shorter compacted view, so the retry below exercises
+    the re-keyed proof rather than an unchanged list."""
+    before = len(state.host)
+    state.compress()
+    assert state.engine._last_compression_status == "compacted"
+    assert len(state.host) < before
+
+
 def test_retry_host_merged_scaffold_after_compaction():
     """R5: the retry repeats the last exchange of the cold-resumed compacted view."""
     state = RestartMachine()
@@ -19,7 +28,7 @@ def test_retry_host_merged_scaffold_after_compaction():
         state.exactly_once()
         state.cold_resume()
         state.exactly_once()
-        state.compress()
+        _compress(state)
         state.exactly_once()
         state.cold_resume()
         state.exactly_once()
@@ -40,7 +49,7 @@ def test_retry_after_a_new_turn_beside_merged_scaffold():
     try:
         state.new_turn("alpha", False, 0, False, "lookup")
         state.cold_resume()
-        state.compress()
+        _compress(state)
         state.new_turn("alpha 2", False, 0, False, "lookup")
         state.exactly_once()
         state.new_turn("alpha 2", False, 0, True, "lookup")

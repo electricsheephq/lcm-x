@@ -653,7 +653,7 @@ def test_leaf_summary_and_publication_callbacks_at_host_depth(
         assert max(distance for row in distances.values() for distance in row.values()) < 28
 
 
-@pytest.mark.parametrize("path", ["publish-locked", "publish-overflow", "gc", "prepared", "sweep", "dynamic", "gc-reply"])
+@pytest.mark.parametrize("path", ["publish-locked", "publish-overflow", "prepared", "sweep", "dynamic"])
 def test_leaf_commit_and_advance_callbacks_at_host_depth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str,
 ) -> None:
@@ -688,15 +688,10 @@ def test_leaf_commit_and_advance_callbacks_at_host_depth(
                     summary_model="trace-model", threshold_full_sweep_enabled=path in {"publish-locked", "sweep"},
                     dynamic_leaf_chunk_enabled=path == "dynamic", embeddings_enabled=False,
                     temporal_rollups_enabled=False, large_output_externalization_enabled=False,
-                    large_output_transcript_gc_enabled=path in {"gc", "gc-reply"},
                     background_leaf_prep_enabled=path == "prepared")
     if path == "prepared":
         settings.update(context_threshold=0.75, leaf_chunk_tokens=4000, dynamic_leaf_chunk_max=4000,
                         max_assembly_tokens=200000, background_leaf_prep_max_calls=64)
-    if path == "gc-reply":
-        settings.update(fresh_tail_count=7, leaf_chunk_tokens=400, dynamic_leaf_chunk_max=400,
-                        max_assembly_tokens=1300, threshold_full_sweep_enabled=True,
-                        summary_prefix_target_tokens=1000)
     survival = importlib.import_module("hermes_lcm.survival_fit")
     # The shared harness disables host estimation; restore it for this callback probe.
     monkeypatch.setattr(survival, "_host_estimate", real_host_estimate)
@@ -768,12 +763,9 @@ def test_leaf_commit_and_advance_callbacks_at_host_depth(
         monkeypatch.setitem(sys.modules, pricing.__name__, pricing)
         monkeypatch.setitem(sys.modules, auxiliary.__name__, auxiliary)
         metadata = ModuleType("agent.model_metadata")
-        estimates = 0
         def estimate(messages: Any) -> int:
-            nonlocal estimates
             boundary()
-            estimates += 1
-            return 1000000 if path == "gc-reply" and estimates % 2 else 0
+            return 0
         metadata.estimate_messages_tokens_rough = estimate
         monkeypatch.setitem(sys.modules, metadata.__name__, metadata)
         view = transcript(Scenario("commit-stack", turns=8))
@@ -781,13 +773,6 @@ def test_leaf_commit_and_advance_callbacks_at_host_depth(
         for row in view:
             if row["role"] != "system":
                 row["content"] = [{"type": "text", "text": row["content"]}, image]
-        if path == "gc-reply":
-            from tests.test_issue_1162_keep_reply import PAD as REPLY_PAD, _Host
-
-            host = _Host(True)
-            view = [row for i in range(1, 5) for row in (host.user(f"[T{i}] ask"), host.reply(f"reply to T{i}"))]
-            view += [host.user("continue", pad=REPLY_PAD * 3), host.call(1), host.result(1),
-                     host.user("continue", pad=REPLY_PAD * 3), host.call(2), host.result(2)]
         engine.ingest(view)
         if path == "prepared":
             engine.last_prompt_tokens = 150000
@@ -802,14 +787,13 @@ def test_leaf_commit_and_advance_callbacks_at_host_depth(
         previous = sys.getprofile()
         sys.setprofile(profile)
         try:
-            agent.compress(engine, view, None if path == "gc-reply" else 150000 if path == "prepared" else 250000 if path == "publish-overflow" else 60000)
+            agent.compress(engine, view, 150000 if path == "prepared" else 250000 if path == "publish-overflow" else 60000)
         finally:
             sys.setprofile(previous)
         required = {"publish-locked": "L6:_assemble_committed_compaction_context",
                     "publish-overflow": "L6:_fail_open_after_publication_failure",
-                    "gc": "L7:_assemble_committed_compaction_context", "prepared": "L7:count_messages_tokens",
-                    "sweep": "L7:_fresh_tail_start", "dynamic": "L7:_fresh_tail_start",
-                    "gc-reply": "L7:_assemble_committed_compaction_context"}
+                    "prepared": "L7:count_messages_tokens",
+                    "sweep": "L7:_fresh_tail_start", "dynamic": "L7:_fresh_tail_start"}
         assert required[path] in distances, (distances, engine._foreground_budget.leaves, engine._last_threshold_full_sweep, engine._last_compression_noop_reason)
         print(json.dumps(dict(path=path, distances=distances, paths=paths), sort_keys=True))
         assert max(distance for row in distances.values() for distance in row.values()) < 28

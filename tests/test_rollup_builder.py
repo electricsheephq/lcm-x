@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 import hermes_lcm.engine as engine_module
+import hermes_lcm.maintenance_scheduler as maintenance_scheduler
 import hermes_lcm.rollup_builder as builder_module
 import hermes_lcm.rollup_periods as periods_module
 from tests.timing_helpers import returns_while_blocked
@@ -612,7 +613,7 @@ def test_rollup_background_maintenance_deduplicates_rapid_scope_binds(
 
 
 def test_rollup_background_scheduler_bounds_distinct_pending_scopes():
-    scheduler = engine_module._RollupMaintenanceScheduler(max_pending_jobs=2)
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(max_pending_jobs=2)
     first_started = threading.Event()
     release_first = threading.Event()
     completed: list[str] = []
@@ -662,7 +663,7 @@ def test_rollup_background_scheduler_bounds_distinct_pending_scopes():
 
 
 def test_rollup_scheduler_reserves_active_follow_up_when_queue_is_full():
-    scheduler = engine_module._RollupMaintenanceScheduler(max_pending_jobs=1)
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(max_pending_jobs=1)
     first_started = threading.Event()
     release_first = threading.Event()
     completed: list[str] = []
@@ -695,7 +696,7 @@ def test_rollup_scheduler_reserves_active_follow_up_when_queue_is_full():
 
 
 def test_rollup_scheduler_follow_up_slot_is_single_and_queue_fair():
-    scheduler = engine_module._RollupMaintenanceScheduler(max_pending_jobs=1)
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(max_pending_jobs=1)
     a1_started = threading.Event()
     release_a1 = threading.Event()
     a2_started = threading.Event()
@@ -765,7 +766,7 @@ def test_rollup_scheduler_follow_up_slot_is_single_and_queue_fair():
 
 
 def test_rollup_scheduler_releases_completed_owner_keys():
-    scheduler = engine_module._RollupMaintenanceScheduler(max_pending_jobs=2)
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(max_pending_jobs=2)
     owner = object()
     completed: list[int] = []
 
@@ -784,7 +785,7 @@ def test_rollup_scheduler_releases_completed_owner_keys():
 
 
 def test_rollup_scheduler_runs_same_key_after_cancelled_job():
-    scheduler = engine_module._RollupMaintenanceScheduler(max_pending_jobs=1)
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(max_pending_jobs=1)
     key = ("db", "cancelled")
     first_started = threading.Event()
     second_ran = threading.Event()
@@ -803,7 +804,7 @@ def test_rollup_scheduler_runs_same_key_after_cancelled_job():
 
 
 def test_rollup_scheduler_operator_exclusion_is_bounded_and_defers_maintenance():
-    scheduler = engine_module._RollupMaintenanceScheduler(max_pending_jobs=1)
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(max_pending_jobs=1)
     operator_key = ("db", "operator")
     completed: list[str] = []
 
@@ -1157,7 +1158,9 @@ def test_deletion_staleness_bumps_generation_and_supersedes_inflight(rollup_part
 
     dag.connection.execute("DELETE FROM summary_nodes WHERE node_id=?", (node_id,))
     dag.connection.commit()
-    assert builder_module.mark_stale_for_deleted_nodes(dag, [node_id]) == 1
+    # The delete trigger queued the invalidation; draining it stales the day.
+    assert store.has_pending_invalidations(scope)
+    assert store.drain_invalidations(event_limit=256, day_budget=256) == 1
     # The in-flight build cannot publish deleted-node content over the stale row.
     assert store.mark_ready(token, "deleted content", 1, [node_id], "fp") is False
     row = store.get_rollup("day", day.isoformat(), scope)
@@ -1409,19 +1412,35 @@ def test_publication_stales_every_day_a_summary_spans(rollup_parts):
     assert store.get_rollup("month", "2026-07-01", scope)["status"] == "stale"
 
 
-def test_deleted_node_staleness_covers_more_than_get_session_nodes_limit(rollup_parts):
-    # get_session_nodes caps at 1000; the unbounded id capture must return every
-    # deleted node so rollups past the cap are still staled (maintainer #388).
+@pytest.mark.parametrize("retain", [0, 1])
+def test_deleted_node_staleness_covers_more_than_get_session_nodes_limit(rollup_parts, retain):
+    # get_session_nodes caps at 1000, and a reset deletes in batches of 256. The
+    # delete trigger on summary_nodes (maintainer #388) must still stale the
+    # rollup of a node past that cap, for both reset paths the engine uses.
     store, dag, _config = rollup_parts
-    scope = "session-over-1000"
-    for i in range(1001):
-        _add_node(dag, scope, date(2026, 7, 15), f"node {i}")
+    scope = f"session-over-1000-retain-{retain}"
+    jul15 = date(2026, 7, 15)
+    jul16 = date(2026, 7, 16)
+    for i in range(1000):
+        _add_node(dag, scope, jul15, f"node {i}")
+    last = _add_node(dag, scope, jul16, "node past the cap")
+    assert last not in {node.node_id for node in dag.get_session_nodes(scope)}
+    store.drain_invalidations(event_limit=2048, day_budget=2048)
+    assert not store.has_pending_invalidations(scope)
+    _ready(
+        store, "day", jul16.isoformat(), scope,
+        summary="ready jul16", source_ids=[last], fingerprint="jul16",
+    )
+    assert store.get_rollup("day", jul16.isoformat(), scope)["status"] == "ready"
 
-    assert len(dag.get_session_nodes(scope)) == 1000
-    all_ids = dag.get_session_node_ids_below_depth(scope, None)
-    assert len(all_ids) == 1001
-    # Depth filtering also returns the complete set unbounded (all are depth 0).
-    assert len(dag.get_session_node_ids_below_depth(scope, 1)) == 1001
+    if retain == 0:
+        deleted = dag.delete_session_nodes(scope)
+    else:
+        deleted = dag.delete_below_depth(scope, retain)
+    assert deleted == 1001
+    store.drain_invalidations(event_limit=2048, day_budget=2048)
+    assert not store.has_pending_invalidations(scope)
+    assert store.get_rollup("day", jul16.isoformat(), scope)["status"] == "stale"
 
 
 def test_aggregate_uses_one_canonical_parent_child_frontier(rollup_parts):

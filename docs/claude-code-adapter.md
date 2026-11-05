@@ -26,7 +26,11 @@ be off (`CLAUDE_CODE_TRANSCRIPT_LOCAL_GC` unset). With it on, the GC can delete 
 has not read yet. Capture still runs, best effort: the `PreCompact` drain reads the history before
 the trim only when the store lock is free and within 10 s. It records the flag per session
 (`capture:local_gc:<session>`, kept once any hook saw it on), and the audit lists those sessions
-without a lossless claim.
+without a lossless claim. One limit holds with the GC off too: a subagent transcript removed before
+the worker first reads it leaves nothing behind (no cursor, no set-aside record, no file), so a
+whole-home audit can still pass. Claude Code's own cleanup removes a whole session, main transcript
+included, and the selected-session audit (`--session`) reports that case; whether Claude Code ever
+removes only a subagent's transcript is unverified.
 
 It ships as a Claude Code plugin: hooks for capture, a bundled MCP server for recall. Claude Code
 plugins and settings hooks are also run by Grok Build, so the same package is the base for other
@@ -341,8 +345,9 @@ hook entry handles:
   for long paths; never the newest session as a guess.
 - The end-of-session `Stop` (reason not `end_turn`) and `SessionEnd` (1.5 s budget) are
   observe-only: logged, never spooled, so they cannot replace a pending record.
-- The Grok reader (`updates.jsonl`) is experimental and off (`LCMX_GROK_CAPTURE=1` enables it)
-  until a real-session proof shows tool results are complete, `/compact` and `/rewind` never
+- The Grok reader (`updates.jsonl`) is not in this release, so the hook refuses every Grok event
+  (`grok_capture_off`) and spools nothing; no setting enables it. It lands only after a
+  real-session proof shows tool results are complete, `/compact` and `/rewind` never
   rewrite the file, and event ids are stable. Without stable ids, uid = session, line index and
   line digest; a rewritten file starts a new generation.
 
@@ -364,7 +369,10 @@ hook entry handles:
   Python back the cache and the writing it has without `-I`; any other Python keeps its own. The worker and the MCP
   server need Python 3.11 or newer with LCM-X's dependencies: `LCMX_PYTHON`, else a venv in the
   plugin's data directory (`CLAUDE_PLUGIN_DATA`, which survives plugin updates and is removed on
-  uninstall), else `<home>/venv`.
+  uninstall), else `<home>/venv`. A relative `LCMX_PYTHON` or `LCMX_PACKAGE_ROOT` is refused, as
+  a relative home is: the hook checks paths from the project folder, while the worker runs in the
+  store home. Hooks then record `runtime_missing` or `package_missing`, records wait in the spool,
+  and the server names the setting.
   - **Zero steps** when a Python 3.11+ exists. Without `LCMX_PYTHON` or a venv, the plugin finds
     one on the hook's `PATH`: the hook's own `python3` if it is 3.11+, else `python3.14` down to
     `python3.11`. Only absolute `PATH` entries are searched: a relative one would name the project

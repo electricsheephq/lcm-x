@@ -38,17 +38,17 @@ def test_reference_diagnostic_choices():
     }
 
 
-@pytest.mark.parametrize("key", (
-    "LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED", "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED",
+@pytest.mark.parametrize("key,removal", (
+    ("LCM_DEFERRED_MAINTENANCE_ENABLED", "v0.31.0"),
 ))
-def test_reference_deprecation_warning_bytes(monkeypatch, key):
+def test_reference_deprecation_warning_bytes(monkeypatch, key, removal):
     for name in tuple(config.os.environ):
         if name.startswith("LCM_"):
             monkeypatch.delenv(name)
     monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda: {})
     monkeypatch.setenv(key, "true")
     assert config.LCMConfig.from_env().config_source_warnings == [
-        f"deprecated: {key} is set; this experiment is removed in v0.30.0 (#1246). "
+        f"deprecated: {key} is set; this experiment is removed in {removal} (#1246). "
         "Until then it behaves as before."
     ]
 
@@ -202,7 +202,7 @@ def _provider_choice_row(monkeypatch, spelling):
         health_result = tools._embedding_provider_health_check(SimpleNamespace(
             _config=cfg, _store=SimpleNamespace(db_path="unused"),
         ))
-    auto = maintenance._automatic_chunks_allowed(cfg, command)
+    auto = providers._automatic_chunks_allowed(cfg)
     monkeypatch.setattr(command, "_embedding_read_connection", lambda _: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(command, "_embedding_current_profile", lambda _: None)
     monkeypatch.setattr(command, "_chunk_current_profile", lambda _: None)

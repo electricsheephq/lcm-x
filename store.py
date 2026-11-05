@@ -3,9 +3,9 @@ from __future__ import annotations
 """Immutable-first message store — the source of truth.
 
 Every message is persisted durably in SQLite. The normal model is append-only,
-with one narrow opt-in exception: already-externalized summarized tool-result
-rows may be rewritten to compact GC tombstones while preserving the original
-row identity (`store_id`) for DAG/source lookup.
+with a legacy GC rewrite seam retained for tests and old stores. Automatic
+compaction no longer rewrites summarized tool-result rows; old GC placeholders
+retain their row identity (`store_id`) for DAG/source lookup.
 """
 
 
@@ -637,8 +637,8 @@ class MessageStore:
             config = self._ingest_protection_config
             if not config.embeddings_enabled:
                 return
-            from . import command, embedding_maintenance
-            if embedding_maintenance._automatic_chunks_allowed(config, command):
+            from . import embedding_provider
+            if embedding_provider._automatic_chunks_allowed(config):
                 return
             if self._conn.in_transaction and not (getattr(self, "_foreground_ingest_owner", False)
                                                   and self._transaction_owner.owns_connection(self._conn)):
@@ -1418,9 +1418,16 @@ class MessageStore:
                 self._conn.executemany("INSERT OR IGNORE INTO ledger_meta(key, value) VALUES (?, ?)", (
                     ("digest_salt", secrets.token_bytes(32)), ("ledger_format", 1), ("view_seq", 0),
                 ))
+                self._conn.execute("INSERT OR IGNORE INTO ledger_meta(key,value) SELECT 'emission_provenance_floor',value FROM ledger_meta WHERE key='view_seq'")
             self._ingest_ledger_schema_ready = True
             if deleted:
                 logger.warning("ingest ledger salt_missing: cleared ledger rows %s", deleted)
+
+    def emission_provenance_floor_recorded(self) -> bool:
+        """Read an already-ready ledger's floor marker without starting a write."""
+        with self._write_lock:
+            return self._conn.execute(
+                "SELECT 1 FROM ledger_meta WHERE key='emission_provenance_floor'").fetchone() is not None
 
     def ingest_ledger_salt(self) -> bytes | None:
         """Read the store salt without creating a pre-ledger store's schema."""

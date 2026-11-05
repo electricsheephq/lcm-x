@@ -109,6 +109,7 @@ from .embedding_provider import (
     _VOYAGE_CONTEXT_MAX_REQUEST_CHUNKS,
     _VOYAGE_CONTEXT_REQUEST_TOKEN_BUDGET,
     _VOYAGE_MAX_BATCH_ITEMS,
+    _is_local_embedding_provider,
     _is_voyage_context_model,
     _plan_contextualized_requests,
     default_chunk_model,
@@ -5293,15 +5294,6 @@ def _chunk_backfill_remaining(
         in_flight = 0
         uncertain = 0
     return remaining, in_flight, uncertain
-
-
-# Providers that embed on this machine and never transmit text off-box. The raw-
-# text consent gate on the chunk corpus is waived for these (F1).
-_LOCAL_EMBEDDING_PROVIDERS = frozenset({"fastembed", "ollama"})
-
-
-def _is_local_embedding_provider(provider_name: str) -> bool:
-    return str(provider_name or "").strip().lower() in _LOCAL_EMBEDDING_PROVIDERS
 
 
 def _chunk_backfill_text(

@@ -28,7 +28,7 @@ def test_idempotent_metadata_and_states(store):
     assert isinstance(salt, bytes) and len(salt) == 32
     assert store.ingest_ledger_state() == "ready"
     assert dict(store.connection.execute("SELECT key, value FROM ledger_meta")) == {
-        "digest_salt": salt, "ledger_format": 1, "view_seq": 0,
+        "digest_salt": salt, "ledger_format": 1, "view_seq": 0, "emission_provenance_floor": 0,
     }
     store.ensure_ingest_ledger()
     assert store.ingest_ledger_salt() == salt

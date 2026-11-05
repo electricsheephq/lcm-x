@@ -1010,10 +1010,6 @@
       "detail": "getattr(self._config,\"foreground_soft_seconds\",",
       "line": 1719
     },
-    "engine.py::LCMEngine._maybe_gc_compacted_tool_results::getattr(self._config,\"large_output_transcript_gc_enabled\",#1": {
-      "detail": "getattr(self._config,\"large_output_transcript_gc_enabled\",",
-      "line": 6670
-    },
     "engine.py::LCMEngine._maybe_stub_active_tool_result::getattr(self._config,\"large_output_active_replay_stubbing_enabled\",#1": {
       "detail": "getattr(self._config,\"large_output_active_replay_stubbing_enabled\",",
       "line": 7001
@@ -1740,8 +1736,6 @@
     "benchmarking/steady_state.py": 274,
     "benchmarking/stress.py": 1191,
     "benchmarking/types.py": 191,
-    "benchmarking/w3b_diversity_replay.py": 456,
-    "benchmarking/w3b_it4_replay.py": 188,
     "benchmarks/benchmark_active_tool_stubbing.py": 231,
     "benchmarks/benchmark_float32_chunk_loader.py": 163,
     "benchmarks/qa-harness/src/providers/hermes-lcm/bridge/hermes_lcm_bridge.py": 385,
@@ -14727,97 +14721,6 @@
       "loc": 4,
       "statements": 1
     },
-    "benchmarking/w3b_diversity_replay.py::ProjectedQueryProvider.__init__": {
-      "branches": 2,
-      "cc": 3,
-      "line": 53,
-      "loc": 42,
-      "statements": 18
-    },
-    "benchmarking/w3b_diversity_replay.py::ProjectedQueryProvider._solve": {
-      "branches": 5,
-      "cc": 6,
-      "line": 97,
-      "loc": 38,
-      "statements": 15
-    },
-    "benchmarking/w3b_diversity_replay.py::ProjectedQueryProvider.embed_documents": {
-      "branches": 0,
-      "cc": 1,
-      "line": 185,
-      "loc": 2,
-      "statements": 1
-    },
-    "benchmarking/w3b_diversity_replay.py::ProjectedQueryProvider.embed_query": {
-      "branches": 6,
-      "cc": 7,
-      "line": 136,
-      "loc": 48,
-      "statements": 24
-    },
-    "benchmarking/w3b_diversity_replay.py::ProjectedStateReplayContext.__init__": {
-      "branches": 0,
-      "cc": 1,
-      "line": 192,
-      "loc": 4,
-      "statements": 3
-    },
-    "benchmarking/w3b_diversity_replay.py::ProjectedStateReplayContext._open_store": {
-      "branches": 0,
-      "cc": 2,
-      "line": 197,
-      "loc": 35,
-      "statements": 9
-    },
-    "benchmarking/w3b_diversity_replay.py::ProjectedStateReplayContext._open_store._ReplayStore._semantic_source_ranks": {
-      "branches": 0,
-      "cc": 1,
-      "line": 219,
-      "loc": 2,
-      "statements": 0
-    },
-    "benchmarking/w3b_diversity_replay.py::_evaluate_cell": {
-      "branches": 6,
-      "cc": 7,
-      "line": 258,
-      "loc": 58,
-      "statements": 29
-    },
-    "benchmarking/w3b_diversity_replay.py::_pool_ids": {
-      "branches": 0,
-      "cc": 1,
-      "line": 234,
-      "loc": 5,
-      "statements": 3
-    },
-    "benchmarking/w3b_diversity_replay.py::_target_in_pool": {
-      "branches": 2,
-      "cc": 3,
-      "line": 241,
-      "loc": 15,
-      "statements": 4
-    },
-    "benchmarking/w3b_diversity_replay.py::main": {
-      "branches": 5,
-      "cc": 6,
-      "line": 318,
-      "loc": 135,
-      "statements": 46
-    },
-    "benchmarking/w3b_it4_replay.py::main": {
-      "branches": 2,
-      "cc": 4,
-      "line": 48,
-      "loc": 137,
-      "statements": 48
-    },
-    "benchmarking/w3b_it4_replay.py::main.run": {
-      "branches": 0,
-      "cc": 1,
-      "line": 110,
-      "loc": 14,
-      "statements": 7
-    },
     "benchmarks/benchmark_active_tool_stubbing.py::_payload_for_target_tokens": {
       "branches": 1,
       "cc": 2,
@@ -18815,20 +18718,6 @@
       "loc": 105,
       "statements": 29
     },
-    "engine.py::LCMEngine._maybe_gc_compacted_tool_results": {
-      "branches": 12,
-      "cc": 14,
-      "line": 6665,
-      "loc": 74,
-      "statements": 34
-    },
-    "engine.py::LCMEngine._maybe_gc_compacted_tool_results._archive_in_rewrite_txn": {
-      "branches": 0,
-      "cc": 1,
-      "line": 6677,
-      "loc": 6,
-      "statements": 1
-    },
     "engine.py::LCMEngine._maybe_reclassify_current_session_as_auxiliary_before_message_ingest": {
       "branches": 6,
       "cc": 7,
@@ -19402,13 +19291,6 @@
       "line": 1204,
       "loc": 67,
       "statements": 31
-    },
-    "engine.py::LCMEngine._should_allow_follow_on_condensation": {
-      "branches": 6,
-      "cc": 7,
-      "line": 7194,
-      "loc": 24,
-      "statements": 8
     },
     "engine.py::LCMEngine._should_force_overflow_recovery": {
       "branches": 2,
@@ -49923,13 +49805,6 @@
       "loc": 2,
       "statements": 1
     },
-    "tests/test_issue_4_restart_safe_fail_open.py::test_post_commit_gc_lock_returns_compacted_context_without_restart_reingest": {
-      "branches": 2,
-      "cc": 1,
-      "line": 138,
-      "loc": 54,
-      "statements": 37
-    },
     "tests/test_issue_4_restart_safe_fail_open.py::test_precommit_lock_preserves_redaction_and_overflow_convergence": {
       "branches": 1,
       "cc": 1,
@@ -67626,48 +67501,6 @@
       "loc": 34,
       "statements": 9
     },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_allows_condensation_when_debt_reaches_two_groups": {
-      "branches": 2,
-      "cc": 5,
-      "line": 12751,
-      "loc": 51,
-      "statements": 19
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_allows_condensation_when_debt_reaches_two_groups.mock_summary": {
-      "branches": 1,
-      "cc": 2,
-      "line": 12790,
-      "loc": 4,
-      "statements": 1
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_does_not_block_forced_overflow_condensation": {
-      "branches": 0,
-      "cc": 3,
-      "line": 12803,
-      "loc": 50,
-      "statements": 17
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_does_not_block_forced_overflow_condensation.mock_summary": {
-      "branches": 1,
-      "cc": 2,
-      "line": 12841,
-      "loc": 4,
-      "statements": 1
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_suppresses_follow_on_condensation_for_single_fanin_group": {
-      "branches": 1,
-      "cc": 4,
-      "line": 12646,
-      "loc": 52,
-      "statements": 21
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_suppresses_follow_on_condensation_for_single_fanin_group.mock_summary": {
-      "branches": 1,
-      "cc": 2,
-      "line": 12684,
-      "loc": 4,
-      "statements": 1
-    },
     "tests/test_lcm_engine.py::TestEngineCompress.test_compress_carries_preserved_user_request_across_repeated_compaction": {
       "branches": 0,
       "cc": 2,
@@ -67969,20 +67802,6 @@
       "loc": 2,
       "statements": 0
     },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_critical_budget_pressure_bypasses_cache_friendly_single_group_suppression": {
-      "branches": 1,
-      "cc": 4,
-      "line": 12699,
-      "loc": 51,
-      "statements": 19
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_critical_budget_pressure_bypasses_cache_friendly_single_group_suppression.mock_summary": {
-      "branches": 1,
-      "cc": 2,
-      "line": 12738,
-      "loc": 4,
-      "statements": 1
-    },
     "tests/test_lcm_engine.py::TestEngineCompress.test_dynamic_leaf_chunk_pressure_uses_current_working_window_after_each_pass": {
       "branches": 1,
       "cc": 5,
@@ -68172,20 +67991,6 @@
       "loc": 9,
       "statements": 4
     },
-    "tests/test_lcm_engine.py::TestEngineTools.test_compress_gc_rewrites_summarized_externalized_tool_results": {
-      "branches": 0,
-      "cc": 1,
-      "line": 26391,
-      "loc": 48,
-      "statements": 21
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_compress_gc_skips_pinned_tool_results": {
-      "branches": 0,
-      "cc": 1,
-      "line": 26474,
-      "loc": 35,
-      "statements": 16
-    },
     "tests/test_lcm_engine.py::TestEngineTools.test_describe_and_expand_are_session_scoped": {
       "branches": 0,
       "cc": 1,
@@ -68220,20 +68025,6 @@
       "line": 24987,
       "loc": 3,
       "statements": 1
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_gc_does_not_tombstone_row_with_only_embedded_externalized_ref": {
-      "branches": 0,
-      "cc": 1,
-      "line": 26539,
-      "loc": 39,
-      "statements": 14
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_gc_helper_does_not_miss_tool_rows_when_chunk_contains_unmatched_synthetic_messages": {
-      "branches": 0,
-      "cc": 1,
-      "line": 26510,
-      "loc": 28,
-      "statements": 8
     },
     "tests/test_lcm_engine.py::TestEngineTools.test_handle_describe_and_expand_accept_explicit_cross_session_node": {
       "branches": 0,
@@ -104870,26 +104661,6 @@
       "detail": "engine._store",
       "line": 79
     },
-    "tests/test_issue_4_restart_safe_fail_open.py::test_post_commit_gc_lock_returns_compacted_context_without_restart_reingest::engine._config#1": {
-      "detail": "engine._config",
-      "line": 146
-    },
-    "tests/test_issue_4_restart_safe_fail_open.py::test_post_commit_gc_lock_returns_compacted_context_without_restart_reingest::engine._config#2": {
-      "detail": "engine._config",
-      "line": 147
-    },
-    "tests/test_issue_4_restart_safe_fail_open.py::test_post_commit_gc_lock_returns_compacted_context_without_restart_reingest::engine._dag#1": {
-      "detail": "engine._dag",
-      "line": 161
-    },
-    "tests/test_issue_4_restart_safe_fail_open.py::test_post_commit_gc_lock_returns_compacted_context_without_restart_reingest::engine._lifecycle#1": {
-      "detail": "engine._lifecycle",
-      "line": 160
-    },
-    "tests/test_issue_4_restart_safe_fail_open.py::test_post_commit_gc_lock_returns_compacted_context_without_restart_reingest::engine._store#1": {
-      "detail": "engine._store",
-      "line": 162
-    },
     "tests/test_issue_4_restart_safe_fail_open.py::test_precommit_lock_preserves_redaction_and_overflow_convergence::engine._dag#1": {
       "detail": "engine._dag",
       "line": 307
@@ -115030,46 +114801,6 @@
       "detail": "engine._session_id",
       "line": 11513
     },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_allows_condensation_when_debt_reaches_two_groups::engine._dag#1": {
-      "detail": "engine._dag",
-      "line": 12768
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_allows_condensation_when_debt_reaches_two_groups::engine._dag#2": {
-      "detail": "engine._dag",
-      "line": 12799
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_allows_condensation_when_debt_reaches_two_groups::engine._session_id#1": {
-      "detail": "engine._session_id",
-      "line": 12763
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_does_not_block_forced_overflow_condensation::engine._dag#1": {
-      "detail": "engine._dag",
-      "line": 12820
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_does_not_block_forced_overflow_condensation::engine._dag#2": {
-      "detail": "engine._dag",
-      "line": 12850
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_does_not_block_forced_overflow_condensation::engine._session_id#1": {
-      "detail": "engine._session_id",
-      "line": 12816
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_suppresses_follow_on_condensation_for_single_fanin_group::engine._dag#1": {
-      "detail": "engine._dag",
-      "line": 12662
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_suppresses_follow_on_condensation_for_single_fanin_group::engine._dag#2": {
-      "detail": "engine._dag",
-      "line": 12693
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_suppresses_follow_on_condensation_for_single_fanin_group::engine._dag#3": {
-      "detail": "engine._dag",
-      "line": 12694
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_cache_friendly_gating_suppresses_follow_on_condensation_for_single_fanin_group::engine._session_id#1": {
-      "detail": "engine._session_id",
-      "line": 12658
-    },
     "tests/test_lcm_engine.py::TestEngineCompress.test_compress_creates_dag_node::engine._dag#1": {
       "detail": "engine._dag",
       "line": 11905
@@ -115190,18 +114921,6 @@
       "detail": "engine._maybe_condense",
       "line": 12058
     },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_critical_budget_pressure_bypasses_cache_friendly_single_group_suppression::engine._dag#1": {
-      "detail": "engine._dag",
-      "line": 12716
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_critical_budget_pressure_bypasses_cache_friendly_single_group_suppression::engine._dag#2": {
-      "detail": "engine._dag",
-      "line": 12747
-    },
-    "tests/test_lcm_engine.py::TestEngineCompress.test_critical_budget_pressure_bypasses_cache_friendly_single_group_suppression::engine._session_id#1": {
-      "detail": "engine._session_id",
-      "line": 12712
-    },
     "tests/test_lcm_engine.py::TestEngineCompress.test_dynamic_leaf_chunk_pressure_uses_current_working_window_after_each_pass::engine._session_id#1": {
       "detail": "engine._session_id",
       "line": 12252
@@ -115250,34 +114969,6 @@
       "detail": "engine._store",
       "line": 10750
     },
-    "tests/test_lcm_engine.py::TestEngineTools.test_compress_gc_rewrites_summarized_externalized_tool_results::engine._session_id#1": {
-      "detail": "engine._session_id",
-      "line": 26401
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_compress_gc_rewrites_summarized_externalized_tool_results::engine._store#1": {
-      "detail": "engine._store",
-      "line": 26426
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_compress_gc_skips_pinned_tool_results::engine._ingest_messages#1": {
-      "detail": "engine._ingest_messages",
-      "line": 26499
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_compress_gc_skips_pinned_tool_results::engine._session_id#1": {
-      "detail": "engine._session_id",
-      "line": 26484
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_compress_gc_skips_pinned_tool_results::engine._store#1": {
-      "detail": "engine._store",
-      "line": 26500
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_compress_gc_skips_pinned_tool_results::engine._store#2": {
-      "detail": "engine._store",
-      "line": 26501
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_compress_gc_skips_pinned_tool_results::engine._store#3": {
-      "detail": "engine._store",
-      "line": 26505
-    },
     "tests/test_lcm_engine.py::TestEngineTools.test_describe_and_expand_are_session_scoped::engine._dag#1": {
       "detail": "engine._dag",
       "line": 26939
@@ -115313,50 +115004,6 @@
     "tests/test_lcm_engine.py::TestEngineTools.test_expand_query_routes_configured_reasoning_effort_to_synthesis::engine._store#1": {
       "detail": "engine._store",
       "line": 24982
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_gc_does_not_tombstone_row_with_only_embedded_externalized_ref::engine._ingest_messages#1": {
-      "detail": "engine._ingest_messages",
-      "line": 26555
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_gc_does_not_tombstone_row_with_only_embedded_externalized_ref::engine._maybe_gc_compacted_tool_results#1": {
-      "detail": "engine._maybe_gc_compacted_tool_results",
-      "line": 26570
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_gc_does_not_tombstone_row_with_only_embedded_externalized_ref::engine._session_id#1": {
-      "detail": "engine._session_id",
-      "line": 26552
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_gc_does_not_tombstone_row_with_only_embedded_externalized_ref::engine._store#1": {
-      "detail": "engine._store",
-      "line": 26559
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_gc_does_not_tombstone_row_with_only_embedded_externalized_ref::engine._store#2": {
-      "detail": "engine._store",
-      "line": 26565
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_gc_does_not_tombstone_row_with_only_embedded_externalized_ref::engine._store#3": {
-      "detail": "engine._store",
-      "line": 26575
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_gc_helper_does_not_miss_tool_rows_when_chunk_contains_unmatched_synthetic_messages::engine._maybe_gc_compacted_tool_results#1": {
-      "detail": "engine._maybe_gc_compacted_tool_results",
-      "line": 26529
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_gc_helper_does_not_miss_tool_rows_when_chunk_contains_unmatched_synthetic_messages::engine._serialize_messages#1": {
-      "detail": "engine._serialize_messages",
-      "line": 26525
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_gc_helper_does_not_miss_tool_rows_when_chunk_contains_unmatched_synthetic_messages::engine._session_id#1": {
-      "detail": "engine._session_id",
-      "line": 26518
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_gc_helper_does_not_miss_tool_rows_when_chunk_contains_unmatched_synthetic_messages::engine._store#1": {
-      "detail": "engine._store",
-      "line": 26521
-    },
-    "tests/test_lcm_engine.py::TestEngineTools.test_gc_helper_does_not_miss_tool_rows_when_chunk_contains_unmatched_synthetic_messages::engine._store#2": {
-      "detail": "engine._store",
-      "line": 26537
     },
     "tests/test_lcm_engine.py::TestEngineTools.test_handle_describe_and_expand_accept_explicit_cross_session_node::engine._dag#1": {
       "detail": "engine._dag",

@@ -8,6 +8,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 import sqlite3
 import threading
+import logging
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ class TransactionOwner:
         self._lock = lock
         self._active_connection: sqlite3.Connection | None = None
         self._owner_thread: int | None = None
+        self.rollback_failures = 0
 
     def owns(self, conn: sqlite3.Connection) -> bool:
         """Whether an enclosing atomic scope owns this connection, even before a write."""
@@ -99,9 +101,13 @@ class TransactionOwner:
             try:
                 yield
                 conn.commit()
-            except BaseException:
-                conn.rollback()
-                raise
+            except BaseException as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    self.rollback_failures += 1
+                    logging.getLogger(__name__).warning("SQLite rollback failed; preserving original exception", exc_info=True)
+                raise exc
             finally:
                 self._active_connection = None
                 self._owner_thread = None

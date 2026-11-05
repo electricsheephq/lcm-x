@@ -38,10 +38,14 @@ search.
 | `LCMX_CAPTURE` | on | `off` disables capture |
 | `LCMX_PYTHON` | `<store home>/venv/bin/python` | Runtime interpreter |
 | `LCMX_PACKAGE_ROOT` | the plugin's vendored copy, else this checkout | LCM-X package |
-| `LCMX_GROK_CAPTURE` | off | `1` enables the experimental Grok Build reader |
 | `LCMX_GROK_HOME` | `~/.lcm-x/grok-build` | Store home for Grok Build sessions (one owning harness per store) |
 
-Home settings must be absolute paths; a relative one disables capture and the server says so.
+Path settings must be absolute, and the server names a relative one. A relative home disables
+capture. A relative `LCMX_PYTHON` or `LCMX_PACKAGE_ROOT` leaves records in the spool, and hooks
+record `runtime_missing` or `package_missing` until it is fixed.
+
+Grok Build sessions are not captured in this release: its session-file reader is not included, so
+hooks log each Grok event as `grok_capture_off` and spool nothing.
 
 The store lives outside the plugin's folders, so removing or updating the plugin never removes
 your memory. Capture runs on macOS and Linux.
