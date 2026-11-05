@@ -7085,7 +7085,7 @@ class LCMEngine(
                 if tail is retried_tail:
                     break
                 if tail.get("kind") == "cold" and self._cold_tail_is_bound(tail) and tail["session_id"] == self._session_id:
-                    tail["went_on"] = True
+                    tail["went_on" if attribution["rows_written"] else "went_on_noop"] = True
             if pending.oob_rows or "_out_of_band_durable_rows" in self.__dict__:
                 self._out_of_band_durable_rows = pending.oob_rows
             if "protected" in prepared:
@@ -11455,17 +11455,20 @@ class LCMEngine(
         return (tail["store"] is self.__dict__.get("_store")
                 and tail["hermes_home"] == str(self._hermes_home or ""))
 
-    def _retry_cold_tail(self, tail, *, sibling):
+    def _retry_cold_tail(self, tail, *, sibling, deadline=None):
+        tail.pop("kept_on_conflict", None)
         if not self._cold_tail_is_bound(tail):
             if tail["store"]._conn is None:
                 self._ledger_count("ledger.tail.cold_store_unbound")
                 return False
-            return self._retry_cold_tail_s3(tail, stamps=True, hermes_home=tail["hermes_home"])
+            return self._retry_cold_tail_s3(tail, stamps=True, hermes_home=tail["hermes_home"], deadline=deadline)
         same = (not sibling and tail["session_id"] == self._session_id
                 and _normalize_conversation_id_value(tail["conversation_id"]) ==
                     _normalize_conversation_id_value(self._conversation_id))
         if same and not self._current_binding_stores_nothing():
-            went_on = tail.get("went_on", False)  # Set by every later ingest but an earlier end's retry.
+            went_on = tail.get("went_on", False)
+            if not went_on and tail.get("went_on_noop"):
+                went_on = self._cold_tail_stored(tail) is not None
             stored = self._cold_tail_stored(tail, stamps=True)
             if stored is not None and stored >= len(tail["view"]):
                 # Later ingests stored the whole view. As after a warm retry, the next ingest finds its cursor again.
@@ -11475,25 +11478,73 @@ class LCMEngine(
                 # The view can be older than the session's history. A cold start would move the live cursor: as for
                 # another session, only a matching stored prefix gets the view's missing rows. Stamps count here
                 # too, so a retyped row never stands for the view's own.
-                if not self._retry_cold_tail_s3(tail, stamps=True):
+                if not self._retry_cold_tail_s3(tail, stamps=True, deadline=deadline):
                     return False
                 self._ingest_cursor_needs_reconcile = True
                 return True
+            conflict = self._cold_tail_one_conflict(tail)
             self._session_end_flush_active = False
             self._ingest_cursor_needs_reconcile = True
             self._ingest_messages(tail["view"], allow_session_end_replay_proof=False, no_view=True, retried_tail=tail)
             # The host can still rewrite this view, so the next ingest finds its own cursor.
             self._ingest_cursor_needs_reconcile = True
+            if conflict is not None and not self._cold_tail_conflict_placed(tail, conflict, deadline=deadline):
+                tail["kept_on_conflict"] = True
+                self._ledger_count("ledger.tail.cold_unmatched")
+                if not tail.get("unmatched_warned"):
+                    logger.warning("LCM session-end cold tail conflicting stamp unplaced; retry pending")
+                    tail["unmatched_warned"] = True
+                return False
             return True
         # Another session, or this one under a binding that stores nothing: the S3 route. This session keeps its stamp
         # check, so a retyped row never stands for the view's own.
-        return self._retry_cold_tail_s3(tail, stamps=same)
+        return self._retry_cold_tail_s3(tail, stamps=same, deadline=deadline)
 
-    def _cold_tail_stored(self, tail, *, stamps=False, hermes_home=None):
+    def _cold_tail_one_conflict(self, tail):
+        """Return the sole unexplained user stamp conflict in an identity-matching prefix."""
+        view, session, home = tail["view"], tail["session_id"], tail["hermes_home"]
+        stored = tail["store"].get_range(session, limit=len(view) + 1,
+            conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
+        conflicts = []
+        for index, (row, message) in enumerate(zip(stored, view)):
+            if (self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home) !=
+                    self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home)):
+                return None
+            stamp, seen = _normalize_observed_at(message.get("timestamp")), _normalize_observed_at(row.get("observed_at"))
+            if None not in (stamp, seen) and stamp != seen:
+                conflicts.append((index, row, message, stamp))
+        if len(conflicts) != 1:
+            return None
+        index, row, message, stamp = conflicts[0]
+        if message.get("role") != "user" or any(
+                tail["store"].get_message_relations([row["store_id"]], kind) for kind in ("alt_stamp", "carried_stamp")):
+            return None
+        return index, message, stamp
+
+    def _cold_tail_conflict_placed(self, tail, conflict, *, deadline=None):
+        """Find the occurrence throughout the tail's own session and conversation."""
+        _, message, stamp = conflict
+        session, home, start = tail["session_id"], tail["hermes_home"], 0
+        conversation = _normalize_conversation_id_value(tail["conversation_id"])
+        identity = self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home)
+        while rows := tail["store"].get_range(session, start_id=start, limit=1000,
+                conversation_id=conversation):
+            if any(_normalize_conversation_id_value(row.get("conversation_id")) == conversation and
+                   _normalize_observed_at(row.get("observed_at")) == stamp and
+                   self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home) == identity
+                   for row in rows):
+                return True
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            start = rows[-1]["store_id"] + 1
+        return False
+
+    def _cold_tail_stored(self, tail, *, stamps=False):
         """How many of the view's rows the session's stored prefix holds, or None when they differ.
 
         With ``stamps``, a known host stamp that differs from the stored row's is a different occurrence."""
         view, session = tail["view"], tail["session_id"]
+        hermes_home = tail["hermes_home"]
         conversation = _normalize_conversation_id_value(tail["conversation_id"])
         stored = tail["store"].get_range(session, limit=len(view) + 1, conversation_id=conversation)
         for row, message in zip(stored, view):
@@ -11505,12 +11556,22 @@ class LCMEngine(
                 return None
         return len(stored)
 
-    def _retry_cold_tail_s3(self, tail, *, stamps=False, hermes_home=None):
+    def _retry_cold_tail_s3(self, tail, *, stamps=False, hermes_home=None, deadline=None):
         view, session = tail["view"], tail["session_id"]
         ids = []
         with tail["store"].ingest_atomic():
-            stored = self._cold_tail_stored(tail, stamps=stamps, hermes_home=hermes_home)
+            stored = self._cold_tail_stored(tail, stamps=stamps)
+            conflict = self._cold_tail_one_conflict(tail) if stored is None or not stamps else None
+            if stored is not None and not stamps and conflict is not None:
+                if stored < len(view):
+                    self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
+                        conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
+                if self._cold_tail_conflict_placed(tail, conflict, deadline=deadline):
+                    return True
+                stored = None
             if stored is None:
+                if conflict is not None:
+                    tail["kept_on_conflict"] = True
                 self._ledger_count("ledger.tail.cold_unmatched")
                 if not tail.get("unmatched_warned"):
                     logger.warning("LCM session-end cold tail prefix mismatch; retry pending")
@@ -11540,7 +11601,7 @@ class LCMEngine(
                     [store._conn], max(0, int((deadline - time.monotonic()) * 1000)),
                 ):
                     if tail.get("kind") == "cold":
-                        if self._retry_cold_tail(tail, sibling=sibling):
+                        if self._retry_cold_tail(tail, sibling=sibling, deadline=deadline):
                             committed = True
                             self._pending_session_tails.remove(tail)
                         if time.monotonic() >= deadline:
@@ -11595,18 +11656,58 @@ class LCMEngine(
             if time.monotonic() >= deadline:
                 break
         if exiting:
-            self._warn_unflushed_session_tails("SQLite lock")
+            self._warn_unflushed_session_tails("SQLite lock", deadline=deadline)
         elif not self._pending_session_tails:
             maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
 
-    def _warn_unflushed_session_tails(self, reason: str) -> None:
-        remaining = sum(len(tail["view"] if tail.get("kind") == "cold" else tail["messages"])
-                        for tail in self._pending_session_tails)
-        if remaining:
+    def _cold_tail_absent_count(self, tail, *, deadline=None):
+        """Count absent occurrences once, matching known stamps before untimed rows."""
+        session, home, start = tail["session_id"], tail["hermes_home"], 0
+        conversation = _normalize_conversation_id_value(tail["conversation_id"])
+        stored = Counter()
+        while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("session-end exit count deadline expired")
+            rows = tail["store"].get_range(session, start_id=start, limit=1000, conversation_id=conversation)
+            if not rows:
+                break
+            stored.update((self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home),
+                           _normalize_observed_at(row.get("observed_at"))) for row in rows
+                          if _normalize_conversation_id_value(row.get("conversation_id")) == conversation)
+            start = rows[-1]["store_id"] + 1
+        wanted = Counter((self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home),
+                          _normalize_observed_at(message.get("timestamp"))) for message in tail["view"])
+        missing, available = 0, Counter()
+        for (identity, stamp), amount in wanted.items():
+            if stamp is not None:
+                matched = min(amount, stored[identity, stamp])
+                stored[identity, stamp] -= matched
+                missing += amount - matched
+        for (identity, _), amount in stored.items():
+            available[identity] += amount
+        return missing + sum(max(0, amount - available[identity]) for (identity, stamp), amount in wanted.items()
+                             if stamp is None)
+
+    def _warn_unflushed_session_tails(self, reason: str, *, deadline=None) -> None:
+        counts = {}
+        for tail in self._pending_session_tails:
+            why, remaining = reason, len(tail["view"] if tail.get("kind") == "cold" else tail["messages"])
+            if (tail.get("kind") == "cold" and tail.get("kept_on_conflict")
+                    and tail["store"]._write_lock.acquire(blocking=False)):
+                try:
+                    why, remaining = "stamp conflict", self._cold_tail_absent_count(tail, deadline=deadline)
+                except Exception:
+                    pass  # A still-busy or unreadable store retains the conservative exit count.
+                finally:
+                    tail["store"]._write_lock.release()
+            counts[why] = counts.get(why, 0) + remaining
+        for why, remaining in counts.items():
+            if not remaining:
+                continue
             self._ledger_count("ledger.tail.unflushed", amount=remaining)
             logger.warning(
                 "LCM session-end raw-message ingest skipped due to %s after shutdown retry; "
-                "final messages may be absent from the plugin-local store unflushed=%d", reason, remaining,
+                "final messages may be absent from the plugin-local store unflushed=%d", why, remaining,
             )
         # One exit attempt, even if embedding quiesce also invokes the hook.
         maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
