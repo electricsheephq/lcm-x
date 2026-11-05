@@ -117,7 +117,8 @@ def test_02_bindings_use_raw_view_before_redaction(engines):
     entries = ledger.decode_entries(vector["entries"])
     assert [e.ref for e in entries] == [b["occ_id"] for b in bindings]
     assert entries[0].uidset_digest is not None and entries[1].uidset_digest is None
-    assert not sql_rows(engine, "lineage_marks")
+    # P1g deliberately lifts X11: the store mark means examined through.
+    assert sql_rows(engine, "lineage_marks")[0]["max_store_id"] == stored[-1]["store_id"]
     assert engine._last_ingest_attribution["ledger_digest_ms"] >= 0
     assert engine._last_ingest_attribution["ledger_ms"] >= 0
 

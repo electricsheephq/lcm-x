@@ -636,7 +636,7 @@ def test_accepted_ledger_gaps_do_not_publish_marker_counters(engines, monkeypatc
     assert count(engine, "write_failed") == int(failure == "write")
 
 
-# E: frozen caad1f5f8 writer, with the named P1f adoption/pending-key delta.
+# E: frozen caad1f5f8 writer, with P1f adoption/pending-key and P1g probe/mark deltas.
 # Keeping this local makes the SQL assertion runnable without git or a base checkout.
 def _main_ledger_write(self, attempt, after_commit, attribution):
     store, conn = self._store, self._store._conn
@@ -661,6 +661,13 @@ def _main_ledger_write(self, attempt, after_commit, attribution):
             lineage = persisted[0] if persisted else attempt["lineage"]
             if persisted and attempt["resolved"] is not None and lineage != attempt["resolved"]:
                 delta["ledger.lineage_drift"] += 1
+            mark, session_top, lag = conn.execute(
+                "SELECT mark,max(store_id),count(m.store_id) FILTER (WHERE NOT EXISTS "
+                "(SELECT 1 FROM occurrence_bindings b WHERE b.store_id=m.store_id)) FROM "
+                "(SELECT (SELECT max_store_id FROM lineage_marks WHERE lineage=?) AS mark) "
+                "LEFT JOIN messages m ON m.session_id=? AND m.store_id>coalesce(mark,0) "
+                "AND m.store_id NOT IN (SELECT value FROM json_each(?))",
+                (lineage, self._session_id, json.dumps(sorted(attempt["stored"].values())))).fetchone()
             ids = set(attempt["matched"].values()) | {sid for sid, _kind, _stamp in attempt["observations"]}
             by_store = {}
             for sid, occ, ordinal in conn.execute(
@@ -725,6 +732,11 @@ def _main_ledger_write(self, attempt, after_commit, attribution):
                 ledger.write_view(conn, attempt["salt"], lineage, "ingest", None, entries,
                                          view_seq=seq, precomputed_chain=attempt["chain"])
                 delta.update({"ledger.bindings_written": len(rows), "ledger.views_written": 1})
+            # P1g plain-path delta only: no rebind in this frozen writer.
+            target = max(mark or 0, session_top or 0, *attempt["stored"].values())
+            if not lag and not attempt.get("no_view") and target != (mark or 0):
+                ledger.update_store_mark(conn, lineage, target)
+                delta["ledger.store_mark_advanced"] += 1
             if ledger.has_pending(store.db_identity):
                 digests = set().union(*(ledger.pending_emission_digests((store.db_identity, attempt["salt"]),
                     key, attempt.get("retried_emissions", ())) for key in {lineage, ledger.lineage_key(None, self._session_id)}))
