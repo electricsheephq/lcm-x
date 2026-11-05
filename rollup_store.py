@@ -179,7 +179,7 @@ class RollupStore:
         The claim deliberately does NOT clear ``lcm_rollup_sources``: the prior
         last-known-good lineage stays queryable until :meth:`mark_ready` swaps it
         (sources-replace + ``status = 'ready'`` in one transaction). Clearing at
-        claim opened a purge/deletion race — a concurrent purge-by-node queried
+        claim once opened a purge/deletion race: the purge-by-node path (since removed) queried
         the affected rollups, found ZERO sources (lineage already cleared) and so
         did not re-stale, letting the in-flight build publish deleted-node
         content as ``ready`` (maintainer #387 A2).
@@ -500,9 +500,9 @@ class RollupStore:
         missing month with no row); seeding them together makes the batch
         atomic — a failure on any target rolls the whole seed back so no target
         is left half-queued (maintainer #391 D2). For each target, a
-        currently-``building`` row is left untouched, and
-        a conflicting seed advances ``generation`` to supersede an in-flight
-        build.
+        currently-``building`` row is left untouched; any other existing row is
+        re-staled with ``generation`` advanced, so a builder whose lease was
+        already reclaimed cannot publish over it.
         """
         rows = self._expand_stale_targets(targets)
         if not rows:
