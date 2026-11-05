@@ -602,6 +602,7 @@ def test_untrusted_names_the_other_writers_a_file_could_have():
 
 @pytest.mark.parametrize("case, reason", [
     ("folder", "which is writable by others"),
+    ("dot_dot", "which is writable by others"),
     ("symlink_in_folder", "which is writable by others"),
     ("symlink_into_folder", "which is writable by others"),
     ("group", "which is writable by its group, whose members include eve"),
@@ -622,6 +623,8 @@ def test_a_reader_override_another_user_could_redirect_starts_the_plain_reader(s
     elif case == "symlink_into_folder":
         command = base / "override" / "link"
         command.symlink_to(shared / "reader")
+    elif case == "dot_dot":  # `..` is looked up in the shared folder, so the shared folder is checked
+        command = shared / ".." / "override" / "reader"
     shared.chmod(0o775 if case in ("group", "unknown_group") else 0o777)
     if case == "group":
         monkeypatch.setattr(start_reader.launcher, "other_members", lambda gid, owners: ["eve"])
@@ -752,10 +755,12 @@ def test_the_walk_looks_entries_up_as_the_kernel_does(tmp_path, monkeypatch):
     (base / "a" / "link").symlink_to("../b")
     looked_up = []
     lstat = os.lstat
-    monkeypatch.setattr(launcher.os, "lstat", lambda path: looked_up.append(path) or lstat(path))
-    assert launcher.path_untrusted(str(base / "a" / "link" / "reader"), (os.geteuid(), 0)) == ""
+    with monkeypatch.context() as patch:  # undone before tmp_path's cleanup, which calls lstat too
+        patch.setattr(launcher.os, "lstat", lambda path: looked_up.append(path) or lstat(path))
+        assert launcher.path_untrusted(str(base / "a" / "link" / "reader"), (os.geteuid(), 0)) == ""
     prefixes = [os.path.join("/", *base.parts[1:index + 1]) for index in range(1, len(base.parts))]
-    assert looked_up == [*prefixes, *(str(base / part) for part in ("a", "a/link", "b", "b/reader"))]
+    # `..` in a/ names base, and is checked in a/ as any entry is
+    assert looked_up == [*prefixes, *(str(base / part) for part in ("a", "a/link", "", "b", "b/reader"))]
 
 
 # Each program the launcher ends up running appends [which, argv] to LCMX_TEST_RECORD.

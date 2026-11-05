@@ -84,10 +84,7 @@ def path_untrusted(path: str, owners: Tuple[int, ...]) -> str:
         name = pending.pop(0)
         if name in ("", "."):
             continue
-        if name == "..":
-            folder = os.path.dirname(folder)
-            continue
-        entry = os.path.join(folder, name)
+        entry = os.path.dirname(folder) if name == ".." else os.path.join(folder, name)  # `..` is looked up here too
         try:
             info = os.lstat(entry)
             reason = folder_untrusted(os.stat(folder), info, owners)

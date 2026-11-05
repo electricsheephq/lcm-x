@@ -303,7 +303,8 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
     root; groups nested in a directory service are not expanded. The line on stderr names the
     folder. The command then starts by its configured path, not its resolved one: once every folder
     passes, nobody else can redirect it, and a venv's Python finds its venv from the path it was
-    started by. Script arguments are not checked.
+    started by. Script arguments are not checked, nor are a script's `#!` interpreter, the `PATH`
+    search of `#!/usr/bin/env`, or folder ACLs.
   - Once started, the override owns recall. The plugin does not supervise it; falling back to
     `LCMX_LOCAL_READER_CMD` on its own failures is the override's job. The file is read only when
     the plain reader could start; otherwise the server reports the missing setup step as before.
