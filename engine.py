@@ -5181,8 +5181,8 @@ class LCMEngine(
                 conversation_id=off_current_normal_conversation_id, source=off_current_source, error=exc)
             self._ledger_count("ledger.tail.busy_at_end")
             logger.warning(
-                "LCM session-end raw-message ingest skipped due to SQLite lock; "
-                "retry pending at the next session start or shutdown: %s unflushed=%d", exc, len(messages))
+                "LCM session-end raw-message ingest skipped due to SQLite lock; retry pending at the next session start or "
+                "end in this process, or at engine shutdown if the host calls it: %s session=%s unflushed=%d", exc, session_id, len(messages))
             return True
 
         if off_current_lineage:
@@ -5414,11 +5414,11 @@ class LCMEngine(
                         self._ledger_count("ledger.tail.busy_at_end")
                         logger.warning(
                             "LCM session-end raw-message ingest skipped due to SQLite lock after short wait; "
-                            "%s: %s unflushed=%d",
-                            "retry pending at the next session start or shutdown"
+                            "%s: %s session=%s unflushed=%d",
+                            "retry pending at the next session start or end in this process, or at engine shutdown if the host calls it"
                             if len(self._pending_session_tails) > pending_before
                             else "final messages may be absent from the plugin-local store",
-                            exc,
+                            exc, session_id,
                             unflushed,
                         )
                         return
