@@ -304,7 +304,8 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
     user database is provably local, since a directory service may not list its users: on Linux,
     glibc, with every `passwd` and `group` line of `nsswitch.conf`, and any `initgroups` line,
     naming only `files`, `systemd` or `altfiles`; on macOS, a search path in use
-    (`dscl /Search -read / SearchPath`) of local nodes only. Anything else fails such a folder:
+    (`dscl /Search -read / SearchPath`) of local nodes only (`/Local/...` and `/BSD/local`, not an
+    NIS domain under `/BSD/`). Anything else fails such a folder:
     another C library, no `nsswitch.conf`, a node that is not local, an error or a timeout. The check
     runs once per launch and is never stored. The line on stderr names the folder; for a folder
     writable by its group it names the group too, and says when the user database is not provably

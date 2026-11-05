@@ -85,10 +85,11 @@ def nsswitch_is_local(text: str) -> bool:
 
 def search_path_is_local(output: str) -> bool:
     """Whether the directory search path macOS uses, as `dscl /Search -read / SearchPath` prints it,
-    has only local nodes. The default policy's path can include an LDAP server that DHCP names."""
+    has only local nodes: `/Local/...` and `/BSD/local`, not an NIS domain under `/BSD/`. The
+    default policy's path can include an LDAP server that DHCP names."""
     key, _, rest = output.partition(":")
     nodes = rest.split()  # a node with spaces in its name splits too, and its first part is not local
-    return key.strip() == "SearchPath" and bool(nodes) and all(node.startswith(("/Local/", "/BSD/"))
+    return key.strip() == "SearchPath" and bool(nodes) and all(node.startswith("/Local/") or node == "/BSD/local"
                                                                for node in nodes)
 
 

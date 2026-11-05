@@ -605,7 +605,7 @@ def test_untrusted_names_the_other_writers_a_file_could_have():
     ("dot_dot", "which is writable by others"),
     ("symlink_in_folder", "which is writable by others"),
     ("symlink_into_folder", "which is writable by others"),
-    ("group", "which is writable by its group crew, whose members include eve"),
+    ("group", "which is writable by its group crew, whose members include guest"),
     ("unknown_group", "which is writable by its group crew, which the user database does not list"),
     ("unlistable_database", "which is writable by its group crew (user database not provably local)"),
 ])
@@ -630,7 +630,7 @@ def test_a_reader_override_another_user_could_redirect_starts_the_plain_reader(s
     monkeypatch.setattr(start_reader.launcher, "group_name", lambda gid: "crew")
     monkeypatch.setattr(start_reader.launcher, "user_database_is_local", lambda: case != "unlistable_database")
     if case == "group":
-        monkeypatch.setattr(start_reader.launcher, "other_members", lambda gid, owners: ["eve"])
+        monkeypatch.setattr(start_reader.launcher, "other_members", lambda gid, owners: ["guest"])
     elif case == "unknown_group":
         def unlisted(gid, owners):
             raise KeyError(gid)
@@ -703,7 +703,7 @@ def test_folder_untrusted_names_who_else_could_replace_an_entry(monkeypatch):
     """The folder rule both ways, on stat results a test cannot make for real: folders and entries
     other users own, and groups with other members."""
     launcher = _launcher()
-    members = {80: [], 81: ["eve"]}
+    members = {80: [], 81: ["guest"]}
 
     def other_members(gid, owners):
         return members[gid]  # a KeyError, as for a group the user database does not list
@@ -722,7 +722,7 @@ def test_folder_untrusted_names_who_else_could_replace_an_entry(monkeypatch):
     assert launcher.folder_untrusted(folder(0o755, uid=502), mine, owners) == "not owned by this user or root"
     assert launcher.folder_untrusted(folder(0o775), mine, owners) == ""
     assert launcher.folder_untrusted(folder(0o775, gid=81), mine, owners) == (
-        "writable by its group staff, whose members include eve")
+        "writable by its group staff, whose members include guest")
     assert launcher.folder_untrusted(folder(0o775, gid=99), mine, owners) == (
         "writable by its group 99, which the user database does not list")
     assert launcher.folder_untrusted(folder(0o757), mine, owners) == "writable by others"
@@ -738,19 +738,19 @@ def test_folder_untrusted_names_who_else_could_replace_an_entry(monkeypatch):
 
 def _group_folder_verdicts(launcher, monkeypatch, database_is_local):
     """What a folder writable by its group comes to under this user database, for a group of only
-    this user and root, then for one with eve in it."""
+    this user and root, then for one with guest in it."""
     monkeypatch.setattr(launcher, "user_database_is_local", lambda: database_is_local)
     monkeypatch.setattr(launcher, "group_name", lambda gid: "crew")
     folder = os.stat_result((stat.S_IFDIR | 0o775, 0, 0, 1, 501, 80, 0, 0, 0, 0))
     entry = os.stat_result((stat.S_IFREG | 0o755, 0, 0, 1, 501, 0, 0, 0, 0, 0))
     verdicts = []
-    for others in ([], ["eve"]):
+    for others in ([], ["guest"]):
         monkeypatch.setattr(launcher, "other_members", lambda gid, owners, others=others: others)
         verdicts.append(launcher.folder_untrusted(folder, entry, (501, 0)))
     return verdicts
 
 
-_MEMBERS_RULE = ["", "writable by its group crew, whose members include eve"]
+_MEMBERS_RULE = ["", "writable by its group crew, whose members include guest"]
 _NOT_PROVABLE = ["writable by its group crew (user database not provably local)"] * 2
 
 
@@ -786,6 +786,7 @@ def test_on_linux_a_group_folder_passes_only_where_nsswitch_conf_lists_local_use
     ("print('SearchPath: /Local/Default /BSD/local')", 30, True),
     ("print('SearchPath:\\n /Local/Default\\n /Active Directory/CORP/All Domains')", 30, False),
     ("print('SearchPath: /Local/Default /LDAPv3/ldap.example.com')", 30, False),  # as DHCP can add
+    ("print('SearchPath: /Local/Default /BSD/corp')", 30, False),  # an NIS domain
     ("print('CSPSearchPath: /Local/Default')", 30, False),  # the custom policy's path, maybe not in use
     ("print('SearchPath: /Local/Default'); raise SystemExit(1)", 30, False),
     ("print('')", 30, False),
@@ -805,13 +806,13 @@ def test_other_members_counts_listed_members_and_primary_group_users(monkeypatch
     user and root are not others, and a listed name the user database does not know is another."""
     launcher = _launcher()
     users = [SimpleNamespace(pw_name=name, pw_uid=uid, pw_gid=gid)
-             for name, uid, gid in (("me", 501, 20), ("root", 0, 0), ("eve", 502, 80), ("bob", 503, 20))]
+             for name, uid, gid in (("me", 501, 20), ("root", 0, 0), ("guest", 502, 80), ("bob", 503, 20))]
     groups = {20: [], 80: ["root", "me"], 81: ["me", "ghost"], 82: ["root", "me"]}
     monkeypatch.setattr(launcher.grp, "getgrgid", lambda gid: SimpleNamespace(gr_mem=groups[gid]))
     monkeypatch.setattr(launcher.pwd, "getpwnam", lambda name: {user.pw_name: user for user in users}[name])
     monkeypatch.setattr(launcher.pwd, "getpwall", lambda: users)
     owners = (501, 0)
-    assert launcher.other_members(80, owners) == ["eve"]  # listed: root and me; eve by primary group
+    assert launcher.other_members(80, owners) == ["guest"]  # listed: root and me; guest by primary group
     assert launcher.other_members(81, owners) == ["ghost"]
     assert launcher.other_members(82, owners) == []
     assert launcher.other_members(20, owners) == ["bob"]
