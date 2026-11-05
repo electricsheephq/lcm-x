@@ -1,4 +1,4 @@
-"""#2215: LCMEngine declares compress() as its only change to the host transcript (compacts_outside_compress)."""
+"""#2215: LCMEngine declares compress() as the only place it rewrites or removes host-transcript messages."""
 
 import pytest
 
