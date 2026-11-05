@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     home = args.home.expanduser()
     if not home.is_absolute():
         return 2
-    if _lock_held(home):  # the holder sees every spooled record
+    if _lock_held(home):  # its holder, or a prober going on to a scan, sees every spooled record
         return 4 if args.deadline is not None else 0
     # The Hermes home is read before the store's own settings replace HERMES_HOME: the
     # writer refuses any store home inside it.
