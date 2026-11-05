@@ -34,7 +34,7 @@ def usage_from(record):
 class ShimCodex(Codex):
     def run(self, *args, **kwargs):
         proc = super().run(*args, **kwargs)  # Preserve the original trace before classification.
-        events = [json.loads(line) for line in proc.stdout.splitlines() if line.startswith("{")]
+        events = [json.loads(line) for line in proc.stdout.split("\n") if line.startswith("{")]  # As Codex.call.
         done = any(e.get("type") == "turn.completed" for e in events)
         fatal = next((e for e in reversed(events) if e.get("type") == "turn.failed"), None)
         fatal = fatal or next((e for e in reversed(events) if e.get("type") == "error"), {})
@@ -54,7 +54,7 @@ class Shim:
         self.backends, self.log = backends, Path(log)
         self.log.parent.mkdir(parents=True, exist_ok=True)
         self.slots = threading.BoundedSemaphore(concurrency)
-        self.stopped, self.log_lock = threading.Event(), threading.Lock()
+        self.stopped, self.draining, self.log_lock = threading.Event(), threading.Event(), threading.Lock()
 
     def check_quota(self):
         if self.stopped.is_set():
@@ -62,10 +62,14 @@ class Shim:
         self.backends.quota.check("codex")
 
     def complete(self, request, records):
+        if self.draining.is_set():
+            return 503, error("shutting_down")
         self.check_quota()
         if not self.slots.acquire(timeout=30):
             return 503, error("lane_busy")
         try:
+            if self.draining.is_set():  # Queued before the signal; calls already running still finish.
+                return 503, error("shutting_down")
             self.check_quota()
             message = self.backends.call(MODELS[request["model"]], request["messages"], records)
             if not records:
@@ -145,13 +149,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/v1/chat/completions":
             self.send_error(404)
             return
-        try:
-            length = int(self.headers.get("Content-Length", "-1"))
-            if length < 0 or self.headers.get("Transfer-Encoding"):
-                raise ValueError()
-            status, headers, payload = self.server.shim.handle(self.rfile.read(length))
-        except (ValueError, OSError):
-            status, headers, payload = 400, {}, encode(error("invalid_request"))
+        status, headers, payload = self.answer()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
@@ -162,6 +160,22 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+    def answer(self):
+        # A cross-origin page cannot send this type without a preflight, and OPTIONS is never answered.
+        if self.headers.get_content_type() != "application/json":
+            return 415, {}, encode(error("unsupported_media_type"))
+        try:
+            length = int(self.headers.get("Content-Length", "-1"))
+            if length < 0 or self.headers.get("Transfer-Encoding"):
+                raise ValueError()
+            raw = self.rfile.read(length)
+        except (ValueError, OSError):
+            return 400, {}, encode(error("invalid_request"))
+        try:
+            return self.server.shim.handle(raw)
+        except Exception:  # For example a failed receipt write after the backend returned.
+            return 503, {}, encode(error("lane_unavailable"))
 
 
 class Server(ThreadingHTTPServer):
@@ -180,7 +194,7 @@ def build(root, log, concurrency=4):
     home = os.environ.get("LCMX_SHIM_CODEX_HOME")
     if not home or not Path(home).is_absolute() or not Path(home).is_dir():
         raise ValueError("LCMX_SHIM_CODEX_HOME must name an existing absolute leased directory")
-    root = Path(root)
+    root = Path(root).resolve()  # FMP passes it as the child cwd and as --cd; relative would nest.
     root.mkdir(parents=True, exist_ok=True)
     # A new quota on every restart; previous receipts are retained, never pruned.
     quota_root = root / ("instance-" + str(time.time_ns()))
@@ -198,6 +212,7 @@ def serve(shim, port):
             def stop(*_):
                 if not stopping.is_set():
                     stopping.set()
+                    shim.draining.set()
                     threading.Thread(target=server.shutdown).start()
             for signum in (signal.SIGTERM, signal.SIGINT):
                 previous[signum] = signal.signal(signum, stop)

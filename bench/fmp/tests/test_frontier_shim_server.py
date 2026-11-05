@@ -211,6 +211,18 @@ def test_queued_call_checks_stop_again(lane):
     shim.slots.release.assert_called_once()
 
 
+def test_draining_refuses_new_and_queued_requests(lane):
+    shim, backend = lane
+    shim.draining.set()
+    assert invoke(shim) == (503, {}, server.error("shutting_down"))
+    shim.draining.clear()
+    shim.slots = Mock()
+    shim.slots.acquire.side_effect = lambda **_: (shim.draining.set() or True)
+    assert invoke(shim)[2] == server.error("shutting_down")
+    backend.call.assert_not_called()
+    shim.slots.release.assert_called_once()
+
+
 @pytest.mark.parametrize("cap", [0, 5, True])
 def test_concurrency_guard(lane, tmp_path, cap):
     with pytest.raises(ValueError):
@@ -232,7 +244,7 @@ def test_http_loopback_shape_and_arbitrary_bearer(lane):
                 assert response.status == 200
                 assert json.loads(response.read())["choices"][0]["message"]["content"] == ANSWER
             shim.stopped.set()
-            client.request("POST", "/v1/chat/completions", server.encode(REQUEST))
+            client.request("POST", "/v1/chat/completions", server.encode(REQUEST), {"Content-Type": "application/json"})
             response = client.getresponse()
             assert response.status == 429 and response.getheader("Retry-After") == "60"
             response.read()
@@ -241,6 +253,81 @@ def test_http_loopback_shape_and_arbitrary_bearer(lane):
             httpd.shutdown()
             worker.join(timeout=5)
     assert "dummy-one" not in shim.log.read_text()
+
+
+def post(shim, headers, handle=None):
+    if handle:
+        shim.handle = handle
+    with server.Server(shim, port=0) as httpd:
+        worker = threading.Thread(target=httpd.serve_forever)
+        worker.start()
+        client = http.client.HTTPConnection(*httpd.server_address, timeout=5)
+        try:
+            client.request("POST", "/v1/chat/completions", server.encode(REQUEST), headers)
+            response = client.getresponse()
+            return response.status, json.loads(response.read())
+        finally:
+            client.close()
+            httpd.shutdown()
+            worker.join(timeout=5)
+
+
+@pytest.mark.parametrize("headers", [{}, {"Content-Type": "text/plain"},
+                                     {"Content-Type": "application/x-www-form-urlencoded"}])
+def test_non_json_content_type_is_415_without_dispatch(lane, headers):
+    shim, backend = lane
+    assert post(shim, headers) == (415, server.error("unsupported_media_type"))
+    backend.call.assert_not_called()
+    assert not shim.log.exists()
+
+
+def test_json_content_type_with_charset_is_served(lane):
+    assert post(lane[0], {"Content-Type": "application/json; charset=utf-8"})[0] == 200
+
+
+@pytest.mark.parametrize("exc", [OSError, RuntimeError])
+def test_failure_after_the_body_is_read_is_503(lane, exc):
+    status, body = post(lane[0], {"Content-Type": "application/json"}, Mock(side_effect=exc("receipt")))
+    assert (status, body) == (503, server.error("lane_unavailable"))
+
+
+def test_relative_root_is_resolved_before_fmp(tmp_path, monkeypatch):
+    home = tmp_path / "lease"
+    home.mkdir()
+    monkeypatch.setenv("LCMX_SHIM_CODEX_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    codex = Mock()
+    monkeypatch.setattr(server, "ShimCodex", codex)
+    monkeypatch.setattr(server, "Backends", Mock())
+    server.build(Path("state"), Path("log.jsonl"))
+    quota_root = codex.call_args.args[0]
+    assert quota_root.is_absolute() and quota_root.parent == (tmp_path / "state").resolve()
+
+
+def test_line_separators_inside_answer_text_survive(tmp_path):
+    text = "first\u2028second\u2029third\x85fourth"
+    home = tmp_path / "lease"
+    home.mkdir()
+
+    def runner(cmd, **kwargs):
+        rollout = home / "sessions" / "rollout-test-thread.jsonl"
+        rollout.parent.mkdir(exist_ok=True)
+        rollout.write_text(json.dumps(
+            {"type": "response_item", "payload": {"role": "assistant", "model": "gpt-6.1-sol"}}) + "\n")
+        events = [{"type": "thread.started", "thread_id": "thread"},
+                  {"type": "item.completed", "item": {"type": "agent_message", "text": text}},
+                  {"type": "turn.completed"}]
+        # Codex writes these code points raw inside JSON strings.
+        return subprocess.CompletedProcess(cmd, 0, "\n".join(json.dumps(e, ensure_ascii=False) for e in events), "")
+
+    quota = Quota(tmp_path / "quota.json")
+    codex = server.ShimCodex(tmp_path / "run", quota, codex_home=home, runner=runner)
+    backends = Backends(tmp_path, quota, MODELS.values(), codex=codex)
+    try:
+        status, _, body = invoke(server.Shim(backends, tmp_path / "log.jsonl"))
+        assert status == 200 and body["choices"][0]["message"]["content"] == text
+    finally:
+        backends.close()
 
 
 def test_build_requires_home_and_injects_deadline_and_fresh_quota(tmp_path, monkeypatch):
@@ -387,7 +474,7 @@ def test_shutdown_drains_calls_before_cleanup_and_overrides_ignored_sigint(lane,
     def fetch():
         client = http.client.HTTPConnection(*instance[0].server_address, timeout=5)
         try:
-            client.request("POST", "/v1/chat/completions", server.encode(REQUEST))
+            client.request("POST", "/v1/chat/completions", server.encode(REQUEST), {"Content-Type": "application/json"})
             response = client.getresponse()
             response.read()
             return response.status
@@ -402,6 +489,7 @@ def test_shutdown_drains_calls_before_cleanup_and_overrides_ignored_sigint(lane,
             handler = signal.getsignal(signum)
             assert callable(handler)
             handler(signum, None)
+            assert shim.draining.is_set()
             assert drained.wait(timeout=5)
             backend.close.assert_not_called()
         finally:

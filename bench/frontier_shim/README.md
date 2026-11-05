@@ -8,7 +8,7 @@ not used. Add a thinking-disabled GLM route only if R1-0 demonstrates that the
 direct endpoint thinks by default. No Claude instrument is used.
 
 The operator supplies `LCMX_SHIM_CODEX_HOME`, an existing absolute directory
-leased through Switchboard. The shim passes that path to FMP without inspecting
+holding a leased Codex login. The shim passes that path to FMP without inspecting
 credentials or creating auth links. FMP's existing default home and timeouts
 are unchanged for other callers; total-token pass-through is opt-in too.
 Launch in an otherwise idle model-stage window:
@@ -20,7 +20,7 @@ python -m bench.frontier_shim.server --root "$R1_SHIM_STATE" \
 
 The bind address is always **127.0.0.1**, default port 8765 (`--port` changes only
 the port). `POST /v1/chat/completions` accepts any bearer key, including a dummy
-key. Messages must have system/user roles and string content; streaming and
+key, and requires `Content-Type: application/json` (415 otherwise). Messages must have system/user roles and string content; streaming and
 additional generation controls are rejected. Responses include assistant text,
 the model FMP reads back, and only reported token fields. Missing usage fields
 remain absent, including total tokens if FMP reports no total; no zero or total
@@ -56,8 +56,8 @@ A reported usage limit or FMP quota stop returns **429, Retry-After: 60** and
 latches the shim stopped until restart. No reset wait and no internal retries.
 On the first `codex_stopped_restart_required`, kill the stage immediately; its
 per-item results files allow safe resume. Stop the shim with **SIGTERM**
-(`kill -TERM <shim-pid>`), wait for it to exit, use `codex-account-swap` to swap
-the lease, restart with the leased home, and resume the stage. SIGINT also drains
+(`kill -TERM <shim-pid>`), wait for it to exit, lease a home on an account with
+quota, restart with that home, and resume the stage. SIGINT also drains
 active calls; stalled client sockets time out after 60 seconds. Each restart uses a fresh
 FMP quota ledger; prior ledgers and call receipts remain. Calls already in flight
 may finish after a stop. Client retries can duplicate calls; repeated request
@@ -72,8 +72,8 @@ separate, sensitive raw artifacts; rollouts stay enabled for identity and quota
 readback. Record leased-home disk growth during smoke and pilot; prune nothing.
 
 Operator cautions:
-- Stop the harness stage before the shim. After SIGTERM, a request already
-  waiting for a slot can still start one Codex call (up to 540 seconds).
+- Stop the harness stage before the shim. After SIGTERM, queued and new requests
+  get 503 `shutting_down`; calls already running finish (up to 540 seconds).
 - A record with no rollout returns 503, and without rollouts the weekly brake
   cannot fire. If the call log shows one, stop the stage and check the leased
   home before resuming.
