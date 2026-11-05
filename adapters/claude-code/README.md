@@ -48,10 +48,11 @@ that file; its format and fallbacks are in the design doc's Recall surface secti
 
 The command's first item must be an absolute path; there is no `PATH` search. Every folder on the
 way to it, through any symlinks, must be writable only by you or root, or be a shared sticky folder
-such as `/tmp` whose entry is yours. A folder writable by its group
-passes only when that group's members, listed or by primary group, are you and root: a multi-admin
-Mac falls back to the plain reader for a command under Homebrew's folders, and groups nested in a
-directory service are not expanded. Script arguments, such as the script in
+such as `/tmp` whose entry is yours. A folder writable by its group passes only when that group's
+members, listed or by primary group, are you and root, and only on a host whose users all come from
+local files, since a directory service (SSSD, LDAP, Active Directory) may not list its users.
+Elsewhere, and on a multi-admin Mac for a command under Homebrew's folders, the plain reader starts;
+groups nested in a directory service are not expanded. Script arguments, such as the script in
 `["/usr/bin/python3", "/path/to/override.py"]`, are not checked: keep them in a folder only you can
 write. Nor are a script's `#!` interpreter, the `PATH` search of `#!/usr/bin/env`, or folder ACLs.
 

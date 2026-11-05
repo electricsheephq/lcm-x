@@ -300,11 +300,14 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
     nobody else. A folder writable by others fails, except a sticky one whose entry belongs to that
     user or root. A folder writable by its group passes only when the group's members (its listed
     members and every user whose primary group it is, read when the check runs) are that user and
-    root; groups nested in a directory service are not expanded. The line on stderr names the
-    folder. The command then starts by its configured path, not its resolved one: once every folder
-    passes, nobody else can redirect it, and a venv's Python finds its venv from the path it was
-    started by. Script arguments are not checked, nor are a script's `#!` interpreter, the `PATH`
-    search of `#!/usr/bin/env`, or folder ACLs.
+    root; groups nested in a directory service are not expanded. Members are only trusted when the
+    host's user database is local (on Linux, `nsswitch.conf` takes `passwd` and `group` only from
+    `files`, `systemd` or `altfiles`; on macOS, the directory search path has only local nodes),
+    since a directory service may not list its users; elsewhere such a folder fails. The line on
+    stderr names the folder. The command then starts by its configured path, not its resolved one:
+    once every folder passes, nobody else can redirect it, and a venv's Python finds its venv from
+    the path it was started by. Script arguments are not checked, nor are a script's `#!`
+    interpreter, the `PATH` search of `#!/usr/bin/env`, or folder ACLs.
   - Once started, the override owns recall. The plugin does not supervise it; falling back to
     `LCMX_LOCAL_READER_CMD` on its own failures is the override's job. The file is read only when
     the plain reader could start; otherwise the server reports the missing setup step as before.

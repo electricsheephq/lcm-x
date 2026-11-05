@@ -17,8 +17,11 @@ import grp
 import json
 import os
 import pwd
+import re
 import stat
+import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -54,6 +57,45 @@ def other_members(gid: int, owners: Tuple[int, ...]) -> List[str]:
     return sorted(others)
 
 
+LOCAL_SOURCES = {"files", "systemd", "altfiles"}
+
+
+def nsswitch_is_local(text: str) -> bool:
+    """Whether nsswitch.conf takes both users and groups only from local sources."""
+    sources = {}
+    for line in text.splitlines():
+        database, _, rest = line.split("#", 1)[0].partition(":")
+        if database.strip() in ("passwd", "group"):
+            sources[database.strip()] = re.sub(r"\[[^]]*\]", " ", rest).split()  # [NOTFOUND=return] is an action
+    return set(sources) == {"passwd", "group"} and all(words and set(words) <= LOCAL_SOURCES
+                                                       for words in sources.values())
+
+
+def search_path_is_local(output: str) -> bool:
+    """Whether macOS's directory search path, as `dscl /Search -read / CSPSearchPath` prints it, has
+    only local nodes."""
+    nodes = output.partition("CSPSearchPath:")[2].split()
+    return bool(nodes) and all(node.startswith(("/Local/", "/BSD/")) for node in nodes)
+
+
+@lru_cache(maxsize=None)
+def user_database_is_local() -> bool:
+    """Whether every user and group comes from a local source, so listing them finds every member of
+    a group. A directory service may not list its users (SSSD by default), and then nothing can
+    prove that a group has no other member."""
+    if sys.platform == "darwin":
+        try:
+            found = subprocess.run(["/usr/bin/dscl", "/Search", "-read", "/", "CSPSearchPath"],
+                                   capture_output=True, text=True, timeout=2, check=True)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return search_path_is_local(found.stdout)
+    try:
+        return nsswitch_is_local(Path("/etc/nsswitch.conf").read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return False
+
+
 def folder_untrusted(folder: os.stat_result, entry: os.stat_result, owners: Tuple[int, ...]) -> str:
     """Why another local user could replace ``entry`` in ``folder`` ("" when only ``owners`` can)."""
     if folder.st_uid not in owners:
@@ -64,6 +106,8 @@ def folder_untrusted(folder: os.stat_result, entry: os.stat_result, owners: Tupl
         return "" if entry.st_uid in owners else "shared, and the entry in it belongs to another user"
     if folder.st_mode & stat.S_IWOTH:
         return "writable by others"
+    if not user_database_is_local():
+        return "writable by its group, and this host's user database cannot list every member"
     try:
         others = other_members(folder.st_gid, owners)
     except KeyError:

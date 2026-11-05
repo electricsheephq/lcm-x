@@ -607,6 +607,7 @@ def test_untrusted_names_the_other_writers_a_file_could_have():
     ("symlink_into_folder", "which is writable by others"),
     ("group", "which is writable by its group, whose members include eve"),
     ("unknown_group", "which is writable by a group the user database does not list"),
+    ("unlistable_database", "which is writable by its group, and this host's user database cannot list every member"),
 ])
 def test_a_reader_override_another_user_could_redirect_starts_the_plain_reader(start_reader, env, tmp_path,
                                                                                 monkeypatch, capsys, case, reason):
@@ -625,7 +626,8 @@ def test_a_reader_override_another_user_could_redirect_starts_the_plain_reader(s
         command.symlink_to(shared / "reader")
     elif case == "dot_dot":  # `..` is looked up in the shared folder, so the shared folder is checked
         command = shared / ".." / "override" / "reader"
-    shared.chmod(0o775 if case in ("group", "unknown_group") else 0o777)
+    shared.chmod(0o775 if case in ("group", "unknown_group", "unlistable_database") else 0o777)
+    monkeypatch.setattr(start_reader.launcher, "user_database_is_local", lambda: case != "unlistable_database")
     if case == "group":
         monkeypatch.setattr(start_reader.launcher, "other_members", lambda gid, owners: ["eve"])
     elif case == "unknown_group":
@@ -633,6 +635,8 @@ def test_a_reader_override_another_user_could_redirect_starts_the_plain_reader(s
             raise KeyError(gid)
 
         monkeypatch.setattr(start_reader.launcher, "other_members", unlisted)
+    elif case == "unlistable_database":  # SSSD, say: users it does not list may be members
+        monkeypatch.setattr(start_reader.launcher, "other_members", lambda gid, owners: [])
     _write_override(env, {"version": 1, "command": [str(command)]})
     plain = _plain_reader(env, tmp_path)
     assert start_reader() == ("plain", plain[0], plain, None)
@@ -676,6 +680,7 @@ def test_a_reader_override_behind_folders_only_this_user_can_write_starts_as_con
         reader.parent.chmod(0o1777)
     elif case == "group_of_this_user":
         reader.parent.chmod(0o775)
+        monkeypatch.setattr(start_reader.launcher, "user_database_is_local", lambda: True)
         monkeypatch.setattr(start_reader.launcher, "other_members", lambda gid, owners: [])
     else:
         command = base / "venv" / "bin" / "python"
@@ -703,6 +708,7 @@ def test_folder_untrusted_names_who_else_could_replace_an_entry(monkeypatch):
         return members[gid]  # a KeyError, as for a group the user database does not list
 
     monkeypatch.setattr(launcher, "other_members", other_members)
+    monkeypatch.setattr(launcher, "user_database_is_local", lambda: True)
 
     def folder(mode, uid=501, gid=80):
         return os.stat_result((stat.S_IFDIR | mode, 0, 0, 1, uid, gid, 0, 0, 0, 0))
@@ -723,6 +729,22 @@ def test_folder_untrusted_names_who_else_could_replace_an_entry(monkeypatch):
         "shared, and the entry in it belongs to another user")
     assert launcher.folder_untrusted(folder(0o1775, gid=81), theirs, owners) == (
         "shared, and the entry in it belongs to another user")
+    monkeypatch.setattr(launcher, "user_database_is_local", lambda: False)
+    assert launcher.folder_untrusted(folder(0o775), mine, owners) == (
+        "writable by its group, and this host's user database cannot list every member")
+
+
+def test_only_a_local_user_database_can_prove_a_group_has_no_other_member():
+    """The members rule needs every user listed, and a directory service may not list its users."""
+    launcher = _launcher()
+    assert launcher.nsswitch_is_local("passwd: files systemd\ngroup: files [SUCCESS=merge] systemd\n")
+    assert not launcher.nsswitch_is_local("passwd: files sss\ngroup: files sss\n")
+    assert not launcher.nsswitch_is_local("passwd: files\n")  # no group line
+    assert not launcher.nsswitch_is_local("passwd: compat\ngroup: compat\n")  # compat can bring in NIS
+    assert launcher.search_path_is_local("CSPSearchPath: /Local/Default\n")
+    assert launcher.search_path_is_local("CSPSearchPath:\n /Local/Default\n /BSD/local\n")
+    assert not launcher.search_path_is_local("CSPSearchPath:\n /Local/Default\n /Active Directory/CORP/All Domains\n")
+    assert not launcher.search_path_is_local("")
 
 
 def test_other_members_counts_listed_members_and_primary_group_users(monkeypatch):
