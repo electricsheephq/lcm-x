@@ -75,37 +75,37 @@ unchanged by this lane):
 - **`process`**: assigned once during engine construction and never reset during
   that engine object's life. The object is the boundary, rather than the operating
   system process: `LCMEngine.__init__` creates `_stable_use_lock` and
-  `_condensation_inflight_lock` at `engine.py:514` and `engine.py:517`; session and
+  `_condensation_inflight_lock` at `engine.py:515` and `engine.py:518`; session and
   profile reset helpers do not replace them. Mutable contents can still change.
 - **`profile`**: bound to the store/profile/config; storage rebinding replaces the
   database-backed helpers and clears state belonging to the old profile.
-  Construction takes the config at `engine.py:505` and binds storage at
-  `engine.py:536`; `_bind_storage` creates `_store`, `_dag`, and `_lifecycle`
-  at `engine.py:927`. `_rebind_storage_for_home` closes/replaces helpers and calls
-  `_reset_profile_runtime_state` at `engine.py:1108`. With a configured shared
+  Construction takes the config at `engine.py:506` and binds storage at
+  `engine.py:537`; `_bind_storage` creates `_store`, `_dag`, and `_lifecycle`
+  at `engine.py:940`. `_rebind_storage_for_home` closes/replaces helpers and calls
+  `_reset_profile_runtime_state` at `engine.py:1121`. With a configured shared
   database path, the home changes and runtime state resets without replacing
-  those helpers (`engine.py:1087`); config itself is not reloaded by this hook.
+  those helpers (`engine.py:1100`); config itself is not reloaded by this hook.
 - **`conversation`**: survives session rotation within one conversation; clear or
   replace it when the conversation changes (including a profile change), rather
   than on each session callback. `_survival_host_overhead` records a peak keyed
   by conversation at `survival_fit.py:111`; `_bind_lifecycle_state` clears
-  `_survival_overhead_observation` only when that key changes (`engine.py:2437`).
-  Profile rebinding also clears it (`engine.py:1026`); session reset does not.
+  `_survival_overhead_observation` only when that key changes (`engine.py:2450`).
+  Profile rebinding also clears it (`engine.py:1039`); session reset does not.
 - **`session`**: cleared or rebound at session start/reset/rebind. The helpers
   `_reset_session_counters`, `_reset_compaction_progress`, and
   `_reset_session_scoped_runtime_state` start at `reset_state.py:14`,
   `reset_state.py:42`, and `reset_state.py:49`.
-  `on_session_start` calls through to the rebind paths (`engine.py:3900`,
-  `engine.py:4180`); `on_session_reset` clears runtime state (`engine.py:4599`,
-  `engine.py:4628`). Verified compression carry-over may restore progress.
+  `on_session_start` calls through to the rebind paths (`engine.py:3913`,
+  `engine.py:4193`); `on_session_reset` clears runtime state (`engine.py:4612`,
+  `engine.py:4641`). Verified compression carry-over may restore progress.
   `on_session_end` finalizes state rather than clearing every field
-  (`engine.py:4201`, `engine.py:4555`); bypass compressor state is explicitly
-  cleared on end/reset/replacement (`bypass.py:85`, `bypass.py:124`, `engine.py:4607`).
+  (`engine.py:4214`, `engine.py:4568`); bypass compressor state is explicitly
+  cleared on end/reset/replacement (`bypass.py:85`, `bypass.py:124`, `engine.py:4620`).
 - **`invocation`**: valid only during one compress, assemble, or tool call, with
   cleanup on every exit, including early return and exception. The tail bound
-  is initialized at `engine.py:608`; `_fresh_tail_pressure_yield_invocation`
-  sets up a clean scope (`engine.py:2702`) and uses `finally` for cleanup
-  (`engine.py:2740`). Nested calls restore the outer invocation's saved state;
+  is initialized at `engine.py:609`; `_fresh_tail_pressure_yield_invocation`
+  sets up a clean scope (`engine.py:2715`) and uses `finally` for cleanup
+  (`engine.py:2753`). Nested calls restore the outer invocation's saved state;
   a reset inside the call wins over restoration. This anchor covers compaction
   entry points, not an assertion that every tool/assembly field is scoped so.
 

@@ -66,7 +66,6 @@ from .escalation import (
 )
 from .externalize import (
     _build_externalized_placeholder,
-    build_transcript_gc_placeholder,
     extract_externalized_ref,
     find_externalized_payload_for_message,
     find_externalized_tool_result_content_for_call,
@@ -184,6 +183,8 @@ from . import tools as lcm_tools
 logger = logging.getLogger(__name__)
 _DIAGNOSTIC_ENGINE_TOKENS = itertools.count(1)
 _NATIVE_RECOVERY_WARNING_LOGGED = False
+_CACHE_FRIENDLY_CONDENSATION_WARNING_LOGGED = False
+_LARGE_OUTPUT_TRANSCRIPT_GC_WARNING_LOGGED = False
 
 
 @lru_cache(maxsize=1)
@@ -748,6 +749,18 @@ class LCMEngine(
             logger.warning(
                 "LCM_NATIVE_RECOVERY is no longer supported (removed in v0.25.0) and is ignored; "
                 "compaction uses the LCM path"
+            )
+        global _CACHE_FRIENDLY_CONDENSATION_WARNING_LOGGED, _LARGE_OUTPUT_TRANSCRIPT_GC_WARNING_LOGGED
+        if self._config.cache_friendly_condensation_enabled and not _CACHE_FRIENDLY_CONDENSATION_WARNING_LOGGED:
+            _CACHE_FRIENDLY_CONDENSATION_WARNING_LOGGED = True
+            logger.warning(
+                "LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED is no longer supported (removed in v0.30.0) and is ignored"
+            )
+        if self._config.large_output_transcript_gc_enabled and not _LARGE_OUTPUT_TRANSCRIPT_GC_WARNING_LOGGED:
+            _LARGE_OUTPUT_TRANSCRIPT_GC_WARNING_LOGGED = True
+            logger.warning(
+                "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED is no longer supported (removed in v0.30.0) and is ignored; "
+                "summarized tool rows are no longer rewritten"
             )
         self._hermes_home = hermes_home
         self._stable_use_lock = threading.Lock()
@@ -8850,81 +8863,6 @@ class LCMEngine(
             return False
         return True
 
-    def _maybe_gc_compacted_tool_results(
-        self,
-        compacted_chunk: List[Dict[str, Any]],
-        source_store_ids: List[int],
-    ) -> None:
-        if not getattr(self._config, "large_output_transcript_gc_enabled", False):
-            return
-        if not compacted_chunk or not source_store_ids:
-            return
-
-        stored_by_id = self._store.get_batch(source_store_ids)
-
-        def _archive_in_rewrite_txn(conn: "sqlite3.Connection", sid: int) -> None:
-            # Runs inside gc_externalized_tool_result's write transaction, right
-            # after the content rewrite and before its commit: archive this row's
-            # now-stale chunks ATOMICALLY with the rewrite so a recall can never
-            # slice the new (short) content at the old chunk offsets (F2).
-            self._archive_chunks_for_messages([sid], connection=conn)
-
-        for store_id in source_store_ids:
-            stored = stored_by_id.get(store_id)
-            if not stored or stored.get("session_id") != self._session_id:
-                continue
-            if stored.get("role") != "tool":
-                continue
-            content = stored.get("content", "") or ""
-            tool_call_id = stored.get("tool_call_id", "") or ""
-            if not content:
-                continue
-
-            # Only take the fast ref-branch when the ENTIRE row is the
-            # externalized placeholder. A ref merely embedded in surrounding
-            # text (e.g. a recall-tool result that quotes a placeholder) must
-            # fall through to the content-equality lookup below, which tombstones
-            # only when the full row content matches the stored payload -
-            # otherwise the surrounding, never-externalized text is lost.
-            ref = extract_externalized_ref(content) if is_externalized_placeholder(content) else None
-            if ref:
-                externalized = load_externalized_payload(
-                    ref,
-                    config=self._config,
-                    hermes_home=self._hermes_home,
-                )
-                if externalized is not None and externalized.get("kind", "tool_result") == "tool_result":
-                    placeholder = build_transcript_gc_placeholder(externalized)
-                    self._store.gc_externalized_tool_result(
-                        store_id, placeholder, before_commit=_archive_in_rewrite_txn
-                    )
-                    continue
-
-            lookup_candidates = []
-            sanitized_content = sanitize_pre_compaction_content(content)
-            if sanitized_content and sanitized_content != content:
-                lookup_candidates.append(sanitized_content)
-            lookup_candidates.append(content)
-
-            externalized = None
-            for candidate in lookup_candidates:
-                externalized = find_externalized_payload_for_message(
-                    candidate,
-                    tool_call_id=tool_call_id,
-                    session_id=self._session_id,
-                    config=self._config,
-                    hermes_home=self._hermes_home,
-                )
-                if externalized is not None:
-                    break
-            if externalized is None:
-                continue
-
-            placeholder = build_transcript_gc_placeholder(externalized)
-            self._store.gc_externalized_tool_result(
-                store_id, placeholder, before_commit=_archive_in_rewrite_txn
-            )
-
     def _serialize_messages(self, messages: List[Dict[str, Any]], session_id: Optional[str] = None) -> str:
         return self._serialize_messages_with_clip(messages, session_id)[0]
 
@@ -9282,38 +9220,11 @@ class LCMEngine(
 
     # -- Internal: condensation --------------------------------------------
 
-    def _should_allow_follow_on_condensation(
-        self,
-        *,
-        uncondensed_count: int,
-        leaf_compacted_this_turn: bool,
-        force_overflow: bool,
-        critical_budget_pressure: bool = False,
-    ) -> tuple[bool, str]:
-        if not leaf_compacted_this_turn:
-            return True, ""
-        if not self._config.cache_friendly_condensation_enabled:
-            return True, ""
-        if force_overflow:
-            return True, ""
-        if critical_budget_pressure:
-            return True, ""
-
-        fanin = max(1, self._config.condensation_fanin)
-        debt_threshold = fanin * max(1, self._config.cache_friendly_min_debt_groups)
-        if uncondensed_count >= debt_threshold:
-            return True, ""
-        if uncondensed_count == fanin:
-            return False, "cache_friendly_single_group"
-        return False, "cache_friendly_low_debt"
-
     def _maybe_condense(
         self,
         focus_topic: Optional[str] = None,
         *,
-        leaf_compacted_this_turn: bool = False,
         force_overflow: bool = False,
-        critical_budget_pressure: bool = False,
     ) -> int:
         """Check if any depth level has enough nodes for condensation."""
         self._last_condensation_suppressed_reason = ""
@@ -9343,16 +9254,6 @@ class LCMEngine(
                 self._session_id, depth
             )
             if len(uncondensed) < fanin:
-                continue
-
-            allow_condense, reason = self._should_allow_follow_on_condensation(
-                uncondensed_count=len(uncondensed),
-                leaf_compacted_this_turn=leaf_compacted_this_turn,
-                force_overflow=force_overflow,
-                critical_budget_pressure=critical_budget_pressure,
-            )
-            if not allow_condense:
-                suppression_reason = reason or suppression_reason
                 continue
 
             # Take the first fanin nodes and condense
@@ -9399,11 +9300,6 @@ class LCMEngine(
                 source_tokens, summary_tokens,
             )
 
-            if leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
-                break
-
-        if not condensation_passes and leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
-            self._last_condensation_suppressed_reason = suppression_reason
         if route_stopped:
             self._last_condensation_suppressed_reason = "summary_route_unavailable"
         if result_rejected:

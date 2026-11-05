@@ -12684,218 +12684,6 @@ class TestEngineCompress:
         finally:
             instance.shutdown()
 
-    def test_cache_friendly_gating_suppresses_follow_on_condensation_for_single_fanin_group(self, tmp_path, monkeypatch):
-        config = LCMConfig(
-            fresh_tail_count=2,
-            leaf_chunk_tokens=50,
-            dynamic_leaf_chunk_enabled=True,
-            dynamic_leaf_chunk_max=120,
-            condensation_fanin=2,
-            database_path=str(tmp_path / "lcm_cache_friendly_suppress.db"),
-        )
-        monkeypatch.setenv("LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED", "true")
-        loaded = LCMConfig.from_env()
-        config.cache_friendly_condensation_enabled = loaded.cache_friendly_condensation_enabled
-        config.config_source_warnings = loaded.config_source_warnings
-        config.cache_friendly_min_debt_groups = 2
-        engine = LCMEngine(config=config)
-        engine._session_id = "test-session"
-        engine.context_length = 200000
-        engine.threshold_tokens = int(200000 * config.context_threshold)
-
-        engine._dag.add_node(SummaryNode(
-            session_id="test-session",
-            depth=0,
-            summary="Earlier leaf",
-            token_count=40,
-            source_token_count=80,
-            source_ids=[1],
-            source_type="messages",
-            created_at=time.time() - 10,
-            expand_hint="earlier leaf",
-        ))
-
-        messages = [{"role": "system", "content": "You are a helpful assistant."}]
-        for i in range(6):
-            role = "user" if i % 2 == 0 else "assistant"
-            messages.append({
-                "role": role,
-                "content": f"Message {i}: " + ("chunk " * 35),
-            })
-
-        import hermes_lcm.engine as engine_module
-
-        def mock_summary(**kwargs):
-            if kwargs["depth"] == 0:
-                return "Leaf summary.\nExpand for details about: oldest raw chunk", 1
-            return "Condensed summary.\nExpand for details about: d0 summaries", 1
-
-        monkeypatch.setattr(engine_module, "summarize_with_escalation", mock_summary)
-
-        engine.compress(messages)
-
-        depth0 = engine._dag.get_session_nodes("test-session", depth=0)
-        depth1 = engine._dag.get_session_nodes("test-session", depth=1)
-        assert len(depth0) == 2
-        assert depth1 == []
-        assert engine.get_status()["condensation_suppressed_reason"] == "cache_friendly_single_group"
-
-    def test_critical_budget_pressure_bypasses_cache_friendly_single_group_suppression(self, tmp_path, monkeypatch):
-        config = LCMConfig(
-            fresh_tail_count=2,
-            leaf_chunk_tokens=50,
-            dynamic_leaf_chunk_enabled=True,
-            dynamic_leaf_chunk_max=120,
-            condensation_fanin=2,
-            critical_budget_pressure_ratio=0.90,
-            database_path=str(tmp_path / "lcm_cache_friendly_critical.db"),
-        )
-        config.cache_friendly_condensation_enabled = True
-        config.cache_friendly_min_debt_groups = 2
-        engine = LCMEngine(config=config)
-        engine._session_id = "test-session"
-        engine.context_length = 1000
-        engine.threshold_tokens = int(1000 * config.context_threshold)
-
-        engine._dag.add_node(SummaryNode(
-            session_id="test-session",
-            depth=0,
-            summary="Earlier leaf",
-            token_count=40,
-            source_token_count=80,
-            source_ids=[1],
-            source_type="messages",
-            created_at=time.time() - 10,
-            expand_hint="earlier leaf",
-        ))
-
-        messages = [{"role": "system", "content": "You are a helpful assistant."}]
-        for i in range(6):
-            role = "user" if i % 2 == 0 else "assistant"
-            messages.append({
-                "role": role,
-                "content": f"Message {i}: " + ("chunk " * 35),
-            })
-
-        import hermes_lcm.engine as engine_module
-
-        def mock_summary(**kwargs):
-            if kwargs["depth"] == 0:
-                return "Leaf summary.\nExpand for details about: oldest raw chunk", 1
-            return "Condensed summary.\nExpand for details about: d0 summaries", 1
-
-        monkeypatch.setattr(engine_module, "summarize_with_escalation", mock_summary)
-
-        engine.compress(messages, current_tokens=900)
-
-        depth1 = engine._dag.get_session_nodes("test-session", depth=1)
-        assert len(depth1) == 1
-        assert engine.get_status()["condensation_suppressed_reason"] == ""
-
-    def test_cache_friendly_gating_allows_condensation_when_debt_reaches_two_groups(self, tmp_path, monkeypatch):
-        config = LCMConfig(
-            fresh_tail_count=2,
-            leaf_chunk_tokens=50,
-            dynamic_leaf_chunk_enabled=True,
-            dynamic_leaf_chunk_max=120,
-            condensation_fanin=2,
-            database_path=str(tmp_path / "lcm_cache_friendly_debt.db"),
-        )
-        config.cache_friendly_condensation_enabled = True
-        config.cache_friendly_min_debt_groups = 2
-        engine = LCMEngine(config=config)
-        engine._session_id = "test-session"
-        engine.context_length = 200000
-        engine.threshold_tokens = int(200000 * config.context_threshold)
-
-        for i in range(3):
-            engine._dag.add_node(SummaryNode(
-                session_id="test-session",
-                depth=0,
-                summary=f"Earlier leaf {i}",
-                token_count=40,
-                source_token_count=80,
-                source_ids=[i + 1],
-                source_type="messages",
-                created_at=time.time() - (10 + i),
-                expand_hint=f"earlier leaf {i}",
-            ))
-
-        messages = [{"role": "system", "content": "You are a helpful assistant."}]
-        for i in range(6):
-            role = "user" if i % 2 == 0 else "assistant"
-            messages.append({
-                "role": role,
-                "content": f"Message {i}: " + ("chunk " * 35),
-            })
-
-        import hermes_lcm.engine as engine_module
-
-        def mock_summary(**kwargs):
-            if kwargs["depth"] == 0:
-                return "Leaf summary.\nExpand for details about: oldest raw chunk", 1
-            return "Condensed summary.\nExpand for details about: d0 summaries", 1
-
-        monkeypatch.setattr(engine_module, "summarize_with_escalation", mock_summary)
-
-        engine.compress(messages)
-
-        depth1 = engine._dag.get_session_nodes("test-session", depth=1)
-        assert len(depth1) == 1
-        assert engine.get_status()["condensation_suppressed_reason"] == ""
-
-    def test_cache_friendly_gating_does_not_block_forced_overflow_condensation(self, tmp_path, monkeypatch):
-        config = LCMConfig(
-            fresh_tail_count=1,
-            leaf_chunk_tokens=50,
-            dynamic_leaf_chunk_enabled=True,
-            dynamic_leaf_chunk_max=120,
-            condensation_fanin=2,
-            max_assembly_tokens=90,
-            database_path=str(tmp_path / "lcm_cache_friendly_overflow.db"),
-        )
-        config.cache_friendly_condensation_enabled = True
-        config.cache_friendly_min_debt_groups = 2
-        engine = LCMEngine(config=config)
-        engine._session_id = "test-session"
-        engine.context_length = 200000
-        engine.threshold_tokens = int(200000 * config.context_threshold)
-
-        engine._dag.add_node(SummaryNode(
-            session_id="test-session",
-            depth=0,
-            summary="Earlier leaf",
-            token_count=40,
-            source_token_count=80,
-            source_ids=[1],
-            source_type="messages",
-            created_at=time.time() - 10,
-            expand_hint="earlier leaf",
-        ))
-
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "A " * 40},
-            {"role": "assistant", "content": "B " * 40},
-            {"role": "user", "content": "Tail " * 60},
-        ]
-
-        import hermes_lcm.engine as engine_module
-
-        def mock_summary(**kwargs):
-            if kwargs["depth"] == 0:
-                return "Leaf summary.\nExpand for details about: oldest raw chunk", 1
-            return "Condensed summary.\nExpand for details about: d0 summaries", 1
-
-        monkeypatch.setattr(engine_module, "summarize_with_escalation", mock_summary)
-
-        engine.compress(messages, current_tokens=120)
-
-        depth1 = engine._dag.get_session_nodes("test-session", depth=1)
-        assert len(depth1) == 1
-        assert engine.get_status()["condensation_suppressed_reason"] == ""
-
-
 class TestPostCompactionIngestion:
     """Regression tests for issue #1 — messages must be persisted after
     compaction even though the active context is shorter than the store."""
@@ -26511,59 +26299,6 @@ class TestEngineTools:
         assert "externalized_payload" in context_json
         assert result["context_truncated"] is False
 
-    def test_compress_gc_rewrites_summarized_externalized_tool_results(self, tmp_path, monkeypatch):
-        config = LCMConfig(
-            database_path=str(tmp_path / "lcm_gc.db"),
-            fresh_tail_count=0,
-            leaf_chunk_tokens=50,
-            large_output_externalization_enabled=True,
-            large_output_externalization_threshold_chars=200,
-            large_output_transcript_gc_enabled=True,
-        )
-        monkeypatch.setenv("LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED", "true")
-        loaded = LCMConfig.from_env()
-        config.large_output_transcript_gc_enabled = loaded.large_output_transcript_gc_enabled
-        config.config_source_warnings = loaded.config_source_warnings
-        engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
-        engine._session_id = "test-session"
-        engine.context_length = 200000
-        engine.threshold_tokens = int(200000 * config.context_threshold)
-
-        monkeypatch.setattr(
-            lcm_engine,
-            "summarize_with_escalation",
-            lambda **kwargs: ("Summarized tool result.\nExpand for details about: tool result", 1),
-        )
-
-        content = "RESULT:\n" + ("abcdef" * 2000)
-        messages = [
-            {"role": "system", "content": "You are helpful."},
-            {"role": "tool", "tool_call_id": "call_gc", "content": content},
-        ]
-
-        compressed = engine.compress(messages)
-
-        assert compressed[0]["role"] == "system"
-        # The summary follows the system prompt, so it must be role "user" —
-        # an assistant summary as the first non-system message is rejected by
-        # Anthropic (it extracts the system prompt and requires messages[0]
-        # to be "user").
-        assert compressed[1]["role"] == "user"
-        assert "Recent Summary" in compressed[1]["content"]
-        stored_tool = next(row for row in engine._store.get_range("test-session") if row["role"] == "tool")
-        assert stored_tool["content"].startswith("[GC'd externalized tool output:")
-        assert "ref=" in stored_tool["content"]
-        assert content[:100] not in stored_tool["content"]
-        assert stored_tool["token_estimate"] == count_message_tokens(
-            {"role": "tool", "tool_call_id": "call_gc", "content": stored_tool["content"]}
-        )
-        assert stored_tool["token_estimate"] < count_message_tokens(
-            {"role": "tool", "tool_call_id": "call_gc", "content": content}
-        )
-        payload_files = list((tmp_path / "hermes" / "lcm-large-outputs").glob("*.json"))
-        assert len(payload_files) == 1
-        assert json.loads(payload_files[0].read_text())["content"] == content
-
     def test_handle_expand_still_resolves_externalized_metadata_after_transcript_gc_rewrite(self, tmp_path, monkeypatch):
         config = LCMConfig(
             database_path=str(tmp_path / "lcm_gc_expand.db"),
@@ -26571,137 +26306,31 @@ class TestEngineTools:
             leaf_chunk_tokens=50,
             large_output_externalization_enabled=True,
             large_output_externalization_threshold_chars=200,
-            large_output_transcript_gc_enabled=True,
         )
         engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
         engine._session_id = "test-session"
         engine.context_length = 200000
         engine.threshold_tokens = int(200000 * config.context_threshold)
 
-        monkeypatch.setattr(
-            lcm_engine,
-            "summarize_with_escalation",
-            lambda **kwargs: ("Summarized tool result.\nExpand for details about: tool result", 1),
-        )
-
         content = "RESULT:\n" + ("abcdef" * 2000)
-        messages = [
-            {"role": "system", "content": "You are helpful."},
+        engine._serialize_messages([
             {"role": "tool", "tool_call_id": "call_gc", "content": content},
-        ]
-
-        engine.compress(messages)
-        node_id = engine._dag.get_session_nodes("test-session")[0].node_id
+        ])
+        ref = next((tmp_path / "hermes" / "lcm-large-outputs").glob("*.json")).name
+        placeholder = f"[GC'd externalized tool output: tool_call_id=call_gc; chars={len(content)}; ref={ref}]"
+        store_id = engine._store.append(
+            "test-session", {"role": "tool", "tool_call_id": "call_gc", "content": placeholder},
+        )
+        node_id = engine._dag.add_node(SummaryNode(
+            session_id="test-session", depth=0, summary="externalized payload summary",
+            token_count=10, source_token_count=200, source_ids=[store_id],
+            source_type="messages", created_at=0,
+        ))
         result = json.loads(engine.handle_tool_call("lcm_expand", {"node_id": node_id}))
 
         assert result["expanded"][0]["content"].startswith("[GC'd externalized tool output:")
         assert result["expanded"][0]["externalized"]["tool_call_id"] == "call_gc"
         assert result["expanded"][0]["externalized"]["ref"].endswith(".json")
-
-    def test_compress_gc_skips_pinned_tool_results(self, tmp_path, monkeypatch):
-        config = LCMConfig(
-            database_path=str(tmp_path / "lcm_gc_pinned.db"),
-            fresh_tail_count=0,
-            leaf_chunk_tokens=50,
-            large_output_externalization_enabled=True,
-            large_output_externalization_threshold_chars=200,
-            large_output_transcript_gc_enabled=True,
-        )
-        engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
-        engine._session_id = "test-session"
-        engine.context_length = 200000
-        engine.threshold_tokens = int(200000 * config.context_threshold)
-
-        monkeypatch.setattr(
-            lcm_engine,
-            "summarize_with_escalation",
-            lambda **kwargs: ("Summarized tool result.\nExpand for details about: tool result", 1),
-        )
-
-        content = "RESULT:\n" + ("abcdef" * 2000)
-        messages = [
-            {"role": "system", "content": "You are helpful."},
-            {"role": "tool", "tool_call_id": "call_gc", "content": content},
-        ]
-        engine._ingest_messages(messages)
-        tool_store_id = next(row for row in engine._store.get_range("test-session") if row["role"] == "tool")["store_id"]
-        engine._store.pin(tool_store_id)
-
-        engine.compress(messages)
-
-        pinned_content = engine._store.get(tool_store_id)["content"]
-        assert pinned_content.startswith("[Externalized tool output:")
-        assert not pinned_content.startswith("[GC'd externalized tool output:")
-        assert content[:100] not in pinned_content
-
-    def test_gc_helper_does_not_miss_tool_rows_when_chunk_contains_unmatched_synthetic_messages(self, tmp_path):
-        config = LCMConfig(
-            database_path=str(tmp_path / "lcm_gc_helper.db"),
-            large_output_externalization_enabled=True,
-            large_output_externalization_threshold_chars=200,
-            large_output_transcript_gc_enabled=True,
-        )
-        engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
-        engine._session_id = "test-session"
-
-        content = "RESULT:\n" + ("abcdef" * 2000)
-        tool_store_id = engine._store.append(
-            "test-session",
-            {"role": "tool", "tool_call_id": "call_gc", "content": content},
-        )
-        engine._serialize_messages([
-            {"role": "tool", "tool_call_id": "call_gc", "content": content}
-        ])
-
-        engine._maybe_gc_compacted_tool_results(
-            [
-                {"role": "assistant", "content": "[Recent Summary (d0, node 1)]"},
-                {"role": "tool", "tool_call_id": "call_gc", "content": content},
-            ],
-            [tool_store_id],
-        )
-
-        assert engine._store.get(tool_store_id)["content"].startswith("[GC'd externalized tool output:")
-
-    def test_gc_does_not_tombstone_row_with_only_embedded_externalized_ref(self, tmp_path):
-        # Regression: a tool row that merely QUOTES an externalized placeholder
-        # inside surrounding text (e.g. a recall-tool result) must not have its
-        # whole content tombstoned - that would discard the surrounding text,
-        # which was never externalized and is unrecoverable.
-        config = LCMConfig(
-            database_path=str(tmp_path / "lcm_gc_embed.db"),
-            large_output_externalization_enabled=True,
-            # 1000 (was 200): the #680 stub is ~255 chars, so the quoting row must stay below the threshold.
-            large_output_externalization_threshold_chars=1000,
-            large_output_transcript_gc_enabled=True,
-        )
-        engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
-        engine._session_id = "test-session"
-
-        big = "RESULT:\n" + ("abcdef" * 2000)
-        engine._ingest_messages([
-            {"role": "tool", "tool_call_id": "call_ext", "content": big},
-        ])
-        placeholder = next(
-            row for row in engine._store.get_range("test-session") if row["role"] == "tool"
-        )["content"]
-        assert placeholder.startswith("[Externalized tool output:")
-        assert "ref=" in placeholder
-
-        embedded = f"Here are the search results:\n{placeholder}\nEnd of results."
-        embed_store_id = engine._store.append(
-            "test-session",
-            {"role": "tool", "tool_call_id": "call_recall", "content": embedded},
-        )
-
-        engine._maybe_gc_compacted_tool_results(
-            [{"role": "tool", "tool_call_id": "call_recall", "content": embedded}],
-            [embed_store_id],
-        )
-
-        preserved = engine._store.get(embed_store_id)["content"]
-        assert preserved == embedded
-        assert not preserved.startswith("[GC'd externalized")
 
     def test_handle_expand_does_not_inline_full_externalized_payload_for_gc_rows(self, tmp_path, monkeypatch):
         config = LCMConfig(
@@ -26710,27 +26339,26 @@ class TestEngineTools:
             leaf_chunk_tokens=50,
             large_output_externalization_enabled=True,
             large_output_externalization_threshold_chars=200,
-            large_output_transcript_gc_enabled=True,
         )
         engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
         engine._session_id = "test-session"
         engine.context_length = 200000
         engine.threshold_tokens = int(200000 * config.context_threshold)
 
-        monkeypatch.setattr(
-            lcm_engine,
-            "summarize_with_escalation",
-            lambda **kwargs: ("Summarized tool result.\nExpand for details about: tool result", 1),
-        )
-
         content = "RESULT:\n" + ("abcdef" * 2000)
-        messages = [
-            {"role": "system", "content": "You are helpful."},
+        engine._serialize_messages([
             {"role": "tool", "tool_call_id": "call_gc", "content": content},
-        ]
-        engine.compress(messages)
-        node_id = engine._dag.get_session_nodes("test-session")[0].node_id
-
+        ])
+        ref = next((tmp_path / "hermes" / "lcm-large-outputs").glob("*.json")).name
+        placeholder = f"[GC'd externalized tool output: tool_call_id=call_gc; chars={len(content)}; ref={ref}]"
+        store_id = engine._store.append(
+            "test-session", {"role": "tool", "tool_call_id": "call_gc", "content": placeholder},
+        )
+        node_id = engine._dag.add_node(SummaryNode(
+            session_id="test-session", depth=0, summary="externalized payload summary",
+            token_count=10, source_token_count=200, source_ids=[store_id],
+            source_type="messages", created_at=0,
+        ))
         result = json.loads(engine.handle_tool_call("lcm_expand", {"node_id": node_id, "max_tokens": 1}))
 
         assert result["expanded"][0]["content"].startswith("[GC'd externalized tool output:")

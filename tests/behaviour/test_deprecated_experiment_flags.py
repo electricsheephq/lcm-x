@@ -1,4 +1,4 @@
-"""Characterize the loading sources of the retiring experiments."""
+"""Pin parsed-and-ignored experiments and the remaining deprecation."""
 
 import pytest
 
@@ -10,12 +10,9 @@ FLAGS = (
     ("deferred_maintenance_enabled", "LCM_DEFERRED_MAINTENANCE_ENABLED"),
     ("large_output_transcript_gc_enabled", "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED"),
 )
-# Removal release per key (#1246); deferred maintenance was deprecated one minor later.
-REMOVED_IN = {
-    "LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED": "v0.30.0",
-    "LCM_DEFERRED_MAINTENANCE_ENABLED": "v0.31.0",
-    "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED": "v0.30.0",
-}
+REMOVED_FLAGS = (FLAGS[0], FLAGS[2])
+DEPRECATED_FLAGS = (FLAGS[1],)
+REMOVED_IN = {"LCM_DEFERRED_MAINTENANCE_ENABLED": "v0.31.0"}
 
 
 @pytest.fixture(autouse=True)
@@ -75,7 +72,7 @@ def test_deprecation_warning_table(monkeypatch, field, key, raw, enabled):
         monkeypatch.setenv(key, raw)
     c = config.LCMConfig.from_env()
     assert getattr(c, field) is enabled
-    assert c.config_source_warnings == ([_warning(key)] if enabled else [])
+    assert c.config_source_warnings == ([_warning(key)] if enabled and key in REMOVED_IN else [])
 
 
 def test_each_flag_warns_once_per_loaded_config(monkeypatch):
@@ -83,7 +80,7 @@ def test_each_flag_warns_once_per_loaded_config(monkeypatch):
         monkeypatch.setenv(key, "true")
     for _ in range(2):
         c = config.LCMConfig.from_env()
-        assert c.config_source_warnings == [_warning(key) for field, key in FLAGS]
+        assert c.config_source_warnings == [_warning(key) for field, key in DEPRECATED_FLAGS]
 
 
 @pytest.mark.parametrize("field,key", FLAGS)
@@ -101,7 +98,7 @@ def test_deprecation_warning_consumers(monkeypatch, tmp_path, caplog, field, key
     monkeypatch.setenv("LCM_TEMPORAL_ROLLUPS_ENABLED", "false")
     c = config.LCMConfig.from_env()
     c.database_path = str(tmp_path / "lcm.db")
-    expected = [_warning(key)] if raw == "true" else []
+    expected = [_warning(key)] if raw == "true" and key in REMOVED_IN else []
     engine = LCMEngine(config=c, hermes_home=str(tmp_path))
     try:
         engine.on_session_start("experiment-warning", context_length=200000)
@@ -121,3 +118,91 @@ def test_deprecation_warning_consumers(monkeypatch, tmp_path, caplog, field, key
     finally:
         engine.shutdown()
     assert not any("deprecated:" in record.message for record in caplog.records)
+
+
+@pytest.mark.parametrize("field,key", REMOVED_FLAGS)
+@pytest.mark.parametrize("raw", [None, "false", "true"])
+def test_removed_flag_warns_once_per_process(monkeypatch, tmp_path, caplog, field, key, raw):
+    from hermes_lcm import engine as engine_module
+
+    warning_flag = {
+        "cache_friendly_condensation_enabled": "_CACHE_FRIENDLY_CONDENSATION_WARNING_LOGGED",
+        "large_output_transcript_gc_enabled": "_LARGE_OUTPUT_TRANSCRIPT_GC_WARNING_LOGGED",
+    }[field]
+    monkeypatch.setattr(engine_module, warning_flag, False)
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
+    monkeypatch.setenv("LCM_TEMPORAL_ROLLUPS_ENABLED", "false")
+    if raw is not None:
+        monkeypatch.setenv(key, raw)
+    for i in range(2):
+        c = config.LCMConfig.from_env()
+        c.database_path = str(tmp_path / f"warning-{i}.db")
+        assert c.config_source_warnings == []
+        engine = engine_module.LCMEngine(config=c, hermes_home=str(tmp_path))
+        engine.shutdown()
+    expected = f"{key} is no longer supported (removed in v0.30.0) and is ignored"
+    if field == "large_output_transcript_gc_enabled":
+        expected += "; summarized tool rows are no longer rewritten"
+    assert [record.message for record in caplog.records if key in record.message] == (
+        [expected] if raw == "true" else []
+    )
+
+
+@pytest.mark.parametrize("field,key", REMOVED_FLAGS)
+def test_removed_flag_true_matches_unset_compaction(monkeypatch, tmp_path, field, key):
+    from types import SimpleNamespace
+
+    from hermes_lcm import engine as engine_module, externalize
+    from hermes_lcm.dag import SummaryNode
+    from tests.harness import engine_context, pin_char_counter
+
+    pin_char_counter(monkeypatch)
+    monkeypatch.setattr(externalize, "time", SimpleNamespace(
+        strftime=lambda *_: "20260101_000000", gmtime=lambda: (),
+        time_ns=lambda: 1, time=lambda: 1.0,
+    ))
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **kwargs: (
+        "Leaf summary. Expand for details about: oldest raw chunk" if kwargs["depth"] == 0
+        else "Condensed summary. Expand for details about: earlier leaves", 1,
+    ))
+    results = []
+    for raw in (None, "true"):
+        if raw is not None:
+            monkeypatch.setenv(key, raw)
+        loaded = config.LCMConfig.from_env()
+        assert getattr(loaded, field) is (raw == "true")
+        assert loaded.config_source_warnings == []
+        with engine_context(
+            tmp_path / str(raw), window=200000, session_id="experiment-parity",
+            fresh_tail_count=2, leaf_chunk_tokens=100, dynamic_leaf_chunk_enabled=True,
+            dynamic_leaf_chunk_max=200, condensation_fanin=2, threshold_full_sweep_enabled=False,
+            embeddings_enabled=False, temporal_rollups_enabled=False,
+            large_output_externalization_enabled=True, large_output_externalization_threshold_chars=200,
+            **{field: getattr(loaded, field)},
+        ) as engine:
+            engine._dag.add_node(SummaryNode(
+                session_id=engine._session_id, depth=0, summary="Earlier leaf " * 30,
+                token_count=100, source_token_count=200, source_ids=[1],
+                source_type="messages", created_at=0,
+            ))
+            messages = [{"role": "system", "content": "Stable system."},
+                        {"role": "assistant", "content": "Running tool", "tool_calls": [
+                            {"id": "call-parity", "type": "function", "function": {
+                                "name": "read", "arguments": "{}"}}]},
+                        {"role": "tool", "tool_call_id": "call-parity", "content": "abcdef" * 2000}]
+            messages += [{"role": "user" if i % 2 == 0 else "assistant",
+                          "content": f"Message {i}: " + "chunk " * 35} for i in range(6)]
+            output = engine.compress(messages)
+            nodes = engine._dag.get_session_nodes(engine._session_id)
+            assert any(node.depth == 1 for node in nodes)
+            rows = engine._store.get_range(engine._session_id)
+            assert any(row["role"] == "tool" for row in rows)
+            assert all(not row["content"].startswith("[GC'd externalized") for row in rows)
+            keys = ("role", "content", "tool_calls", "tool_call_id")
+            results.append((
+                [{k: row[k] for k in keys if k in row} for row in output],
+                [{k: row[k] for k in keys if k in row} for row in rows],
+                [(n.depth, n.summary, n.source_ids, n.source_type) for n in nodes],
+                engine.get_status()["condensation_suppressed_reason"],
+            ))
+    assert results[0] == results[1]
