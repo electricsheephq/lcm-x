@@ -11578,8 +11578,6 @@ class LCMEngine(
                     self._ledger_count("ledger.tail.retry.deferred")
                     logger.debug("LCM pending session-end retry deferred", exc_info=True)
                     break
-                if tail.get("kind") == "cold" and not self._cold_tail_is_bound(tail):
-                    self._ledger_count("ledger.tail.cold_store_unbound")
                 self._ledger_count("ledger.tail.retry_failed")
                 logger.warning("LCM pending session-end retry failed (%s); retry pending", type(exc).__name__)
             finally:

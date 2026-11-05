@@ -318,10 +318,10 @@ class HostUidShadowMixin:
             canonical = next((sid for sid, kind in bindings.get(uid, ()) if kind == "canonical"), bound[0] if bound else None)
             unmapped = not rows and stored is None and (idx < cursor or idx in capture["tool_segment"] or idx in replayed)
             if bound:  # BOUND: compared against the payload-matching version (R1-1); the gate marks that binding
-                hit = self._host_uid_bytes_match(bound, identity[idx], fetched,
-                    **(dict(store=store, hermes_home=hermes_home, session_id=capture["session_id"],
-                            conversation_id=capture["conversation_id"]) if hermes_home is not None else {})) if not rows else None
-                lossy = not rows and stored is None and _lossy_identity(self._message_replay_identity(identity[idx]))
+                detached = dict(store=store, hermes_home=hermes_home, session_id=capture["session_id"],
+                                conversation_id=capture["conversation_id"]) if hermes_home is not None else {}
+                hit = self._host_uid_bytes_match(bound, identity[idx], fetched, **detached) if not rows else None
+                lossy = not rows and stored is None and _lossy_identity(self._message_replay_identity(identity[idx], **detached))
                 if stored is not None:  # VERSION_NEW is an event only; a stored duplicate is a replay check
                     delta["bound.disagree.stored_despite_match" if hit is not None else "bound.version_new"] += 1
                     if hit is not None:
