@@ -501,8 +501,8 @@ class RollupStore:
         atomic — a failure on any target rolls the whole seed back so no target
         is left half-queued (maintainer #391 D2). For each target, a
         currently-``building`` row is left untouched; any other existing row is
-        re-staled with ``generation`` advanced, so a builder whose lease was
-        already reclaimed cannot publish over it.
+        re-staled with ``generation`` advanced, which invalidates any older
+        build token for that row.
         """
         rows = self._expand_stale_targets(targets)
         if not rows:
