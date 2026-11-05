@@ -723,9 +723,14 @@ def test_a_relative_runtime_setting_is_refused_and_the_record_waits(hook, env, t
         monkeypatch.delenv(name, raising=False)
     for name, value in lane.items():
         monkeypatch.setenv(name, value)
+    # A valid override, so the guards below catch it starting. Its command is a script the test
+    # owns: the interpreter running the tests can be group-writable, as on CI's runners.
+    override = str(_executable(tmp_path / "override" / "reader"))
+    _write_override(env, {"version": 1, "command": [override]})
+    assert launcher.reader_override(Path(env["LCMX_CC_HOME"]) / launcher.OVERRIDE) == ([override], "")
     monkeypatch.setattr(launcher.os, "execv", lambda path, argv: pytest.fail("the reader started"))
-    monkeypatch.setattr(launcher.os, "execve", lambda path, argv, environment: pytest.fail("the reader started"))
-    assert launcher.main() == 1
+    monkeypatch.setattr(launcher.os, "execve", lambda path, argv, environment: pytest.fail("the override started"))
+    assert launcher.main() == 1  # the setting is refused before a valid override could start
     assert capsys.readouterr().err == "lcm-x: %s must be an absolute path\n" % setting
 
 
