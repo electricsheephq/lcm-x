@@ -10,6 +10,7 @@ See docs/recorder.md; ``recorder_read.read`` rebuilds a recording.
 from __future__ import annotations
 
 import atexit
+import errno
 import hashlib
 import importlib
 import inspect
@@ -222,11 +223,24 @@ def _backup(conn, dest: Path) -> dict:
     return {"path": str(dest), "state": "ok", "bytes": dest.stat().st_size}
 
 
+_SESSION_SELECT = f"SELECT {', '.join(SESSION_COLUMNS)} FROM sessions"
+_SESSION_SHAPE = "SELECT count(*), max(rowid), (SELECT id FROM sessions ORDER BY rowid DESC LIMIT 1) FROM sessions"
+_PARENT = SESSION_COLUMNS.index("parent_session_id")
+
+
 class _StateDb:
-    """The Hermes ``sessions`` projection through one persistent read-only connection."""
+    """The Hermes ``sessions`` projection through one persistent read-only connection.
+
+    LCM reads ``sessions`` by id along a session's parent chain (host_uid.py:118, identity_anchor.py:95-99,
+    aux_session.py:713-727, :783 and :1006, engine.py:2602-2610) and reads every id only for lifecycle stats
+    (lifecycle_state.py:547). So a root re-reads the parent chains of its sessions when the file changed since
+    they were read, and a change also records the rows inserted since the last look. A deleted or reused rowid
+    falls back to the full diff. Each look is one read transaction, so its rows and shape agree.
+    """
 
     def __init__(self, path: Path):
         self.path, self.conn, self.version, self.last = path, None, None, {}
+        self.shape, self.read_at = None, {}
 
     def _connect(self):
         if self.conn is None:
@@ -236,24 +250,32 @@ class _StateDb:
                                         check_same_thread=False, timeout=1.0)
         return True
 
-    def _row(self, sid):
-        row = self.conn.execute(f"SELECT {', '.join(SESSION_COLUMNS)} FROM sessions WHERE id = ?", (sid,)).fetchone()
-        return list(row) if row else "no_row"
+    def _read(self, look):
+        self.conn.execute("BEGIN")
+        try:
+            return look(self.conn.execute("PRAGMA data_version").fetchone()[0])
+        finally:
+            self.conn.execute("COMMIT")
+
+    def _all(self, version):
+        rows = self.conn.execute(_SESSION_SELECT).fetchall()
+        self.shape, self.version = self.conn.execute(_SESSION_SHAPE).fetchone(), version
+        self.read_at = dict.fromkeys((row[0] for row in rows), version)
+        return rows
 
     def full(self):
         try:
             if not self._connect():
                 return "no_database"
-            self.version = self.conn.execute("PRAGMA data_version").fetchone()[0]
-            rows = self.conn.execute(f"SELECT {', '.join(SESSION_COLUMNS)} FROM sessions").fetchall()
+            rows = self._read(self._all)
         except Exception:
             self.conn = None
             return "read_error"
-        self.last = {row[0]: list(row) for row in rows}
+        self.last = {row[0]: row for row in rows}
         return [list(row) for row in rows]
 
     def changes(self, session_ids):
-        """All sessions rows that differ from their last recorded outcome."""
+        """Rows that differ from their last recorded outcome: new rows, and the parent chains of ``session_ids``."""
         had = self.conn is not None
         try:
             if not self._connect():
@@ -263,19 +285,47 @@ class _StateDb:
             if not had:
                 return {"$full": self.full()}
             version = self.conn.execute("PRAGMA data_version").fetchone()[0]
-            if version == self.version:
+            if version == self.version and all(self.read_at.get(sid) == version for sid in session_ids):
                 return None
-            self.version = version
-            rows = self.conn.execute(f"SELECT {', '.join(SESSION_COLUMNS)} FROM sessions").fetchall()
-            now = {row[0]: list(row) for row in rows}
-            out = {sid: now.get(sid, "no_row") for sid in now.keys() | self.last.keys()
-                   if now.get(sid, "no_row") != self.last.get(sid, "no_row")}
-            self.last = now
-            return out or None
+            return self._read(lambda now: self._look(now, session_ids)) or None
         except Exception:
             changed = {sid: "read_error" for sid in session_ids if sid and self.last.get(sid) != "read_error"}
             self.last.update(changed)
             return changed or None
+
+    def _look(self, version, session_ids):
+        out = {}
+        if version != self.version:
+            shape = self.conn.execute(_SESSION_SHAPE).fetchone()
+            if shape != self.shape:
+                count, top, top_id = self.shape or (0, None, None)
+                grown = self.conn.execute(_SESSION_SELECT + " WHERE rowid > ?", (top or 0,)).fetchall()
+                kept = top is None or self.conn.execute(
+                    "SELECT id FROM sessions WHERE rowid = ?", (top,)).fetchone() == (top_id,)
+                if kept and shape[0] == count + len(grown):
+                    self.shape = shape
+                    self.read_at.update((row[0], version) for row in grown)
+                else:  # a row was deleted, or a rowid reused
+                    grown = self._all(version)
+                    out.update((sid, "no_row") for sid in self.last.keys() - {row[0] for row in grown})
+                    self.last = {sid: value for sid, value in self.last.items() if sid in self.read_at}
+                for row in grown:
+                    if row != self.last.get(row[0]):
+                        self.last[row[0]], out[row[0]] = row, list(row)
+            self.version = version
+        for sid in session_ids:
+            hops = set()
+            while sid and sid not in hops and len(hops) <= 256:
+                hops.add(sid)
+                if self.read_at.get(sid) == version:
+                    value = self.last.get(sid)
+                else:
+                    row = self.conn.execute(_SESSION_SELECT + " WHERE id = ?", (sid,)).fetchone()
+                    value, self.read_at[sid] = (row if row is not None else "no_row"), version
+                    if value != self.last.get(sid):
+                        self.last[sid], out[sid] = value, list(row) if row is not None else value
+                sid = value[_PARENT] if isinstance(value, tuple) else None
+        return out
 
 
 class _Entry:
@@ -338,6 +388,10 @@ class _Writer(threading.Thread):
             except BaseException:
                 pass
         finally:
+            with self.cv:
+                for item, _size in self.items:
+                    if item[0] == "sync":
+                        item[1].set()
             self.rec._log_pending()
 
     def _run(self):
@@ -407,6 +461,12 @@ class _Writer(threading.Thread):
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(tmp, path)
+                for directory in (path.parent, path.parent.parent):
+                    fd = os.open(directory, os.O_RDONLY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
                 self.total_bytes += len(data)
             self.known_blobs.add(sha)
         return {"$b": sha}
@@ -583,7 +643,7 @@ class Recorder:
     def _capture_payloads(self, payload_dir):
         snap = _mkdir(self.proc / "snapshot")
         result = {}
-        manifest, size = [], 0
+        size = 0
         if payload_dir.is_dir():
             files = sorted(p for p in payload_dir.rglob("*") if p.is_file())
             size = sum(p.stat().st_size for p in files)
@@ -595,22 +655,43 @@ class Recorder:
                 for path in files:
                     rel = path.relative_to(payload_dir)
                     _mkdir((out / rel).parent)
-                    shutil.copy2(path, out / rel)
-                    os.chmod(out / rel, 0o600)
-                    st = (out / rel).stat()
-                    manifest.append({"name": str(rel), "size": st.st_size, "mode": st.st_mode, "uid": st.st_uid,
-                                     "gid": st.st_gid, "mtime_ns": st.st_mtime_ns, "sha256": _sha256_file(out / rel)})
+                    try:
+                        os.link(path, out / rel)
+                    except OSError as exc:
+                        if exc.errno != errno.EXDEV:
+                            raise
+                        self._payload_copy(path, out / rel)
                 result["payloads"] = "ok"
         else:
             result["payloads"] = "absent"
         result["payload_dir"] = str(payload_dir)
+        self.payload_snapshot = result
+
+    @staticmethod
+    def _payload_copy(source, target):
+        st = source.stat()
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with open(source, "rb") as src, os.fdopen(fd, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+    def _snapshot(self, pinned, payload_dir: Path):
+        snap = self.proc / "snapshot"
+        manifest = []
+        for path in sorted((snap / "large-outputs").rglob("*")):
+            if not path.is_file():
+                continue
+            tmp = path.with_name(path.name + ".snapshot-tmp")
+            self._payload_copy(path, tmp)
+            os.replace(tmp, path)
+            st = path.stat()
+            manifest.append({"name": str(path.relative_to(snap / "large-outputs")), "size": st.st_size,
+                             "mode": st.st_mode, "uid": st.st_uid, "gid": st.st_gid,
+                             "mtime_ns": st.st_mtime_ns, "sha256": _sha256_file(path)})
         fd = os.open(snap / "large-outputs.manifest.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as handle:
             json.dump(manifest, handle, sort_keys=True)
-        self.payload_snapshot = result
-
-    def _snapshot(self, pinned, payload_dir: Path):
-        self.snapshot = {**_backup(pinned, self.proc / "snapshot" / "lcm.db"), **self.payload_snapshot}
+        self.snapshot = {**_backup(pinned, snap / "lcm.db"), **self.payload_snapshot}
         self.write_status()
 
     def _monitor_on(self):
@@ -699,6 +780,8 @@ class Recorder:
         return capture
 
     def _register(self, kind, args, kwargs):
+        if self.stopped is not None:
+            return
         name = kwargs.get("name", args[0] if args else "")
         callback = next((kwargs[k] for k in ("handler", "callback", "fn", "func") if k in kwargs), None)
         if callback is None:
@@ -782,22 +865,21 @@ class Recorder:
         except BaseException as exc:
             self.failed("PY_RETURN", exc)
         finally:
-            self._pop(code, sys._getframe(1))
-            self.cur = None
+            self._discard(code, sys._getframe(1))
         return None
 
     def _on_unwind(self, code, offset, exc):
+        if id(code) not in self.roots:
+            return None
         try:
-            if id(code) in self.roots:
-                self._exit(code, sys._getframe(1), "raise", exc)
+            self._exit(code, sys._getframe(1), "raise", exc)
         except KeyboardInterrupt:
             self.failed("PY_UNWIND", interrupted=True)
             raise
         except BaseException as error:
             self.failed("PY_UNWIND", error)
         finally:
-            self._pop(code, sys._getframe(1))
-            self.cur = None
+            self._discard(code, sys._getframe(1))
         return None
 
     def _enter(self, code, frame):
@@ -810,6 +892,8 @@ class Recorder:
             return
         stack = self._stack()
         parent = next((e for e in reversed(stack) if e.rec is not None), None)
+        if kind == "input" and parent is None:
+            return
         if any(e.rec is None for e in stack):
             return  # inside a call that is not recorded (a foreign path)
         engine = None
@@ -825,6 +909,7 @@ class Recorder:
         else:
             name, engine = self._callback(code, loc, name)
         with self.lock:
+            self._flush_gone()
             if engine is not None and self._foreign(engine):
                 self.counters["recorder.foreign_path"] += 1
                 stack.append(_Entry(frame, code, None, None, parent is None, name))
@@ -868,7 +953,7 @@ class Recorder:
             self.cur = None
             if root:
                 self.inflight += 1
-            self.busy[etoken] += 1
+            self.busy[rec["engine"]] += 1
 
     def _pop(self, code, frame):
         stack = self._stack()
@@ -878,51 +963,63 @@ class Recorder:
             return []
         entries = stack[index:]
         del stack[index:]
-        for entry in entries:
-            if entry.rec is not None:
-                self._close(entry)
         return entries
+
+    def _discard(self, code, frame):
+        entries = self._pop(code, frame)
+        if entries:
+            with self.lock:
+                for entry in entries:
+                    if entry.rec is not None:
+                        self._close(entry)
 
     def _exit(self, code, frame, status, value):
         entries = self._pop(code, frame)
-        if not entries or self.stopped is not None:
+        if not entries:
             return
         entry = entries[0]
         with self.lock:
-            for orphan in entries[1:]:
-                if orphan.rec is not None:
-                    orphan.rec.update(status="stack_mismatch", seq_exit=self._next())
-                    self._emit(orphan.rec)
-                    self.lose("stack_mismatch", orphan.rec["seq_enter"])
-            if entry.rec is None:
-                return
-            rec = entry.rec
-            self.cur = entry
-            self.session = rec.get("session") or ""
-            marks = []
-            if status == "return":
-                rec["status"] = "return"
-                if rec["kind"] == "input":
-                    rec["result"] = {"outcome": "ok" if value is not None else "unavailable",
-                                     "stat": value[1] if value else None,
-                                     "sha256": hashlib.sha256(value[0].encode()).hexdigest() if value else None,
-                                     "content": Blob(value[0]) if value else None}
+            try:
+                if self.stopped is not None:
+                    return
+                for orphan in entries[1:]:
+                    if orphan.rec is not None:
+                        orphan.rec.update(status="stack_mismatch", seq_exit=self._next())
+                        self._emit(orphan.rec)
+                        self.lose("stack_mismatch", orphan.rec["seq_enter"])
+                if entry.rec is None:
+                    return
+                rec = entry.rec
+                self.cur = entry
+                self.session = rec.get("session") or ""
+                marks = []
+                if status == "return":
+                    rec["status"] = "return"
+                    if rec["kind"] == "input":
+                        rec["result"] = {"outcome": "ok" if value is not None else "unavailable",
+                                         "stat": value[1] if value else None,
+                                         "sha256": hashlib.sha256(value[0].encode()).hexdigest() if value else None,
+                                         "content": Blob(value[0]) if value else None}
+                    else:
+                        rec["result"] = self._summary_result(value, entry.t0) if rec["kind"] in ("summary", "bg") \
+                            else self._copy(value, marks)
                 else:
-                    rec["result"] = self._summary_result(value, entry.t0) if rec["kind"] in ("summary", "bg") \
-                        else self._copy(value, marks)
-            else:
-                rec["status"] = "raise"
-                rec["exception"] = _exception(value)
-            if entry.name == "compress" and entry.engine is not None:
-                d = entry.engine.__dict__
-                rec["compression"] = [d.get("_last_compression_status"), d.get("_last_compression_noop_reason")]
-            if marks:
-                self._unsupported(rec, marks)
-            rec["seq_exit"] = self._next()
-            rec["t_exit"] = [time.time(), time.monotonic()]
-            self.cur = None
-            self._emit(rec)
-            if entry.root:
+                    rec["status"] = "raise"
+                    rec["exception"] = _exception(value)
+                if entry.name == "compress" and entry.engine is not None:
+                    d = entry.engine.__dict__
+                    rec["compression"] = [d.get("_last_compression_status"), d.get("_last_compression_noop_reason")]
+                if marks:
+                    self._unsupported(rec, marks)
+                rec["seq_exit"] = self._next()
+                rec["t_exit"] = [time.time(), time.monotonic()]
+                self._emit(rec)
+            finally:
+                self.cur = None
+                for completed in entries:
+                    if completed.rec is not None:
+                        self._close(completed)
+            if entry.root and entry.rec is not None:
                 self._after_root(entry)
         if entry.root and entry.name in _SYNC_ROOTS and self.stopped is None:
             self.writer.drain(2.0)
@@ -961,6 +1058,8 @@ class Recorder:
                 "platform": d.get("_session_platform")}
 
     def _next(self) -> int:
+        if self.gone:
+            self._flush_gone()
         seq = next(self.seq)
         self.last_seq = max(self.last_seq, seq)
         return seq
@@ -1135,7 +1234,8 @@ class Recorder:
         changed = self._config_files(engine or self.engine)
         if changed:
             self._emit({"kind": "config_files", "files": changed}, single=True)
-        ids = {self.session} | {v for k, v in _flat_items(loc) if k.endswith("session_id") and isinstance(v, str)}
+        ids = {self.session, engine.__dict__.get("_session_id") if engine is not None else None}
+        ids |= {v for k, v in _flat_items(loc) if k.endswith("session_id") and isinstance(v, str)}
         rows = self.state_db.changes(sorted(i for i in ids if i))
         if rows:
             self._emit({"kind": "sessions", "rows": rows}, single=True)
@@ -1173,7 +1273,7 @@ class Recorder:
                     package = type(engine).__module__.rpartition(".")[0]
                     config_module = sys.modules[package + ".config"]
                     values = config_module._load_hermes_config_yaml(path)
-                    values = {k: values[k] for k in ("lcm", "compression", "auxiliary") if k in values}
+                    values = {k: values[k] for k in ("lcm", "compression", "auxiliary", "context", "plugins") if k in values}
                     if "auxiliary" in values:
                         values["auxiliary"] = {"compression": (values["auxiliary"] or {}).get("compression", {})}
                     entry["values"] = self._config_values(values)
@@ -1254,7 +1354,7 @@ class Recorder:
             pinned = _pin(self.db_path)
         except Exception as exc:
             self.counters["recorder.checkpoint_skipped"] += 1
-            logger.warning("LCM recorder: checkpoint +%dh skipped: %s", hours, exc)
+            self.warnings.append(("LCM recorder: checkpoint +%dh skipped: %s", hours, exc))
             return
         watermark = self.last_seq
 
@@ -1341,13 +1441,17 @@ class Recorder:
             self.end_state = "writer_failed"
 
     def cap(self, reason):
-        with self.lock:
+        if not self.lock.acquire(blocking=False):
+            return  # The next writer tick (or the host's synchronous tick) retries the cap.
+        try:
             if self.stopped is not None:
                 return
             self.stopped = self.end_state = "cap"
             self.writer._append({"kind": "cap", "reason": reason, "seq": self._next(), "v": FORMAT_VERSION,
                                  "pid": os.getpid(), "lost": self.lost})
             self.warnings.append(("LCM recorder: stopped at the size cap or the disk floor (%s)", reason))
+        finally:
+            self.lock.release()
         self._log_pending()
 
     def write_status(self):
@@ -1433,7 +1537,8 @@ def _cost(rec) -> int:
         if isinstance(value, Blob):
             return size + walk(value.copy)
         if isinstance(value, View):
-            return size + walk(value.ops)
+            return size + sys.getsizeof(value.ops) + 160 * len(value.ops) + sum(
+                walk(op[2]) for op in value.ops if op[0] in ("e", "n"))
         if isinstance(value, Tag):
             return size + walk(value.value)
         if isinstance(value, dict):

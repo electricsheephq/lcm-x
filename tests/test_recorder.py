@@ -10,6 +10,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import stat
 import statistics
 import subprocess
 import sys
@@ -1657,3 +1658,463 @@ def test_fix_r1_15_config_file_changes_replayed(lab):
     rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "replay-config-changes", prepare=prepare)
     config_module = importlib.import_module(rep.module.__name__ + ".config")
     assert config_module.hermes_auxiliary_compression_max_concurrency(rep.state.path.parent) == 19
+
+
+# FIX-PACKET-L3-1-r2: deterministic interleavings and bounded cost probes.
+@needs312
+def test_fix_r2_01_checkpoint_waits_for_detached_return(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rec.writer.drain(5)
+    detached, release = threading.Event(), threading.Event()
+    pop = rec._pop
+    def pause(code, frame):
+        entries = pop(code, frame)
+        if entries and threading.current_thread().name == "unfinished-return":
+            detached.set()
+            assert release.wait(2)
+        return entries
+    lab.mp.setattr(rec, "_pop", pause)
+    rec.started = -1e9
+    rec.checkpoints = [24]
+    thread = threading.Thread(target=ctx.offered.get_status, name="unfinished-return", daemon=True)
+    thread.start()
+    try:
+        assert detached.wait(2)
+        ctx.offered.get_status()
+        rec.writer.drain(5)
+        assert not [e for e in recorder_module_events(rec) if e["kind"] == "checkpoint_sealed"]
+    finally:
+        release.set()
+        thread.join(2)
+    assert not thread.is_alive()
+    rec.writer.drain(5)
+    rec.writer.drain(5)  # The seal queues its event behind an already queued sync.
+    events = recorder_module_events(rec)
+    checkpoint = next(e for e in events if e["kind"] == "checkpoint_sealed")
+    assert all(not (e["seq_enter"] <= checkpoint["through"] < e["seq_exit"])
+               for e in events if "seq_enter" in e)
+
+
+@needs312
+def test_fix_r2_02_gone_precedes_next_root(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    clone = ctx.offered.clone_for_agent()
+    token = rec.engines[clone]
+    del clone
+    gc.collect()
+    assert token in rec.gone
+    ctx.offered.get_status()
+    rec.writer.drain(5)
+    events = recorder_module_events(rec)
+    gone = next(e["seq"] for e in events if e["kind"] == "engine_gone" and e["engine"] == token)
+    root = next(e["seq_enter"] for e in events if e.get("name") == "get_status")
+    assert gone < root
+
+
+@needs312
+def test_fix_r2_03_unwatched_unwind_keeps_cur(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    def unwatched():
+        raise ValueError("unwatched")
+    def catch():
+        try:
+            unwatched()
+        except ValueError:
+            pass
+    with rec.lock:
+        marker = rec.cur = object()
+        thread = threading.Thread(target=catch)
+        thread.start()
+        thread.join(1)
+        try:
+            assert not thread.is_alive()
+            assert rec.cur is marker
+        finally:
+            rec.cur = None
+
+
+@needs312
+def test_fix_r2_04_inputs_follow_owning_root(lab):
+    from tests.recorder_replay import Replayer, _StateServer, _Threads
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    persisted = importlib.import_module(module.__name__ + ".ingest_persisted")
+    markers = {}
+    for name in ("A", "B", "unparented"):
+        path = lab.host.home / "cache" / "spillover" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(name[0])
+        markers[name] = (f"<persisted-output>\nOutput too large (1 characters).\nFull output saved to: {path}"
+                         f"\nPreview (first 1 chars):\n{name[0]}\n...\n</persisted-output>")
+    def read(text):
+        return persisted.recover_hermes_persisted_output_with_file_stat(text, hermes_home=str(lab.host.home))
+    read(markers["unparented"])
+    entered, b_done = threading.Event(), threading.Event()
+    def A():
+        entered.set()
+        assert b_done.wait(2)
+        return read(markers["A"])[0]
+    def B():
+        return read(markers["B"])[0]
+    rec._register("tool", ("A", A), {})
+    rec._register("tool", ("B", B), {})
+    thread = threading.Thread(target=A)
+    thread.start()
+    assert entered.wait(2)
+    try:
+        B()
+    finally:
+        b_done.set()
+        thread.join(2)
+    rec.writer.drain(5)
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    recording = reader.read(rec.proc)
+    roots = [e for e in recording["roots"] if e["name"] in ("A", "B")]
+    assert [e["name"] for e in roots] == ["A", "B"]
+    assert not [e for e in recording["roots"] if e["kind"] == "input"]
+    recording["events"] = [e for e in recording["events"] if e in roots or e.get("kind") == "input"]
+    (lab.tmp / "replay-home").mkdir()
+    state = _StateServer(lab.tmp / "replay-home" / "state.db")
+    state.full(recording["process_start"]["sessions"])
+    rep = Replayer(recording, module, ctx, reader, state)
+    ctx.tools.update({name: (lambda n=name: rep.persisted_output(markers[n])[0]) for name in ("A", "B")})
+    # The replay callbacks have no recorded parameters.
+    workers = _Threads()
+    try:
+        rep.run(None, threads=workers)
+    finally:
+        workers.close()
+    assert rep.diffs == []
+
+
+@needs312
+def test_fix_r2_05_view_cost_walks_only_copied_blobs(lab):
+    module, ctx = lab.load(lab.home())
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    view = rm.View([("s", i) if i % 2 else ("c", i, i - 1) for i in range(1200)])
+    start = time.perf_counter()
+    for _ in range(200):
+        rm._cost({"view": view})
+    print("VIEW COST ms/record", (time.perf_counter() - start) * 1000 / 200)
+    sizes, original = [], sys.getsizeof
+    lab.mp.setattr(sys, "getsizeof", lambda value: (sizes.append(type(value)), original(value))[-1])
+    assert rm._cost(view) >= 1200 * 100
+    assert len(sizes) < 10
+    assert rm._cost(rm.View([("n", 1, rm.Blob([None] * 1_000_000))])) >= 8_000_000
+
+
+@needs312
+@pytest.mark.parametrize("count", [1000, 10000])
+def test_fix_r2_06_sessions_scan_budget(lab, count):
+    """A root reads its own session chains and the rows inserted since the last look, never the whole table."""
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    path = rec.state_db.path
+    with sqlite3.connect(path) as conn:
+        conn.executemany("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?)",
+                         [(f"s{i}", "cli", None, 1.0, None, None, "model") for i in range(count)])
+        conn.execute("CREATE TABLE other (x)")
+    ctx.offered.on_session_start("s0", platform="cli")
+    rec.state_db.full()
+    writes = {"own": ("UPDATE sessions SET model_config = ? WHERE id = 's0'", lambda i: (str(i),)),
+              "other_row": ("UPDATE sessions SET model_config = ? WHERE id = 's1'", lambda i: (str(i),)),
+              "insert": ("INSERT INTO sessions VALUES (?, 'cli', 's0', 1.0, NULL, NULL, NULL)", lambda i: (f"n{i}",)),
+              "other_table": ("INSERT INTO other VALUES (?)", lambda i: (i,))}
+    medians = {}
+    for case, (sql, args) in writes.items():
+        samples = []
+        for i in range(25):
+            with sqlite3.connect(path) as conn:
+                conn.execute(sql, args(i))
+            start = time.perf_counter()
+            ctx.offered.get_tool_schemas()
+            samples.append((time.perf_counter() - start) * 1000)
+        medians[case] = statistics.median(samples)
+    print("SESSIONS ROOT", count, json.dumps(medians, sort_keys=True))
+    last = rec.state_db.last
+    assert last["s0"][-1] == "24" and all(f"n{i}" in last for i in range(25))
+    assert last["s1"][-1] == "model"  # no root read s1's chain, so its change waits for one that does
+    assert max(medians.values()) <= 5
+
+
+@needs312
+def test_fix_r2_06_row_outside_the_chain_is_recorded_at_its_own_root(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    write_state_db(rec.state_db.path, [("X", "cli", None, FROZEN, None, None, None)])
+    ctx.offered.on_session_start("X", platform="cli")
+    with sqlite3.connect(rec.state_db.path) as conn:
+        conn.execute("UPDATE sessions SET end_reason = 'user_exit' WHERE id = 'X'")
+    rec.session = ""
+    rec._before_root(None, "bg", None, {}, None)
+    def ended():
+        return [e for e in recorder_module_events(rec)
+                if e["kind"] == "sessions" and (e["rows"].get("X") or [None] * 6)[5] == "user_exit"]
+    rec.writer.drain(5)
+    assert not ended()
+    ctx.offered.get_status()
+    rec.writer.drain(5)
+    assert len(ended()) == 1
+
+
+@needs312
+def test_fix_r2_06_parent_changed_with_its_new_child_is_recorded(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    write_state_db(rec.state_db.path, [("P", "cli", None, FROZEN, None, None, None)])
+    rec.state_db.full()
+    with sqlite3.connect(rec.state_db.path) as conn:
+        conn.execute("INSERT INTO sessions VALUES ('C', 'cli', 'P', 2.0, NULL, NULL, NULL)")
+        conn.execute("UPDATE sessions SET end_reason = 'compression' WHERE id = 'P'")
+    rec.session = ""
+    rec._before_root(None, "bg", None, {"session_id": "C"}, None)
+    rec.writer.drain(5)
+    rows = [e["rows"] for e in recorder_module_events(rec) if e["kind"] == "sessions"]
+    assert any(isinstance(r.get("C"), list) for r in rows)
+    assert any((r.get("P") or [None] * 6)[5] == "compression" for r in rows)
+
+
+@needs312
+def test_fix_r2_06_deleted_row_falls_back_to_the_full_diff(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    write_state_db(rec.state_db.path, [("X", "cli", None, FROZEN, None, None, None),
+                                       ("Y", "cli", None, FROZEN, None, None, None)])
+    rec.state_db.full()
+    with sqlite3.connect(rec.state_db.path) as conn:
+        conn.execute("DELETE FROM sessions WHERE id = 'X'")
+    rec.session = ""
+    rec._before_root(None, "bg", None, {}, None)
+    rec.writer.drain(5)
+    assert any(e["kind"] == "sessions" and e["rows"].get("X") == "no_row" for e in recorder_module_events(rec))
+    assert "X" not in rec.state_db.last and isinstance(rec.state_db.last["Y"], tuple)
+
+
+@needs312
+@pytest.mark.parametrize("cross_device", [False, True])
+def test_fix_r2_07_payload_pin_defers_copy_and_hash(lab, cross_device):
+    import errno
+    home = lab.home()
+    source = home / "lcm-large-outputs" / "pin.json"
+    source.parent.mkdir()
+    source.write_text("before")
+    source.chmod(0o644)
+    module = load_plugin(REPO, prefix="hermes_lcm_rec")
+    lab.modules.append(module)
+    prepare(module)
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    release = threading.Event()
+    snapshot, monitor, sha = rm.Recorder._snapshot, rm.Recorder._monitor_on, rm._sha256_file
+    hashed, copies = [], []
+    copyfileobj = shutil.copyfileobj
+    def copy_on_writer(*args, **kwargs):
+        copies.append(threading.current_thread().name)
+        return copyfileobj(*args, **kwargs)
+    lab.mp.setattr(shutil, "copyfileobj", copy_on_writer)
+    if cross_device:
+        lab.mp.setattr(os, "link", lambda *a, **kw: (_ for _ in ()).throw(OSError(errno.EXDEV, "cross device")))
+    def deferred(self, *args):
+        assert release.wait(2)
+        snapshot(self, *args)
+    def at_monitor(self):
+        pin = self.proc / "snapshot" / "large-outputs" / source.name
+        assert (pin.stat().st_ino == source.stat().st_ino) is not cross_device
+        assert source.stat().st_mode & 0o777 == 0o644
+        replacement = source.with_suffix(".tmp")
+        replacement.write_text("after")
+        replacement.replace(source)
+        release.set()
+        monitor(self)
+    def hash_on_writer(path):
+        if path.name == source.name:
+            hashed.append(threading.current_thread().name)
+        return sha(path)
+    lab.mp.setattr(rm.Recorder, "_snapshot", deferred)
+    lab.mp.setattr(rm.Recorder, "_monitor_on", at_monitor)
+    lab.mp.setattr(rm, "_sha256_file", hash_on_writer)
+    try:
+        lab.host.home = home
+        lab.mp.setenv("LCM_RECORDER_ENABLED", "1")
+        lab.mp.setenv("LCM_RECORDER_DIR", str(home / "lcm-recorder"))
+        ctx = FakeCtx()
+        module.register(ctx)
+        lab.engines.append(ctx.offered)
+        rec = _recorder()
+        assert rec is not None
+        assert rec.writer.drain(5)
+        captured = rec.proc / "snapshot" / "large-outputs" / source.name
+        assert captured.read_text() == "before"
+        assert captured.stat().st_mode & 0o777 == 0o600
+        assert hashed == ["lcm-recorder-writer"]
+        if not cross_device:
+            assert copies == ["lcm-recorder-writer"]
+    finally:
+        release.set()
+
+
+@needs312
+def test_fix_r2_c7_stopped_registration_avoids_lock(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    with rec.lock:
+        rec._fork_child()
+        thread = threading.Thread(target=lambda: ctx.register_command("child", lambda: None), daemon=True)
+        thread.start()
+        thread.join(0.2)
+        done = not thread.is_alive()
+    thread.join(1)
+    assert done
+
+
+@needs312
+def test_fix_r2_c8_cap_never_waits_for_host_lock(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rec.writer.drain(5)
+    rec._atexit()
+    def tick():
+        with rec.writer.io:
+            rec.cap("exit disk floor")
+    with rec.lock:
+        thread = threading.Thread(target=tick, daemon=True)
+        thread.start()
+        thread.join(0.2)
+        done = not thread.is_alive()
+    thread.join(1)
+    assert done
+    rec.cap("retry")
+    assert rec.stopped == "cap"
+
+
+@needs312
+def test_fix_r2_c9_blob_directories_and_fsync_order(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    rec.writer.drain(5)
+    order = []
+    fsync, replace = os.fsync, os.replace
+    def synced(fd):
+        info = os.fstat(fd)
+        order.append("directory" if stat.S_ISDIR(info.st_mode) else "file")
+        return fsync(fd)
+    def renamed(src, dst):
+        order.append("rename")
+        return replace(src, dst)
+    lab.mp.setattr(os, "fsync", synced)
+    lab.mp.setattr(os, "replace", renamed)
+    with rec.writer.io:
+        rec.writer._blob(rm.Blob("directory durability unique"))
+    assert order == ["file", "rename", "directory", "directory"]
+
+
+@needs312
+def test_fix_r2_c10_checkpoint_logging_outside_lock(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    seen = []
+    lab.mp.setattr(rm, "_pin", lambda path: (_ for _ in ()).throw(OSError("pin failed")))
+    lab.mp.setattr(rm.logger, "warning", lambda *args: seen.append(rec.lock._is_owned()))
+    with rec.lock:
+        rec._checkpoint(24)
+    rec._log_pending()
+    assert seen == [False]
+
+
+@needs312
+def test_fix_r2_c10_writer_death_releases_queued_sync(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rec.writer.drain(5)
+    entered, release = threading.Event(), threading.Event()
+    def die():
+        entered.set()
+        assert release.wait(2)
+        raise SystemExit("queued-sync")
+    rec.writer.offer(("call", die))
+    assert entered.wait(1)
+    waiter = threading.Event()
+    rec.writer.offer(("sync", waiter), force=True)
+    release.set()
+    assert waiter.wait(0.5)
+    assert rec.writer.dead is not None
+
+
+@needs312
+def test_fix_r2_c10_replay_restores_from_env(lab):
+    module, ctx = lab.load(lab.home())
+    ctx.offered.get_tool_schemas()
+    rec = lab.stop()
+    originals = []
+    from tests import recorder_replay as rp
+    load = rp.load_plugin
+    def loaded(*args, **kwargs):
+        module = load(*args, **kwargs)
+        cls = importlib.import_module(module.__name__ + ".config").LCMConfig
+        originals.append((cls, cls.__dict__["from_env"]))
+        return module
+    lab.mp.setattr(rp, "load_plugin", loaded)
+    replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "restore-config", prepare=prepare)
+    cls, original = originals[0]
+    assert cls.__dict__["from_env"] is original
+
+
+@needs312
+def test_fix_r2_c11_legacy_identity_replayed(lab):
+    import yaml
+    home = lab.home()
+    values = {"context": {"engine": "lcm"}, "plugins": {"enabled": ["hermes-lcm", "hermes-lcm-x"]}}
+    (home / "config.yaml").write_text(yaml.safe_dump(values))
+    lab.mp.setattr(sys.modules["hermes_cli.config"], "load_config", lambda: values)
+    module, ctx = lab.load(home)
+    ctx.offered.get_status()
+    rec = lab.stop()
+    def prepared(module):
+        prepare(module)
+        config = sys.modules["hermes_cli.config"]
+        config.load_config = lambda: yaml.safe_load((config.get_hermes_home() / "config.yaml").read_text())
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "legacy-replay", prepare=prepared)
+    assert rep.engines[1].name == "lcm"
+    assert rep.diffs == []
+
+
+@needs312
+def test_fix_r2_cq1_blob_fsynced_before_referring_event(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    rec.writer.drain(5)
+    order, real = [], os.fsync
+    def synced(fd):
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode):
+            order.append(st.st_ino)
+        return real(fd)
+    with rec.writer.io:
+        lab.mp.setattr(os, "fsync", synced)
+        rec.writer._append({"kind": "fsync_probe", "body": rm.Blob("fsync reference unique")})
+        rec.writer._tick(force=True)
+        event_inode = os.fstat(rec.writer.segment.fileno()).st_ino
+    assert len(order) >= 2
+    assert order[0] != event_inode and order[-1] == event_inode
+
+
+@needs312
+def test_fix_r2_cq1_blob_cut_crosses_checkpoint(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    rec._emit({"kind": "damaged", "value": rm.Blob("checkpoint damaged unique")}, single=True)
+    through = rec.last_seq
+    rec._emit({"kind": "checkpoint_sealed", "hours": 24, "through": through}, single=True)
+    rec.writer.drain(5)
+    event = next(e for e in recorder_module_events(rec) if e["kind"] == "damaged")
+    sha = event["value"]["$b"]
+    (rec.root / "blobs" / sha[:2] / sha).unlink()
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    with pytest.raises(reader.RecordingError, match="checkpoint crosses blob_missing"):
+        reader.read(rec.proc, checkpoint=24)

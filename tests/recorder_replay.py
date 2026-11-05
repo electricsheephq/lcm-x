@@ -226,7 +226,7 @@ class Replayer:
         self.compared = 0
         self.pool = defaultdict(deque)
         self.root_attempts = deque()
-        self.inputs = deque(e for e in recording["events"] if e.get("kind") == "input")
+        self.inputs = deque()
         for event in recording["events"]:
             if event.get("kind") == "summary":
                 self.pool[self._key(event["args"])].append(event)
@@ -428,6 +428,8 @@ class Replayer:
                 host.context.clear()
                 host.context.update({k: v for k, v in (event.get("context") or {}).items() if isinstance(v, str)})
             self.root_attempts = deque(c for c in _walk(event) if c.get("kind") == "summary")
+            self.inputs = deque(sorted((c for c in _walk(event) if c.get("kind") == "input"),
+                                       key=lambda c: c["seq_enter"]))
             status, value = threads.run(event["thread_token"], lambda e=event: self.call(e))
             if status == "return":
                 self.bind_result(event, value)
@@ -517,12 +519,13 @@ def replay(proc, *, plugin_root, workdir, host_path=None, checkpoint=None, mutat
     os.environ.update(replay_env)
     os.environ["LCM_RECORDER_ENABLED"] = "0"
     threads = _Threads()
-    module = None
+    module = config_module = original_descriptor = None
     try:
         with HostModules(home) as host:
             module = load_plugin(plugin_root)
             _config_files(start.get("config_files") or {}, start, home, reader)
             config_module = importlib.import_module(module.__name__ + ".config")
+            original_descriptor = config_module.LCMConfig.__dict__["from_env"]
             original_from_env = config_module.LCMConfig.from_env
             effective = original_from_env()
             for key, value in start["config"].items():
@@ -554,6 +557,8 @@ def replay(proc, *, plugin_root, workdir, host_path=None, checkpoint=None, mutat
             replayer.excluded_sessions = {s for s, marks in recording["marks"].items() if marks.get("aux_context")}
             return replayer
     finally:
+        if original_descriptor is not None:
+            config_module.LCMConfig.from_env = original_descriptor
         threads.close()
         for key in [k for k in os.environ if k.startswith("LCM_")]:
             os.environ.pop(key)
