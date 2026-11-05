@@ -10,7 +10,6 @@ See docs/recorder.md; ``recorder_read.read`` rebuilds a recording.
 from __future__ import annotations
 
 import atexit
-import errno
 import hashlib
 import importlib
 import inspect
@@ -226,6 +225,7 @@ def _backup(conn, dest: Path) -> dict:
 _SESSION_SELECT = f"SELECT {', '.join(SESSION_COLUMNS)} FROM sessions"
 _SESSION_SHAPE = "SELECT count(*), max(rowid), (SELECT id FROM sessions ORDER BY rowid DESC LIMIT 1) FROM sessions"
 _PARENT = SESSION_COLUMNS.index("parent_session_id")
+_CHAIN_ROWS = 258  # host_uid.py:122 reads a session and up to _MAX_LINEAGE_HOPS + 1 (257) parents
 
 
 class _StateDb:
@@ -240,15 +240,25 @@ class _StateDb:
 
     def __init__(self, path: Path):
         self.path, self.conn, self.version, self.last = path, None, None, {}
-        self.shape, self.read_at = None, {}
+        self.shape, self.read_at, self.ident = None, {}, None
 
     def _connect(self):
         if self.conn is None:
             if not self.path.exists():
                 return False
+            st = os.stat(self.path)
             self.conn = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True,
                                         check_same_thread=False, timeout=1.0)
+            self.ident = (st.st_dev, st.st_ino)
         return True
+
+    def _same_file(self):
+        """Whether the open connection still reads the file at ``path`` (not one replaced, deleted or made unreadable)."""
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            return False
+        return (st.st_dev, st.st_ino) == self.ident and os.access(self.path, os.R_OK)
 
     def _read(self, look):
         self.conn.execute("BEGIN")
@@ -278,6 +288,8 @@ class _StateDb:
         """Rows that differ from their last recorded outcome: new rows, and the parent chains of ``session_ids``."""
         had = self.conn is not None
         try:
+            if had and not self._same_file():
+                self.conn, had = None, False
             if not self._connect():
                 changed = {sid: "no_database" for sid in session_ids if self.last.get(sid) != "no_database"}
                 self.last.update(changed)
@@ -285,13 +297,25 @@ class _StateDb:
             if not had:
                 return {"$full": self.full()}
             version = self.conn.execute("PRAGMA data_version").fetchone()[0]
-            if version == self.version and all(self.read_at.get(sid) == version for sid in session_ids):
+            if version == self.version and all(self._fresh(sid, version) for sid in session_ids):
                 return None
             return self._read(lambda now: self._look(now, session_ids)) or None
         except Exception:
+            self.conn = None  # a failed look may have marked rows recorded: the next call reads every row
             changed = {sid: "read_error" for sid in session_ids if sid and self.last.get(sid) != "read_error"}
             self.last.update(changed)
             return changed or None
+
+    def _fresh(self, sid, version):
+        """Whether every row on ``sid``'s parent chain was read at ``version`` (an inserted row is fresh before its parent)."""
+        hops = set()
+        while sid and sid not in hops and len(hops) < _CHAIN_ROWS:
+            if self.read_at.get(sid) != version:
+                return False
+            hops.add(sid)
+            value = self.last.get(sid)
+            sid = value[_PARENT] if isinstance(value, tuple) else None
+        return True
 
     def _look(self, version, session_ids):
         out = {}
@@ -315,7 +339,7 @@ class _StateDb:
             self.version = version
         for sid in session_ids:
             hops = set()
-            while sid and sid not in hops and len(hops) <= 256:
+            while sid and sid not in hops and len(hops) < _CHAIN_ROWS:
                 hops.add(sid)
                 if self.read_at.get(sid) == version:
                     value = self.last.get(sid)
@@ -374,7 +398,8 @@ class _Writer(threading.Thread):
             return False
         self.rec._flush_gone()
         done = threading.Event()
-        self.offer(("sync", done), 0, force=True)
+        if not self.offer(("sync", done), 0, force=True):
+            return False
         return done.wait(timeout)
 
     def run(self):
@@ -430,9 +455,11 @@ class _Writer(threading.Thread):
                     self.rec.cap(f"bytes={self.total_bytes} free={free}")
 
     def _process(self, item):
-        if self.dead is not None:
-            return
         kind = item[0]
+        if self.dead is not None:
+            if kind == "sync":
+                item[1].set()
+            return
         try:
             if kind == "event":
                 self._append(item[1])
@@ -657,9 +684,7 @@ class Recorder:
                     _mkdir((out / rel).parent)
                     try:
                         os.link(path, out / rel)
-                    except OSError as exc:
-                        if exc.errno != errno.EXDEV:
-                            raise
+                    except OSError:  # another filesystem, or links refused or unsupported there
                         self._payload_copy(path, out / rel)
                 result["payloads"] = "ok"
         else:
@@ -967,7 +992,7 @@ class Recorder:
 
     def _discard(self, code, frame):
         entries = self._pop(code, frame)
-        if entries:
+        if entries and self.stopped != "fork":
             with self.lock:
                 for entry in entries:
                     if entry.rec is not None:
@@ -975,7 +1000,7 @@ class Recorder:
 
     def _exit(self, code, frame, status, value):
         entries = self._pop(code, frame)
-        if not entries:
+        if not entries or self.stopped == "fork":
             return
         entry = entries[0]
         with self.lock:
@@ -1276,6 +1301,10 @@ class Recorder:
                     values = {k: values[k] for k in ("lcm", "compression", "auxiliary", "context", "plugins") if k in values}
                     if "auxiliary" in values:
                         values["auxiliary"] = {"compression": (values["auxiliary"] or {}).get("compression", {})}
+                    for key, keep in (("context", "engine"), ("plugins", "enabled")):  # plugin_identity.py:49-54
+                        if key in values:
+                            section = values[key]
+                            values[key] = {keep: section[keep]} if isinstance(section, dict) and keep in section else {}
                     entry["values"] = self._config_values(values)
                     reader = config_module.hermes_auxiliary_compression_max_concurrency
                     entry["auxiliary.compression.max_concurrency"] = reader(home)
@@ -1388,13 +1417,13 @@ class Recorder:
         with self.lock:
             if self.gone:
                 self._flush_gone()
+            if self.stopped is not None:
+                return
             if single:
                 rec["seq"] = self._next()
             rec.update(v=FORMAT_VERSION, pid=os.getpid(), lost=self.lost)
             rec.setdefault("t", time.time())
             self.wall = [self.wall[0] or rec["t"], rec["t"]]
-            if self.stopped is not None:
-                return
             if not self.writer.offer(("event", rec), _cost(rec)):
                 self.stopped = "gap"
                 self.end_state = "gap"

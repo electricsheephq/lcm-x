@@ -1894,8 +1894,8 @@ def test_fix_r2_06_deleted_row_falls_back_to_the_full_diff(lab):
 
 
 @needs312
-@pytest.mark.parametrize("cross_device", [False, True])
-def test_fix_r2_07_payload_pin_defers_copy_and_hash(lab, cross_device):
+@pytest.mark.parametrize("link_error", [None, "EXDEV", "EPERM"])
+def test_fix_r2_07_payload_pin_defers_copy_and_hash(lab, link_error):
     import errno
     home = lab.home()
     source = home / "lcm-large-outputs" / "pin.json"
@@ -1914,14 +1914,14 @@ def test_fix_r2_07_payload_pin_defers_copy_and_hash(lab, cross_device):
         copies.append(threading.current_thread().name)
         return copyfileobj(*args, **kwargs)
     lab.mp.setattr(shutil, "copyfileobj", copy_on_writer)
-    if cross_device:
-        lab.mp.setattr(os, "link", lambda *a, **kw: (_ for _ in ()).throw(OSError(errno.EXDEV, "cross device")))
+    if link_error:
+        lab.mp.setattr(os, "link", lambda *a, **kw: (_ for _ in ()).throw(OSError(getattr(errno, link_error), link_error)))
     def deferred(self, *args):
         assert release.wait(2)
         snapshot(self, *args)
     def at_monitor(self):
         pin = self.proc / "snapshot" / "large-outputs" / source.name
-        assert (pin.stat().st_ino == source.stat().st_ino) is not cross_device
+        assert (pin.stat().st_ino == source.stat().st_ino) is (link_error is None)
         assert source.stat().st_mode & 0o777 == 0o644
         replacement = source.with_suffix(".tmp")
         replacement.write_text("after")
@@ -1949,7 +1949,7 @@ def test_fix_r2_07_payload_pin_defers_copy_and_hash(lab, cross_device):
         assert captured.read_text() == "before"
         assert captured.stat().st_mode & 0o777 == 0o600
         assert hashed == ["lcm-recorder-writer"]
-        if not cross_device:
+        if link_error is None:
             assert copies == ["lcm-recorder-writer"]
     finally:
         release.set()
@@ -2067,7 +2067,8 @@ def test_fix_r2_c10_replay_restores_from_env(lab):
 def test_fix_r2_c11_legacy_identity_replayed(lab):
     import yaml
     home = lab.home()
-    values = {"context": {"engine": "lcm"}, "plugins": {"enabled": ["hermes-lcm", "hermes-lcm-x"]}}
+    values = {"context": {"engine": "lcm", "other": "r3-unread-setting"},
+              "plugins": {"enabled": ["hermes-lcm", "hermes-lcm-x"], "other": {"setting": "r3-unread-setting"}}}
     (home / "config.yaml").write_text(yaml.safe_dump(values))
     lab.mp.setattr(sys.modules["hermes_cli.config"], "load_config", lambda: values)
     module, ctx = lab.load(home)
@@ -2080,6 +2081,7 @@ def test_fix_r2_c11_legacy_identity_replayed(lab):
     rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "legacy-replay", prepare=prepared)
     assert rep.engines[1].name == "lcm"
     assert rep.diffs == []
+    assert not any(b"r3-unread-setting" in path.read_bytes() for path in rec.proc.rglob("*") if path.is_file())
 
 
 @needs312
@@ -2118,3 +2120,149 @@ def test_fix_r2_cq1_blob_cut_crosses_checkpoint(lab):
     reader = importlib.import_module(module.__name__ + ".recorder_read")
     with pytest.raises(reader.RecordingError, match="checkpoint crosses blob_missing"):
         reader.read(rec.proc, checkpoint=24)
+
+
+@needs312
+@pytest.mark.parametrize("first", [{"session_id": "Y"}, {}])
+def test_fix_r3_01_new_child_after_an_unrelated_root_reads_its_parent(lab, first):
+    """One commit inserts C under P and ends P. A root elsewhere records the insert first; C's root still walks to P."""
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    write_state_db(rec.state_db.path, [("P", "cli", None, FROZEN, None, None, None),
+                                       ("Y", "cli", None, FROZEN, None, None, None)])
+    rec.state_db.full()
+    with sqlite3.connect(rec.state_db.path) as conn:
+        conn.execute("INSERT INTO sessions VALUES ('C', 'cli', 'P', 2.0, NULL, NULL, NULL)")
+        conn.execute("UPDATE sessions SET end_reason = 'compression' WHERE id = 'P'")
+    rec.session = ""
+    rec._before_root(None, "bg", None, first, None)
+    rec._before_root(None, "bg", None, {"session_id": "C"}, None)
+    rec.writer.drain(5)
+    rows = [e["rows"] for e in recorder_module_events(rec) if e["kind"] == "sessions"]
+    assert any(isinstance(r.get("C"), list) for r in rows)
+    assert any((r.get("P") or [None] * 6)[5] == "compression" for r in rows)
+
+
+@needs312
+def test_fix_r3_02_write_error_death_releases_queued_sync(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rec.writer.drain(5)
+    entered, release = threading.Event(), threading.Event()
+    def fail():
+        entered.set()
+        assert release.wait(2)
+        raise OSError("disk gone")
+    rec.writer.offer(("call", fail))
+    assert entered.wait(1)
+    waiter = threading.Event()
+    rec.writer.offer(("sync", waiter), force=True)
+    release.set()
+    assert waiter.wait(0.5)
+    assert rec.writer.dead is not None and rec.writer.drain(5) is False
+
+
+@needs312
+def test_fix_r3_03_read_error_mid_look_rereads_every_row(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    db = rec.state_db
+    write_state_db(db.path, [("P", "cli", None, FROZEN, None, None, None), ("C", "cli", "P", FROZEN, None, None, None)])
+    db.full()
+    with sqlite3.connect(db.path) as conn:
+        conn.execute("UPDATE sessions SET model_config = 'm' WHERE id = 'C'")
+        conn.execute("UPDATE sessions SET end_reason = 'compression' WHERE id = 'P'")
+    real, reads = db.conn, []
+    class Flaky:
+        def execute(self, sql, *args):
+            if sql.endswith("WHERE id = ?"):
+                reads.append(args)
+                if len(reads) == 2:
+                    raise sqlite3.OperationalError("database is locked")
+            return real.execute(sql, *args)
+    db.conn = Flaky()
+    first = db.changes(["C"])
+    assert first == {"C": "read_error"}
+    second = db.changes(["C"])
+    assert {row[0]: row[5] for row in second["$full"]}["P"] == "compression"
+    from tests.recorder_replay import _StateServer
+    (lab.tmp / "replay-state").mkdir()
+    server = _StateServer(lab.tmp / "replay-state" / "state.db")
+    server.full([["P", "cli", None, FROZEN, None, None, None], ["C", "cli", "P", FROZEN, None, None, None]])
+    server.apply(first)
+    server.apply(second)
+    with sqlite3.connect(server.path) as conn:
+        assert dict(conn.execute("SELECT id, end_reason FROM sessions")) == {"P": "compression", "C": None}
+    conn.close()
+
+
+@needs312
+def test_fix_r3_05_cap_after_a_finished_engine_is_read_as_cap(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rec.writer.drain(5)
+    rec.writer.sync = True
+    rec.gone.append(10_000)
+    rec.cap("test")
+    assert rec.writer.drain(5)
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    assert reader.read(rec.proc)["cause"] == "cap"
+
+
+@needs312
+def test_fix_r3_06_forked_child_returns_without_the_inherited_lock(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    held, release, done = threading.Event(), threading.Event(), threading.Event()
+    def hold():
+        with rec.lock:
+            held.set()
+            release.wait(5)
+    def child():
+        frame = sys._getframe()
+        for leave in (rec._discard, lambda c, f: rec._exit(c, f, "return", None)):
+            rec._stack().append(rm._Entry(frame, frame.f_code, {"kind": "engine", "seq_enter": 1}, None, True, "x"))
+            leave(frame.f_code, frame)
+        done.set()
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert held.wait(1)
+    rec._fork_child()
+    try:
+        threading.Thread(target=child, daemon=True).start()
+        assert done.wait(0.5)
+    finally:
+        release.set()
+        holder.join(2)
+
+
+@needs312
+@pytest.mark.parametrize("change", ["replace", "delete"])
+def test_fix_r3_08_replaced_or_deleted_state_db_is_noticed(lab, change):
+    module, ctx = lab.load(lab.home())
+    db = _recorder().state_db
+    write_state_db(db.path, [("P", "cli", None, FROZEN, None, None, None)])
+    db.full()
+    assert db.changes(["P"]) is None
+    if change == "replace":
+        fresh = db.path.with_name("state.db.next")
+        write_state_db(fresh, [("P", "cli", None, FROZEN, None, "user_exit", None)])
+        os.replace(fresh, db.path)
+        assert {row[0]: row[5] for row in db.changes(["P"])["$full"]}["P"] == "user_exit"
+    else:
+        db.path.unlink()
+        assert db.changes(["P"]) == {"P": "no_database"}
+
+
+@needs312
+def test_fix_r3_09_chain_walk_reaches_as_deep_as_the_lineage_read(lab):
+    module, ctx = lab.load(lab.home())
+    db = _recorder().state_db
+    write_state_db(db.path, [(f"s{i}", "cli", f"s{i - 1}" if i else None, FROZEN, None, "compression", None)
+                             for i in range(258)])
+    db.full()
+    with sqlite3.connect(db.path) as conn:
+        conn.execute("UPDATE sessions SET model_config = 'm' WHERE id = 's0'")
+    conn.close()
+    assert db.changes(["s257"])["s0"][6] == "m"
