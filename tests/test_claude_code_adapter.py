@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -696,6 +697,7 @@ def start_reader(env, tmp_path, monkeypatch):
             launcher.main()
         (only,) = made
         return only
+    start.launcher = launcher
     return start
 
 
@@ -832,6 +834,245 @@ def test_untrusted_names_the_other_writers_a_file_could_have():
     assert launcher.untrusted(info(0o664, 501), (501,)) == "writable by group or others"
     assert launcher.untrusted(info(0o646, 501), (501,)) == "writable by group or others"
     assert launcher.untrusted(info(0o775, 0), (501, 0)) == "writable by group or others"
+
+
+@pytest.mark.parametrize("case, reason", [
+    ("folder", "which is writable by others"),
+    ("dot_dot", "which is writable by others"),
+    ("symlink_in_folder", "which is writable by others"),
+    ("symlink_into_folder", "which is writable by others"),
+    ("group", "which is writable by its group crew, whose members include guest"),
+    ("unknown_group", "which is writable by its group crew, which the user database does not list"),
+    ("unlistable_database", "which is writable by its group crew (user database not provably local)"),
+])
+def test_a_reader_override_another_user_could_redirect_starts_the_plain_reader(start_reader, env, tmp_path,
+                                                                                monkeypatch, capsys, case, reason):
+    """REGRESSION (#2261): command[0] passed its own checks while a folder on the way to it, or to a
+    symlink on it, let another local user replace or redirect it before the start. Such a folder
+    now starts the plain reader, and the line names it."""
+    base = Path(os.path.realpath(tmp_path))
+    shared = base / "shared"
+    shared.mkdir()
+    trusted = _executable(base / "override" / "reader")
+    command = _executable(shared / "reader") if case != "symlink_in_folder" else shared / "reader"
+    if case == "symlink_in_folder":
+        command.symlink_to(trusted)
+    elif case == "symlink_into_folder":
+        command = base / "override" / "link"
+        command.symlink_to(shared / "reader")
+    elif case == "dot_dot":  # `..` is looked up in the shared folder, so the shared folder is checked
+        command = shared / ".." / "override" / "reader"
+    shared.chmod(0o775 if case in ("group", "unknown_group", "unlistable_database") else 0o777)
+    monkeypatch.setattr(start_reader.launcher, "group_name", lambda gid: "crew")
+    monkeypatch.setattr(start_reader.launcher, "user_database_is_local", lambda: case != "unlistable_database")
+    if case == "group":
+        monkeypatch.setattr(start_reader.launcher, "other_members", lambda gid, owners: ["guest"])
+    elif case == "unknown_group":
+        def unlisted(gid, owners):
+            raise KeyError(gid)
+
+        monkeypatch.setattr(start_reader.launcher, "other_members", unlisted)
+    elif case == "unlistable_database":  # SSSD, say: users it does not list may be members
+        monkeypatch.setattr(start_reader.launcher, "other_members", lambda gid, owners: [])
+    _write_override(env, {"version": 1, "command": [str(command)]})
+    plain = _plain_reader(env, tmp_path)
+    assert start_reader() == ("plain", plain[0], plain, None)
+    (line,) = capsys.readouterr().err.splitlines()
+    assert '"command[0]" is under %s, %s' % (shared, reason) in line and line.endswith("; starting the plain reader")
+
+
+def test_a_command_swapped_between_the_check_and_the_start_never_starts(start_reader, env, tmp_path, monkeypatch):
+    """REGRESSION (#2261): the replacement the review reproduced with a second user, made here
+    between the launcher's check and its start, as the folder's mode lets another user do. The
+    swapped file started; now the folder that allows the swap starts the plain reader."""
+    base = Path(os.path.realpath(tmp_path))
+    command = _executable(base / "shared" / "reader")
+    command.parent.chmod(0o777)
+    checked = start_reader.launcher.reader_override
+
+    def check_then_swap(path):
+        result = checked(path)
+        swapped = command.parent / "swapped"
+        swapped.write_text("#!/bin/sh\necho another user's program\n", encoding="utf-8")
+        swapped.chmod(0o755)
+        os.replace(swapped, command)
+        return result
+
+    monkeypatch.setattr(start_reader.launcher, "reader_override", check_then_swap)
+    _write_override(env, {"version": 1, "command": [str(command)]})
+    plain = _plain_reader(env, tmp_path)
+    assert start_reader() == ("plain", plain[0], plain, None)
+
+
+@pytest.mark.parametrize("case", ["sticky", "group_of_this_user", "symlink"])
+def test_a_reader_override_behind_folders_only_this_user_can_write_starts_as_configured(start_reader, env, tmp_path,
+                                                                                        monkeypatch, capsys, case):
+    """A sticky folder holding this user's own entry passes, as does a folder writable only by a
+    group whose members are this user or root. The command starts by its configured path, not the
+    one its symlinks resolve to: a venv's Python finds its venv from the path it was started by."""
+    base = Path(os.path.realpath(tmp_path))
+    reader = _executable(base / "shared" / "reader")
+    command = reader
+    if case == "sticky":
+        reader.parent.chmod(0o1777)
+    elif case == "group_of_this_user":
+        reader.parent.chmod(0o775)
+        monkeypatch.setattr(start_reader.launcher, "user_database_is_local", lambda: True)
+        monkeypatch.setattr(start_reader.launcher, "other_members", lambda gid, owners: [])
+    else:
+        command = base / "venv" / "bin" / "python"
+        command.parent.mkdir(parents=True)
+        command.symlink_to(reader)
+    _write_override(env, {"version": 1, "command": [str(command), "-I"]})
+    assert start_reader()[:3] == ("override", str(command), [str(command), "-I"])
+    assert capsys.readouterr().err == ""
+
+
+def _launcher():
+    spec = importlib.util.spec_from_file_location("lcmx_mcp_under_test", PLUGIN / "bin" / "lcmx_mcp.py")
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    return launcher
+
+
+def test_folder_untrusted_names_who_else_could_replace_an_entry(monkeypatch):
+    """The folder rule both ways, on stat results a test cannot make for real: folders and entries
+    other users own, and groups with other members."""
+    launcher = _launcher()
+    members = {80: [], 81: ["guest"]}
+
+    def other_members(gid, owners):
+        return members[gid]  # a KeyError, as for a group the user database does not list
+
+    monkeypatch.setattr(launcher, "other_members", other_members)
+    monkeypatch.setattr(launcher, "group_name", lambda gid: {80: "crew", 81: "staff"}.get(gid, str(gid)))
+    monkeypatch.setattr(launcher, "user_database_is_local", lambda: True)
+
+    def folder(mode, uid=501, gid=80):
+        return os.stat_result((stat.S_IFDIR | mode, 0, 0, 1, uid, gid, 0, 0, 0, 0))
+
+    mine, theirs = (os.stat_result((stat.S_IFREG | 0o755, 0, 0, 1, uid, 0, 0, 0, 0, 0)) for uid in (501, 502))
+    owners = (501, 0)
+    assert launcher.folder_untrusted(folder(0o755), mine, owners) == ""
+    assert launcher.folder_untrusted(folder(0o755, uid=0), theirs, owners) == ""
+    assert launcher.folder_untrusted(folder(0o755, uid=502), mine, owners) == "not owned by this user or root"
+    assert launcher.folder_untrusted(folder(0o775), mine, owners) == ""
+    assert launcher.folder_untrusted(folder(0o775, gid=81), mine, owners) == (
+        "writable by its group staff, whose members include guest")
+    assert launcher.folder_untrusted(folder(0o775, gid=99), mine, owners) == (
+        "writable by its group 99, which the user database does not list")
+    assert launcher.folder_untrusted(folder(0o757), mine, owners) == "writable by others"
+    assert launcher.folder_untrusted(folder(0o1777, uid=0), mine, owners) == ""
+    assert launcher.folder_untrusted(folder(0o1777, uid=0), theirs, owners) == (
+        "shared, and the entry in it belongs to another user")
+    assert launcher.folder_untrusted(folder(0o1775, gid=81), theirs, owners) == (
+        "shared, and the entry in it belongs to another user")
+    monkeypatch.setattr(launcher, "user_database_is_local", lambda: False)
+    assert launcher.folder_untrusted(folder(0o775), mine, owners) == (
+        "writable by its group crew (user database not provably local)")
+
+
+def _group_folder_verdicts(launcher, monkeypatch, database_is_local):
+    """What a folder writable by its group comes to under this user database, for a group of only
+    this user and root, then for one with guest in it."""
+    monkeypatch.setattr(launcher, "user_database_is_local", lambda: database_is_local)
+    monkeypatch.setattr(launcher, "group_name", lambda gid: "crew")
+    folder = os.stat_result((stat.S_IFDIR | 0o775, 0, 0, 1, 501, 80, 0, 0, 0, 0))
+    entry = os.stat_result((stat.S_IFREG | 0o755, 0, 0, 1, 501, 0, 0, 0, 0, 0))
+    verdicts = []
+    for others in ([], ["guest"]):
+        monkeypatch.setattr(launcher, "other_members", lambda gid, owners, others=others: others)
+        verdicts.append(launcher.folder_untrusted(folder, entry, (501, 0)))
+    return verdicts
+
+
+_MEMBERS_RULE = ["", "writable by its group crew, whose members include guest"]
+_NOT_PROVABLE = ["writable by its group crew (user database not provably local)"] * 2
+
+
+@pytest.mark.parametrize("conf, libc, local", [
+    ("passwd: files\ngroup: files\n", "glibc 2.39", True),
+    ("passwd: files systemd\ngroup: files [SUCCESS=merge] systemd\n", "glibc 2.39", True),
+    ("passwd: files sss systemd\ngroup: files sss systemd\n", "glibc 2.39", False),
+    ("passwd: files ldap\ngroup: files ldap\n", "glibc 2.39", False),
+    ("passwd: compat\ngroup: compat\n", "glibc 2.39", False),  # compat can bring in NIS
+    ("passwd: files\n", "glibc 2.39", False),  # no group line: glibc's default is not provably local
+    ("passwd: sss files\ngroup: files\npasswd: files\n", "glibc 2.39", False),  # every line counts
+    ("passwd: files\ngroup: files\ninitgroups: files sss\n", "glibc 2.39", False),
+    (None, "glibc 2.39", False),  # no nsswitch.conf
+    ("passwd: files\ngroup: files\n", "", False),  # musl does not read nsswitch.conf
+])
+def test_on_linux_a_group_folder_passes_only_where_nsswitch_conf_lists_local_users(tmp_path, monkeypatch, conf,
+                                                                                    libc, local):
+    """The members rule needs every user listed, and a directory service such as SSSD or LDAP may
+    not list its users: anything about nsswitch.conf that does not prove the users are local refuses
+    a folder writable by its group."""
+    launcher = _launcher()
+    nsswitch = tmp_path / "nsswitch.conf"
+    if conf is not None:
+        nsswitch.write_text(conf, encoding="utf-8")
+    monkeypatch.setattr(launcher, "libc_name", lambda: libc)
+    is_local = launcher.linux_database_is_local(nsswitch)
+    assert is_local is local
+    assert _group_folder_verdicts(launcher, monkeypatch, is_local) == (_MEMBERS_RULE if local else _NOT_PROVABLE)
+
+
+@pytest.mark.parametrize("script, timeout, local", [
+    ("print('SearchPath: /Local/Default')", 30, True),
+    ("print('SearchPath: /Local/Default /BSD/local')", 30, True),
+    ("print('SearchPath:\\n /Local/Default\\n /Active Directory/CORP/All Domains')", 30, False),
+    ("print('SearchPath: /Local/Default /LDAPv3/ldap.example.com')", 30, False),  # as DHCP can add
+    ("print('SearchPath: /Local/Default /BSD/corp')", 30, False),  # an NIS domain
+    ("print('CSPSearchPath: /Local/Default')", 30, False),  # the custom policy's path, maybe not in use
+    ("print('SearchPath: /Local/Default'); raise SystemExit(1)", 30, False),
+    ("print('')", 30, False),
+    ("import time; time.sleep(30)", 0.5, False),  # dscl times out
+])
+def test_on_macos_a_group_folder_passes_only_where_the_search_path_has_local_nodes(monkeypatch, script, timeout,
+                                                                                    local):
+    """The search path macOS uses now must have only local nodes; dscl's output stands in for it."""
+    launcher = _launcher()
+    is_local = launcher.macos_database_is_local([sys.executable, "-c", script], timeout)
+    assert is_local is local
+    assert _group_folder_verdicts(launcher, monkeypatch, is_local) == (_MEMBERS_RULE if local else _NOT_PROVABLE)
+
+
+def test_other_members_counts_listed_members_and_primary_group_users(monkeypatch):
+    """A group's members are its listed members and every user whose primary group it is; only this
+    user and root are not others, and a listed name the user database does not know is another."""
+    launcher = _launcher()
+    users = [SimpleNamespace(pw_name=name, pw_uid=uid, pw_gid=gid)
+             for name, uid, gid in (("me", 501, 20), ("root", 0, 0), ("guest", 502, 80), ("bob", 503, 20))]
+    groups = {20: [], 80: ["root", "me"], 81: ["me", "ghost"], 82: ["root", "me"]}
+    monkeypatch.setattr(launcher.grp, "getgrgid", lambda gid: SimpleNamespace(gr_mem=groups[gid]))
+    monkeypatch.setattr(launcher.pwd, "getpwnam", lambda name: {user.pw_name: user for user in users}[name])
+    monkeypatch.setattr(launcher.pwd, "getpwall", lambda: users)
+    owners = (501, 0)
+    assert launcher.other_members(80, owners) == ["guest"]  # listed: root and me; guest by primary group
+    assert launcher.other_members(81, owners) == ["ghost"]
+    assert launcher.other_members(82, owners) == []
+    assert launcher.other_members(20, owners) == ["bob"]
+    with pytest.raises(KeyError):
+        launcher.other_members(99, owners)
+
+
+def test_the_walk_looks_entries_up_as_the_kernel_does(tmp_path, monkeypatch):
+    """Every entry on the way, in order: from `/` down, the symlink itself, then its target, with
+    `..` stepping back through the resolved path. Each entry's folder is checked when it is looked
+    up, so `/` and each symlink's own folder are checked too."""
+    launcher = _launcher()
+    base = Path(os.path.realpath(tmp_path))
+    _executable(base / "b" / "reader")
+    (base / "a").mkdir()
+    (base / "a" / "link").symlink_to("../b")
+    looked_up = []
+    lstat = os.lstat
+    with monkeypatch.context() as patch:  # undone before tmp_path's cleanup, which calls lstat too
+        patch.setattr(launcher.os, "lstat", lambda path: looked_up.append(path) or lstat(path))
+        assert launcher.path_untrusted(str(base / "a" / "link" / "reader"), (os.geteuid(), 0)) == ""
+    prefixes = [os.path.join("/", *base.parts[1:index + 1]) for index in range(1, len(base.parts))]
+    # `..` in a/ names base, and is checked in a/ as any entry is
+    assert looked_up == [*prefixes, *(str(base / part) for part in ("a", "a/link", "", "b", "b/reader"))]
 
 
 # Each program the launcher ends up running appends [which, argv] to LCMX_TEST_RECORD.
