@@ -11318,7 +11318,8 @@ class LCMEngine(
 
     def _queue_cold_session_tail(self, view, *, session_id, conversation_id, source, error):
         tail = dict(kind="cold", store=self._store, hermes_home=str(self._hermes_home or ""), session_id=session_id,
-                    conversation_id=conversation_id, source=source, view=copy.deepcopy(view))
+                    conversation_id=conversation_id, source=source, view=copy.deepcopy(view),
+                    context_window_tokens=self._store.get_context_window_tokens(session_id))
         if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
             self._pending_session_tails.append(tail)
             self._ledger_count("ledger.tail.queued.cold." + type(error).__name__)
@@ -11518,7 +11519,8 @@ class LCMEngine(
             if stored < len(view):
                 ids = self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
                     conversation_id=_normalize_conversation_id_value(tail["conversation_id"]),
-                    **(dict(store=tail["store"], hermes_home=hermes_home) if hermes_home is not None else {}))
+                    **(dict(store=tail["store"], hermes_home=hermes_home,
+                            context_window_tokens=tail.get("context_window_tokens")) if hermes_home is not None else {}))
         if hermes_home is not None and ids:
             self._ledger_count("ledger.tail.cold_detached_stored")
         return True
