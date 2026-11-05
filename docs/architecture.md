@@ -25,7 +25,7 @@ runtime evidence.
   their assertion/adaptive-retrieval/entity flags are on. `LCM_DISABLED_TOOLS` can hide any tool.
 - **Source-aware retrieval** - filters raw rows and summaries by descendant source lineage
 - **Session controls** - ignore noisy sessions or keep sessions read-only with glob patterns
-- **Large payload controls** - optional ingest-time externalization for oversized tool/media/raw payloads, plus transcript GC for already-externalized tool results
+- **Large payload controls** - optional ingest-time externalization for oversized tool/media/raw payloads, with read compatibility for legacy transcript GC placeholders
 - **Sensitive-pattern controls** - two independent layers: opt-in durable redaction of API
   keys, bearer tokens, passwords, and private keys before LCM stores or summarizes them
   (off by default — the durable store is lossless), and automatic protection of the copies

@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime
@@ -66,7 +67,6 @@ from .escalation import (
 )
 from .externalize import (
     _build_externalized_placeholder,
-    build_transcript_gc_placeholder,
     extract_externalized_ref,
     find_externalized_payload_for_message,
     find_externalized_tool_result_content_for_call,
@@ -184,6 +184,8 @@ from . import tools as lcm_tools
 logger = logging.getLogger(__name__)
 _DIAGNOSTIC_ENGINE_TOKENS = itertools.count(1)
 _NATIVE_RECOVERY_WARNING_LOGGED = False
+_CACHE_FRIENDLY_CONDENSATION_WARNING_LOGGED = False
+_LARGE_OUTPUT_TRANSCRIPT_GC_WARNING_LOGGED = False
 
 
 @lru_cache(maxsize=1)
@@ -748,6 +750,18 @@ class LCMEngine(
             logger.warning(
                 "LCM_NATIVE_RECOVERY is no longer supported (removed in v0.25.0) and is ignored; "
                 "compaction uses the LCM path"
+            )
+        global _CACHE_FRIENDLY_CONDENSATION_WARNING_LOGGED, _LARGE_OUTPUT_TRANSCRIPT_GC_WARNING_LOGGED
+        if self._config.cache_friendly_condensation_enabled and not _CACHE_FRIENDLY_CONDENSATION_WARNING_LOGGED:
+            _CACHE_FRIENDLY_CONDENSATION_WARNING_LOGGED = True
+            logger.warning(
+                "LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED is no longer supported (removed in v0.30.0) and is ignored"
+            )
+        if self._config.large_output_transcript_gc_enabled and not _LARGE_OUTPUT_TRANSCRIPT_GC_WARNING_LOGGED:
+            _LARGE_OUTPUT_TRANSCRIPT_GC_WARNING_LOGGED = True
+            logger.warning(
+                "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED is no longer supported (removed in v0.30.0) and is ignored; "
+                "summarized tool rows are no longer rewritten"
             )
         self._hermes_home = hermes_home
         self._stable_use_lock = threading.Lock()
@@ -5180,8 +5194,8 @@ class LCMEngine(
                 conversation_id=off_current_normal_conversation_id, source=off_current_source, error=exc)
             self._ledger_count("ledger.tail.busy_at_end")
             logger.warning(
-                "LCM session-end raw-message ingest skipped due to SQLite lock; "
-                "retry pending at the next session start or shutdown: %s unflushed=%d", exc, len(messages))
+                "LCM session-end raw-message ingest skipped due to SQLite lock; retry pending at the next session start or "
+                "end in this process, at engine shutdown, or at a normal interpreter exit (not os._exit): %s session=%s unflushed=%d", exc, session_id, len(messages))
             return True
 
         if off_current_lineage:
@@ -5413,11 +5427,11 @@ class LCMEngine(
                         self._ledger_count("ledger.tail.busy_at_end")
                         logger.warning(
                             "LCM session-end raw-message ingest skipped due to SQLite lock after short wait; "
-                            "%s: %s unflushed=%d",
-                            "retry pending at the next session start or shutdown"
+                            "%s: %s session=%s unflushed=%d",
+                            "retry pending at the next session start or end in this process, at engine shutdown, or at a normal interpreter exit (not os._exit)"
                             if len(self._pending_session_tails) > pending_before
                             else "final messages may be absent from the plugin-local store",
-                            exc,
+                            exc, session_id,
                             unflushed,
                         )
                         return
@@ -7433,6 +7447,13 @@ class LCMEngine(
                     groups = [[(attempt["stored"][idx], "generated_unproven", None, None, None)] for idx in sorted(flagged)]
                     delta["ledger.generated_unproven_rows"] += store.add_message_relations(groups)
                 delta.update("ledger.marker_rows." + kind for kind in markers.values())
+                mark, session_top, lag = conn.execute(
+                    "SELECT mark,max(store_id),count(m.store_id) FILTER (WHERE NOT EXISTS "
+                    "(SELECT 1 FROM occurrence_bindings b WHERE b.store_id=m.store_id)) FROM "
+                    "(SELECT (SELECT max_store_id FROM lineage_marks WHERE lineage=?) AS mark) "
+                    "LEFT JOIN messages m ON m.session_id=? AND m.store_id>coalesce(mark,0) "
+                    "AND m.store_id NOT IN (SELECT value FROM json_each(?))",
+                    (lineage, self._session_id, json.dumps(sorted(attempt["stored"].values())))).fetchone()
                 ids = set(attempt["matched"].values()) | {sid for sid, _kind, _stamp in attempt["observations"]}
                 by_store = {}
                 for sid, occ, ordinal in conn.execute(
@@ -7479,6 +7500,7 @@ class LCMEngine(
                     if stamp not in stamps and len(stamps) < 4:
                         observations.append((sid, kind, stamp))
                         stamps.add(stamp)
+                seq, rebind_ok = None, True
                 if pending or observations or not same or changed_ref:
                     seq = ingest_ledger.next_view_seq(conn)
                     if respace:
@@ -7494,11 +7516,69 @@ class LCMEngine(
                         entries[idx] = entries[idx]._replace(ref=None if idx in attempt["remainders"] else occ)
                     for sid, kind, stamp in observations:
                         ingest_ledger.add_stamp_observation(conn, lineage, by_store[sid][0][0], stamp, kind, seq)
-                    if not attempt.get("no_view"):
-                        ingest_ledger.write_view(conn, attempt["salt"], lineage, "ingest", None, entries,
-                                                 view_seq=seq, precomputed_chain=attempt["chain"])
-                        delta["ledger.views_written"] += 1
                     delta["ledger.bindings_written"] += len(rows)
+                memo = (store.db_identity, attempt["salt"], self._session_id)
+                if lag:
+                    rebind_ok = memo not in getattr(self, "_ledger_rebind_too_large", ())
+                    if rebind_ok:
+                        flag, rebind_delta = getattr(store, "_pending_relation_schema", False), Counter()
+                        delta["ledger.rebind.runs"] += 1
+                        try:
+                            with _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
+                                plan = ingest_ledger.plan_rebinds(store, str(self._conversation_id or ""),
+                                    self._session_id, attempt["salt"], attempt, mark)
+                                kept = list(conn.execute("SELECT store_id,ordinal FROM occurrence_bindings WHERE lineage=? "
+                                    "AND disposition IN ('stored','migrated','ambiguous') ORDER BY store_id", (lineage,))) if plan["pairs"] else []
+                                kept_ids = [s for s, _ in kept]
+                                pairs, placements, last = [], [], (0, 0)
+                                for i, sid in plan["pairs"]:
+                                    left_index, right_index = bisect_left(kept_ids, sid) - 1, bisect_right(kept_ids, sid)
+                                    left = kept[left_index][1] if left_index >= 0 else None
+                                    right = kept[right_index][1] if right_index < len(kept) else None
+                                    bounds = (left or 0, right if right is not None else 1 << 63)
+                                    if bounds[0] >= bounds[1] or any(a < b for a, b in zip(bounds, last)):
+                                        plan["skipped"]["crossed"] += 1
+                                        continue
+                                    pairs.append((i, sid))
+                                    placements.append(ingest_ledger.Placement(left, right))
+                                    last = bounds
+                                rebind_seq = seq if seq is not None else ingest_ledger.next_view_seq(conn) if plan["pairs"] else None
+                                refs = []
+                                if pairs:
+                                    labels, mapping = ingest_ledger.plan_ordinals(ingest_ledger.lineage_ordinals(conn, lineage), placements)
+                                    if mapping:
+                                        ingest_ledger.apply_respace(conn, lineage, mapping)
+                                        rebind_delta["ledger.respaced"] += 1
+                                    refs = ingest_ledger.insert_bindings(conn, lineage, [dict(ordinal=o, store_id=sid,
+                                        identity_digest=entries[i].identity_digest, stamp=attempt["stamps"][i],
+                                        disposition="migrated", key_rank=None, tag=None, view_seq=rebind_seq)
+                                        for (i, sid), o in zip(pairs, labels)])
+                            for (i, _sid), occ in zip(pairs, refs):
+                                entries[i] = entries[i]._replace(ref=occ)
+                            if plan["pairs"]:
+                                seq = rebind_seq
+                            rebind_delta.update({"ledger.rebind.skipped." + k: n for k, n in plan["skipped"].items()})
+                            rebind_delta["ledger.rebind.bound"] += len(pairs)
+                            delta.update(rebind_delta)
+                            rebind_ok = not plan["too_large"]
+                            if not rebind_ok:
+                                self.__dict__.setdefault("_ledger_rebind_too_large", set()).add(memo)
+                        except BaseException as exc:
+                            store._pending_relation_schema = flag
+                            if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
+                                    or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                                raise
+                            delta["ledger.rebind_failed"] += 1
+                            rebind_ok = False
+                    delta["ledger.rebind.residual"] += lag - rebind_delta.get("ledger.rebind.bound", 0) if rebind_ok else lag
+                if seq is not None and not attempt.get("no_view"):
+                    ingest_ledger.write_view(conn, attempt["salt"], lineage, "ingest", None, entries,
+                                             view_seq=seq, precomputed_chain=attempt["chain"])
+                    delta["ledger.views_written"] += 1
+                target = max(mark or 0, session_top or 0, *attempt["stored"].values())
+                if rebind_ok and not attempt.get("no_view") and target != (mark or 0):
+                    ingest_ledger.update_store_mark(conn, lineage, target)
+                    delta["ledger.store_mark_advanced"] += 1
         except BaseException as exc:
             store._pending_relation_schema = pending_relation_schema
             if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
@@ -8850,81 +8930,6 @@ class LCMEngine(
             return False
         return True
 
-    def _maybe_gc_compacted_tool_results(
-        self,
-        compacted_chunk: List[Dict[str, Any]],
-        source_store_ids: List[int],
-    ) -> None:
-        if not getattr(self._config, "large_output_transcript_gc_enabled", False):
-            return
-        if not compacted_chunk or not source_store_ids:
-            return
-
-        stored_by_id = self._store.get_batch(source_store_ids)
-
-        def _archive_in_rewrite_txn(conn: "sqlite3.Connection", sid: int) -> None:
-            # Runs inside gc_externalized_tool_result's write transaction, right
-            # after the content rewrite and before its commit: archive this row's
-            # now-stale chunks ATOMICALLY with the rewrite so a recall can never
-            # slice the new (short) content at the old chunk offsets (F2).
-            self._archive_chunks_for_messages([sid], connection=conn)
-
-        for store_id in source_store_ids:
-            stored = stored_by_id.get(store_id)
-            if not stored or stored.get("session_id") != self._session_id:
-                continue
-            if stored.get("role") != "tool":
-                continue
-            content = stored.get("content", "") or ""
-            tool_call_id = stored.get("tool_call_id", "") or ""
-            if not content:
-                continue
-
-            # Only take the fast ref-branch when the ENTIRE row is the
-            # externalized placeholder. A ref merely embedded in surrounding
-            # text (e.g. a recall-tool result that quotes a placeholder) must
-            # fall through to the content-equality lookup below, which tombstones
-            # only when the full row content matches the stored payload -
-            # otherwise the surrounding, never-externalized text is lost.
-            ref = extract_externalized_ref(content) if is_externalized_placeholder(content) else None
-            if ref:
-                externalized = load_externalized_payload(
-                    ref,
-                    config=self._config,
-                    hermes_home=self._hermes_home,
-                )
-                if externalized is not None and externalized.get("kind", "tool_result") == "tool_result":
-                    placeholder = build_transcript_gc_placeholder(externalized)
-                    self._store.gc_externalized_tool_result(
-                        store_id, placeholder, before_commit=_archive_in_rewrite_txn
-                    )
-                    continue
-
-            lookup_candidates = []
-            sanitized_content = sanitize_pre_compaction_content(content)
-            if sanitized_content and sanitized_content != content:
-                lookup_candidates.append(sanitized_content)
-            lookup_candidates.append(content)
-
-            externalized = None
-            for candidate in lookup_candidates:
-                externalized = find_externalized_payload_for_message(
-                    candidate,
-                    tool_call_id=tool_call_id,
-                    session_id=self._session_id,
-                    config=self._config,
-                    hermes_home=self._hermes_home,
-                )
-                if externalized is not None:
-                    break
-            if externalized is None:
-                continue
-
-            placeholder = build_transcript_gc_placeholder(externalized)
-            self._store.gc_externalized_tool_result(
-                store_id, placeholder, before_commit=_archive_in_rewrite_txn
-            )
-
     def _serialize_messages(self, messages: List[Dict[str, Any]], session_id: Optional[str] = None) -> str:
         return self._serialize_messages_with_clip(messages, session_id)[0]
 
@@ -9282,38 +9287,11 @@ class LCMEngine(
 
     # -- Internal: condensation --------------------------------------------
 
-    def _should_allow_follow_on_condensation(
-        self,
-        *,
-        uncondensed_count: int,
-        leaf_compacted_this_turn: bool,
-        force_overflow: bool,
-        critical_budget_pressure: bool = False,
-    ) -> tuple[bool, str]:
-        if not leaf_compacted_this_turn:
-            return True, ""
-        if not self._config.cache_friendly_condensation_enabled:
-            return True, ""
-        if force_overflow:
-            return True, ""
-        if critical_budget_pressure:
-            return True, ""
-
-        fanin = max(1, self._config.condensation_fanin)
-        debt_threshold = fanin * max(1, self._config.cache_friendly_min_debt_groups)
-        if uncondensed_count >= debt_threshold:
-            return True, ""
-        if uncondensed_count == fanin:
-            return False, "cache_friendly_single_group"
-        return False, "cache_friendly_low_debt"
-
     def _maybe_condense(
         self,
         focus_topic: Optional[str] = None,
         *,
-        leaf_compacted_this_turn: bool = False,
         force_overflow: bool = False,
-        critical_budget_pressure: bool = False,
     ) -> int:
         """Check if any depth level has enough nodes for condensation."""
         self._last_condensation_suppressed_reason = ""
@@ -9343,16 +9321,6 @@ class LCMEngine(
                 self._session_id, depth
             )
             if len(uncondensed) < fanin:
-                continue
-
-            allow_condense, reason = self._should_allow_follow_on_condensation(
-                uncondensed_count=len(uncondensed),
-                leaf_compacted_this_turn=leaf_compacted_this_turn,
-                force_overflow=force_overflow,
-                critical_budget_pressure=critical_budget_pressure,
-            )
-            if not allow_condense:
-                suppression_reason = reason or suppression_reason
                 continue
 
             # Take the first fanin nodes and condense
@@ -9399,11 +9367,6 @@ class LCMEngine(
                 source_tokens, summary_tokens,
             )
 
-            if leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
-                break
-
-        if not condensation_passes and leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
-            self._last_condensation_suppressed_reason = suppression_reason
         if route_stopped:
             self._last_condensation_suppressed_reason = "summary_route_unavailable"
         if result_rejected:

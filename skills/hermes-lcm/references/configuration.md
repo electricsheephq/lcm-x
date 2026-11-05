@@ -152,7 +152,9 @@ except `LCM_EMBEDDINGS_ENABLED`: a blank value there turns embeddings off instea
 keeping the local default.
 Range warnings (`LCM_CONTEXT_THRESHOLD`, `LCM_SURVIVAL_RESERVE`, `LCM_LEAF_CHUNK_TOKENS`, `LCM_SUMMARY_TIMEOUT_MS`), choice warnings (`LCM_EMBEDDING_PROVIDER`, `LCM_PREANSWER_EVIDENCE_MODE`, `LCM_EMBEDDING_STORAGE_DTYPE`), and dropped-input warnings (`LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS`, `LCM_RECALL_ARM_WEIGHTS`, `LCM_MODEL_THRESHOLDS`) use the same channel without changing values or consumer fallbacks.
 
-`LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` and `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` are deprecated in v0.28.0 and removed in v0.30.0, and `LCM_DEFERRED_MAINTENANCE_ENABLED` is deprecated in v0.30.0 and removed in v0.31.0 (#1246); `LCM_DEFERRED_MAINTENANCE_MAX_PASSES` only applies while it is on. Each enabled flag adds one `config_source_warnings` entry without changing behavior; false or unset flags and direct `LCMConfig(...)` construction add no deprecation warning. These flags are environment-only; their `lcm.*` YAML keys are ignored and shipped presets do not set them.
+`LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED`, `LCM_CACHE_FRIENDLY_MIN_DEBT_GROUPS`, and `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` were removed in v0.30.0 (#1246); they are parsed and ignored. Each true flag logs one warning per process; summarized tool rows are no longer rewritten. They add no deprecation entry to `config_source_warnings`, and existing GC placeholders remain readable.
+
+`LCM_DEFERRED_MAINTENANCE_ENABLED` is deprecated in v0.30.0 and removed in v0.31.0 (#1246); `LCM_DEFERRED_MAINTENANCE_MAX_PASSES` only applies while it is on. Enabling it adds one `config_source_warnings` entry without changing behavior; false or unset values and direct `LCMConfig(...)` construction add no deprecation warning. These flags are environment-only; their `lcm.*` YAML keys are ignored and shipped presets do not set them.
 
 ### Tool exposure
 
@@ -216,8 +218,8 @@ their existing clamping, fallback, and normalization rules. `—` means no metad
 in that column, not that every input is valid or that a removed option is active.
 `LCM_NATIVE_RECOVERY` was removed in v0.25.0; it is parsed and ignored.
 The operator guide and the prose above explain behavior and coupled settings.
-Deprecation releases describe the three retiring experiments; enabling any of them still
-warns without changing its behavior until removal.
+The deprecation release describes deferred maintenance; enabling it still warns
+without changing its behavior until removal.
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 | Environment key | Type | Default | Diagnostic range / choices | Deprecation |
@@ -235,7 +237,7 @@ warns without changing its behavior until removal.
 | `LCM_CONDENSATION_FANIN` | `int` | `4` | — | — |
 | `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `bool` | `false` | — | — |
 | `LCM_DYNAMIC_LEAF_CHUNK_MAX` | `int` | `40000` | — | — |
-| `LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` | `bool` | `false` | — | Deprecated v0.28.0; removed v0.30.0 |
+| `LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` | `bool` | `false` | — | — |
 | `LCM_CACHE_FRIENDLY_MIN_DEBT_GROUPS` | `int` | `2` | — | — |
 | `LCM_DEFERRED_MAINTENANCE_ENABLED` | `bool` | `false` | — | Deprecated v0.30.0; removed v0.31.0 |
 | `LCM_DEFERRED_MAINTENANCE_MAX_PASSES` | `int` | `4` | — | — |
@@ -269,7 +271,7 @@ warns without changing its behavior until removal.
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `bool` | `true` | — | — |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `int` | `10000` | — | — |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `int` | `2000` | — | — |
-| `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `bool` | `false` | — | Deprecated v0.28.0; removed v0.30.0 |
+| `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `bool` | `false` | — | — |
 | `LCM_STUB_FIRST_EXIT_TARGET_RATIO` | `float` | `0.0` | — | — |
 | `LCM_SUMMARY_MODEL` | `str` | `""` | — | — |
 | `LCM_NATIVE_RECOVERY` | `bool` | `false` | — | — |
