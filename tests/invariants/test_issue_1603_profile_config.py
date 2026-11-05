@@ -373,6 +373,9 @@ def test_environment_read_inventory():
             "identity check to distinguish routed snapshot from process mapping",
         ("config.py", "containment_base_dir"): "LCM_HERMES_BASE_DIR: operator containment root stays process-wide",
         ("embedding_provider.py", "__init__"): "FASTEMBED_CACHE_PATH: process-wide model download cache",
+        ("recorder.py", "_command_context"):
+            "default-off recorder (#2243): the HERMES_SESSION_* values a command sees, when the gateway's session "
+            "context module is absent; never LCM profile configuration",
         ("inactive_record.py", "_process_start"): "LC_ALL=C subprocess for ps process identity, not profile configuration",
         ("__init__.py", "_engine_took_slot"): "HERMES_HOME: process launch identity for inactive-record ownership, not profile configuration",
         ("adapters/claude-code/bin/lcmx_hook.py", "main"):

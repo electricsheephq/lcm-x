@@ -4,7 +4,7 @@
 ``sys.monitoring`` (Python 3.12+) on the code objects of the host-facing roots, so no callable is wrapped and
 no frame is added. Callbacks never raise into, return a value for, or disable the code they observe. Files are
 local: ``<dir>/proc/<pid>-<start>-<db8>/`` (events, snapshot, checkpoints, STATUS.json) and ``<dir>/blobs/``.
-See docs/recorder.md; ``recorder_read.read`` rebuilds a recording.
+See https://github.com/electricsheephq/lcm-x/blob/main/docs/recorder.md; ``recorder_read.read`` rebuilds a recording.
 """
 
 from __future__ import annotations

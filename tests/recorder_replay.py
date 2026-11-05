@@ -595,7 +595,6 @@ def _env_value(key, value, start, home):
 
 
 def _config_files(files, start, home, reader):
-    import yaml
     def clean(value):
         if isinstance(value, reader.Ref):
             return None
@@ -614,6 +613,8 @@ def _config_files(files, start, home, reader):
         if entry.get("state") == "absent":
             target.unlink(missing_ok=True)
         else:
+            import yaml  # only a recording that captured a config file needs a YAML writer
+
             target.parent.mkdir(parents=True, exist_ok=True)
             values = clean(entry.get("values") or {})
             target.write_text(yaml.safe_dump(values))
