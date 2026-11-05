@@ -72,6 +72,26 @@ def _spooled(env, setting="LCMX_CC_HOME") -> list[Path]:
     return sorted(directory.glob("*.json")) if directory.exists() else []
 
 
+EXEC_ARGS = ["-I", "-S", "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"]
+SHELL_FORM = 'python3 -I -S "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"'
+# Grok Build's manifest search order (crates/codegen/xai-grok-agent/src/plugins/manifest.rs in its
+# source at 2bdd1d6a): the first that exists is the plugin's manifest.
+GROK_MANIFESTS = ("plugin.json", ".grok-plugin/plugin.json", ".claude-plugin/plugin.json")
+
+
+def _hooks_file(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))["hooks"]
+
+
+def _argv(hook: dict) -> list[str]:
+    """What the host spawns for a registered command hook. With ``args``, Claude Code's exec form:
+    the command found on PATH and the arguments with ``${CLAUDE_PLUGIN_ROOT}`` substituted, with no
+    shell. Without, the command through ``sh -c``, as Grok Build runs it."""
+    if "args" not in hook:
+        return ["sh", "-c", hook["command"]]  # Grok Build finds sh on PATH
+    return [hook["command"], *[arg.replace("${CLAUDE_PLUGIN_ROOT}", str(PLUGIN)) for arg in hook["args"]]]
+
+
 def test_claude_payload_is_spooled_without_output(hook, env, tmp_path, capsys):
     transcript = _transcript(tmp_path)
     payload = {"hook_event_name": "Stop", "session_id": "0b6f2c1e-5f1d-4c1b-9b7e-2a1d3c4b5a69",
@@ -175,20 +195,61 @@ def test_relative_paths_are_refused(hook, env, tmp_path, monkeypatch, setting):
 
 def test_plugin_files_are_consistent(hook):
     manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
-    hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+    hooks = _hooks_file(PLUGIN / "hooks" / "hooks.json")
     servers = json.loads((PLUGIN / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
     assert manifest["name"] == "lcm-x"
     assert set(hooks) == set(hook.EVENTS) - {"PostToolUse"}  # accepted for Grok Build only
     assert hook.ASYNC_EVENTS == {"PostToolBatch"}
     for event, entries in hooks.items():
         for entry in entries:
-            # The shell form, which every host runs: Grok Build's runner is not yet proven to honour
-            # an exec form's args. -I -S skips site and ignores the user's Python settings.
-            assert entry["hooks"][0]["command"] == 'python3 -I -S "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"'
+            # Claude Code's exec form: python3, found on PATH, starts with no shell before it (#2141).
+            # -I -S skips site and ignores the user's Python settings.
+            assert (entry["hooks"][0]["command"], entry["hooks"][0]["args"]) == ("python3", EXEC_ARGS)
             # Only PostToolBatch runs in the background: the worker settles on the end events, a fork's
             # start source rides on SessionStart's record, and -p kills an async hook still running at exit.
             assert entry["hooks"][0].get("async", False) is (event in hook.ASYNC_EVENTS)
     assert set(servers) == {"lcm-x"}
+
+
+def test_each_host_has_its_own_hooks_file_with_the_same_hooks():
+    """#2141: Claude Code runs the exec form, which starts no shell. Grok Build's hook runner drops
+    ``args``, so Grok keeps the shell form in its own file. The two files register the same events,
+    matchers, timeouts and async flags; only the command form differs, so they cannot drift."""
+    claude = _hooks_file(PLUGIN / "hooks" / "hooks.json")
+    grok = _hooks_file(PLUGIN / ".grok-plugin" / "hooks.json")
+
+    def without_command(hooks):
+        return {event: [{**group, "hooks": [{key: value for key, value in each.items() if key not in ("command", "args")}
+                                            for each in group["hooks"]]} for group in groups]
+                for event, groups in hooks.items()}
+
+    def commands(hooks):
+        return {(each["command"], tuple(each.get("args", ()))) for groups in hooks.values()
+                for group in groups for each in group["hooks"]}
+
+    assert without_command(claude) == without_command(grok)
+    assert commands(claude) == {("python3", tuple(EXEC_ARGS))}
+    assert commands(grok) == {(SHELL_FORM, ())}
+
+
+def test_grok_build_reads_its_own_manifest_and_hooks_in_the_shell_form():
+    """#2141, a static check; Grok Build's runtime half stays unproven until it is installed (R11).
+    Grok takes the first manifest in GROK_MANIFESTS, and a hooks path there replaces hooks/hooks.json
+    instead of merging with it. Its runner drops ``args`` and starts a command through ``sh -c``
+    only when the command holds a shell character such as a space or ``$``. It runs any other as a
+    path in the hooks file's folder, where an exec-form ``python3`` does not exist."""
+    assert [name for name in GROK_MANIFESTS if (PLUGIN / name).is_file()][0] == ".grok-plugin/plugin.json"
+    grok = json.loads((PLUGIN / ".grok-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    claude = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    # Claude Code merges a manifest's hooks into hooks/hooks.json, so this would register each hook twice.
+    assert "hooks" not in claude
+    assert {**grok, "hooks": None} == {**claude, "hooks": None}  # one name, version and description
+    hooks = (PLUGIN / grok["hooks"]).resolve()
+    assert hooks == (PLUGIN / ".grok-plugin" / "hooks.json").resolve()
+    for groups in _hooks_file(hooks).values():
+        for group in groups:
+            for each in group["hooks"]:
+                assert "args" not in each and any(mark in each["command"] for mark in " |&;<>$")
 
 
 @pytest.mark.parametrize("entry, expected", [
@@ -660,9 +721,8 @@ def test_a_slow_step_is_charged_to_the_step_that_took_it(hook, env, tmp_path, mo
 def test_the_registered_hook_command_ignores_the_users_python_settings(env, tmp_path, setting):
     """REGRESSION (#2141): Claude Code runs the hook command in the user's environment, where a
     PYTHONPATH can shadow the standard library and a PYTHONHOME can stop python3 from starting.
-    The registered command runs isolated, so the hook still spools and prints nothing."""
-    hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
-    [command] = {entry["hooks"][0]["command"] for entries in hooks.values() for entry in entries}
+    The registered command runs isolated, so the hook still spools and prints nothing: Claude Code's
+    exec form and Grok Build's shell form alike."""
     planted = tmp_path / "planted"
     planted.mkdir()
     (planted / "json.py").write_text("raise SystemExit('a planted module loaded')\n", encoding="utf-8")
@@ -672,14 +732,16 @@ def test_the_registered_hook_command_ignores_the_users_python_settings(env, tmp_
     home = Path(env["LCMX_CC_HOME"])
     home.mkdir(parents=True)
     payload = {"hook_event_name": "Stop", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
-    lane = {**env, "PATH": str(python.parent), "CLAUDE_PLUGIN_ROOT": str(PLUGIN), setting: str(planted)}
-    with open(home / "capture.lock", "a") as handle:  # a worker is running, so the hook starts none
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        done = subprocess.run(["/bin/sh", "-c", command], input=json.dumps(payload), env=lane,
-                              capture_output=True, text=True, timeout=60)
-    assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
-    assert len(_spooled(env)) == 1
-    assert _log(env)[-1]["outcome"] == "worker_running"
+    lane = {**env, "PATH": f"{python.parent}:/bin", "CLAUDE_PLUGIN_ROOT": str(PLUGIN), setting: str(planted)}
+    for runs, hooks_file in enumerate((PLUGIN / "hooks" / "hooks.json", PLUGIN / ".grok-plugin" / "hooks.json"), 1):
+        [registered] = _hooks_file(hooks_file)["Stop"][0]["hooks"]
+        with open(home / "capture.lock", "a") as handle:  # a worker is running, so the hook starts none
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            done = subprocess.run(_argv(registered), input=json.dumps(payload), env=lane,
+                                  capture_output=True, text=True, timeout=60)
+        assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+        assert len(_spooled(env)) == 1
+        assert [row["outcome"] for row in _log(env)] == ["worker_running"] * runs  # each form logged its own run
 
 
 def test_the_reader_names_the_one_setup_step_when_no_python_is_found(env, tmp_path, monkeypatch, capsys):

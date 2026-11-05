@@ -422,6 +422,13 @@ def _registered(event):
     return hook
 
 
+def _argv(event):
+    """What Claude Code spawns for the event's hook in exec form: the command found on PATH, and
+    the arguments with ``${CLAUDE_PLUGIN_ROOT}`` substituted, with no shell."""
+    hook = _registered(event)
+    return [hook["command"], *[arg.replace("${CLAUDE_PLUGIN_ROOT}", str(PLUGIN)) for arg in hook["args"]]]
+
+
 @pytest.mark.parametrize("killed", ["before_its_record", "after_its_record"])
 @pytest.mark.parametrize("case", ["session_goes_on", "print_mode_exit"])
 def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes, case, killed):
@@ -467,7 +474,7 @@ def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes
         with open(home / "capture.lock", "a") as held:  # the running worker
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
             for event in events:
-                done = subprocess.run(["/bin/sh", "-c", _registered(event)["command"]], input=payload(event),
+                done = subprocess.run(_argv(event), input=payload(event),
                                       env=env, capture_output=True, text=True, timeout=60)
                 assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
         outcomes = [json.loads(line)["outcome"] for line in log.read_text(encoding="utf-8").splitlines()]
@@ -475,7 +482,7 @@ def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes
         assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
         return stored(home)
 
-    tool_batch = subprocess.Popen(["/bin/sh", "-c", _registered("PostToolBatch")["command"]], env=env,
+    tool_batch = subprocess.Popen(_argv("PostToolBatch"), env=env,
                                   stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                   start_new_session=True)  # waits for its payload until it gets one
 
