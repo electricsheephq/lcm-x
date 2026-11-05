@@ -135,7 +135,14 @@ class HostModules:
         hermes_cli.__path__ = []
         config = types.ModuleType("hermes_cli.config")
         config.get_hermes_home = lambda: self.home
-        config.load_config = lambda: {}
+        def load_config():
+            path = self.home / "config.yaml"
+            if not path.exists():
+                return {}
+            import yaml  # only a recording that captured a config file needs a YAML reader
+
+            return yaml.safe_load(path.read_text()) or {}
+        config.load_config = load_config
         hermes_cli.config = config
         gateway = types.ModuleType("gateway")
         gateway.__path__ = []
@@ -568,7 +575,7 @@ def replay(proc, *, plugin_root, workdir, host_path=None, checkpoint=None, mutat
     (a path that does not exist yet) replays at the recorded Hermes home, so rows that carry the home path or a
     digest of it compare equal."""
     plugin_root, workdir = Path(plugin_root), Path(workdir)
-    reader = _load_reader(plugin_root)
+    reader = _load_reader()
     recording = reader.read(proc, checkpoint=checkpoint)
     if mutate is not None:
         mutate(recording, reader)
@@ -734,8 +741,9 @@ class _TagShim:
         return getattr(self._real, name)
 
 
-def _load_reader(plugin_root):
-    spec = importlib.util.spec_from_file_location(f"_recorder_read_{next(_LOADS)}", Path(plugin_root) / "recorder_read.py")
+def _load_reader():
+    spec = importlib.util.spec_from_file_location(f"_recorder_read_{next(_LOADS)}",
+                                                 Path(__file__).resolve().parents[1] / "recorder_read.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

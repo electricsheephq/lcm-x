@@ -2594,6 +2594,51 @@ def test_2263_13_command_profile_refusal_replays(lab):
     assert not rep.diffs
 
 
+@needs312
+def test_2263_14_replay_host_load_config_reads_restored_yaml(lab):
+    yaml = pytest.importorskip("yaml")
+    home = lab.home()
+    values = {"lcm": {"context_threshold": 0.73}, "context": {"engine": "lcm"}}
+    (home / "config.yaml").write_text(yaml.safe_dump(values))
+    # Model the recording host even when this test runs against the old harness for red proof.
+    lab.mp.setattr(sys.modules["hermes_cli.config"], "load_config", lambda: values)
+    module, ctx = lab.load(home)
+    identity = importlib.import_module(module.__name__ + ".plugin_identity")
+    assert identity.load_hermes_config()["lcm"] == values["lcm"]
+    ctx.offered.get_status()
+    rec = lab.stop()
+    seen = []
+    def prepared(module):
+        prepare(module)
+        identity = importlib.import_module(module.__name__ + ".plugin_identity")
+        seen.append(identity.load_hermes_config())
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "host-config", prepare=prepared)
+    assert seen == [values]
+    assert rep.engines[1].name == "lcm"
+    assert rep.compared == 1
+    assert not rep.diffs
+
+
+@needs312
+@pytest.mark.parametrize("reader_state", ["missing", "raises"])
+def test_2263_15_replay_reader_comes_from_harness(lab, reader_state):
+    module, ctx = lab.load(lab.home())
+    ctx.offered.get_tool_schemas()  # get_status includes paths that differ in the copied tree
+    rec = lab.stop()
+    plugin_root = lab.tmp / "plugin-copy"
+    shutil.copytree(REPO, plugin_root, ignore=shutil.ignore_patterns(
+        ".git", "__pycache__", ".pytest_cache", ".ruff_cache"))
+    reader = plugin_root / "recorder_read.py"
+    if reader_state == "missing":
+        reader.unlink()
+    else:
+        reader.write_text("raise RuntimeError('replayed tree reader must not be imported')\n")
+    rep = replay(rec.proc, plugin_root=plugin_root, workdir=lab.tmp / "harness-reader", prepare=prepare)
+    assert Path(rep.reader.__file__).resolve() == REPO / "recorder_read.py"
+    assert rep.compared == 1
+    assert not rep.diffs
+
+
 def test_2263_s5_replay_root_timeout_restores_environment(lab):
     from tests import recorder_replay as rr
     module, ctx = lab.load(lab.home())

@@ -111,3 +111,5 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
 snapshot paths. `tests/recorder_replay.py` is a mini-replayer: it loads the plugin against a fake Hermes context,
 restores the snapshot, drives the recorded roots in order on one thread per recorded thread, serves recorded summary
 attempts and persisted-output inputs, restores the recorded effective configuration in the replay home, and compares every root's return and the in-scope tables.
+
+Replaying a recording that captured a `config.yaml` needs PyYAML; the harness imports it only then.
