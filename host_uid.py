@@ -319,7 +319,8 @@ class HostUidShadowMixin:
             unmapped = not rows and stored is None and (idx < cursor or idx in capture["tool_segment"] or idx in replayed)
             if bound:  # BOUND: compared against the payload-matching version (R1-1); the gate marks that binding
                 hit = self._host_uid_bytes_match(bound, identity[idx], fetched,
-                    **(dict(store=store, hermes_home=hermes_home) if hermes_home is not None else {})) if not rows else None
+                    **(dict(store=store, hermes_home=hermes_home, session_id=capture["session_id"],
+                            conversation_id=capture["conversation_id"]) if hermes_home is not None else {})) if not rows else None
                 lossy = not rows and stored is None and _lossy_identity(self._message_replay_identity(identity[idx]))
                 if stored is not None:  # VERSION_NEW is an event only; a stored duplicate is a replay check
                     delta["bound.disagree.stored_despite_match" if hit is not None else "bound.version_new"] += 1
@@ -394,11 +395,12 @@ class HostUidShadowMixin:
         for start in range(0, len(missing), 500):
             fetched.update((self._store if store is None else store).get_batch(missing[start:start + 500]))
 
-    def _host_uid_bytes_match(self, store_ids, identity_message, fetched: dict, *, store=None, hermes_home=None) -> Optional[int]:
+    def _host_uid_bytes_match(self, store_ids, identity_message, fetched: dict, *, store=None, hermes_home=None,
+                              session_id=None, conversation_id=None) -> Optional[int]:
         """The first bound row holding this dict's payload (its stored or host-rewrite form), else None."""
         if any(int(sid) not in fetched for sid in store_ids):
             self._host_uid_fetch(store_ids, fetched, **(dict(store=store) if store is not None else {}))
-        target = {} if store is None else dict(store=store, hermes_home=hermes_home)
+        target = {} if store is None else dict(store=store, hermes_home=hermes_home, session_id=session_id, conversation_id=conversation_id)
         identity = self._message_replay_identity(identity_message, strip_carrier=False, **target)
         return next((int(sid) for sid in store_ids if fetched.get(int(sid)) is not None
                      and identity in self._stored_row_forms(fetched[int(sid)], **target)), None)

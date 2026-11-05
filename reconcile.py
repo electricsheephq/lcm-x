@@ -445,6 +445,7 @@ class ReconcileMixin:
         tool_call_id: str,
         stripped: str,
         blocks: tuple[str, ...],
+        store=None, session_id=None,
     ) -> bool:
         """True when this session's store already holds THIS row with these blocks.
 
@@ -475,13 +476,14 @@ class ReconcileMixin:
         # the cost is a duplicate, the alternative is silent loss.
         if not tool_call_id:
             return False
-        session_id = str(getattr(self, "_session_id", "") or "")
-        store = getattr(self, "_store", None)
+        detached = store is not None
+        session_id = str((getattr(self, "_session_id", "") if session_id is None else session_id) or "")
+        store = getattr(self, "_store", None) if store is None else store
         if not session_id or store is None:
             return False
-        pending = getattr(self, "_pending_ingest_frontier", None)
-        cache = pending.oob_rows if pending is not None and hasattr(pending, "oob_rows") else getattr(
-            self, "_out_of_band_durable_rows", None)
+        pending = None if detached else getattr(self, "_pending_ingest_frontier", None)
+        cache = set() if detached else (pending.oob_rows if pending is not None and hasattr(pending, "oob_rows") else getattr(
+            self, "_out_of_band_durable_rows", None))
         if cache is None:
             cache = set()
             self._out_of_band_durable_rows = cache
@@ -525,6 +527,7 @@ class ReconcileMixin:
         *,
         stored_row: bool,
         tool_call_id: str = "",
+        store=None, session_id=None,
     ) -> str:
         """Remove out-of-band user blocks from a replay identity when sound.
 
@@ -555,6 +558,7 @@ class ReconcileMixin:
             tool_call_id=tool_call_id,
             stripped=stripped,
             blocks=blocks,
+            **(dict(store=store, session_id=session_id) if store is not None else {}),
         ):
             return content
         return stripped
@@ -736,13 +740,14 @@ class ReconcileMixin:
             pos = content.find("\n\n---\n\n", pos + 7)
         return None
 
-    def _stored_row_forms(self, row: Dict[str, Any], *, store=None, hermes_home=None) -> set:
+    def _stored_row_forms(self, row: Dict[str, Any], *, store=None, hermes_home=None, session_id=None, conversation_id=None) -> set:
         """A stored row's admissible identities: exact and its host-rewrite override form."""
         forms = (self._message_replay_identity(row, stored_row=True, with_host_rewrite=h,
-                 store=store, hermes_home=hermes_home) for h in (False, True))
+                 store=store, hermes_home=hermes_home, session_id=session_id, conversation_id=conversation_id) for h in (False, True))
         forms = set(forms)
         if row.get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER:
-            forms.add(self._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False))
+            forms.add(self._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False,
+                **(dict(store=store, hermes_home=hermes_home, session_id=session_id, conversation_id=conversation_id) if store is not None else {})))
         return forms
 
     def _replay_row_admits(self, message, row: Dict[str, Any], *, carrier: bool = False) -> bool:
@@ -866,7 +871,7 @@ class ReconcileMixin:
         self._bound_host_rewrite_overrides({store_id})
 
     def _pruned_tool_output_identity(self, msg: Dict[str, Any], role: str, content: str, *,
-                                     stored_row: bool = False) -> Optional[tuple]:
+                                     stored_row: bool = False, store=None, hermes_home=None, session_id=None, conversation_id=None) -> Optional[tuple]:
         """#773: the replay identity of the stored tool row a host-pruned tool row stands for, else None.
 
         Only a tool row whose whole content is the placeholder qualifies. The rows it can stand for are
@@ -888,8 +893,9 @@ class ReconcileMixin:
         release stored (``stored_row``: this session) is decided on the rows stored before it, so the
         host row, the copy and the source are one occurrence and a store already holding copies maps
         the host list as it did before. Stored rows are never changed."""
-        call_id, store = str(msg.get("tool_call_id") or ""), getattr(self, "_store", None)
-        session = getattr(self, "_session_id", None)
+        target = {} if store is None else dict(store=store, hermes_home=hermes_home, session_id=session_id, conversation_id=conversation_id)
+        call_id, store = str(msg.get("tool_call_id") or ""), getattr(self, "_store", None) if store is None else store
+        session = getattr(self, "_session_id", None) if session_id is None else session_id
         if (role != "tool" or content != _HERMES_PRUNED_TOOL_PLACEHOLDER or not call_id or store is None
                 or not session):
             return None
@@ -903,7 +909,7 @@ class ReconcileMixin:
                 return None
             conversation = str(msg.get("conversation_id") or "").strip()
         else:
-            conversation = str(getattr(self, "_conversation_id", None) or "").strip()
+            conversation = str((getattr(self, "_conversation_id", None) if conversation_id is None else conversation_id) or "").strip()
         tool_name = str(msg.get("tool_name") or msg.get("name") or "")
         # Each row's identity is read hundreds of times per pass, so the rows are remembered per bound
         # store until a write, by this or another connection, may have changed them: an answer read
@@ -912,11 +918,11 @@ class ReconcileMixin:
             generation = store.write_generation()
         except Exception:  # an unreadable store proves nothing: the row keeps its own identity
             return None
-        if (getattr(self, "_pruned_tool_source_store", None) is not store
+        if not target and (getattr(self, "_pruned_tool_source_store", None) is not store
                 or getattr(self, "_pruned_tool_source_generation", None) != generation):
             self._pruned_tool_source_store, self._pruned_tool_source_identities = store, {}
             self._pruned_tool_source_generation = generation
-        known = self._pruned_tool_source_identities
+        known = {} if target else self._pruned_tool_source_identities
         key = (session, conversation, call_id, tool_name)
         if key not in known:
             try:
@@ -931,7 +937,7 @@ class ReconcileMixin:
                 clearable = (not cleared and len(text) > _HERMES_PRUNE_MIN_CHARS
                              and not _is_stored_nonstring_content(text))
                 entries.append((int(row["store_id"]), cleared,
-                                self._message_replay_identity(row, stored_row=True) if clearable else None,
+                                self._message_replay_identity(row, stored_row=True, **target) if clearable else None,
                                 str(row.get("tool_name") or "") == tool_name))
             known[key] = tuple(entries)
             if len(known) > _HOST_REWRITE_OVERRIDE_CACHE_CAP:  # FIFO-bounded
@@ -946,14 +952,16 @@ class ReconcileMixin:
     def _message_replay_identity(
         self, msg: Dict[str, Any], *, stored_row: bool = False, with_host_rewrite: bool = False,
         strip_carrier: bool = True, allow_pruned_tool_alias: bool = True, store=None, hermes_home=None,
+        session_id=None, conversation_id=None,
     ) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
         content = normalize_content_value(msg.get("content")) or ""
-        source = None if stored_row else self._survival_projection_source(msg, role, content)
+        source = None if stored_row else self._survival_projection_source(msg, role, content, **(dict(store=store) if store is not None else {}))
         if source is not None:  # #582: a survival-fit projection is its source row, never a new occurrence
             return self._message_replay_identity(
-                source, stored_row=True, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
-        pruned = (self._pruned_tool_output_identity(msg, role, content, stored_row=stored_row)
+                source, stored_row=True, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias, **(dict(store=store, hermes_home=hermes_home, session_id=session_id, conversation_id=conversation_id) if store is not None else {}))
+        pruned = (self._pruned_tool_output_identity(msg, role, content, stored_row=stored_row,
+                    **(dict(store=store, hermes_home=hermes_home, session_id=session_id, conversation_id=conversation_id) if store is not None else {}))
                   if allow_pruned_tool_alias and content == _HERMES_PRUNED_TOOL_PLACEHOLDER else None)
         if pruned is not None:  # #773: likewise a host-pruned tool row (or its stored copy) is the row it cleared
             return pruned
@@ -998,6 +1006,7 @@ class ReconcileMixin:
             content,
             stored_row=stored_row,
             tool_call_id=str(msg.get("tool_call_id") or ""),
+            **(dict(store=store, session_id=session_id) if store is not None else {}),
         )
         if (
             role == "tool"
@@ -1008,7 +1017,7 @@ class ReconcileMixin:
             persisted_output_source_path = _persisted_output_saved_path(content)
             persisted_output_preview_sha256, allow_redacted_preview_match = self._persisted_output_marker_replay_proof(content)
             durable_content = None
-            recovered_with_stat = recover_hermes_persisted_output_with_file_stat(content, hermes_home=self._hermes_home) if not stored_row else None
+            recovered_with_stat = recover_hermes_persisted_output_with_file_stat(content, hermes_home=self._hermes_home if hermes_home is None else hermes_home) if not stored_row else None
             recovered_content = recovered_with_stat[0] if recovered_with_stat is not None else None
             recovered_identity_content = None
             if recovered_content is not None:
@@ -1046,14 +1055,14 @@ class ReconcileMixin:
             ):
                 durable_content = find_externalized_tool_result_content_for_call(
                     tool_call_id=str(msg.get("tool_call_id") or ""),
-                    session_id=str(msg.get("session_id") or self._session_id or ""),
+                    session_id=str(msg.get("session_id") or (self._session_id if session_id is None else session_id) or ""),
                     expected_chars=expected_chars,
                     persisted_output_source_path=persisted_output_source_path,
                     persisted_output_preview_sha256=persisted_output_preview_sha256,
                     require_persisted_output_file_not_newer=require_live_file_freshness,
                     allow_redacted_preview_match=allow_redacted_preview_match,
                     config=self._config,
-                    hermes_home=self._hermes_home,
+                    hermes_home=self._hermes_home if hermes_home is None else hermes_home,
                 )
             if durable_content is not None and (
                 recovered_content is None or self._recovered_content_matches_durable_identity(recovered_content, durable_content)
@@ -1062,13 +1071,13 @@ class ReconcileMixin:
             elif recovered_content is not None:
                 stale_durable_content = find_externalized_tool_result_content_for_call(
                     tool_call_id=str(msg.get("tool_call_id") or ""),
-                    session_id=str(msg.get("session_id") or self._session_id or ""),
+                    session_id=str(msg.get("session_id") or (self._session_id if session_id is None else session_id) or ""),
                     expected_chars=expected_chars,
                     persisted_output_source_path=persisted_output_source_path,
                     persisted_output_preview_sha256=persisted_output_preview_sha256,
                     allow_redacted_preview_match=allow_redacted_preview_match,
                     config=self._config,
-                    hermes_home=self._hermes_home,
+                    hermes_home=self._hermes_home if hermes_home is None else hermes_home,
                 )
                 if (
                     stale_durable_content is not None
@@ -1091,7 +1100,7 @@ class ReconcileMixin:
                     content = recovered_identity_content
         tool_calls = msg.get("tool_calls")
         if stored_row:
-            session_id = str(msg.get("session_id") or self._session_id or "")
+            session_id = str(msg.get("session_id") or (self._session_id if session_id is None else session_id) or "")
             content = self._restore_ingest_payload_placeholders_in_content_identity(
                 content,
                 session_id=session_id, **(dict(hermes_home=hermes_home) if hermes_home is not None else {}),

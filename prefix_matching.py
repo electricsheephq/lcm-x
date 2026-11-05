@@ -346,6 +346,8 @@ class PrefixMatchingMixin:
         )
         host_uids = self._host_uid_capture(kept, kept, 0, 0, None, (), session_id=session_id,
             **(dict(store=store) if hermes_home is not None else {}))  # v0.26.0 shadow
+        if host_uids is not None and hermes_home is not None:
+            host_uids["conversation_id"] = conversation_id
         store_ids = store._append_protected_batch(
             session_id,
             protected_messages,

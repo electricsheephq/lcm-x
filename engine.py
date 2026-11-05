@@ -7078,7 +7078,7 @@ class LCMEngine(
             for tail in self.__dict__.get("_pending_session_tails", ()):
                 if tail is retried_tail:
                     break
-                if tail.get("kind") == "cold" and tail["store"] is self._store and tail["session_id"] == self._session_id:
+                if tail.get("kind") == "cold" and self._cold_tail_is_bound(tail) and tail["session_id"] == self._session_id:
                     tail["went_on"] = True
             if pending.oob_rows or "_out_of_band_durable_rows" in self.__dict__:
                 self._out_of_band_durable_rows = pending.oob_rows
@@ -11443,9 +11443,12 @@ class LCMEngine(
                 raise
             after_commit.append(lambda exc=exc: self._ledger_count("ledger.write_failed", exc))
 
+    def _cold_tail_is_bound(self, tail):
+        return (tail["store"] is self.__dict__.get("_store")
+                and tail["hermes_home"] == str(self._hermes_home or ""))
+
     def _retry_cold_tail(self, tail, *, sibling):
-        if (tail["store"] is not self.__dict__.get("_store")
-                or tail["hermes_home"] != str(self._hermes_home or "")):
+        if not self._cold_tail_is_bound(tail):
             if tail["store"]._conn is None:
                 self._ledger_count("ledger.tail.cold_store_unbound")
                 return False
@@ -11574,8 +11577,7 @@ class LCMEngine(
                     self._ledger_count("ledger.tail.retry.deferred")
                     logger.debug("LCM pending session-end retry deferred", exc_info=True)
                     break
-                if tail.get("kind") == "cold" and (store is not self.__dict__.get("_store")
-                        or tail["hermes_home"] != str(self._hermes_home or "")):
+                if tail.get("kind") == "cold" and not self._cold_tail_is_bound(tail):
                     self._ledger_count("ledger.tail.cold_store_unbound")
                 self._ledger_count("ledger.tail.retry_failed")
                 logger.warning("LCM pending session-end retry failed (%s); retry pending", type(exc).__name__)

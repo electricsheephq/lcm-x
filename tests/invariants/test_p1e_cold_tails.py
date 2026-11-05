@@ -121,7 +121,8 @@ def committed_rows(path, session):
             "SELECT * FROM messages WHERE session_id=? ORDER BY store_id", (session,))]
 
 
-def home_rebound_cold_tail(engines, monkeypatch, *, shared=False, origin="current", large=False, reused_uid=False):
+def home_rebound_cold_tail(engines, monkeypatch, *, shared=False, origin="current", large=False, reused_uid=False,
+                           tool_outputs=None):
     engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
     monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "shadow")
     home = Path(engine._hermes_home)
@@ -141,6 +142,11 @@ def home_rebound_cold_tail(engines, monkeypatch, *, shared=False, origin="curren
                                   "function": {"name": "shell", "arguments": "{}"}}]
         view.insert(2, _m("tool", "large output " * 4000, 2.5, "tool-result",
                           tool_call_id="call", tool_name="shell"))
+    if tool_outputs is not None:
+        outputs = tool_outputs(home)
+        view[1]["tool_calls"] = [{"id": row["tool_call_id"], "type": "function",
+                                  "function": {"name": "shell", "arguments": "{}"}} for row in outputs]
+        view[2:2] = outputs
     engine.ingest(copy.deepcopy(view[:1]))
     store = engine._store
     if origin == "off_current":
@@ -236,6 +242,87 @@ def test_shared_store_home_rebind_retries_under_the_tail_home(engines, monkeypat
     with sqlite3.connect(engine._store.db_path) as reader:
         keys = {row[0] for row in reader.execute("SELECT lineage_key FROM host_uid_bindings")}
     assert keys == {engine._host_uid_lineage_key("S1", hermes_home=str(home))[0]}
+
+
+def test_shared_store_other_home_ingest_does_not_mark_cold_tail(engines, monkeypatch):
+    engine, tail, view, home, other_home = home_rebound_cold_tail(engines, monkeypatch, shared=True)
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_retry_session_end_tails", lambda **kwargs: None)
+        engine.on_session_start("S1", hermes_home=str(other_home), platform="api", conversation_id="conv2")
+    engine.ingest([_m("user", "home B row", 10., "b1")])
+    assert [r["content"] for r in committed_rows(engine._store.db_path, "S1")] == ["A1", "home B row"]
+    assert not tail.get("went_on", False)
+    # Return to A without draining at session start, so the retry takes the bound current-session route.
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_retry_session_end_tails", lambda **kwargs: None)
+        engine.on_session_start("S1", hermes_home=str(home), platform="cli", conversation_id="conv1")
+    engine._retry_pending_session_tails()
+    engine._retry_pending_session_tails()
+    rows = committed_rows(engine._store.db_path, "S1")
+    assert [r["content"] for r in rows if r["conversation_id"] == "conv1"] == [m["content"] for m in view]
+    assert [r["content"] for r in rows if r["conversation_id"] == "conv2"] == ["home B row"]
+    assert not engine._pending_session_tails
+
+
+def test_detached_cold_externalized_identity_preserves_active_state(engines, monkeypatch):
+    from hermes_lcm import reconcile
+    from tests.test_issue_10_persisted_output_spillover import _write_output
+    from tests.test_reconcile_oob_message_block import OOB_BLOCK
+
+    payload = "tail output " * 4000
+
+    def outputs(home):
+        marker = _write_output(home / "cache" / "spillover" / "call.txt", full=payload)
+        return [_m("tool", content, 2.1 + i / 10, "a1", tool_call_id=f"call-{i}", tool_name="shell")
+                for i, content in enumerate((payload, "result" + OOB_BLOCK,
+                                              reconcile._HERMES_PRUNED_TOOL_PLACEHOLDER, marker))]
+
+    engine, tail, view, home, _ = home_rebound_cold_tail(engines, monkeypatch, tool_outputs=outputs)
+    watch, overrides = engine._host_rewrite_state()
+    engine._pruned_tool_source_store = engine._store
+    engine._pruned_tool_source_generation = engine._store.write_generation()
+    pruned = engine._pruned_tool_source_identities = {"active": ()}
+    oob = engine._out_of_band_durable_rows = {"active"}
+    foreign_reads, recovered, durable = [], [], []
+    recover = reconcile.recover_hermes_persisted_output_with_file_stat
+    find = reconcile.find_externalized_tool_result_content_for_call
+
+    def recover_at(content, **kwargs):
+        recovered.append(kwargs["hermes_home"])
+        return recover(content, **kwargs)
+
+    def find_at(**kwargs):
+        durable.append((kwargs["hermes_home"], kwargs["session_id"]))
+        return find(**kwargs)
+
+    with monkeypatch.context() as patch:
+        for name in ("write_generation", "find_session_tool_rows", "get_session_tail", "get_batch"):
+            original = getattr(engine._store, name)
+
+            def observed(*args, _name=name, _original=original, **kwargs):
+                foreign_reads.append(_name)
+                return _original(*args, **kwargs)
+
+            patch.setattr(engine._store, name, observed)
+        patch.setattr(reconcile, "recover_hermes_persisted_output_with_file_stat", recover_at)
+        patch.setattr(reconcile, "find_externalized_tool_result_content_for_call", find_at)
+        engine._retry_pending_session_tails()
+        engine._retry_pending_session_tails()
+    assert not foreign_reads
+    assert recovered and set(recovered) == {str(home)}
+    assert durable and set(durable) == {(str(home), "S1")}
+    assert engine._host_rewrite_store is engine._store
+    assert engine._host_rewrite_watch is watch and engine._host_rewrite_overrides is overrides
+    assert engine._pruned_tool_source_store is engine._store
+    assert engine._pruned_tool_source_identities is pruned and pruned == {"active": ()}
+    assert engine._out_of_band_durable_rows is oob and oob == {"active"}
+    rows = committed_rows(tail["store"].db_path, "S1")
+    assert len(rows) == len(view) and len({r["store_id"] for r in rows}) == len(view)
+    ref = extract_externalized_ref(rows[2]["content"])
+    assert ref and load_externalized_payload(ref, config=engine._config, hermes_home=str(home))["content"] == payload
+    assert not committed_rows(engine._store.db_path, "S1")
+    assert not committed_rows(engine._store.db_path, "S2")
+    assert not engine._pending_session_tails and count(engine, "tail.cold_detached_stored") == 1
 
 
 def test_detached_cold_tail_with_a_stamp_conflict_is_kept_and_counted(engines, monkeypatch):
