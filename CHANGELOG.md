@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Removed: cache-friendly follow-on condensation and transcript GC (#1246); their keys remain parsed and ignored with one warning per process when enabled, and legacy GC placeholders remain readable.
+
 - New: `scripts/lcm_x_mcp.py` (`lcm-x mcp`), a read-only stdio MCP server for Claude Code over one Hermes store. It serves `lcm_recall`, `lcm_grep`, `lcm_expand`, `lcm_load_session` and `lcm_describe` with their production schemas and outputs, opens the store read-only per call and never writes it; results carry `store_uuid` and degraded-mode flags. Hermes stores are unchanged: the reader derives `store_uuid` from the store file's identity (`store_uuid_source: derived`) unless a writer has stamped one. (#1192)
 - Ingest records shadow ledger bindings, stamp observations and view vectors in its own transaction; `LCM_INGEST_LEDGER=off` disables this without changing stored rows (#2055).
 - Fix: successful delegated-child resumes and store-only turns log at DEBUG without false fallback counts or skipped-ingest warnings; storage is unchanged (#2074).
