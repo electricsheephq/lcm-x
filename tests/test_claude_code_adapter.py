@@ -145,20 +145,18 @@ def test_grok_build_payload_is_normalized_and_off_by_default(hook, env):
     assert _spooled(env) == [] and _spooled(env, "LCMX_GROK_HOME") == []
 
 
-def test_grok_build_uses_its_own_home_and_never_spools_observe_only_events(hook, env):
-    """One owning harness per store; a session-end event cannot replace a pending record."""
+def test_grok_build_events_are_refused_in_their_own_home_whatever_the_old_flag_says(hook, env):
+    """REGRESSION (#2189): no Grok session-file reader is in this release. LCMX_GROK_CAPTURE=1 let
+    Grok records into the spool, where the worker matched no lineage (they carry no transcript
+    path) and deleted each one, having captured nothing. Every Grok event is now refused, and
+    logged in Grok's own home (one owning harness per store)."""
     grok_env = {**env, "GROK_SESSION_ID": "g-1", "LCMX_GROK_CAPTURE": "1"}
-    stop = {"hookEventName": "Stop", "sessionId": "g-1", "cwd": "/work", "reason": "end_turn"}
-    assert hook.main(io.StringIO(json.dumps(stop)), grok_env) == 0
-    assert _spooled(env) == []
-    [record_path] = _spooled(env, "LCMX_GROK_HOME")
-    assert json.loads(record_path.read_text(encoding="utf-8"))["observe_only"] is False
-    for event, reason in (("SessionEnd", None), ("Stop", "session_end")):
+    for event, reason in (("Stop", "end_turn"), ("PostToolUse", None), ("SessionEnd", None), ("Stop", "session_end")):
         payload = {"hookEventName": event, "sessionId": "g-1", "cwd": "/work", "reason": reason}
         assert hook.main(io.StringIO(json.dumps(payload)), grok_env) == 0
-        assert _log(env, "LCMX_GROK_HOME")[-1]["outcome"] == "observed"
-    assert json.loads(record_path.read_text(encoding="utf-8"))["event"] == "Stop"
-    assert json.loads(record_path.read_text(encoding="utf-8"))["reason"] == "end_turn"
+        assert _log(env, "LCMX_GROK_HOME")[-1]["outcome"] == "grok_capture_off"
+    assert _spooled(env) == [] and _spooled(env, "LCMX_GROK_HOME") == []
+    assert not Path(env["LCMX_CC_HOME"]).exists()
 
 
 @pytest.mark.parametrize("setting", ["LCMX_CC_HOME", "CLAUDE_CONFIG_DIR"])
@@ -693,6 +691,40 @@ def test_the_reader_names_the_one_setup_step_when_no_python_is_found(env, tmp_pa
     monkeypatch.setenv("LCMX_PACKAGE_ROOT", str(_package(tmp_path)))
     assert launcher.main() == 1
     assert "uv venv --python 3.11" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("setting", "outcome"), [("LCMX_PYTHON", "runtime_missing"),
+                                                  ("LCMX_PACKAGE_ROOT", "package_missing")])
+def test_a_relative_runtime_setting_is_refused_and_the_record_waits(hook, env, tmp_path, monkeypatch, capsys,
+                                                                    setting, outcome):
+    """REGRESSION (#2189): the hook checked a relative LCMX_PYTHON or LCMX_PACKAGE_ROOT from the
+    folder it runs in, and the worker then ran in the store home, where the path names nothing.
+    Each is refused, as a relative home is: no found Python or other package stands in for it,
+    nothing starts, the record stays spooled, and the server names the setting."""
+    package = _package(tmp_path)
+    python = tmp_path / "bin" / "python3.11"
+    python.parent.mkdir()
+    python.symlink_to(sys.executable)
+    monkeypatch.chdir(tmp_path)  # from here, each relative path below names a real file
+    started = []
+    monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: started.append(command))
+    lane = {**env, "PATH": str(python.parent), "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(package)}
+    lane[setting] = {"LCMX_PYTHON": "bin/python3.11", "LCMX_PACKAGE_ROOT": "package"}[setting]
+    payload = {"hook_event_name": "Stop", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    assert hook.main(io.StringIO(json.dumps(payload)), lane) == 0
+    assert (_log(env)[-1]["outcome"], started) == (outcome, [])
+    assert len(_spooled(env)) == 1
+
+    spec = importlib.util.spec_from_file_location("lcmx_mcp_under_test", PLUGIN / "bin" / "lcmx_mcp.py")
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    for name in ("CLAUDE_PLUGIN_DATA", "GROK_SESSION_ID"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in lane.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(launcher.os, "execv", lambda path, argv: pytest.fail("the reader started"))
+    assert launcher.main() == 1
+    assert capsys.readouterr().err == "lcm-x: %s must be an absolute path\n" % setting
 
 
 def test_a_precompact_drain_never_waits_on_a_held_lock(hook, env, tmp_path, monkeypatch):

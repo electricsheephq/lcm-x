@@ -91,12 +91,9 @@ def test_engine_state_db_path_fallback_outside_allowed_base_rejected(monkeypatch
 
     from hermes_lcm.engine import LCMEngine
 
-    class MockStore:
-        db_path = str(tmp_path / "outside" / "lcm.db")
-
     engine = LCMEngine.__new__(LCMEngine)
     engine._hermes_home = ""
-    engine._store = MockStore()
+    engine._db_path = tmp_path / "outside" / "lcm.db"
 
     with pytest.raises(ValueError, match="not within allowed base"):
         engine._state_db_path()

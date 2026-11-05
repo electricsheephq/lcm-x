@@ -866,8 +866,10 @@ def test_f7_composite_and_remainder_real_ingest_parity_with_off(tmp_path, monkey
     assert results["shadow"][0].get(expected) == 1, results["shadow"][0]
 
 
-def test_r2_version_new_leaves_bindings_unchecked_until_a_replay(tmp_path):
+@pytest.mark.parametrize("ledger_mode,replay_kind", [("off", "replay"), ("shadow", "prefix_replay")])
+def test_r2_version_new_leaves_bindings_unchecked_until_a_replay(tmp_path, monkeypatch, ledger_mode, replay_kind):
     """Reviewer A->B: a changed-bytes store is a VERSION_NEW event, never a gate check on A or B."""
+    monkeypatch.setenv("LCM_INGEST_LEDGER", ledger_mode)
     _state_db(tmp_path, [("S", None, None)])
     engine = _engine(tmp_path)
     try:
@@ -883,7 +885,9 @@ def test_r2_version_new_leaves_bindings_unchecked_until_a_replay(tmp_path):
     engine = _engine(tmp_path)
     try:  # restart: the host replays u with A's bytes
         engine.ingest([_m("user", "A" + PAD, 10.0, "u")])
-        assert _counts(engine) == {"replay.bound.agree.replay": 1}  # #436 maps it onto A
+        # P1d's proven prefix remains unbound in plan["matched"] (§5), so the
+        # shadow verifies the same canonical A through its prefix replay path.
+        assert _counts(engine) == {f"replay.bound.agree.{replay_kind}": 1}
         assert _gate(engine) == [("u", "agree", 0), ("u", None, 0)]
         assert "host_uid_gate_checked: 1" in _doctor_text(engine)
     finally:

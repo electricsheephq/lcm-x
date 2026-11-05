@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import effective_embedding_model, embedding_provider_id, profile_bound
-from .embedding_provider import FastembedProvider, _is_loopback_url
+from .embedding_provider import FastembedProvider, _automatic_chunks_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -239,20 +239,6 @@ def run_incremental_embedding_pass(
     return dict(slice_state, outcome=outcome) if slice_state is not None else outcome
 
 
-def _automatic_chunks_allowed(config: Any, command: Any) -> bool:
-    provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
-    provider = embedding_provider_id(provider)
-    if not command._is_local_embedding_provider(provider):
-        return False
-    if provider != "ollama":
-        return True  # FastEmbed runs in this process
-    # Read the base URL exactly as resolve_provider/OllamaProvider do.
-    base_url = str(
-        getattr(config, "ollama_base_url", "http://localhost:11434")
-    ).strip().rstrip("/") or "http://localhost:11434"
-    return _is_loopback_url(base_url)
-
-
 def _corpus_failure(result: dict[str, Any]) -> str | None:
     if result["status"] in {"error", "failed"}:
         if result["error"]:
@@ -299,7 +285,7 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any, slice_state=None) 
         del result  # providers are disposable; FastEmbed shares its model
     if breaker is not None and breaker.is_open():
         return "circuit_open", None  # the query path's breaker is cooling down
-    if not _automatic_chunks_allowed(config, command):
+    if not _automatic_chunks_allowed(config):
         try:
             command._validate_cloud_chunk_metadata(config, db_path)
         except Exception as exc:
@@ -317,7 +303,7 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any, slice_state=None) 
         config, db_path, apply=True, limit=limit, retry_uncertain=retry,
         stop_event=_STOP_EMBEDDING_MAINTENANCE, **({"maintenance_slice": max(0.001, slice_state["deadline"] - time.monotonic())} if sliced else {}),
     ))]
-    if _automatic_chunks_allowed(config, command):
+    if _automatic_chunks_allowed(config):
         corpora.append(("chunks", lambda retry: command._chunk_backfill_run(
             config, db_path, apply=True, limit=limit, retry_uncertain=retry, policy="",
             incremental=True,

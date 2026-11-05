@@ -184,10 +184,15 @@ def test_every_recovery_call_site_passes_hermes_home():
     assert len(calls) == 8
     missing = [(filename, node.lineno) for filename, node in calls if not any(kw.arg == "hermes_home" for kw in node.keywords)]
     assert not missing, f"Recovery call sites missing hermes_home: {missing}"
+    # #2210: reconcile's persisted-output identity read takes a detached cold tail's own home when one is passed.
+    detached = "self._hermes_home if hermes_home is None else hermes_home"
+    forms = []
     for filename, node in calls:
-        home = next(kw.value for kw in node.keywords if kw.arg == "hermes_home")
+        home = ast.unparse(next(kw.value for kw in node.keywords if kw.arg == "hermes_home"))
         expected = "hermes_home" if filename in ("ingest_persisted.py", "ingest_protection.py") else "self._hermes_home"
-        assert ast.unparse(home) == expected
+        assert home == expected or (filename == "reconcile.py" and home == detached), (filename, node.lineno, home)
+        forms.append(home)
+    assert forms.count(detached) == 1
 
 
 def test_recover_spillover_requires_hermes_home(tmp_path):

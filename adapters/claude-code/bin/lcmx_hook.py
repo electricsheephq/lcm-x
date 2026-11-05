@@ -132,14 +132,14 @@ def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[st
         record["problem"] = "bad_agent_id"
         return record
     if grok:
-        # Grok Build has no transcript path. Its end-of-session Stop and the 1.5 s
-        # SessionEnd are logged only. Its session-file reader stays off until
-        # its own real-session proof passes.
+        # Grok Build has no transcript path, and its session-file reader is not in this release:
+        # a spooled Grok record would match no lineage, and the worker would delete it having
+        # captured nothing. So every Grok event is refused until that reader and its real-session
+        # proof land. Its end-of-session Stop and the 1.5 s SessionEnd are observe-only for it.
         event_name = record["event"]
         record["observe_only"] = event_name == "SessionEnd" or (
             event_name == "Stop" and record["reason"] not in (None, "end_turn"))
-        if environ.get("LCMX_GROK_CAPTURE") != "1":
-            record["problem"] = "grok_capture_off"
+        record["problem"] = "grok_capture_off"
         return record
     root = lcmx_runtime.claude_projects_root(environ)
     if root is None:

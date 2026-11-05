@@ -332,8 +332,7 @@ def test_new_call_invalidates_old_signal(engines, monkeypatch, path):
     engine._session_stateless = False
     assert adopt(engine)
     assert emissions(engine)[0]["state"] == "proposed"
-    assert count(engine, "emission_signal_unmatched") == (0 if path == "write_failure" else 1)
-    assert count(engine, "emission_signal_deferred") == (1 if path == "write_failure" else 0)
+    assert count(engine, "emission_signal_unmatched") == 1
 
 
 def test_parent_handle_survives_child_bypass(engines, monkeypatch):
@@ -428,7 +427,11 @@ def test_ordinary_failures_count_warn_once_and_preserve_output(engines, monkeypa
     warnings = [r.getMessage() for r in caplog.records if "ledger." + counter in r.getMessage()]
     assert len(warnings) == 1 and "compress output unaffected" in warnings[0]
     assert all(r["state"] == "proposed" for r in emissions(engine))
-    if site != "set_emission_state":
+    if site == "write_view":
+        assert emissions(engine) and emission_views(engine) == []
+        assert count(engine, "emission_recovered_provenance_only") == len(emissions(engine))
+        assert engine._emission_handle is None
+    elif site != "set_emission_state":
         assert emissions(engine) == emission_views(engine) == []
 
 

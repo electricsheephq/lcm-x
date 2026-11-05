@@ -117,7 +117,7 @@ Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/
 - `LCM_HOST_MESSAGE_UID` (default `shadow`; `off`, `shadow`, `on`; env only): on a host whose messages carry `message_uid`, record which stored row each uid was bound to in the droppable `host_uid_bindings` table and count agreement with the existing identity matching; ingest decisions are unchanged. `/lcm doctor` reports `host_uid_*` counts. `off`: no capture, no table writes, no counts, no log line. Under `shadow` and `on`, canonical uid evidence can also exclude a proven hidden re-ingest copy of an assistant message from leaf summary input (the row stays stored and searchable); `off` disables that. `on` behaves exactly like `shadow`: both record count-only would-reject alias UID-conflict diagnostics in the debug log without changing matching, stored rows, bindings, or ingest writes. `off` performs no UID/binding reads on this diagnostic path. Unknown values behave as `shadow` and warn once. No-op on hosts without uids;
 - `FASTEMBED_CACHE_PATH` (fastembed's own variable, not an `LCM_*` key): the model cache the local `fastembed` provider loads from (default: the user cache directory); it may be a shared, read-only cache. A read-only cache must be pre-seeded, because preparation cannot download into it. Bge-small uses one ONNX Runtime intra-op thread; other models use two;
 - `LCM_IGNORE_SESSION_PATTERNS` and `LCM_STATELESS_SESSION_PATTERNS`: storage ownership boundaries;
-- `LCM_INGEST_LEDGER` (default `shadow`; `off`, `shadow`; env only): write foreground ingest bindings, stamp observations and view vectors in the ingest transaction, without changing row decisions. Ordinary isolated ledger failures fail open; busy errors still retry the ingest, and a lost owner transaction or savepoint error still rolls it back. `off` disables setup and ingest ledger work. Unknown values mean `shadow` and warn once per process. Tail drain, delegated children and compaction write no ledger rows at P1b-2b;
+- `LCM_INGEST_LEDGER` (default `shadow`; `off`, `shadow`; env only): write foreground ingest bindings, stamp observations and view vectors in the ingest transaction. On a cold or reconciled start, `shadow` also uses the ledger's occurrence-proven prefix as a cursor candidate. It can only move the cursor forward past rows proven stored or skipped by `LCM_IGNORE_MESSAGE_PATTERNS`, so it can change which incoming rows are stored. Ordinary isolated ledger failures fail open; busy errors still retry the ingest, and a lost owner transaction or savepoint error still rolls it back. `off` disables setup, ledger writes and the candidate, and restores the legacy cursor choice. Unknown values mean `shadow` and warn once per process. Tail drain, delegated children and compaction write no ledger rows at P1b-2b;
 - summary/embedding provider settings only after confirming credentials, cost, and data handling; see [docs/embeddings-setup.md, "Install consent, updates and recovery"](https://github.com/electricsheephq/lcm-x/blob/main/docs/embeddings-setup.md#install-consent-updates-and-recovery) for the embedding-dependency recovery note. Known cloud providers protect provider-bound copies automatically with the configured nonempty known pattern list while durable storage stays raw. `LCM_SENSITIVE_PATTERNS_ENABLED=true` is a separate irreversible durable-ingest opt-in. `LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly sends raw cloud copies under the `privacy:off` vector revision; warmup binds the chosen posture and later query/backfill calls fail closed on identity drift.
 
 `LCM_EMBEDDING_QUERY_PREFIX` / `LCM_EMBEDDING_DOCUMENT_PREFIX` default to `""` and apply only to Ollama and OpenAI-compatible embeddings.
@@ -152,7 +152,9 @@ except `LCM_EMBEDDINGS_ENABLED`: a blank value there turns embeddings off instea
 keeping the local default.
 Range warnings (`LCM_CONTEXT_THRESHOLD`, `LCM_SURVIVAL_RESERVE`, `LCM_LEAF_CHUNK_TOKENS`, `LCM_SUMMARY_TIMEOUT_MS`), choice warnings (`LCM_EMBEDDING_PROVIDER`, `LCM_PREANSWER_EVIDENCE_MODE`, `LCM_EMBEDDING_STORAGE_DTYPE`), and dropped-input warnings (`LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS`, `LCM_RECALL_ARM_WEIGHTS`, `LCM_MODEL_THRESHOLDS`) use the same channel without changing values or consumer fallbacks.
 
-`LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` and `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` are deprecated in v0.28.0 and removed in v0.30.0 (#1246). Each enabled flag adds one `config_source_warnings` entry without changing behavior; false or unset flags and direct `LCMConfig(...)` construction add no deprecation warning. These flags are environment-only; their `lcm.*` YAML keys are ignored and shipped presets do not set them.
+`LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED`, `LCM_CACHE_FRIENDLY_MIN_DEBT_GROUPS`, and `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` were removed in v0.30.0 (#1246); they are parsed and ignored. Each true flag logs one warning per process; summarized tool rows are no longer rewritten. They add no deprecation entry to `config_source_warnings`, and existing GC placeholders remain readable.
+
+`LCM_DEFERRED_MAINTENANCE_ENABLED` is deprecated in v0.30.0 and removed in v0.31.0 (#1246); `LCM_DEFERRED_MAINTENANCE_MAX_PASSES` only applies while it is on. Enabling it adds one `config_source_warnings` entry without changing behavior; false or unset values and direct `LCMConfig(...)` construction add no deprecation warning. These flags are environment-only; their `lcm.*` YAML keys are ignored and shipped presets do not set them.
 
 ### Tool exposure
 
@@ -184,6 +186,7 @@ A 400 or 404 saying the route cannot serve its model (unknown model, model not f
 - `LCM_SUMMARY_CIRCUIT_BREAKER_REJECTION_THRESHOLD` (default `6`, #630): results rejected for their content (empty, reasoning-only, integrity contract violated, not shorter than the source) before the route is refused;
 - `LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS` (default `300`): seconds an open route is refused before a retry is allowed;
 - `LCM_SUMMARY_TIMEOUT_MS` (default `120000`, the host's own compression default; when unset, Hermes `auxiliary.compression.timeout` applies if configured): how long one summary call may run before it counts as a failure. The foreground time budget can cut a call shorter.
+- `LCM_SHUTDOWN_COMPACTION_WAIT_S` (default `10.0`; env only, for example `LCM_SHUTDOWN_COMPACTION_WAIT_S=0.2`): a finite nonnegative float bounding the compaction drain after shutdown acquires its existing unbounded lifecycle lease. Values above `86400` are capped at `86400`; invalid values use `10.0`. Once shutdown starts, new compactions return the host messages unchanged and active passes stop at write checkpoints. On timeout one WARNING is logged and connections remain open; call shutdown again after the active pass exits to close them.
 - `LCM_FOREGROUND_SOFT_SECONDS` (default `60`; `0` = none) and `LCM_FOREGROUND_HARD_SECONDS` (default `120`; `0` or invalid = `120`) (#605): one time budget for a threshold sweep, counted from `compress()` entry. The progress call (a condensation when the summary frontier is over its target, else the first leaf) is tried while 15 s of usable time is left before the hard bound less a finalize reserve; after a stored leaf or condensed node a call starts only if its route's recent duration says it ends, with the reserve, by the hard bound and by the soft target (stop reason `soft_target_reached`). Each call's timeout is at most the usable time left. A step already running is not interrupted, so a compaction can end past the hard bound: read the INFO line `LCM compaction stop:` for the seconds. On `reason=error`, a trailing `failure=` field names the known cause as one token, such as `publication_invariant_conflict` or `exception:RuntimeError` (#1180). A call cut by the budget does not count against the route's circuit, and a compaction takes one spend-guard slot; rollups use their own guard. The budget covers the sweep-off, manual `/compress`, forced overflow and recovery paths too (manual and forced use the hard bound only), and a leaf or condensation source within `LCM_L3_TRUNCATE_TOKENS` is written whole as level 3 with no call.
 
 A published retained-occurrence escape logs one WARNING per pass naming the stored rows and the host/store order mismatch (#1162). The stop line adds `escaped=store_id:<id>,role:<role>,kind:<shown|mapped>,n:<count>` for published escapes only. The host copies stay live and the source rows stay stored; a failed summary emits neither this WARNING nor the token.
@@ -215,8 +218,8 @@ their existing clamping, fallback, and normalization rules. `—` means no metad
 in that column, not that every input is valid or that a removed option is active.
 `LCM_NATIVE_RECOVERY` was removed in v0.25.0; it is parsed and ignored.
 The operator guide and the prose above explain behavior and coupled settings.
-Deprecation releases describe the two retiring experiments; enabling either still
-warns without changing its behavior until removal.
+The deprecation release describes deferred maintenance; enabling it still warns
+without changing its behavior until removal.
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 | Environment key | Type | Default | Diagnostic range / choices | Deprecation |
@@ -234,9 +237,9 @@ warns without changing its behavior until removal.
 | `LCM_CONDENSATION_FANIN` | `int` | `4` | — | — |
 | `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `bool` | `false` | — | — |
 | `LCM_DYNAMIC_LEAF_CHUNK_MAX` | `int` | `40000` | — | — |
-| `LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` | `bool` | `false` | — | Deprecated v0.28.0; removed v0.30.0 |
+| `LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` | `bool` | `false` | — | — |
 | `LCM_CACHE_FRIENDLY_MIN_DEBT_GROUPS` | `int` | `2` | — | — |
-| `LCM_DEFERRED_MAINTENANCE_ENABLED` | `bool` | `false` | — | — |
+| `LCM_DEFERRED_MAINTENANCE_ENABLED` | `bool` | `false` | — | Deprecated v0.30.0; removed v0.31.0 |
 | `LCM_DEFERRED_MAINTENANCE_MAX_PASSES` | `int` | `4` | — | — |
 | `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `float` | `0.0` | — | — |
 | `LCM_THRESHOLD_FULL_SWEEP_ENABLED` | `bool` | `true` | — | — |
@@ -268,7 +271,7 @@ warns without changing its behavior until removal.
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `bool` | `true` | — | — |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `int` | `10000` | — | — |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `int` | `2000` | — | — |
-| `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `bool` | `false` | — | Deprecated v0.28.0; removed v0.30.0 |
+| `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `bool` | `false` | — | — |
 | `LCM_STUB_FIRST_EXIT_TARGET_RATIO` | `float` | `0.0` | — | — |
 | `LCM_SUMMARY_MODEL` | `str` | `""` | — | — |
 | `LCM_NATIVE_RECOVERY` | `bool` | `false` | — | — |
@@ -371,7 +374,7 @@ checkout root. Credential entries list only variable names, never values.
 | `LCM_ENABLE_SLASH_COMMAND` | `__init__.py` | Optional slash-command registration | plugin registration |
 | `LCM_SENDER_CAPTURE` | `sender_capture.py` | Profile-aware pending sender capture; default `true`, `0` disables capture without removing columns or backfilling history | each call — pending association creation through the profile-aware boolean resolver |
 | `LCM_HERMES_BASE_DIR` | `config.py` (called by `engine.py`, `externalize.py`, `diagnostics.py`) | Storage containment boundary; process-wide, never read from a routed profile | each call — storage-directory resolution or state-database containment validation; `_get_allowed_hermes_base()` also reads it when called (tests only; no production caller) |
-| `LCM_IDENTITY_ANCHOR` | `identity_anchor.py` | Identity-anchor switch | each call — `identity_anchor_enabled()` checks during ingest, replay identity handling, and compaction |
+| `LCM_IDENTITY_ANCHOR` | `config.py` (called by `identity_anchor.py`, `reconcile.py`, `engine.py`, `store_complete.py`) | Identity-anchor switch | each call — `identity_anchor_enabled()` checks during ingest, replay identity handling, and compaction |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `db_bootstrap.py` | Startup integrity-check interval | database open — startup FTS validation, after structural checks pass |
 | `LCM_FTS_INTEGRITY_BACKGROUND` | `db_bootstrap.py` | Background integrity-check switch | database open — startup FTS validation, when a deep check is due |
 | `LCM_EMBEDDING_BACKFILL_LEASE_TTL_S` | `command.py` | Backfill claim lifetime | each call — each summary or chunk backfill apply run, before lease acquisition |
