@@ -346,15 +346,23 @@ def test_exit_drain_stores_a_detached_cold_tail(engines, monkeypatch):
     assert not committed_rows(engine._store.db_path, "S1")
 
 
-@pytest.mark.parametrize("reused_uid", [False, True])
-def test_shutdown_after_a_failed_rebind_stores_the_detached_tail_without_reopening(engines, monkeypatch, reused_uid):
-    """A detached retry reads only the tail's store, so shutdown after a failed rebind never retries the open (#2152)."""
+_SUMMARY_SHAPED = "[Recent Summary (d0, node 1)]\nA3\n[Expand for details: A3]"
+
+
+@pytest.mark.parametrize("uid, last", [
+    pytest.param("a3", "A3", id="plain"),
+    pytest.param("a1", "A3", id="reused_uid"),
+    pytest.param("a3", _SUMMARY_SHAPED, id="summary_shaped"),
+])
+def test_shutdown_after_a_failed_rebind_stores_the_detached_tail_without_reopening(engines, monkeypatch, uid, last):
+    """A detached retry reads only the tail's store, so shutdown after a failed rebind never retries the open (#2152).
+
+    A summary-shaped user row has no bound DAG node to verify it, so it is kept as a real user row."""
     engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
     monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "shadow")
     engine._config.database_path = ""
     engine.on_session_start("S1", platform="cli", conversation_id="conv1")
-    view = [_m("user", "A1", 1., "a1"), _m("assistant", "A2", 2., "a2"),
-            _m("user", "A3", 3., "a1" if reused_uid else "a3")]
+    view = [_m("user", "A1", 1., "a1"), _m("assistant", "A2", 2., "a2"), _m("user", last, 3., uid)]
     engine.ingest(copy.deepcopy(view[:1]))
     store = engine._store
 
@@ -376,9 +384,13 @@ def test_shutdown_after_a_failed_rebind_stores_the_detached_tail_without_reopeni
     with pytest.raises(sqlite3.OperationalError):
         engine._rebind_storage_for_home(str(Path(engine._hermes_home).parent / "other-home"))
     engine.shutdown()
-    assert [r["content"] for r in committed_rows(store.db_path, "S1")] == ["A1", "A2", "A3"]
+    rows = committed_rows(store.db_path, "S1")
+    assert [r["content"] for r in rows] == ["A1", "A2", last]
     assert len(attempts) == 1 and not engine._pending_session_tails
     assert count(engine, "tail.cold_detached_stored") == 1
+    with sqlite3.connect(store.db_path) as reader:
+        provenance = reader.execute("SELECT key FROM metadata WHERE key LIKE 'real_user_scaffold_store_id:%'").fetchall()
+    assert provenance == ([(f"real_user_scaffold_store_id:{rows[2]['store_id']}",)] if last != "A3" else [])
 
 
 def test_off_current_partial_suffix_commit_then_lock(engines, monkeypatch):

@@ -354,7 +354,7 @@ class PrefixMatchingMixin:
             [count_message_tokens(msg) for msg in protected_messages],
             source=source,
             conversation_id=conversation_id,
-            metadata_factory=self._real_user_scaffold_metadata_rows,
+            metadata_factory=lambda msg, store_id: self._real_user_scaffold_metadata_rows(msg, store_id, bound=hermes_home is None),
             metadata_messages=kept,
         )
         self._host_uid_shadow(host_uids, dict(enumerate(store_ids)),

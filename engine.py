@@ -3556,14 +3556,14 @@ class LCMEngine(
                 return selected, boundary
             load_limit = min(total_count, max(load_limit + 1, load_limit * 2))
 
-    def _is_scaffold_shaped_user_message(self, message: Dict[str, Any]) -> bool:
-        """Return whether a user message has the shape of generated context."""
+    def _is_scaffold_shaped_user_message(self, message: Dict[str, Any], *, bound: bool = True) -> bool:
+        """Return whether a user message has the shape of generated context (``bound=False``: another store's row)."""
         return bool(
             isinstance(message, dict)
             and message.get("role") == "user"
             and (
                 self._is_context_summary_content(message.get("content"))
-                or self._is_replayed_context_scaffold_message(message)
+                or self._is_replayed_context_scaffold_message(message, bound=bound)
                 or self._is_preserved_todo_context_message(message)
             )
         )
@@ -3575,10 +3575,10 @@ class LCMEngine(
     def _real_user_scaffold_metadata_rows(
         self,
         message: Dict[str, Any],
-        store_id: int,
+        store_id: int, *, bound: bool = True,
     ) -> List[tuple[str, str]]:
         """Build metadata committed atomically with a scaffold-shaped user row."""
-        if not self._is_scaffold_shaped_user_message(message):
+        if not self._is_scaffold_shaped_user_message(message, bound=bound):
             return []
         return [
             (
@@ -6560,11 +6560,11 @@ class LCMEngine(
         end = self._verified_lcm_summary_prefix_end(content)
         return end is not None and not content[end:].strip()
 
-    def _is_replayed_context_scaffold_message(self, msg: Dict[str, Any]) -> bool:
+    def _is_replayed_context_scaffold_message(self, msg: Dict[str, Any], *, bound: bool = True) -> bool:
         """Return true for active-context scaffolding that should not be re-ingested."""
-        if self._is_registered_folded_tail_message(msg):
+        if bound and self._is_registered_folded_tail_message(msg):  # Unbound (#2210): no bound fold or DAG node
             return False
-        if self._generated_context_carrier_remainder(msg) is not None:
+        if bound and self._generated_context_carrier_remainder(msg) is not None:  # verifies another store's row.
             return False
         role = str(msg.get("role") or "")
         content = normalize_content_value(msg.get("content")) or ""
