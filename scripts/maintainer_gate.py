@@ -58,6 +58,7 @@ TURN_PATH_FILES = {
     "db_bootstrap.py",  # Conversation-range selection shapes compaction inputs and ownership.
     "diagnostics.py",  # State-db path resolution decides foreground branch restoration/rebind.
     "engine_registry.py",  # Post-turn hooks select the clone that ingests each session turn.
+    "maintenance_scheduler.py",  # Runs default-on maintenance and the exit drain that stores pending session-end tails.
     "message_patterns.py",  # Pattern matches omit rows from ingest, replay and compaction.
     "model_routing.py",  # Sets provider, model and effort on the summary request.
     "plugin_identity.py",  # Engine-name matching gates post-turn ingest and clone resolution.
@@ -110,11 +111,13 @@ NON_TURN_PATH_FILES = {
     "inspect_tools.py",  # Explicit lcm_inspect tool handler; read-only metadata.
     "level3_repair.py",  # Explicit repair or read-only doctor scan.
     "maintenance.py",  # Explicit backup, repair or rotation only.
+    "mcp_reader.py",  # Separate read-only `lcm-x mcp` process; never loaded by Hermes.
     "memory_tools.py",  # Default-off, read-only entity cards.
     "occurrence_time.py",  # Retrieval metadata; never durable turn occurrence.
     "preanswer_evidence.py",  # Unwired opt-in pre-answer helper.
     "presets.py",  # Status/dry-run suggestions; no live config mutation.
     "query_view_store.py",  # Default-off query views; optional-schema verification.
+    "readonly_store.py",  # Read-only store views for the `lcm-x mcp` reader only.
     "reasoning.py",  # Explicit computation or default-off pre-answer hook.
     "recall_delivery.py",  # Explicit recall; proactive assembly defaults off.
     "recall_session.py",  # Default-off session delivery for explicit recall only.

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import pytest
 
 import hermes_lcm.command as command_module
-import hermes_lcm.engine as engine_module
+import hermes_lcm.maintenance_scheduler as maintenance_scheduler
 import hermes_lcm.rollup_builder as builder_module
 from hermes_lcm import tools as lcm_tools
 from hermes_lcm.command import handle_lcm_command
@@ -187,7 +187,7 @@ def test_rollups_rebuild_refuses_while_background_maintenance_is_active(
         if not release.wait(timeout=5):
             raise AssertionError("test did not release background maintenance")
 
-    assert engine_module._ROLLUP_MAINTENANCE_SCHEDULER.schedule(
+    assert maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER.schedule(
         key,
         blocking_maintenance,
     )
@@ -207,7 +207,7 @@ def test_rollups_rebuild_refuses_while_background_maintenance_is_active(
         assert "retry" in result.lower()
     finally:
         release.set()
-        assert engine_module._ROLLUP_MAINTENANCE_SCHEDULER.drain({key}, timeout=5)
+        assert maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER.drain({key}, timeout=5)
 
 
 def test_rollups_rebuild_releases_operator_lease_when_store_open_fails(
@@ -226,8 +226,8 @@ def test_rollups_rebuild_releases_operator_lease_when_store_open_fails(
 
     assert "status: error" in result
     assert "forced store-open failure" in result
-    assert engine_module._ROLLUP_MAINTENANCE_SCHEDULER.try_acquire_exclusive(key)
-    engine_module._ROLLUP_MAINTENANCE_SCHEDULER.release_exclusive(key)
+    assert maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER.try_acquire_exclusive(key)
+    maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER.release_exclusive(key)
 
 
 def test_rollups_rebuild_releases_operator_lease_when_store_close_fails(
@@ -247,8 +247,8 @@ def test_rollups_rebuild_releases_operator_lease_when_store_close_fails(
     with pytest.raises(RuntimeError, match="forced store-close failure"):
         handle_lcm_command("rollups rebuild day 2026-07-15", engine)
 
-    assert engine_module._ROLLUP_MAINTENANCE_SCHEDULER.try_acquire_exclusive(key)
-    engine_module._ROLLUP_MAINTENANCE_SCHEDULER.release_exclusive(key)
+    assert maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER.try_acquire_exclusive(key)
+    maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER.release_exclusive(key)
 
 
 def test_rollups_rebuild_all_durably_seeds_unattempted_targets(engine, monkeypatch):

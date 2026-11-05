@@ -29,6 +29,9 @@ Configuration, evidence and disclosures: [benchmarks/RESULTS.md](benchmarks/RESU
 LCM-X replaces one-shot active-context compression with a SQLite-backed,
 DAG-based context engine. It keeps the live prompt bounded, preserves raw
 messages, and gives the agent tools to recover exact detail after compaction.
+[The promise](VISION.md#the-promise) says exactly what "nothing is ever lost" covers; known
+exceptions are bugs against it, listed in the latest release's
+[Known issues](https://github.com/electricsheephq/lcm-x/releases/latest).
 
 The project name is **LCM-X**. From v0.24.0 the plugin is named
 `hermes-lcm-x` and the runtime context engine `lcm-x`
@@ -59,6 +62,7 @@ What we are building and why: [VISION.md](VISION.md). What ships when:
 - [Recall skill and policy](#recall-skill-and-policy)
 - [Configuration](#configuration)
 - [Retrieval contract](#retrieval-contract)
+- [Use LCM-X memory from Claude Code (read-only)](#use-lcm-x-memory-from-claude-code-read-only)
 - [OpenClaw/lossless-claw import](#openclawlossless-claw-import)
 - [Troubleshooting](#troubleshooting)
 - [Architecture](#architecture)
@@ -137,12 +141,12 @@ copy-paste setups per agent type. Externalization and temporal rollups are on by
 ## Project status
 
 The latest stable release is
-[`v0.29.0`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.0)
-at `c13dea3783bdbd1aab52d83dff5d009bfade0bd2`, released 2026-10-28 (plugin `hermes-lcm-x`, engine `lcm-x`).
-It turns local semantic recall on by default once its companion plugin is installed,
-returns fuller recall from long messages, and stores retried and stopped turns more
-reliably. See [project status](docs/project-status.md) for the release summary, the
-disclosed qualification decisions and current work.
+[`v0.29.1`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.1)
+at `3a4a08ff501347a79669fab51444c471b09b551d`, released 2026-11-03 (plugin `hermes-lcm-x`, engine `lcm-x`).
+Compaction gets past a row the host still holds, keeps its 10-minute pause, and
+summarises in store order, and a restart after a cleanup pass no longer stores the
+conversation again. See [project status](docs/project-status.md) for the release summary,
+the disclosed qualification decisions and current work.
 It requires Hermes 0.21.3 or newer (#1080). It carries
 the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
@@ -156,8 +160,9 @@ Stable release identity and the continuing `main` development line are
 separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
-The `main` line carries the forward identity `hermes-lcm-x v0.29.1`, which the `v0.29.1-rc1`
-tag carries first, on top of `v0.29.0`. The `v0.29.0` tag carries `hermes-lcm-x v0.29.0`.
+v0.29.1 was cut from the `release/v0.29.x` maintenance branch, not from `main`; v0.29.x
+patch releases (v0.29.2 next, the first release train) are cut from that branch. The `main`
+line keeps the identity `hermes-lcm-x v0.29.1` in `plugin.yaml` until its own next release.
 An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
 The manifest declares 16 tools; runtime discovery advertises 13 by default,
@@ -698,7 +703,7 @@ assistant even when doing so exceeds a configured bound.
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `10000` | First-sight threshold: a new tool result over this many tokens is stubbed at ingest |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `2000` | Aged tier: at a compaction, a tool result outside the fresh tail is stubbed from this many tokens (`0` = the first-sight threshold; never above it) |
 | `LCM_STUB_FIRST_EXIT_TARGET_RATIO` | `0` | Lowers the stub-first exit's target (#671) to min(built-in, int(ratio x threshold)); `0` keeps the built-in min(threshold - `LCM_LEAF_CHUNK_TOKENS`, 0.95 x threshold); `>= 0` and `<= 1`, else the built-in target with a config warning |
-| `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Rewrite already-externalized summarized tool rows to compact placeholders; deprecated since v0.28.0, removed in v0.30.0 (#1246). Enabling it adds a config warning; behavior is unchanged until removal |
+| `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Removed in v0.30.0; parsed and ignored (#1246). Setting it true logs one warning per process; summarized tool rows are no longer rewritten |
 | `LCM_DOCTOR_CLEAN_APPLY_ENABLED` | `false` | Permit destructive `/lcm doctor clean apply` in trusted operator contexts |
 | `LCM_EMPTY_LIFECYCLE_GC_ENABLED` | `true` | Master toggle for automatic pruning of lifecycle rows for sessions that never ingested any messages or summary nodes |
 | `LCM_EMPTY_LIFECYCLE_GC_THRESHOLD` | `200` | Number of lifecycle rows at which the GC pass fires |
@@ -719,12 +724,13 @@ assistant even when doing so exceeds a configured bound.
 | `LCM_EXPANSION_REASONING_EFFORT` | task/provider default | Expansion synthesis reasoning override with the same supported values and the same ignore-and-report handling; YAML key: `lcm.expansion_reasoning_effort` |
 | `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` | Context budget used by the auxiliary LLM for `lcm_expand_query` |
 | `LCM_SUMMARY_TIMEOUT_MS` | `120000` | Timeout for one summarization call (inherits `auxiliary.compression.timeout` when that is set); the foreground time budget can cut a call shorter |
+| `LCM_SHUTDOWN_COMPACTION_WAIT_S` | `10.0` | Seconds shutdown waits for active compaction after taking the lifecycle lease; on timeout connections stay open for a later shutdown retry. New compactions return the host messages unchanged once shutdown starts. Finite nonnegative float, capped at `86400`; invalid values use the default. |
 | `LCM_SUMMARY_PROMPT_VERSION` | `1` | 1 = today's prompts; 2 = the frontier prompt with the focus directives in the policy and a 3× output ceiling |
 | `LCM_NATIVE_RECOVERY` | `false` | removed in v0.25.0; ignored if set (`true` logs one WARNING each time the plugin loads) |
 | `LCM_SURVIVAL_FIT` | `true` | When compaction cannot bring the returned list under the model window (a publication failure, a sweep deadline, a lock), drop the oldest whole user turns from live context until it fits; an oversized newest turn gets a bounded projection. Nothing is deleted: the rows stay stored and reachable with `lcm_grep` / `lcm_load_session`. Logs `LCM survival fit applied`, warns the user once, and `/lcm doctor` reports `survival_fit` as history without changing its status. The `lcm_doctor` tool returns it in the top-level `survival_fit` field, or null when no fit is recorded |
 | `LCM_SURVIVAL_RESERVE` | `0.15` | Share of the model window the survival fit keeps free for the response and host overhead (the fit target is window x (1 - reserve), minus the observed host overhead) |
 | `LCM_EXPANSION_TIMEOUT_MS` | `120000` | Timeout for one `lcm_expand_query` synthesis call |
-| `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `0.0` | Disabled at `0.0`; when set, permits critical-pressure bypasses for bounded deferred catch-up and cache-friendly follow-on condensation only |
+| `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `0.0` | Disabled at `0.0`; when set, permits critical-pressure bypasses for bounded deferred catch-up only |
 
 Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
 
@@ -884,15 +890,18 @@ synchronous and independent of deferred/background maintenance.
 
 ### Cache policy boundary
 
-LCM is **cache-friendly**, not fully cache-aware. It may avoid some follow-on
-condensation churn, but current cache usage counters are retrospective status
-data only; they do not tell the plugin whether the next prompt mutation will
+`LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` and
+`LCM_CACHE_FRIENDLY_MIN_DEBT_GROUPS` were removed in v0.30.0 (#1246); both are
+parsed and ignored. Setting the flag true logs one warning per process.
+
+LCM is not fully cache-aware. Current cache usage counters are retrospective
+status data only; they do not tell the plugin whether the next prompt mutation will
 break a hot provider cache.
 
 `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` is a narrow escape hatch. It is disabled by
 default (`0.0`). When set, LCM compares prompt pressure against the context
 window and only at or above that ratio may bypass existing polite gates for
-bounded deferred maintenance catch-up and cache-friendly follow-on condensation.
+bounded deferred maintenance catch-up.
 Revisit full cache-aware deferred compaction only after Hermes core exposes
 reliable cache state / cache-break signals.
 
@@ -1042,10 +1051,9 @@ If bytes already landed in Hermes `state.db`, that is upstream/outside LCM scope
 use backup-first cleanup or migration procedures before mutating historical host
 rows.
 
-Transcript GC is separate and opt-in. It only rewrites already-externalized,
-already-summarized tool-role rows to compact placeholders. It keeps the same
-`store_id`, keeps payload files, skips pinned messages, and preserves lossless
-recovery through `externalized_ref`.
+Transcript GC was removed in v0.30.0 (#1246). Summarized tool rows are no
+longer rewritten. Existing GC placeholders and their payload files remain
+readable through `externalized_ref`, `lcm_expand`, and `lcm_expand_query`.
 
 ## Retrieval contract
 
@@ -1084,6 +1092,45 @@ Carried-over summary nodes can become current-session content after `/new`, but
 their source eligibility still comes from descendant raw messages. Expanding a
 carried-over current-session node recovers the original raw message sources even
 when those sources still belong to a previous session.
+
+## Use LCM-X memory from Claude Code (read-only)
+
+`scripts/lcm_x_mcp.py` is a stdio MCP server over one Hermes profile's LCM-X
+store. It serves `lcm_recall`, `lcm_grep`, `lcm_expand`, `lcm_load_session` and
+`lcm_describe` with the same schemas and outputs as inside Hermes. Run it with the
+Hermes venv Python (3.10 or newer):
+
+```bash
+claude mcp add lcm-x -- <hermes-venv-python> <plugin_dir>/scripts/lcm_x_mcp.py \
+  --store <path/to/lcm.db> --hermes-home <HERMES_HOME>
+```
+
+- **Reads only.** The store is opened read-only, with a fresh connection per tool
+  call; the server never migrates, repairs, backfills, checkpoints or creates
+  tables, so Hermes stays the only writer, and Hermes' new rows show up on the next
+  call. It also reads the profile's externalized payload files and the `LCM_*`
+  lines of `<HERMES_HOME>/.env` (no other key in that file).
+- **No active session.** `lcm_grep` defaults to `session_scope='all'`, a `node_id`
+  without `session_id` resolves in the node's own session, and externalized
+  payloads resolve from any session of the store.
+- **Flags.** Every result starts with `store_uuid` and a `reader` object.
+  `reader.degraded` lists `embedding_identity_mismatch` or `provider_unavailable`
+  when vectors are off and only full text answers; vectors are used only when the
+  locally cached embedding model matches the store's active identity in full, and
+  cloud providers are never called. `reader.tokenizer` is `estimate` until the
+  tokenizer has loaded. `reader.capabilities` shows optional tables the store
+  lacks. Ids may be sent bare or as `<store_uuid>:<id>`; another store's prefix
+  is refused.
+- **Offline.** If the store's writer is not running and the store's `-wal`/`-shm`
+  coordination files are gone (the header is read twice, about 50 ms apart), a
+  call returns a `store_offline` error without opening the store (so the reader
+  never creates those files), and the next call retries. A reader that opens
+  in the instant the agent stops may recreate the two empty coordination files; the
+  agent's next start handles them. A store stamped newer than the plugin, or below
+  schema v5, is refused with `schema_refused`.
+
+See the [operator guide](docs/operator-guide.md#use-lcm-x-memory-from-claude-code-read-only)
+for details.
 
 ## OpenClaw/lossless-claw import
 
@@ -1287,7 +1334,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.29.0` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.29.1` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License

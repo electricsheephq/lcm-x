@@ -129,3 +129,11 @@ def test_candidates_header_questions_and_rank_order(tmp_path, capsys, fault):
     assert compare.main(["candidates", str(a), str(b)]) == int(fault is not None)
     out = json.loads(capsys.readouterr().out)
     assert out == {"header_equal": fault != "header", "only_a": int(fault == "only_a"), "only_b": int(fault == "only_b"), "ranked_mismatches": int(fault == "ranking"), "files_equal": fault is None}
+
+
+@pytest.mark.parametrize("rows,ok", [([{"call": 0, "keys": 3, "mismatches": 0}], True), ([{"call": 0, "keys": 3, "mismatches": 1}], False),
+                                     ([{"call": 0, "keys": 3, "mismatches": 0}] * 2, False), ([], False)])
+def test_verify_summarises_logs(tmp_path, capsys, rows, ok):
+    assert compare.main(["verify", str(write_jsonl(tmp_path / "verify.jsonl", rows))]) == int(not ok)
+    out = json.loads(capsys.readouterr().out)
+    assert (out["calls"], out["mismatches"]) == (len(rows), sum(row["mismatches"] for row in rows))
