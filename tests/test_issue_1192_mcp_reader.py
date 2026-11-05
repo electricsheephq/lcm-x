@@ -695,6 +695,8 @@ def hung_tokenizer(monkeypatch):
     earlier = tokens._encoder_thread
     if earlier is not None and earlier.is_alive():
         earlier.join(timeout=10)  # an earlier test's real load must not land during this one
+        if earlier.is_alive():  # it would overwrite this test's state, and teardown would undo its result
+            pytest.skip("an earlier test's tokenizer load is still running")
     monkeypatch.setattr(tokens, "_load_encoder", load)
     monkeypatch.setattr(tokens, "_encoder", None)
     monkeypatch.setattr(tokens, "_encoder_ready", False)
