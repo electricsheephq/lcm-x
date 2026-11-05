@@ -57,43 +57,77 @@ def other_members(gid: int, owners: Tuple[int, ...]) -> List[str]:
     return sorted(others)
 
 
+def group_name(gid: int) -> str:
+    """The group's name, else its number."""
+    try:
+        return grp.getgrgid(gid).gr_name
+    except KeyError:
+        return str(gid)
+
+
 LOCAL_SOURCES = {"files", "systemd", "altfiles"}
+NSSWITCH = Path("/etc/nsswitch.conf")
+SEARCH_PATH = ("/usr/bin/dscl", "/Search", "-read", "/", "SearchPath")
 
 
 def nsswitch_is_local(text: str) -> bool:
-    """Whether nsswitch.conf takes both users and groups only from local sources."""
+    """Whether nsswitch.conf takes users and groups only from local sources: every `passwd` and
+    `group` line, and any `initgroups` line, which gives a user their other groups at login."""
     sources = {}
     for line in text.splitlines():
         database, _, rest = line.split("#", 1)[0].partition(":")
-        if database.strip() in ("passwd", "group"):
-            sources[database.strip()] = re.sub(r"\[[^]]*\]", " ", rest).split()  # [NOTFOUND=return] is an action
-    return set(sources) == {"passwd", "group"} and all(words and set(words) <= LOCAL_SOURCES
-                                                       for words in sources.values())
+        if database.strip() in ("passwd", "group", "initgroups"):
+            words = re.sub(r"\[[^]]*\]", " ", rest).split()  # [NOTFOUND=return] is an action
+            sources.setdefault(database.strip(), []).append(words)
+    return {"passwd", "group"} <= set(sources) and all(words and set(words) <= LOCAL_SOURCES
+                                                         for lines in sources.values() for words in lines)
 
 
 def search_path_is_local(output: str) -> bool:
-    """Whether macOS's directory search path, as `dscl /Search -read / CSPSearchPath` prints it, has
-    only local nodes."""
-    nodes = output.partition("CSPSearchPath:")[2].split()
-    return bool(nodes) and all(node.startswith(("/Local/", "/BSD/")) for node in nodes)
+    """Whether the directory search path macOS uses, as `dscl /Search -read / SearchPath` prints it,
+    has only local nodes. The default policy's path can include an LDAP server that DHCP names."""
+    key, _, rest = output.partition(":")
+    nodes = rest.split()  # a node with spaces in its name splits too, and its first part is not local
+    return key.strip() == "SearchPath" and bool(nodes) and all(node.startswith(("/Local/", "/BSD/"))
+                                                               for node in nodes)
+
+
+def libc_name() -> str:
+    """glibc's name and version, such as "glibc 2.39"; "" for another C library, such as musl."""
+    try:
+        return os.confstr("CS_GNU_LIBC_VERSION") or ""
+    except (OSError, ValueError):  # ValueError: a C library that does not know the name
+        return ""
+
+
+def macos_database_is_local(command=SEARCH_PATH, timeout: float = 2.0) -> bool:
+    try:
+        found = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=timeout,
+                               check=True)
+    except (OSError, subprocess.SubprocessError):  # a timeout too
+        return False
+    return search_path_is_local(found.stdout)
+
+
+def linux_database_is_local(nsswitch: Path = NSSWITCH) -> bool:
+    if not libc_name().startswith("glibc "):  # musl does not read nsswitch.conf
+        return False
+    try:
+        return nsswitch_is_local(nsswitch.read_text(encoding="utf-8", errors="replace"))
+    except OSError:  # without the file, glibc's defaults are not provably local
+        return False
 
 
 @lru_cache(maxsize=None)
 def user_database_is_local() -> bool:
     """Whether every user and group comes from a local source, so listing them finds every member of
     a group. A directory service may not list its users (SSSD by default), and then nothing can
-    prove that a group has no other member."""
+    prove that a group has no other member. Worked out once per launch, and never stored."""
     if sys.platform == "darwin":
-        try:
-            found = subprocess.run(["/usr/bin/dscl", "/Search", "-read", "/", "CSPSearchPath"],
-                                   capture_output=True, text=True, timeout=2, check=True)
-        except (OSError, subprocess.SubprocessError):
-            return False
-        return search_path_is_local(found.stdout)
-    try:
-        return nsswitch_is_local(Path("/etc/nsswitch.conf").read_text(encoding="utf-8", errors="replace"))
-    except OSError:
-        return False
+        return macos_database_is_local()
+    if sys.platform.startswith("linux"):
+        return linux_database_is_local()
+    return False
 
 
 def folder_untrusted(folder: os.stat_result, entry: os.stat_result, owners: Tuple[int, ...]) -> str:
@@ -106,13 +140,14 @@ def folder_untrusted(folder: os.stat_result, entry: os.stat_result, owners: Tupl
         return "" if entry.st_uid in owners else "shared, and the entry in it belongs to another user"
     if folder.st_mode & stat.S_IWOTH:
         return "writable by others"
+    group = group_name(folder.st_gid)
     if not user_database_is_local():
-        return "writable by its group, and this host's user database cannot list every member"
+        return "writable by its group %s (user database not provably local)" % group
     try:
         others = other_members(folder.st_gid, owners)
     except KeyError:
-        return "writable by a group the user database does not list"
-    return "writable by its group, whose members include %s" % ", ".join(others) if others else ""
+        return "writable by its group %s, which the user database does not list" % group
+    return "writable by its group %s, whose members include %s" % (group, ", ".join(others)) if others else ""
 
 
 def path_untrusted(path: str, owners: Tuple[int, ...]) -> str:

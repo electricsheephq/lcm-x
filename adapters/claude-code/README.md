@@ -49,10 +49,14 @@ that file; its format and fallbacks are in the design doc's Recall surface secti
 The command's first item must be an absolute path; there is no `PATH` search. Every folder on the
 way to it, through any symlinks, must be writable only by you or root, or be a shared sticky folder
 such as `/tmp` whose entry is yours. A folder writable by its group passes only when that group's
-members, listed or by primary group, are you and root, and only on a host whose users all come from
-local files, since a directory service (SSSD, LDAP, Active Directory) may not list its users.
-Elsewhere, and on a multi-admin Mac for a command under Homebrew's folders, the plain reader starts;
-groups nested in a directory service are not expanded. Script arguments, such as the script in
+members, listed or by primary group, are you and root, and only where the user database is provably
+local: on Linux, glibc with `nsswitch.conf` taking users and groups only from `files`, `systemd` or
+`altfiles`; on macOS, a directory search path of local nodes only. On a machine bound to a directory
+service (SSSD, LDAP, Active Directory), which may not list its users, a command under a folder
+writable by its group starts the plain reader, and the line on stderr says "user database not
+provably local": keep the command under folders only you can write. So does a command under
+Homebrew's folders on a Mac with several admins; groups nested in another group are not expanded.
+Script arguments, such as the script in
 `["/usr/bin/python3", "/path/to/override.py"]`, are not checked: keep them in a folder only you can
 write. Nor are a script's `#!` interpreter, the `PATH` search of `#!/usr/bin/env`, or folder ACLs.
 
