@@ -1329,8 +1329,115 @@ def test_kept_conflict_exit_warning_names_the_stamp_conflict(engines, monkeypatc
         assert engine._pending_session_tails == [tail]
         rows = committed_rows(tail["store"].db_path, "S")
         absent_suffix = int(not any(r["content"] == "absent reply" for r in rows))
-        assert absent_suffix == (route != "cold_start")
+        assert absent_suffix == (route == "stamps_on")
         assert count(engine, "tail.unflushed") - before == 1 + absent_suffix
         warning = [r.getMessage() for r in caplog.records if "after shutdown retry" in r.getMessage()]
         assert len(warning) == 1 and "stamp conflict" in warning[0] and "SQLite lock" not in warning[0]
         assert f"unflushed={1 + absent_suffix}" in warning[0]
+
+
+def test_busy_cold_tail_exit_keeps_the_lock_reason_and_whole_count(engines, monkeypatch, caplog):
+    engine = engines()
+    view = [_m("user", "C", 3.), _m("assistant", "D", 4.), _m("user", "E", 5.)]
+    tail = queue_cold(engine, monkeypatch, view, stored=history())
+    tail["kept_on_conflict"] = True  # A previous attempt's label must not survive a busy retry.
+    before = committed_rows(tail["store"].db_path, "S")
+    locker = sqlite3.connect(tail["store"].db_path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        caplog.clear()
+        engine._retry_pending_session_tails(exiting=True)
+    finally:
+        locker.rollback()
+        locker.close()
+    warning = [r.getMessage() for r in caplog.records if "after shutdown retry" in r.getMessage()]
+    assert len(warning) == 1 and "SQLite lock" in warning[0] and "stamp conflict" not in warning[0]
+    assert "unflushed=3" in warning[0] and count(engine, "tail.unflushed") == 3
+    assert engine._pending_session_tails == [tail] and not tail.get("kept_on_conflict")
+    assert committed_rows(tail["store"].db_path, "S") == before
+
+
+def test_kept_conflict_on_the_stamps_off_route_stores_the_absent_suffix(engines, monkeypatch, caplog):
+    engine = engines()
+    queued, resent = cold_resend_views()
+    queued.append(_m("assistant", "absent reply", 5.5))
+    with resumed_cold_resend(engine, monkeypatch, queued, resent) as (tail, resumed):
+        resumed.on_session_start("S9", platform="cli", conversation_id="c9")
+        rows = committed_rows(tail["store"].db_path, "S")
+        assert [r["content"] for r in rows] == ["A", "B", "C", "D", "Q", "absent reply"]
+        assert engine._pending_session_tails == [tail] and count(engine, "tail.cold_unmatched") == 1
+        for _ in range(3):
+            engine._retry_pending_session_tails(sibling=True)
+            assert engine._pending_session_tails == [tail]
+            assert committed_rows(tail["store"].db_path, "S") == rows
+        assert count(engine, "tail.cold_unmatched") == 4
+        caplog.clear()
+        engine._warn_unflushed_session_tails("SQLite lock")
+        warning = [r.getMessage() for r in caplog.records if "after shutdown retry" in r.getMessage()]
+        assert len(warning) == 1 and "stamp conflict" in warning[0] and "unflushed=1" in warning[0]
+        assert count(engine, "tail.unflushed") == 1
+
+
+def test_kept_conflict_exit_count_matches_each_stored_row_once(engines, monkeypatch, caplog):
+    engine = engines()
+    ok = _m("user", "ok")
+    stored = [*history(), _m("user", "Q", 6.), copy.deepcopy(ok)]
+    view = [*history(), _m("user", "Q", 5.), copy.deepcopy(ok), copy.deepcopy(ok)]
+    tail = queue_cold(engine, monkeypatch, view, stored=stored)
+    before = committed_rows(tail["store"].db_path, "S")
+    engine.ingest(copy.deepcopy(stored))
+    engine._retry_pending_session_tails()
+    caplog.clear()
+    engine._warn_unflushed_session_tails("SQLite lock")
+    assert engine._pending_session_tails == [tail]
+    assert count(engine, "tail.unflushed") == 2
+    assert "stamp conflict" in caplog.text and "unflushed=2" in caplog.text
+    assert committed_rows(tail["store"].db_path, "S") == before
+
+
+def test_kept_conflict_exit_count_takes_untimed_view_rows_as_stored(engines, monkeypatch, caplog):
+    engine = engines()
+    stored = [*history(), _m("user", "Q", 6.), _m("assistant", "reply", 7.)]
+    view = [*history(), _m("user", "Q", 5.), _m("assistant", "reply")]
+    tail = queue_cold(engine, monkeypatch, view, stored=stored)
+    before = committed_rows(tail["store"].db_path, "S")
+    engine.ingest(copy.deepcopy(stored))
+    engine._retry_pending_session_tails()
+    caplog.clear()
+    engine._warn_unflushed_session_tails("SQLite lock")
+    assert engine._pending_session_tails == [tail]
+    assert count(engine, "tail.unflushed") == 1
+    assert "stamp conflict" in caplog.text and "unflushed=1" in caplog.text
+    assert committed_rows(tail["store"].db_path, "S") == before
+
+
+def test_kept_conflict_exit_count_reads_the_session_once(engines, monkeypatch, caplog):
+    engine = engines()
+    suffix = [_m("assistant", f"reply-{i}", 10. + i) for i in range(45)]
+    stored = [*history(), _m("user", "Q", 6.), *suffix]
+    view = [*history(), _m("user", "Q", 5.), *suffix]
+    assert len(view) == 50
+    tail = queue_cold(engine, monkeypatch, view, stored=stored)
+    engine.ingest(copy.deepcopy(stored))
+    engine._retry_pending_session_tails()
+    store = tail["store"]
+    with store.ingest_atomic():
+        for i in range(2450):
+            store.append("S", _m("assistant", f"padding-{i}", 100. + i), source="cli", conversation_id="conv")
+    before = committed_rows(store.db_path, "S")
+    assert len(before) == 2500
+    calls, read = [], store.get_range
+
+    def observed(*args, **kwargs):
+        calls.append((args, kwargs))
+        return read(*args, **kwargs)
+
+    caplog.clear()
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "get_range", observed)
+        engine._warn_unflushed_session_tails("SQLite lock")
+    assert 0 < len(calls) <= 5
+    assert all(args == ("S",) and kwargs["conversation_id"] == "conv" for args, kwargs in calls)
+    assert engine._pending_session_tails == [tail] and count(engine, "tail.unflushed") == 1
+    assert "stamp conflict" in caplog.text and "unflushed=1" in caplog.text
+    assert committed_rows(store.db_path, "S") == before
