@@ -3238,16 +3238,16 @@ class LCMEngine(
             return Path(env_base).expanduser().resolve()
         return None  # No restriction when env var not set
 
-    def _state_db_path(self, kwargs: Dict[str, Any] | None = None) -> Path:
+    def _state_db_path(self, kwargs: Dict[str, Any] | None = None, *, hermes_home=None, db_path=None) -> Path:
         kwargs = kwargs or {}
-        hermes_home = str(kwargs.get("hermes_home") or self._hermes_home or "")
+        hermes_home = str(kwargs.get("hermes_home") or self._hermes_home or "") if hermes_home is None else hermes_home
         if hermes_home:
             return _enforce_state_db_containment(
                 Path(hermes_home) / "state.db",
                 description=f"hermes_home {hermes_home}",
             )
         # Path resolution is needed before first use too; it must not open LCM.
-        db_path = Path(self._db_path)
+        db_path = Path(self._db_path if db_path is None else db_path)
         return _enforce_state_db_containment(
             db_path.parent / "state.db",
             description=f"state database fallback from LCM database {db_path}",
@@ -3562,14 +3562,14 @@ class LCMEngine(
                 return selected, boundary
             load_limit = min(total_count, max(load_limit + 1, load_limit * 2))
 
-    def _is_scaffold_shaped_user_message(self, message: Dict[str, Any]) -> bool:
-        """Return whether a user message has the shape of generated context."""
+    def _is_scaffold_shaped_user_message(self, message: Dict[str, Any], *, bound: bool = True) -> bool:
+        """Return whether a user message has the shape of generated context (``bound=False``: another store's row)."""
         return bool(
             isinstance(message, dict)
             and message.get("role") == "user"
             and (
                 self._is_context_summary_content(message.get("content"))
-                or self._is_replayed_context_scaffold_message(message)
+                or self._is_replayed_context_scaffold_message(message, bound=bound)
                 or self._is_preserved_todo_context_message(message)
             )
         )
@@ -3581,10 +3581,10 @@ class LCMEngine(
     def _real_user_scaffold_metadata_rows(
         self,
         message: Dict[str, Any],
-        store_id: int,
+        store_id: int, *, bound: bool = True,
     ) -> List[tuple[str, str]]:
         """Build metadata committed atomically with a scaffold-shaped user row."""
-        if not self._is_scaffold_shaped_user_message(message):
+        if not self._is_scaffold_shaped_user_message(message, bound=bound):
             return []
         return [
             (
@@ -6566,11 +6566,11 @@ class LCMEngine(
         end = self._verified_lcm_summary_prefix_end(content)
         return end is not None and not content[end:].strip()
 
-    def _is_replayed_context_scaffold_message(self, msg: Dict[str, Any]) -> bool:
+    def _is_replayed_context_scaffold_message(self, msg: Dict[str, Any], *, bound: bool = True) -> bool:
         """Return true for active-context scaffolding that should not be re-ingested."""
-        if self._is_registered_folded_tail_message(msg):
+        if bound and self._is_registered_folded_tail_message(msg):  # Unbound (#2210): no bound fold or DAG node
             return False
-        if self._generated_context_carrier_remainder(msg) is not None:
+        if bound and self._generated_context_carrier_remainder(msg) is not None:  # verifies another store's row.
             return False
         role = str(msg.get("role") or "")
         content = normalize_content_value(msg.get("content")) or ""
@@ -6600,26 +6600,26 @@ class LCMEngine(
             )
         )
 
-    def _restore_ingest_payload_placeholders_in_value(self, value: Any, *, session_id: str) -> Any:
+    def _restore_ingest_payload_placeholders_in_value(self, value: Any, *, session_id: str, hermes_home=None) -> Any:
         if isinstance(value, dict):
             return {
-                self._restore_ingest_payload_placeholders_in_value(key, session_id=session_id)
+                self._restore_ingest_payload_placeholders_in_value(key, session_id=session_id, hermes_home=hermes_home)
                 if isinstance(key, str)
-                else key: self._restore_ingest_payload_placeholders_in_value(val, session_id=session_id)
+                else key: self._restore_ingest_payload_placeholders_in_value(val, session_id=session_id, hermes_home=hermes_home)
                 for key, val in value.items()
             }
         if isinstance(value, list):
-            return [self._restore_ingest_payload_placeholders_in_value(item, session_id=session_id) for item in value]
+            return [self._restore_ingest_payload_placeholders_in_value(item, session_id=session_id, hermes_home=hermes_home) for item in value]
         if isinstance(value, str):
             return restore_ingest_payload_placeholders(
                 value,
                 config=self._config,
-                hermes_home=self._hermes_home,
+                hermes_home=self._hermes_home if hermes_home is None else hermes_home,
                 session_id=session_id,
             )
         return value
 
-    def _restore_ingest_payload_placeholders_in_content_identity(self, content: str, *, session_id: str) -> str:
+    def _restore_ingest_payload_placeholders_in_content_identity(self, content: str, *, session_id: str, hermes_home=None) -> str:
         if not content:
             return content
         try:
@@ -6628,7 +6628,7 @@ class LCMEngine(
             return restore_ingest_payload_placeholders(
                 content,
                 config=self._config,
-                hermes_home=self._hermes_home,
+                hermes_home=self._hermes_home if hermes_home is None else hermes_home,
                 session_id=session_id,
             )
         restore_as_structured = False
@@ -6637,7 +6637,7 @@ class LCMEngine(
                 payload = load_externalized_payload(
                     ref,
                     config=self._config,
-                    hermes_home=self._hermes_home,
+                    hermes_home=self._hermes_home if hermes_home is None else hermes_home,
                 )
                 payload_session_id = (payload or {}).get("session_id") or ""
                 if session_id and payload_session_id and payload_session_id != session_id:
@@ -6647,12 +6647,12 @@ class LCMEngine(
                     restore_as_structured = True
                     break
         if restore_as_structured:
-            restored = self._restore_ingest_payload_placeholders_in_value(decoded, session_id=session_id)
+            restored = self._restore_ingest_payload_placeholders_in_value(decoded, session_id=session_id, hermes_home=hermes_home)
             return normalize_content_value(restored) or ""
         return restore_ingest_payload_placeholders(
             content,
             config=self._config,
-            hermes_home=self._hermes_home,
+            hermes_home=self._hermes_home if hermes_home is None else hermes_home,
             session_id=session_id,
         )
 
@@ -7084,7 +7084,7 @@ class LCMEngine(
             for tail in self.__dict__.get("_pending_session_tails", ()):
                 if tail is retried_tail:
                     break
-                if tail.get("kind") == "cold" and tail["store"] is self._store and tail["session_id"] == self._session_id:
+                if tail.get("kind") == "cold" and self._cold_tail_is_bound(tail) and tail["session_id"] == self._session_id:
                     tail["went_on"] = True
             if pending.oob_rows or "_out_of_band_durable_rows" in self.__dict__:
                 self._out_of_band_durable_rows = pending.oob_rows
@@ -7515,10 +7515,11 @@ class LCMEngine(
         self._compression_boundary_stored_placeholder_digest_counts = {}
         self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
 
-    def _raise_ingest_busy(self, error):
-        if self._store._transaction_owner.owns_connection(self._store._conn) and (
+    def _raise_ingest_busy(self, error, *, store=None):
+        store = self._store if store is None else store  # a detached cold tail's own store (#2210)
+        if store._transaction_owner.owns_connection(store._conn) and (
             isinstance(error, _SqliteSavepointError) or _is_ingest_busy_error(error, require_code=True)
-            or isinstance(error, sqlite3.Error) and not self._store._conn.in_transaction
+            or isinstance(error, sqlite3.Error) and not store._conn.in_transaction
         ):
             raise error
 
@@ -7579,14 +7580,15 @@ class LCMEngine(
         return winner
 
     @contextmanager
-    def _ingest_evidence(self, *, classification=False):
+    def _ingest_evidence(self, *, classification=False, store=None):
         """Keep a fail-open writer's SQL and identity memory within its savepoint."""
         if getattr(self, "_ingest_read_only", None) is not None:
             if classification:
                 yield
                 return
             raise sqlite3.OperationalError("session-end evidence deferred")
-        if not self._store._transaction_owner.owns_connection(self._store._conn):
+        store = self._store if store is None else store
+        if not store._transaction_owner.owns_connection(store._conn):
             yield
             return
         names = ("_host_rewrite_store", "_host_rewrite_watch", "_host_rewrite_overrides",
@@ -7596,21 +7598,21 @@ class LCMEngine(
                  for name in names if name != "_host_rewrite_store" and name in self.__dict__}
         old_store = self.__dict__.get("_host_rewrite_store", missing)
         receipts = [(receipt, dict(receipt)) for receipt in getattr(self, "_identity_anchor_recoveries", ())]
-        schemas = {name: getattr(self._store, name, False)
+        schemas = {name: getattr(store, name, False)
                    for name in ("_pending_relation_schema", "_pending_host_uid_schema")}
         collector = getattr(self, "_ingest_ledger_observations", None)
         attempt = getattr(self, "_ingest_ledger_attempt", None)
         if attempt is not None:
             self._ingest_ledger_observations = []
         try:
-            with _sqlite_savepoint(self._store._conn, abort_on_cleanup_failure=True, owner_active=True,
-                                   foreground_ingest=getattr(self._store, "_foreground_ingest_owner", False)):
+            with _sqlite_savepoint(store._conn, abort_on_cleanup_failure=True, owner_active=True,
+                                   foreground_ingest=getattr(store, "_foreground_ingest_owner", False)):
                 yield
             if attempt is not None:
                 (collector if collector is not None else attempt["observations"]).extend(self._ingest_ledger_observations)
         except BaseException:
             for name, value in schemas.items():
-                setattr(self._store, name, value)
+                setattr(store, name, value)
             for name in names:
                 if name in saved:
                     original, previous = saved[name]
@@ -11315,7 +11317,7 @@ class LCMEngine(
         )
 
     def _queue_cold_session_tail(self, view, *, session_id, conversation_id, source, error):
-        tail = dict(kind="cold", store=self._store, session_id=session_id,
+        tail = dict(kind="cold", store=self._store, hermes_home=str(self._hermes_home or ""), session_id=session_id,
                     conversation_id=conversation_id, source=source, view=copy.deepcopy(view))
         if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
             self._pending_session_tails.append(tail)
@@ -11326,7 +11328,7 @@ class LCMEngine(
     @staticmethod
     def _tail_key(tail):
         if tail.get("kind") == "cold":
-            return ("cold", tail["store"].db_path, tail["session_id"], tail["conversation_id"], tail["view"])
+            return ("cold", tail["store"].db_path, tail["hermes_home"], tail["session_id"], tail["conversation_id"], tail["view"])
         return (tail.get("kind", "warm"), tail["store"].db_path, *(tail[key] for key in (
             "session_id", "conversation_id", "after_store_id", "messages", "metadata_messages")))
 
@@ -11448,10 +11450,16 @@ class LCMEngine(
                 raise
             after_commit.append(lambda exc=exc: self._ledger_count("ledger.write_failed", exc))
 
+    def _cold_tail_is_bound(self, tail):
+        return (tail["store"] is self.__dict__.get("_store")
+                and tail["hermes_home"] == str(self._hermes_home or ""))
+
     def _retry_cold_tail(self, tail, *, sibling):
-        if tail["store"] is not self.__dict__.get("_store"):
-            self._ledger_count("ledger.tail.cold_store_unbound")
-            return False
+        if not self._cold_tail_is_bound(tail):
+            if tail["store"]._conn is None:
+                self._ledger_count("ledger.tail.cold_store_unbound")
+                return False
+            return self._retry_cold_tail_s3(tail, stamps=True, hermes_home=tail["hermes_home"])
         same = (not sibling and tail["session_id"] == self._session_id
                 and _normalize_conversation_id_value(tail["conversation_id"]) ==
                     _normalize_conversation_id_value(self._conversation_id))
@@ -11480,7 +11488,7 @@ class LCMEngine(
         # check, so a retyped row never stands for the view's own.
         return self._retry_cold_tail_s3(tail, stamps=same)
 
-    def _cold_tail_stored(self, tail, *, stamps=False):
+    def _cold_tail_stored(self, tail, *, stamps=False, hermes_home=None):
         """How many of the view's rows the session's stored prefix holds, or None when they differ.
 
         With ``stamps``, a known host stamp that differs from the stored row's is a different occurrence."""
@@ -11488,18 +11496,19 @@ class LCMEngine(
         conversation = _normalize_conversation_id_value(tail["conversation_id"])
         stored = tail["store"].get_range(session, limit=len(view) + 1, conversation_id=conversation)
         for row, message in zip(stored, view):
-            if (self._session_end_prefix_compare_identity(row, session_id=session) !=
-                    self._session_end_prefix_compare_identity(message, session_id=session)):
+            if (self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=hermes_home) !=
+                    self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=hermes_home)):
                 return None
             stamp, seen = _normalize_observed_at(message.get("timestamp")), _normalize_observed_at(row.get("observed_at"))
             if stamps and None not in (stamp, seen) and stamp != seen:
                 return None
         return len(stored)
 
-    def _retry_cold_tail_s3(self, tail, *, stamps=False):
+    def _retry_cold_tail_s3(self, tail, *, stamps=False, hermes_home=None):
         view, session = tail["view"], tail["session_id"]
+        ids = []
         with tail["store"].ingest_atomic():
-            stored = self._cold_tail_stored(tail, stamps=stamps)
+            stored = self._cold_tail_stored(tail, stamps=stamps, hermes_home=hermes_home)
             if stored is None:
                 self._ledger_count("ledger.tail.cold_unmatched")
                 if not tail.get("unmatched_warned"):
@@ -11507,8 +11516,11 @@ class LCMEngine(
                     tail["unmatched_warned"] = True
                 return False
             if stored < len(view):
-                self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
-                    conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
+                ids = self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
+                    conversation_id=_normalize_conversation_id_value(tail["conversation_id"]),
+                    **(dict(store=tail["store"], hermes_home=hermes_home) if hermes_home is not None else {}))
+        if hermes_home is not None and ids:
+            self._ledger_count("ledger.tail.cold_detached_stored")
         return True
 
     def _retry_pending_session_tails(self, *, deadline: float | None = None, exiting: bool = False,
@@ -11702,3 +11714,7 @@ class LCMEngine(
                 logger.warning("LCM shutdown cleanup failed", exc_info=True)
         if failures:
             raise failures[0]
+
+    def _bound_store_unopened(self):
+        """The bound store object, read without a lazy open (#2152): a failed rebind stays failed."""
+        return self.__dict__.get("_store")

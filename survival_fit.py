@@ -491,7 +491,7 @@ class SurvivalFitMixin:
     _survival_projected_fields = staticmethod(projected_fields)
     _survival_bounded_call = staticmethod(bounded_call)
 
-    def _survival_projection_source(self, message: Dict[str, Any], role: str, content: str) -> Optional[Dict[str, Any]]:
+    def _survival_projection_source(self, message: Dict[str, Any], role: str, content: str, *, store=None) -> Optional[Dict[str, Any]]:
         """The stored row ``message`` is a projection of, else None. Self-verifying: each mark names a store
         id and the projection parameters; the row is loaded and its projection recomputed from its stored
         bytes, and the message must agree with it on every key the projection defines or the store keeps:
@@ -505,7 +505,8 @@ class SurvivalFitMixin:
         under that row's own stamp."""
         calls = message.get("tool_calls")
         matches = projection_mark_candidates(content, calls)
-        store = getattr(self, "_store", None)
+        target = {} if store is None else dict(store=store)
+        store = getattr(self, "_store", None) if store is None else store
         if store is None:
             return None
         for match in matches:
@@ -518,7 +519,7 @@ class SurvivalFitMixin:
                 row = None
             if not row or str(row.get("role") or "") != role:
                 continue
-            if not self._survival_stamp_matches(message, row):
+            if not self._survival_stamp_matches(message, row, **target):
                 continue
             fields = self._survival_projected_fields(row, int(tokens), int(head), int(tail))
             legacy_fields = self._survival_projected_fields(row, int(tokens), int(head), int(tail), legacy=True)
@@ -558,7 +559,7 @@ class SurvivalFitMixin:
             out.append((k, stored_row))
         return out
 
-    def _survival_stamp_matches(self, message: Dict[str, Any], row: Dict[str, Any]) -> bool:
+    def _survival_stamp_matches(self, message: Dict[str, Any], row: Dict[str, Any], *, store=None) -> bool:
         """No host stamp; or the source row's own: its observed_at or a recorded alias stamp (normalized as
         the identity anchor normalizes them); or any stamp when the source was stored unstamped (R6-1: a
         host that re-inserts the copy with a fresh stamp, Hermes 0.21.2; the byte rule still decides)."""
@@ -567,7 +568,7 @@ class SurvivalFitMixin:
         if stamp is None or observed is None or observed == stamp:
             return True
         try:
-            aliases = self._store.get_message_relations([int(row["store_id"])], "alt_stamp")
+            aliases = (self._store if store is None else store).get_message_relations([int(row["store_id"])], "alt_stamp")
         except Exception:
             return False
         return any(_normalize_observed_at(rel.get("observed_at")) == stamp for rel in aliases)
