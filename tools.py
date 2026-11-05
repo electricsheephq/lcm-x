@@ -2807,7 +2807,6 @@ class _LcmRecallStrictSelector:
         self._missing: set[int] = set()
         self.ledger = _LcmRecallSelectionLedger()
         self.rows: dict[int, dict[str, Any]] = {}
-        self.batched_reads = 0
 
     @property
     def unreferenced_dropped(self) -> int:
@@ -2876,7 +2875,6 @@ class _LcmRecallStrictSelector:
             if store_id not in self.rows and store_id not in self._missing
         ]
         if wanted:
-            self.batched_reads += 1
             fetched = self._engine._store.get_batch(wanted)
             # A row the store does not have is remembered as MISSING, or the walk
             # cannot tell "not fetched yet" from "fetched and absent" and keeps

@@ -1930,11 +1930,6 @@ def _rollups_status_text(engine) -> str:
         "oldest_stale_age_seconds: "
         + (str(oldest_age) if oldest_age is not None else "(none)")
     )
-    for kind in ("day", "week", "month"):
-        cursor = status["last_build_cursors"][kind]
-        built_at = status["last_built_at"][kind]
-        lines.append(f"last_build_cursor_{kind}: {cursor or '(none)'}")
-        lines.append(f"last_built_at_{kind}: {built_at or '(never)'}")
     lines.append(f"last_error: {status['last_error'] or '(none)'}")
     if status.get("query_error"):
         lines.append(f"query_error: {status['query_error']}")
