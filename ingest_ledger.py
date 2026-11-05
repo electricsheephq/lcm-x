@@ -214,13 +214,14 @@ def plan_ordinals(existing, placements):
     witnesses) share one label and therefore one re-spacing map entry.
     """
     original = sorted(set(existing))
+    original_set = set(original)
     if any(not isinstance(value, int) or not 0 < value <= _MAX_ORDINAL for value in original):
         raise LedgerError("existing ordinals must be positive signed 64-bit integers")
     positions, groups = original.copy(), defaultdict(list)
     previous_left, previous_right, previous_gap = 0, 0, 0
     for index, placement in enumerate(placements):
         left, right, supersedes = Placement(*placement)
-        if any(value is not None and value not in original for value in (left, right, supersedes)):
+        if any(value is not None and value not in original_set for value in (left, right, supersedes)):
             raise LedgerError("placement bound is not an existing ordinal")
         left_bound, right_bound = left or 0, right if right is not None else _MAX_ORDINAL + 1
         if left_bound >= right_bound or left_bound < previous_left or right_bound < previous_right:
@@ -271,6 +272,46 @@ def plan_ordinals(existing, placements):
                 value += step
                 positions[g] = value
     return result, {old: new for old, new in zip(original, positions) if old != new}
+
+
+def plan_rebinds(store, conversation_id, session_id, salt, attempt, mark):
+    """Plan exact own-session pairs, including bound hits in the uniqueness test."""
+    want, skipped = defaultdict(list), Counter()
+    for i, entry in enumerate(attempt["entries"]):
+        if i in attempt["stored"]:
+            continue
+        stamp = attempt["stamps"][i]
+        if stamp is None:
+            skipped["unstamped"] += 1
+        else:
+            want[stamp, entry.identity_digest].append(i)
+    if len(want) > 4096:
+        return dict(pairs=[], skipped=Counter(too_large=1), too_large=True)
+    rows = store.find_rows_by_observed_at(conversation_id, [session_id], [float(s) for s, _ in want])
+    keyed = defaultdict(list)
+    for row in rows:
+        if rows.canonical_stamps.get(row["store_id"]) == row["observed_at"]:
+            keyed[stamp_text(row["observed_at"]), identity_digest(salt, row)].append(row["store_id"])
+    bound = {r[0] for r in store._conn.execute(
+        "SELECT store_id FROM occurrence_bindings WHERE store_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(sorted({r["store_id"] for r in rows})),))}
+    owners, pairs = Counter(attempt["matched"].values()), []
+    for key, indexes in want.items():
+        hits = keyed.get(key, ())
+        if not hits:
+            continue
+        if len(indexes) != 1 or len(hits) != 1:
+            skipped["ambiguous"] += len(indexes)
+            continue
+        i, sid = indexes[0], hits[0]
+        if sid in bound or sid <= (mark or 0):
+            skipped["already_bound"] += 1
+        elif (attempt["matched"].get(i) not in (None, sid)
+              or owners[sid] > (attempt["matched"].get(i) == sid)):
+            skipped["anchor_disagree"] += 1
+        else:
+            pairs.append((i, sid))
+    return dict(pairs=sorted(pairs, key=lambda pair: pair[1]), skipped=skipped, too_large=False)
 
 
 def lineage_key(host_uid_key: str | None, session_id: str) -> str:

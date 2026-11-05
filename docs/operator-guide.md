@@ -465,11 +465,12 @@ keep the default and appear in `config_source_warnings` in `lcm_status` JSON,
 raw value limited to 40 characters, and the value used. Empty or whitespace-only
 values in that loader keep the default without a warning.
 Range warnings (`LCM_CONTEXT_THRESHOLD`, `LCM_SURVIVAL_RESERVE`, `LCM_LEAF_CHUNK_TOKENS`, `LCM_SUMMARY_TIMEOUT_MS`), choice warnings (`LCM_EMBEDDING_PROVIDER`, `LCM_PREANSWER_EVIDENCE_MODE`, `LCM_EMBEDDING_STORAGE_DTYPE`), and dropped-input warnings (`LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS`, `LCM_RECALL_ARM_WEIGHTS`, `LCM_MODEL_THRESHOLDS`) use the same channel without changing values or consumer fallbacks.
-Three deprecated keys add one deprecation warning each on the same channel when enabled:
-`LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` and `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED`, removed
-in v0.30.0, and `LCM_DEFERRED_MAINTENANCE_ENABLED`, removed in v0.31.0
-(`LCM_DEFERRED_MAINTENANCE_MAX_PASSES` only applies while it is on). Their behavior is
-unchanged until removal (#1246).
+`LCM_DEFERRED_MAINTENANCE_ENABLED` adds one deprecation warning on the same
+channel when enabled; it is removed in v0.31.0. Its behavior is unchanged until
+removal (#1246), and `LCM_DEFERRED_MAINTENANCE_MAX_PASSES` only applies while it
+is on. The cache-friendly condensation and transcript GC keys were removed in
+v0.30.0; they are parsed and ignored, with one logger warning per process when
+each flag is true and no deprecation entry in `config_source_warnings`.
 
 `compression.target_ratio` and the host's other built-in-compressor ratios belong
 to the host's built-in compressor and are not read by LCM-X. How much one LCM-X
@@ -515,8 +516,8 @@ Useful environment variables:
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `10000` | First-sight threshold: a new tool result over this many tokens is stubbed at ingest |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `2000` | Aged tier: at a compaction, a tool result outside the fresh tail is stubbed from this many tokens (`0` = the first-sight threshold; never above it) |
 | `LCM_STUB_FIRST_EXIT_TARGET_RATIO` | `0` | Lowers the stub-first exit's target (#671) to min(built-in, int(ratio x threshold)); `0` keeps the built-in min(threshold - `LCM_LEAF_CHUNK_TOKENS`, 0.95 x threshold); `>= 0` and `<= 1`, else the built-in target with a config warning |
-| `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Rewrite already-externalized summarized tool rows to compact placeholders; deprecated since v0.28.0, removed in v0.30.0 (#1246). Enabling it adds a config warning; behavior is unchanged until removal |
-| `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `0.0` | Disabled at `0.0`; when set, permits critical-pressure bypasses for bounded deferred catch-up and cache-friendly follow-on condensation only |
+| `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Removed in v0.30.0; parsed and ignored (#1246). Setting it true logs one warning per process; summarized tool rows are no longer rewritten |
+| `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `0.0` | Disabled at `0.0`; when set, permits critical-pressure bypasses for bounded deferred catch-up only |
 | `LCM_SURVIVAL_FIT` | `true` | When compaction cannot bring the returned list under the model window (a publication failure, a sweep deadline, a lock), drop the oldest whole user turns from live context until it fits; an oversized newest turn gets a bounded projection. Nothing is deleted: the rows stay stored and reachable with `lcm_grep` / `lcm_load_session`. Logs `LCM survival fit applied`, warns the user once, and `/lcm doctor` reports `survival_fit` |
 | `LCM_SURVIVAL_RESERVE` | `0.15` | Share of the model window the survival fit keeps free for the response and host overhead (the fit target is window x (1 - reserve), minus the observed host overhead) |
 | `LCM_HOST_MESSAGE_UID` | `shadow` | `shadow`: on a host that sends `message_uid`, records the row each uid was bound to in the droppable `host_uid_bindings` table and counts agreement with the existing identity matching; ingest, replay and emission are unchanged, and `/lcm doctor` reports `host_uid_*` counts only. `off`: no capture, no table writes, no counts and no log line. Under `shadow` and `on`, canonical uid evidence can also exclude a proven hidden re-ingest copy of an assistant message from leaf summary input (the row stays stored and searchable); `off` disables that. `on` behaves exactly like `shadow`: both record count-only would-reject alias UID-conflict diagnostics in the debug log without changing matching, stored rows, bindings, or ingest writes. `off` performs no UID/binding reads on this diagnostic path. Unknown values behave as `shadow` and log one warning. Bindings are deleted with their messages, and lineage keys are namespaced by Hermes home, so one database shared by several homes keeps them apart |
@@ -830,9 +831,12 @@ future reviewed endpoint-locality contract says otherwise.
 
 ### Cache policy boundary
 
-LCM is **cache-friendly**, not fully cache-aware. It may avoid some follow-on
-condensation churn, but current cache usage counters are retrospective status
-data only; they do not tell the plugin whether the next prompt mutation will
+`LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` and
+`LCM_CACHE_FRIENDLY_MIN_DEBT_GROUPS` were removed in v0.30.0 (#1246); both are
+parsed and ignored. Setting the flag true logs one warning per process.
+
+LCM is not fully cache-aware. Current cache usage counters are retrospective
+status data only; they do not tell the plugin whether the next prompt mutation will
 break a hot provider cache. For that reason LCM does **not** implement
 provider/model TTL heuristics, provider-family detection, cache-touch/cache-break
 tracking, TTL delays, or full cache-aware deferred compaction.
@@ -840,7 +844,7 @@ tracking, TTL delays, or full cache-aware deferred compaction.
 `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` is a narrow escape hatch. It is disabled by
 default (`0.0`). When set, LCM compares prompt pressure against the context
 window and only at or above that ratio may bypass the existing polite gates for
-bounded deferred maintenance catch-up and cache-friendly follow-on condensation.
+bounded deferred maintenance catch-up.
 Below that pressure, simpler existing behavior is preserved. Revisit full
 cache-aware deferred compaction only after Hermes core exposes reliable cache
 state / cache-break signals.
@@ -1298,11 +1302,9 @@ Hermes core, or any other host layer, from writing inline payloads to Hermes
 historical rows already present in `lcm.db`. Cleaning older suspicious rows
 requires a separate backup-first cleanup or migration flow.
 
-Transcript GC is separate and also opt-in. It only rewrites already-externalized,
-already-summarized tool-role rows to compact placeholders. It keeps the same
-`store_id`, keeps payload files, skips pinned messages, and preserves lossless
-recovery through `externalized_ref`. After GC, `lcm_grep` will not match the
-original giant tool blob text directly; search summaries or refs instead.
+Transcript GC was removed in v0.30.0 (#1246). Summarized tool rows are no
+longer rewritten. Existing GC placeholders and their payload files remain
+readable through `externalized_ref`, `lcm_expand`, and `lcm_expand_query`.
 
 ## Slash Commands
 

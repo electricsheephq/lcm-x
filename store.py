@@ -3,9 +3,9 @@ from __future__ import annotations
 """Immutable-first message store — the source of truth.
 
 Every message is persisted durably in SQLite. The normal model is append-only,
-with one narrow opt-in exception: already-externalized summarized tool-result
-rows may be rewritten to compact GC tombstones while preserving the original
-row identity (`store_id`) for DAG/source lookup.
+with a legacy GC rewrite seam retained for tests and old stores. Automatic
+compaction no longer rewrites summarized tool-result rows; old GC placeholders
+retain their row identity (`store_id`) for DAG/source lookup.
 """
 
 
