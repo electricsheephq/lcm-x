@@ -8,12 +8,15 @@ the plain reader's argv in ``LCMX_LOCAL_READER_CMD``. Anything else about that f
 that does not start, starts the plain reader. The plugin never writes the file.
 
 Only a file this user owns can choose the command, and only a command this user or root owns can
-start; neither may be writable by group or others, so another local user cannot run code as this one.
+start; neither may be writable by group or others, and no folder on the way to the command may be
+writable by another local user, so another local user cannot run code as this one.
 """
 from __future__ import annotations
 
+import grp
 import json
 import os
+import pwd
 import stat
 import sys
 from pathlib import Path
@@ -32,6 +35,76 @@ def untrusted(info: os.stat_result, owners: Tuple[int, ...]) -> str:
         return "not owned by this user" if len(set(owners)) == 1 else "not owned by this user or root"
     if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         return "writable by group or others"
+    return ""
+
+
+def other_members(gid: int, owners: Tuple[int, ...]) -> List[str]:
+    """The users of group ``gid`` not in ``owners``, as the user database lists them now: its listed
+    members and every user whose primary group it is. Groups nested in a directory service are not
+    expanded. Raises KeyError for a group the database does not list."""
+    others = set()
+    for name in grp.getgrgid(gid).gr_mem:
+        try:
+            uid = pwd.getpwnam(name).pw_uid
+        except KeyError:
+            uid = None
+        if uid not in owners:
+            others.add(name)
+    others.update(user.pw_name for user in pwd.getpwall() if user.pw_gid == gid and user.pw_uid not in owners)
+    return sorted(others)
+
+
+def folder_untrusted(folder: os.stat_result, entry: os.stat_result, owners: Tuple[int, ...]) -> str:
+    """Why another local user could replace ``entry`` in ``folder`` ("" when only ``owners`` can)."""
+    if folder.st_uid not in owners:
+        return "not owned by this user or root"
+    if not folder.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return ""
+    if folder.st_mode & stat.S_ISVTX:  # sticky: only the entry's owner, the folder's owner or root can replace it
+        return "" if entry.st_uid in owners else "shared, and the entry in it belongs to another user"
+    if folder.st_mode & stat.S_IWOTH:
+        return "writable by others"
+    try:
+        others = other_members(folder.st_gid, owners)
+    except KeyError:
+        return "writable by a group the user database does not list"
+    return "writable by its group, whose members include %s" % ", ".join(others) if others else ""
+
+
+def path_untrusted(path: str, owners: Tuple[int, ...]) -> str:
+    """Why another local user could change what the absolute ``path`` names ("" when none can).
+
+    Resolves it as the kernel does and checks every folder an entry is looked up in: ``/``, each
+    folder on the way, and the folder of each symlink on it. When all pass, nobody else can redirect
+    the path between this check and the start, so the path is started as given: a venv's Python
+    finds its venv from the path it was started by."""
+    pending = path.split("/")
+    folder, links = "/", 0
+    while pending:
+        name = pending.pop(0)
+        if name in ("", "."):
+            continue
+        if name == "..":
+            folder = os.path.dirname(folder)
+            continue
+        entry = os.path.join(folder, name)
+        try:
+            info = os.lstat(entry)
+            reason = folder_untrusted(os.stat(folder), info, owners)
+            target = os.readlink(entry) if not reason and stat.S_ISLNK(info.st_mode) else None
+        except OSError as error:
+            return "not resolvable (%s)" % (error.strerror or error)
+        if reason:
+            return "under %s, which is %s" % (folder, reason)
+        if target is None:
+            folder = entry
+            continue
+        links += 1
+        if links > 40:
+            return "not resolvable (too many symlinks)"
+        if target.startswith("/"):
+            folder = "/"
+        pending[:0] = target.split("/")
     return ""
 
 
@@ -81,6 +154,7 @@ def reader_override(path: Path) -> Tuple[Optional[List[str]], str]:
         reason = untrusted(os.stat(command[0]), (os.geteuid(), 0))  # root owns system interpreters
     except OSError:
         return None, '"command[0]" is missing or not executable'
+    reason = reason or path_untrusted(command[0], (os.geteuid(), 0))
     if reason:
         return None, '"command[0]" is ' + reason
     return command, ""

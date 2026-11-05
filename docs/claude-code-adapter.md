@@ -294,6 +294,16 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
     the file is not owned by the user the server runs as, or when `command`'s first item is owned
     by anyone but that user or root (root owns system interpreters), or when either one is
     writable by group or others.
+  - Nor may another local user replace or redirect the command before it starts (#2261). Resolving
+    `command[0]` looks entries up in `/`, in each folder on the way, and in the folder of each
+    symlink on it, and each such folder must pass: owned by that user or root, and writable by
+    nobody else. A folder writable by others fails, except a sticky one whose entry belongs to that
+    user or root. A folder writable by its group passes only when the group's members (its listed
+    members and every user whose primary group it is, read when the check runs) are that user and
+    root; groups nested in a directory service are not expanded. The line on stderr names the
+    folder. The command then starts by its configured path, not its resolved one: once every folder
+    passes, nobody else can redirect it, and a venv's Python finds its venv from the path it was
+    started by. Script arguments are not checked.
   - Once started, the override owns recall. The plugin does not supervise it; falling back to
     `LCMX_LOCAL_READER_CMD` on its own failures is the override's job. The file is read only when
     the plain reader could start; otherwise the server reports the missing setup step as before.
