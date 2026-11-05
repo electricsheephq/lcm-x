@@ -86,6 +86,24 @@ have waited for. The async hook never takes the store lock (step 1 below), so it
 leaves a synchronous hook waiting on it. A test kills the hook before and after it writes its
 record, in a session that goes on and at a `-p` exit, and finds every row stored.
 
+Each hook writes one line to `logs/hook.log` in the home: the event, the session id, the outcome and
+its in-process milliseconds (`ms`), without content or paths. For #2164 the line also carries `t0`,
+the wall-clock second the hook's own code began, so a row joins Claude Code's debug line for the same
+run and the gap before `t0` is the start-up of the shell and the interpreter, and `phases`, the
+milliseconds of each step that ran, in order:
+- `imports`;
+- `read` (the payload) and `spool`;
+- `runtime` (finding the runtime and the worker) and `probe` (the lock);
+- `subprocess` (its import), then `start` (a detached worker). For `PreCompact` it is instead
+  `drain` (the bounded run) and `recheck` (the lock again), with `start` if a worker takes the rest;
+- `log`, the log's own set-up.
+
+Each step ends when the next begins, and a run that returns early or fails logs the step it was in.
+So the steps after `imports` add up to about `ms`: each is rounded on its own, and they begin just
+after `ms` starts and end just after it stops. Neither counts the writing of the line itself. The steps
+use a monotonic clock, while `t0` and `t` are wall-clock times. These are measurements only: nothing
+reads them to decide anything.
+
 ### Spool and worker handshake
 
 Two reviews found a lost wake-up: a hook that fires while the worker finishes its last scan sees the

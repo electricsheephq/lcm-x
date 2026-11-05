@@ -589,6 +589,73 @@ def test_the_async_hook_starts_a_worker_without_probing_the_lock(hook, env, tmp_
     assert (_log(env)[-1]["outcome"], len(started), len(probed)) == ("worker_running", 1, 1)
 
 
+def test_each_hook_log_line_times_the_steps_that_ran(hook, env, tmp_path, monkeypatch):
+    """#2164: a slow hook run must be split by step, so each log line carries the wall-clock start
+    of the hook's own code (``t0``, to join Claude Code's debug line) and the milliseconds of each
+    step that ran, in order, including the step a run returned or failed in. Measurement only: the
+    outcomes and ``ms`` are as before."""
+    lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(_package(tmp_path))}
+    payload = {"session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    checks, code = [], [0]
+    monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: None)
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(command, code[0]))
+    monkeypatch.setattr(hook, "_lock_held", lambda lock: checks.pop(0))
+    spooled = ["imports", "read", "spool", "runtime"]
+    drained = spooled + ["probe", "subprocess", "drain"]
+    runs = [  # event, environment, what each lock check finds, the drain's exit code, outcome, steps
+        ("Stop", lane, [False], 0, "worker_started", spooled + ["probe", "subprocess", "start", "log"]),
+        ("Stop", lane, [True], 0, "worker_running", spooled + ["probe", "log"]),
+        ("PostToolBatch", lane, [], 0, "worker_started", spooled + ["subprocess", "start", "log"]),
+        ("PreCompact", lane, [False], 0, "drained", drained + ["log"]),
+        ("PreCompact", lane, [False, True], 5, "drain_bound+holder", drained + ["recheck", "log"]),
+        ("PreCompact", lane, [False, False], 5, "drain_bound+worker", drained + ["recheck", "start", "log"]),
+        ("Stop", env, [], 0, "runtime_missing", spooled + ["log"]),
+        ("Notification", lane, [], 0, "unsupported_event", ["imports", "read", "log"]),
+    ]
+    for event, environ, found, exit_code, outcome, steps in runs:
+        checks[:], code[0] = found, exit_code
+        assert hook.main(io.StringIO(json.dumps({**payload, "hook_event_name": event})), environ) == 0
+        row = _log(env)[-1]
+        assert (row["outcome"], list(row["phases"]), checks) == (outcome, steps, [])
+        assert all(type(value) is float and value >= 0 for value in [row["ms"], *row["phases"].values()])
+        assert row["t0"] == round(hook._T0_WALL, 3)
+    assert hook.main(io.StringIO("not json"), lane) == 0
+    row = _log(env)[-1]
+    assert (row["outcome"], list(row["phases"])) == ("error:JSONDecodeError", ["imports", "read", "log"])
+
+
+def test_a_slow_step_is_charged_to_the_step_that_took_it(hook, env, tmp_path, monkeypatch):
+    """REGRESSION (review of #2165): a PreCompact run's second lock check was charged to starting
+    the worker, or to no step at all, and a step that ended in an early return was not logged, so a
+    slow run could not be split by step."""
+    lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(_package(tmp_path))}
+    payload = {"hook_event_name": "PreCompact", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    checks = []
+
+    def check(lock):
+        held, delay = checks.pop(0)
+        time.sleep(delay)
+        return held
+
+    monkeypatch.setattr(hook, "_lock_held", check)
+    monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: None)
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(command, 5))
+    for held, outcome in ((True, "drain_bound+holder"), (False, "drain_bound+worker")):
+        checks[:] = [(False, 0), (held, 0.06)]  # the probe finds the lock free; the check after the drain is slow
+        assert hook.main(io.StringIO(json.dumps(payload)), lane) == 0
+        row = _log(env)[-1]
+        assert (row["outcome"], row["phases"]["recheck"] >= 50) == (outcome, True)
+
+    def slow_lookup(environ, home):
+        time.sleep(0.06)
+        return None
+
+    monkeypatch.setattr(hook.lcmx_runtime, "runtime_command", slow_lookup)
+    assert hook.main(io.StringIO(json.dumps({**payload, "hook_event_name": "Stop"})), lane) == 0
+    row = _log(env)[-1]
+    assert (row["outcome"], row["phases"]["runtime"] >= 50) == ("runtime_missing", True)
+
+
 @pytest.mark.parametrize("setting", ["PYTHONPATH", "PYTHONHOME"])
 def test_the_registered_hook_command_ignores_the_users_python_settings(env, tmp_path, setting):
     """REGRESSION (#2141): Claude Code runs the hook command in the user's environment, where a
@@ -657,9 +724,14 @@ def test_a_relative_runtime_setting_is_refused_and_the_record_waits(hook, env, t
         monkeypatch.delenv(name, raising=False)
     for name, value in lane.items():
         monkeypatch.setenv(name, value)
+    # A valid override, so the guards below catch it starting. Its command is a script the test
+    # owns: the interpreter running the tests can be group-writable, as on CI's runners.
+    override = str(_executable(tmp_path / "override" / "reader"))
+    _write_override(env, {"version": 1, "command": [override]})
+    assert launcher.reader_override(Path(env["LCMX_CC_HOME"]) / launcher.OVERRIDE) == ([override], "")
     monkeypatch.setattr(launcher.os, "execv", lambda path, argv: pytest.fail("the reader started"))
-    monkeypatch.setattr(launcher.os, "execve", lambda path, argv, environment: pytest.fail("the reader started"))
-    assert launcher.main() == 1
+    monkeypatch.setattr(launcher.os, "execve", lambda path, argv, environment: pytest.fail("the override started"))
+    assert launcher.main() == 1  # the setting is refused before a valid override could start
     assert capsys.readouterr().err == "lcm-x: %s must be an absolute path\n" % setting
 
 
