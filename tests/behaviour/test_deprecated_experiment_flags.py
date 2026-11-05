@@ -1,4 +1,4 @@
-"""Characterize the loading sources of the two retiring experiments."""
+"""Characterize the loading sources of the retiring experiments."""
 
 import pytest
 
@@ -7,8 +7,15 @@ from hermes_lcm import config, presets
 
 FLAGS = (
     ("cache_friendly_condensation_enabled", "LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED"),
+    ("deferred_maintenance_enabled", "LCM_DEFERRED_MAINTENANCE_ENABLED"),
     ("large_output_transcript_gc_enabled", "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED"),
 )
+# Removal release per key (#1246); deferred maintenance was deprecated one minor later.
+REMOVED_IN = {
+    "LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED": "v0.30.0",
+    "LCM_DEFERRED_MAINTENANCE_ENABLED": "v0.31.0",
+    "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED": "v0.30.0",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -52,7 +59,7 @@ def test_presets_do_not_enable_retiring_flags():
 
 def _warning(key):
     return (
-        f"deprecated: {key} is set; this experiment is removed in v0.30.0 (#1246). "
+        f"deprecated: {key} is set; this experiment is removed in {REMOVED_IN[key]} (#1246). "
         "Until then it behaves as before."
     )
 
@@ -71,7 +78,7 @@ def test_deprecation_warning_table(monkeypatch, field, key, raw, enabled):
     assert c.config_source_warnings == ([_warning(key)] if enabled else [])
 
 
-def test_both_flags_warn_once_per_loaded_config(monkeypatch):
+def test_each_flag_warns_once_per_loaded_config(monkeypatch):
     for field, key in FLAGS:
         monkeypatch.setenv(key, "true")
     for _ in range(2):

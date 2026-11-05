@@ -152,7 +152,7 @@ except `LCM_EMBEDDINGS_ENABLED`: a blank value there turns embeddings off instea
 keeping the local default.
 Range warnings (`LCM_CONTEXT_THRESHOLD`, `LCM_SURVIVAL_RESERVE`, `LCM_LEAF_CHUNK_TOKENS`, `LCM_SUMMARY_TIMEOUT_MS`), choice warnings (`LCM_EMBEDDING_PROVIDER`, `LCM_PREANSWER_EVIDENCE_MODE`, `LCM_EMBEDDING_STORAGE_DTYPE`), and dropped-input warnings (`LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS`, `LCM_RECALL_ARM_WEIGHTS`, `LCM_MODEL_THRESHOLDS`) use the same channel without changing values or consumer fallbacks.
 
-`LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` and `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` are deprecated in v0.28.0 and removed in v0.30.0 (#1246). Each enabled flag adds one `config_source_warnings` entry without changing behavior; false or unset flags and direct `LCMConfig(...)` construction add no deprecation warning. These flags are environment-only; their `lcm.*` YAML keys are ignored and shipped presets do not set them.
+`LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` and `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` are deprecated in v0.28.0 and removed in v0.30.0, and `LCM_DEFERRED_MAINTENANCE_ENABLED` is deprecated in v0.30.0 and removed in v0.31.0 (#1246). Each enabled flag adds one `config_source_warnings` entry without changing behavior; false or unset flags and direct `LCMConfig(...)` construction add no deprecation warning. These flags are environment-only; their `lcm.*` YAML keys are ignored and shipped presets do not set them.
 
 ### Tool exposure
 
@@ -216,7 +216,7 @@ their existing clamping, fallback, and normalization rules. `—` means no metad
 in that column, not that every input is valid or that a removed option is active.
 `LCM_NATIVE_RECOVERY` was removed in v0.25.0; it is parsed and ignored.
 The operator guide and the prose above explain behavior and coupled settings.
-Deprecation releases describe the two retiring experiments; enabling either still
+Deprecation releases describe the three retiring experiments; enabling any of them still
 warns without changing its behavior until removal.
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
@@ -237,7 +237,7 @@ warns without changing its behavior until removal.
 | `LCM_DYNAMIC_LEAF_CHUNK_MAX` | `int` | `40000` | — | — |
 | `LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` | `bool` | `false` | — | Deprecated v0.28.0; removed v0.30.0 |
 | `LCM_CACHE_FRIENDLY_MIN_DEBT_GROUPS` | `int` | `2` | — | — |
-| `LCM_DEFERRED_MAINTENANCE_ENABLED` | `bool` | `false` | — | — |
+| `LCM_DEFERRED_MAINTENANCE_ENABLED` | `bool` | `false` | — | Deprecated v0.30.0; removed v0.31.0 |
 | `LCM_DEFERRED_MAINTENANCE_MAX_PASSES` | `int` | `4` | — | — |
 | `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `float` | `0.0` | — | — |
 | `LCM_THRESHOLD_FULL_SWEEP_ENABLED` | `bool` | `true` | — | — |
