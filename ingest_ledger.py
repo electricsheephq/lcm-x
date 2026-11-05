@@ -295,7 +295,7 @@ def plan_rebinds(store, conversation_id, session_id, salt, attempt, mark):
     bound = {r[0] for r in store._conn.execute(
         "SELECT store_id FROM occurrence_bindings WHERE store_id IN (SELECT value FROM json_each(?))",
         (json.dumps(sorted({r["store_id"] for r in rows})),))}
-    pairs = []
+    owners, pairs = Counter(attempt["matched"].values()), []
     for key, indexes in want.items():
         hits = keyed.get(key, ())
         if not hits:
@@ -307,7 +307,7 @@ def plan_rebinds(store, conversation_id, session_id, salt, attempt, mark):
         if sid in bound or sid <= (mark or 0):
             skipped["already_bound"] += 1
         elif (attempt["matched"].get(i) not in (None, sid)
-              or any(j != i and value == sid for j, value in attempt["matched"].items())):
+              or owners[sid] > (attempt["matched"].get(i) == sid)):
             skipped["anchor_disagree"] += 1
         else:
             pairs.append((i, sid))
