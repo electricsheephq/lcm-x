@@ -42,10 +42,16 @@ search.
 
 Path settings must be absolute, and the server names a relative one. A relative home disables
 capture. A relative `LCMX_PYTHON` or `LCMX_PACKAGE_ROOT` leaves records in the spool, and hooks
-record `runtime_missing` or `package_missing` until it is fixed.
+record `runtime_missing` or `package_missing` until it is fixed. A bare command name such as
+`python3.12` counts as relative and is not looked up on `PATH`: give its full path.
 
 Grok Build sessions are not captured in this release: its session-file reader is not included, so
 hooks log each Grok event as `grok_capture_off` and spool nothing.
+
+A `reader-override.json` in the store home makes the server start another reader in place of the
+plain one, and hands it the plain reader's command. Anything wrong with the file starts the plain
+reader, and so does a file or command that another user could have written. The plugin never writes
+that file; its format and fallbacks are in the design doc's Recall surface section.
 
 The store lives outside the plugin's folders, so removing or updating the plugin never removes
 your memory. Capture runs on macOS and Linux.
