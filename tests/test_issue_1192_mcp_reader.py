@@ -9,13 +9,17 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import io
 import json
+import logging
 import math
 import os
 import re
 import sqlite3
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,7 +29,9 @@ import pytest
 
 import hermes_lcm.embedding_provider as embedding_provider
 import hermes_lcm.retrieval_core as retrieval_core
+import hermes_lcm.tokens as tokens
 import hermes_lcm.tools as lcm_tools
+from tests.timing_helpers import returns_while_blocked
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
 from hermes_lcm.db_bootstrap import ensure_store_uuid, join_background_stem_backfills
@@ -229,14 +235,20 @@ def fx(tmp_path):
     return build_store(tmp_path)
 
 
-def make_reader(fixture: Fixture, monkeypatch, *, prepare: bool = True):
-    """The reader as the launcher builds it: the profile's LCM_* view, then LCMConfig.from_env()."""
+def stage_profile_env(fixture: Fixture, monkeypatch) -> None:
+    """The profile's LCM_* view and HERMES_HOME, as the launcher applies them; monkeypatch restores."""
     mcp_reader, _ = _reader_modules()
     for key in [k for k in os.environ if k.startswith("LCM_")]:
         monkeypatch.delenv(key)
     for key, value in mcp_reader.read_profile_env(fixture.home).items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("HERMES_HOME", str(fixture.home))
+
+
+def make_reader(fixture: Fixture, monkeypatch, *, prepare: bool = True):
+    """The reader as the launcher builds it: the profile's LCM_* view, then LCMConfig.from_env()."""
+    mcp_reader, _ = _reader_modules()
+    stage_profile_env(fixture, monkeypatch)
     reader = mcp_reader.StoreReader(fixture.db, fixture.home, config=LCMConfig.from_env())
     if prepare:
         reader.prepare(tokenizer_wait_s=0.5)
@@ -669,6 +681,117 @@ def test_t7_cloud_provider_is_never_called(fx, monkeypatch):
     payload, _, _ = call(reader, "lcm_recall", {"query": "heron logo"})
     assert payload["reader"]["degraded"] == ["provider_unavailable"]
     assert cloud.queries == []
+
+
+@pytest.fixture
+def hung_tokenizer(monkeypatch):
+    """A tiktoken load that hangs until released, as where the BPE download never ends."""
+    release = threading.Event()
+
+    def load():
+        release.wait(30)
+        return None  # tiktoken unavailable once released: counts stay estimates
+
+    earlier = tokens._encoder_thread
+    if earlier is not None and earlier.is_alive():
+        earlier.join(timeout=10)  # an earlier test's real load must not land during this one
+    monkeypatch.setattr(tokens, "_load_encoder", load)
+    monkeypatch.setattr(tokens, "_encoder", None)
+    monkeypatch.setattr(tokens, "_encoder_ready", False)
+    monkeypatch.setattr(tokens, "_encoder_thread", None)
+    monkeypatch.setattr(tokens, "_encoder_generation", 0)
+    tokens._count_tokens_cached.cache_clear()
+    yield release
+    release.set()
+    # Join before monkeypatch restores the module state the loader writes.
+    if tokens._encoder_thread is not None:
+        tokens._encoder_thread.join(timeout=10)
+    tokens._count_tokens_cached.cache_clear()
+
+
+@pytest.mark.parametrize("held", ["before_it_starts", "while_the_model_warms"])
+def test_issue_2179_server_answers_before_its_warmup_ends(fx, monkeypatch, tmp_path, hung_tokenizer, held):
+    """REGRESSION (#2179): main() serves while the tokenizer load hangs and the warmup is held,
+    before it starts or while the query model warms, and no call waits on the tokenizer load. The
+    first grep answers from full text, flagged; recall uses vectors once the model is warm, with
+    the tokenizer load still hanging."""
+    mcp_reader, _ = _reader_modules()
+    # A call that waited on the load at all would now wait until its release.
+    monkeypatch.setattr(tokens, "_ENCODER_FIRST_WAIT_S", 3600.0)
+    warmup_held, model_warming, stalled = threading.Event(), threading.Event(), threading.Event()
+
+    class SlowWarmup(HashProvider):
+        def embed_query(self, text):
+            if text == "warmup":
+                model_warming.set()
+                if held == "while_the_model_warms":
+                    warmup_held.wait(30)
+            return super().embed_query(text)
+
+    slow = SlowWarmup()
+    monkeypatch.setattr(embedding_provider, "resolve_provider", lambda _config, **_kw: slow)
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config, **_kw: slow)
+    readers = []
+
+    class RecordedReader(mcp_reader.StoreReader):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            readers.append(self)
+
+        def prepare(self, **kwargs):
+            if held == "before_it_starts":
+                warmup_held.wait(30)
+            super().prepare(**kwargs)
+
+    monkeypatch.setattr(mcp_reader, "StoreReader", RecordedReader)
+    protocol = io.StringIO()
+    monkeypatch.setattr(mcp_reader, "_isolate_stdio", lambda _log_path: protocol)
+    monkeypatch.setattr(logging, "basicConfig", lambda **_kw: None)
+    stage_profile_env(fx, monkeypatch)  # main() replaces the LCM_* view; this restores it after
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(fileno=lambda: read_fd))
+
+    def feed():  # the calls arrive once the warmup is where this case holds it
+        os.write(write_fd, (_req(1, "initialize", {"protocolVersion": "2025-06-18"}) + "\n").encode())
+        if held == "while_the_model_warms" and not model_warming.wait(5):
+            stalled.set()
+        for ident, name, arguments in ((2, "lcm_grep", {"query": "heron logo"}),
+                                       (3, "lcm_expand", {"node_id": fx.node_ids[0]})):
+            os.write(write_fd, (_req(ident, "tools/call", {"name": name, "arguments": arguments}) + "\n").encode())
+        os.close(write_fd)
+
+    feeder = threading.Thread(target=feed, daemon=True)
+    feeder.start()
+    argv = ["--store", str(fx.db), "--hermes-home", str(fx.home), "--log-dir", str(tmp_path / "logs")]
+    try:
+        # main() answers and returns while the warmup is held and the tokenizer load hangs.
+        assert returns_while_blocked(lambda: mcp_reader.main(argv), warmup_held) == 0
+        assert not stalled.is_set(), "the warmup never reached the model warm"
+        initialized, grep, expand = [json.loads(line) for line in protocol.getvalue().splitlines()]
+        assert initialized["id"] == 1 and initialized["result"]["protocolVersion"] == "2025-06-18"
+        found = json.loads(grep["result"]["content"][0]["text"])
+        assert found["reader"]["degraded"] == ["provider_unavailable"]
+        assert found["reader"]["tokenizer"] == "estimate"
+        assert found["total_results"] > 0, "full text answers"
+        expanded = json.loads(expand["result"]["content"][0]["text"])  # it counts tokens, without waiting
+        assert expand["result"]["isError"] is False and expanded["reader"]["tokenizer"] == "estimate"
+
+        (reader,) = readers
+        deadline = time.monotonic() + 10
+        while reader._provider is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        payload, is_error, _ = call(reader, "lcm_recall", {"query": "which logo did we choose for Aurora"})
+        assert not is_error and payload["reader"]["degraded"] == []
+        assert payload["provenance"]["coverage"]["summary"] in {"full", "bounded"}
+        assert payload["reader"]["tokenizer"] == "estimate" and not hung_tokenizer.is_set()
+    finally:
+        hung_tokenizer.set()
+        warmup_held.set()
+        feeder.join(timeout=10)
+        for thread in threading.enumerate():
+            if thread.name == "lcm-x-mcp-warmup":
+                thread.join(timeout=10)
+        os.close(read_fd)
 
 
 # -- T8: externalized payloads from a non-current session, from --hermes-home ------
