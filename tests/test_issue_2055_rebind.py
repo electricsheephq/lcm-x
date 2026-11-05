@@ -36,7 +36,13 @@ def test_preledger_session_binds(engines, monkeypatch):
     monkeypatch.setenv("LCM_INGEST_LEDGER", "shadow")
     engine.ingest(deepcopy([*view, _m("user", "next", 5.)]))
     bindings = sql_rows(engine, "occurrence_bindings")
-    assert [b["disposition"] for b in sorted(bindings, key=lambda b: b["ordinal"])] == ["migrated"] * 4 + ["stored"]
+    ordered = sorted(bindings, key=lambda b: b["ordinal"])
+    assert [b["disposition"] for b in ordered] == ["migrated"] * 4 + ["stored"]
+    # N2: migrated and newly stored refs must survive in the persisted view.
+    newest = ledger.newest_view(engine._store._conn, ordered[0]["lineage"], "ingest")
+    entries = ledger.decode_entries(newest["entries"])
+    assert [entry.ref for entry in entries[:4]] == [b["occ_id"] for b in ordered[:4]]
+    assert entries[4].ref == ordered[4]["occ_id"]
     assert {b["store_id"] for b in bindings} == {r["store_id"] for r in engine._store.get_session_messages("S")}
     assert sql_rows(engine, "lineage_marks")[0]["max_store_id"] == max(b["store_id"] for b in bindings)
 
@@ -310,16 +316,19 @@ def test_never_binds_other_session(engines):
 
 def test_alias_and_other_lineage_and_mark_are_vetoes(engines):
     engine = engines()
-    view = history()
+    view = history(5)
     ids = unbound(engine, view)
-    bind(engine, ids[:1], view[:1], [100], lineage="foreign-lineage")
+    # T1: the foreign binding is above the mark, so only the lineage veto protects it.
+    bind(engine, ids[3:4], view[3:4], [100], lineage="foreign-lineage")
     with engine._store.ingest_atomic():
         engine._store.add_message_relations([[(ids[1], "alt_stamp", None, None, 42.)]])
         ledger.update_store_mark(engine._store._conn, engine._prepare_ingest_ledger(view, Counter())["lineage"], ids[2])
-    write(engine, [view[0], {**view[1], "timestamp": 42.}, view[2], view[3]])
-    assert [b["store_id"] for b in migrated(engine)] == [ids[3]]
-    assert count(engine, "rebind.skipped.already_bound") == 2  # foreign binding and below-mark canonical hit
+    write(engine, [view[0], {**view[1], "timestamp": 42.}, *view[2:]])
+    assert [b["store_id"] for b in migrated(engine)] == [ids[4]]
+    assert count(engine, "rebind.skipped.already_bound") == 3  # foreign binding and two below-mark canonical hits
     assert count(engine, "rebind.residual") == 0 and mark(engine) == ids[-1]
+    protected = [b for b in sql_rows(engine, "occurrence_bindings") if b["store_id"] == ids[3]]
+    assert len(protected) == 1 and protected[0]["lineage"] == "foreign-lineage"
 
 
 def test_no_view_retry_binds_and_leaves_the_mark(engines):

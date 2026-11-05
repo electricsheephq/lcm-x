@@ -214,13 +214,14 @@ def plan_ordinals(existing, placements):
     witnesses) share one label and therefore one re-spacing map entry.
     """
     original = sorted(set(existing))
+    original_set = set(original)
     if any(not isinstance(value, int) or not 0 < value <= _MAX_ORDINAL for value in original):
         raise LedgerError("existing ordinals must be positive signed 64-bit integers")
     positions, groups = original.copy(), defaultdict(list)
     previous_left, previous_right, previous_gap = 0, 0, 0
     for index, placement in enumerate(placements):
         left, right, supersedes = Placement(*placement)
-        if any(value is not None and value not in original for value in (left, right, supersedes)):
+        if any(value is not None and value not in original_set for value in (left, right, supersedes)):
             raise LedgerError("placement bound is not an existing ordinal")
         left_bound, right_bound = left or 0, right if right is not None else _MAX_ORDINAL + 1
         if left_bound >= right_bound or left_bound < previous_left or right_bound < previous_right:

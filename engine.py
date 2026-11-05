@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime
@@ -7515,10 +7516,12 @@ class LCMEngine(
                                     self._session_id, attempt["salt"], attempt, mark)
                                 kept = list(conn.execute("SELECT store_id,ordinal FROM occurrence_bindings WHERE lineage=? "
                                     "AND disposition IN ('stored','migrated','ambiguous') ORDER BY store_id", (lineage,))) if plan["pairs"] else []
+                                kept_ids = [s for s, _ in kept]
                                 pairs, placements, last = [], [], (0, 0)
                                 for i, sid in plan["pairs"]:
-                                    left = next((o for s, o in reversed(kept) if s < sid), None)
-                                    right = next((o for s, o in kept if s > sid), None)
+                                    left_index, right_index = bisect_left(kept_ids, sid) - 1, bisect_right(kept_ids, sid)
+                                    left = kept[left_index][1] if left_index >= 0 else None
+                                    right = kept[right_index][1] if right_index < len(kept) else None
                                     bounds = (left or 0, right if right is not None else 1 << 63)
                                     if bounds[0] >= bounds[1] or any(a < b for a, b in zip(bounds, last)):
                                         plan["skipped"]["crossed"] += 1
