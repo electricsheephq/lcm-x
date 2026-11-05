@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 import hermes_lcm.engine as engine_module
+import hermes_lcm.maintenance_scheduler as maintenance_scheduler
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
@@ -48,7 +49,9 @@ def _locked_flush(engine, caplog):
     finally:
         locker.execute("ROLLBACK")
         locker.close()
-    assert "retry pending at the next session start or shutdown" in caplog.text
+    assert ("retry pending at the next session start or end in this process, "
+            "at engine shutdown, or at a normal interpreter exit (not os._exit)") in caplog.text
+    assert "session=S unflushed=" in caplog.text
     assert "may be absent" not in caplog.text
     assert _contents(engine) == [message["content"] for message in messages[:2]]
     return messages
@@ -58,7 +61,7 @@ def test_locked_flush_reports_pending_count_without_content(engines, monkeypatch
     """Warn only after shutdown's bounded retry still cannot store the tail."""
     engine = engines()
     messages = _locked_flush(engine, caplog)
-    monkeypatch.setattr(engine_module, "_SESSION_END_SHUTDOWN_TIMEOUT_MS", 20)
+    monkeypatch.setattr(maintenance_scheduler, "_SESSION_END_SHUTDOWN_TIMEOUT_MS", 20)
     caplog.clear()  # Assert the shutdown diagnostic, not the end notice.
     locker = sqlite3.connect(str(engine._store.db_path), isolation_level=None)
     locker.execute("BEGIN IMMEDIATE")

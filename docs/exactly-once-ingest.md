@@ -6,11 +6,11 @@ Tracker: #1993 (v0.30.0, "nothing lost"). Status: reviewed; ready for phase P1 (
 - Finding ids from those reviews (A1-A12, L1-1 to L5-10, "Astra n") stay in parentheses for traceability. The review record itself is not published. In §5a, A and C mark the Codex and Claude reviewers' findings.
 - In §1 and §5, C1-C4 name the three commit points and the injected-crash cells built on them.
 - E1-E7 are this design's rules (§2) and M1-M16 its decisions (§6). I-numbers (for example I1 and I5) are the invariants in [docs/invariants.md](invariants.md).
-- File and line references are at commit 0eb6e8736ac0361341b3f29ebfb8e30e5b4dabc5 (v0.29.1-rc2), the tree this design reads.
+- File and line references are at commit da6f6d4aa37ee5a0a70321391ebb2baaaedde9b4 (main on 2026-11-05), where every one was re-checked. The design was first written against v0.29.1-rc2 (0eb6e8736ac0361341b3f29ebfb8e30e5b4dabc5).
 
 ## 1. Problem
-- `messages` has no identity key (store.py:429-447). Exactly-once is an in-memory decision made before the INSERT.
-- The cursor and the in-process proof live in memory only (frontier_state.py:7-16). A cold start rebuilds them by tail matching, and when that fails it re-stores whole batches ("persisted ambiguous delta", reconcile.py:3044-3053).
+- `messages` has no identity key (store.py:522-540). Exactly-once is an in-memory decision made before the INSERT.
+- The cursor and the in-process proof live in memory only (frontier_state.py:7-16). A cold start rebuilds them by tail matching, and when that fails it re-stores whole batches ("persisted ambiguous delta", reconcile.py:3054-3063).
 - Decision evidence commits apart from the rows: before the INSERT (C1), after it (C2), and with the cursor advance (C3).
 - Unkeyed rows are decided by position. A replace or a merge counts as not-new, so the change is lost (#7).
 - The host uid is shadow only (#643).
@@ -67,8 +67,8 @@ Tracker: #1993 (v0.30.0, "nothing lost"). Status: reviewed; ready for phase P1 (
   - Rank 1 needs the Window only.
 - **E6 Generated rows** bind by emission descriptor only. Descriptors are durable before the host sees the list (§3.3). If the emission write failed, a returned generated row is stored with `generated_unproven`: visible, never silent.
 - **E7 Frontier, diagnostic only (A5).**
-  - The frontier gate stays today's exact contiguous-coverage and duplicate-source checks (lifecycle_state.py:1149-1168).
-  - E7 itself (the frontier is at most the highest store_id bound in the adopted generation) is checked and logged at each adoption (§3.3). A lagging frontier loses nothing (engine.py:10602-10616 already reports a stale advance).
+  - The frontier gate stays today's exact contiguous-coverage and duplicate-source checks (lifecycle_state.py:1110-1132).
+  - E7 itself (the frontier is at most the highest store_id bound in the adopted generation) is checked and logged at each adoption (§3.3). A lagging frontier loses nothing (engine.py:11203-11222 already reports a stale advance).
 
 ## 3. The model
 ### 3.1 The ledger: one write rule and its tables
@@ -95,9 +95,9 @@ A replay with an unchanged stamp writes nothing except the view vector.
    - **Re-spacing:** when a gap has no integer midpoint, the ingest re-spaces the smallest window of neighbouring ordinals that leaves every gap in it at least 2^10 apart. It runs in the same transaction, and is logged and counted.
    - Indexes: (lineage, ordinal), (lineage, stamp, identity_digest), and (lineage, identity_digest). Ranks 1-3 find candidates lineage-wide through them, from any epoch; E5c then decides.
    - Kept forever.
-2. **Uid bindings (A7)** reuse the canonical `host_uid_bindings` shape (store.py:1239) and are written inside the ingest transaction.
+2. **Uid bindings (A7)** reuse the canonical `host_uid_bindings` shape (store.py:1470-1476) and are written inside the ingest transaction.
    - The canonical binding carries UNIQUE (lineage, uid). This is the only place uniqueness on a uid is enforced; view entries carry no uid.
-   - Revision rows (lineage, uid, revision, occ_id) record the content revisions (E5a), using host_uid.py's existing version kind (host_uid.py:299-310).
+   - Revision rows (lineage, uid, revision, occ_id) record the content revisions (E5a), using host_uid.py's existing version kind (host_uid.py:320-330).
    - The absorbed-uid constituent bindings (A1) live here too.
    - `disagree_seen` and `proof_kind` decide eligibility (E5 rank 1).
    - The uid modes are defined in M16.
@@ -118,12 +118,12 @@ A replay with an unchanged stamp writes nothing except the view vector.
    - Each entry is (identity_digest, stamp_digest or NULL, uidset_digest or NULL, occ_id or descriptor id). uidset_digest covers the uid and the absorbed-uid set, so a view whose only change is a uid or an absorbed uid does not match its previous entry (#1428).
    - The prefix chain is a running digest over the three digests of every entry.
    - The last 2 of each kind are kept per lineage.
-   - Only ingests write vectors. A tail retry (§3.5) and an S3 end (§3.7) write bindings and no vector (L3-5).
+   - Only ingests write vectors. A decided tail retry (§3.5), and at P2 an S3 end (§3.7), write bindings and no vector (L3-5).
 6. **Lineage marks (§3.6):** `lineage_marks(lineage, max_store_id, legacy_proof_digest, max_leaf_id, stamp_policy)`, one row per lineage.
-   - The ingest transaction writes the store mark, only when max_store_id changes (L4-10).
-   - `dag.add_node` (dag.py:267), the single DAG insert point, writes the leaf mark in the same transaction as the node. Condensations and conversation-less leaves therefore update it too (L4-7).
-   - Every writer of the legacy commit proof updates `legacy_proof_digest` in the same transaction: the compress() exit write, the rotation re-key and the reset clear (L4-2, L5-4). The digest covers the per-session proof keys and excludes created_at.
-7. **Meta:** the per-store digest salt lives in a ledger meta row in the same file, so backups and copies keep it (M4). A ledger whose salt is missing is unreadable. The store is then treated as pre-ledger and re-migrated with a new salt (§3.6), which is a re-migration, never a mass re-store.
+   - At P1 the ingest transaction writes only the store mark, when it changes: "examined through", including counted unbound residuals (L4-10). A `no_view` cold-tail ingest binds exact matches but leaves the mark unchanged because its view can be older than history.
+   - The leaf-mark writer is P2 (§5a): `dag.add_node` (dag.py:277) uses a separate connection, so its transaction has no ledger owner (L4-7).
+   - Proof-mark writers are P2 (§5a): the compress() exit write, rotation re-key, reset clear and `_rewrite_own_carry_ranges` (reconcile.py:2743). The digest will cover the per-session proof keys and exclude created_at (L4-2, L5-4).
+7. **Meta:** the per-store digest salt lives in a ledger meta row in the same file, so backups and copies keep it (M4). A ledger whose salt is missing is unreadable. The store is then treated as pre-ledger and re-migrated with a new salt (§3.6), which is a lazy binding-only re-migration on a later incoming exact copy, never a mass re-store.
 
 Two definitions:
 - **The durable cursor** is the newest ingest vector. A cold start finds the anchored run against it (§3.4.2). At P1 that run is one more candidate in today's cursor choice, never a replacement for tail matching (§5); at P2 it is the classifier's base.
@@ -134,15 +134,15 @@ In order:
 1. **Outside the lock:** compute every row's digests and the prefix chain. This step reads no store state. The view factories must be pure and cheap, because a retry re-runs them.
 2. **`BEGIN IMMEDIATE`,** opened explicitly before the ingest's first store read. Today it starts at the first INSERT, so the reads run outside the lock (L5-7). Classification (today's decisions at P1, §3.4 at P2), the evidence it records, the rows and the complete write list then run inside this one transaction. Every read sees this ingest's own writes, and no other writer can interleave, so there is no snapshot to re-check.
    - The per-ingest counters measure the lock-hold time against the §5 lock bars.
-   - **Fallback, only if those bars fail:** classification moves out of the lock. It runs against a snapshot (the lineage's vectors, marks and view_seq, plus the store's write generation as the baseline) with its evidence staged in memory. Inside the lock the ingest re-reads view_seq, the marks and the store's write generation (`PRAGMA data_version`, store.py:1196-1200), which also moves when an older reader on another connection commits an `alt_stamp` relation or an observed_at backfill. If any of them changed, it classifies again inside the lock under the same rules and budget.
+   - **Fallback, only if those bars fail:** classification moves out of the lock. It runs against a snapshot (the lineage's vectors, marks and view_seq, plus the store's write generation as the baseline) with its evidence staged in memory. Inside the lock the ingest re-reads view_seq, the marks and the store's write generation (`PRAGMA data_version`, store.py:1296-1300), which also moves when an older reader on another connection commits an `alt_stamp` relation or an observed_at backfill. If any of them changed, it classifies again inside the lock under the same rules and budget.
 3. **Insert the rows.**
    - `messages.observed_at` is written ONCE at INSERT from the row's own stamp, and never updated.
-   - At P2 the observed_at backfill UPDATEs are retired, so an old row never takes a new stamp (#1512). At P1 today's NULL-only backfill stays, inside the ingest transaction, because today's anchor finds its candidates through observed_at (identity_anchor.py:291).
+   - At P2 the observed_at backfill UPDATEs are retired, so an old row never takes a new stamp (#1512). At P1 today's NULL-only backfill stays, inside the ingest transaction, because today's anchor finds its candidates through observed_at (identity_anchor.py:289-291).
 4. **Write the complete list (L5-6):**
    - occurrence bindings, including any re-spacing;
    - the ingest view vector;
    - the store mark, when it changed;
-   - the relations: composite (forward composite_part is today's `composite` relation), split, supersedes, possible_replay_of, generated_unproven and adopted_from;
+   - the relations: composite (forward composite_part is today's `composite` relation), split, supersedes, possible_replay_of and generated_unproven; `adopted_from:<P>` is a `ledger_meta` key pointing to L;
    - uid canonical, revision and constituent bindings;
    - stamp observations;
    - the anchor carry metadata;
@@ -157,18 +157,18 @@ Rules:
 - Concurrent writers serialize on the lock. The UNIQUE indexes are a backstop that sends the loser back to classify again (M5).
 - Today's decision evidence (the C1 data) is written inside the same transaction and gets no commit of its own. The classifier reads it back on the same connection. Under the fallback in step 2 it is staged in memory instead.
 - **At P1 the writers on the ingest path defer to the ingest transaction's owner** (`MessageStore.ingest_atomic`):
-  - `backfill_observed_at_many` and the insert retry wrapper (sqlite_util.py:53-74) drop their own `with conn:`, which would commit or roll back the open transaction;
-  - `_host_uid_write` (store.py:1325) and `_host_uid_count` (host_uid.py:479) join the transaction instead of refusing it;
-  - `update_metadata_json` (store.py:1784), which opens its own `BEGIN IMMEDIATE`, is not called inside it;
+  - `backfill_observed_at_many` and the insert retry wrapper (sqlite_util.py:70-106) drop their own `with conn:`, which would commit or roll back the open transaction;
+  - `_host_uid_write` (store.py:1546-1557) and `_host_uid_count` (host_uid.py:479) join the transaction instead of refusing it;
+  - `update_metadata_json` (store.py:2131-2150), which opens its own `BEGIN IMMEDIATE`, is not called inside it;
   - a SQLITE_BUSY_SNAPSHOT inside the transaction rolls it back, and the ingest retries once from classification;
-  - the tests that pin the own-transaction rule change with them (test_host_uid_shadow.py:1012 and the ingest-trace golden test).
+  - the tests that pin the own-transaction rule change with them (tests/test_host_uid_shadow.py:1023-1044 and the ingest-trace golden test).
 - Faulted ingests close here (#1815: three shapes that duplicate or skip the retry). A failed transaction leaves no partial evidence, and the retry classifies again.
 - Each ingest counts its lock-hold time, rows classified, rank-5 DP cells, bytes written, cost fallbacks and re-spacings. These are the §5 instruments.
 
 P1 shadow notes (P1b-2b, `LCM_INGEST_LEDGER=shadow`, default; `off` preserves Part A's SQL stream):
-- **X1:** all ledger writes use one strict SAVEPOINT inside `MessageStore.ingest_atomic`; ordinary isolated failures fail open, while busy errors, cancellation and integrity loss keep owner semantics.
+- **X1:** ledger batches use strict SAVEPOINTs inside `MessageStore.ingest_atomic`; adoption has its own savepoint before emission retries and classification. Ordinary isolated failures fail open, while busy errors, cancellation and integrity loss keep owner semantics.
 - **X2:** existing vector bits are stamp 1, uidset 2, descriptor 4, unbound 8.
-- **X3:** the frozen-tail drain and delegated-child S3 path write no ledger rows; their unbound rows await P1g.
+- **X3:** decided tails with frozen evidence write bindings; fallback tails and S3 writes remain unbound until a later own-session exact re-bind (P1g). Never-resumed sessions remain P2 work.
 - **X4:** `key_rank` is NULL; ranks are P2.
 - **X5:** alt_stamp observations require a bound same-lineage occurrence and successful evidence-savepoint release at today's relation sites.
 - **X6:** `add_stamp_observation` retains its existing trigger; nothing reads `stamp_policy` for decisions.
@@ -176,10 +176,10 @@ P1 shadow notes (P1b-2b, `LCM_INGEST_LEDGER=shadow`, default; `off` preserves Pa
 - **X8:** `view_seq` is store-global, shared by an ingest's bindings and vector, and allocated only when needed.
 - **X9:** `plan_ordinals` places new rows in view order between pre-existing same-lineage neighbours; crossed bounds skip the ledger batch, and respacing is atomic and logged at INFO.
 - **X10:** `MessageStore.ingest_atomic` owns the transaction; ledger setup occurs separately at session start.
-- **X11:** no store-mark advancement until P1g proves coverage of earlier unbound rows, including failed ledger batches, drain and S3 writes.
-- **X12:** missing named non-fork ancestry is provisional only for the ledger, bypasses the legacy cache, and is never persisted; persisted complete lineage wins over later unresolved or drifting lookups.
-- **X13:** an ingest vector carries a ref only for a row that this ingest stores or that the identity anchor matches to exactly one binding. A prefix row the anchor does not match, as on an ordinary append, is unbound in the new vector. Carrying refs across a verified prefix is new matching, left to the cold-start cursor reader, which needs it before it reads a vector.
-- **X14:** the persisted lineage is keyed by session id, as the store keys session rows. A store shared by two Hermes homes that reuse one session id keeps the first home's lineage and counts `ledger.lineage_drift`; P1f revisits the key.
+- **X11 (P1g):** the store mark means examined through, not max bound. The indexed own-session lag probe excludes this ingest's stored ids. Failed, crossed, read-only, too-large and `no_view` attempts leave the mark behind; residual rows require P2's anti-join base (§5a).
+- **X12:** missing named non-fork ancestry is provisional only for the ledger, bypasses the legacy cache, and is never persisted; persisted complete lineage wins over later unresolved or drifting lookups. P1f adopts provisional history at transaction start, before the cold cursor's first resolved turn.
+- **X13:** an ingest vector carries a ref for a row this ingest stores, an anchor match to exactly one binding, or a successful P1g exact migrated pair after its savepoint releases. A prefix row without an anchor binding or an exact re-bind remains unbound in the new vector. Carrying refs across a verified prefix is new matching, left to the cold-start cursor reader, which needs it before it reads a vector.
+- **X14:** the persisted lineage remains keyed by session id, as the store keys session rows. A store shared by two Hermes homes that reuse one session id keeps the first home's lineage and counts `ledger.lineage_drift`; P1f retains this key and adds the `adopted_from:<P>` forwarding record.
 - **R3/R17 deviation:** skip an equal-prefix-chain ingest vector when no new binding, observation or newly resolved ref changes it; an unavailable mapping alone does not invalidate the prior vector. This avoids per-turn write load on no-op turns.
 - Preparation hashes the full raw view before BEGIN, including absorbed uids, and records `ledger_digest_ms`; the savepoint records `ledger_ms` within lock hold. Latency on real hosts remains unproven.
 
@@ -202,11 +202,11 @@ The pieces:
   - After a restart the process mark is gone, but the stored-byte recognizer still flags these rows. It reads existing byte shapes; it adds no emitted bytes or carrier tag. A carrier's marker is its leading summary header.
   - The shapes, in precedence order, are: leading summary header plus `[Expand for details:`, objective scaffold prefix, overflow recovery prefix, LCM's full recall header inside `<relevant-memories>`, an exact tool-result stub, survival projection text or bounded-call notice, then user-only summary/scaffold/recovery parts joined after `"\n\n"`. Leading checks use the first text part for structured content. System rows are excluded; the bare recall tag and other mid-row markers do not match. Projection marks are the exception: LCM emits them inside a row, so they match anywhere in the text, and a row that quotes one (for example `lcm_grep` output) is flagged as visible doubt, never lost.
   - A user row carrying these marker bytes is stored and flagged, never lost. Stored NEW applies only where today's classifier stores: exact cursor evidence, DAG-verified scaffolds and verified recovery projections keep their existing skips.
-  - `possible_replay_of` is deferred to P1h or P2; P1c-2b does no DAG or descriptor lookup on ingest.
+  - P1f writes one-time merge `possible_replay_of` pairs (§3.8); per-ingest and tail relations remain deferred to P1h or P2. P1c-2b does no DAG or descriptor lookup on ingest.
   - The recognizer reads the protected payload and the remainder it was protected from, so a generated row large enough for whole-row externalization is still flagged.
   - Accepted gaps: ledger off, `ledger.write_failed` (the savepoint rolls the relation back), not-ready or read-only stores, session-end tail stores (P1e), mid-row markers outside the joined rule, and the externalized form of the over-cap tool-result stub (an `[Externalized tool output: …]` reference, not a recognized shape).
-- **Adoption.** The emission becomes adopted on the host's boundary signal (engine.py:4444) or when an incoming view anchors on it.
-  - A host refusal or rollback (#1116, `record_rejected_compaction`, engine.py:2686) sets it to refused. A refused emission is never a base and never adopted (L5-2), and the previous epoch stays current.
+- **Adoption.** The emission becomes adopted on the host's boundary signal (engine.py:4182, 4534) or when an incoming view anchors on it.
+  - A host refusal or rollback (#1116, `record_rejected_compaction`, engine.py:2411-2424) sets it to refused. A refused emission is never a base and never adopted (L5-2), and the previous epoch stays current.
   - E7 is checked and logged at adoption.
 - **Crash between the write and the host's ingest:** safe. The host never held an output that was not durable, so a summary or scaffold that comes back always matches its descriptor (E6, the #534 carrier shape).
 - No ATTACH and no separate marker file.
@@ -227,7 +227,7 @@ No step reopens an earlier one.
 8. Everything left is NEW, with `possible_replay_of` when a candidate was rejected (E4).
 
 #### 3.4.2 Base and the anchored run
-- **Eligible records:** this lineage's retained vectors (2 ingest, 2 emission), excluding refused emissions.
+- **Eligible records:** this lineage's retained vectors (2 ingest, 2 emission), excluding refused, retry-recovered and below-provenance-floor emission vectors. Emissions must also clear the lineage's recovered high-water mark, as in `emission_candidate` below; when no emission is eligible, P2 uses its history fallback.
 - **Entry match:** two entries match when their identity digests are equal and no known key disagrees. Uid sets that are both known must be equal. Stamps that are both known must be equal, except on a stamp_unreliable lineage.
   - A generated entry whose observed stamp is not yet recorded has a missing stamp, so the host stamping it does not break the run.
 - **The anchored run** is the longest run V[0..k-1] that matches R[j..j+k-1], over eligible records R and offsets j, with k ≥ 1.
@@ -317,54 +317,63 @@ Traces:
 
 ### 3.5 Pending session-end tails (A9)
 A tail exists because the store hit SQLite busy at session end. The ledger is in the same file, so it cannot take the tail at that moment either.
-- A tail is queued for ANY lock failure at session end, including a locked reconcile read (#1805).
-- Each queued tail records its frozen head: the occ_id of the last placed row of the view it followed (L5-5).
-- Tails stay in memory. Each one is retried inside one ledger transaction, and writes bindings but no vector.
-  - **P1 rule:** the tail's leading rows that match, in order and on all three digests, the kept bindings right after the frozen head are REPLAY. Every other row is stored, with `possible_replay_of` when a binding after the frozen head has its identity digest. This replaces the positional `after_store_id` check (engine.py:10674-10692, #1440). A tail frozen before any decision was made (a locked reconcile read, #1805) is retried as a cold-start ingest of its own session, so fix 2's candidates apply (§5). When that session is no longer the engine's current one, the retry takes today's S3 end route (prefix_matching.py:345-386), which has no fix-2 candidates. Either way, any row it stores whose identity digest matches a kept binding of the lineage carries `possible_replay_of`.
-  - **P2:** the tail goes through §3.4, with the frozen head as its head and the history after it as its target.
+- **Decided tails (PR-A):** a busy append at session end queues the filtered, protected rows and freezes their pre-protection ledger entries, stamps, remainder digests, salt and lineage in memory. The head is resolved at retry from `after_store_id`: the maximum kept ordinal of this session at or before that store id (its logical last row; the physically last row can be an earlier insertion), else no ordinal floor. Only a tail whose rows end the host view is decided this way: a tail whose rows are not the view's last rows (an insertion before already stored rows, or an append followed by view rows that are filtered and not stored) freezes no ledger evidence (counted `tail.queued.inserted`), so it keeps positional matching (`fallback.no_ledger`) and writes no bindings, and its rows wait for an exact re-bind (P1g). Queueing adds no ledger reads (engine.py:8680-8715).
+- **P1 hybrid rule:** the target is the session/conversation's store-space window after `after_store_id`, bounded by the tail length. Its leading rows are REPLAY in order. A row with exactly one binding (kept or `composite_part`) must agree on identity and stamp (or a recorded stamp observation) and, unless the queued row carries a host stamp (never a remainder), be above the head/last matched ordinal (a stamped row is the same message wherever another view placed it; the floor keeps unstamped twins out), and have no disagreement between two known uidsets. A remainder matches only `composite_part`. Unbound or multiply bound rows use today's protected `_pending_row_identity`; a foreign conversation stops the walk. This preserves store.append and S3 replay coverage (engine.py:11310-11389, #1440 item 1).
+- A read-only pre-trim removes the already committed prefix before BEGIN; a fully covered tail takes no write lock. Otherwise one `ingest_atomic` transaction re-matches, appends the suffix and writes bindings, with no vector. Ledger off, absent frozen evidence, an unready ledger or a changed salt keeps positional matching in that same transaction and writes no bindings. Salt and persisted lineage come from the tail's own store (engine.py:11321-11327, 11573-11589).
+- `possible_replay_of` remains deferred to P1h. The retry discloses `ledger.tail.retry.candidates_unmarked` for stored suffix rows whose identity appears in the bound window; it does not yet mark those rows.
+- **Cold tails (PR-B):** ANY Exception in the frozen run before the append point, including a locked reconcile count/tail read or deferred evidence (#1805), queues a deep copy of the raw host view, recording its Hermes home and deduplicated by store/home/session/conversation/view and counted by exception type (engine.py:7076-7080; shared queue engine.py:11282-11295). A retry takes the current-session route only while the same store and Hermes home are bound, the session and normalized conversation agree, and that binding stores rows. An ignored or stateless binding takes S3, keeping stamps on for the current session.
+  - The same-session retry first compares the stored prefix with the view, including known stamps: a fully covered view adds nothing and the next ingest reconciles its cursor. Progress after the end means a committed ingest that stores rows (`went_on`), or a zero-row ingest (`went_on_noop`) while the identity prefix still matches with stamps off. Only cold tails bound to that store/home/session are marked; a retry marks only earlier queued ends (engine.py:7094-7101, 11414-11444; #2205). After progress, the view can be older than history, so retry takes stamps-on S3. Otherwise cold-start ingest runs with session-end replay proof disabled and no vector; ignore patterns and protection run once, and the next ingest reconciles.
+  - **D-n single-conflict keep (#1838, part of #2206):** before the cold start, find exactly one identity-matching user row with differing known stamps and no stored `alt_stamp` or `carried_stamp` relation. Host uids do not disable this rule. After ingest, keep the tail if that occurrence is still unplaced, count `ledger.tail.cold_unmatched` and warn once. Placement searches the tail's own store/home/session and normalized conversation, paging through all rows. The placement search checks the drain deadline after each page; an unfinished search keeps and counts the tail. On stamps-off S3 (D2), append the absent suffix once, then keep only an unplaced conflict; an occurrence already placed in that session/conversation covers the tail without a count or warning. This applies to the engine's own `/new`, other-session and sibling retries (engine.py:11445-11548).
+  - S3 compares the prefix inside one `ingest_atomic`: a covered view (including a longer store) adds nothing, a shorter matching store gets the suffix, and a mismatch keeps, counts and warns once. A tail detached from the engine's store or home takes S3 under its recorded home and store with stamps on; a closed store keeps it pending and counts `ledger.tail.cold_store_unbound` (#2210; engine.py:11417-11427; prefix_matching.py:314-363). Retries never finalize lifecycle state. Non-busy exceptions count `ledger.tail.retry_failed`, warn with their type and allow later tails to retry; busy errors and interrupts defer. A warm retry committed before an after-commit exception or interrupt is removed (#2202; engine.py:11589-11614).
+  - **Known limits for P1:** an **undo-and-resend after a busy session end** (case 1 or F1) kept by D-n stays pending, counted and reported at exit (at engine shutdown or a normal interpreter exit; see M9 for `os._exit`); this is not a pass of “0 loss”. P1 parity and crash cells exclude **undo-and-resend after a busy session end** by name. Storing the earlier occurrence visibly with `possible_replay_of` is P1h or P2 work. A single store-newer restamp also stays pending until exit. With no later ingest (case 1), two or more stamp conflicts can still be lost as today; on the identity-matching no-op-ingest route they are kept and counted. An ignored row plus a stamp conflict takes the cold start and silently removes the earlier occurrence, an accepted regression pinned as strict-xfail. A rewritten view after progress may remain pending rather than append undone rows after later ones. Unstamped rewrites still cost duplicates, never loss (#2203): a resumed engine's rewrite followed by the ended engine's exit drain can store the view again, as can a rewrite after a cold-start retry. Under an ignored or stateless same-session binding, a differing known stamp keeps the view and its absent suffix pending. The stamps-off single-conflict rule is limited to the user-row shape above; a detached tail always keeps its stamp check.
+  - An off-current S3 end with a recorded normal conversation and no bypass lineage also queues the raw view on a busy prefix read, recorded-prefix row probe or suffix append, counts `ledger.tail.busy_at_end`, warns and returns before lifecycle finalization (engine.py:5184-5199, 5206-5239, 5297-5309; prefix_matching.py:157-176). Retry uses dedicated S3, with stamps off unless detached, without re-entering the end queue or finalizing. Bypass-lineage ends remain excluded: a busy read leaves the append-versus-bypass route undecidable.
+- **P2:** the tail goes through §3.4, with the frozen head as its head and the history after it as its target.
 - **M9 (re-ruled).** The loss window needs all three of:
   - busy at session end;
   - busy again at every later retry (the next start, the next end, a sibling bind, and the 5 s shutdown drain);
   - then process death or a busy exit.
+  - On a host that leaves through `os._exit` without calling the engine's `shutdown()` (the Hermes gateway until NousResearch/hermes-agent#87328), neither the shutdown drain nor the interpreter-exit (`atexit`) drain runs, so nothing is retried or reported at exit. A tail kept by the last busy end before a stop gets no retry in that process; only its queue-time warning, which names the session, reports it (#2253).
+- Only a tail kept on the single unexplained user-conflict shape reports "stamp conflict" at exit; other pending tails retain the passed reason and whole-view count. The keep marker is cleared before each cold retry and set only at a qualifying keep, so a later busy retry cannot inherit the exclusion. The conflict count pages the session/conversation once and matches occurrences with Counters: stamped rows first by identity and stamp, then untimed rows by identity from the remaining stored copies. D2 stores the absent suffix before keeping the conflicting occurrence; stamps-on S3 still withholds that suffix. The exact count takes the tail store's write lock without waiting and checks the drain deadline before each page; a busy lock, expired deadline or read failure retains the passed reason and whole-view count (engine.py:11623-11674; maintenance_scheduler.py:425).
 - Recovery happens only through a host resume of that session; `/new` does not recover it.
-- Accepted and disclosed, with no sidecar journal. Every busy-at-end event and every drain failure is logged and counted. Any drain failure during the parity audit fails the gate; it is never relabelled as deferred (§5).
+- Accepted and disclosed, with no sidecar journal. Every busy-at-end event and every drain failure is logged and counted. Outside the named undo-and-resend-after-a-busy-end exclusion above, any drain failure during the parity audit fails the gate; it is never relabelled as deferred (§5). A tail pending at such a hard exit is an M9 hit: the audit attributes it to #2253 by its warning's session id and the session's missing rows, and it fails the gate like any other M9 hit.
 
 ### 3.6 Migration and rollback
-- **When:** the first ledger ingest of a lineage that has pre-ledger rows, and again after a detected rollback.
-- **Base (L4-1):** the lineage's pre-ledger rows across its session and its compression ancestors, plus the carry ranges, in store order.
+- **When:** every ready foreground ingest probes its own session for unbound rows above the store mark, including pre-ledger, failed-ledger and older-reader writes.
+- **Base (L4-1):** at P1, only the current session's unbound rows above the examined-through store mark. Ancestors, carry ranges and lineage-wide alignment are P2.
 - **P1, binding only.** Today's code classifies the view, and its decisions take effect.
-  - Migration then binds each stored row it can tie to a byte-exact copy by today's matching, consume-once.
-  - It binds an aligned row to its own byte-exact copy, never to a neighbour's copy set (#588), and records the incoming row's pre-redaction digest.
-  - It leaves every other row unbound and inserts no rows.
-  - An unbound pre-ledger row stays a lineage-wide rank-2 candidate (by its stamp and content). A NEW row that matches one carries `possible_replay_of`.
+  - P1g pairs a unique (canonical host stamp, salted identity digest) on both sides, with identity-anchor agreement, no aliases and no positional walk. `_pending_row_identity` (engine.py:11271) is the separate positional tail comparator, not this matcher.
+  - It binds only its own exact copy, never a neighbour's copy set (#588's P1 half), another session's row, an already bound row in any lineage, or a row at/below the mark. The single identity digest is already pre-redaction (engine.py:7334-7343, 7357; persisted at 7509); no new digest is added.
+  - It leaves every other row unbound and inserts no message rows. Protected bytes, name-only tool results (#1232), twins, unstamped rows, anchor disagreements and crossed pairs are counted as residuals; crossed pairs are dropped individually. `ledger.rebind.residual` is a per-ingest count of this session's unbound rows above the mark that the ingest did not bind; it repeats on each ingest until the mark advances. A failure, the too-large memo or a `no_view` retry leaves the mark behind; while the memo holds, the probe re-counts those rows on every ingest. More than 4096 distinct wanted keys sets a per-store/salt/session too-large memo and leaves the mark behind. The other counters are `ledger.rebind.{runs,bound}`, `ledger.rebind.skipped.{ambiguous,anchor_disagree,unstamped,already_bound,crossed,too_large}`, `ledger.rebind_failed`, `ledger.store_mark_advanced` and `ledger.respaced`.
+  - A later ordinary ingest advances the mark to max(old mark, session top, newly stored ids) after a successful examination, including residuals. Ordinary rebind failures roll back only the nested savepoint, restore the schema flag and count `ledger.rebind_failed`; busy, cancellation and owner failures propagate. Lineage-wide rank-2 candidates and per-ingest `possible_replay_of` are P1h/P2.
 - **P2.** Migration runs the §3.4 classifier with this base. Ranks 1-4 are the anchors, including persisted legacy-proof emissions as rank-4 descriptors, and rank 5 runs between them.
   - Misfits and ties are stored with `possible_replay_of` and tagged `migration_residual`. The doctor counts them, and that count is the #758(a) metric (L4-6).
   - An all-identical unkeyed overlap is the M2 limit.
 - **Rollback detection.** The lineage marks (§3.1 item 6) record its max store_id, the legacy proof digest, and its max DAG leaf id.
   - A mark that changed behind the ledger's back means an older reader wrote this lineage.
-  - Re-migration then covers only the rows past the marks. Rows already bound are fixed anchors; the §3.1 insert rule places the rest; a new vector and new marks are written; epoch 0 is untouched (L4-3).
+  - P1g re-examines own-session rows past the store mark; P2 instead anti-joins all unbound rows, including earlier residuals (§5a). Rows already bound are fixed anchors; the §3.1 insert rule places the rest; a new vector and new marks are written; epoch 0 is untouched (L4-3).
   - Writes to other lineages never trip it.
-- **Legacy identity-only writes (Astra 8).** An older reader can add an alt_stamp relation or backfill observed_at without changing any mark. So on every ingest the classifier reads the legacy identity relations of its candidates (the alt_stamp relations and the reconcile.py:924 aliases) as observations with source `legacy`. No mark is needed for them.
+- **Legacy identity-only writes (Astra 8).** An older reader can add an alt_stamp relation or backfill observed_at without changing any mark. So on every ingest the classifier reads the legacy identity relations of its candidates (the alt_stamp relations and the reconcile.py:964-968 aliases) as observations with source `legacy`. No mark is needed for them.
 - **Re-upgrade (#534, L4-9).** A summary that an older reader published is read as a rank-4 descriptor when that reader persisted its proof. A memory-only legacy proof leaves no descriptor, and the replayed summary is stored with `generated_unproven`. That is visible, and disclosed.
 - **Disclosed residual (#758(a)):** a redaction-policy change before the first ledger ingest leaves a one-time visible duplicate.
+- **Disclosed, not counted:** the store mark is per lineage while the probe is per session. When a compression child advances the lineage's mark past its parent's S3 tail written after rotation, a later foreground ingest of the parent does not re-examine those rows; P2's anti-join does.
 - **Rollback is a supported path** (docs/process/schema-changes.md:14-18; invariant I5).
 
 ### 3.7 Other insert routes and state
-- S3 is the session end for a non-current session (prefix_matching.py:156-192, 345-386). It goes through the same classifier and writes bindings but no vector.
+- S3 is the session end for a non-current session (prefix_matching.py:157-196, 314-363). At P1 it writes no bindings or vector; a later foreground ingest of that session can re-bind its exact copies unless another session of the same lineage has advanced the store mark past them (§3.6). P2 uses the shared classifier.
 - The process-local carrier seen/retired ledger, capped at 256 (identity_anchor.py:57), becomes `emissions` rows.
 
 ### 3.8 Lineage (A8)
 - **Key.** A lineage's key is the persisted host_uid key `<home_tag>:<root>` (host_uid.py:77).
   - It is fixed per session at first resolution and never re-derived.
-  - A partial chain is never cached. This fixes identity_anchor.py:99-110, where a missing child row caches the short chain.
-- **Provisional lineage.** While the key is unresolved, writes go under a provisional session-scoped lineage P. When the key resolves to L, P merges into L inside one ingest transaction, in five steps (L4-4, Astra 11):
+  - The ledger key lookup already bypasses the legacy cache (host_uid.py:83). The separate partial-chain cache read at identity_anchor.py:80-82 and written at :113-114 remains deferred to P2.
+- **Provisional lineage.** While the key is unresolved, writes go under a provisional session-scoped lineage P. Once a resolved or persisted key L is known and P has bindings, views or emissions, P merges into L at the start of the ingest transaction, before emission retries and the cold cursor, in its own savepoint (L4-4, Astra 11):
   1. Re-read L's key, marks and view_seq inside the lock.
-  2. Classify P's rows against L's ledger by §3.4, with L's history as the base. A P row that replays an L occurrence keeps both stored rows, and P's copy gets `possible_replay_of` to L's.
-  3. Give EVERY retained P occurrence, matched or not, a fresh ordinal after L's max, in P's order; occ_ids and relations are unchanged, so UNIQUE (lineage, ordinal) holds. Re-key P's vectors to L; P's newest becomes L's cursor when it is newer.
-  4. A uid with a canonical binding in both: L's stays canonical, and P's becomes a revision with `possible_replay_of`. Nothing is deleted.
-  5. Set max_store_id and max_leaf_id to the larger value, recompute legacy_proof_digest from the merged proof keys, and record `adopted_from` (the #1520 mechanism). The same merge corrects ownership invented on a cold post-turn ingest (#1250).
-- **At P1 the merge binds only:** step 2 uses migration's byte-exact, consume-once matching and writes relations only; every occurrence of P, replayed or not, is re-keyed to L with a fresh ordinal (step 3), together with every reference to it; view_seq is store-global, so "newer" in step 3 is defined.
-- **Fork child.** It starts a new lineage with a parent link (by occ_id). While the parent lineage is provisional, the link stays provisional. A missing parent stays provisional and never becomes a root (L4-8).
+  2. At P1, pair kept P and L bindings by equal non-NULL stamp and identity_digest, consuming L matches once in P ordinal order. Keep both stored rows and write `possible_replay_of` from P's copy to L's. Unstamped digest twins get no relation and are counted.
+  3. Give each distinct non-NULL P ordinal a fresh ordinal after L's max, in P's order; occ_ids, refs and relations are unchanged, so UNIQUE (lineage, ordinal) holds. Re-key bindings, observations, emissions and vectors; keep the newest two vectors per kind. view_seq is store-global, so P's newest becomes L's cursor when it is newer.
+  4. At P1 this is a no-op: legacy `host_uid_bindings` retains its own key. Canonical uid/revision merging moves to P2.
+  5. Keep L's max_store_id (P1g re-scans once), coalesce L's legacy_proof_digest and max_leaf_id with P's, and keep stamp_unreliable if either side has it. Merge emission_recovered by numeric maximum and record `ledger_meta['adopted_from:' + P] = L` (the #1520 record). Ownership repair (#1250) remains deferred.
+- **Failure and restart.** Ordinary merge failures roll back only the adoption savepoint and count `ledger.lineage_merge_failed`; without a persisted key the batch stays under P. Busy errors, cancellation and owner integrity loss propagate. The per-store/salt/session memo is set only after COMMIT. Late adoption appends P's ordinals and counts `ledger.lineage_merge.late`; it never discards stored history.
+- **Fork child.** It starts a new lineage. The parent link by occ_id moves to P2; while the parent lineage is provisional, that link will stay provisional. A missing named non-fork parent stays provisional and never becomes a root (L4-8).
 - The host's view model is not declared (M7).
 
 ### 3.9 Readers (A5, A12a)
@@ -381,22 +390,24 @@ These ship with the P2 flip:
 ## 4. Child map (every v0.30.0 milestone issue; the closing phase in brackets)
 | Class | Mechanism | Issues | Fixed by |
 |---|---|---|---|
-| A | Evidence not atomic with rows | [P1] #574; #1440 item 1 (the P1 tail rule; items 2, 3, 5, 6 split out as non-identity); #1451 item 4; #534 residuals (the atomic exit write); #1805; #1815; #1978 (reader stamp); #1904 item 1 (items 2-5 are test hygiene, folded into #1451's tests). [P2] #1506; #1508 (needs carried_stamp reads) | §3.2, §3.3, §3.5 |
-| B | Cursor or proof lost on restart or rotation | [P1] #758(b); #1523 (recovery-emission binding); the #1328 regression family (the durable-cursor fast path). [P2] #545 (the retained-prefix witness); #1838 (rank-3 scoping, unkeyed definition); #2029 (§3.9 mapper; its exit write is P1); #588 (both halves: migration's alignment is P2) | §3.1, §3.3, §3.4.2, §3.6, §3.9 |
-| C | Unkeyed rows decided by position or content | [P2] #7; #1525; #1566 (anchored offset; the all-identical window is the M2 limit); #1446; #1967 (rank-3 stamp veto; the engine.py:7750 before 7752 ordering hazard); #1451 item 3; #1674 (h2); #1563 (ordinals); #1573; #1547; #607 (multiplicity and legacy twins); #1519 (h4 and the Window: a visible duplicate, not a loss); #1133's default-chunk replay cell (from #1208) | §3.4, E2b, E5b, E5c, §3.6 |
+| A | Evidence not atomic with rows | [P1] #574; #1440 item 1 (the P1 tail rule; items 2, 3, 5, 6 split out as non-identity); #1451 item 4; #534 residuals (the atomic exit write); #1805; #2205 (zero-row progress); #2210 (tail store/home ownership); #1815; #1978 (reader stamp); #1904 item 1 (items 2-5 are test hygiene, folded into #1451's tests). [P2] #1506; #1508 (needs carried_stamp reads) | §3.2, §3.3, §3.5 |
+| B | Cursor or proof lost on restart or rotation | [P1] #758(b); #1880 (host-preserved cleanup); #1286 (cleanup proof); #2163 (cold tool-group boundary); #1523 (recovery-emission binding); the #1328 regression family (the durable-cursor fast path). [P2] #545 (the retained-prefix witness); #1838 (rank-3 scoping, unkeyed definition); #2029 (§3.9 mapper; its exit write is P1); #588 (own-copy binding is P1; alignment is P2) | §3.1, §3.3, §3.4.2, §3.6, §3.9 |
+| C | Unkeyed rows decided by position or content | [P1 limits] #1838 and #2206 (D-n cold-tail keep, §3.5); #2203 (unstamped cold rewrite). [P2] #7; #1525; #1566 (anchored offset; the all-identical window is the M2 limit); #1446; #1967 (rank-3 stamp veto; the engine.py:7835 before 7916 ordering hazard); #1451 item 3; #1674 (h2); #1563 (ordinals); #1573; #1547; #607 (multiplicity and legacy twins); #1519 (h4 and the Window: a visible duplicate, not a loss); #1133's default-chunk replay cell (from #1208) | §3.4, E2b, E5b, E5c, §3.6 |
 | D | Host-uid evidence ignored or misused | [P1 tables, P2 rules and uid `on`] #1836; #1837; #1869; #1179; #1428; #1449 (Window on rank 1); #1512; #1520; #1922; #1924; #1795; #1451 rewind variant | E5 rank 1, E5a, §3.1 item 2, §3.2, §3.8, M16 |
 | E | Identity drift from transforms | [P1 digest, P2 aliases] #758(a) (one-time residual disclosed); #1836-#1838 (pruned outputs); #588 stub-vs-raw alias. #10's spillover half is fixed by #739 (merged 10-28; keep its test), and its Windows CRLF half is split out as #2046 (same class, P2) | §3.1 salted digest, E5b aliases |
 | F | Composite and carrier claims | [P2] #1506; #1508; #2032-F1; #2032-D1; #1003 (rank-4 stamp veto); #1961 and #1446 (emission merged with a host row); #1402; #553 (coverage guard; close as fixed by #581 if a real-host reliability run compacts cleanly); #606 (P3 note: fixed via E6 once §3.3 lands); #923 (now visible: supersedes may target a generated entry, plus possible_replay_of; eliminated only by class D) | §3.4.6, E6, §3.9 |
 | G | Admission: rows never offered to ingest (NOT fixed by the ledger) | [own children, in parallel with P1] #1931 (delegated-child sessions bypassed, bypass.py:151-163); #2042 (after its measurement split: children go to #1931, top-level is P1 v0.30.0); #1250 (ownership; its lineage half is §3.8) | Separate gate children, own PRs |
 
 - #1451 items 1-2 are done.
-- Milestone items outside this design, each with its own issue and PR: #1607, #1650, #1652, #1656, #1666, #1898, #1959, #2045.
+- Milestone items outside this design, each with its own issue and PR: #1650, #1652, #1656, #1666, #1898, #1959, #2045.
 - Not product shapes:
   - #824 is an instrument artefact (see #861).
   - #1328's point fix stands; its regression family is in class B, and its test is kept.
   - #491 is out of scope (redaction).
 
 **Regressions.** Every child gets a regression that fails on v0.29.0, or is strict-xfail there.
+- Cold-tail regressions live in `tests/invariants/test_p1e_cold_tails.py`: #2205 `test_ingest_that_stores_nothing_after_the_end_is_not_progress`; #1838/#2206 `test_resumed_engine_resend_keeps_the_earlier_cold_occurrence`, `test_noop_ingest_after_a_resumed_resend_keeps_the_earlier_occurrence`, `test_store_newer_restamp_stores_missing_rows_and_keeps_the_tail`, `test_repeated_retry_of_a_kept_conflict_adds_nothing`, `test_kept_conflict_placed_check_is_conversation_scoped`, `test_kept_conflict_survives_own_session_switch`, `test_multi_conflict_view_is_not_kept` and `test_kept_conflict_exit_warning_names_the_stamp_conflict`; review regressions add `test_busy_cold_tail_exit_keeps_the_lock_reason_and_whole_count`, `test_kept_conflict_on_the_stamps_off_route_stores_the_absent_suffix`, `test_kept_conflict_exit_count_matches_each_stored_row_once`, `test_kept_conflict_exit_count_takes_untimed_view_rows_as_stored` and `test_kept_conflict_exit_count_reads_the_session_once`; #2203 `test_resumed_session_that_rewrote_the_cold_view` remains strict-xfail unstamped. #2210 keeps `test_cold_tail_after_home_rebind_is_stored_in_its_own_store`, `test_shared_store_home_rebind_retries_under_the_tail_home`, `test_shared_store_other_home_ingest_does_not_mark_cold_tail` and the detached-tail tests in that file.
+- #1880 keeps `tests/test_issue_1880_defer_size_cleanup.py`; #1286 keeps `tests/test_issue_1286_cleanup_rewrite_proof.py`; #2163 needs the cold-bind tool-group boundary cell alongside the durable-cursor regressions. These references are coverage mapping, not a claim that those issues are closed.
 - The drafts' strict-xfail and RED tests carry over: #742, #756, #769, #783, #784, #924, #1544, #1914, #1935, #1937, and #1133's default-chunk replay cell.
 - Each rule added in revision r3.2 has a named case:
   - test_issue_1519 (anchorless and moved-past);
@@ -423,22 +434,22 @@ These ship with the P2 flip:
     - the ledger schema (docs/process/schema-changes.md);
     - one transaction per ingest: the explicit BEGIN IMMEDIATE before the first store read, classification and the complete write list inside it, and the lock-hold counters (§3.2);
     - the compress() single exit, its emission records and its visible failure path (§3.3);
-    - the lineage marks with all their writers;
+    - the examined-through store mark; leaf and proof mark writers are P2 (§5a);
     - the durable cursor;
     - the lineage key and the provisional merge (§3.8);
     - binding-only migration (§3.6);
     - the P1 tail rule (§3.5);
     - stamp observations;
     - the per-ingest counters (§3.2);
-    - the reliability scorer reads relations, so a visible surplus row is told apart from a silent one; `possible_replay_of` writes are deferred to P1h or P2.
+    - the reliability scorer reads relations, so a visible surplus row is told apart from a silent one; P1f writes merge `possible_replay_of` pairs, while per-ingest and tail writes remain deferred to P1h or P2.
   - **Behaviour:** today's classifier keeps deciding. Four fixes take effect at P1, because each one either stores more or skips only on exact evidence:
     1. atomic evidence (class A);
-    2. on a cold start, the anchored run at j = 0 on the durable cursor, or on the newest non-refused emission vector, becomes one more candidate in today's largest-cursor choice (reconcile.py:3091-3125). It never replaces tail matching, so rows stored by a tail retry or an S3 end, which write no vector, are still found (the class B restart family, and a crash between the compress() return and the next ingest);
+    2. on a cold start, the anchored run at j = 0 on the durable cursor, or on the newest non-refused emission vector read through `emission_candidate`, becomes one more candidate in today's largest-cursor choice (reconcile.py:3107-3141). A withheld emission candidate falls back to today's cursor choice. It never replaces tail matching, so rows stored by a tail retry or an S3 end, which write no vector, are still found (the class B restart family, and a crash between the compress() return and the next ingest);
     3. the single exit write and its visible failure path (#2029's exit half, #606, the #534 residuals);
-    4. the P1 tail rule (#1440 item 1).
+    4. the P1 tail rule (#1440 item 1), including D-n's identity-conditioned no-op progress and single-conflict keep on cold-start and stamps-off S3 retries (#1838, #2205, part of #2206; §3.5), with its named P1 known limit.
   - It closes the [P1] children in §4.
   - **Gate for P1:**
-    - The injected-crash cells (C1-C4, the session-end tail including one frozen before any decision and retried after other ingests, and an emission-write failure followed by a restart) show 0 loss and 0 silent surplus. A surplus row that carries a relation is visible; a surplus row without one fails.
+    - Excluding the named **undo-and-resend after a busy session end** limit (§3.5), the injected-crash cells (C1-C4, the session-end tail including one frozen before any decision and retried after other ingests, and an emission-write failure followed by a restart) show 0 loss and 0 silent surplus. A surplus row that carries a relation is visible; a surplus row without one fails.
     - The release spec's existing turn-latency bars hold (D5 and D7). D2 measures facts kept, not latency.
     - Write-lock hold is at most 50 ms at p90 and 250 ms at p99 on views of up to 2,000 rows, read from the new counters.
     - Busy errors stay at or below the v0.29.x count on the same cells.
@@ -473,7 +484,8 @@ Sources: the r3.2 findings of the Codex reviewer (A) and of the Claude reviewer 
 - A3: the anchored run can accept an older revision of a uid before E5a runs. Validate revisions before accepting anchored entries.
 - A5 and C7/C10: head selection defeats the [p, q] → [q, p] and keyed [B, A] rules, and rows outside every interval get no candidate. A NEW row equal to an unbound entry of the base record (under h4, of the durable cursor) gets possible_replay_of; state the keyed-reorder outcome.
 - A6 and C6: the retained-prefix witness is unreachable for [R] → [R+N1], and an emission merged into V[0] has no anchor. Select the previous vector independently of the run; split an emission-merged V[0] by its descriptor before the search; let the run start at a small V[i] with an empty leading gap.
-- C8: P2's first ingest of a lineage that still has unbound pre-ledger rows runs P2 migration over them once, so #758(a) stays measurable.
+- C8: P2 migration enumerates unbound rows with an anti-join against bindings, including residuals below P1g's examined-through mark; it never uses that mark as its base. Run once at the P2 transition so #758(a) stays measurable.
+- Deferred P1f/P1g work: leaf and proof mark writers (§3.1 item 6), the legacy partial-chain cache (F0), and canonical uid/revision merging (merge step 4, §3.8).
 - C9: the first ingest that binds a generated row records its observed stamp, for every kind, so the #1003 veto arms.
 - PR review 1: after a rollback, an older reader can backfill `messages.observed_at` with no relation. At re-upgrade, import those backfills as legacy stamp observations, so the stamp veto sees them. Named regression: downgrade, backfill, re-upgrade.
 - PR review 2: rank 5's target includes superseded occurrences, so an incoming row equal to a superseded one is counted as REPLAY. Exclude superseded occurrences from the lo_d/hi_d counts; a match to one takes the NEW path with `supersedes` and `possible_replay_of`. Named regression: x, then x superseded by x', then x again.
@@ -553,31 +565,63 @@ entries after BEGIN IMMEDIATE and retries each in its own savepoint before
 classification. The registry lock never spans store or SQLite work. Salt changes
 drop stale entries. Claims exclude concurrent attempts; rollback (including a
 busy retry or interrupt) releases them; successful entries settle immediately after
-COMMIT, while callbacks count recovery. Only the originating engine with the
-same compress-call number receives the recovered handle, provided the entry is
-neither superseded nor refused; other retries count it as unhandled.
+COMMIT, while callbacks count `ledger.emission_retry_ok` and
+`ledger.emission_recovered_provenance_only` once per recovered entry.
 
-A host refusal or adoption before the retry is kept on the pending entry
-(`ledger.emission_signal_deferred`) and applied to its descriptors and emission
-view in the retry's savepoint. Refusal is sticky: adoption cannot overwrite it,
-and a refused entry never restores a handle. A signal arriving between the
-in-savepoint read and publication counts `ledger.emission_signal_late`; it does
-not reach the committed state, though a late refusal recorded on the entry
-still restores no handle.
-A later successful exit write supersedes older pending entries in that lineage.
-It marks them inside its write transaction, so a retry through any store on the
-same database, which reads the mark only inside its own write transaction, sees
-it; a write that does not commit restores the mark under its store's write lock.
-Their retries recover descriptors, including
-any signal, without an emission view, and count
-`ledger.emission_retry_superseded`. Other entries retry oldest first in
-registry order, so within one process emission views stay in emission order,
-unless an older entry's retry fails while a newer entry's retry succeeds.
-Narrow windows remain open and must close before P1d relies on emission
-views or states (#2112): a late refusal that never reaches the committed state,
-a refusal between the settle at COMMIT and publication, a refusal for an entry
-another engine recovered, an entry keyed by a provisional lineage, and that
-partial retry failure, after which the older entry's view is the newer one.
+A retry-recovered emission is provenance only: it inserts the same descriptors,
+but writes no emission view, receives no handle and takes no host signal.
+There are no deferred signals or supersession flags. A signal without a matching
+live handle counts `ledger.emission_signal_unmatched`. Live exit views and their
+handle-scoped signals keep the P1c-1 behavior, including adoption only at the two
+verified boundary continuation exits.
+
+The retry savepoint records `emission_recovered:<lineage>` in `ledger_meta` as the
+numeric maximum of its existing value and the retry's `view_seq`, using the
+persisted session lineage when present. The mark commits or rolls back with the
+descriptors. Shadow-mode `on_session_start` calls ledger setup when an
+already-ready store lacks `emission_provenance_floor`. Setup records it once
+with `INSERT OR IGNORE`, from the current `view_seq` counter, in its own
+transaction, immediately after initializing the counter. Fresh ledgers get 0.
+A store without the key treats the current counter as its floor until it is
+recorded. Ingest, retry and compress add no floor SQL.
+Historical recovered views cannot be distinguished from old live views, so every
+pre-floor emission remains ineligible until a newer live exit write commits.
+
+P1d will read `ingest_ledger.emission_candidate(conn, lineage)`; nothing calls it
+on the operating path yet. It reads the newest emission view, its state, the
+recovered mark and the floor in one SQL statement. It returns that view with
+`usable` only when its state is `proposed` or `adopted` and its sequence exceeds
+both the recovered mark (if any) and the floor. Otherwise it returns no view with
+`none`, `refused`, `withheld_recovered` or `below_floor`; it never falls back to
+an older emission. Before a floor exists, the current sequence is the conservative
+floor. The single statement has a consistent snapshot outside a transaction;
+inside the caller's transaction it also sees that transaction's own retry writes,
+so a same-transaction retry already withholds the candidate. It never reads the
+process registry. Withholding falls back to today's cursor choice and tail matching.
+
+The ten #2112 windows close as follows:
+1. A refusal after retry insertion is unmatched; recovered descriptors have no candidate view.
+2. A refusal between settle and publication cannot find or later acquire a recovered handle.
+3. Recovery by another engine never restores a handle to either engine, so the originator's refusal cannot make recovered data eligible.
+4. Provisional-lineage drift cannot create a view, and the retry mark uses the persisted lineage.
+5. Cross-process retries durably raise the high-water mark, withholding older live candidates without process memory.
+6. Partial failures cannot reorder views because retries write none, and the recovered mark uses a numeric maximum.
+7. An exit-write interrupt registers the payload unless readback finds the emission view and exactly this write's ordered descriptor pairs, then propagates unchanged.
+8. A rollback cannot clear another store's supersession flag because those flags no longer exist.
+9. Publication only counts recovery; it neither reads supersession flags nor restores a handle outside the transaction.
+10. A session reset cannot retain a deferred signal because no pending entry stores one.
+
+After the owner finishes, a non-`Exception` interrupt reads back the emission
+view by lineage and this write's allocated `view_seq`, plus the `ledger_emissions`
+`(output_index, descriptor_digest)` pairs ordered by `output_index`. Only an
+existing view and an exact pair match, including count and order, prove COMMIT;
+a peer's different write at a reused sequence registers the failed payload.
+The read helper uses at most two SELECTs under the store write lock, with no write.
+An open transaction skips readback and leaves the commit state unknown.
+A failed readback, open transaction or unallocated sequence registers conservatively;
+an extra recovered sequence can withhold a candidate, but cannot make a
+recovered emission eligible. The original interrupt always propagates unchanged.
+Ordinary exit writes add no readback or transaction arguments.
 
 Inside the ingest ledger savepoint, a stored row matching a still-pending
 descriptor in this store and lineage gains one `generated_unproven` relation.
@@ -593,4 +637,4 @@ skips get no relation. A fail-open rollback (`ledger.write_failed`), ledger off,
 a store that is not ready, read-only or has a changed salt still skips relations.
 Session-end tail stores (P1e), mid-row markers outside the joined rule and the
 externalized over-cap tool-result stub remain accepted gaps. The process mark is lost on restart; the byte recognizer is not.
-`possible_replay_of` is deferred to P1h or P2.
+P1f writes merge `possible_replay_of` pairs (§3.8); per-ingest and tail relations remain deferred to P1h or P2.

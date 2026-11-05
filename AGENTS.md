@@ -223,7 +223,7 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   release notes list them as not run; the minor releases v0.29.0 and v0.30.0 run all phases.
 - The GA commit may differ from the passing rc tree by EXACTLY the release-notes addition
   (mechanically verified: `git diff rcN..GA --name-only` ⊆ `.github/release-notes/`); GA notes
-  link the four phase receipts (A-D; under the tiers, those of the selected rows). A P0/P1 gauntlet finding means fix → new rc → re-run; the only
+  link the four phase receipts (A-D; under the tiers, those of the selected rows). A P0/P1 gauntlet finding means fix → new rc → re-run; the
   exceptions are a Phase B shape or a Phase C publication conflict that the previous GA also
   shows, with the candidate no worse than the base; and a Phase B duplicate-only shape reachable
   only under an injected crash or kill, meeting all five conditions in the spec's differential
@@ -235,8 +235,13 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   these conditions by a reviewer from a different model than the classification's author,
   named in the Phase B receipt. The shape is disclosed at P2 with a tracked fix planned for
   the next patch release. If any condition fails, the normal P0/P1 rule applies and the rc
-  respins. A duplicate on any path without an injected fault still respins; the one recorded
-  exception is the spec's v0.29.1-only D5 rc3-window decision (#1286's upgrade-time
-  duplicate, probe P-S2).
+  respins. A duplicate on any path without an injected fault still respins. The spec records
+  two exceptions: its v0.29.1-only D5 rc3-window decision, extended to rc4 (#1286's
+  upgrade-time duplicate, probe P-S2; #1674's cold-bind re-store, probes P-S6 and P-S6R, and
+  from amendment 5 its comparison with v0.29.0 on each bind's own inputs, shape S7), and, from
+  v0.29.2 while #1674 is open, a cold-bind copy that the D5 clone run's bar 2 matches against
+  the previous GA (KNOWN under #1674 and disclosed; no other duplicate is covered). From v0.29.2
+  the reference-agent canary is judged only by the spec's canary rule and never triggers this
+  respin.
 - Agents preparing a release produce the rc tag and receipts; the GA cut itself follows the
   maintainers-own-releases rule above, which the release-manager delegation meets.

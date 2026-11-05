@@ -1601,6 +1601,9 @@ def test_lcm_backup_creates_sqlite_snapshot(engine):
 
 
 def test_lcm_backup_returns_error_when_sqlite_backup_fails(engine, monkeypatch):
+    # Fault the backup connection, after the lazy engine's first-use open.
+    engine._ensure_storage()
+
     def boom(_path):
         raise sqlite3.OperationalError("disk I/O error")
 

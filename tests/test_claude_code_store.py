@@ -530,6 +530,160 @@ def test_idle_worker_does_not_load_embeddings(tmp_path, home, hermes, monkeypatc
     assert report["complete"] and report["embedding"] == "skipped_idle" and report["vectors"] == 0
 
 
+@pytest.fixture
+def fake_fastembed(monkeypatch):
+    """The real pass and FastEmbed provider over a fake model in an empty model cache; each load
+    is recorded as (start, end), runs ``during`` first, and raises while ``fail`` is set."""
+    from hermes_lcm import embedding_provider as provider_mod
+
+    fake = SimpleNamespace(models={}, loads=[], during=[], fail=False)
+
+    class Model:
+        def query_embed(self, texts):
+            return [[1.0, 0.0] for _ in texts]
+
+        embed = query_embed
+
+    def construct(self, *, allow_download):
+        assert not allow_download
+        started = time.monotonic()
+        for action in fake.during:
+            action()
+        if fake.fail:
+            raise provider_mod.ProviderNotWarmedUp("the fake model is not cached")
+        time.sleep(0.05)
+        fake.loads.append((started, time.monotonic()))
+        return Model()
+
+    monkeypatch.setattr(provider_mod, "_FASTEMBED_MODELS", fake.models)
+    monkeypatch.setattr(provider_mod.FastembedProvider, "_construct", construct)
+    monkeypatch.setattr(provider_mod, "probe_provider_availability",
+                        lambda _config: {"available": True, "detail": "fake model"})
+    return fake
+
+
+def _fresh_worker_after(tmp_path, home, hermes, fake, config, entry):
+    """A store with its profiles registered and its chunks embedded; then ``entry`` is appended,
+    its record spooled, and the model cache emptied, as in a fresh worker process."""
+    hook, path = _hook(), _transcript(tmp_path, CONVERSATION[:2])
+    _record(hook, home, path)
+    assert cc.run_worker(home, config=config, hermes_home=hermes, settle_s=0)["vectors"] > 0
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+    _record(hook, home, path)
+    fake.models.clear()
+    fake.loads.clear()
+    return hook
+
+
+def test_a_fresh_worker_loads_the_chunk_model_before_its_first_slice(tmp_path, home, hermes, monkeypatch,
+                                                                    fake_fastembed):
+    """The load comes before the first slice and outside the budget, so a slice is embedding only,
+    and a record spooled during the load is captured before the first batch."""
+    config = LCMConfig(embeddings_enabled=True, embedding_provider="fastembed")
+    hook = _fresh_worker_after(tmp_path, home, hermes, fake_fastembed, config, CONVERSATION[-1])
+    late = _transcript(tmp_path, [_entry("user", "v1", "late", session="s2")], session="s2")
+    fake_fastembed.during.append(lambda: _record(hook, home, late, session="s2"))
+    slices, real_pass = [], cc.run_incremental_embedding_pass
+
+    def observed(database, passed_config, *, slice_state):
+        with closing(sqlite3.connect(database)) as conn:
+            late_rows = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = 's2'").fetchone()[0]
+        slices.append((time.monotonic(), bool(fake_fastembed.models), late_rows,
+                       slice_state["capture_budget_end"], slice_state.get("model_load_s")))
+        return real_pass(database, passed_config, slice_state=slice_state)
+
+    monkeypatch.setattr(cc, "run_incremental_embedding_pass", observed)
+    report = cc.run_worker(home, config=config, hermes_home=hermes, settle_s=0)
+    assert report["complete"] and report["records"] == 2 and report["vectors"] == 2
+    [(load_start, load_end)] = fake_fastembed.loads
+    assert slices and all(loaded and late_rows == 1 for _, loaded, late_rows, _, _ in slices)
+    assert load_end <= slices[0][0]
+    assert all(load_end - load_start <= load_s < load_end - load_start + 1.0 for *_, load_s in slices)
+
+
+def test_a_round_after_the_budget_ran_out_loads_no_model(tmp_path, home, hermes, monkeypatch, fake_fastembed):
+    """No slice can run once the budget has run out, so a later drain round neither searches for
+    a chunk nor loads the model."""
+    config = LCMConfig(embeddings_enabled=True, embedding_provider="fastembed")
+    hook = _fresh_worker_after(tmp_path, home, hermes, fake_fastembed, config, CONVERSATION[2])  # a tool result
+    late = _transcript(tmp_path, [_entry("user", "v1", "late", session="s2")], session="s2")
+    clock, probes = [100.0], []
+    real_pass, real_load = cc.run_incremental_embedding_pass, cc._load_chunk_model
+
+    def observed(database, passed_config, *, slice_state):
+        if not cc.pending(home):
+            _record(hook, home, late, session="s2")  # the next round has a chunk to embed
+            clock[0] += cc.EMBED_BUDGET_S + 1.0  # and starts after the budget ran out
+        return real_pass(database, passed_config, slice_state=slice_state)
+
+    def load(database, passed_config):
+        probes.append(clock[0])
+        return real_load(database, passed_config)
+
+    monkeypatch.setattr(cc, "run_incremental_embedding_pass", observed)
+    monkeypatch.setattr(cc, "_load_chunk_model", load)
+    monkeypatch.setattr(cc, "time", SimpleNamespace(monotonic=lambda: clock[0], time=time.time,
+                                                    sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
+    report = cc.run_worker(home, config=config, hermes_home=hermes, settle_s=0)
+    assert report["complete"] and report["records"] == 2 and report["embedding"] == "budget"
+    assert probes == [100.0] and fake_fastembed.loads == [] and not fake_fastembed.models
+    with closing(sqlite3.connect(home / "lcm.db")) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = 's2'").fetchone()[0] == 1
+
+
+def test_the_budget_covers_the_discovery_but_not_the_model_load(tmp_path, home, hermes, monkeypatch,
+                                                                fake_fastembed):
+    from hermes_lcm import command
+
+    config = LCMConfig(embeddings_enabled=True, embedding_provider="fastembed")
+    _fresh_worker_after(tmp_path, home, hermes, fake_fastembed, config, CONVERSATION[-1])
+    clock, starts, real_discovery = [100.0], [], command._chunk_pending_rows
+
+    def discovery(*args, **kwargs):
+        clock[0] += 1.0  # a slow discovery
+        return real_discovery(*args, **kwargs)
+
+    def sliced(database, passed_config, *, slice_state):
+        starts.append(clock[0])
+        clock[0] += 1.0
+        return _embedding_slice(slice_state, "chunks=complete:1", vectors=1, again=True)
+
+    fake_fastembed.during.append(lambda: clock.__setitem__(0, clock[0] + 3.0))  # a slow load
+    monkeypatch.setattr(command, "_chunk_pending_rows", discovery)
+    monkeypatch.setattr(cc, "run_incremental_embedding_pass", sliced)
+    monkeypatch.setattr(cc, "time", SimpleNamespace(monotonic=lambda: clock[0], time=time.time, sleep=time.sleep))
+    report = cc.run_worker(home, config=config, hermes_home=hermes, settle_s=0)
+    assert report["embedding"] == "budget" and len(fake_fastembed.loads) == 1
+    assert starts == [104.0 + n for n in range(7)]  # 8 s from 100.0 less the 1 s discovery; the 3 s load is extra
+
+
+def test_a_worker_with_no_chunk_to_embed_loads_no_model(tmp_path, home, hermes, fake_fastembed):
+    config = LCMConfig(embeddings_enabled=True, embedding_provider="fastembed")
+    _fresh_worker_after(tmp_path, home, hermes, fake_fastembed, config, CONVERSATION[2])  # a tool result
+    report = cc.run_worker(home, config=config, hermes_home=hermes, settle_s=0)
+    assert report["complete"] and report["vectors"] == 0 and report["embedding"] == "chunks=complete complete"
+    assert fake_fastembed.loads == [] and not fake_fastembed.models
+
+
+def test_a_model_that_cannot_load_leaves_the_outcome_to_the_pass(tmp_path, home, hermes, monkeypatch,
+                                                                fake_fastembed):
+    config = LCMConfig(embeddings_enabled=True, embedding_provider="fastembed")
+    _fresh_worker_after(tmp_path, home, hermes, fake_fastembed, config, CONVERSATION[-1])
+    fake_fastembed.fail = True
+    states, real_pass = [], cc.run_incremental_embedding_pass
+
+    def observed(database, passed_config, *, slice_state):
+        states.append(slice_state["model_load_s"])
+        return real_pass(database, passed_config, slice_state=slice_state)
+
+    monkeypatch.setattr(cc, "run_incremental_embedding_pass", observed)
+    report = cc.run_worker(home, config=config, hermes_home=hermes, settle_s=0)
+    assert report["complete"] and report["vectors"] == 0 and states and set(states) == {None}
+    with closing(sqlite3.connect(home / "lcm.db")) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM messages WHERE content = 'The word is ochre.'").fetchone()[0] == 1
+
+
 @pytest.mark.parametrize("during_sleep", [False, True])
 def test_embedding_yields_to_spool_and_resumes_state_in_the_same_run(tmp_path, home, hermes, monkeypatch, during_sleep):
     hook = _hook()
