@@ -885,6 +885,19 @@ If startup/status output shows a host-side compression percentage that disagrees
 with LCM, trust live LCM status after a normal message has initialized the
 session.
 
+### Hermes checkpoint gate (`compression.checkpoint_required`)
+
+Hermes's opt-in `compression.checkpoint_required` gate refuses, at agent init,
+an engine that may rewrite or remove host-transcript messages outside
+`compress()`; that check is the compaction-authority resolver
+`engine_compacts_outside_compress` (hermes-agent#94983). LCM-X declares
+`compacts_outside_compress = False` (#2215): `compress()` is the only place it
+rewrites or removes host-transcript messages, so the check accepts it. With the
+gate armed, Hermes's `compress()` also needs an active API-v2 checkpoint memory
+provider, which Hermes does not bundle; arm the gate only with one installed.
+The gate is off by default and LCM-X never sets it. On a Hermes build without
+the gate, or without the resolver, the declaration does nothing.
+
 ### Preset inspection and dry-run suggestions
 
 Model-aware presets are inspectable, but they are not automatic live config

@@ -730,6 +730,12 @@ class LCMEngine(
       5. Active context = system prompt + DAG summaries + fresh tail
     """
 
+    # Hermes's compression.checkpoint_required gate asks whether an engine rewrites or removes host-transcript
+    # messages outside compress() (#2215). LCM-X does not: on_turn_complete() and the background workers write only LCM-X's own
+    # store, and prepared leaves (#787) publish inside compress(). A class attribute and the bool singleton, so the
+    # fresh type(self)(...) that clone_for_agent() builds carries it too.
+    compacts_outside_compress = False
+
     def __init__(self, config: LCMConfig | None = None,
                  hermes_home: str = ""):
         self._config = config or LCMConfig.from_env()
