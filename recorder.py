@@ -207,6 +207,10 @@ def _pin(db_path: Path):
     return conn
 
 
+def _disk_room(target: Path, need: int) -> bool:
+    return shutil.disk_usage(target).free - need >= DISK_FLOOR
+
+
 def _backup(conn, dest: Path) -> dict:
     _mkdir(dest.parent)
     if conn is None:
@@ -462,6 +466,8 @@ class _Writer(threading.Thread):
             return
         try:
             if kind == "event":
+                if self.rec.stopped == "disk_floor":
+                    return
                 self._append(item[1])
             elif kind == "call":
                 item[1]()
@@ -590,9 +596,15 @@ class Recorder:
             self.max_bytes = int(raw) if raw not in (None, "") else DEFAULT_MAX_BYTES
         except ValueError:
             logger.warning("LCM recorder: LCM_RECORDER_MAX_BYTES=%r is not an integer; using 20 GiB", raw)
+        self.writer.start()
+        payload_dir = self._payload_dir(engine)
+        need = self.db_path.stat().st_size if self.db_path.exists() else 0
+        need += sum(p.stat().st_size for p in payload_dir.rglob("*") if p.is_file())
+        if not _disk_room(self.root, need):
+            self._snapshot_refused()
+            return
         pinned = _pin(self.db_path)
         self.writer.total_bytes = self._existing_bytes()
-        self.writer.start()
         self._token(engine)
         self._resolve(type(engine))
         home = str(engine.__dict__.get("_hermes_home") or "")
@@ -600,23 +612,25 @@ class Recorder:
         self.state_db = _StateDb(state_path)
         facts = self._process_facts(engine, home, state_path)
         self.env_digest = hash(json.dumps(plain(facts["env"]), sort_keys=True))
+        self._capture_payloads(payload_dir)
+        self.writer.offer(("call", lambda: self._snapshot(pinned, payload_dir)), force=True)
         self._emit({"kind": "process_start", **facts}, single=True)
         self.opened = True
         self._seed(self.engines[engine], engine)
-        payload_dir = self._payload_dir(engine)
-        self._capture_payloads(payload_dir)
-        self.writer.offer(("call", lambda: self._snapshot(pinned, payload_dir)), force=True)
         self._monitor_on()
         self.capture_ctx(ctx)
         atexit.register(self._atexit)
         os.register_at_fork(after_in_child=self._fork_child)
 
     def add(self, ctx, engine):
-        if self.stopped is not None:
+        if self.stopped is not None or self._foreign(engine):
             return
         with self.lock:
-            self._token(engine)
+            token = self._token(engine)
             self._resolve(type(engine))
+            self._emit({"kind": "register", "engine": token,
+                        "hermes_home": str(engine.__dict__.get("_hermes_home") or ""),
+                        "env": self._env_values(engine)}, single=True)
         self.capture_ctx(ctx)
 
     def _existing_bytes(self) -> int:
@@ -674,9 +688,11 @@ class Recorder:
         if payload_dir.is_dir():
             files = sorted(p for p in payload_dir.rglob("*") if p.is_file())
             size = sum(p.stat().st_size for p in files)
-            if shutil.disk_usage(self.root).free < 2 * size:
+            room = _disk_room(self.root, size)
+            if not room or shutil.disk_usage(self.root).free < 2 * size:
                 self.counters["recorder.payload_copy_skipped"] += 1
                 result["payloads"] = "payloads_missing"
+                result["cause"] = "disk_floor" if not room else "space"
             else:
                 out = _mkdir(snap / "large-outputs")
                 for path in files:
@@ -700,8 +716,23 @@ class Recorder:
             shutil.copyfileobj(src, dst)
         os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
 
+    def _snapshot_refused(self):
+        self.stopped = self.end_state = "disk_floor"
+        self.lose("disk_floor")
+        self.write_status()
+
     def _snapshot(self, pinned, payload_dir: Path):
         snap = self.proc / "snapshot"
+        files = [p for p in (snap / "large-outputs").rglob("*") if p.is_file()]
+        need = (pinned.execute("PRAGMA page_count").fetchone()[0] *
+                pinned.execute("PRAGMA page_size").fetchone()[0]) if pinned is not None else 0
+        need += sum(p.stat().st_size for p in files)
+        if not _disk_room(self.root, need):
+            if pinned is not None:
+                pinned.rollback()
+                pinned.close()
+            self._snapshot_refused()
+            return
         manifest = []
         for path in sorted((snap / "large-outputs").rglob("*")):
             if not path.is_file():
@@ -953,6 +984,9 @@ class Recorder:
                    "thread": threading.current_thread().name, "thread_token": self._thread_token(),
                    "engine": etoken if etoken is not None else "unknown", "t_enter": [time.time(), time.monotonic()],
                    **self._identity(engine)}
+            if root and engine is not None:
+                store = engine.__dict__.get("_store")
+                rec["_ledger_ready"] = bool(store and store.__dict__.get("_ingest_ledger_schema_ready"))
             marks = []
             entry = _Entry(frame, code, rec, engine, root, name)
             (stack[0] if stack else entry).touched.add(etoken)
@@ -1036,6 +1070,13 @@ class Recorder:
                     rec["compression"] = [d.get("_last_compression_status"), d.get("_last_compression_noop_reason")]
                 if marks:
                     self._unsupported(rec, marks)
+                if entry.root and entry.engine is not None:
+                    store = entry.engine.__dict__.get("_store")
+                    if not rec.pop("_ledger_ready", False) and store is not None and \
+                            store.__dict__.get("_ingest_ledger_schema_ready"):
+                        salt = store.ingest_ledger_salt()
+                        if salt is not None:
+                            rec["ledger_salt"] = salt.hex()
                 rec["seq_exit"] = self._next()
                 rec["t_exit"] = [time.time(), time.monotonic()]
                 self._emit(rec)
@@ -1260,6 +1301,9 @@ class Recorder:
         if changed:
             self._emit({"kind": "config_files", "files": changed}, single=True)
         ids = {self.session, engine.__dict__.get("_session_id") if engine is not None else None}
+        if engine is not None:
+            ids |= {engine.__dict__.get(n) for n in ("_foreground_rebind_session_id",
+                                                    "_foreground_rebind_parent_session_id")}
         ids |= {v for k, v in _flat_items(loc) if k.endswith("session_id") and isinstance(v, str)}
         rows = self.state_db.changes(sorted(i for i in ids if i))
         if rows:
@@ -1327,7 +1371,8 @@ class Recorder:
                 from gateway.session_context import get_session_env
                 values[name] = str(get_session_env(name, "") or "")
             except ImportError:
-                values[name] = str(self._env_values(self.engine).get(name) or os.environ.get(name, "") or "")
+                from .config import lcm_env_get
+                values[name] = str(lcm_env_get(name, "") or "")
             except Exception:
                 values[name] = Tag("read_error", True)
         try:
@@ -1377,8 +1422,11 @@ class Recorder:
     def _checkpoint(self, hours):
         try:
             size = self.db_path.stat().st_size if self.db_path.exists() else 0
-            if shutil.disk_usage(self.root).free < 2 * size:
+            room = _disk_room(self.root, size)
+            if not room or shutil.disk_usage(self.root).free < 2 * size:
                 self.counters["recorder.checkpoint_skipped"] += 1
+                self.warnings.append(("LCM recorder: checkpoint +%dh skipped: %s", hours,
+                                      "disk_floor" if not room else "space"))
                 return
             pinned = _pin(self.db_path)
         except Exception as exc:
@@ -1436,6 +1484,9 @@ class Recorder:
         self.marks.setdefault(session or "", Counter())[name] += 1
 
     def lose(self, cause, seq=None):
+        if cause in ("ctx_capture_unavailable", "uncapturable"):
+            self.lost += 1
+            self._emit({"kind": "loss", "lost_observation": cause}, single=True)
         self.counters["recorder.coverage_lost"] += 1
         if self.first_cause is None:
             self.first_cause = {"cause": cause, "seq": seq if seq is not None else self.last_seq}
@@ -1486,7 +1537,7 @@ class Recorder:
     def write_status(self):
         status = {"v": FORMAT_VERSION, "pid": os.getpid(), "last_seq": self.last_seq, "lost": self.lost,
                   "bytes": self.writer.total_bytes, "counters": dict(self.counters),
-                  "marks": {k: dict(v) for k, v in self.marks.items()}, "first_cause": self.first_cause,
+                  "marks": {k: dict(v) for k, v in list(self.marks.items())}, "first_cause": self.first_cause,
                   "last_checkpoint": self.last_checkpoint, "end_state": self.end_state,
                   "ended": "ended without exit" if self.end_state in ("running", "gap", "cap") else self.end_state,
                   "ctx_capture": self.ctx_capture, "replayable": self.ctx_capture == "ok"

@@ -127,6 +127,8 @@ def read(proc, *, checkpoint=None, verify=True) -> dict:
     root = proc.parent.parent
     raw = load_events(proc)
     status = json.loads((proc / "STATUS.json").read_text()) if (proc / "STATUS.json").exists() else {}
+    if status.get("replayable") is False:
+        raise RecordingError("STATUS: recording is not replayable")
     seqs = {s for event in raw for s in _seqs(event)}
     end, cause = 1, "end"
     while end in seqs:

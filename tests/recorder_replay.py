@@ -9,6 +9,7 @@ attempts by key, and compares every root's return value and status. ``compare_st
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 import gc
 import hashlib
 import importlib
@@ -29,7 +30,8 @@ from pathlib import Path
 
 # Tables outside the comparison: rollups, assertions, entities and vectors (background or LLM-synthesis owned),
 # plus FTS shadow tables that mirror compared ones.
-EXCLUDED_TABLE_PREFIXES = ("lcm_rollup", "assertion", "entity", "entities", "vector", "embedding", "chunk",
+EXCLUDED_TABLE_PREFIXES = ("lcm_rollup", "lcm_assertion", "lcm_entit", "lcm_embedding_", "lcm_chunk_", "lcm_memory_",
+                           "assertion", "entity", "entities", "vector", "embedding", "chunk",
                            "messages_fts", "nodes_fts", "sqlite_")
 # Tool returns that depend on LLM synthesis (expand_query_tools.py:642-665 on both trees): declared gaps.
 EXCLUDED_TOOL_RETURNS = frozenset({"lcm_expand_query"})
@@ -38,7 +40,58 @@ EXCLUDED_TOOL_RETURNS = frozenset({"lcm_expand_query"})
 # get_status's ``no_progress_hold.until`` is wall clock plus a monotonic remainder (engine.py:2390).
 CLOCK_FIELDS = frozenset({"duration_ms", "last_compaction_duration_ms"})
 CLOCK_PATHS = frozenset({("no_progress_hold", "until")})
+# SQL defaults and Python wall-clock writes; row identities remain in the comparison.
+SQL_CLOCK_COLUMNS = frozenset({
+    "messages.timestamp", "messages.ingested_at", "summary_nodes.created_at", "summary_nodes.earliest_at",
+    "summary_nodes.latest_at", "summary_node_provenance.created_at", "host_uid_bindings.created_at",
+    "session_lineage.created_at", "message_relations.created_at", "lcm_lifecycle_state.updated_at",
+    "lcm_lifecycle_state.current_bound_at", "lcm_lifecycle_state.last_finalized_at",
+    "lcm_lifecycle_state.debt_updated_at", "lcm_lifecycle_state.last_maintenance_attempt_at",
+    "lcm_lifecycle_state.last_rollover_at", "lcm_lifecycle_state.last_reset_at",
+    "lcm_rollup_invalidations.created_at", "lcm_assertion_sources.processed_at", "lcm_assertions.created_at",
+    "lcm_assertion_relations.created_at", "lcm_assertion_sources.invalidated_at", "lcm_migration_state.completed_at",
+    "lcm_query_corpus_state.changed_at", "lcm_query_views.updated_at", "lcm_query_views.created_at",
+    "lcm_query_views.expires_at", "lcm_query_views.lease_expires_at"})
+PATH_SETTINGS = ("database_path", "large_output_externalization_path", "extraction_output_path")
+ROOT_TIMEOUT = 60
 _LOADS = itertools.count()
+
+
+class ReplayModelBlocked(TimeoutError):
+    pass
+
+
+class _AuxiliaryStub(types.ModuleType):
+    def __init__(self):
+        super().__init__("agent.auxiliary_client")
+        self.replayer = None
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        caller = traceback.extract_stack(limit=3)[-2]
+        if self.replayer is not None:
+            self.replayer.blocked_calls += 1
+            self.replayer.diffs.append(("blocked_model", name, caller.filename, caller.lineno, caller.name))
+        raise ReplayModelBlocked(f"replay blocked agent.auxiliary_client.{name}")
+
+
+@contextmanager
+def _root_sources(event, module):
+    wall, ns = time.time, time.time_ns
+    started = wall()  # preserve deliberately frozen lab clocks while advancing with a live clock
+    time.time = lambda: event["t_enter"][0] + (wall() - started)
+    time.time_ns = lambda: int(time.time() * 1_000_000_000)
+    store = importlib.import_module(module.__name__ + ".store")
+    source = store.secrets
+    if event.get("ledger_salt"):
+        salt = bytes.fromhex(event["ledger_salt"])
+        store.secrets = types.SimpleNamespace(token_bytes=lambda n: salt if n == len(salt) else source.token_bytes(n))
+    try:
+        yield
+    finally:
+        store.secrets = source
+        time.time, time.time_ns = wall, ns
 
 
 class FakeCtx:
@@ -75,6 +128,7 @@ class HostModules:
 
     def __init__(self, home):
         self.home, self.context, self.saved = Path(home), {}, {}
+        self.profiles = {}
 
     def __enter__(self):
         hermes_cli = types.ModuleType("hermes_cli")
@@ -88,7 +142,10 @@ class HostModules:
         session_context = types.ModuleType("gateway.session_context")
         session_context.get_session_env = lambda name, default="": self.context.get(name, default)
         gateway.session_context = session_context
-        for name, module in (("hermes_cli", hermes_cli), ("hermes_cli.config", config), ("gateway", gateway),
+        constants = types.ModuleType("hermes_constants")
+        constants.profile_name_for_home = lambda home: self.profiles.get(str(Path(home)), "")
+        for name, module in (("hermes_constants", constants), ("hermes_cli", hermes_cli),
+                             ("hermes_cli.config", config), ("gateway", gateway),
                              ("gateway.session_context", session_context)):
             self.saved[name] = sys.modules.get(name)
             sys.modules[name] = module
@@ -200,7 +257,8 @@ class _Threads:
                 box["value"], box["status"] = exc, "raise"
             done.set()
         worker[0].put(job)
-        done.wait()
+        if not done.wait(ROOT_TIMEOUT):
+            raise TimeoutError("replay root timed out")
         return box["status"], box["value"]
 
     def close(self):
@@ -217,6 +275,8 @@ class Replayer:
     def __init__(self, recording, module, ctx, reader, state):
         self.rec, self.module, self.ctx, self.reader, self.state = recording, module, ctx, reader, state
         self.engines = {1: ctx.offered}
+        self.contexts = {1: ctx}
+        self.blocked_calls = self.key_misses = 0
         self.objects = {}
         self.homes = {}
         self.seeds = {}
@@ -242,6 +302,8 @@ class Replayer:
         if event is not None and event in self.root_attempts:
             self.root_attempts.remove(event)
         elif event is None and self.root_attempts:
+            self.key_misses += 1
+            self.diffs.append(("summary_key_miss", "summary", "key", self._key(self.root_attempts[0]["args"]), key))
             event = self.root_attempts.popleft()
             self.pool[self._key(event["args"])].remove(event)
         started = time.monotonic()
@@ -353,13 +415,13 @@ class Replayer:
             fn = getattr(target, name)
             positional = positional[1:]
         elif kind == "hook":
-            fn = self.ctx.hooks[name][0]
+            fn = self.contexts.get(event.get("engine"), self.ctx).hooks[name][0]
         elif kind == "tool":
-            fn = self.ctx.tools[name]
+            fn = self.contexts.get(event.get("engine"), self.ctx).tools[name]
         elif kind == "command":
-            fn = self.ctx.commands[name]
+            fn = self.contexts.get(event.get("engine"), self.ctx).commands[name]
         elif kind == "prompt_section":
-            fn = self.ctx.sections[name]
+            fn = self.contexts.get(event.get("engine"), self.ctx).sections[name]
         else:
             module = sys.modules.get(f"{self.module.__name__}.maintenance_scheduler") or importlib.import_module(
                 f"{self.module.__name__}.engine")
@@ -382,7 +444,17 @@ class Replayer:
 
     def apply_state(self, event, host):
         kind = event["kind"]
-        if kind == "seed":
+        if kind == "register":
+            self.apply_state({"kind": "env", "values": event["env"]}, host)
+            host.home = Path(self.home(event["hermes_home"]))
+            host.home.mkdir(parents=True, exist_ok=True)
+            ctx = FakeCtx()
+            self.module.register(ctx)
+            token = event["engine"]
+            self.engines[token], self.contexts[token] = ctx.offered, ctx
+            for name, value in self.seeds.pop(token, {}).items():
+                setattr(ctx.offered, name, self.value(value))
+        elif kind == "seed":
             engine = self.engines.get(event["engine"])
             if engine is None:
                 self.seeds[event["engine"]] = dict(event["values"])
@@ -426,11 +498,16 @@ class Replayer:
                 continue
             if kind == "command":
                 host.context.clear()
-                host.context.update({k: v for k, v in (event.get("context") or {}).items() if isinstance(v, str)})
+                context = event.get("context") or {}
+                host.context.update({k: v for k, v in context.items() if isinstance(v, str)})
+                engine = self.engines.get(event.get("engine"))
+                if engine is not None:
+                    host.profiles[str(Path(engine._hermes_home))] = context.get("engine_profile", "")
             self.root_attempts = deque(c for c in _walk(event) if c.get("kind") == "summary")
             self.inputs = deque(sorted((c for c in _walk(event) if c.get("kind") == "input"),
                                        key=lambda c: c["seq_enter"]))
-            status, value = threads.run(event["thread_token"], lambda e=event: self.call(e))
+            with _root_sources(event, self.module):
+                status, value = threads.run(event["thread_token"], lambda e=event: self.call(e))
             if status == "return":
                 self.bind_result(event, value)
             self.compare(event, status, value)
@@ -499,6 +576,7 @@ def replay(proc, *, plugin_root, workdir, host_path=None, checkpoint=None, mutat
     home = Path(home) if home is not None else workdir / "home"
     home.mkdir(parents=True)
     config_homes = {str(Path(path).parent) for e in recording["events"] for path in e.get("files", {})}
+    config_homes |= {e["hermes_home"] for e in recording["events"] if e.get("kind") == "register"}
     start["replay_homes"] = {path: str(home / f"profile-{i}") for i, path in enumerate(sorted(config_homes))
                              if path != start["hermes_home"]}
     db = home / Path(start["db_path"]).name
@@ -509,6 +587,7 @@ def replay(proc, *, plugin_root, workdir, host_path=None, checkpoint=None, mutat
         shutil.copytree(recording["payloads"], home / "lcm-large-outputs")
     state = _StateServer(home / "state.db")
     state.full(start["sessions"])
+    saved_path = list(sys.path)
     if host_path is not None and str(host_path) not in sys.path:
         sys.path.insert(0, str(host_path))
     replay_env = {key: _env_value(key, value, start, home)
@@ -520,6 +599,12 @@ def replay(proc, *, plugin_root, workdir, host_path=None, checkpoint=None, mutat
     os.environ["LCM_RECORDER_ENABLED"] = "0"
     threads = _Threads()
     module = config_module = original_descriptor = None
+    auxiliary = _AuxiliaryStub()
+    saved_auxiliary = sys.modules.get("agent.auxiliary_client")
+    agent = importlib.import_module("agent")
+    missing = object()
+    saved_attribute = vars(agent).get("auxiliary_client", missing)
+    sys.modules["agent.auxiliary_client"] = agent.auxiliary_client = auxiliary
     try:
         with HostModules(home) as host:
             module = load_plugin(plugin_root)
@@ -530,11 +615,11 @@ def replay(proc, *, plugin_root, workdir, host_path=None, checkpoint=None, mutat
             effective = original_from_env()
             for key, value in start["config"].items():
                 if not isinstance(value, reader.Ref):
-                    if key in ("database_path", "large_output_externalization_path") and value:
+                    if key in PATH_SETTINGS and value:
                         value = _replay_path(value, start, home)
                     setattr(effective, key, value)
             for path in (effective.database_path or db, effective.large_output_externalization_path or home / "lcm-large-outputs",
-                         state.path):
+                         effective.extraction_output_path or home / "lcm-extractions", state.path):
                 _inside_home(path, home)
             first_config = [effective]
             config_module.LCMConfig.from_env = classmethod(
@@ -546,6 +631,7 @@ def replay(proc, *, plugin_root, workdir, host_path=None, checkpoint=None, mutat
             escalation = importlib.import_module(module.__name__ + ".escalation")
             ctx = FakeCtx()
             replayer = Replayer(recording, module, ctx, reader, state)
+            auxiliary.replayer = replayer
             escalation._invoke_summary_attempt = replayer.summary
             for name in ("ingest_persisted", "ingest_protection", "engine", "reconcile"):
                 persisted = importlib.import_module(module.__name__ + "." + name)
@@ -557,6 +643,15 @@ def replay(proc, *, plugin_root, workdir, host_path=None, checkpoint=None, mutat
             replayer.excluded_sessions = {s for s, marks in recording["marks"].items() if marks.get("aux_context")}
             return replayer
     finally:
+        sys.path[:] = saved_path
+        if saved_auxiliary is None:
+            sys.modules.pop("agent.auxiliary_client", None)
+        else:
+            sys.modules["agent.auxiliary_client"] = saved_auxiliary
+        if saved_attribute is missing:
+            vars(agent).pop("auxiliary_client", None)
+        else:
+            agent.auxiliary_client = saved_attribute
         if original_descriptor is not None:
             config_module.LCMConfig.from_env = original_descriptor
         threads.close()
@@ -577,14 +672,16 @@ def _replay_path(value, start, home):
     mappings = [(start["db_path"], home / Path(start["db_path"]).name),
                 (start.get("payload_dir"), home / "lcm-large-outputs"), (start["hermes_home"], home),
                 *[(old, Path(new)) for old, new in start.get("replay_homes", {}).items()]]
+    mappings = sorted(((Path(src).expanduser().resolve(), dst) for src, dst in mappings if src),
+                      key=lambda pair: len(pair[0].parts), reverse=True)
     for source, dest in mappings:
-        if source and path.is_relative_to(Path(source).expanduser().resolve()):
-            return _inside_home(dest / path.relative_to(Path(source).expanduser().resolve()), home)
+        if path.is_relative_to(source):
+            return _inside_home(dest / path.relative_to(source), home)
     return _inside_home(path, home)
 
 
 def _env_value(key, value, start, home):
-    if key in ("LCM_DATABASE_PATH", "LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH"):
+    if key in {"LCM_" + name.upper() for name in PATH_SETTINGS}:
         return _replay_path(value, start, home) if value else value
     if Path(value).is_absolute():
         try:
@@ -595,13 +692,15 @@ def _env_value(key, value, start, home):
 
 
 def _config_files(files, start, home, reader):
-    def clean(value):
+    def clean(value, key=None):
         if isinstance(value, reader.Ref):
             return None
         if isinstance(value, dict):
-            return {k: clean(v) for k, v in value.items() if not isinstance(v, reader.Ref)}
+            return {k: clean(v, k) for k, v in value.items() if not isinstance(v, reader.Ref)}
         if isinstance(value, list):
             return [clean(v) for v in value]
+        if isinstance(value, str) and key in PATH_SETTINGS and value:
+            return _replay_path(value, start, home)
         if isinstance(value, str) and Path(value).is_absolute():
             try:
                 return _replay_path(value, start, home)
@@ -613,10 +712,10 @@ def _config_files(files, start, home, reader):
         if entry.get("state") == "absent":
             target.unlink(missing_ok=True)
         else:
+            values = clean(entry.get("values") or {})
             import yaml  # only a recording that captured a config file needs a YAML writer
 
             target.parent.mkdir(parents=True, exist_ok=True)
-            values = clean(entry.get("values") or {})
             target.write_text(yaml.safe_dump(values))
 
 
@@ -678,5 +777,6 @@ def store_rows(db, *, excluded_columns=(), excluded_sessions=(), excluded_prefix
 
 
 def compare_stores(expected, actual, **kwargs) -> dict:
+    kwargs.setdefault("excluded_columns", SQL_CLOCK_COLUMNS)
     a, b = store_rows(expected, **kwargs), store_rows(actual, **kwargs)
     return {t: (a.get(t), b.get(t)) for t in sorted(set(a) | set(b)) if a.get(t) != b.get(t)}

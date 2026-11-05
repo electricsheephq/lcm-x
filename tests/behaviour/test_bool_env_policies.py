@@ -108,7 +108,8 @@ RAW_READERS = {
     "db_bootstrap.py": {"_integrity_check_interval_hours"},
     "embedding_provider.py": {"probe_provider_availability", "_request", "rerank", "__init__"},
     "engine.py": {"_set_context_length"},
-    # The default-off recorder (#2243): its directory, its byte cap and the HERMES_SESSION_* fallback.
+    # The default-off recorder (#2243): its directory and HERMES_HOME in install, its byte cap and
+    # the profile-scoped HERMES_SESSION_* fallback in _command_context.
     "recorder.py": {"install", "start", "_command_context"},
 }
 

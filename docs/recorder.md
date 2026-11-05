@@ -11,12 +11,12 @@ created.
 | --- | --- | --- |
 | `LCM_RECORDER_ENABLED` | `false` | Install the recorder at plugin registration. |
 | `LCM_RECORDER_DIR` | `$HERMES_HOME/lcm-recorder/` | Where recordings go. |
-| `LCM_RECORDER_MAX_BYTES` | 20 GiB | Cap on event segments and blobs (snapshots and checkpoints are not counted). |
+| `LCM_RECORDER_MAX_BYTES` | 20 GiB | Cap on event segments and shared blobs across every recording under `LCM_RECORDER_DIR` (snapshots and checkpoints are not counted). |
 
 All three are read with the profile-scoped environment at registration; restart the host to change them. On Python
 3.11 the flag logs one warning and installs nothing. If `sys.monitoring` tool ids 3 and 4 are both taken, it logs one
-warning and installs nothing. One recorder serves the whole process; a second registration (another profile's
-PluginManager) adds its engine to the same recording.
+warning and installs nothing. One recorder serves the whole process; a second registration (PluginManager) adds its
+engine to the same recording when it uses the same database; foreign engines are skipped.
 
 ## What is recorded
 
@@ -50,20 +50,28 @@ PluginManager) adds its engine to the same recording.
 ```
 
 Each Hermes process gets its own directory. Two directories on the same database whose wall-time ranges overlap are
-flagged `overlap` by the reader. The initial payload copy finishes before monitoring starts; a separate writer
+flagged `overlap` by the reader. Payload files are pinned before monitoring starts; a separate writer
 thread writes queued events while the host's turn thread copies values.
+
+`PY_UNWIND` cannot be enabled locally: its callback runs for every unwound Python frame in the process, including
+code outside LCM. In the exception-heavy lab test (`test_2263_s4_exception_unwind_budget`), 10,000 exceptions unwinding
+nine frames took 4.99 ms with recording off and 9.59 ms with it on: about 0.051 microseconds extra per frame. The test
+prints the measurement and applies a generous scaled bound; this number describes that workload.
 
 ## Privacy
 
-Recordings are local files only and hold message content. Directories are created 0700 and files 0600. A profile
-backup that copies `$HERMES_HOME` copies the recording too. Secrets are not written: the values passed to
+Recordings capture host inputs before LCM ingest filters: sensitive-pattern redaction and ignore and stateless
+session patterns do not reduce what the recorder stores. Recordings are local files only and hold message content.
+Directories are created 0700 and files 0600. A profile backup that copies `$HERMES_HOME` copies the recording too. Secrets are not written: the values passed to
 `update_model(api_key=..., base_url=...)`, `session_db`, and any `LCM_*` key or config field whose name has a whole
 `_`-separated segment matching KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL or AUTH are recorded only as set or unset.
 
 ## Limits, coverage and the replayable prefix
 
 - **Cap and disk floor:** when the recording reaches `LCM_RECORDER_MAX_BYTES`, or free disk falls below 20 GiB, a
-  `cap` event is written and recording stops. LCM keeps running unchanged.
+  `cap` event is written and recording stops. The cap spans every recording under `LCM_RECORDER_DIR`, including
+  shared `blobs/`. Before snapshots, payload copies and checkpoints, free space minus the planned write must remain
+  at least 20 GiB. A refused snapshot records `disk_floor` in STATUS and writes no events. LCM keeps running unchanged.
 - **Queue admission:** the writer queue admits at most 10,000 events or 512 MiB; an event refused there writes a
   `gap` event and recording stops.
 - **Coverage ends:** recording stops being complete at the first of: a gap, the cap, a value that cannot be copied

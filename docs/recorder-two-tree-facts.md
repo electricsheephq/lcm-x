@@ -48,7 +48,7 @@ M = main 4aca75d5a, R = rc1 7594beb7, H = Hermes bench pin 71d34bad. "held" = th
    list; added to `EXTRA_ENGINE_ROOTS` with a test.
 7. `_compaction_telemetry_counter_epoch` is `uuid4` per engine (M `engine.py:921`, `reset_state.py:31`) and lands
    in `metadata` rows. It is recorded once per engine as a `seed` event and the replayer applies it. One regenerated
-   inside a root (in-root reset) is a declared gap.
+   inside a root (in-root reset) is recorded at root exit.
 
 Decisions 1-6 of Delivery checkpoint 2: (1) the aux descriptor records every frame either rule accepts, with the rule;
 (2) the record-only test excludes the SQLite-default time columns listed in `tests/test_recorder.py`
