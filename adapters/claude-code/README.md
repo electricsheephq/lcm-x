@@ -16,7 +16,8 @@ and recall need the read-only MCP reader (#1216), which lands first. Design:
 claude --plugin-dir adapters/claude-code
 ```
 
-Hooks need the system `python3` (3.9 or newer). Capture and recall need Python 3.11 or newer. The
+Hooks need the system `python3` (3.9 or newer), which they run isolated from your Python settings
+(`-I -S`). Capture and recall need Python 3.11 or newer. The
 plugin looks for one in this order:
 - `LCMX_PYTHON`;
 - a venv in the plugin's data folder, or at `<store home>/venv`;
@@ -36,10 +37,15 @@ search.
 | `LCMX_CAPTURE` | on | `off` disables capture |
 | `LCMX_PYTHON` | `<store home>/venv/bin/python` | Runtime interpreter |
 | `LCMX_PACKAGE_ROOT` | the plugin's vendored copy, else this checkout | LCM-X package |
-| `LCMX_GROK_CAPTURE` | off | `1` enables the experimental Grok Build reader |
 | `LCMX_GROK_HOME` | `~/.lcm-x/grok-build` | Store home for Grok Build sessions (one owning harness per store) |
 
-Home settings must be absolute paths; a relative one disables capture and the server says so.
+Path settings must be absolute, and the server names a relative one. A relative home disables
+capture. A relative `LCMX_PYTHON` or `LCMX_PACKAGE_ROOT` leaves records in the spool, and hooks
+record `runtime_missing` or `package_missing` until it is fixed. A bare command name such as
+`python3.12` counts as relative and is not looked up on `PATH`: give its full path.
+
+Grok Build sessions are not captured in this release: its session-file reader is not included, so
+hooks log each Grok event as `grok_capture_off` and spool nothing.
 
 A `reader-override.json` in the store home makes the server start another reader in place of the
 plain one, and hands it the plain reader's command. Anything wrong with the file starts the plain

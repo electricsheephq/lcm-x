@@ -146,20 +146,18 @@ def test_grok_build_payload_is_normalized_and_off_by_default(hook, env):
     assert _spooled(env) == [] and _spooled(env, "LCMX_GROK_HOME") == []
 
 
-def test_grok_build_uses_its_own_home_and_never_spools_observe_only_events(hook, env):
-    """One owning harness per store; a session-end event cannot replace a pending record."""
+def test_grok_build_events_are_refused_in_their_own_home_whatever_the_old_flag_says(hook, env):
+    """REGRESSION (#2189): no Grok session-file reader is in this release. LCMX_GROK_CAPTURE=1 let
+    Grok records into the spool, where the worker matched no lineage (they carry no transcript
+    path) and deleted each one, having captured nothing. Every Grok event is now refused, and
+    logged in Grok's own home (one owning harness per store)."""
     grok_env = {**env, "GROK_SESSION_ID": "g-1", "LCMX_GROK_CAPTURE": "1"}
-    stop = {"hookEventName": "Stop", "sessionId": "g-1", "cwd": "/work", "reason": "end_turn"}
-    assert hook.main(io.StringIO(json.dumps(stop)), grok_env) == 0
-    assert _spooled(env) == []
-    [record_path] = _spooled(env, "LCMX_GROK_HOME")
-    assert json.loads(record_path.read_text(encoding="utf-8"))["observe_only"] is False
-    for event, reason in (("SessionEnd", None), ("Stop", "session_end")):
+    for event, reason in (("Stop", "end_turn"), ("PostToolUse", None), ("SessionEnd", None), ("Stop", "session_end")):
         payload = {"hookEventName": event, "sessionId": "g-1", "cwd": "/work", "reason": reason}
         assert hook.main(io.StringIO(json.dumps(payload)), grok_env) == 0
-        assert _log(env, "LCMX_GROK_HOME")[-1]["outcome"] == "observed"
-    assert json.loads(record_path.read_text(encoding="utf-8"))["event"] == "Stop"
-    assert json.loads(record_path.read_text(encoding="utf-8"))["reason"] == "end_turn"
+        assert _log(env, "LCMX_GROK_HOME")[-1]["outcome"] == "grok_capture_off"
+    assert _spooled(env) == [] and _spooled(env, "LCMX_GROK_HOME") == []
+    assert not Path(env["LCMX_CC_HOME"]).exists()
 
 
 @pytest.mark.parametrize("setting", ["LCMX_CC_HOME", "CLAUDE_CONFIG_DIR"])
@@ -180,9 +178,15 @@ def test_plugin_files_are_consistent(hook):
     servers = json.loads((PLUGIN / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
     assert manifest["name"] == "lcm-x"
     assert set(hooks) == set(hook.EVENTS) - {"PostToolUse"}  # accepted for Grok Build only
-    for entries in hooks.values():
+    assert hook.ASYNC_EVENTS == {"PostToolBatch"}
+    for event, entries in hooks.items():
         for entry in entries:
-            assert entry["hooks"][0]["command"].endswith('bin/lcmx_hook.py"')
+            # The shell form, which every host runs: Grok Build's runner is not yet proven to honour
+            # an exec form's args. -I -S skips site and ignores the user's Python settings.
+            assert entry["hooks"][0]["command"] == 'python3 -I -S "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"'
+            # Only PostToolBatch runs in the background: the worker settles on the end events, a fork's
+            # start source rides on SessionStart's record, and -p kills an async hook still running at exit.
+            assert entry["hooks"][0].get("async", False) is (event in hook.ASYNC_EVENTS)
     assert set(servers) == {"lcm-x"}
 
 
@@ -224,13 +228,13 @@ def test_precompact_reports_the_worker_outcome(hook, env, tmp_path, monkeypatch)
     home = Path(env["LCMX_CC_HOME"])
     home.mkdir(parents=True)
     continued = home / "continued"
-    popen, starts = hook.subprocess.Popen, []
+    popen, starts = subprocess.Popen, []
 
     def counting(*args, **kwargs):  # counts a detached start even if its worker has not run yet
         if kwargs.get("start_new_session"):
             starts.append(args)
         return popen(*args, **kwargs)
-    monkeypatch.setattr(hook.subprocess, "Popen", counting)
+    monkeypatch.setattr(subprocess, "Popen", counting)
     for code, outcome, detached in ((0, "drained", False), (3, "drain_incomplete+worker", True),
                                     (1, "drain_failed:1+worker", True), (2, "drain_failed:2", False),
                                     (4, "worker_running", False), (5, "drain_bound+worker", True)):
@@ -392,7 +396,7 @@ def test_the_worker_and_the_reader_start_isolated_on_a_found_python(hook, env, t
     home = Path(env["LCMX_CC_HOME"])
     home.mkdir(parents=True)
     started = []
-    monkeypatch.setattr(hook.subprocess, "Popen", lambda command, **kwargs: started.append(command))
+    monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: started.append(command))
     lane = {**env, "PATH": str(found.parent), "LCMX_PACKAGE_ROOT": str(package)}
     assert hook.start_worker(home, lane) == "worker_started"
     assert started == [[str(found), "-I", "-S", str(package / "scripts" / "lcm_x_capture.py"), "worker",
@@ -413,6 +417,203 @@ def test_the_worker_and_the_reader_start_isolated_on_a_found_python(hook, env, t
                                       "--log-dir", str(home / "logs")])]
 
 
+@pytest.mark.parametrize("mode", ["venv", "found"])
+def test_a_hook_that_finds_a_worker_running_imports_nothing_it_does_not_need(env, tmp_path, mode):
+    """A hook pays for its imports before it runs (#2141): typing never loads, and a synchronous
+    hook that finds the worker running loads no subprocess. The hook runs as Claude Code starts
+    it. With a set-up runtime it loads no shutil either; a Python found on PATH is looked up with
+    shutil before the lock probe, since only a hook that can start a worker may probe."""
+    transcript = _transcript(tmp_path)
+    home = Path(env["LCMX_CC_HOME"])
+    home.mkdir(parents=True)
+    payload = {"hook_event_name": "UserPromptSubmit", "session_id": "s1", "transcript_path": str(transcript)}
+    lane = {**env, "PATH": str(Path(sys.executable).parent)}
+    if mode == "venv":
+        lane["LCMX_PYTHON"] = sys.executable
+    with open(home / "capture.lock", "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        done = subprocess.run([sys.executable, "-I", "-S", "-X", "importtime", str(PLUGIN / "bin" / "lcmx_hook.py")],
+                              input=json.dumps(payload), env=lane, capture_output=True, text=True, timeout=60)
+    assert (done.returncode, done.stdout) == (0, "")
+    imported = {line.rsplit("|", 1)[-1].strip() for line in done.stderr.splitlines() if line.startswith("import time:")}
+    assert "json" in imported  # the import log is complete
+    assert imported.isdisjoint({"subprocess", "typing"} | ({"shutil"} if mode == "venv" else set()))
+    assert _log(env)[-1]["outcome"] == "worker_running"
+
+
+APPLE_PREFIX = "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9"
+APPLE_CACHE = "/Users/u/Library/Caches/com.apple.python"
+
+
+HOME_ONLY = {b"HOME": b"/Users/u"}
+
+
+@pytest.mark.parametrize(("platform", "base_prefix", "prefix", "environ", "expected"), [
+    ("darwin", APPLE_PREFIX, None, HOME_ONLY, (APPLE_CACHE, False)),
+    ("darwin", "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9", None,
+     HOME_ONLY, (APPLE_CACHE, False)),
+    ("darwin", APPLE_PREFIX, None, {**HOME_ONLY, b"PYTHONDONTWRITEBYTECODE": b"1"}, (APPLE_CACHE, True)),
+    ("darwin", APPLE_PREFIX, "/a/cache/already/set", HOME_ONLY, None),
+    ("darwin", APPLE_PREFIX, None, {}, None),
+    ("darwin", APPLE_PREFIX, None, {b"HOME": b"relative/home"}, None),
+    ("darwin", "/Library/Frameworks/Python.framework/Versions/3.12", None, HOME_ONLY, None),
+    ("darwin", "/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12", None, HOME_ONLY, None),
+    ("linux", "/usr", None, {b"HOME": b"/home/u"}, None),
+])
+def test_only_apples_python_gets_its_bytecode_cache_back(hook, platform, base_prefix, prefix, environ, expected):
+    """REGRESSION (#2154): under -I, Apple's system Python loses its bytecode cache, stops writing
+    one and compiles every module the hook imports from source, which doubled the hook's time.
+    Only that Python, with no cache set and a home to put one in, gets back the cache and the
+    writing it has without -I; any other keeps its own."""
+    assert hook._apple_bytecode_cache(platform, base_prefix, prefix, environ) == expected
+
+
+def _worker_running_lane(env, tmp_path) -> tuple[dict, str]:
+    """A hook that reaches the lock probe: a set-up runtime, a worker script and a transcript."""
+    lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(_package(tmp_path))}
+    payload = {"hook_event_name": "UserPromptSubmit", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    Path(env["LCMX_CC_HOME"]).mkdir(parents=True)
+    return lane, json.dumps(payload)
+
+
+def test_any_other_python_keeps_its_own_bytecode_cache(env, tmp_path):
+    """The cache fix leaves a Python that is not Apple's alone (here the one running the tests):
+    run with the registered flags, it reads nothing from and writes nothing to Apple's cache."""
+    lane, payload = _worker_running_lane(env, tmp_path)
+    user = tmp_path / "user"
+    user.mkdir()
+    with open(Path(env["LCMX_CC_HOME"]) / "capture.lock", "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        done = subprocess.run([sys.executable, "-I", "-S", "-v", str(PLUGIN / "bin" / "lcmx_hook.py")], input=payload,
+                              env={**lane, "HOME": str(user)}, capture_output=True, text=True, timeout=60)
+    assert (done.returncode, done.stdout) == (0, "")
+    assert "# code object from" in done.stderr  # the import log is complete
+    assert "com.apple.python" not in done.stderr and not (user / "Library").exists()
+    assert _log(env)[-1]["outcome"] == "worker_running"
+
+
+def test_the_cache_fix_fails_open(env, tmp_path):
+    """Run as if on Apple's Python, a hook whose cache cannot be written (a home it cannot write,
+    under a folder it cannot write) or that has no home still spools and prints nothing: a cache
+    it cannot use only costs the compile."""
+    lane, payload = _worker_running_lane(env, tmp_path)
+    as_apple = ("import sys; sys.platform = 'darwin'; sys.base_prefix = %r; sys.pycache_prefix = None; "
+                "path = sys.argv[1]; sys.argv = [path]; "
+                "exec(compile(open(path).read(), path, 'exec'), {'__name__': '__main__', '__file__': path})"
+                % APPLE_PREFIX)
+    locked = tmp_path / "locked"
+    (locked / "home").mkdir(parents=True)
+    homes = {"unwritable": locked / "home", "missing": locked / "absent"}
+    try:
+        for folder in (locked / "home", locked):
+            folder.chmod(0o500)
+        with open(Path(env["LCMX_CC_HOME"]) / "capture.lock", "a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            runs = {name: subprocess.run([sys.executable, "-I", "-S", "-c", as_apple, str(PLUGIN / "bin" / "lcmx_hook.py")],
+                                         input=payload, env={**lane, "HOME": str(home)}, capture_output=True, text=True,
+                                         timeout=60) for name, home in homes.items()}
+            runs["no home"] = subprocess.run([sys.executable, "-I", "-S", "-c", as_apple,
+                                              str(PLUGIN / "bin" / "lcmx_hook.py")], input=payload, env=lane,
+                                             capture_output=True, text=True, timeout=60)
+    finally:
+        for folder in (locked, locked / "home"):
+            folder.chmod(0o700)
+    assert {name: (done.returncode, done.stdout, done.stderr) for name, done in runs.items()} == {
+        name: (0, "", "") for name in runs}
+    assert [row["outcome"] for row in _log(env)] == ["worker_running"] * 3
+    if os.geteuid() != 0:  # root writes through the 0o500 folders
+        assert not (locked / "absent").exists() and not (locked / "home" / "Library").exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Apple's system Python exists only on macOS")
+def test_apples_python_reads_its_bytecode_cache_under_the_registered_flags(env, tmp_path):
+    """REGRESSION (#2154): run with the registered -I -S, Apple's system Python compiled json and
+    the rest from source on every start. With a home, the second start reads them from the cache
+    there; with no home, or one it cannot write, the hook still spools and prints nothing."""
+    if subprocess.run(["xcode-select", "-p"], capture_output=True).returncode != 0:
+        pytest.skip("no developer tools, so /usr/bin/python3 is only an installer stub")
+    probe = subprocess.run(["/usr/bin/python3", "-c", "import sys; print(sys.base_prefix)"], capture_output=True,
+                           text=True, timeout=60)
+    if "/Python3.framework/" not in probe.stdout:
+        pytest.skip("/usr/bin/python3 is not Apple's framework Python")
+    lane, payload = _worker_running_lane(env, tmp_path)
+    user, unwritable = tmp_path / "user", tmp_path / "unwritable"
+    user.mkdir()
+    unwritable.mkdir(mode=0o500)
+    argv = ["/usr/bin/python3", "-I", "-S", "-v", str(PLUGIN / "bin" / "lcmx_hook.py")]
+    try:
+        with open(Path(env["LCMX_CC_HOME"]) / "capture.lock", "a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            runs = [subprocess.run(argv, input=payload, env={**lane, "HOME": str(home)}, capture_output=True, text=True,
+                                   timeout=60) for home in (user, user, unwritable)]
+            runs.append(subprocess.run(argv, input=payload, env=lane, capture_output=True, text=True, timeout=60))
+    finally:
+        unwritable.chmod(0o700)
+    assert [(done.returncode, done.stdout) for done in runs] == [(0, "")] * 4
+    loaded = [line for line in runs[1].stderr.splitlines() if line.startswith("# code object from")
+              and "/json/__init__." in line]
+    assert loaded and str(user / "Library" / "Caches" / "com.apple.python") in loaded[0]
+    assert [row["outcome"] for row in _log(env)] == ["worker_running"] * 4
+
+
+def test_only_a_hook_that_can_start_a_worker_probes_the_lock(hook, env, tmp_path, monkeypatch):
+    """REGRESSION: the probe holds the lock for an instant, and a hook or a starting worker that
+    meets it gives way. A hook with no runtime or worker script that probed could leave another
+    session's records with nobody to drain them, so it returns before the probe."""
+    home = Path(env["LCMX_CC_HOME"])
+    package = tmp_path / "package"  # core, but without the worker script
+    package.mkdir()
+    for name in ("plugin.yaml", "store.py"):
+        (package / name).write_text("", encoding="utf-8")
+    monkeypatch.setattr(hook, "_lock_held", lambda lock: pytest.fail("a hook that starts no worker probed the lock"))
+    lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(package)}
+    for deadline in (0, hook.PRECOMPACT_DEADLINE_S):
+        assert hook.start_worker(home, {**env, "PATH": ""}, deadline_s=deadline) == "runtime_missing"
+        assert hook.start_worker(home, lane, deadline_s=deadline) == "worker_missing"
+
+
+def test_the_async_hook_starts_a_worker_without_probing_the_lock(hook, env, tmp_path, monkeypatch):
+    """REGRESSION (review of #2154): Claude Code may kill an async hook at any point, also while
+    its probe holds the lock and a Stop or SessionEnd hook that met the probe has left its record
+    to it. So the async PostToolBatch hook never probes: it starts a worker, which exits at once
+    if another holds the lock. The synchronous hooks still probe."""
+    lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(_package(tmp_path))}
+    payload = {"hook_event_name": "PostToolBatch", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    started, probed = [], []
+    monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: started.append(command))
+    monkeypatch.setattr(hook, "_lock_held", lambda lock: probed.append(lock) or True)
+    assert hook.main(io.StringIO(json.dumps(payload)), lane) == 0
+    assert (_log(env)[-1]["outcome"], len(started), probed) == ("worker_started", 1, [])
+    assert hook.main(io.StringIO(json.dumps({**payload, "hook_event_name": "Stop"})), lane) == 0
+    assert (_log(env)[-1]["outcome"], len(started), len(probed)) == ("worker_running", 1, 1)
+
+
+@pytest.mark.parametrize("setting", ["PYTHONPATH", "PYTHONHOME"])
+def test_the_registered_hook_command_ignores_the_users_python_settings(env, tmp_path, setting):
+    """REGRESSION (#2141): Claude Code runs the hook command in the user's environment, where a
+    PYTHONPATH can shadow the standard library and a PYTHONHOME can stop python3 from starting.
+    The registered command runs isolated, so the hook still spools and prints nothing."""
+    hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+    [command] = {entry["hooks"][0]["command"] for entries in hooks.values() for entry in entries}
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    (planted / "json.py").write_text("raise SystemExit('a planted module loaded')\n", encoding="utf-8")
+    python = tmp_path / "bin" / "python3"
+    python.parent.mkdir()
+    python.symlink_to(sys.executable)
+    home = Path(env["LCMX_CC_HOME"])
+    home.mkdir(parents=True)
+    payload = {"hook_event_name": "Stop", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    lane = {**env, "PATH": str(python.parent), "CLAUDE_PLUGIN_ROOT": str(PLUGIN), setting: str(planted)}
+    with open(home / "capture.lock", "a") as handle:  # a worker is running, so the hook starts none
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        done = subprocess.run(["/bin/sh", "-c", command], input=json.dumps(payload), env=lane,
+                              capture_output=True, text=True, timeout=60)
+    assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+    assert len(_spooled(env)) == 1
+    assert _log(env)[-1]["outcome"] == "worker_running"
+
+
 def test_the_reader_names_the_one_setup_step_when_no_python_is_found(env, tmp_path, monkeypatch, capsys):
     spec = importlib.util.spec_from_file_location("lcmx_mcp_under_test", PLUGIN / "bin" / "lcmx_mcp.py")
     launcher = importlib.util.module_from_spec(spec)
@@ -424,6 +625,41 @@ def test_the_reader_names_the_one_setup_step_when_no_python_is_found(env, tmp_pa
     monkeypatch.setenv("LCMX_PACKAGE_ROOT", str(_package(tmp_path)))
     assert launcher.main() == 1
     assert "uv venv --python 3.11" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("setting", "outcome"), [("LCMX_PYTHON", "runtime_missing"),
+                                                  ("LCMX_PACKAGE_ROOT", "package_missing")])
+def test_a_relative_runtime_setting_is_refused_and_the_record_waits(hook, env, tmp_path, monkeypatch, capsys,
+                                                                    setting, outcome):
+    """REGRESSION (#2189): the hook checked a relative LCMX_PYTHON or LCMX_PACKAGE_ROOT from the
+    folder it runs in, and the worker then ran in the store home, where the path names nothing.
+    Each is refused, as a relative home is: no found Python or other package stands in for it,
+    nothing starts, the record stays spooled, and the server names the setting."""
+    package = _package(tmp_path)
+    python = tmp_path / "bin" / "python3.11"
+    python.parent.mkdir()
+    python.symlink_to(sys.executable)
+    monkeypatch.chdir(tmp_path)  # from here, each relative path below names a real file
+    started = []
+    monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: started.append(command))
+    lane = {**env, "PATH": str(python.parent), "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(package)}
+    lane[setting] = {"LCMX_PYTHON": "bin/python3.11", "LCMX_PACKAGE_ROOT": "package"}[setting]
+    payload = {"hook_event_name": "Stop", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    assert hook.main(io.StringIO(json.dumps(payload)), lane) == 0
+    assert (_log(env)[-1]["outcome"], started) == (outcome, [])
+    assert len(_spooled(env)) == 1
+
+    spec = importlib.util.spec_from_file_location("lcmx_mcp_under_test", PLUGIN / "bin" / "lcmx_mcp.py")
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    for name in ("CLAUDE_PLUGIN_DATA", "GROK_SESSION_ID"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in lane.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(launcher.os, "execv", lambda path, argv: pytest.fail("the reader started"))
+    monkeypatch.setattr(launcher.os, "execve", lambda path, argv, environment: pytest.fail("the reader started"))
+    assert launcher.main() == 1
+    assert capsys.readouterr().err == "lcm-x: %s must be an absolute path\n" % setting
 
 
 class _Started(Exception):
@@ -671,8 +907,8 @@ def test_a_precompact_drain_never_waits_on_a_held_lock(hook, env, tmp_path, monk
     home = Path(env["LCMX_CC_HOME"])
     home.mkdir(parents=True)
     lane = {**env, "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(_package(tmp_path))}
-    monkeypatch.setattr(hook.subprocess, "run", lambda *a, **k: pytest.fail("a held lock must not start a drain"))
-    monkeypatch.setattr(hook.subprocess, "Popen", lambda *a, **k: pytest.fail("the holder takes the record"))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("a held lock must not start a drain"))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("the holder takes the record"))
     with open(home / "capture.lock", "a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         started = time.monotonic()
@@ -693,9 +929,9 @@ def test_a_precompact_drain_cut_at_its_timeout_hands_the_rest_to_a_detached_work
 
     def timed_out(command, *, timeout, **kwargs):
         bounded.append((command, timeout))
-        raise hook.subprocess.TimeoutExpired(command, timeout)
-    monkeypatch.setattr(hook.subprocess, "run", timed_out)
-    monkeypatch.setattr(hook.subprocess, "Popen", lambda command, **kwargs: detached.append(command))
+        raise subprocess.TimeoutExpired(command, timeout)
+    monkeypatch.setattr(subprocess, "run", timed_out)
+    monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: detached.append(command))
     assert hook.start_worker(home, lane, deadline_s=hook.PRECOMPACT_DEADLINE_S) == "drain_timeout+worker"
     assert [timeout for _command, timeout in bounded] == [hook.PRECOMPACT_DEADLINE_S + 2]
     assert "--deadline" in bounded[0][0] and len(detached) == 1 and "--deadline" not in detached[0]
@@ -711,7 +947,7 @@ def test_a_cut_precompact_drain_leaves_the_rest_to_the_worker_that_took_the_lock
     with open(home / "capture.lock", "a") as handle:
         def incomplete_then_taken(command, *, timeout, **kwargs):
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)  # another worker takes the lock meanwhile
-            return hook.subprocess.CompletedProcess(command, 3)
-        monkeypatch.setattr(hook.subprocess, "run", incomplete_then_taken)
-        monkeypatch.setattr(hook.subprocess, "Popen", lambda *a, **k: pytest.fail("the holder takes the rest"))
+            return subprocess.CompletedProcess(command, 3)
+        monkeypatch.setattr(subprocess, "run", incomplete_then_taken)
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("the holder takes the rest"))
         assert hook.start_worker(home, lane, deadline_s=hook.PRECOMPACT_DEADLINE_S) == "drain_incomplete+holder"

@@ -96,7 +96,10 @@ def main() -> int:
     runtime = lcmx_runtime.runtime_command(environ, home)
     package = lcmx_runtime.package_root(environ)
     reader = package / "scripts" / "lcm_x_mcp.py" if package else None
-    if runtime is None:
+    relative = [name for name in ("LCMX_PYTHON", "LCMX_PACKAGE_ROOT") if lcmx_runtime.relative(environ, name)]
+    if relative:
+        problem = "%s must be an absolute path" % relative[0]
+    elif runtime is None:
         problem = ("no Python 3.11 or newer on PATH for LCM-X: install one, or run `uv venv --python 3.11 %s`"
                    % (home / "venv"))
     elif reader is None or not reader.is_file():

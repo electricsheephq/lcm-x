@@ -64,11 +64,27 @@ logged without content and capture catches up on a later run.
 | Hook | What the adapter does | Waits? |
 |---|---|---|
 | `SessionStart` (`startup`, `resume`, `fork`, `clear`, `compact`) | Spool the session; start the worker. A new session's transcript may not exist yet. The `fork` payload names no parent: the parent is found by the fork's copied uuids (below). | No |
-| `UserPromptSubmit`, `PostToolBatch`, `PostCompact` | Spool; start the worker only if none is running. `PostToolBatch` fires once per batch of tool calls, also inside subagents (with `agent_id`). | No |
+| `UserPromptSubmit`, `PostCompact` | Spool; start the worker only if none is running. | No |
+| `PostToolBatch` | Spool; start a worker, which exits at once if one is running: this async hook never probes the lock (step 1 below). It fires once per batch of tool calls, also inside subagents (with `agent_id`). | No |
 | `Stop`, `StopFailure` | Spool; the worker drains the transcript, then settles (below). `StopFailure` replaces `Stop` when the turn ends on an API error. | No |
 | `SubagentStop` | Spool the subagent transcript (`<session>/subagents/agent-<id>.jsonl`) as a child lineage. Internal agents (`agent_type` empty) are captured and tagged; R0 saw the compaction summarizer fire it with a transcript path that does not exist, which is logged with nothing to ingest. | No |
 | `PreCompact` | Drain synchronously, bounded to 10 s, only when the store lock is free; it never waits for the lock. If a worker holds it, the hook returns at once (`worker_running`) and the holder takes the spooled record. The hook logs `drained` only for a worker-confirmed complete drain, otherwise `drain_bound` (the worker's deadline ended it), `drain_incomplete` (work left for another reason), `drain_failed:<code>` or `drain_timeout`; any of these but a refused store then starts a detached worker for the rest (`+worker`), or leaves it to the worker that has taken the lock since (`+holder`). The drain captures only; it never embeds. The hook kills a drain still running 2 s after its bound. | Bounded, never on the lock |
 | `SessionEnd` | Spool; start a detached drain and return at once. | No |
+
+`PostToolBatch` is registered `async`, so Claude Code does not wait for it (#2141). The other hooks
+stay synchronous:
+- the worker settles a transcript only after an end event (`Stop`, `StopFailure`, `SubagentStop`,
+  `SessionEnd`, `PreCompact`);
+- a later hook copies how the session started from `SessionStart`'s record, so that record is
+  written first;
+- in `-p`, Claude Code kills an async hook still running when the session exits.
+
+An async hook killed while it writes leaves at most a temporary dotfile, which the worker never
+reads. One that finishes after a later hook replaces that hook's record. If that was an end event's
+record, the worker skips the settle, and the next run's sweep captures any line the settle would
+have waited for. The async hook never takes the store lock (step 1 below), so its death never
+leaves a synchronous hook waiting on it. A test kills the hook before and after it writes its
+record, in a session that goes on and at a `-p` exit, and finds every row stored.
 
 ### Spool and worker handshake
 
@@ -77,7 +93,11 @@ lock held and starts nobody. The handshake closes it:
 
 1. **Hook:** write the spool record first (one file per session or subagent, atomic replace, with a
    nanosecond `seq`), then probe the lock. Free: start a detached worker. Held: the holder will see
-   the record (step 3).
+   the record (step 3). The probe holds the lock for an instant, and a hook or a starting worker
+   that meets it gives way, so a hook probes only once it has found a runtime and the worker
+   script: the prober must be able to start the worker itself. The async `PostToolBatch` hook
+   never probes, since Claude Code may kill it at any point, mid-probe too. It starts a worker on
+   every tool batch, and a worker that finds the lock held exits before it loads any store code.
 2. **Claim by rename:** the worker renames `<key>.json` to `<key>.claimed` before reading it. A hook
    firing meanwhile writes a new `<key>.json` and never touches the claimed file, so no record is
    deleted unread. The worker deletes the claimed file only after that transcript's batch commits. A
@@ -86,6 +106,9 @@ lock held and starts nobody. The handshake closes it:
 3. **Exit:** the worker releases the lock, then rescans the spool. If a record is there, it retakes
    the lock without blocking and loops. If another worker holds the lock, that worker acquired it
    after the record was written, and every worker scans after acquiring, so it sees the record.
+   A probe (step 1) holds the lock without scanning, but a prober that finds the lock free goes on
+   to a scan: a hook starts a worker, and a starting worker takes the lock. A prober killed before
+   then leaves the record for the next worker run.
 4. **Settle:** after draining a transcript to its end, the worker re-checks it until the file is
    quiet (bounded to about 2 s): R0 found the final reply not yet written at `Stop` in 2 of 4 runs.
 5. **Sweep:** every worker run also checks each registered transcript, with its `subagents/` and
@@ -342,17 +365,28 @@ hook entry handles:
   for long paths; never the newest session as a guess.
 - The end-of-session `Stop` (reason not `end_turn`) and `SessionEnd` (1.5 s budget) are
   observe-only: logged, never spooled, so they cannot replace a pending record.
-- The Grok reader (`updates.jsonl`) is experimental and off (`LCMX_GROK_CAPTURE=1` enables it)
-  until a real-session proof shows tool results are complete, `/compact` and `/rewind` never
+- The Grok reader (`updates.jsonl`) is not in this release, so the hook refuses every Grok event
+  (`grok_capture_off`) and spools nothing; no setting enables it. It lands only after a
+  real-session proof shows tool results are complete, `/compact` and `/rewind` never
   rewrite the file, and event ids are stable. Without stable ids, uid = session, line index and
   line digest; a rewritten file starts a new generation.
 
 ## Runtime and failure modes
 
-- The hook entry runs on the system `python3` (3.9 or newer, stdlib only). The worker and the MCP
+- The hook entry runs on the system `python3` (3.9 or newer, stdlib only), started with `-I -S`:
+  the user's `PYTHONPATH`, `PYTHONHOME`, user site-packages and `.pth` files never reach it. Each
+  module loads only on the path that needs it: a synchronous hook that finds the worker running
+  loads no `subprocess`, and with a set-up runtime no `shutil` either (#2141). Under `-I`, Apple's
+  system Python (Xcode or the Command Line Tools) loses its bytecode cache in
+  `~/Library/Caches/com.apple.python` and stops writing one, so each start compiled the standard
+  library from source and took about twice as long. Before its standard-library imports, the hook gives that
+  Python back the cache and the writing it has without `-I`; any other Python keeps its own. The worker and the MCP
   server need Python 3.11 or newer with LCM-X's dependencies: `LCMX_PYTHON`, else a venv in the
   plugin's data directory (`CLAUDE_PLUGIN_DATA`, which survives plugin updates and is removed on
-  uninstall), else `<home>/venv`.
+  uninstall), else `<home>/venv`. A relative `LCMX_PYTHON` or `LCMX_PACKAGE_ROOT` is refused, as
+  a relative home is: the hook checks paths from the project folder, while the worker runs in the
+  store home. Hooks then record `runtime_missing` or `package_missing`, records wait in the spool,
+  and the server names the setting.
   - **Zero steps** when a Python 3.11+ exists. Without `LCMX_PYTHON` or a venv, the plugin finds
     one on the hook's `PATH`: the hook's own `python3` if it is 3.11+, else `python3.14` down to
     `python3.11`. Only absolute `PATH` entries are searched: a relative one would name the project
@@ -462,8 +496,8 @@ LCM-X for Claude Code is its own release unit, versioned by the plugin manifest
     - It unpacks the asset with no Hermes, in two runtime modes: a fresh venv of the running
       Python (3.11 or newer), and that Python found on `PATH` and run with `-I -S`.
     - It runs each hook's registered command from `hooks/hooks.json` through the shell, as Claude
-      Code does, on a synthetic transcript. It then waits for the worker those hooks started; it
-      never runs a worker itself.
+      Code does, on a synthetic transcript, and waits for each, `async` ones included. It then
+      waits for the worker those hooks started; it never runs a worker itself.
     - It passes when every hook run logged a started or running worker, no spool record failed,
       `bundle.json` names the commit and core version, and the reader, started from `.mcp.json`,
       finds a planted string and returns its stored source.
