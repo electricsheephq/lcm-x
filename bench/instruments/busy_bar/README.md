@@ -28,7 +28,7 @@ python -B bench/instruments/busy_bar/driver.py \
 `orchestrate.py` defaults to 20 runs per cell per tree, with one child process
 at a time. It alternates baseline/candidate for each cell of each run, reversing
 the pair order on odd runs. Baseline is v0.29.2's rc1 tree, `7594beb7`; the
-candidate source references below are from `5692a7f1`. Keep the baseline read-only
+candidate source references below are from `4bf0a9d6`. Keep the baseline read-only
 (including disabling bytecode writes). Outputs include the two combined JSONL
 ledgers, individual run ledgers/logs, fresh stores, and `verdict.txt`/`verdict.json`.
 The same comparison then runs with a 100 ms connection override in the sibling
@@ -80,14 +80,19 @@ The driver accepts `--k`, `--b-view-rows`, `--seed`, `--window-ms` and optional
 runs production plus the fixed 100 ms control. Ledgers record constants, seeds,
 offsets, batch indexes, view sizes, timeout read-backs and operation intervals.
 A/B operation exceptions record the type and, only for `sqlite3.Error`, the first
-200 characters of its message. A locked/busy SQLite exception counts once, alongside
-log/counter signals. Exceptions continue to the next operation. Failed compression
+200 characters of its message. Exception chains retain only types, SQLite codes and
+SQLite-only bounded messages, never wrapper messages. A raised error is busy only
+when it or an error in either its `__cause__` or `__context__` chain is a
+`sqlite3.Error` with `sqlite_errorcode & 0xff` equal to 5 (BUSY) or 6 (LOCKED).
+Extended codes (including 517, BUSY_SNAPSHOT) count. Message text alone does not
+classify a raise. Any other raise makes that run INCONCLUSIVE; no run is replaced.
+Exceptions continue to the next operation. Failed compression
 retains the original uncompressed host view. Setup, restart and coordination errors
 remain driver errors. Unequal exposure remains a driver bug.
 
 ### Product-owned budgets and retries
 
-Sources below are baseline `7594beb7` / candidate `5692a7f1`, respectively.
+Sources below are baseline `7594beb7` / candidate `4bf0a9d6`, respectively.
 The requested `busy_timeout|SQLITE_BUSY|database is locked|_temporary_sqlite_busy_timeout`
 search covered product Python files in both trees; test/bench copies are excluded.
 
@@ -99,6 +104,7 @@ search covered product Python files in both trees; test/bench copies are exclude
 | Foreground ingest retries complete owner once after busy/savepoint rollback; admission retry uses 0 ms | absent | `engine.py:6957-6958,7040-7044`, `store.py:2075` |
 | Write-lock helper retries BUSY_SNAPSHOT once after rollback; ordinary BUSY gets connection budget only | `sqlite_util.py:53-84` | `sqlite_util.py:70-106` |
 | Temporary timeout helper restores previous value | `sqlite_util.py:112-129` | `sqlite_util.py:154-171` |
+| Single-row metadata writes: no custom budget or retry; read-to-write upgrades can fail immediately | `store.py:1701-1739` | `store.py:2011-2049` |
 | Sender update temporarily 0 ms | `store.py:747-779` | `store.py:856-888` |
 | Compaction telemetry reservation 100 ms | `store.py:1839` | `store.py:2197` |
 | Bootstrap/WAL conversion lock retry: 30 s deadline, 5 ms backoff doubling to 250 ms | `db_bootstrap.py:54,162-193` | `db_bootstrap.py:55,163-194` |
@@ -109,7 +115,10 @@ search covered product Python files in both trees; test/bench copies are exclude
 
 The specs' description of a 5 s production timeout refers to the connect argument;
 the actual effective value is read back rather than inferred. No product policy
-is changed to match that description. Read-only, integrity and disabled auxiliary
+is changed to match that description. A deferred read-to-write upgrade can return
+BUSY immediately without invoking the busy handler; the single-row metadata
+helper does not add a retry. The snapshot-retry helper above explains the ingest
+path separately. Sender updates explicitly use a zero budget in both trees. Read-only, integrity and disabled auxiliary
 paths above are inventory, not claims that each runs in these cells.
 
 Both trees patch `_schedule_rollup_maintenance` and
@@ -117,13 +126,17 @@ Both trees patch `_schedule_rollup_maintenance` and
 assertion extraction and background leaf preparation are disabled. The model
 adapter `engine.summarize_with_escalation` returns a constant local summary while
 the public compression pipeline remains real. Driver home lookups are isolated
-before tree import, inherited LCM/Hermes settings are cleared, and socket network
-connections are denied. No credentials or model calls are needed.
+before tree import, inherited `LCM_*`/`HERMES_*` settings are cleared, and socket
+network connections are denied. The three identity/ledger settings are not pinned:
+each tree uses its shipped defaults, read through its loaded config functions and
+recorded as `effective_defaults` (`absent` when that tree lacks the setting).
+No credentials or model calls are needed.
 
 ## Pinned counting signals
 
-The root logging handler records full messages, emitting thread ids and monotonic
-times. These exact substrings are shared by both pinned trees:
+The root logging handler records full messages, emitting thread/process ids,
+monotonic times, levels and bounded exception-chain metadata. LCM loggers are
+captured at DEBUG in both trees. These exact substrings are shared by both pinned trees:
 
 | Signal | Match | Baseline source | Candidate source |
 | --- | --- | --- | --- |
@@ -141,22 +154,50 @@ product behavior. `compress()` exists in both trees at `compaction.py:732`;
 methods and checked at driver startup.
 
 An operation is busy once if any pinned log signal occurs on its own driver
-thread during its interval, or its applicable candidate counter rises. Repeated
-lines, multiple signals, and a counter plus a log still count once. Other-thread
-records, records outside the interval, unrelated errors and counter changes on
-other operation types count nothing. The output reports A, B and total counts.
+thread/process during its public API invocation, its applicable candidate counter
+rises, a raised exception is busy by the code rule above, or an LCM record's
+attached `exc_info` is busy by that same rule. Caught DEBUG failures count too:
+`LCM successful compaction telemetry update failed` is emitted by
+`engine.py:2349` in the baseline / `engine.py:1971` in the candidate for the telemetry write's 100 ms budget.
+Repeated lines, multiple signals, and a counter plus a log still count once.
+A signal belongs to its emitting engine and call, never to another engine whose
+call overlaps it. Internal writes belong to their containing public call's class.
+Outside-call records and other-thread/process records do not count. A caught
+non-busy error neither counts nor makes a run inconclusive. Output reports A, B
+and total counts.
 
 ## Gate interpretation
 
-Only production counts gate: each cell must have candidate busy operations at
-most baseline's, including a baseline-zero cell. Any excess gives `GATE FAIL`
-and names the cells. Equal or lower counts give `GATE PASS` only when the control
-shows at least one busy operation in **each** tree. A zero control in either tree,
-unequal operation counts/run coverage/schedules, or any driver error in either
-comparison gives `INCONCLUSIVE`. Missing control ledgers cannot pass. The gate
-checks production/control exposure too, ignoring only their timeout difference.
-Control counts are printed separately and never compared for a gating verdict.
-The R=2 smoke stops without tuning if either control tree is zero at W=400 ms.
+Only production counts gate: a cell fails when candidate busy operations exceed
+`ceil(1.25 * baseline) + 1`. Thus baseline 0 allows 1; baseline 4 allows 6.
+The default gate session runs **20** production runs per tree/cell. If baseline
+has fewer than 8 busy operations in a cell and candidate has more, both trees run
+**60 additional** production runs of that cell, numbered 20..79, with seeds
+2075..2134 continuing the sequence. The rule then judges the 80-run totals.
+Both initial 20-run and final counts are reported. Missing extension runs make
+the verdict INCONCLUSIVE. `--runs 2` is the local smoke; it does not extend or
+establish the gate's prescribed exposure.
+
+The control always covers the initial runs only (20 for a gate session), with
+the same seeds and offsets. It must show at least one busy failure in **each
+operation class** (`ingest`, `compress`, `session-end`) in **each tree**, including
+signals from internal writes attributed to that class. A missing class/tree is
+named and makes the verdict INCONCLUSIVE. Unequal operation counts/run coverage/
+schedules, any driver error, or any inconclusive run also makes it INCONCLUSIVE.
+Missing control ledgers cannot pass. Production/control exposure must match,
+ignoring their timeout difference and production extension runs. Control counts
+are printed separately and never compared for a gating regression. A smoke with
+zero busy operations in either control tree stops without tuning.
+
+The gate constants stay unchanged: K=2, 2,000 new B rows per operation,
+W=400 ms, `random.Random(2055 + run).random()*W`, 20 initial runs, 60 extension
+runs when required, and 20 control runs. The control overrides `PRAGMA
+busy_timeout=100` on each A/B **main store connection**, immediately after opening
+and after A's restart; the ledger records each read-back. It does not lower
+auxiliary/read-only connections or replace temporary product budgets. Maintenance,
+embeddings and extraction are disabled, so their auxiliary connections do not
+participate. Production applies no override. The error-code and log/counter
+classification rules above apply identically across budgets.
 
 ## Relative lock-bar probe
 
@@ -166,19 +207,47 @@ python -B bench/instruments/busy_bar/holds.py \
   --work-root "$SCRATCH/holds"
 ```
 
-Each run/tree is a fresh process, interleaved with reversed pair order on odd
-runs, serially. Every SQLite connection receives a trace callback. Only first
-keywords, connection ids and monotonic times survive; SQL text is never stored.
-A window opens at BEGIN or the first INSERT/UPDATE/DELETE/REPLACE outside a window,
-and closes at COMMIT/ROLLBACK/END on that connection. SAVEPOINT/RELEASE are neutral.
-Still-open windows close at call end and carry `open_at_end=true`. These are
-statement-trace windows, not an independent lock-acquisition sensor.
+Each run/tree is a fresh process and fresh WAL store, interleaved with reversed
+pair order on odd runs, serially except for its monitor child. It ingests six
+2,000-new-row views into the same session (shape n), then the last stored
+2,000-row view plus a two-row suffix (shape t). Journal mode is checked and
+recorded; any non-WAL store fails the run. Shipped defaults and offline switches
+match the busy driver.
 
-Shape n ingests 2,000 new rows. Shape t immediately ingests that stored view plus
-a two-row suffix. Each run yields one call per shape. Per tree/shape, output
-reports the median and p90 (nearest rank) of the longest window per call, median
-start of the first window and median call time. Shape n is `LOCK-RELATIVE PASS`
-when candidate median longest <= 1.25 * baseline median longest; otherwise FAIL.
-Shape t has no verdict: its absolute bar comes from PR1's counters.
-The gate value comes from one run on a declared quiet host. Local smoke on this
-shared Mac is instrument validation; it cannot establish the declared-host gate.
+The monitor opens only the database's `-shm` file **read-only** and polls
+`fcntl(F_GETLK)` for a write lock at byte 120 (`UNIX_SHM_BASE=120` plus
+`WAL_WRITE_LOCK=0`). It never acquires a lock or opens a SQLite connection. A
+separate process is essential because POSIX locks owned by the querying process
+are invisible to F_GETLK. Darwin's 64-bit struct flock is start/length/pid/type/
+whence (24 bytes); Linux's is type/whence/start/length/pid (32 bytes, including
+padding). Unknown platforms/ABIs fail loudly. Native-layout tests cover both;
+a live known-holder PID check confirms the running kernel's response. This
+Mac's layout was also confirmed by compiling against its SDK's `sys/fcntl.h`.
+Linux kernel execution requires a Linux host; packing tests alone do not prove it.
+
+**Poll constant: 150,000 ns (0.15 ms)** of sleep per loop, plus syscall/loop
+work. Achieved intervals (median/p99/max) and all time/PID samples are recorded
+per run. A local Darwin/Python 3.12 known-hold control measured median 0.194 ms,
+p99 0.201 ms and maximum 0.231 ms; these are observations, not guaranteed bounds.
+Both processes use system-wide `time.monotonic_ns()`, never wall time.
+The engine process stamps only call start/end; it does no per-statement work.
+A held period starts at the first held sample and ends at the first unlocked
+sample. Periods separated by less than the fixed poll interval merge, then are
+clipped to call boundaries; the longest is that call's hold. Sampling may miss
+short holds (reported as zero), and scheduling stalls enlarge edge uncertainty;
+use achieved intervals, not the requested sleep, to assess this uncertainty.
+
+Per tree/shape the summary reports median/p90 longest hold, median first observed
+start and median call duration. Shape n must meet the 1.25 ratio at **all eight**
+statistics: the all-calls median (60 calls in a default session); six per-position
+medians over runs; and the median of each run's longest hold. FAIL names every
+exceeded statistic. Shape t has no verdict: its absolute bar comes from the
+harness's per-ingest counters. `--trace` optionally retains keyword-only statement
+traces/windows for diagnostics; it produces `DIAGNOSTIC ONLY`, never a gate verdict.
+The default never installs a trace callback.
+
+The gate value comes from one ten-run interleaved session on a declared quiet
+host. Local R=3 smoke on a shared host validates the instrument only. It does not
+establish either release bar. A monitor that misses the known 200 ms control hold,
+or an unconfirmed native layout, is a stop condition, not permission to substitute
+a statement-trace measurement.

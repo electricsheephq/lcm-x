@@ -1,4 +1,4 @@
-"""Relative write-window probe: fresh serial processes, keyword-only SQLite traces."""
+"""Relative WAL write-lock probe using an external read-only F_GETLK monitor."""
 
 from __future__ import annotations
 
@@ -17,10 +17,11 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
-    from . import cells, driver
+    from . import cells, driver, monitor
 else:
     import cells
     import driver
+    import monitor
 
 WRITE_WORDS = {"INSERT", "UPDATE", "DELETE", "REPLACE"}
 
@@ -48,13 +49,9 @@ def windows(events: list[tuple[float, int, str]], begin: float, end: float) -> l
     return found
 
 
-def probe(tree: Path, work: Path, rows: int) -> dict[str, Any]:
+def probe(tree: Path, work: Path, rows: int, trace: bool = False) -> dict[str, Any]:
     work.mkdir(parents=True, exist_ok=False)
-    for key in list(os.environ):
-        if key.startswith(("LCM_", "HERMES_")):
-            del os.environ[key]
-    os.environ.update(HERMES_HOME=str(work / "isolated-home"), LCM_INGEST_LEDGER="shadow",
-                      LCM_IDENTITY_ANCHOR="on", LCM_HOST_MESSAGE_UID="off")
+    driver.isolated_environment(work)
     events: list[tuple[float, int, str]] = []
     original_connect = sqlite3.connect
     connections = 0
@@ -65,16 +62,16 @@ def probe(tree: Path, work: Path, rows: int) -> dict[str, Any]:
         index = connections
         connections += 1
 
-        def trace(statement: str) -> None:
+        def callback(statement: str) -> None:
             parts = statement.lstrip().split(None, 1)
-            # SQL text is discarded here, never retained in events or output.
             events.append((time.monotonic(), index, parts[0].upper() if parts else ""))
 
-        conn.set_trace_callback(trace)
+        conn.set_trace_callback(callback)
         return conn
 
-    sqlite3.connect = traced_connect
-    engine = None
+    if trace:
+        sqlite3.connect = traced_connect
+    engine = observer = None
     try:
         config_module, engine_module = driver.load_tree(tree)
         driver.offline_setup(engine_module)
@@ -86,68 +83,118 @@ def probe(tree: Path, work: Path, rows: int) -> dict[str, Any]:
         )
         engine = engine_module.LCMEngine(config=config, hermes_home=str(work / "home"))
         cells.start(engine, "B")
-        cells.start(engine, "A")
-        view = cells.writer_view(0, rows)
+        journal = engine._store._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        if journal.lower() != "wal":
+            raise RuntimeError(f"lock monitor requires WAL, got {journal}")
+        observer = monitor.Monitor(work / "lcm.db")
         results = []
-        for shape, host_view in (("n", view), ("t", view + cells.turn(rows + 1, "B"))):
+        # Each all-new bounded view is distinct, but belongs to the same session.
+        views = [("n", position + 1, cells.writer_view(position, rows)) for position in range(6)]
+        views.append(("t", 1, views[-1][2] + cells.turn(6 * rows + 1, "B")))
+        for shape, position, host_view in views:
             events.clear()
-            begin = time.monotonic()
+            begin = time.monotonic_ns()
             engine.ingest(host_view)
-            end = time.monotonic()
-            found = windows(events, begin, end)
-            results.append({"shape": shape, "view_rows": len(host_view),
-                            "call_ms": (end - begin) * 1000, "windows": found,
-                            "longest_ms": max((window["hold_ms"] for window in found), default=0),
-                            "first_start_ms": min((window["start_ms"] for window in found), default=None),
-                            "trace": events.copy()})
-        return {"tree": str(tree), "rows": rows, "connections": connections, "calls": results}
+            end = time.monotonic_ns()
+            call = {"shape": shape, "position": position, "view_rows": len(host_view),
+                    "begin_ns": begin, "end_ns": end, "call_ms": (end - begin) / 1e6}
+            if trace:
+                call["trace"] = events.copy()
+                call["trace_windows"] = windows(events, begin / 1e9, end / 1e9)
+            results.append(call)
+        # Ensure a post-call observation even for the last very short call.
+        time.sleep(2 * monitor.POLL_NS / 1e9)
+        observed = observer.stop()
+        observer = None
+        samples = observed["samples"]
+        if samples[0][0] > results[0]["begin_ns"] or samples[-1][0] < results[-1]["end_ns"]:
+            raise RuntimeError("monitor samples do not cover all calls")
+        for call in results:
+            found = monitor.held_periods(samples, call["begin_ns"], call["end_ns"])
+            call["windows"] = [{"start_ns": start, "end_ns": end,
+                                "hold_ms": (end - start) / 1e6} for start, end in found]
+            call["longest_ms"] = max(((end - start) / 1e6 for start, end in found), default=0)
+            call["first_start_ms"] = (found[0][0] - call["begin_ns"]) / 1e6 if found else None
+        return {"tree": str(tree), "rows": rows, "journal_mode": journal,
+                "effective_defaults": driver.effective_defaults(config_module),
+                "trace_diagnostic": trace, "monitor": observed, "calls": results}
     finally:
         try:
-            if engine is not None:
-                engine.shutdown()
+            if observer is not None:
+                observer.stop()
         finally:
-            sqlite3.connect = original_connect
+            try:
+                if engine is not None:
+                    engine.shutdown()
+            finally:
+                sqlite3.connect = original_connect
 
 
 def summarize(collected: dict[str, list]) -> dict[str, Any]:
     tables: dict[str, Any] = {}
+    statistics_by_tree: dict[str, dict[str, float]] = {}
     for name, runs in collected.items():
         tables[name] = {}
+        if not runs:
+            raise ValueError(f"no runs: {name}")
+        for run in runs:
+            positions = [call["position"] for call in run["calls"] if call["shape"] == "n"]
+            if positions != list(range(1, 7)) or run["journal_mode"].lower() != "wal":
+                raise ValueError(f"invalid six-call/WAL run: {name}")
         for shape in ("n", "t"):
             calls = [call for run in runs for call in run["calls"] if call["shape"] == shape]
-            if not calls or any(call["first_start_ms"] is None for call in calls):
-                raise ValueError(f"missing write windows: {name} shape {shape}")
+            if not calls:
+                raise ValueError(f"missing calls: {name} shape {shape}")
             longest = sorted(call["longest_ms"] for call in calls)
+            starts = [call["first_start_ms"] for call in calls if call["first_start_ms"] is not None]
             tables[name][shape] = {
                 "calls": len(calls), "median_longest_ms": statistics.median(longest),
                 "p90_longest_ms": longest[math.ceil(0.9 * len(longest)) - 1],
-                "median_first_start_ms": statistics.median(call["first_start_ms"] for call in calls),
+                "median_first_start_ms": statistics.median(starts) if starts else None,
                 "median_call_ms": statistics.median(call["call_ms"] for call in calls),
             }
-    base = tables["baseline"]["n"]["median_longest_ms"]
-    candidate = tables["candidate"]["n"]["median_longest_ms"]
-    return {"tables": tables, "verdict": "LOCK-RELATIVE PASS" if candidate <= 1.25 * base else "LOCK-RELATIVE FAIL"}
+        n_calls = [call for run in runs for call in run["calls"] if call["shape"] == "n"]
+        statistics_by_tree[name] = {
+            "all-calls": tables[name]["n"]["median_longest_ms"],
+            **{f"position-{position}": statistics.median(
+                call["longest_ms"] for call in n_calls if call["position"] == position)
+               for position in range(1, 7)},
+            "run-longest": statistics.median(max(call["longest_ms"] for call in run["calls"]
+                                                 if call["shape"] == "n") for run in runs),
+        }
+    if len(collected["baseline"]) != len(collected["candidate"]):
+        raise ValueError("unequal lock-probe run counts")
+    failed = [key for key, value in statistics_by_tree["candidate"].items()
+              if value > 1.25 * statistics_by_tree["baseline"][key]]
+    diagnostic = any(run.get("trace_diagnostic") for runs in collected.values() for run in runs)
+    return {"tables": tables, "statistics": statistics_by_tree, "failed_statistics": failed,
+            "verdict": "DIAGNOSTIC ONLY" if diagnostic else
+            "LOCK-RELATIVE FAIL" if failed else "LOCK-RELATIVE PASS"}
 
 
 def report(result: dict[str, Any]) -> str:
     lines = ["tree shape calls median_longest_ms p90_longest_ms median_first_start_ms median_call_ms"]
     for name, shapes in result["tables"].items():
         for shape, row in shapes.items():
-            values = " ".join(f"{row[key]:.3f}" for key in (
+            values = " ".join(f"{row[key]:.3f}" if row[key] is not None else "unobserved" for key in (
                 "median_longest_ms", "p90_longest_ms", "median_first_start_ms", "median_call_ms"))
             lines.append(f"{name} {shape} {row['calls']} {values}")
-    base = result["tables"]["baseline"]["n"]["median_longest_ms"]
-    candidate = result["tables"]["candidate"]["n"]["median_longest_ms"]
-    lines.append(f"{result['verdict']}: baseline={base:.3f} ms candidate={candidate:.3f} ms limit={1.25 * base:.3f} ms")
-    lines.append("Shape t is reported only; its absolute bar comes from PR1 counters.")
+    lines.append("statistic baseline_ms candidate_ms limit_ms")
+    for key, base in result["statistics"]["baseline"].items():
+        candidate = result["statistics"]["candidate"][key]
+        lines.append(f"{key} {base:.3f} {candidate:.3f} {1.25 * base:.3f}")
+    lines.append(result["verdict"])
+    if result["failed_statistics"]:
+        lines.append("exceeded: " + ", ".join(result["failed_statistics"]))
+    lines.append("Shape t is reported only; its absolute bar comes from harness counters.")
     return "\n".join(lines) + "\n"
 
 
 def main() -> None:
     # Private child mode keeps each tree isolated in its own interpreter.
     if len(sys.argv) > 1 and sys.argv[1] == "--probe":
-        tree, output, work, rows = sys.argv[2:]
-        result = probe(Path(tree).resolve(), Path(work).resolve(), int(rows))
+        tree, output, work, rows, trace = sys.argv[2:]
+        result = probe(Path(tree).resolve(), Path(work).resolve(), int(rows), trace == "True")
         with Path(output).open("x") as handle:
             json.dump(result, handle)
             handle.write("\n")
@@ -156,6 +203,7 @@ def main() -> None:
     parser.add_argument("baseline_tree", type=Path)
     parser.add_argument("candidate_tree", type=Path)
     parser.add_argument("outdir", type=Path)
+    parser.add_argument("--trace", action="store_true", help="diagnostic only; disables verdict")
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--rows", type=int, default=2000)
     parser.add_argument("--work-root", type=Path,
@@ -177,7 +225,7 @@ def main() -> None:
             output = args.outdir / f"{prefix}.json"
             command = [sys.executable, "-B", str(Path(__file__).resolve()), "--probe",
                        str(tree.resolve()), str(output.resolve()),
-                       str((args.work_root / prefix).resolve()), str(args.rows)]
+                       str((args.work_root / prefix).resolve()), str(args.rows), str(args.trace)]
             with (args.outdir / f"{prefix}.log").open("x") as log:
                 subprocess.run(command, env=env, stdout=log, stderr=log, check=True, timeout=120)
             collected[name].append(json.loads(output.read_text()))
@@ -186,7 +234,7 @@ def main() -> None:
     rendered = report(result)
     (args.outdir / "verdict.txt").write_text(rendered)
     print(rendered, end="")
-    raise SystemExit(0 if result["verdict"] == "LOCK-RELATIVE PASS" else 1)
+    raise SystemExit(0 if result["verdict"] in ("LOCK-RELATIVE PASS", "DIAGNOSTIC ONLY") else 1)
 
 
 if __name__ == "__main__":

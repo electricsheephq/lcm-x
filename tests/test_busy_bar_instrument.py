@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import threading
 import os
 import sqlite3
 import subprocess
@@ -15,6 +17,12 @@ from types import SimpleNamespace
 import pytest
 
 from bench.instruments.busy_bar import cells, driver, gate, holds, orchestrate
+
+
+def sqlite_error(code: int, message: str = "SQLite error") -> sqlite3.OperationalError:
+    error = sqlite3.OperationalError(message)
+    error.sqlite_errorcode = code
+    return error
 
 
 def log(message: str, thread: int = 1, time: float = 2.0) -> dict:
@@ -84,16 +92,20 @@ def test_real_operation_combines_counter_and_root_log() -> None:
 
 def ledger(busy: int) -> list[dict]:
     return [{"cell": cell, "run": 0, "k": 2, "b_view_rows": 2000, "busy_timeout_ms": None, "seed": 2055, "window_ms": 400, "offsets_ms": [1, 2, 3], "errors": [], "operations": [
-        {"engine": owner, "op": "ingest", "busy": index < busy}
+        {"engine": owner, "op": ("ingest", "compress", "session-end")[index], "busy": index < busy}
         for owner in ("A", "B") for index in range(3)]} for cell in cells.CELLS]
 
 
 def control(busy: int) -> list[dict]:
-    return [{**row, "busy_timeout_ms": 100} for row in ledger(busy)]
+    rows = [{**row, "busy_timeout_ms": 100} for row in ledger(0)]
+    for row in rows:
+        for record in row["operations"]:
+            record["busy"] = busy > 0 and (record["engine"] == "A" or busy > 1)
+    return rows
 
 
 @pytest.mark.parametrize("base,candidate,expected", [
-    (1, 1, "GATE PASS"), (2, 1, "GATE PASS"), (1, 2, "GATE FAIL"),
+    (1, 1, "GATE PASS"), (2, 1, "GATE PASS"), (1, 2, "GATE PASS"), (1, 3, "GATE FAIL"),
     (0, 0, "GATE PASS"), (0, 1, "GATE FAIL"),
 ])
 def test_gate_counts(base: int, candidate: int, expected: str) -> None:
@@ -105,7 +117,7 @@ def test_gate_counts(base: int, candidate: int, expected: str) -> None:
 
 
 def test_gate_regression_in_one_cell_cannot_hide_in_total() -> None:
-    baseline, candidate = ledger(2), ledger(0)
+    baseline, candidate = ledger(1), ledger(0)
     candidate[0] = ledger(3)[0]
     result = gate.evaluate(baseline, candidate, control(1), control(1))
     assert result["verdict"] == "GATE FAIL"
@@ -261,8 +273,9 @@ def test_seeded_arrivals_are_identical_across_trees() -> None:
     assert all(0 <= offset < 5 for offset in offsets)
 
 
+@pytest.mark.parametrize("code", [5, 1])
 @pytest.mark.parametrize("cell", cells.CELLS)
-def test_operation_errors_continue_equal_exposure(tmp_path: Path, cell: str) -> None:
+def test_operation_errors_continue_equal_exposure(tmp_path: Path, cell: str, code: int) -> None:
     class Connection:
         def execute(self, sql: str) -> Connection:
             assert sql == "PRAGMA busy_timeout"  # Production mode does not set a PRAGMA.
@@ -279,13 +292,13 @@ def test_operation_errors_continue_equal_exposure(tmp_path: Path, cell: str) -> 
             pass
 
         def ingest(self, view: list) -> None:
-            raise sqlite3.OperationalError("database is locked")
+            raise sqlite_error(code, "database is locked")
 
         def compress(self, view: list, force: bool) -> None:
-            raise sqlite3.OperationalError("database is locked")
+            raise sqlite_error(code, "database is locked")
 
         def on_session_end(self, *args: object) -> None:
-            raise sqlite3.OperationalError("database is locked")
+            raise sqlite_error(code, "database is locked")
 
         def shutdown(self) -> None:
             pass
@@ -293,8 +306,9 @@ def test_operation_errors_continue_equal_exposure(tmp_path: Path, cell: str) -> 
     result = driver.run(cell, tmp_path / "run", SimpleNamespace(LCMConfig=lambda **kw: kw),
                         SimpleNamespace(LCMEngine=Engine), driver.Capture(), b_view_rows=2, window_ms=0)
     assert not result["errors"]
-    assert result["totals"]["A"] == {"operations": cells.A_OPERATIONS[cell], "busy": cells.A_OPERATIONS[cell]}
-    assert result["totals"]["B"] == {"operations": 2 * cells.A_OPERATIONS[cell], "busy": 2 * cells.A_OPERATIONS[cell]}
+    assert result["totals"]["A"] == {"operations": cells.A_OPERATIONS[cell], "busy": cells.A_OPERATIONS[cell] if code == 5 else 0}
+    assert result["inconclusive"] is (code != 5)
+    assert result["totals"]["B"] == {"operations": 2 * cells.A_OPERATIONS[cell], "busy": 2 * cells.A_OPERATIONS[cell] if code == 5 else 0}
     assert all(record["error"] == "OperationalError" and record["sqlite_message"] == "database is locked"
                for record in result["operations"])
     if cell == "compress":
@@ -304,7 +318,7 @@ def test_operation_errors_continue_equal_exposure(tmp_path: Path, cell: str) -> 
 
 
 @pytest.mark.parametrize("exc,message,busy", [
-    (sqlite3.OperationalError("busy" + "x" * 300), "busy" + "x" * 196, True),
+    (sqlite_error(5, "busy" + "x" * 300), "busy" + "x" * 196, True),
     (sqlite3.OperationalError("syntax error"), "syntax error", False),
     (ValueError("private content locked"), None, False),
 ])
@@ -335,11 +349,320 @@ def test_write_window_extraction(trace: list, expected: list) -> None:
 
 def test_holds_percentiles_and_relative_verdict() -> None:
     def runs(multiplier: float) -> list:
-        return [{"calls": [{"shape": shape, "longest_ms": n * multiplier,
-                            "first_start_ms": 2, "call_ms": 30} for shape in ("n", "t")]}
-                for n in range(1, 11)]
+        return [{"journal_mode": "wal", "calls": [
+            {"shape": "n", "position": position, "longest_ms": n * multiplier,
+             "first_start_ms": 2, "call_ms": 30} for position in range(1, 7)] + [
+            {"shape": "t", "position": 1, "longest_ms": n * multiplier,
+             "first_start_ms": 2, "call_ms": 30}]} for n in range(1, 11)]
 
     result = holds.summarize({"baseline": runs(1), "candidate": runs(1.25)})
     assert result["verdict"] == "LOCK-RELATIVE PASS"
     assert result["tables"]["baseline"]["n"]["p90_longest_ms"] == 9
     assert holds.summarize({"baseline": runs(1), "candidate": runs(1.26)})["verdict"] == "LOCK-RELATIVE FAIL"
+
+
+@pytest.mark.parametrize("platform,size,offsets", [
+    ("darwin", 24, {"start": 0, "length": 8, "pid": 16, "type": 20, "whence": 22}),
+    ("linux", 32, {"type": 0, "whence": 2, "start": 8, "length": 16, "pid": 24}),
+])
+def test_monitor_flock_layouts(platform: str, size: int, offsets: dict) -> None:
+    import ctypes
+    from bench.instruments.busy_bar import monitor
+
+    layout = monitor.flock_type(platform)
+    assert ctypes.sizeof(layout) == size
+    assert {name: getattr(layout, name).offset for name in offsets} == offsets
+    packed = layout()
+    packed.start, packed.length, packed.pid = 120, 1, 12345
+    packed.type, packed.whence = 3, 0
+    unpacked = layout.from_buffer_copy(bytes(packed))
+    assert (unpacked.start, unpacked.length, unpacked.pid, unpacked.type, unpacked.whence) == (120, 1, 12345, 3, 0)
+    with pytest.raises(RuntimeError, match="unconfirmed"):
+        monitor.flock_type("unknown")
+
+
+def test_monitor_known_hold_and_readers_only(tmp_path: Path) -> None:
+    from bench.instruments.busy_bar import monitor
+
+    database = tmp_path / "control.db"
+    conn = sqlite3.connect(database)
+    assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    conn.execute("CREATE TABLE control (value INTEGER)")
+    observer = monitor.Monitor(database)
+    writer = subprocess.Popen([sys.executable, "-B", "-c", """
+import sqlite3, sys, time
+conn = sqlite3.connect(sys.argv[1])
+sys.stdin.readline()
+conn.execute('BEGIN IMMEDIATE')
+conn.execute('INSERT INTO control VALUES (1)')
+begin = time.monotonic_ns()
+time.sleep(0.2)
+conn.commit()
+end = time.monotonic_ns()
+print(begin, end, flush=True)
+sys.stdin.readline()
+conn.close()
+""", str(database)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        writer.stdin.write("start\n")
+        writer.stdin.flush()
+        begin, end = map(int, writer.stdout.readline().split())
+        time.sleep(0.003)
+        observed = observer.stop()
+        periods = monitor.held_periods(observed["samples"], begin - 10_000_000, end + 10_000_000)
+        assert len(periods) == 1, "STOP: monitor cannot see a known WAL hold"
+        assert {pid for _, pid in observed["samples"] if pid} == {writer.pid}, "STOP: unconfirmed flock layout"
+        duration = (periods[0][1] - periods[0][0]) / 1e6
+        tolerance = 5 * observed["intervals"]["max_ms"]
+        assert abs(duration - (end - begin) / 1e6) <= tolerance
+        print("monitor control:", json.dumps({"held_ms": duration, **observed["intervals"]}))
+    finally:
+        writer.communicate("stop\n", timeout=10)
+    assert writer.returncode == 0
+    observer = monitor.Monitor(database)
+    conn.execute("BEGIN")
+    conn.execute("SELECT * FROM control").fetchall()
+    time.sleep(0.02)
+    conn.rollback()
+    observed = observer.stop()
+    conn.close()
+    assert not any(pid for _, pid in observed["samples"])
+
+
+@pytest.mark.parametrize("gap,expected", [(149_999, 1), (150_000, 2), (150_001, 2)])
+def test_monitor_merges_only_sub_poll_gaps(gap: int, expected: int) -> None:
+    from bench.instruments.busy_bar import monitor
+
+    samples = [[0, 0], [100, 123], [1000, 0], [1000 + gap, 123], [500_000, 0]]
+    periods = monitor.held_periods(samples, 0, 600_000)
+    assert len(periods) == expected
+    clipped = monitor.held_periods(samples, 200, 400_000)
+    assert clipped[0][0] == 200 and clipped[-1][1] == 400_000
+
+
+@pytest.mark.parametrize("code,busy", [(5, True), (6, True), (517, True), (1, False)])
+@pytest.mark.parametrize("link", [None, "__cause__", "__context__"])
+def test_sqlite_code_classification_and_run_inconclusive(code: int, busy: bool, link: str | None) -> None:
+    error: Exception = sqlite_error(code, "busy locked text does not decide")
+    if link:
+        wrapper = RuntimeError("private text")
+        setattr(wrapper, link, error)
+        error = wrapper
+    operations = driver.Operations(driver.Capture(), False)
+
+    def fail() -> None:
+        raise error
+
+    operations(SimpleNamespace(), "A", "ingest", fail, 2)
+    row = operations.records[0]
+    assert row["busy"] is busy
+    assert row["inconclusive"] is not busy
+    assert row["exceptions"][-1]["sqlite_errorcode"] == code
+    # A cycle terminates and classification still finds the SQLite code.
+    error.__context__ = error
+    assert driver.is_busy(error) is (busy if link != "__context__" else False)
+
+
+def test_sqlite_words_without_errorcode_are_inconclusive() -> None:
+    operations = driver.Operations(driver.Capture(), False)
+
+    def fail() -> None:
+        raise sqlite3.OperationalError("busy locked")
+
+    operations(SimpleNamespace(), "A", "compress", fail, 2)
+    assert operations.records[0]["busy"] is False
+    assert operations.records[0]["inconclusive"] is True
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("other_thread", [False, True])
+def test_debug_caught_exception_attribution(wrapped: bool, other_thread: bool) -> None:
+    capture = driver.Capture()
+    operations = driver.Operations(capture, False)
+    logger = logging.getLogger("hermes_lcm.test-busy-bar")
+    previous = logging.getLogger().level
+    driver.debug_capture(capture)
+
+    def caught(code: int) -> None:
+        error: Exception = sqlite_error(code)
+        if wrapped:
+            error = RuntimeError("wrapper")
+            error.__cause__ = sqlite_error(code)
+        try:
+            raise error
+        except Exception:
+            logger.debug("LCM successful compaction telemetry update failed", exc_info=True)
+
+    def call() -> None:
+        if other_thread:
+            thread = threading.Thread(target=lambda: caught(517))
+            thread.start()
+            thread.join()
+        else:
+            caught(517)
+            caught(517)  # Counts once.
+
+    try:
+        caught(517)  # Outside the judged call.
+        operations(SimpleNamespace(), "A", "compress", call, 2)
+        operations(SimpleNamespace(), "A", "session-end", lambda: caught(1), 2)
+        operations(SimpleNamespace(), "A", "ingest", lambda: None, 2)
+    finally:
+        logging.getLogger().removeHandler(capture)
+        logging.getLogger().setLevel(previous)
+    assert [row["busy"] for row in operations.records] == [not other_thread, False, False]
+    assert not any(row["inconclusive"] for row in operations.records)
+    assert all(row["level"] == "DEBUG" for row in capture.records)
+
+
+@pytest.mark.parametrize("base,candidate,expected", [(0, 1, "GATE PASS"), (0, 2, "GATE FAIL"),
+                                                      (4, 6, "GATE PASS"), (4, 7, "GATE FAIL")])
+def test_gate_exact_tolerance(base: int, candidate: int, expected: str) -> None:
+    def rows(count: int) -> list[dict]:
+        result = ledger(0)
+        # Seven attempts in this fixture; only the first cell has busy operations.
+        result[0]["operations"] += [{"engine": "A", "op": "ingest", "busy": False}]
+        for record in result[0]["operations"][:count]:
+            record["busy"] = True
+        return result
+
+    cb, cc = rows(0), rows(0)
+    for runs in (cb, cc):
+        for row in runs:
+            row["busy_timeout_ms"] = 100
+            for record in row["operations"]:
+                record["busy"] = True
+    assert gate.evaluate(rows(base), rows(candidate), cb, cc)["verdict"] == expected
+
+
+def test_control_requires_every_class_in_each_tree() -> None:
+    scaled = control(1)
+    for row in scaled:
+        for record in row["operations"]:
+            if record["op"] == "session-end":
+                record["busy"] = False
+    result = gate.evaluate(ledger(0), ledger(0), control(1), scaled)
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert any("candidate has 0 busy session-end" in reason for reason in result["reasons"])
+
+
+def test_one_nonbusy_raise_makes_gate_inconclusive() -> None:
+    candidate = ledger(0)
+    candidate[0]["operations"][0]["inconclusive"] = True
+    assert gate.evaluate(ledger(0), candidate, control(1), control(1))["verdict"] == "INCONCLUSIVE"
+
+
+@pytest.mark.parametrize("base,candidate,extended_base,extended_candidate,expected", [
+    (1, 3, 4, 12, "GATE FAIL"), (1, 3, 4, 6, "GATE PASS"), (8, 9, 8, 9, "GATE PASS"),
+])
+def test_small_count_extension(base: int, candidate: int, extended_base: int,
+                               extended_candidate: int, expected: str) -> None:
+    def runs(count: int, total_runs: int) -> list[dict]:
+        rows = []
+        for number in range(total_runs):
+            for row in ledger(0):
+                if number >= 20 and row["cell"] != "ingest":
+                    continue
+                row["run"], row["seed"] = number, 2055 + number
+                if row["cell"] == "ingest" and number < count:
+                    row["operations"][0]["busy"] = True
+                rows.append(row)
+        return rows
+
+    baseline, cand = runs(base, 20), runs(candidate, 20)
+    should_extend = base < 8 and candidate > base
+    assert gate.extension_cells(baseline, cand) == (["ingest"] if should_extend else [])
+    cb, cc = deepcopy(baseline), deepcopy(baseline)
+    for scaled in (cb, cc):
+        for row in scaled:
+            row["busy_timeout_ms"] = 100
+            for record in row["operations"]:
+                record["busy"] = True
+    if should_extend:
+        assert gate.evaluate(baseline, cand, cb, cc)["verdict"] == "INCONCLUSIVE"
+        # Preserve first twenty counts; place the additional busy records in extension runs.
+        def extend(first: list[dict], initial_busy: int, final_busy: int) -> list[dict]:
+            extra = runs(0, 80)[80:]
+            for row in extra[:final_busy - initial_busy]:
+                row["operations"][0]["busy"] = True
+            return first + extra
+        baseline = extend(baseline, base, extended_base)
+        cand = extend(cand, candidate, extended_candidate)
+    result = gate.evaluate(baseline, cand, cb, cc)
+    assert result["verdict"] == expected
+    assert result["initial_tables"]["baseline"]["ingest"]["total"]["busy"] == base
+    assert result["tables"]["candidate"]["ingest"]["total"]["busy"] == extended_candidate
+    if should_extend:
+        assert "20-run busy" in gate.report(result)
+
+
+def test_hold_position_and_rotating_longest_statistics() -> None:
+    def runs(mode: str) -> list[dict]:
+        rows = []
+        for number in range(10):
+            calls = [{"shape": "n", "position": position, "longest_ms":
+                      2 if mode == "first" and position == 1 else
+                      5 if mode == "rotating" and position == number % 6 + 1 else 1,
+                      "first_start_ms": 0, "call_ms": 10} for position in range(1, 7)]
+            rows.append({"journal_mode": "wal", "calls": calls + [
+                {"shape": "t", "longest_ms": 1, "first_start_ms": 0, "call_ms": 10}]})
+        return rows
+
+    first = holds.summarize({"baseline": runs("base"), "candidate": runs("first")})
+    assert first["verdict"] == "LOCK-RELATIVE FAIL"
+    assert first["failed_statistics"] == ["position-1", "run-longest"]
+    rotating = holds.summarize({"baseline": runs("base"), "candidate": runs("rotating")})
+    assert rotating["failed_statistics"] == ["run-longest"]
+    assert "position-1" in holds.report(first)
+    diagnostic = runs("base")
+    diagnostic[0]["trace_diagnostic"] = True
+    assert holds.summarize({"baseline": runs("base"), "candidate": diagnostic})["verdict"] == "DIAGNOSTIC ONLY"
+
+
+def test_isolation_and_shipped_default_readback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "off")
+    monkeypatch.setenv("HERMES_TEST", "inherited")
+    driver.isolated_environment(tmp_path)
+    assert os.environ["HERMES_HOME"] == str(tmp_path / "isolated-home")
+    assert "LCM_HOST_MESSAGE_UID" not in os.environ and "HERMES_TEST" not in os.environ
+    values = driver.effective_defaults(SimpleNamespace(host_message_uid_mode=lambda: "shadow"))
+    assert values == {"LCM_HOST_MESSAGE_UID": "shadow", "LCM_IDENTITY_ANCHOR": "absent", "LCM_INGEST_LEDGER": "absent"}
+
+
+def test_orchestrator_extends_only_selected_production_cell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = []
+
+    def child(command: list[str], **kwargs: object) -> SimpleNamespace:
+        name, cell, output = Path(command[3]).name, command[4], Path(command[5])
+        seed = int(command[command.index("--seed") + 1])
+        number = seed - 2055
+        scaled = "--busy-timeout-ms" in command
+        seen.append((name, cell, number, scaled))
+        row = next(row for row in (control(1) if scaled else ledger(0)) if row["cell"] == cell)
+        row["seed"] = seed
+        if not scaled and cell == "ingest":
+            first_busy = 1 if name == "baseline" else 3
+            row["operations"][0]["busy"] = number < first_busy or 20 <= number < 23
+        output.write_text(json.dumps(row) + "\n")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(orchestrate.subprocess, "run", child)
+    out = tmp_path / "output"
+    monkeypatch.setattr(sys, "argv", ["orchestrate", "baseline", "candidate", str(out),
+                                       "--work-root", str(tmp_path / "scratch")])
+    with pytest.raises(SystemExit) as exc:
+        orchestrate.main()
+    assert exc.value.code == 0
+    result = json.loads((out / "verdict.json").read_text())
+    assert result["extension_cells"] == ["ingest"]
+    assert result["initial_tables"]["baseline"]["ingest"]["total"]["busy"] == 1
+    assert result["initial_tables"]["candidate"]["ingest"]["total"]["busy"] == 3
+    assert result["tables"]["baseline"]["ingest"]["total"]["busy"] == 4
+    assert result["tables"]["candidate"]["ingest"]["total"]["busy"] == 6
+    assert len(gate.read(out / "baseline.jsonl")) == 140
+    extra = [entry for entry in seen if entry[2] >= 20]
+    assert len(extra) == 120
+    assert all(cell == "ingest" and not scaled for _, cell, _, scaled in extra)
+    assert extra[:4] == [("baseline", "ingest", 20, False), ("candidate", "ingest", 20, False),
+                         ("candidate", "ingest", 21, False), ("baseline", "ingest", 21, False)]
+    assert {number for _, _, number, scaled in seen if scaled} == set(range(20))

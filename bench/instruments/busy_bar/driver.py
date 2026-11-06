@@ -30,6 +30,49 @@ DEFAULT_WINDOW_MS = 400
 COUNTERS = {"compress": "ledger.emission_busy", "session-end": "ledger.tail.busy_at_end"}
 
 
+def exception_chain(exc: BaseException | None) -> list[dict[str, Any]]:
+    """Traverse both links, including wrapped extended SQLite codes, without cycles."""
+    pending, seen, found = [exc], set(), []
+    while pending:
+        error = pending.pop()
+        if error is None or id(error) in seen:
+            continue
+        seen.add(id(error))
+        code = getattr(error, "sqlite_errorcode", None) if isinstance(error, sqlite3.Error) else None
+        found.append({"type": type(error).__name__, "sqlite_errorcode": code,
+                      "sqlite_message": str(error)[:200] if isinstance(error, sqlite3.Error) else None,
+                      "busy": isinstance(code, int) and code & 0xff in (5, 6)})
+        pending.extend([error.__context__, error.__cause__])
+    return found
+
+
+def is_busy(exc: BaseException | None) -> bool:
+    return any(error["busy"] for error in exception_chain(exc))
+
+
+def isolated_environment(work: Path) -> None:
+    for key in list(os.environ):
+        if key.startswith(("LCM_", "HERMES_")):
+            del os.environ[key]
+    os.environ["HERMES_HOME"] = str(work / "isolated-home")
+
+
+def effective_defaults(config_module: Any) -> dict[str, Any]:
+    functions = {"LCM_INGEST_LEDGER": "ingest_ledger_mode",
+                 "LCM_IDENTITY_ANCHOR": "identity_anchor_enabled",
+                 "LCM_HOST_MESSAGE_UID": "host_message_uid_mode"}
+    return {key: getattr(config_module, name)() if hasattr(config_module, name) else "absent"
+            for key, name in functions.items()}
+
+
+def debug_capture(capture: Capture) -> None:
+    logging.getLogger().setLevel(logging.DEBUG)
+    for name in list(logging.Logger.manager.loggerDict):
+        if name == "hermes_lcm" or name.startswith("hermes_lcm."):
+            logging.getLogger(name).setLevel(logging.DEBUG)
+    logging.getLogger().addHandler(capture)
+
+
 def busy_signal(message: str) -> str | None:
     if "SQLite write lock recovery exhausted" in message:
         return "write-lock-recovery"
@@ -48,15 +91,23 @@ class Capture(logging.Handler):
         self.records: list[dict[str, Any]] = []
 
     def emit(self, record: logging.LogRecord) -> None:
+        chain = exception_chain(record.exc_info[1] if record.exc_info else None)
         self.records.append({"thread": record.thread, "time": time.monotonic(),
-                             "message": record.getMessage()})
+                             "process": record.process, "logger": record.name,
+                             "level": record.levelname, "message": record.getMessage(),
+                             "exceptions": chain,
+                             "busy_exception": record.name.startswith("hermes_lcm.")
+                             and any(error["busy"] for error in chain)})
 
 
 def count_operation(records: list[dict[str, Any]], thread: int, begin: float, end: float,
                     op: str, before: int, after: int, candidate: bool) -> dict[str, Any]:
-    signals = sorted({signal for record in records
-                      if record["thread"] == thread and begin <= record["time"] <= end
-                      if (signal := busy_signal(record["message"]))})
+    own = [record for record in records
+           if record["thread"] == thread and begin <= record["time"] <= end
+           and record.get("process", os.getpid()) == os.getpid()]
+    signals = sorted({signal for record in own if (signal := busy_signal(record["message"]))})
+    if any(record.get("busy_exception") for record in own):
+        signals.append("logged-sqlite-exception")
     counter = COUNTERS.get(op)
     if candidate and counter and after > before:
         signals.append(counter)
@@ -79,10 +130,12 @@ class Operations:
         before = read()
         thread, begin = threading.get_ident(), time.monotonic()
         error = message = None
+        chain: list[dict[str, Any]] = []
         try:
             return call()
         except Exception as exc:
             error = type(exc).__name__
+            chain = exception_chain(exc)
             if isinstance(exc, sqlite3.Error):
                 message = str(exc)[:200]
             return None
@@ -90,13 +143,15 @@ class Operations:
             end, after = time.monotonic(), read()
             counted = count_operation(self.capture.records.copy(), thread, begin, end,
                                       op, before, after, self.candidate)
-            if message and any(word in message.lower() for word in ("locked", "busy")):
+            raised_busy = any(item["busy"] for item in chain)
+            if raised_busy:
                 counted["busy"] = True
                 counted["signals"].append("sqlite-exception")
             self.records.append({"op": op, "engine": owner, "thread": thread,
                                  "begin": begin, "end": end, "view_rows": view_rows,
                                  "counter_before": before, "counter_after": after,
-                                 "error": error, "sqlite_message": message, **counted})
+                                 "error": error, "sqlite_message": message, "exceptions": chain,
+                                 "inconclusive": error is not None and not raised_busy, **counted})
 
 
 def load_tree(tree: Path) -> tuple[Any, Any]:
@@ -284,6 +339,8 @@ def run(cell: str, directory: Path, config_module: Any, engine_module: Any,
             "candidate_counters": candidate, "b_batches": ticks,
             "b_view_sizes": [tick["view_rows"] for tick in ticks],
             "operations": records, "totals": totals, "errors": errors,
+            "inconclusive": any(record["inconclusive"] for record in records),
+            "effective_defaults": effective_defaults(config_module),
             "logs": capture.records.copy()}
 
 
@@ -305,11 +362,7 @@ def main() -> None:
     if args.busy_timeout_ms is not None and args.busy_timeout_ms < 0:
         parser.error("busy-timeout-ms must be nonnegative")
     # Bind every home/config lookup before importing the target, never the real profile.
-    for key in list(os.environ):
-        if key.startswith(("LCM_", "HERMES_")):
-            del os.environ[key]
-    os.environ.update(HERMES_HOME=str(args.work.resolve() / "isolated-home"),
-                      LCM_INGEST_LEDGER="shadow", LCM_IDENTITY_ANCHOR="on", LCM_HOST_MESSAGE_UID="off")
+    isolated_environment(args.work.resolve())
     config_module, engine_module = load_tree(args.tree.resolve())
     for method in ("ingest", "compress", "on_session_start", "on_session_end", "shutdown"):
         if not callable(getattr(engine_module.LCMEngine, method, None)):
@@ -317,8 +370,7 @@ def main() -> None:
     offline_setup(engine_module)
     capture = Capture()
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    root.addHandler(capture)
+    debug_capture(capture)
     failed = False
     try:
         with args.output.open("x") as output:
@@ -329,7 +381,7 @@ def main() -> None:
                 result["run"] = number
                 output.write(json.dumps(result) + "\n")
                 output.flush()
-                failed |= bool(result["errors"])
+                failed |= bool(result["errors"]) or result["inconclusive"]
     finally:
         root.removeHandler(capture)
     if failed:

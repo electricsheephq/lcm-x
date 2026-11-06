@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
+import math
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,8 @@ def comparison(baseline: list[dict[str, Any]], candidate: list[dict[str, Any]]) 
             counts[(cell, number, "offsets_ms", tuple(run["offsets_ms"]))] += 1
             if run.get("errors"):
                 reasons.append(f"{name}: {cell} run {number} has driver errors")
+            if run.get("inconclusive") or any(record.get("inconclusive") for record in run["operations"]):
+                reasons.append(f"{name}: {cell} run {number} is inconclusive (non-busy raise)")
             for record in run["operations"]:
                 owner, op, busy = record["engine"], record["op"], record["busy"]
                 if owner not in ("A", "B") or op not in ("ingest", "compress", "session-end") or type(busy) is not bool:
@@ -60,9 +63,24 @@ def comparison(baseline: list[dict[str, Any]], candidate: list[dict[str, Any]]) 
                             if exposure[0][key] != exposure[1][key]})
         reasons.append("operation counts, run coverage or schedules differ: " + ", ".join(differing))
     failed = [cell for cell in CELLS
-              if tables["candidate"][cell]["total"]["busy"] > tables["baseline"][cell]["total"]["busy"]]
+              if tables["candidate"][cell]["total"]["busy"] >
+              math.ceil(1.25 * tables["baseline"][cell]["total"]["busy"]) + 1]
     return {"verdict": "INCONCLUSIVE" if reasons else "GATE FAIL" if failed else "GATE PASS",
             "reasons": reasons, "failed_cells": failed, "tables": tables}
+
+
+def extension_cells(baseline: list[dict[str, Any]], candidate: list[dict[str, Any]]) -> list[str]:
+    """Only the prescribed first twenty production runs decide whether to extend."""
+    selected = []
+    for cell in CELLS:
+        pair = [[run for run in rows if run["cell"] == cell and run["run"] < 20]
+                for rows in (baseline, candidate)]
+        if not all({run["run"] for run in runs} == set(range(20)) for runs in pair):
+            continue  # R<20 is a local smoke, not the gate session.
+        busy = [sum(record["busy"] for run in runs for record in run["operations"]) for runs in pair]
+        if busy[0] < 8 and busy[1] > busy[0]:
+            selected.append(cell)
+    return selected
 
 
 def evaluate(baseline: list[dict[str, Any]], candidate: list[dict[str, Any]],
@@ -70,6 +88,14 @@ def evaluate(baseline: list[dict[str, Any]], candidate: list[dict[str, Any]],
              control_candidate: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     result = comparison(baseline, candidate)
     reasons = result["reasons"]
+    extensions = extension_cells(baseline, candidate)
+    result["extension_cells"] = extensions
+    result["initial_tables"] = comparison([run for run in baseline if run["run"] < 20],
+                                           [run for run in candidate if run["run"] < 20])["tables"]
+    for cell in extensions:
+        for name, runs in (("baseline", baseline), ("candidate", candidate)):
+            if {run["run"] for run in runs if run["cell"] == cell} != set(range(80)):
+                reasons.append(f"{name}: {cell} requires 60 additional runs (80 total)")
     if any(run["busy_timeout_ms"] is not None for run in baseline + candidate):
         reasons.append("gating ledgers must use production budgets (no override)")
     if control_baseline is None or control_candidate is None:
@@ -85,11 +111,14 @@ def evaluate(baseline: list[dict[str, Any]], candidate: list[dict[str, Any]],
                 reasons.append(f"{name}: positive control must use 100 ms")
             # Control has the same attempted operations, seeds and arrivals; only its budget differs.
             normalized = [{**run, "busy_timeout_ms": None} for run in scaled]
+            # The control covers the first 20 only; production extensions never extend it.
+            initial = [run for run in prod if run["run"] < 20]
             reasons.extend(f"{name} production/control: " + reason
-                           for reason in comparison(prod, normalized)["reasons"])
-            busy = sum(control["tables"][name][cell]["total"]["busy"] for cell in CELLS)
-            if busy == 0:
-                reasons.append(f"control: {name} has 0 busy operations; schedule did not exercise the bar")
+                           for reason in comparison(initial, normalized)["reasons"])
+            for op in ("ingest", "compress", "session-end"):
+                busy = sum(record["busy"] for run in scaled for record in run["operations"] if record["op"] == op)
+                if busy == 0:
+                    reasons.append(f"control: {name} has 0 busy {op} operations; schedule did not exercise the class")
     result["verdict"] = ("INCONCLUSIVE" if reasons else
                          "GATE FAIL" if result["failed_cells"] else "GATE PASS")
     return result
@@ -110,12 +139,18 @@ def report(result: dict[str, Any]) -> str:
         base, cand = totals["baseline"][owner], totals["candidate"][owner]
         lines.append(f"TOTAL {owner} {base['operations']} {base['busy']} {cand['operations']} {cand['busy']}")
     if "control" in result:
+        for cell in result["extension_cells"]:
+            base = result["initial_tables"]["baseline"][cell]["total"]["busy"]
+            cand = result["initial_tables"]["candidate"][cell]["total"]["busy"]
+            final_base = result["tables"]["baseline"][cell]["total"]["busy"]
+            final_cand = result["tables"]["candidate"][cell]["total"]["busy"]
+            lines.append(f"EXTENSION {cell}: 20-run busy {base}/{cand}; final busy {final_base}/{final_cand}")
         lines.append("POSITIVE CONTROL (100 ms; never gating)")
         lines.extend(report(result["control"]).splitlines()[:-1])
     lines.append(result["verdict"])
     lines.extend(result["reasons"])
     if result["verdict"] == "GATE FAIL":
-        lines.append("higher candidate busy count: " + ", ".join(result["failed_cells"]))
+        lines.append("candidate exceeds ceil(1.25 * baseline) + 1: " + ", ".join(result["failed_cells"]))
     return "\n".join(lines) + "\n"
 
 

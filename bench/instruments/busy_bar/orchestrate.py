@@ -21,7 +21,8 @@ else:
 
 def collect(baseline_tree: Path, candidate_tree: Path, outdir: Path, runs: int,
             k: int, b_view_rows: int, seed: int, window_ms: float,
-            busy_timeout_ms: int | None, work_root: Path) -> dict[str, list]:
+            busy_timeout_ms: int | None, work_root: Path,
+            selected_cells: tuple[str, ...] = cells.CELLS, start_run: int = 0) -> dict[str, list]:
     outdir.mkdir(parents=True, exist_ok=False)
     driver_path = Path(__file__).with_name("driver.py")
     collected: dict[str, list] = {"baseline": [], "candidate": []}
@@ -29,8 +30,8 @@ def collect(baseline_tree: Path, candidate_tree: Path, outdir: Path, runs: int,
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     with (outdir / "baseline.jsonl").open("x") as baseline, (outdir / "candidate.jsonl").open("x") as candidate:
         outputs = {"baseline": baseline, "candidate": candidate}
-        for number in range(runs):
-            for cell in cells.CELLS:
+        for number in range(start_run, start_run + runs):
+            for cell in selected_cells:
                 pair = [("baseline", baseline_tree), ("candidate", candidate_tree)]
                 if number % 2:
                     pair.reverse()
@@ -80,6 +81,16 @@ def main() -> None:
         parser.error("output and scratch directories must be fresh")
     prod = collect(args.baseline_tree, args.candidate_tree, args.outdir, args.runs,
                    args.k, args.b_view_rows, args.seed, args.window_ms, None, args.work_root / "production")
+    extensions = gate.extension_cells(prod["baseline"], prod["candidate"]) if args.runs == 20 else []
+    if extensions:
+        extra = collect(args.baseline_tree, args.candidate_tree, args.outdir / "extension", 60,
+                        args.k, args.b_view_rows, args.seed, args.window_ms, None,
+                        args.work_root / "extension", tuple(extensions), start_run=20)
+        for name in prod:
+            prod[name].extend(extra[name])
+            with (args.outdir / f"{name}.jsonl").open("a") as output:
+                for row in extra[name]:
+                    output.write(json.dumps(row) + "\n")
     control = collect(args.baseline_tree, args.candidate_tree, control_dir, args.runs,
                       args.k, args.b_view_rows, args.seed, args.window_ms, 100, args.work_root / "control")
     result = gate.evaluate(prod["baseline"], prod["candidate"], control["baseline"], control["candidate"])
