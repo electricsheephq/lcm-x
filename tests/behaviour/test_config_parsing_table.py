@@ -60,6 +60,7 @@ CONFIG_ROWS = (
     ('embeddings_enabled', 'LCM_EMBEDDINGS_ENABLED', 'bool', True),
     ('rerank_enabled', 'LCM_RERANK_ENABLED', 'bool', False),
     ('recall_reference_strict', 'LCM_RECALL_REFERENCE_STRICT', 'bool', True),
+    ('recall_adjacent_reply', 'LCM_RECALL_ADJACENT_REPLY', 'bool', False),
     ('recall_fts_anchor', 'LCM_RECALL_FTS_ANCHOR', 'bool', True),
     ('recall_summary_event_time', 'LCM_RECALL_SUMMARY_EVENT_TIME', 'bool', False),
     ('proactive_recall_enabled', 'LCM_PROACTIVE_RECALL_ENABLED', 'bool', False),

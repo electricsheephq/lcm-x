@@ -488,6 +488,7 @@ _SUPPORTED_LCM_CONFIG_YAML_KEYS = {
     "summary_reasoning_effort",
     "expansion_reasoning_effort",
     "embedding_query_prefix", "embedding_document_prefix",
+    "recall_adjacent_reply",
     "large_output_active_replay_stub_threshold_tokens",
     "large_output_active_replay_stub_aged_threshold_tokens",
     "recall_summary_event_time",
@@ -976,6 +977,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("recall_delivery_unit", "LCM_RECALL_DELIVERY_UNIT", str),
     _EnvFieldSpec("recall_delivery_order", "LCM_RECALL_DELIVERY_ORDER", str),
     _EnvFieldSpec("recall_summary_event_time", "LCM_RECALL_SUMMARY_EVENT_TIME", bool),
+    _EnvFieldSpec("recall_adjacent_reply", "LCM_RECALL_ADJACENT_REPLY", bool),
     _EnvFieldSpec("recall_fts_anchor", "LCM_RECALL_FTS_ANCHOR", bool),
     _EnvFieldSpec("proactive_recall_enabled", "LCM_PROACTIVE_RECALL_ENABLED", bool),
     _EnvFieldSpec("proactive_recall_min_score", "LCM_PROACTIVE_RECALL_MIN_SCORE", float),
@@ -1357,6 +1359,7 @@ class LCMConfig:
     # the MIN/MAX host observed_at over all their source messages (never write
     # time). Default-off keeps every response byte-identical.
     recall_summary_event_time: bool = False
+    recall_adjacent_reply: bool = False
     # lcm_recall FTS anchor slot: with two or more arms, the FTS arm's best
     # message is kept inside the delivered window (at most one session evicted).
     # Evidence (#950): frozen LongMemEval-M LOCAL replay, R@10 0.898 -> 0.905 (470 q).
@@ -1550,6 +1553,13 @@ class LCMConfig:
         for name in ("embedding_query_prefix", "embedding_document_prefix"):
             if isinstance(prefix_yaml, dict) and isinstance(prefix_yaml.get(name), str):
                 setattr(c, name, prefix_yaml[name])
+
+        if isinstance(prefix_yaml, dict) and "recall_adjacent_reply" in prefix_yaml:
+            value = prefix_yaml["recall_adjacent_reply"]
+            if isinstance(value, bool):
+                c.recall_adjacent_reply = value
+            else:
+                config_source_warnings.append("invalid config.yaml lcm.recall_adjacent_reply ignored; expected bool")
 
         c.ignored_config_yaml_lcm_keys = _ignored_lcm_config_yaml_keys(cfg_yaml, env=env)
 

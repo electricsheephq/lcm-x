@@ -1266,8 +1266,8 @@ LCM_MEMORY = {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["lookup", "list"]},
-            "name": {"type": "string", "description": "Required for lookup."},
-            "aliases": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+            "name": {"type": "string", "maxLength": 256, "description": "Required for lookup."},
+            "aliases": {"type": "array", "items": {"type": "string", "maxLength": 256}, "maxItems": 8},
             "question": {"type": "string"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 200,
                       "description": "Lookup: default 20, cap 50. List: default 50, cap 200."},

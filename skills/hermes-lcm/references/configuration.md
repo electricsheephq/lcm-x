@@ -187,6 +187,7 @@ The manifest continues to declare all 16 tools.
 ### Recall ranking
 
 - `LCM_RECALL_ARM_WEIGHTS` (default `fts=0.5,summary=1.0,chunk=1.0`): per-arm RRF weights for `lcm_recall`; see [docs/retrieval-tools.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/retrieval-tools.md).
+- `LCM_RECALL_ADJACENT_REPLY` (bool, default `false`; YAML `lcm.recall_adjacent_reply`, environment takes precedence): opt in to up to three next-row replies after the rank-1 raw hit and top-three question hits. Same session/conversation only, from the other role (user ↔ assistant), never older than the source by event time; skip tool, tool-call, empty and subagent replies; runs before the FTS anchor. Keeps the hit limit and candidate pool; citation, session-density and character caps remain. Internal recall and session delivery skip it. Failed reads/deadline discard the step with `provenance.adjacent_reply_unavailable`; successful moves appear in `provenance.adjacent_reply`. Not a tool argument.
 - `LCM_RECALL_FTS_ANCHOR` (default `true`, #950): with two or more arms, keeps the full-text arm's best match inside the `lcm_recall` ranked window when fusion pushed it out (at most one session displaced). The hit keeps its own score; `provenance.fts_anchor = {fired, position, delivered}` reports the move and whether the anchored hit is in the returned hits after `answer_ready` selection and the response cap (`delivered` is `null` when the anchor did not fire). Embeddings-off output is unchanged, and an `fts` weight of `0` turns it off. It is inert for `limit` below `4` (displacing one of three or fewer hits costs more than it gains; frozen in #950), and proactive recall does not use it. Set `false` to restore the previous order. Managed (evaOS fleet) profiles can set it only after a provisioning release adds it to the environment allowlist.
 
 ### Summary circuit
@@ -313,6 +314,7 @@ without changing its behavior until removal.
 | `LCM_RECALL_DELIVERY_UNIT` | `str` | `"hits"` | `"hits"`, `"session"` | — |
 | `LCM_RECALL_DELIVERY_ORDER` | `str` | `"score"` | `"score"`, `"time"` | — |
 | `LCM_RECALL_SUMMARY_EVENT_TIME` | `bool` | `false` | — | — |
+| `LCM_RECALL_ADJACENT_REPLY` | `bool` | `false` | — | — |
 | `LCM_RECALL_FTS_ANCHOR` | `bool` | `true` | — | — |
 | `LCM_PROACTIVE_RECALL_ENABLED` | `bool` | `false` | — | — |
 | `LCM_PROACTIVE_RECALL_MIN_SCORE` | `float` | `0.01` | — | — |
