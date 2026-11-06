@@ -30,15 +30,16 @@ def expect_from_view(rows, lineage):
 def store_outcome(conn, expected):
     wanted = Counter((lineage, role, normalize_content_value(content), call_id, _calls(calls))
                      for lineage, rows in expected.items() for role, content, call_id, calls in rows)
-    ids = defaultdict(list)
+    ids, stored = defaultdict(list), {}
     for sid, session, conversation, role, content, call_id, calls in conn.execute(
             "SELECT store_id,session_id,conversation_id,role,content,tool_call_id,tool_calls FROM messages"):
         ids[(conversation or session, role, content, call_id, _calls(calls))].append(sid)
+        stored[sid] = (session, role, content)  # verifies stripped-content replay links, as the B2 scorer does
     relations = (list(conn.execute("SELECT store_id,kind,related_store_id FROM message_relations"))
                  if conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else [])
     missing = wanted - Counter({key: len(rows) for key, rows in ids.items()})
     groups = [(key, max(0, len(rows) - wanted[key]), sorted(rows)) for key, rows in ids.items()]
-    split = split_surplus(groups, relations)
+    split = split_surplus(groups, relations, stored)
     return dict(loss=sum(missing.values()),
                 loss_keys=[dict(sha256=hashlib.sha256(repr(key).encode()).hexdigest(), count=n)
                            for key, n in sorted(missing.items(), key=lambda item: repr(item[0]))],
@@ -47,7 +48,7 @@ def store_outcome(conn, expected):
 
 
 class GateFailure(AssertionError):
-    """Only the absolute m gate may be expected to fail under #2305."""
+    """A gate cell that is expected to fail raises this; gate_result counts any strict-xfail cell as FAIL."""
 
 
 def gate_result(receipts, *, strict_xfail_cells=()):
