@@ -126,10 +126,33 @@ def test_p1h_tool_pair_and_loose_attempt_credit(tmp_path):
     assert (out["tool_surplus_rows"], out["visible_surplus_rows"], out["silent_surplus_rows"]) == (2, 2, 0)
 
 
-def test_p1h_one_stored_row_explains_at_most_one_tool_entry(tmp_path):
+def test_p1h_one_stored_row_explains_one_copy_per_key(tmp_path):
+    # Review finding 1: each tool entry is its own B2 key, so a marked row explains one copy of each.
     calls = [{"id": name, "function": {"name": name, "arguments": "{}"}} for name in ("a", "b")]
     out = score(tmp_path, [("assistant", "", json.dumps(calls))], [(1, "supersedes", None)])
-    assert (out["tool_surplus_rows"], out["visible_surplus_rows"], out["silent_surplus_rows"]) == (2, 1, 1)
+    assert (out["tool_surplus_rows"], out["visible_surplus_rows"], out["silent_surplus_rows"]) == (2, 2, 0)
+
+
+def test_p1h_marked_row_explains_its_content_and_its_call(tmp_path):
+    calls = [{"id": "a", "function": {"name": "a", "arguments": "{}"}}]
+    out = score(tmp_path, [("assistant", "hello", json.dumps(calls))], [(1, "supersedes", None)])
+    assert out["surplus_rows"] >= 1 and out["tool_surplus_rows"] >= 1
+    assert out["visible_surplus_rows"] == out["surplus_rows"] + out["tool_surplus_rows"]
+    assert out["silent_surplus_rows"] == 0 and out["silent_surplus_examples"] == []
+
+
+def test_p1h_one_row_explains_at_most_one_copy_within_a_key(tmp_path):
+    out = score(tmp_path, [("user", "same")] * 3, [(3, "supersedes", None)])
+    assert (out["surplus_rows"], out["visible_surplus_rows"], out["silent_surplus_rows"]) == (3, 1, 2)
+    assert [e["store_id"] for e in out["silent_surplus_examples"]] == [1, 2]
+
+
+def test_p1h_silent_examples_prefer_the_later_copy(tmp_path):
+    # Review finding 5: with one expected copy and no relation, the example is the later row, not the original.
+    out = score(tmp_path, [("user", "same")] * 2 + [("assistant", fixture.R.format(1, 1))],
+                events=fixture.turn_events(1, held="same"))
+    assert (out["surplus_rows"], out["silent_surplus_rows"]) == (1, 1)
+    assert [e["store_id"] for e in out["silent_surplus_examples"]] == [2]
 
 
 def test_p1h_tool_id_collection_keeps_full_keys_and_counts():
@@ -140,21 +163,34 @@ def test_p1h_tool_id_collection_keeps_full_keys_and_counts():
     assert keys == Counter({key: 31}) and ids == {key: list(range(1, 32))}
 
 
+FULL = {"deficit_rows": 0, "silent_surplus_rows": 0, "visible_surplus_rows": 0, "surplus_rows": 0,
+        "tool_surplus_rows": 0, "tool_missing_rows": 0, "externalized": {"deficit_rows": 0}}
+
+
 @pytest.mark.parametrize("numbers,failed,verdict,want", [
-    ({"deficit_rows": 1, "silent_surplus_rows": 0, "visible_surplus_rows": 0}, ["B2"], "FAIL", True),
-    ({"deficit_rows": 0, "silent_surplus_rows": 1, "visible_surplus_rows": 0}, ["B2"], "FAIL", True),
-    ({"deficit_rows": 0, "silent_surplus_rows": 0, "visible_surplus_rows": 2}, ["B2"], "FAIL", False),
+    ({**FULL, "deficit_rows": 1}, ["B2"], "FAIL", True),
+    ({**FULL, "silent_surplus_rows": 1, "surplus_rows": 1}, ["B2"], "FAIL", True),
+    ({**FULL, "visible_surplus_rows": 2, "surplus_rows": 2}, ["B2"], "FAIL", False),
+    ({**FULL, "visible_surplus_rows": 2, "surplus_rows": 1, "tool_surplus_rows": 1}, ["B2"], "FAIL", False),
     ({"deficit_rows": 0}, ["B2"], "FAIL", True),
     ({"deficit_rows": 0, "visible_surplus_rows": 2}, ["B2"], "FAIL", True),
     ({"deficit_rows": 0, "silent_surplus_rows": 0}, ["B2"], "FAIL", True),
+    ({"deficit_rows": 0, "silent_surplus_rows": 0, "visible_surplus_rows": 0}, ["B2"], "FAIL", True),
     ({}, [], "PASS", True),
-    ({"deficit_rows": 0, "silent_surplus_rows": 0, "visible_surplus_rows": 0}, [], "PASS", False),
-    ({"deficit_rows": 0, "silent_surplus_rows": -1, "visible_surplus_rows": 0}, ["B2"], "FAIL", True),
-    ({"deficit_rows": 0, "silent_surplus_rows": False, "visible_surplus_rows": 0}, ["B2"], "FAIL", True),
-    ({"deficit_rows": 0, "silent_surplus_rows": 0, "visible_surplus_rows": 0, "tool_missing_rows": 1}, ["B2"], "FAIL", True),
-    ({"deficit_rows": 0, "silent_surplus_rows": 0, "visible_surplus_rows": 0,
-      "externalized": {"deficit_rows": 1}}, ["B2"], "FAIL", True),
-])
+    (FULL, [], "PASS", False),
+    ({**FULL, "silent_surplus_rows": -1}, ["B2"], "FAIL", True),
+    ({**FULL, "silent_surplus_rows": False}, ["B2"], "FAIL", True),
+    ({**FULL, "tool_missing_rows": 1}, ["B2"], "FAIL", True),
+    ({**FULL, "externalized": {"deficit_rows": 1}}, ["B2"], "FAIL", True),
+    # Review finding 2: a missing or None tool/externalized count fails closed.
+    ({**FULL, "tool_missing_rows": None}, [], "PASS", True),
+    ({**FULL, "externalized": {"deficit_rows": None}}, [], "PASS", True),
+    ({**FULL, "externalized": {}}, [], "PASS", True),
+    # Review finding 3: the split must cover all surplus.
+    ({**FULL, "surplus_rows": 9}, ["B2"], "FAIL", True),
+    ({**FULL, "visible_surplus_rows": 1, "surplus_rows": 2}, ["B2"], "FAIL", True),
+    ({**FULL, "visible_surplus_rows": 3, "surplus_rows": 2}, ["B2"], "FAIL", True),
+], ids=lambda value: None)
 def test_p1h_b2s_gate_fails_closed(monkeypatch, numbers, failed, verdict, want):
     original = copy.deepcopy(ci.CELL_GATE)
     monkeypatch.setitem(ci.CELL_GATE, PERSISTENT, ("in-process", ("B2S",)))
@@ -199,3 +235,14 @@ def test_p1h_existing_credits_do_not_create_extra_surplus(tmp_path, case):
     assert out["deficit_rows"] == 0
     assert out["surplus_rows"] == expected_surplus
     assert out["visible_surplus_rows"] == out["silent_surplus_rows"] == 0
+
+
+@pytest.mark.parametrize("verdict", ["UNSUPPORTED", "INCONCLUSIVE"])
+def test_p1h_b2s_fails_closed_on_rows_without_numbers(monkeypatch, verdict):
+    # Review finding 4: a B2S-gated row that carries no numbers fails closed (README: B2S).
+    monkeypatch.setitem(ci.CELL_GATE, PERSISTENT, ("in-process", ("B2S",)))
+    rows = rows_for(PERSISTENT, "fixture", "in-process", [])
+    row = next(r for r in rows if r["cell"] == PERSISTENT)
+    row.update(verdict=verdict, numbers={})
+    problems = ci.gate(rows, set())
+    assert any("['B2S']" in p for p in problems)

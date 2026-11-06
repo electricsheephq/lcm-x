@@ -132,10 +132,15 @@ def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[di
                         failed.add("B2D")
                 if "B2S" in bars:
                     b2 = (r.get("numbers") or {}).get("B2") or {}
-                    counts = [b2.get(k) for k in ("deficit_rows", "silent_surplus_rows", "visible_surplus_rows")]
-                    tools = b2.get("tool_missing_rows", 0)
-                    external = (b2.get("externalized") or {}).get("deficit_rows", 0)
-                    if any(type(n) is not int or n < 0 for n in counts) or counts[0] or counts[1] or tools or external:
+                    n = {k: b2.get(k) for k in ("deficit_rows", "silent_surplus_rows", "visible_surplus_rows",
+                                                "surplus_rows", "tool_surplus_rows", "tool_missing_rows")}
+                    n["externalized"] = (b2.get("externalized") or {}).get("deficit_rows")
+                    # Fail closed: every count present and a non-negative int, and the split covers all surplus.
+                    if (any(type(v) is not int or v < 0 for v in n.values())
+                            or n["visible_surplus_rows"] + n["silent_surplus_rows"]
+                            != n["surplus_rows"] + n["tool_surplus_rows"]
+                            or n["deficit_rows"] or n["silent_surplus_rows"] or n["tool_missing_rows"]
+                            or n["externalized"]):
                         failed.add("B2S")
                 if not failed and r["verdict"] != "FAIL":
                     continue

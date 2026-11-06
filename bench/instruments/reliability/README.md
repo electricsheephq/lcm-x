@@ -103,10 +103,13 @@ the host reported `interrupted`. Any other assistant row is surplus.
   stored lineages. B2's verdict, existing numbers and `failed_bars.B2` stay unchanged. Host-parity licences,
   embedded credits, merges and projections retain their existing accounting.
   `supersedes` / `generated_unproven` explain their own row; an unordered `possible_replay_of` pair explains
-  one endpoint only when both rows have the same B2 key in the same lineage. `composite`, `split`, foreign-key
-  pairs and absent relation tables explain nothing. Maximum matching assigns distinct witnesses to distinct
-  stored rows, capped by each key's unlicensed surplus; a stored row explains at most one copy, including
-  assistant rows with multiple tool entries. Duplicate/reversed pairs and repeated self relations add no capacity.
+  one endpoint only when both rows have the same B2 key in the same lineage. Relations are read from the whole
+  store, but a pair across lineages or keys explains nothing. `composite`, `split` and absent relation tables
+  explain nothing. Maximum matching assigns distinct witnesses to distinct stored rows within each key, capped by
+  that key's unlicensed surplus; a stored row explains at most one copy of each key it holds, so an assistant row
+  whose content and tool entries were stored twice explains one copy of each. Duplicate/reversed pairs and
+  repeated self relations add no capacity. `silent_surplus_examples` are best-effort: up to 10 of the
+  highest-numbered unexplained rows of each key, usually the later copies.
   Complete store-ID lists drive this split; existing truncated display lists stay as they are.
   `silent_surplus_examples` merges user, assistant and tool examples (up to 10, sorted by store ID/role/hash):
   `{store_id, role, sha256}`. Tool hashes are SHA256 of `json.dumps(key[1:], sort_keys=True)` (the existing
@@ -392,9 +395,11 @@ On runtime hosts, R1 `publication-failure/rotation-child-persistent` gates only 
 with a positive or missing deficit count; B1 mismatches and B2 surplus remain accepted under #1588, independently of #1797's open state.
 
 `B2S` is an available exact-cell CI predicate beside `B2D`: any deficit (including tool/externalized
-loss), positive silent surplus, or missing/invalid visibility split fails closed. Visible surplus alone
-passes B2S while still failing B2. B2S checks receipts even on a reported PASS; this change promotes no
-`CELL_GATE` entry and does not prove that the P1 gate passes.
+loss), positive silent surplus, or missing/invalid visibility split fails closed. Invalid means any of the
+counts is missing, not an int or negative, or `visible_surplus_rows + silent_surplus_rows` differs from
+`surplus_rows + tool_surplus_rows`. Visible surplus alone passes B2S while still failing B2. B2S checks
+receipts even on a reported PASS; a B2S-gated row reported UNSUPPORTED or INCONCLUSIVE carries no numbers and
+fails closed. This change promotes no `CELL_GATE` entry and does not prove that the P1 gate passes.
 
 ### Claim boundary
 R2 proves the plugin's behaviour through a real `hermes acp` process on the pinned host shas, with every model route

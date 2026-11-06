@@ -438,8 +438,10 @@ def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
 def split_surplus(groups, relations):
     """Maximum matching of relation witnesses to rows, with each key capped at its unlicensed surplus.
 
-    Flow: key quota -> unique self/pair witness -> stored row (capacity one globally).
-    Full ID lists include expected copies: the maximum decides which copies can be surplus.
+    Flow: key quota -> unique self/pair witness -> stored row. Witness and row nodes belong to one key, so a row
+    explains at most one copy of each key it holds: an assistant row whose content and tool entries were stored
+    twice explains one copy of each. Full ID lists include expected copies: the maximum decides which copies can
+    be surplus.
     """
     graph, source, sink = defaultdict(dict), ("source",), ("sink",)
 
@@ -456,11 +458,11 @@ def split_surplus(groups, relations):
         witnesses = [("self", sid) for sid in sorted(held & self_ids)]
         witnesses += [("pair", a, b) for a, b in pairs if a in held and b in held]
         for witness in witnesses:
-            before, after = ("in", witness), ("out", witness)
+            before, after = ("in", index, witness), ("out", index, witness)
             edge(quota, before)
             edge(before, after)
             for sid in witness[1:]:
-                row = ("row", sid)
+                row = ("row", index, sid)
                 edge(after, row)
                 edge(row, sink)
     visible = 0
@@ -485,8 +487,11 @@ def split_surplus(groups, relations):
     examples = []
     for index, (key, surplus, ids) in enumerate(groups):
         silent = graph[source][("key", index)]
-        # Deterministic representatives from rows not explained by the matching.
-        unexplained = [sid for sid in sorted(set(ids)) if graph[("row", sid)].get(sink, 1)]
-        examples += [{"store_id": sid, "role": key[0], "sha256": key[1]} for sid in unexplained[:silent]]
+        if not silent:
+            continue
+        # Best-effort representatives: the highest-numbered rows the matching left unexplained, usually the later
+        # copies rather than the original.
+        unexplained = [sid for sid in sorted(set(ids)) if graph[("row", index, sid)].get(sink, 1)]
+        examples += [{"store_id": sid, "role": key[0], "sha256": key[1]} for sid in unexplained[-silent:]]
     return {"visible_surplus_rows": visible, "silent_surplus_rows": sum(n for _k, n, _ids in groups) - visible,
             "silent_surplus_examples": sorted(examples, key=lambda e: (e["store_id"], e["role"], e["sha256"]))[:10]}
