@@ -18,8 +18,10 @@ python -m bench.instruments.gate_kit.audit --state-db <hermes home>/state.db --l
   created beside them. An immutable open does not read a `-wal` file, so a database with a non-empty `-wal` beside it
   is refused (exit 2), as is one with a non-empty (hot) rollback `-journal`: checkpoint or roll it back first (open it once after the run has stopped, or copy it with its `-wal` and
   checkpoint the copy).
-- `--since`: only host sessions started at or after it, and compaction lines logged at or after it (a naive ISO time
-  is UTC). Stored rows under a session the host does not know count when ingested at or after it.
+- `--since` (a naive ISO time is UTC): a lineage is scored when any member started at or after it, and only those
+  members count: a rotation child in the window is scored without its earlier parent's rows or the copies of them it
+  carries. Stored rows under a session the host does not know count when ingested at or after it. Driver events,
+  compaction lines and recorder lines count only for audited sessions, at or after it.
 - `--log`: the run's Hermes logs, in either Hermes format (`<asctime> <LEVEL> [<session>] <logger>: <message>` or the
   verbose `<asctime> - <logger> - <LEVEL> [<session>] - <message>`). A pattern counts only at the start of a message
   logged by LCM-X's own logger (a `hermes_lcm` module); a line logged to two files counts once.

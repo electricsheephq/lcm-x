@@ -208,6 +208,30 @@ def test_in_place_rewound_rows_are_not_expected(tmp_path):
     assert out["parity"]["totals"]["missing_rows"] == 0 and out["parity"]["totals"]["expected_rows"] == 3
 
 
+ROTATED = {"P": ("cli", None, 1000.5, "compression", 100.0), "P2": ("cli", "P", 3000.0, "user_exit", 1001.0)}
+
+
+@pytest.mark.parametrize("lose", [False, True])
+def test_a_lineage_partly_before_the_window_scores_its_window_members(tmp_path, lose):
+    # The parent started before --since, its rotation child inside it: the child is scored, without the parent's rows
+    # or the copy of them the child carries.
+    carried = [("P2", dict(m, _ts=2000.0 + n)) for n, (_s, m) in enumerate(turn(1, "P"))]
+    host = turn(1, "P") + carried + turn(2, "P2")
+    stored = turn(1, "P") + turn(2, "P2")[: 1 if lose else 2]
+    out = Home(tmp_path, ROTATED, host, stored=stored).run(since=1000.8)
+    assert out["parity"]["lineages"]["P"]["expected_rows"] == 2
+    assert out["parity"]["totals"]["missing_rows"] == int(lose) and out["parity"]["totals"]["surplus_rows"] == 0
+
+
+def test_1674_needs_its_stamped_witness_in_the_rows_own_session(tmp_path):
+    host = [("P", u("question 1")), ("P2", a("answer"))]
+    stored = [("P", u("question 1")), ("P2", u("question 1")), ("P2", a("answer"))]
+    events = [{"t": 0.0, "kind": "restart_cold", "session": "P2"}]
+    out = Home(tmp_path, ROTATED, host, stored=stored, stamps={0}).run([route("P2", "advanced_cursor", 2, 2, 2)], events)
+    assert out["exempted_surplus"]["store_ids"]["#1674"] == []  # the stamped copy is in the parent session
+    assert out["exempted_surplus"]["store_ids"]["unattributed"] == [2]
+
+
 def test_m3_rate_and_ids(tmp_path):
     host = turn(1) + turn(2)
     out = Home(tmp_path, ONE, host, relations=[(2, "generated_unproven", None), (4, "supersedes", None)]).run()
@@ -413,6 +437,14 @@ def test_every_floor_met_gives_gate_pass_and_an_unmet_floor_gives_incomplete(tmp
     assert replay["gate"]["verdict"] == "GATE PASS PENDING HAND CHECK"
 
 
+def test_events_count_only_for_audited_sessions_in_the_window(tmp_path):
+    events = [{"t": 1500.0, "kind": "restart_cold", "session": "S1"}, {"t": 1500.0, "kind": "restart_cold", "session": "ZZ"},
+              {"t": 500.0, "kind": "restart_warm", "session": "S1"}, {"t": 1500.0, "kind": "undo_resend", "session": "S1"}]
+    out = Home(tmp_path, ONE, turn(1)).run(events=events, since=999.0)
+    assert {k: out["coverage"][k]["value"] for k in ("restarts_cold", "restarts_warm", "undo_resend")} == {
+        "restarts_cold": 1, "restarts_warm": 0, "undo_resend": 1}
+
+
 def test_no_events_reports_unknown_floors(tmp_path):
     out = Home(tmp_path, ONE, turn(1)).run()
     assert out["coverage"]["restarts"] == {"value": "unknown", "floor": 10, "met": False}
@@ -446,6 +478,16 @@ def test_a_non_empty_wal_or_hot_journal_is_refused(tmp_path, suffix):
     with pytest.raises(SystemExit) as stop:
         audit.main(["--state-db", str(home.state), "--lcm-db", str(home.lcm), "--out", str(tmp_path / "r.json")])
     assert stop.value.code == 2 and not (tmp_path / "r.json").exists()
+
+
+def test_a_stored_only_session_whose_payloads_are_all_unreadable_is_kept(tmp_path):
+    ref = "gone.json"
+    placeholder = (f"[Externalized tool output: tool=read_file; tool_call_id=c9; chars=10; bytes=10; "
+                   f'read it with lcm_expand(externalized_ref="{ref}"); ref={ref}]')
+    out = Home(tmp_path, ONE, turn(1), stored=turn(1) + [("GHOST", dict(result("c9"), content=placeholder))]).run()
+    assert out["parity"]["lineages"]["GHOST"]["externalized_unresolved"] == 1
+    assert out["gate"]["bars"]["externalized_unresolved"] == {"value": 1, "pass": False}
+    assert out["gate"]["verdict"] == "GATE FAIL"
 
 
 def test_an_unresolved_externalized_payload_fails_its_own_bar(tmp_path):

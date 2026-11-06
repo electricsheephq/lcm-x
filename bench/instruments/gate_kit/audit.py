@@ -154,7 +154,7 @@ def display_key(role, content, ts, call_id, calls, tool_name):
     return (role, multiset.norm(content) if role in ("user", "assistant") else content, ts, call_id, calls, tool_name)
 
 
-def host_expected(rows, group, markers):
+def host_expected(rows, group, markers, scored=None):
     """Per lineage: (role, text) items and the tool-key Counter, counted as the host's lineage display counts rows.
 
     Hermes keeps a rotation parent's originals in the closed parent and gives the child only the compressed handoff
@@ -166,7 +166,9 @@ def host_expected(rows, group, markers):
     identity's count is therefore the most displayed rows any one segment (session) holds of it, and a key's expected
     count is the sum of those over the distinct identities of the lineage. A carried copy is not counted twice, and a
     double within a segment still counts twice. The host's summary row (``_compressed_summary``) and user rows that
-    begin with LCM-X's own generated-carrier markers are not expected."""
+    begin with LCM-X's own generated-carrier markers are not expected. ``scored``: the sessions in the audit window;
+    only their rows are expected, and an identity that an unscored segment of the lineage also holds (a row carried
+    from a parent that started before the window) is the parent's row, so it is not expected either."""
     header, prefixes = markers
     per_segment, first = Counter(), {}
     for row in rows:
@@ -176,9 +178,14 @@ def host_expected(rows, group, markers):
         identity = (group(sid), display_key(role, content, ts, call_id, calls, tool_name))
         per_segment[(identity, sid)] += 1
         first.setdefault(identity, row)
-    copies = Counter()
-    for (identity, _sid), n in per_segment.items():
-        copies[identity] = max(copies[identity], n)
+    copies, earlier = Counter(), set()
+    for (identity, sid), n in per_segment.items():
+        if scored is not None and sid not in scored:
+            earlier.add(identity)
+        else:
+            copies[identity] = max(copies[identity], n)
+    for identity in earlier:
+        copies.pop(identity, None)
     count, texts, excluded = defaultdict(Counter), {}, Counter()
     for identity, n in copies.items():
         g = identity[0]
@@ -280,7 +287,7 @@ def attribute_silent_surplus(silent, ingests, observed, user_rows, restarts):
     lines leave the row unattributed (ambiguity fails as silent surplus). Only #1674 and #2203 are exempted here;
     #849 and #1961 rows are listed for a hand check and stay silent surplus for the gate. Line numbers cite the
     recorder PR's engine.py (``_log_ingest_route`` at 7140-7160).
-    ``silent``: [(store_id, session, ids holding the same key)]; ``observed``: store_id -> observed_at;
+    ``silent``: [(store_id, session, [(store_id, session)] of the copies of its key)]; ``observed``: store_id -> observed_at;
     ``user_rows``: store_id -> (session, text) for stored user rows (compared in memory only); ``restarts``: lineage ->
     driver restart times (restart_cold, restart_warm), or None without --events.
     An exempted row is still a hand check: the verdict is then GATE PASS PENDING HAND CHECK, never GATE PASS."""
@@ -290,7 +297,7 @@ def attribute_silent_surplus(silent, ingests, observed, user_rows, restarts):
     for other, (s, t) in user_rows.items():
         if multiset.norm(t):
             prompts[s].append((other, multiset.norm(t)))
-    for sid, session, ids in silent:
+    for sid, session, ids in silent:  # ids: [(store_id, session)] of every stored copy of the row's key
         lines = [i for i in ingests if i["session"] == session and i["range"][0] <= sid <= i["range"][1]]
         limit = "unattributed"
         if len(lines) == 1:
@@ -306,7 +313,8 @@ def attribute_silent_surplus(silent, ingests, observed, user_rows, restarts):
             # driver restart of the session must also come before the recorder line (none known without --events:
             # hand check). Not checked: the view-order condition.
             elif route == "advanced_cursor" and cursor > 0 and unstamped and any(
-                    other < sid and observed.get(other) is not None for other in ids):
+                    other < sid and other_session == session and observed.get(other) is not None
+                    for other, other_session in ids):
                 if restarts is None or lines[0]["at"] is None:
                     limit = "#1674_needs_manual_check"
                 elif any(t < lines[0]["at"] for t in restarts.get(session, ())):
@@ -363,27 +371,35 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     group = lineage_of(sessions)
     aux, aux_unproven = auxiliary_sessions(log["auxiliary"])
     in_window = {s for s, v in sessions.items() if since is None or (v["started"] or 0) >= since}
-    roots = {group(s) for s in in_window if group(s) in in_window and group(s) not in aux}
+    # A lineage is scored when any member started in the window; only its in-window members (``scored``) count, so a
+    # rotation child in the window is scored even when its parent started before it, without the parent's rows.
+    scored = in_window - aux
+    roots = {group(s) for s in scored}
     expected, carriers = host_expected([r for r in host_rows if group(r[1]) in roots], group,
-                                       plugin_tree.carrier_markers(REPO))
+                                       plugin_tree.carrier_markers(REPO), scored)
     resolved, ext, _ids = externalized.resolve([r[:6] for r in stored], state_db.parent)
     extra = {r[0]: r for r in stored}
+
+    def audited(store_id):  # a scored session's row, or a row under no host session stored in the window
+        session = extra[store_id][1]
+        return session in scored or (session not in sessions and session not in aux
+                                     and (since is None or (extra[store_id][7] or 0) >= since))
+
     by_lineage = defaultdict(list)
     for r in resolved:
-        g = group(r[1])
-        unknown = r[1] not in sessions and (since is None or (extra[r[0]][7] or 0) >= since)  # rows under no host session
-        if g in roots or (unknown and g not in aux):
-            by_lineage[g].append((*r, extra[r[0]][6]))
-    lost = Counter(group(extra[s][1]) for s in ext["store_ids"])
+        if audited(r[0]):
+            by_lineage[group(r[1])].append((*r, extra[r[0]][6]))
+    lost_ids = [s for s in ext["store_ids"] if audited(s)]  # unreadable payloads: kept, even with no readable row
+    lost = Counter(group(extra[s][1]) for s in lost_ids)
     parity, silent_rows = {}, []
-    for g in sorted(roots | set(by_lineage)):
+    for g in sorted(roots | set(by_lineage) | set(lost)):
         items, tools = expected.get(g, ([], Counter()))
         numbers, silent = score_lineage(g, items, tools, by_lineage[g], relations)
         numbers["stored_rows"] += lost[g]
         numbers.update(externalized_unresolved=lost[g], host_carrier_rows_excluded=carriers[g],
                        source=sessions.get(g, {}).get("source"), host_session=g in sessions)
         parity[g] = numbers
-        silent_rows += [(sid, extra[sid][1], ids) for sid, ids in silent]
+        silent_rows += [(sid, extra[sid][1], [(i, extra[i][1]) for i in ids]) for sid, ids in silent]
 
     # Whole-run parity: every scored lineage, #1931 bucket B children included (only PASS(A) is bucket A's own bar).
     keys = ("expected_rows", "stored_rows", "missing_rows", "split_assistant_keys", "surplus_rows",
@@ -391,25 +407,28 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     totals = {k: sum(p[k] for p in parity.values()) for k in keys}
     zero = sorted(g for g, p in parity.items() if p["host_session"] and p["expected_rows"] and not p["stored_rows"])
     per_session = Counter(r[1] for r in stored)
-    window_ids = {r[0] for rows in by_lineage.values() for r in rows} | set(ext["store_ids"]) & {
-        r[0] for r in stored if group(r[1]) in parity}
+    window_ids = {r[0] for rows in by_lineage.values() for r in rows} | set(lost_ids)
+    audited_sessions = scored | {extra[i][1] for i in window_ids}
     denominator = len(window_ids)
 
     # #1931 buckets: ended children that are not rotation children, started in the window, not AUXILIARY.
     buckets = {"A": [], "B": []}
-    for s in sorted(in_window - aux):
+    for s in sorted(scored):
         v = sessions[s]
         if v["parent"] and v["ended"] is not None and not compression_child(s, sessions):
             buckets["A" if v["source"] == DELEGATE_SOURCE else "B"].append(s)
 
     # Coverage floors (section 5, "The driven run").
-    turns = sum(1 for g in roots for role, _t in expected.get(g, ([],))[0] if role == "user")
-    calls = Counter((k[3], k[4]) for g in roots for k, n in expected.get(g, ([], Counter()))[1].items()
+    turns = sum(1 for g in parity for role, _t in expected.get(g, ([],))[0] if role == "user")
+    calls = Counter((k[3], k[4]) for g in parity for k, n in expected.get(g, ([], Counter()))[1].items()
                     if k[1] == "call" for _ in range(n))
+    if events is not None:  # driver evidence counts only for audited sessions, inside the window
+        events = [e for e in events if str(e.get("session") or "") in audited_sessions
+                  and (since is None or float(e.get("t") or 0) >= since)]
     kinds = Counter(e["kind"] for e in events) if events is not None else None
     # Compaction lines: deduplicated, tagged with a scored session, and inside the window when one is given.
     compaction_lines = sorted((sid, at) for sid, at, _msg in log["compactions"]
-                              if group(sid) in parity and (since is None or at >= since))
+                              if sid in audited_sessions and (since is None or at >= since))
     restarts = None
     if events is not None:
         restarts = defaultdict(list)
@@ -449,7 +468,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     m3 = {"numerator": len(doubt), "denominator": denominator, "store_ids": doubt,
           "rate": len(doubt) / denominator if denominator else 0.0}
 
-    ingests = log["ingests"]
+    ingests = [i for i in log["ingests"] if i["session"] in audited_sessions and (since is None or i["at"] >= since)]
     storing = [i for i in ingests if i["rows"] > 0]
     pairs = sum(i["pairs"] for i in ingests)
     recorder = {"present": bool(ingests), **({"status": "recorder absent"} if not ingests else {}),
