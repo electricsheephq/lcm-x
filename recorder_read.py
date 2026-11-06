@@ -134,8 +134,10 @@ def read(proc, *, checkpoint=None, verify=True) -> dict:
     while end in seqs:
         end += 1
     if seqs and end <= max(seqs):
-        # Dropped queued data and the refused event leave holes before the diagnostic gap marker.
-        cause = "gap" if any(e.get("kind") == "gap" and e["seq"] >= end for e in raw) else "seq_hole"
+        # Dropped queued data and open calls leave holes before the diagnostic stop marker.
+        marker = min((e for e in raw if e.get("kind") in ("gap", "cap") and e["seq"] >= end),
+                     key=lambda e: e["seq"], default={})
+        cause = marker.get("reason", marker.get("kind", "seq_hole"))
     ordered = sorted(raw, key=lambda e: min(_seqs(e)))
     lost = 0
     for event in ordered:
@@ -155,7 +157,7 @@ def read(proc, *, checkpoint=None, verify=True) -> dict:
     if stop not in ("cap", "disk_floor", "gap"):
         stop = first.get("cause")
     if stop in ("cap", "disk_floor", "gap") and (cause == "end" or
-            (cause == "seq_hole" and end >= first.get("seq", float("inf")))):
+            (cause == "seq_hole" and isinstance(first.get("seq"), int) and end >= first["seq"])):
         cause = stop
     sealed = None
     if checkpoint is not None:
@@ -168,10 +170,9 @@ def read(proc, *, checkpoint=None, verify=True) -> dict:
             end, cause = sealed["through"] + 1, "checkpoint"
     prefix = [e for e in raw if max(_seqs(e)) < end]
     snapshot = status.get("snapshot") or {}
-    if checkpoint is None and snapshot.get("state") not in ("ok", "no_database"):
+    if snapshot.get("state") not in ("ok", "no_database"):
         raise RecordingError("STATUS: recording is not replayable: start snapshot is not ok")
-    if status.get("replayable") is False and not (checkpoint is not None
-            and status.get("ctx_capture") == "ok" and snapshot.get("payloads") != "payloads_missing"):
+    if status.get("replayable") is False:
         snapshot = status.get("snapshot") or {}
         capture_loss = next((e for e in ordered if e.get("kind") == "loss"
                              and e.get("lost_observation") == "ctx_capture_unavailable"), None)

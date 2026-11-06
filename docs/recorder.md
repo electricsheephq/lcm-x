@@ -76,7 +76,8 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
   at startup; subsequent planned writes count conservatively, including payload links and temporary copies.
   STATUS reserves only growth up to twice its largest size, covering the old file beside its replacement.
   Concurrent recorder processes can together pass the cap because each counts other processes' bytes at startup.
-  A refused initial snapshot writes no events. When a bound refuses data other than a checkpoint, recording stops; queued events are
+  A refused initial snapshot writes no events except the `cap` marker.
+  When a bound refuses data other than a checkpoint, recording stops; queued events are
   dropped and counted as `dropped_after_stop`. One `cap` marker names the cause and refused planned size, followed
   by STATUS, using the diagnostic reserve; if no diagnostic fits, the last complete prefix remains readable.
   A diagnostic refusal never stops recording. LCM keeps running.
@@ -85,10 +86,12 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
 - **Coverage ends:** recording stops being complete at the first of: a gap, the cap, a value that cannot be copied
   (`unsupported`), `hermes_home_changed`, a lost observation, a root stack mismatch, or a recorder failure (`recorder.failed`; the failure
   never reaches the engine or Hermes). `STATUS.json` names the first cause and its seq.
+  For a stop at a bound, the seq is the last one assigned when the stop happened.
 - **Replayable prefix:** the reader returns events up to the first missing seq or the first coverage end, whichever
   comes first. A missing, torn or hash-mismatched blob cuts the prefix before its event with a `blob_*` cause.
   Everything before it is complete; a checkpoint crossing a hole or damaged blob is rejected.
-  A failed start snapshot is unreplayable; replay from a sealed checkpoint remains available.
+  A failed start snapshot is unreplayable, including from a sealed checkpoint.
+  Checkpoint replay starts from the start snapshot and compares against the checkpoint backup.
 - **Checkpoints:** at +24, +72 and +144 hours, between roots, the recorder backs up `lcm.db` and writes a
   `checkpoint_sealed` event with the seq it covers. Reading with a checkpoint returns the prefix through that seq, and
   a replay of it must match the backup, without needing an exit. A checkpoint refused by the cap or disk floor

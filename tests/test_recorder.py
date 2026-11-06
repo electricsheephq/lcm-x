@@ -3582,22 +3582,23 @@ def test_2280_r6_start_tolerates_vanishing_file(lab):
     root.mkdir()
     vanished = root / "STATUS.other.tmp"
     vanished.write_text("other process")
-    is_file = Path.is_file
-    def disappearing(path):
-        found = is_file(path)
-        if path == vanished and found:
-            vanished.unlink()
-        return found
-    lab.mp.setattr(Path, "is_file", disappearing)
+    walk = os.walk
+    def disappearing(*args, **kwargs):
+        for directory, dirs, files in walk(*args, **kwargs):
+            if Path(directory) == root and vanished.name in files:
+                vanished.unlink()
+            yield directory, dirs, files
+    lab.mp.setattr(os, "walk", disappearing)
     _, ctx = lab.load(home)
     rec = _recorder()
     assert rec is not None and rec.opened
+    assert not vanished.exists()
     assert rec.writer.drain(5)
     assert isinstance(ctx.offered.get_status(), dict)
 
 
 @needs312
-def test_2280_r7_failed_snapshot_blocks_start_but_not_checkpoint(lab):
+def test_2280_r7_failed_snapshot_blocks_start_and_checkpoint(lab):
     home = prepared_home(lab)
     module = load_plugin(REPO, prefix="hermes_lcm_rec")
     lab.modules.append(module)
@@ -3627,12 +3628,15 @@ def test_2280_r7_failed_snapshot_blocks_start_but_not_checkpoint(lab):
     rec._checkpoint(24)
     assert rec.writer.drain(5)
     assert rec.writer.drain(5)  # seal queues its marker behind the first drain's sync item
-    assert reader.read(rec.proc, checkpoint=24)["sealed"]["hours"] == 24
+    with pytest.raises(reader.RecordingError, match="not replayable"):
+        reader.read(rec.proc, checkpoint=24)
     # A stale replayable flag must not allow a partial start database either.
     status["replayable"] = True
     (rec.proc / "STATUS.json").write_text(json.dumps(status))
     with pytest.raises(reader.RecordingError, match="not replayable"):
         reader.read(rec.proc)
+    with pytest.raises(reader.RecordingError, match="not replayable"):
+        reader.read(rec.proc, checkpoint=24)
 
 
 @needs312
@@ -3762,3 +3766,122 @@ def test_2280_r1_status_replacements_are_serialized(lab):
             if second.ident is not None:
                 second.join(5)
         assert not first.is_alive() and not second.is_alive() and not errors
+
+
+def _round3_constrain(lab, rec, rm, bound, headroom=0):
+    if bound == "cap":
+        rec.max_bytes = rec.writer.total_bytes + rm.DIAG_RESERVE + headroom
+    else:
+        usage = shutil.disk_usage(rec.root)
+        lab.mp.setattr(shutil, "disk_usage", lambda _: usage._replace(free=rm.DISK_FLOOR + headroom))
+
+
+@needs312
+@pytest.mark.parametrize("bound", ["cap", "disk_floor"])
+def test_2280_q1_queued_events_name_bound(lab, bound):
+    """Real writer: a refused event followed by two queued events leaves three holes."""
+    rec, rm, _ = _round2_recorder(lab)
+    first_hole = rec.last_seq + 1
+    entered, release = threading.Event(), threading.Event()
+    assert rec.writer.offer(("call", lambda: (entered.set(), release.wait(5))))
+    try:
+        assert entered.wait(2)
+        rec._emit({"kind": "refused", "text": "x" * 8192}, single=True)
+        rec._emit({"kind": "queued_one"}, single=True)
+        rec._emit({"kind": "queued_two"}, single=True)
+        _round3_constrain(lab, rec, rm, bound, headroom=4096)
+    finally:
+        release.set()
+    assert rec.writer.drain(5)
+    raw = recorder_module_events(rec)
+    assert not any(e["kind"] in ("refused", "queued_one", "queued_two") for e in raw)
+    assert rec.counters["dropped_after_stop"] == 3
+    marker = next(e for e in raw if e["kind"] == "cap")
+    status = json.loads((rec.proc / "STATUS.json").read_text())
+    assert first_hole < status["first_cause"]["seq"] < marker["seq"]
+    recording = importlib.import_module(rm.__package__ + ".recorder_read").read(rec.proc)
+    assert recording["prefix_end"] == first_hole - 1
+    assert recording["cause"] == bound
+
+
+@needs312
+def test_2280_q1_refused_call_names_cap(lab):
+    """A real monitored engine call allocates enter and exit before the writer refuses it."""
+    rec, rm, ctx = _round2_recorder(lab)
+    first_hole = rec.last_seq + 1
+    entered, release = threading.Event(), threading.Event()
+    assert rec.writer.offer(("call", lambda: (entered.set(), release.wait(5))))
+    try:
+        assert entered.wait(2)
+        ctx.offered.get_status()
+        with rec.writer.cv:
+            call = next(item[1] for (item, _) in rec.writer.items
+                        if item[0] == "event" and item[1].get("name") == "get_status")
+            assert call["seq_enter"] == first_hole < call["seq_exit"]
+        _round3_constrain(lab, rec, rm, "cap")
+    finally:
+        release.set()
+    assert rec.writer.drain(5)
+    raw = recorder_module_events(rec)
+    assert not any(e.get("name") == "get_status" for e in raw)
+    assert next(e for e in raw if e["kind"] == "cap")["seq"] > call["seq_exit"]
+    recording = importlib.import_module(rm.__package__ + ".recorder_read").read(rec.proc)
+    assert recording["prefix_end"] == first_hole - 1
+    assert recording["cause"] == "cap"
+
+
+@needs312
+def test_2280_q1_open_parent_names_cap(lab):
+    """A real monitored parent stays open while one child writes and its sibling is refused."""
+    rec, rm, ctx = _round2_recorder(lab)
+    first_hole = rec.last_seq + 1
+    def parent():
+        ctx.offered.get_status()
+        assert rec.writer.drain(5)
+        children = [e for e in recorder_module_events(rec) if e.get("name") == "get_status"]
+        assert len(children) == 1
+        assert children[0]["parent_seq"] == first_hole < children[0]["seq_enter"]
+        entered, release = threading.Event(), threading.Event()
+        assert rec.writer.offer(("call", lambda: (entered.set(), release.wait(5))))
+        try:
+            assert entered.wait(2)
+            ctx.offered.get_status()
+            _round3_constrain(lab, rec, rm, "cap")
+        finally:
+            release.set()
+        assert rec.writer.drain(5)
+        assert rec.stopped == "cap"
+    rec._register("tool", ("parent", parent), {})
+    parent()
+    assert rec.writer.drain(5)
+    raw = recorder_module_events(rec)
+    assert not any(e.get("name") == "parent" for e in raw)
+    assert len([e for e in raw if e.get("name") == "get_status"]) == 1
+    recording = importlib.import_module(rm.__package__ + ".recorder_read").read(rec.proc)
+    assert recording["prefix_end"] == first_hole - 1
+    assert recording["cause"] == "cap"
+
+
+def test_2280_q1_string_first_cause_keeps_seq_hole(tmp_path):
+    """Synthetic segment isolates an unrelated hole with an uncapturable string seq in STATUS."""
+    import recorder_read as reader
+    proc = tmp_path / "proc" / "synthetic"
+    (proc / "events").mkdir(parents=True)
+    (proc / "events" / "one.jsonl").write_text(
+        json.dumps({"kind": "process_start", "seq": 1}) + "\n" +
+        json.dumps({"kind": "probe", "seq": 3}) + "\n")
+    (proc / "STATUS.json").write_text(json.dumps({
+        "snapshot": {"state": "ok"}, "replayable": True, "end_state": "cap",
+        "first_cause": {"cause": "uncapturable", "seq": "tool:opaque"}}))
+    recording = reader.read(proc)
+    assert recording["prefix_end"] == 1
+    assert recording["cause"] == "seq_hole"
+
+
+@pytest.mark.parametrize("wording", [
+    "A refused initial snapshot writes no events except the `cap` marker.",
+    "For a stop at a bound, the seq is the last one assigned when the stop happened.",
+    "A failed start snapshot is unreplayable, including from a sealed checkpoint.",
+])
+def test_2280_q4_docs_describe_stop_and_snapshot(wording):
+    assert wording in (REPO / "docs" / "recorder.md").read_text()
