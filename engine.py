@@ -38,6 +38,7 @@ from .config import LCMConfig, _disabled_tool_names, _parse_float_env, containme
 from .dag import SummaryDAG, SummaryNode
 from . import ingest_ledger, sender_capture, survival_codec
 from . import maintenance_scheduler
+from . import tokens as _token_counter
 from .diagnostics import _enforce_state_db_containment
 from .engine_registry import (
     _ACTIVE_ENGINE_COLD_START_LOCK,
@@ -7010,6 +7011,7 @@ class LCMEngine(
             after_commit.append(lambda value=rollback_failures:
                                 setattr(self, "_ledger_rollback_failures_published", value))
             try:
+                prepared["view_only"] = self._precompute_ingest_view_only(messages)
                 if getattr(self, "_identity_anchor_recovery", None):
                     self._identity_anchor_observe_recovery()
                 with self._store.ingest_atomic(admission_retry=admission_retry) as sample:
@@ -8294,6 +8296,7 @@ class LCMEngine(
             messages_to_store_with_index=messages_to_store_with_index,
             active_replay_messages=active_replay_messages,
             replay_messages=replay_messages,
+            view_only=(prepared or {}).get("view_only"),
         )
         if prepared is not None:
             prepared.update(protected=protected_messages, replay=replay_messages)
@@ -8304,6 +8307,7 @@ class LCMEngine(
             sender_originals=[(idx, messages[idx]) for idx, _msg in messages_to_store_with_index],
             sender_excluded=anchor_remainders,
             after_commit=after_commit,
+            view_only=(prepared or {}).get("view_only"),
         )
         attribution["rows_written"] = len(store_ids)
         # Logical row payload bytes, not SQLite page/WAL amplification.
@@ -8325,7 +8329,8 @@ class LCMEngine(
             self._ingest_ledger_attempt["stored_markers"] = {
                 idx: kind for (idx, msg), protected, _sid in zip(
                     messages_to_store_with_index, protected_messages, store_ids)
-                if (kind := self._lcm_generated_marker(protected) or self._lcm_generated_marker(msg)) is not None}
+                if (kind := self._ingest_precomputed_marker(idx, protected, (prepared or {}).get("view_only"))
+                    or self._ingest_precomputed_marker(idx, msg, (prepared or {}).get("view_only"))) is not None}
         if anchor_plan is not None:
             try:
                 with self._ingest_evidence():
@@ -8742,14 +8747,78 @@ class LCMEngine(
             messages_to_store_with_index = kept
         return messages_to_store_with_index, active_replay_messages
 
+    @staticmethod
+    def _ingest_token_counter_key():
+        return (count_message_tokens, _token_counter._encoder_generation,
+                _token_counter._encoder_ready, _token_counter._encoder)
+
+    def _precompute_ingest_view_only(self, messages):
+        """Pure warm-attempt hints; protection and replay stay under the lock.
+
+        Snapshot only plain host data, so copying cannot invoke application
+        hooks. Image estimates retain their live host price under the lock.
+        """
+        def plain(value):
+            if type(value) in (str, int, float, bool, type(None)):
+                return True
+            if type(value) in (list, tuple):
+                return all(plain(item) for item in value)
+            return type(value) is dict and all(type(key) is str and plain(item) for key, item in value.items())
+
+        if self._ingest_cursor_needs_reconcile:
+            return None
+        try:
+            if not plain(messages):
+                return None
+            inputs = copy.deepcopy(messages)
+            hints = dict(inputs=inputs, estimates={}, markers={}, marker=self._lcm_generated_marker,
+                         counter=self._ingest_token_counter_key(), names=None, names_function=_tool_result_names)
+            try:
+                hints["names"] = _tool_result_names(inputs)
+            except Exception:
+                pass  # Retry at the original call site, with its original error boundary.
+            config = self._config
+            # Externalization replaces an oversized tool result with a placeholder,
+            # so its raw estimate could never be reused; leave it to the lock.
+            # User and assistant text has a much higher floor (#1016), so keep it.
+            oversized = (int(getattr(config, "large_output_externalization_threshold_chars", 0) or 0)
+                         if getattr(config, "large_output_externalization_enabled", False) else 0)
+            for index in range(min(max(self._ingest_cursor, 0), len(inputs)), len(inputs)):
+                row = inputs[index]
+                try:
+                    hints["markers"][index] = self._lcm_generated_marker(row)
+                except Exception:
+                    pass
+                content = row.get("content")
+                if oversized and row.get("role") == "tool" and type(content) is str and len(content) > oversized:
+                    continue
+                if _token_counter._encoder_ready and type(row.get("content")) in (str, type(None)):
+                    try:
+                        hints["estimates"][index] = count_message_tokens(row)
+                    except Exception:
+                        pass
+            return hints
+        except Exception:
+            return None
+
+    def _ingest_precomputed_marker(self, index, row, view_only):
+        if (view_only is not None and view_only["marker"] == self._lcm_generated_marker
+                and index in view_only["markers"] and row == view_only["inputs"][index]):
+            return view_only["markers"][index]
+        return self._lcm_generated_marker(row)
+
     def _protect_ingest_rows(
         self, *,
         messages: List[Dict[str, Any]],
         messages_to_store_with_index: list[tuple[int, Dict[str, Any]]],
         active_replay_messages: List[Dict[str, Any]],
         replay_messages: List[Dict[str, Any]],
+        view_only=None,
     ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        tool_result_names = _tool_result_names(messages)
+        tool_result_names = (view_only["names"] if view_only is not None
+                             and view_only["names"] is not None
+                             and view_only["names_function"] is _tool_result_names
+                             and messages == view_only["inputs"] else _tool_result_names(messages))
         protected_messages = protect_messages_for_ingest(
             [msg for _idx, msg in messages_to_store_with_index],
             session_id=self._session_id,
@@ -8804,8 +8873,12 @@ class LCMEngine(
         protected_messages: List[Dict[str, Any]],
         sender_originals=(), sender_excluded=(),
         after_commit=None,
+        view_only=None,
     ) -> list[int]:
-        estimates = [count_message_tokens(m) for m in protected_messages]
+        estimates = [view_only["estimates"][index] if view_only is not None and index in view_only["estimates"]
+                     and view_only["counter"] == self._ingest_token_counter_key()
+                     and row == view_only["inputs"][index] else count_message_tokens(row)
+                     for (index, _msg), row in zip(messages_to_store_with_index, protected_messages)]
         batch = dict(
             store=self._store, session_id=self._session_id,
             source=self._session_platform, conversation_id=self._conversation_id,
