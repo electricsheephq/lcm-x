@@ -70,7 +70,8 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
 
 - **Cap and disk floor:** when the recording reaches `LCM_RECORDER_MAX_BYTES`, or free disk falls below 20 GiB, a
   `cap` event is written and recording stops. The cap spans every recording under `LCM_RECORDER_DIR`, including
-  shared `blobs/`. Before snapshots, payload copies and checkpoints, free space minus the planned write must remain
+  shared `blobs/`. Other recordings' bytes are counted when a recorder starts, so recorders running at the same time
+  can together pass the cap; each still stops at the disk floor. Before snapshots, payload copies and checkpoints, free space minus the planned write must remain
   at least 20 GiB. A refused snapshot records `disk_floor` in STATUS and writes no events. LCM keeps running unchanged.
 - **Queue admission:** the writer queue admits at most 10,000 events or 512 MiB; an event refused there writes a
   `gap` event and recording stops.

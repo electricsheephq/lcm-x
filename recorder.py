@@ -641,9 +641,12 @@ class Recorder:
             changed = self._config_files(engine)
             if changed:
                 self._emit({"kind": "config_files", "files": changed}, single=True)
+            env = self._env_values(engine)
             self._emit({"kind": "register", "engine": token,
                         "hermes_home": str(engine.__dict__.get("_hermes_home") or ""),
-                        "env": self._env_values(engine)}, single=True)
+                        "env": env}, single=True)
+            # replay applies the registration's environment, so the next root is compared against it
+            self.env_digest = hash(json.dumps(plain(env), sort_keys=True))
         self.capture_ctx(ctx)
 
     def _existing_bytes(self) -> int:

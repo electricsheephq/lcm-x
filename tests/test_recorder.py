@@ -2775,6 +2775,29 @@ def test_2269_r1_symlink_home_replays_without_extra_database(lab, registrations)
 
 
 @needs312
+def test_2269_r2_registration_env_becomes_the_env_baseline(lab):
+    """A second registration under other LCM_* values, then a root under the first values: replay applies the
+    registration's environment, so the recorder must emit an env event that restores the first values."""
+    lab.mp.setenv("LCM_CONTEXT_THRESHOLD", "0.75")
+    home = lab.home()
+    _, first = lab.load(home)
+    first.offered.get_status()
+    rec = _recorder()
+    lab.mp.setenv("LCM_CONTEXT_THRESHOLD", "0.42")
+    lab.load(home)
+    lab.mp.setenv("LCM_CONTEXT_THRESHOLD", "0.75")
+    first.offered.get_status()
+    assert rec.writer.drain(5)
+    events = recorder_module_events(rec)
+    last = max(i for i, e in enumerate(events) if e["kind"] == "register")
+    assert events[last]["env"].get("LCM_CONTEXT_THRESHOLD") == "0.42"
+    assert any(e["kind"] == "env" and e["values"].get("LCM_CONTEXT_THRESHOLD") == "0.75" for e in events[last + 1:])
+    rec = lab.stop()
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "registration-env", prepare=prepare)
+    assert rep.diffs == []
+
+
+@needs312
 def test_2269_r1_registration_captures_changed_yaml(lab):
     yaml = pytest.importorskip("yaml")
     home = lab.home()
