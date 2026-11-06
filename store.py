@@ -817,6 +817,11 @@ class MessageStore:
                         else msg
                     )
                     for key, value in metadata_factory(metadata_message, store_id):
+                        if key.startswith("folded_tail_lineage:"):
+                            # A factory can supply arbitrary metadata keys. As
+                            # with write_metadata_json, do not cache after a
+                            # write that an enclosing savepoint may roll back.
+                            self._ingest_folded_tail_reads = None
                         conn.execute(
                             """
                             INSERT INTO metadata(key, value)
@@ -2029,6 +2034,11 @@ class MessageStore:
             return False
         wrote = False
         with self._write_lock:
+            if any(key.startswith("folded_tail_lineage:") for key in keys):
+                # Disable for the remainder of this attempt, including failed
+                # writes and enclosing savepoint rollbacks. A value read after
+                # a write must never survive rollback of that write.
+                self._ingest_folded_tail_reads = None
             for key in keys:
                 if skip_unchanged:
                     existing = conn.execute(
@@ -2079,11 +2089,13 @@ class MessageStore:
                         trace.ingest_admission = False
                 previous = getattr(self, "_foreground_ingest_owner", False)
                 self._foreground_ingest_owner = True
+                self._ingest_folded_tail_reads = {}
                 try:
                     yield
                     if not self._conn.in_transaction:
                         raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT")
                 finally:
+                    self._ingest_folded_tail_reads = None
                     self._foreground_ingest_owner = previous
 
     def atomic(self, *, immediate: bool = False) -> AbstractContextManager[None]:
