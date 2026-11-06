@@ -61,6 +61,8 @@ def deliver_recall(
     rerank_enabled: Callable[[], bool],
     session_delivery: Callable[..., str] | None = None,
     delivery_order: str = "score",
+    adjacent_reply: list[dict[str, int]] | None = None,
+    adjacent_reply_unavailable: str | None = None,
 ) -> str:
     """Deliver ranked entries without changing retrieval or host-read policy."""
     if session_delivery is not None:
@@ -211,6 +213,8 @@ def deliver_recall(
             "from_current_session": bool(hit.get("from_current_session")),
             "arms": arms,
         }
+        if hit.get("adjacent_to") is not None:
+            item.update(adjacent_to=hit["adjacent_to"], arms=["adjacent"])
         if hit.get("lineage"):  # #1931: a delegated subagent's hit names its parent session
             item.update(parent_session_id=hit.get("parent_session_id"), lineage=hit["lineage"])
         if hit.get("kind") == "summary":
@@ -357,6 +361,10 @@ def deliver_recall(
         },
         "degraded": degraded,
     }
+    if adjacent_reply:
+        response["provenance"]["adjacent_reply"] = adjacent_reply
+    if adjacent_reply_unavailable is not None:
+        response["provenance"]["adjacent_reply_unavailable"] = adjacent_reply_unavailable
     if rerank_enabled() and rerank_scores:
         response["provenance"]["rerank_scores"] = rerank_scores
     if fts_rerun:

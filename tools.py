@@ -4124,6 +4124,82 @@ def default_semantic_cpu_limited(config) -> bool:
             and effective_cpus() <= 2)
 
 
+def _lcm_recall_adjacent_reply(
+    engine, ordered, source_rows, *, limit, deadline, excluded, allowed,
+):
+    """Atomically place up to three same-conversation replies; never write rows."""
+    placed = list(ordered)
+    pairs = []
+    try:
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        for rank, source in enumerate(ordered[:3]):
+            hit = source["hit"]
+            row = source_rows.get(hit.get("store_id"))
+            if (hit.get("kind") == "summary" or hit.get("node_id") is not None
+                    or row is None or row.get("role") == "tool"):
+                continue
+            if rank and not str(row.get("content") or "").strip().endswith("?"):
+                continue
+            session_id = row.get("session_id")
+            if (not session_id or session_id in excluded
+                    or (allowed is not None and session_id not in allowed)):
+                continue
+            neighbours = _run_within_deadline(
+                lambda: engine._store.get_session_messages_after(
+                    session_id, hit["store_id"], limit=1,
+                ),
+                remaining_s=deadline - time.monotonic(),
+                name="lcm-recall-adjacent",
+            )
+            if time.monotonic() >= deadline:
+                raise TimeoutError
+            if not neighbours:
+                continue
+            neighbour = neighbours[0]
+            content = str(neighbour.get("content") or "")
+            sid = neighbour.get("session_id")
+            if (sid != session_id or sid in excluded
+                    or (allowed is not None and sid not in allowed)
+                    or (neighbour.get("conversation_id") or "") != (row.get("conversation_id") or "")
+                    or neighbour.get("role") == "tool" or neighbour.get("tool_calls")
+                    or not content.strip() or neighbour.get("source") == _SUBAGENT_SOURCE):
+                continue
+            store_id = neighbour["store_id"]
+            existing = next((i for i, entry in enumerate(placed)
+                             if entry["hit"].get("kind") != "summary"
+                             and entry["hit"].get("store_id") == store_id), None)
+            if existing is not None and existing < limit:
+                continue
+            if existing is not None:
+                entry = placed.pop(existing)
+                entry = {**entry, "hit": dict(entry["hit"])}
+            else:
+                reply = {
+                    "kind": "message_excerpt", "store_id": store_id,
+                    "session_id": sid, "role": neighbour.get("role"),
+                    "source": neighbour.get("source") or "",
+                    "timestamp": neighbour.get("timestamp") or 0,
+                    "content_offset": 0, "snippet": content[:_LCM_RECALL_SNIPPET_CHARS],
+                    "from_current_session": sid == engine.current_session_id,
+                }
+                reply["expand_hint"] = _lcm_recall_excerpt_expand_hint(reply)
+                entry = {"hit": reply}
+            entry.update(rrf_score=source["rrf_score"], _final_score=source["_final_score"],
+                         ranks=dict(source["ranks"]))
+            entry["hit"]["adjacent_to"] = hit["store_id"]
+            source_index = next(i for i, item in enumerate(placed) if item is source)
+            placed.insert(source_index + 1, entry)
+            pairs.append({"store_id": store_id, "after_store_id": hit["store_id"]})
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+    except TimeoutError:
+        return ordered, [], "deadline"
+    except Exception as exc:  # noqa: BLE001 - optional read must never fail recall
+        return ordered, [], f"read_failed:{type(exc).__name__}"
+    return placed, pairs, None
+
+
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     """Search the agent's entire memory (all conversations, all time) by meaning.
 
@@ -4588,9 +4664,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     ordered, arm_order, arm_weights = fuse_candidates(
         arm_hits, getattr(engine._config, "recall_arm_weights", None)
     )
-    ordered = collapse_duplicate_candidates(
-        ordered, duplicate_identity_rows(engine, ordered, deadline=deadline)
-    )
+    identity_rows = duplicate_identity_rows(engine, ordered, deadline=deadline)
+    ordered = collapse_duplicate_candidates(ordered, identity_rows)
     fts_arm_index = arm_order.index("fts") if "fts" in arm_order else None
     now = time.time()
     scope_session_ids = set(_recent._recent_conversation_scope_session_ids(engine))
@@ -4620,6 +4695,13 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
         )
 
+    adjacent_pairs, adjacent_unavailable = [], None
+    if (kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) != "session"
+            and kwargs.get("adjacent_reply", getattr(engine._config, "recall_adjacent_reply", False))):
+        ordered, adjacent_pairs, adjacent_unavailable = _lcm_recall_adjacent_reply(
+            engine, ordered, identity_rows, limit=limit, deadline=deadline,
+            excluded=excluded_session_ids, allowed=candidate_session_ids,
+        )
     _annotate_subagent_lineage(engine, [entry["hit"] for entry in ordered if isinstance(entry.get("hit"), dict)])
     session_delivery = None
     if kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) == "session":
@@ -4674,6 +4756,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         ),
         rerank_enabled=lambda: bool(getattr(engine._config, "rerank_enabled", False)),
         session_delivery=session_delivery,
+        adjacent_reply=adjacent_pairs,
+        adjacent_reply_unavailable=adjacent_unavailable,
         delivery_order=kwargs.get("delivery_order", getattr(engine._config, "recall_delivery_order", "score")),
     )
 

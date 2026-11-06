@@ -6,6 +6,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- New: opt-in `recall_adjacent_reply` / `LCM_RECALL_ADJACENT_REPLY=true` places next-turn replies after the best raw recall hit and top-three question hits, within the existing hit limit and caps. Default-off, read-only, deadline-bounded; internal recall and session delivery retain their behavior.
 - New: opt-in `recall_delivery_order="time"` / `LCM_RECALL_DELIVERY_ORDER=time` delivers the same selected `lcm_recall` hits oldest to newest by host observation time, with untimed hits and summaries last. The default `score`, session delivery, and internal recall retain their existing order.
 
 - Removed: cache-friendly follow-on condensation and transcript GC (#1246); their keys remain parsed and ignored with one warning per process when enabled, and legacy GC placeholders remain readable.

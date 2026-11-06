@@ -60,6 +60,21 @@ score order; ties keep score order. The default `score` preserves existing outpu
 Only time mode adds `provenance.delivery_order: "time"`; session delivery and
 internal recall consumers keep their existing order.
 
+Set `recall_adjacent_reply=true` (or `LCM_RECALL_ADJACENT_REPLY=true`; default
+`false`) to insert the next stored reply after the rank-1 raw message hit and
+after question hits among ranks 1–3. The reply stays in the same session and
+conversation and respects session exclusions. Tool rows, tool-call rows, empty
+replies and subagent replies are skipped without looking further. Already
+selected neighbours stay put; neighbours deeper in the pool move up without
+duplication. Inserted hits inherit their source score, carry `adjacent_to` and
+arm `adjacent`, and shift the tail beyond the hit limit without deleting it.
+`provenance.adjacent_reply` lists inserted/moved `{store_id, after_store_id}`
+pairs. At most three single-row reads share the recall deadline; a failed read
+or deadline discards the whole step and adds `provenance.adjacent_reply_unavailable`.
+Citation, session-density and character caps still apply; time delivery order
+still sorts the selected hits. Session delivery and internal callers skip the
+step. This is configuration, not a model-visible tool argument.
+
 ### Retrieval contract
 
 LCM retrieval tools default to current-session scope. `lcm_grep` accepts
