@@ -1,10 +1,10 @@
-# Exactly-once ingest: one model for retries, replays and restarts (design r3.4)
+# Exactly-once ingest: one model for retries, replays and restarts (design r3.5)
 
 Tracker: #1993 (v0.30.0, "nothing lost"). Status: reviewed; ready for phase P1 (2026-10-28). Phase P1 is tracked in its own issue, linked from #1993.
 
-**Review history.** Four rounds of independent review shaped this design: a Codex gpt-6-astra reviewer and Claude review workflows (several lenses, skeptics and a critic). Each round's findings were folded before the next. The last two rounds checked only the P1 parts, and both reviewers returned READY FOR P1 on r3.4.
+**Review history.** Four rounds of independent review shaped this design: a Codex gpt-6-astra reviewer and Claude review workflows (several lenses, skeptics and a critic). Each round's findings were folded before the next. The last two rounds checked only the P1 parts, and both reviewers returned READY FOR P1 on r3.4. r3.5 (2026-11-06) adds the gate definitions for P1h in §5 and moves the rank-5 and cost-fallback counters to P2; it changes no rule.
 - Finding ids from those reviews (A1-A12, L1-1 to L5-10, "Astra n") stay in parentheses for traceability. The review record itself is not published. In §5a, A and C mark the Codex and Claude reviewers' findings.
-- In §1 and §5, C1-C4 name the three commit points and the injected-crash cells built on them.
+- In §1 and §5, C1-C3 name the three commit points, and C4 names an emission-write failure followed by a restart; the injected-crash cells are built on all four (r3.5).
 - E1-E7 are this design's rules (§2) and M1-M16 its decisions (§6). I-numbers (for example I1 and I5) are the invariants in [docs/invariants.md](invariants.md).
 - File and line references are at commit da6f6d4aa37ee5a0a70321391ebb2baaaedde9b4 (main on 2026-11-05), where every one was re-checked. The design was first written against v0.29.1-rc2 (0eb6e8736ac0361341b3f29ebfb8e30e5b4dabc5).
 
@@ -163,7 +163,7 @@ Rules:
   - a SQLITE_BUSY_SNAPSHOT inside the transaction rolls it back, and the ingest retries once from classification;
   - the tests that pin the own-transaction rule change with them (tests/test_host_uid_shadow.py:1023-1044 and the ingest-trace golden test).
 - Faulted ingests close here (#1815: three shapes that duplicate or skip the retry). A failed transaction leaves no partial evidence, and the retry classifies again.
-- Each ingest counts its lock-hold time, rows classified, rank-5 DP cells, bytes written, cost fallbacks and re-spacings. These are the §5 instruments.
+- Each ingest counts its lock-hold time, rows classified, bytes written and re-spacings. These are the §5 instruments. Rank-5 DP cells and cost fallbacks are P2 counters; they are absent at P1, because rank 5 is P2 (r3.5).
 
 P1 shadow notes (P1b-2b, `LCM_INGEST_LEDGER=shadow`, default; `off` preserves Part A's SQL stream):
 - **X1:** ledger batches use strict SAVEPOINTs inside `MessageStore.ingest_atomic`; adoption has its own savepoint before emission retries and classification. Ordinary isolated failures fail open, while busy errors, cancellation and integrity loss keep owner semantics.
@@ -449,10 +449,17 @@ These ship with the P2 flip:
     4. the P1 tail rule (#1440 item 1), including D-n's identity-conditioned no-op progress and single-conflict keep on cold-start and stamps-off S3 retries (#1838, #2205, part of #2206; §3.5), with its named P1 known limit.
   - It closes the [P1] children in §4.
   - **Gate for P1:**
-    - Excluding the named **undo-and-resend after a busy session end** limit (§3.5), the injected-crash cells (C1-C4, the session-end tail including one frozen before any decision and retried after other ingests, and an emission-write failure followed by a restart) show 0 loss and 0 silent surplus. A surplus row that carries a relation is visible; a surplus row without one fails.
+    - Excluding the named **undo-and-resend after a busy session end** limit (§3.5), the injected-crash cells (C1-C3; C4, an emission-write failure followed by a restart; and the session-end tail, including one frozen before any decision and retried after other ingests) show 0 loss and 0 silent surplus. A surplus row that carries a relation is visible; a surplus row without one fails.
     - The release spec's existing turn-latency bars hold (D5 and D7). D2 measures facts kept, not latency.
     - Write-lock hold is at most 50 ms at p90 and 250 ms at p99 on views of up to 2,000 rows, read from the new counters.
     - Busy errors stay at or below the v0.29.x count on the same cells.
+  - **Gate definitions (r3.5, for P1h):**
+    - The commit-point cells are the boundaries of `test_fault_at_each_former_commit` (tests/test_issue_2055_ingest_transaction.py). C1, before the INSERT, is b, d, e and f; the INSERT boundary is the row write itself; C2, after it, is h, i, j and k; C3, with the cursor advance, is c (the commit proof's carry-range rewrite during cursor reconciliation).
+    - The commit-point cells (C1-C3) also run with process death (`os._exit`), not only with in-process exceptions. No cell injects a ledger-write failure, which §3.3 lists as an accepted gap. A generated row stored by a tail retry is judged like any other row.
+    - Surplus is checked across the whole store, not only in the cell's session. A surplus row that carries a relation (§3.2, step 4) is visible; any other surplus row fails.
+    - The lock bar is read from the per-ingest counters on the 2,000-row synthetic ingest harness (tests/test_issue_2055_cold_cursor_cost.py). It is asserted under the `latency` marker and measured once on a declared quiet host, as the classifier's cost bar is. The gate cells record their lock-hold values beside it.
+    - The busy bar compares v0.29.2 with the candidate on host-level versions of the same cells. It counts the log lines both trees share: the SQLite retry warning, `LCM ingest failed` and `skipped due to SQLite lock`.
+    - Per-ingest and tail `possible_replay_of` writes stay P2 work, unless a gate cell shows a surplus row without a relation. In that case P1h adds them before the gate can pass.
 - **G, admission** (in parallel with P1; a gate prerequisite). #1931 and its delegated-child reliability cell, then #2042 after its split. Own spec, own PR.
 - **P2, classifier.**
   - Contents: E2b's key order and M14's stamp control, E5a-E5c, the §3.4 evaluation order, PARTIAL with the witness, rank 5 with counts and the budget, migration's classifier, the §3.9 readers, and uid mode `on` (M16).
