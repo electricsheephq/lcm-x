@@ -94,8 +94,13 @@ def test_response_cap_keeps_score_survivors(delivery, detail):
     final_fit_cap = len(invoke(detail=detail)) - 2 * len(json.dumps(full["hits"][-1]))
     caps = [2200, final_fit_cap] if detail == "answer_ready" else [1300]
     for cap in caps:
-        score = json.loads(invoke(detail=detail, response_char_cap=cap))
-        timed = json.loads(invoke(detail=detail, response_char_cap=cap, delivery_order="time"))
+        score_raw = invoke(detail=detail, response_char_cap=cap)
+        score = json.loads(score_raw)
+        timed_raw = invoke(detail=detail, response_char_cap=cap, delivery_order="time")
+        # answer_ready caps the whole envelope; snippets budgets hits only. Either
+        # way time mode is never longer than score mode once past the cap.
+        assert len(timed_raw) <= max(cap, len(score_raw))
+        timed = json.loads(timed_raw)
         ids = [hit["store_id"] for hit in score["hits"]]
         assert 0 < len(ids) < 6
         assert ids == list(range(1, len(ids) + 1))
@@ -217,6 +222,10 @@ def test_internal_consumers_ignore_time(internal_recall, monkeypatch, consumer):
 
     before = invoke()
     e._config.recall_delivery_order = "time"
+    # Positive control: on this fixture the model's own call does reorder.
+    own = json.loads(tools.lcm_recall(args, engine=e))
+    own_score = json.loads(tools.lcm_recall(args, engine=e, delivery_order="score"))
+    assert [h.get("store_id") for h in own["hits"]] != [h.get("store_id") for h in own_score["hits"]]
     assert invoke() == before
 
 
@@ -261,3 +270,15 @@ def test_benchmark_callers_pin_score():
         assert calls
         assert all(any(kw.arg == "delivery_order" and isinstance(kw.value, ast.Constant)
                        and kw.value.value == "score" for kw in call.keywords) for call in calls)
+
+
+def test_time_marker_never_exceeds_the_cap(delivery):
+    invoke, _ = delivery
+    full = invoke(detail="answer_ready", delivery_order="time")
+    # A cap that fits the unmarked response exactly: the marker must be omitted, no hit dropped.
+    unmarked = json.loads(full)
+    unmarked["provenance"].pop("delivery_order")
+    cap = len(json.dumps(unmarked, ensure_ascii=False))
+    raw = invoke(detail="answer_ready", response_char_cap=cap, delivery_order="time")
+    assert len(raw) <= cap
+    assert len(json.loads(raw)["hits"]) == len(unmarked["hits"])

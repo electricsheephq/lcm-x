@@ -456,8 +456,13 @@ def deliver_recall(
         return observed_at is None, observed_at if observed_at is not None else 0.0
 
     hits_out.sort(key=event_time_key)
+    ensure_ascii = detail != "answer_ready"
+    # Reordering keeps the encoded length; the marker is extra, so it is added
+    # only when it still fits the response cap (never by dropping a hit).
+    unmarked = json.dumps(response, ensure_ascii=ensure_ascii)
     response["provenance"]["delivery_order"] = "time"
-    return json.dumps(response, ensure_ascii=detail != "answer_ready")
+    marked = json.dumps(response, ensure_ascii=ensure_ascii)
+    return marked if len(marked) <= response_char_cap else unmarked
 
 
 def _fit_answer_ready_response(

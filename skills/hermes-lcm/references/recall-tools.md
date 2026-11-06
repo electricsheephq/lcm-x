@@ -142,3 +142,4 @@ return their existing `status: disabled` responses.
 ## Operator tools
 
 `lcm_status`, `lcm_inspect`, and `lcm_doctor` report health and metadata. They do not replace content retrieval.
+- With `LCM_RECALL_DELIVERY_ORDER=time` (default `score`), the same hits are delivered oldest to newest by event time, with untimed and summary hits last; `hits[0]` is then not the best match, so read each hit's `score`. `provenance.delivery_order` is `"time"` when the response cap leaves room for it.
