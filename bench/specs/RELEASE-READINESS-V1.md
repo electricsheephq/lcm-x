@@ -72,7 +72,8 @@ never wait for it.
      since its last run (the capture store, ingest, externalization or sanitizing).
   4. **CLI smoke** (`scripts/claude_code_unit_smoke.py`) from the candidate's asset with no Hermes
      and no host stub, in both runtime modes: a fresh venv, and a Python found on `PATH`, on Python
-     3.11 and 3.14 (the versions the tag workflow runs). The tag workflow runs it again on the tag.
+     3.11 and 3.14. The tag workflow runs it again on the tag; there the venv mode uses 3.11 and 3.14,
+     and the found mode uses the runner's own `python3`, as the smoke's `PATH` rule makes it.
 
   Every R run, R10 included, uses a scratch `HOME` and a scratch Claude Code config directory, never
   a user's own Claude Code setup. Install records (macOS in a clean environment: a scratch `HOME`
@@ -87,13 +88,15 @@ never wait for it.
   failure found only after the tag (the workflow's checks, or its Python 3.14 smoke), is narrowed by
   running the smoke on 3.11 and 3.14 before the tag. If the tag's workflow still fails, nothing is
   published: the fix lands as a new candidate and the release takes the next patch version, since
-  deleting a pushed tag stays with the code owner.
+  deleting a pushed tag stays with the code owner. A run that failed before any draft existed with
+  no fault in the tree (a runner or API error) may be re-run by hand under the same tag.
 - **Authority.** A unit tag is the unit's GA cut after its release gate passes, so the
   release-manager delegation in AGENTS.md covers tagging and publishing it.
 - **When the gate re-runs.** Every unit release runs the gate on its candidate.
   `scripts/claude_code_unit_delta.py` lists the files the unit depends on that changed since the
   last `claude-code-v*` tag (the import closure of the worker and the reader, plus the plugin
-  folder); a later release cites that list in its receipt. The binding gate run is the one on the
+  folder); a later release cites that list in its receipt, with `--since` set to the last published
+  unit tag when a newer tag was never published. The binding gate run is the one on the
   candidate; runs on earlier commits are rehearsals.
 - **Receipt and notes.** The gate's receipt is a result card (`RESULT-MANIFEST.json` and
   `RESULT.md`): counts, ids, hashes and timings only, never transcript content. It is attached to

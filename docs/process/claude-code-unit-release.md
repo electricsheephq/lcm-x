@@ -21,7 +21,8 @@ the gate's evidence.
      per session: exit 0 and `verified: true`;
    - the growth check when its inputs changed since its last run;
    - `python scripts/claude_code_unit_smoke.py --ref <candidate sha> --runtime venv`, then
-     `--runtime found`, each on Python 3.11 and 3.14;
+     `--runtime found`, each on Python 3.11 and 3.14 (the tag workflow's found mode later uses the
+     runner's own `python3`);
    - the install records (macOS, Linux).
 4. **Receipt.** Write the result card (`RESULT-MANIFEST.json`, `RESULT.md`): counts, ids, hashes
    and timings, no transcript content, no machine-local paths. Report anything the spec sends to
@@ -32,7 +33,9 @@ the gate's evidence.
    `main`'s first-parent history, the manifest version, the notes), builds the asset, runs the CLI
    smoke on Python 3.11 and 3.14, and leaves a draft release with the asset, `.sha256` and
    `bundle.json`; the release body is the notes plus the bundled core line. If the run fails,
-   nothing is published: fix through a new candidate and release the next patch version. The
+   nothing is published: fix through a new candidate and release the next patch version. A run that
+   failed before any draft existed with no fault in the tree (a runner or API error) may be re-run
+   by hand under the same tag. The
    workflow only creates a release and never edits one: if any release for the tag exists, draft or
    published, it stops. To rebuild a draft, delete the draft and re-run the workflow by hand with
    the tag.
