@@ -7,7 +7,7 @@ Claude Code's own compaction is unchanged, and the plugin adds nothing to the co
 
 **Status: preview (0.1.0), opt-in.** The hooks record which transcript changed and start the
 capture worker, which writes every message and tool result to the store; the read-only MCP reader
-serves recall. Release notes: `.github/release-notes/claude-code-v0.1.0.md`. Design:
+serves recall. Release notes: [claude-code-v0.1.0](../../.github/release-notes/claude-code-v0.1.0.md). Design:
 [docs/claude-code-adapter.md](../../docs/claude-code-adapter.md).
 
 ## Try it from a checkout
