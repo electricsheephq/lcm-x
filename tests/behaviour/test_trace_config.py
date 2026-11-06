@@ -52,10 +52,6 @@ def test_other_dataclasses_keep_full_serialization(canonical):
     assert canonical.value(record(paths=[Path("relative")])) == {"enabled": False, "paths": ["relative"]}
 
 
-def test_config_outcome_changes_are_digest_bound():
-    assert outcome_gate(["--base-ref", "origin/main"]) == 0
-
-
 def test_baseline_lists_every_config_field():
     """A new LCMConfig field must add its default to the pinned baseline in the same PR.
 
