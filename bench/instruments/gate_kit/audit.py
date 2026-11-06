@@ -115,14 +115,17 @@ def opt(cols: set, name: str, default: str) -> str:
 def read_host(path: Path):
     with ro(path) as con:
         sc, mc = columns(con, "sessions"), columns(con, "messages")
-        sessions = {r[0]: dict(zip(("source", "parent", "started", "ended", "end_reason"), r[1:])) for r in con.execute(
-            "select id, " + ", ".join(opt(sc, c, d) for c, d in (("source", "''"), ("parent_session_id", "NULL"),
-                                                                    ("started_at", "0"), ("ended_at", "NULL"),
-                                                                    ("end_reason", "NULL"))) + " from sessions")}
+        sessions = {r[0]: dict(zip(("source", "parent", "started", "ended", "end_reason", "rewind_count"), r[1:]))
+                    for r in con.execute("select id, " + ", ".join(opt(sc, c, d) for c, d in (
+                        ("source", "''"), ("parent_session_id", "NULL"), ("started_at", "0"), ("ended_at", "NULL"),
+                        ("end_reason", "NULL"), ("rewind_count", "NULL"))) + " from sessions")}
+        # Displayed: active, or archived history. Undone: soft-deleted by a rewind (hermes_state_messages.py
+        # rewind_to_message sets active = 0 and leaves compacted = 0); without the compacted column none is known.
         displayed = "(active = 1 OR compacted = 1)" if "compacted" in mc else "1"
+        undone = "(active = 0 AND compacted = 0)" if {"active", "compacted"} <= mc else "0"
         rows = con.execute("select id, session_id, role, content, " + ", ".join(opt(mc, c, d) for c, d in (
             ("tool_calls", "NULL"), ("tool_call_id", "NULL"), ("_compressed_summary", "0"), ("timestamp", "NULL"),
-            ("tool_name", "NULL"))) + f", {displayed} from messages order by id").fetchall()
+            ("tool_name", "NULL"))) + f", {displayed}, {undone} from messages order by id").fetchall()
     return sessions, rows, "compacted" in mc
 
 
@@ -180,7 +183,7 @@ def host_expected(rows, group, markers, scored=None):
     header, prefixes = markers
     per_segment, first = Counter(), {}
     for row in rows:
-        rid, sid, role, content, calls, call_id, summary, ts, tool_name, displayed = row
+        rid, sid, role, content, calls, call_id, summary, ts, tool_name, displayed = row[:10]
         if summary or not displayed:
             continue
         identity = (group(sid), display_key(role, content, ts, call_id, calls, tool_name))
@@ -270,6 +273,33 @@ def read_logs(paths, tz=None):
                                        "range": (int(hit["a"]), int(hit["b"])), "rows": int(hit["rows"]),
                                        "pairs": int(hit["pairs"]), "stripped": int(hit["stripped"])})
     return out
+
+
+def undo_retained_rows(stored_rows, host_rows):
+    """Stored rows that are a host undo's retained occurrence: neither expected nor surplus.
+
+    A TUI undo soft-deletes the undone rows in the host (hermes_state_messages.py rewind_to_message: active = 0, with
+    compacted left 0), so they are not displayed and not expected; LCM-X keeps the copy it stored and stores the
+    resend as a new occurrence. A stored row is undo_retained when the host holds an undone row (``host_rows``:
+    active = 0 and compacted = 0) of the same session and the same row key, and the stored row's observed_at equals
+    that host row's timestamp, which proves it is that occurrence. Each undone host row excuses at most one stored
+    copy; a stored row with NULL observed_at (an unstamped host) is never excused.
+    ``stored_rows``: (store_id, session, role, content, tool_calls, tool_call_id, observed_at)."""
+    def key(role, content, calls, call_id):
+        return role, multiset.norm(content or ""), call_id, tuple(sorted(
+            map(repr, tool_calls.stored_keys([(0, "", role, content, calls, call_id)]))))
+
+    pool = Counter()
+    for rid, sid, role, content, calls, call_id, _summary, ts, *_rest in host_rows:
+        if ts is not None:
+            pool[(sid, key(role, content, calls, call_id), float(ts))] += 1
+    excused = []
+    for store_id, session, role, content, calls, call_id, observed in sorted(stored_rows):
+        slot = (session, key(role, content, calls, call_id), float(observed)) if observed is not None else None
+        if slot is not None and pool[slot] > 0:
+            pool[slot] -= 1
+            excused.append(store_id)
+    return excused
 
 
 def attribute_compactions(lines, events):
@@ -416,6 +446,10 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
         if audited(r[0]):
             by_lineage[group(r[1])].append((*r, extra[r[0]][6]))
     lost_ids = [s for s in ext["store_ids"] if audited(s)]  # unreadable payloads: kept, even with no readable row
+    retained = set(undo_retained_rows([r for rows in by_lineage.values() for r in rows],
+                                      [r for r in host_rows if r[10] and r[1] in scored]))
+    for g, rows in by_lineage.items():  # kept rows of an undone occurrence: out of parity, surplus and M3's numerator
+        by_lineage[g] = [r for r in rows if r[0] not in retained]
     lost = Counter(group(extra[s][1]) for s in lost_ids)
     parity, silent_rows = {}, []
     for g in sorted(roots | set(by_lineage) | set(lost)):
@@ -433,7 +467,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     totals = {k: sum(p[k] for p in parity.values()) for k in keys}
     zero = sorted(g for g, p in parity.items() if p["host_session"] and p["expected_rows"] and not p["stored_rows"])
     per_session = Counter(r[1] for r in stored)
-    window_ids = {r[0] for rows in by_lineage.values() for r in rows} | set(lost_ids)
+    window_ids = {r[0] for rows in by_lineage.values() for r in rows} | set(lost_ids) | retained
     audited_sessions = scored | {extra[i][1] for i in window_ids}
     denominator = len(window_ids)
 
@@ -494,7 +528,8 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
         uid[src]["rows_with_canonical_uid"] += int(uids is not None and sid in uids)
 
     # M3: rows carrying generated_unproven, or the store_id side of a possible_replay_of pair.
-    doubt = sorted({s for s, kind, _o in relations if kind in ("possible_replay_of", "generated_unproven")} & window_ids)
+    doubt = sorted({s for s, kind, _o in relations if kind in ("possible_replay_of", "generated_unproven")}
+                   & window_ids - retained)
     m3 = {"numerator": len(doubt), "denominator": denominator, "store_ids": doubt,
           "rate": len(doubt) / denominator if denominator else 0.0}
 
@@ -557,7 +592,10 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
                                     for s, v in sessions.items() if group(s) in parity}},
             "coverage": coverage, "coverage_basis": coverage_basis,
             "uid_coverage": {"table": "present" if uids is not None else "table absent", "per_source": dict(uid)},
-            "m3": m3, "recorder": recorder, "exempted_surplus": exempted, "issue_1931": issue_1931,
+            "m3": m3, "recorder": recorder,
+            "undo_retained": {"rows": len(retained), "store_ids": sorted(retained),
+                              "host_rewind_count": {s: sessions[s]["rewind_count"] for s in sorted(scored)
+                                                    if sessions[s]["rewind_count"]}}, "exempted_surplus": exempted, "issue_1931": issue_1931,
             "gate": {"bars": bars, "verdict": verdict}}
 
 
