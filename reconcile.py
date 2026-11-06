@@ -1973,6 +1973,7 @@ class ReconcileMixin:
     def _collect_persisted_replay_evidence(
         self, run: _TailReplayRun, candidate: _TailReplayCandidate,
     ) -> None:
+        """Record persisted-output replay matches and recovery gaps for this candidate."""
         stored_tail = run.stored_tail
         stored_tail_rows = run.stored_tail_rows
         sanitized_replay_tail = run.sanitized_replay_tail
@@ -2004,6 +2005,7 @@ class ReconcileMixin:
         matches_inline_generation_cleanup_tail = False
         if candidate_has_unrecoverable_persisted_marker:
             def generationless_identity(identity):
+                """Strip generation metadata once per identity in this replay run."""
                 cached = run.generationless_identities.get(identity)
                 if cached is None:
                     cached = self._strip_inline_persisted_output_generation_identity(identity)

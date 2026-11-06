@@ -11,6 +11,7 @@ from hermes_lcm.engine import LCMEngine
 
 @pytest.mark.parametrize("n", [16, 32])
 def test_generationless_normalization_is_linear_and_call_local(tmp_path, monkeypatch, n):
+    """Normalize each unique identity once per scan without reusing a prior scan's cache."""
     engine = LCMEngine(config=LCMConfig(
         database_path=str(tmp_path / "lcm.db"),
         large_output_externalization_path=str(tmp_path / "externalized"),
