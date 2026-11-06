@@ -93,7 +93,10 @@ os._exit(0)
 
 M_XFAIL = pytest.mark.xfail(
     strict=True, raises=GateFailure,
-    reason="#2305: process death after the proof re-key leaves 7 silent surplus rows (P1 gate blocker)")
+    reason="#2305: the cold bind after a mid-history insert re-stores unstamped rows as silent surplus "
+           "(the no-crash control shows the same rows; P1 gate blocker)")
+# #2305's silent surplus per m shape; loss is never expected, and a different count is a new failure.
+M_SILENT = {"insert": 7, "field_chain_replace": 9}
 
 
 @pytest.mark.parametrize("boundary,shape", [
@@ -206,8 +209,9 @@ os._exit(0)
         outcome = store_outcome(fresh._store._conn, expected)
         assert outcome == control_outcome
         record(dict(family="process_death", boundary="m", shape=shape, strict_xfail=True), outcome, fresh)
-        if outcome["loss"] or outcome["silent"]:
-            raise GateFailure(outcome)
+        assert outcome["loss"] == 0, outcome  # Loss is never an expected failure.
+        assert outcome["silent"] == M_SILENT[shape], outcome  # Only #2305's known rows.
+        raise GateFailure(outcome)
     finally:
         fresh.shutdown()
 
