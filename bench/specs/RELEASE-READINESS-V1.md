@@ -79,8 +79,9 @@ never wait for it.
   and Claude Code config directory, not a new OS account; Linux in a fresh container) go with the gate's receipt: whether capture wrote
   rows and how many manual steps it took.
 - **No rc tag.** A unit release has no `-rcN` tag. The gate already binds the exact candidate tree
-  (above), and the tag workflow publishes nothing: it re-checks the tag, rebuilds the asset, runs
-  the CLI smoke and leaves a **draft** release. The release manager publishes the draft after
+  (above), and the tag workflow publishes nothing: it re-checks the tag against the pushed commit,
+  rebuilds the asset, runs the CLI smoke and creates a **draft** release; it never edits an existing
+  release. The release manager publishes the draft after
   reading the workflow run. An rc tag would also need its own manifest version (`0.1.0-rc1`), so the
   final tag's tree would differ from the gated tree by a product file. What an rc would absorb, a
   failure found only after the tag (the workflow's checks, or its Python 3.14 smoke), is narrowed by

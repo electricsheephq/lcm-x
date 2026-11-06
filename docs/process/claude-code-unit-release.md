@@ -32,7 +32,10 @@ the gate's evidence.
    `main`'s first-parent history, the manifest version, the notes), builds the asset, runs the CLI
    smoke on Python 3.11 and 3.14, and leaves a draft release with the asset, `.sha256` and
    `bundle.json`; the release body is the notes plus the bundled core line. If the run fails,
-   nothing is published: fix through a new candidate and release the next patch version.
+   nothing is published: fix through a new candidate and release the next patch version. The
+   workflow only creates a release and never edits one: if any release for the tag exists, draft or
+   published, it stops. To rebuild a draft, delete the draft and re-run the workflow by hand with
+   the tag.
 6. **Publish.** The release manager attaches the gate's result card to the draft, reads the
    workflow run, and publishes the draft as a prerelease (below 1.0.0) with "Set as the latest
    release" unticked: `gh release edit claude-code-v<version> --draft=false --prerelease --latest=false`.
