@@ -155,7 +155,8 @@ python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --
   the default 10 s a slow plugin load leaves a host on the built-in compressor, writing nothing to `lcm.db`;
 - a host tree whose TUI gateway has `session.close`, `session.resume` and `session.undo`, run from the host venv.
 
-Then audit the run: `audit.py --state-db <home>/state.db --lcm-db <home>/lcm.db --log <home>/logs/agent.log --log
+Then checkpoint both databases once the run has stopped (the audit refuses a non-empty `-wal`; see "Run" above) and
+audit the run: `audit.py --state-db <home>/state.db --lcm-db <home>/lcm.db --log <home>/logs/agent.log --log
 <workdir>/host-logs/acp.stderr --events <events.jsonl> --out <result.json>`. Audit only a run whose events show no
 `lcm_inactive` error: after every operation the driver scans each host's stderr and `<home>/logs/agent.log` for
 LCM-X's "LCM-X is NOT active in this process" notice and the host's "Context engine 'lcm-x' not found" fallback; on

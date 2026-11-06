@@ -361,6 +361,12 @@ def test_smoke_against_fake_provider_then_audit(tmp_path):
     assert {k: kinds[k] for k in audit.EVENT_KINDS} == {"restart_cold": 1, "restart_warm": 1, "undo_resend": 2,
                                                         "delegate_prompt": 1, "compress_request": 1}
     assert summary["delegate"]["children_in_state_db"] >= 1 and summary["context_length"] == 64000
+    for db in ("state.db", "lcm.db"):  # the audit reads immutable files: open each once after the run to checkpoint
+        con = sqlite3.connect(home / db)
+        try:
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            con.close()
     logs = sorted((home / "logs").glob("*.log"))
     out = tmp_path / "audit.json"
     assert audit.main(["--state-db", str(home / "state.db"), "--lcm-db", str(home / "lcm.db"), "--events", str(ev.path),
