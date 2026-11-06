@@ -617,20 +617,20 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sequence-compaction": {
-      "outcome_sha": "2e9712b282201b6620e519a7eedb6a897876ab17a9dd0492d3a3d0fcbfc138c6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b7530134497fd5bca8404b1fc21008e2a47266467e135d183ffe9cd2b5c46272",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
     },
     "sequence-host-merge": {
-      "outcome_sha": "4d8dceef8ba470aee3aec750fb01c9eb4e4232ba238959075b4308b26164ceb0",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "6652f566e1fc0bf3b55282d7f9df9334f8d7ddb7b9b7060aeffce24fa2e00235",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
     },
     "sequence-rewrite": {
-      "outcome_sha": "4724ba25115bac1ba138283a8a6fdd4f378c94fddbf1d9c53db4f41fcd896df0",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "3d5b5fe312485983be3ad6ff137d630a81bc4207d09f012fd56cb53ba90b35fd",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
     },
     "sequence-rotation": {
-      "outcome_sha": "3e2fd39772f7a59cd42a2ce49a65a96cdae9d81537870d64e87ef947bcace2d7",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "1294da1506dbd42abd196d77b73a9b2b8de7092c772aa74b8e05ecdafe0f70b4",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
     },
     "sqlite-append": {
       "outcome_sha": "320d20fb18a6a040ab1a1d25b70e0b06c0647b403bf39145d12277fa954d5938",
