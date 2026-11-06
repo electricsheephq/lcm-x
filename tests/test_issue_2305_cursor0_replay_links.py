@@ -312,7 +312,7 @@ def test_17_recorder_cursor0_and_append(host, caplog):
                          r"stored=(\d+)-(\d+) rows=(\d+) replay_pairs=(\d+) stripped=(\d+)", records[0].getMessage())
     assert match is not None
     new = host.engine._store.get_session_messages(SID)[len(before):]
-    assert match.groups() == (SID, "persisted batch", "0", "persisted ambiguous delta", str(new[0]["store_id"]),
+    assert match.groups() == (SID, "persisted_batch", "0", "persisted ambiguous delta", str(new[0]["store_id"]),
                               str(new[-1]["store_id"]), str(len(new)), "7", "1")
     assert all(row["content"] not in records[0].getMessage() for row in new)
     caplog.clear()

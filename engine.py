@@ -7155,7 +7155,8 @@ class LCMEngine(
     @staticmethod
     def _log_ingest_route(session, route, cursor, reason, ids, pairs=(0, 0)):
         if ids:
-            level = logging.INFO if route in ("persisted batch", "cold", "session_end", "warm_tail", "S3") else logging.DEBUG
+            route = str(route).replace(" ", "_")  # one token per route, so audits can parse the line
+            level = logging.INFO if route in ("persisted_batch", "cold", "session_end", "warm_tail", "S3") else logging.DEBUG
             logger.log(level, "LCM ingest route: session=%s route=%s cursor=%d reason=%s stored=%d-%d rows=%d "
                        "replay_pairs=%d stripped=%d", session, route, cursor, reason,
                        min(ids), max(ids), len(ids), *pairs)
