@@ -7605,7 +7605,7 @@ class LCMEngine(
                                     while begin < len(candidates) and candidates[begin][0] in used:
                                         begin += 1
                                     starts[id(candidates)] = begin
-                                    target = next((old for old, old_stamp in candidates[begin:] if old not in used
+                                    target = next((old for old, old_stamp in itertools.islice(candidates, begin, None) if old not in used
                                                    and (stamp is None or old_stamp is None or stamp == old_stamp)), None)
                                     if target is not None:
                                         pairs.append([(sid, "possible_replay_of", target, None, None)])
