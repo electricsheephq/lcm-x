@@ -36,7 +36,10 @@ The same comparison then runs with a 100 ms connection override in the sibling
 `--work-root` (a fresh temporary directory if omitted), separately from evidence.
 Run without `nice` where sandbox policy denies it. Driver runs default to one; each uses a new `WORK/run-N` and refuses an existing
 directory. Orchestrator refuses an existing output directory. Exit status is 0
-for PASS, 1 for FAIL, and 2 for INCONCLUSIVE (or a failed driver operation).
+for PASS, 1 for FAIL, and 2 for INCONCLUSIVE (or a failed driver operation). A gate verdict needs
+the full session (runs 0-19 of every cell in both trees, 0-79 for an extended cell; ten runs per tree for
+holds); anything shorter prints SMOKE PASS/FAIL (holds: LOCK-SMOKE PASS/FAIL) and exits 3. Holds are
+INCONCLUSIVE when any 2,000-new-row call shows no observed hold or a baseline statistic is 0 (a blind monitor).
 
 ## Workload and schedule
 

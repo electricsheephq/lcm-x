@@ -28,6 +28,7 @@ WRITE_WORDS = {"INSERT", "UPDATE", "DELETE", "REPLACE"}
 # Design r3.7 (§5): the 2,000-new-row hold ratio is reported; it fails only above this
 # regression tripwire against v0.29.2 (r3.6's 1.25 bar no longer applies).
 TRIPWIRE = 2.25
+GATE_RUNS = 10
 
 
 def windows(events: list[tuple[float, int, str]], begin: float, end: float) -> list[dict[str, Any]]:
@@ -171,9 +172,18 @@ def summarize(collected: dict[str, list]) -> dict[str, Any]:
     failed = [key for key, value in statistics_by_tree["candidate"].items()
               if value > TRIPWIRE * statistics_by_tree["baseline"][key]]
     diagnostic = any(run.get("trace_diagnostic") for runs in collected.values() for run in runs)
+    # A blind monitor must never pass: every 2,000-new-row call holds the write lock.
+    reasons = [f"{name}: {sum(1 for run in runs for call in run['calls'] if call['shape'] == 'n' and not call['longest_ms'])}"
+               " shape-n calls with no observed hold" for name, runs in collected.items()
+               if any(call["shape"] == "n" and not call["longest_ms"] for run in runs for call in run["calls"])]
+    reasons += [f"baseline statistic {key} is 0" for key, value in statistics_by_tree["baseline"].items() if not value]
+    verdict = ("DIAGNOSTIC ONLY" if diagnostic else "INCONCLUSIVE" if reasons else
+               "LOCK-TRIPWIRE FAIL" if failed else "LOCK-TRIPWIRE PASS")
+    if verdict.startswith("LOCK-TRIPWIRE") and len(collected["baseline"]) < GATE_RUNS:
+        verdict = verdict.replace("TRIPWIRE", "SMOKE")  # The gate session is ten runs per tree.
+        reasons.append(f"{len(collected['baseline'])} runs per tree; a gate session needs {GATE_RUNS}")
     return {"tables": tables, "statistics": statistics_by_tree, "failed_statistics": failed,
-            "verdict": "DIAGNOSTIC ONLY" if diagnostic else
-            "LOCK-TRIPWIRE FAIL" if failed else "LOCK-TRIPWIRE PASS"}
+            "reasons": reasons, "verdict": verdict}
 
 
 def report(result: dict[str, Any]) -> str:
@@ -188,6 +198,7 @@ def report(result: dict[str, Any]) -> str:
         candidate = result["statistics"]["candidate"][key]
         lines.append(f"{key} {base:.3f} {candidate:.3f} {TRIPWIRE * base:.3f} {candidate / base if base else float('nan'):.3f}")
     lines.append(result["verdict"])
+    lines.extend(result.get("reasons", ()))
     if result["failed_statistics"]:
         lines.append("exceeded: " + ", ".join(result["failed_statistics"]))
     lines.append("Shape t is reported only; its absolute bar comes from harness counters.")
@@ -238,7 +249,8 @@ def main() -> None:
     rendered = report(result)
     (args.outdir / "verdict.txt").write_text(rendered)
     print(rendered, end="")
-    raise SystemExit(0 if result["verdict"] in ("LOCK-TRIPWIRE PASS", "DIAGNOSTIC ONLY") else 1)
+    raise SystemExit({"LOCK-TRIPWIRE PASS": 0, "DIAGNOSTIC ONLY": 0, "LOCK-TRIPWIRE FAIL": 1,
+                      "INCONCLUSIVE": 2}.get(result["verdict"], 3))
 
 
 if __name__ == "__main__":

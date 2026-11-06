@@ -54,7 +54,7 @@ def lock_owner(fd: int) -> int | None:
         return None
     if answer.type != fcntl.F_WRLCK or answer.start != WAL_WRITE_BYTE or answer.length != 1:
         raise RuntimeError("unexpected WAL lock response; struct layout/lock definition unconfirmed")
-    return answer.pid
+    return answer.pid or -1  # Held even when the holder's PID is not visible (another PID namespace).
 
 
 def held_periods(samples: list[list[int]], begin: int, end: int,

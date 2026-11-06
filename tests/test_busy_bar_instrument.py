@@ -104,15 +104,20 @@ def control(busy: int) -> list[dict]:
     return rows
 
 
+def smoke(verdict: str) -> str:
+    """Fixtures with fewer than the prescribed runs get the same rule, labelled a smoke."""
+    return verdict.replace("GATE", "SMOKE")
+
+
 @pytest.mark.parametrize("base,candidate,expected", [
     (1, 1, "GATE PASS"), (2, 1, "GATE PASS"), (1, 2, "GATE PASS"), (1, 3, "GATE FAIL"),
     (0, 0, "GATE PASS"), (0, 1, "GATE FAIL"),
 ])
 def test_gate_counts(base: int, candidate: int, expected: str) -> None:
     result = gate.evaluate(ledger(base), ledger(candidate), control(1), control(1))
-    assert result["verdict"] == expected
+    assert result["verdict"] == smoke(expected) and not result["gate_session"]
     rendered = gate.report(result)
-    assert expected in rendered
+    assert smoke(expected) in rendered
     assert "TOTAL total 24" in rendered
 
 
@@ -120,7 +125,7 @@ def test_gate_regression_in_one_cell_cannot_hide_in_total() -> None:
     baseline, candidate = ledger(1), ledger(0)
     candidate[0] = ledger(3)[0]
     result = gate.evaluate(baseline, candidate, control(1), control(1))
-    assert result["verdict"] == "GATE FAIL"
+    assert result["verdict"] == "SMOKE FAIL"
     assert result["failed_cells"] == ["ingest"]
 
 
@@ -151,8 +156,8 @@ def test_gate_cli_writes_verdict(tmp_path: Path) -> None:
     result = subprocess.run([sys.executable, str(Path(gate.__file__)), *map(str, paths[:2]),
                              "--control-baseline", str(paths[2]), "--control-candidate", str(paths[3])],
                             capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stderr
-    assert "GATE PASS" in result.stdout
+    assert result.returncode == 3, result.stderr  # one run per cell: a smoke, never a gate verdict
+    assert "SMOKE PASS" in result.stdout and "GATE PASS" not in result.stdout
 
 
 def test_orchestrator_serial_interleaving(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,7 +177,7 @@ def test_orchestrator_serial_interleaving(tmp_path: Path, monkeypatch: pytest.Mo
                                        "--work-root", str(tmp_path / "scratch")])
     with pytest.raises(SystemExit) as exc:
         orchestrate.main()
-    assert exc.value.code == 0
+    assert exc.value.code == 3  # R=2 is a smoke
     assert seen == (["baseline", "candidate"] * 4 + ["candidate", "baseline"] * 4) * 2
     assert len(gate.read(out / "baseline.jsonl")) == 8
     assert len(gate.read(out / "candidate.jsonl")) == 8
@@ -240,7 +245,7 @@ def test_zero_control_is_inconclusive(missing: str) -> None:
 
 def test_control_busy_regression_never_gates() -> None:
     result = gate.evaluate(ledger(0), ledger(0), control(1), control(3))
-    assert result["verdict"] == "GATE PASS"
+    assert result["verdict"] == "SMOKE PASS"
 
 
 @pytest.mark.parametrize("damage", ["seed", "offset", "budget", "error"])
@@ -532,7 +537,7 @@ def test_gate_exact_tolerance(base: int, candidate: int, expected: str) -> None:
             row["busy_timeout_ms"] = 100
             for record in row["operations"]:
                 record["busy"] = True
-    assert gate.evaluate(rows(base), rows(candidate), cb, cc)["verdict"] == expected
+    assert gate.evaluate(rows(base), rows(candidate), cb, cc)["verdict"] == smoke(expected)
 
 
 def test_control_requires_every_class_in_each_tree() -> None:
@@ -666,3 +671,46 @@ def test_orchestrator_extends_only_selected_production_cell(tmp_path: Path, monk
     assert extra[:4] == [("baseline", "ingest", 20, False), ("candidate", "ingest", 20, False),
                          ("candidate", "ingest", 21, False), ("baseline", "ingest", 21, False)]
     assert {number for _, _, number, scaled in seen if scaled} == set(range(20))
+
+
+def test_only_a_full_session_gates() -> None:
+    def session(runs: int) -> list[dict]:
+        rows = []
+        for number in range(runs):
+            for row in ledger(0):
+                row["run"], row["seed"] = number, 2055 + number
+                rows.append(row)
+        return rows
+
+    def scaled(rows: list[dict]) -> list[dict]:
+        rows = deepcopy(rows)
+        for row in rows:
+            row["busy_timeout_ms"] = 100
+            for record in row["operations"]:
+                record["busy"] = True
+        return rows
+
+    full = gate.evaluate(session(20), session(20), scaled(session(20)), scaled(session(20)))
+    assert full["verdict"] == "GATE PASS" and full["gate_session"]
+    short = gate.evaluate(session(19), session(19), scaled(session(19)), scaled(session(19)))
+    assert short["verdict"] == "SMOKE PASS" and not short["gate_session"]
+    assert any("has 19 runs, a gate session needs 20" in reason for reason in short["reasons"])
+    assert gate.EXIT[short["verdict"]] == 3
+
+
+def test_blind_or_short_hold_sessions_never_gate() -> None:
+    def runs(multiplier: float, count: int = 10, blind: bool = False) -> list:
+        return [{"journal_mode": "wal", "calls": [
+            {"shape": "n", "position": position, "longest_ms": 0 if blind else n * multiplier,
+             "first_start_ms": 2, "call_ms": 30} for position in range(1, 7)] + [
+            {"shape": "t", "position": 1, "longest_ms": 0, "first_start_ms": None, "call_ms": 30}]}
+            for n in range(1, count + 1)]
+
+    blind = holds.summarize({"baseline": runs(1, blind=True), "candidate": runs(1, blind=True)})
+    assert blind["verdict"] == "INCONCLUSIVE"
+    assert any("no observed hold" in reason for reason in blind["reasons"])
+    assert holds.summarize({"baseline": runs(1), "candidate": runs(1, blind=True)})["verdict"] == "INCONCLUSIVE"
+    short = holds.summarize({"baseline": runs(1, 3), "candidate": runs(1, 3)})
+    assert short["verdict"] == "LOCK-SMOKE PASS"
+    assert holds.summarize({"baseline": runs(1, 3), "candidate": runs(3, 3)})["verdict"] == "LOCK-SMOKE FAIL"
+    assert holds.summarize({"baseline": runs(1), "candidate": runs(1)})["verdict"] == "LOCK-TRIPWIRE PASS"

@@ -100,7 +100,7 @@ def main() -> None:
     (control_dir / "verdict.txt").write_text("POSITIVE CONTROL ONLY; never gating\n" +
                                              gate.report(result["control"]))
     print(rendered, end="")
-    raise SystemExit({"GATE PASS": 0, "GATE FAIL": 1, "INCONCLUSIVE": 2}[result["verdict"]])
+    raise SystemExit(gate.EXIT[result["verdict"]])
 
 
 if __name__ == "__main__":

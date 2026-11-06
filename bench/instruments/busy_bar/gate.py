@@ -121,7 +121,20 @@ def evaluate(baseline: list[dict[str, Any]], candidate: list[dict[str, Any]],
                     reasons.append(f"control: {name} has 0 busy {op} operations; schedule did not exercise the class")
     result["verdict"] = ("INCONCLUSIVE" if reasons else
                          "GATE FAIL" if result["failed_cells"] else "GATE PASS")
+    # Only the prescribed session gates: runs 0-19 of every cell in both trees, 0-79 for an
+    # extended cell. Anything shorter is a smoke and can never print a gate verdict.
+    short = [f"{name}: {cell} has {len(got)} runs, a gate session needs {len(want)}"
+             for cell in CELLS for name, runs in (("baseline", baseline), ("candidate", candidate))
+             if (got := {run["run"] for run in runs if run["cell"] == cell})
+             != (want := set(range(80 if cell in extensions else 20)))]
+    result["gate_session"] = not short
+    if short and result["verdict"] != "INCONCLUSIVE":
+        result["verdict"] = result["verdict"].replace("GATE", "SMOKE")
+        reasons.extend(short)
     return result
+
+
+EXIT = {"GATE PASS": 0, "GATE FAIL": 1, "INCONCLUSIVE": 2, "SMOKE PASS": 3, "SMOKE FAIL": 3}
 
 
 def report(result: dict[str, Any]) -> str:
@@ -149,7 +162,7 @@ def report(result: dict[str, Any]) -> str:
         lines.extend(report(result["control"]).splitlines()[:-1])
     lines.append(result["verdict"])
     lines.extend(result["reasons"])
-    if result["verdict"] == "GATE FAIL":
+    if result["verdict"] in ("GATE FAIL", "SMOKE FAIL"):
         lines.append("candidate exceeds ceil(1.25 * baseline) + 1: " + ", ".join(result["failed_cells"]))
     return "\n".join(lines) + "\n"
 
@@ -169,7 +182,7 @@ def main() -> None:
         print(f"INCONCLUSIVE: invalid ledger ({type(exc).__name__})")
         raise SystemExit(2) from exc
     print(report(result), end="")
-    raise SystemExit({"GATE PASS": 0, "GATE FAIL": 1, "INCONCLUSIVE": 2}[result["verdict"]])
+    raise SystemExit(EXIT[result["verdict"]])
 
 
 if __name__ == "__main__":
