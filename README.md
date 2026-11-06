@@ -1108,11 +1108,14 @@ claude mcp add lcm-x -- <hermes-venv-python> <plugin_dir>/scripts/lcm_x_mcp.py \
 - **Reads only.** The store is opened read-only, with a fresh connection per tool
   call; the server never migrates, repairs, backfills, checkpoints or creates
   tables, so Hermes stays the only writer, and Hermes' new rows show up on the next
-  call. It also reads the profile's externalized payload files and the `LCM_*`
-  lines of `<HERMES_HOME>/.env` (no other key in that file).
+  call. It also reads the profile's externalized payload files and
+  `<HERMES_HOME>/.env`, which it reads whole but of which it parses and keeps only
+  the `LCM_*` lines and `FASTEMBED_CACHE_PATH`.
 - **No active session.** `lcm_grep` defaults to `session_scope='all'`, a `node_id`
   without `session_id` resolves in the node's own session, and externalized
-  payloads resolve from any session of the store.
+  payloads resolve from any session of the store when the payload directory is
+  inside the profile (outside it, a lookup without a session filter returns not
+  found).
 - **Flags.** Every result starts with `store_uuid` and a `reader` object.
   `reader.degraded` lists `embedding_identity_mismatch` or `provider_unavailable`
   when vectors are off and only full text answers; vectors are used only when the

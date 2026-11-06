@@ -1585,9 +1585,10 @@ What it reads:
 - the store, opened `mode=ro` with a new connection for each tool call, so no read
   snapshot outlives a call and Hermes' WAL checkpoints keep progressing;
 - the profile's externalized payload files (read only, never created);
-- `<HERMES_HOME>/.env`, of which it parses only `LCM_*` lines and
-  `FASTEMBED_CACHE_PATH`. Provider API keys and every other line are never read
-  into the server, logged or forwarded. The `LCM_*` settings of the shell that
+- `<HERMES_HOME>/.env`. It reads the whole file but parses and keeps only the
+  `LCM_*` lines and `FASTEMBED_CACHE_PATH`. Provider API keys and every other line
+  are in the server's memory while it parses, and are never kept, logged or
+  forwarded. The `LCM_*` settings of the shell that
   started the server are ignored, including `LCM_HERMES_BASE_DIR`.
   `LCM_DISABLED_TOOLS` from the profile hides those tools.
 
@@ -1604,7 +1605,9 @@ Behaviour without an active session:
 - `lcm_expand`/`lcm_describe` with a `node_id` but no `session_id` resolve the
   node in its own session;
 - externalized payloads (by `externalized_ref`, or attached to a `store_id`
-  expansion) resolve from any session of the store.
+  expansion) resolve from any session of the store when the payload directory is
+  inside the profile. With `LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH` outside it, a
+  lookup without a session filter returns not found.
 
 Result flags. Every result is the production JSON object prefixed with
 `store_uuid` and a `reader` object:
@@ -1635,8 +1638,11 @@ Errors:
   v5, or lacks a required core table. Nothing is opened for write.
 
 Logs go to `lcm-x-mcp-<pid>.log` under `--log-dir` (default `$TMPDIR`): one
-metadata line per call (tool, argument hash, latency, size); the server itself
-never logs argument text or `.env` values. Stdout carries only protocol lines.
+metadata line per call (tool, argument hash, latency, size). The server's own lines
+never carry argument text or `.env` values, but the production tool code it runs
+can log a warning that quotes an argument (an unsupported `lcm_grep`
+`session_scope` value), and that warning goes to the same file. Stdout carries
+only protocol lines.
 
 ## Import and backfill
 
