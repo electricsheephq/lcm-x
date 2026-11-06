@@ -311,7 +311,7 @@ def test_fts_candidate_path_is_used_scoped_and_read_only(engine, monkeypatch):
     assert reason is None and [r["store_id"] for r in fs] == [f]
     query = next(s for s in statements if s.startswith("WITH requests"))
     assert "messages_fts MATCH" in query and "instr(lower" not in query
-    assert "forget OR remember OR memory OR memorize OR retain OR disregard" in query
+    assert "forget OR remember OR remembering OR memory OR memorize OR retain OR disregard" in query
     assert not any(s.startswith(("INSERT", "UPDATE", "DELETE", "CREATE")) for s in statements)
 
 
@@ -323,3 +323,30 @@ def test_scan_fallback_when_fts_is_absent(tmp_path):
         conn.execute("INSERT INTO messages VALUES (1, 's', 'user', 'Forget my green tea', '', NULL, 1)")
     fs, _, reason = forget.read_forget_rows(path, [], deadline=time.monotonic() + 1)
     assert reason is None and [r["store_id"] for r in fs] == [1]
+
+
+@pytest.mark.parametrize("text", [
+    "Stop remembering my home address on Oak Street",
+    "Don't store my home address on Oak Street",
+    "I don't want you to know my home address on Oak Street",
+    "Ignore what I said about my home address on Oak Street",
+    "I'd rather you not store my home address on Oak Street",
+])
+def test_every_detected_form_is_read_through_the_index(engine, text):
+    old = add(engine, "My home address is 12 Oak Street")
+    add(engine, "Noted your address", "assistant")
+    f = add(engine, text, stamp=1700100000)
+    assert forget.is_forget_request(text, "user")
+    fs, _, reason = forget.read_forget_rows(engine._store.db_path, [old], deadline=time.monotonic() + 1)
+    assert reason is None and f in [r["store_id"] for r in fs]
+
+
+def test_tool_call_and_result_rows_are_never_covered():
+    f = dict(store_id=10, session_id="s", content="Please forget my home address on Oak Street",
+             previous_ids=(8, 9), observed_at=None)
+    call = dict(store_id=8, session_id="s", role="assistant", content="Looking up your home address on Oak Street",
+                tool_calls='[{"id":"1"}]', observed_at=None)
+    result = dict(store_id=9, session_id="s", role="tool", content="home address Oak Street", observed_at=None)
+    plain = dict(store_id=8, session_id="s", role="assistant", content="Your home address on Oak Street", observed_at=None)
+    assert not forget.covers(call, f) and not forget.covers(result, f)
+    assert forget.covers(plain, f)

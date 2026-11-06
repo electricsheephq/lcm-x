@@ -40,8 +40,12 @@ _STOPWORDS = frozenset("""
     history data earlier previous memory rather didn know
 """.split())
 _KEYWORDS = ('forget', 'remember', 'disregard', 'erase', 'delete', 'remove', 'wipe',
-             'scratch', 'discard', 'purge', 'rather you', 'want you to', 'memory', 'memorize', 'retain')
-_FTS_QUERY = "forget OR remember OR memory OR memorize OR retain OR disregard"
+             'scratch', 'discard', 'purge', 'rather you', 'want you to', 'memory', 'memorize', 'retain',
+             'store', 'ignore', 'know')
+# Every detection pattern has at least one of these terms or phrases (the index has no stemming).
+_FTS_QUERY = ('forget OR remember OR remembering OR memory OR memorize OR retain OR disregard '
+              'OR "store my" OR "store that" OR "store this" OR "know my" OR "know that" '
+              'OR "know this" OR "know about" OR "ignore what"')
 
 
 def is_forget_request(text: str, role: str = "user") -> bool:
@@ -58,6 +62,10 @@ def forget_content_words(text: str) -> set[str]:
 def covers(row: dict, forget: dict) -> bool:
     """Inputs carry store scope and the forget row's two predecessors."""
     if row.get("scope") != forget.get("scope"):
+        return False
+    # Tool calls and tool results are never withheld or annotated, so a
+    # call/result group is never split (precision first).
+    if str(row.get("role") or "").lower() == "tool" or row.get("tool_calls"):
         return False
     earlier = row["store_id"] < forget["store_id"]
     if row.get("observed_at") is not None and forget.get("observed_at") is not None:
