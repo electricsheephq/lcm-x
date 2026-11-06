@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from time import perf_counter
 
+import pytest
+
 from hermes_lcm import ingest_ledger as ledger
 from tests.test_host_uid_shadow import _m
 from tests.test_issue_2055_cold_cursor import candidate, force_today, prepare
@@ -100,3 +102,60 @@ def test_t10_repeated_digest_and_raw_part_rows_exhaust_one_budget(engines):
     run, counts = candidate(engine, view)
     assert run["k"] == 0 and counts["stop.budget"] == 1
     assert Counter(row["disposition"] for row in ledger.bindings_by_digest(conn, lineage, digest))["composite_part"] == 5000
+
+
+@pytest.mark.latency
+def test_p1h_lock_bar_replay_and_new_rows(engines, monkeypatch):
+    """Read committing holds; only replay and the per-turn suffix have an absolute bar."""
+    results = {}
+    for shape in ("stored_view", "stored_view_suffix", "new_rows"):
+        engine = engines("p1h-" + shape)
+        view = [_m("user" if i % 2 == 0 else "assistant", f"synthetic row {i}", float(i + 1)) for i in range(2000)]
+        attempt = prepare(engine, view)
+        conn, lineage = engine._store._conn, attempt["lineage"]
+        with engine._store.atomic(immediate=True):
+            conn.executemany("INSERT INTO messages(store_id,session_id,conversation_id,role,content,timestamp,observed_at) "
+                             "VALUES (?,'S','conv',?,?,?,?)",
+                             [(i + 1, view[i]["role"], view[i]["content"], float(i + 1), float(i + 1)) if i < 2000
+                              else (i + 1, "assistant", "old synthetic history", float(i + 1), float(i + 1))
+                              for i in range(50000)])
+            ledger.insert_bindings(conn, lineage, [dict(
+                ordinal=(i + 1) * ledger.ORDINAL_STEP, store_id=i + 1,
+                identity_digest=attempt["entries"][i].identity_digest if i < 2000 else b"z" * 16,
+                stamp=ledger.stamp_text(float(i + 1)), disposition="stored", view_seq=1) for i in range(50000)])
+            ledger.write_view(conn, attempt["salt"], lineage, "ingest", None,
+                              [e._replace(ref=i + 1) for i, e in enumerate(attempt["entries"])])
+        measurements = []
+        for turn in range(50):
+            new_count = 2000 if shape == "new_rows" else 2 if shape == "stored_view_suffix" else 0
+            suffix = [
+                _m("user" if i % 2 == 0 else "assistant", f"new row {turn}:{i}", float(50001 + turn * 2000 + i))
+                for i in range(new_count)]
+            incoming = suffix if shape == "new_rows" else view + suffix
+            if shape != "new_rows":
+                force_today(engine, monkeypatch)
+            engine._ingest_messages([dict(row) for row in incoming])
+            with engine._ingest_lock_guard:
+                sample = dict(engine._ingest_lock_records[-1])
+            assert sample["outcome"] == "commit" and sample["view_rows"] == len(incoming)
+            assert sample["rows_written"] == new_count
+            measurements.append(sample["hold_ms"])
+            assert engine._store.get_session_count("S") == 50000 + (turn + 1) * new_count
+        measured = quantiles(measurements)
+        results[shape] = dict(measured, raw_hold_ms=measurements,
+                              within_targets=measured["p90_ms"] <= 50 and measured["p99_ms"] <= 250)
+    result = dict(shapes=results, view_rows=2000, initial_lineage_bindings=50000,
+                  within_targets=all(results[shape]["within_targets"] for shape in ("stored_view", "stored_view_suffix")))
+    output = os.environ.get("LCMX_P1D_TIMING_OUTPUT")
+    if output:
+        Path(output).write_text(json.dumps(result, indent=2) + "\n")
+    report = os.environ.get("LCM_P1_LOCK_BAR_REPORT")
+    if report:
+        with Path(report).open("a") as stream:
+            stream.write(json.dumps({shape: {k: r[k] for k in ("n", "p50_ms", "p90_ms", "p99_ms", "max_ms")}
+                                     for shape, r in results.items()}, sort_keys=True) + "\n")
+    measured = "; ".join(f"{shape}: p90={r['p90_ms']:.3f}ms p99={r['p99_ms']:.3f}ms" for shape, r in results.items())
+    if os.environ.get("LCM_P1_LOCK_BAR") == "1":
+        assert result["within_targets"], measured
+    else:
+        pytest.skip(measured)

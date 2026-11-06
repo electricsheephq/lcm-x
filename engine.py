@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from bisect import bisect_left, bisect_right
-from collections import Counter
+from collections import Counter, deque
 from contextlib import contextmanager
 from datetime import datetime
 from functools import lru_cache
@@ -740,6 +740,9 @@ class LCMEngine(
 
     def __init__(self, config: LCMConfig | None = None,
                  hermes_home: str = ""):
+        self._ingest_lock_guard = threading.Lock()
+        self._ingest_lock_records = deque(maxlen=512)
+        self._ingest_lock_totals = Counter()
         self._config = config or LCMConfig.from_env()
         self._absolute_threshold_tokens = getattr(
             self._config, "_absolute_threshold_tokens", None
@@ -5855,6 +5858,10 @@ class LCMEngine(
 
     def get_status(self) -> Dict[str, Any]:
         status = super().get_status()
+        try:
+            status["ingest_lock"] = self._ingest_lock_status()
+        except Exception as exc:
+            status["ingest_lock"] = {"error": type(exc).__name__}
         status.update({
             "compression_count": self.compression_count,
             "last_prompt_tokens": self.last_prompt_tokens,
@@ -6775,7 +6782,11 @@ class LCMEngine(
                 raise ValueError("invalid occurrence snapshot")
             snapshot["proof_sha256"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         # Helpers defer their commits to this owner; no exception is swallowed before rollback.
-        with self._store.atomic(immediate=True):
+        store, conn = self._store, self._store._conn
+        nested = store._transaction_owner.owns(conn) or conn.in_transaction
+        with (contextlib.nullcontext() if nested else
+              self._emission_lock_record(len(proof.get("output") or ()))) as timing, (
+                store._timed_atomic(timing) if timing is not None else store.atomic(immediate=True)):
             super()._write_compress_commit_proof_payload(proof, payload)
             self._store.write_metadata_json(
                 [self._replay_snapshot_metadata_key("host_occurrence_snapshot")],
@@ -6988,6 +6999,8 @@ class LCMEngine(
             prepared = {}
             tail_registered = self in maintenance_scheduler._PENDING_TAIL_ENGINES
             held_at = None
+            record = self._ingest_telemetry(self._new_ingest_lock_record, messages, attempt + 1, no_view)
+            sample = None
             rollback_failures = self._store._transaction_owner.rollback_failures
             published_rollbacks = getattr(self, "_ledger_rollback_failures_published", 0)
             if rollback_failures > published_rollbacks:
@@ -6998,7 +7011,7 @@ class LCMEngine(
             try:
                 if getattr(self, "_identity_anchor_recovery", None):
                     self._identity_anchor_observe_recovery()
-                with self._store.ingest_atomic(admission_retry=admission_retry):
+                with self._store.ingest_atomic(admission_retry=admission_retry) as sample:
                     held_at = _perf_counter()
                     emission_attempt = self._ingest_ledger_attempt = (
                         dict(ledger_prepared, stored={}, matched={}, remainders={}, observations=[])
@@ -7012,7 +7025,7 @@ class LCMEngine(
                         self._retry_pending_emissions(self._ingest_ledger_attempt, after_commit, emission_claim)
                     active, finish = self._ingest_messages_transaction(
                         messages, after_commit, attribution,
-                        prepared=prepared,
+                        prepared=prepared, telemetry=record,
                         allow_session_end_replay_proof=allow_session_end_replay_proof)
                     if self._ingest_ledger_attempt is not None:
                         self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
@@ -7022,6 +7035,8 @@ class LCMEngine(
                         emission_claim, completed=emission_attempt["retried_emissions"])
                 attribution["lock_hold_ms"] += (_perf_counter() - held_at) * 1000
             except BaseException as exc:
+                self._ingest_telemetry(self._record_ingest_attempt, record, sample, attribution,
+                                       None if emission_committed else exc)
                 self._ingest_ledger_attempt = None
                 if held_at is not None:
                     attribution["lock_hold_ms"] += (_perf_counter() - held_at) * 1000
@@ -7119,6 +7134,7 @@ class LCMEngine(
                     callback()
                 except Exception as exc:
                     self._record_ingest_failure("post-commit cache", exc)
+            self._ingest_telemetry(self._record_ingest_attempt, record, sample, attribution)
             if prepared.get("sender_update"):
                 sender_capture.try_update(self)
             try:
@@ -7127,6 +7143,87 @@ class LCMEngine(
                 self._record_ingest_failure("post-commit replay cache", exc)
                 return active
         raise AssertionError("unreachable ingest retry state")
+
+    def _ingest_telemetry(self, action, *args):
+        try:
+            return action(*args)
+        except Exception:
+            self._ledger_count("telemetry.failed")
+            try:
+                if not self.__dict__.get("_ingest_lock_warned"):
+                    self._ingest_lock_warned = True
+                    logger.debug("LCM ingest lock telemetry failed", exc_info=True)
+            except Exception:
+                pass
+
+    def _new_ingest_lock_record(self, messages, attempt, no_view=False):
+        route = ("warm_tail" if no_view else "session_end" if self._session_end_flush_active else
+                 "adapter" if "claude" in str(self._session_platform).lower() else "foreground")
+        return dict(route=route, attempt=attempt, hold_ms=0.0, view_rows=len(messages),
+                    rows_classified=len(messages) if self._ingest_cursor_needs_reconcile else
+                    max(0, len(messages) - self._ingest_cursor),
+                    counts=dict(getattr(self, "_ingest_ledger_counters", {})))
+
+    def _record_ingest_attempt(self, record, timing, attribution, error=None):
+        if record is not None:
+            record.update(timing if timing is not None else {"hold_ms": None})
+        self._record_ingest_lock(record, attribution, error)
+
+    def _record_ingest_lock(self, sample, attribution, error=None):
+        if sample is None:
+            return
+        if sample["route"] == "emission" and sample["hold_ms"] is None and error is None:
+            return
+        if "telemetry_error" in sample:
+            raise RuntimeError(sample["telemetry_error"])
+        counts = getattr(self, "_ingest_ledger_counters", {})
+        previous = sample.pop("counts")
+        sample.update(outcome="busy" if error is not None and _is_ingest_busy_error(error) else
+                      "rollback" if error is not None else "commit",
+                      rows_written=attribution.get("rows_written", 0) if error is None else 0,
+                      bytes_written=attribution.get("bytes_written", 0) if error is None else 0,
+                      respaced=counts.get("ledger.respaced", 0) - previous.get("ledger.respaced", 0),
+                      busy=dict(attempt=bool(error is not None and _is_ingest_busy_error(error)),
+                                ledger=sum(v - previous.get(k, 0) for k, v in counts.items()
+                                           if k.startswith("ledger.") and "busy" in k)))
+        hold = sample["hold_ms"]
+        bucket = "no_hold" if hold is None else "le_50_ms" if hold <= 50 else "le_250_ms" if hold <= 250 else "gt_250_ms"
+        with self._ingest_lock_guard:
+            self._ingest_lock_records.append(sample)
+            self._ingest_lock_totals[bucket] += 1
+            if sample["view_rows"] <= 2000:
+                self._ingest_lock_totals["small_" + bucket] += 1
+            self._ingest_lock_totals["respaced_total"] += sample["respaced"]
+            self._ingest_lock_totals["busy_attempts"] += sample["busy"]["attempt"]
+
+    @contextmanager
+    def _emission_lock_record(self, view_rows):
+        sample = self._ingest_telemetry(self._new_ingest_lock_record, range(view_rows), 1)
+        if sample is not None:
+            sample.update(route="emission", rows_classified=0, hold_ms=None)
+        error = None
+        try:
+            yield sample
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            self._ingest_telemetry(self._record_ingest_lock, sample, {}, error)
+
+    def _ingest_lock_status(self):
+        def summary(records):
+            values = sorted(r["hold_ms"] for r in records if r["hold_ms"] is not None)
+            n = len(values)
+            return dict(samples=n, p90_ms=values[min(n - 1, int(n * .9))] if n else None,
+                        p99_ms=values[min(n - 1, int(n * .99))] if n else None,
+                        max_ms=max(values) if n else None)
+        with self._ingest_lock_guard:
+            records, totals = list(self._ingest_lock_records), self._ingest_lock_totals.copy()
+        return dict(summary(r for r in records if r["view_rows"] <= 2000 and r["route"] != "emission"),
+                    buckets={k: totals[k] for k in ("no_hold", "le_50_ms", "le_250_ms", "gt_250_ms")},
+                    small_view_buckets={k: totals["small_" + k] for k in ("no_hold", "le_50_ms", "le_250_ms", "gt_250_ms")},
+                    emission=summary(r for r in records if r["route"] == "emission"),
+                    respaced_total=totals["respaced_total"], busy_attempts=totals["busy_attempts"])
 
     def _ledger_count(self, key, error=None, amount=1, subject="ingest"):
         try:
@@ -7145,14 +7242,15 @@ class LCMEngine(
             pass  # Telemetry must never fail the ingest.
 
     @contextmanager
-    def _emission_owner(self, salt):
+    def _emission_owner(self, salt, timing=None):
         store, conn = self._store, self._store._conn
         with store._write_lock:
             if store._transaction_owner.owns(conn) or conn.in_transaction:
                 self._ledger_count("ledger.emission_skipped_in_transaction")
                 yield None, "in_transaction"
                 return
-            with _temporary_sqlite_busy_timeout([conn], 100), store.atomic(immediate=True):
+            with _temporary_sqlite_busy_timeout([conn], 100), (
+                    store._timed_atomic(timing) if timing is not None else store.atomic(immediate=True)):
                 if store.ingest_ledger_state() != "ready" or getattr(self, "_ingest_read_only", None) is not None:
                     self._ledger_count("ledger.emission_skipped_not_ready")
                     yield None, "not_ready"
@@ -7204,7 +7302,7 @@ class LCMEngine(
         started = _perf_counter()
         seq = None
         try:
-            with self._emission_owner(salt) as (conn, reason):
+            with self._emission_lock_record(len(returned)) as timing, self._emission_owner(salt, timing) as (conn, reason):
                 if conn is None:
                     if reason == "in_transaction":
                         self._mark_pending_emission(store_key, lineage, payload)
@@ -7713,7 +7811,7 @@ class LCMEngine(
                 self._ingest_ledger_observations = collector
 
     def _ingest_messages_transaction(self, messages, after_commit, attribution, *,
-                                     allow_session_end_replay_proof=False, prepared=None):
+                                     allow_session_end_replay_proof=False, prepared=None, telemetry=None):
         """Today's classifier and evidence; caller owns COMMIT and retry.
 
         Store-dependent protection/token counts are part of lock_hold_ms, and
@@ -7839,6 +7937,9 @@ class LCMEngine(
             messages=messages, n=n, cursor=cursor,
         )
         reconciled_existing_session = self._ingest_cursor_needs_reconcile
+        if telemetry is not None:
+            self._ingest_telemetry(telemetry.update, dict(
+                rows_classified=n - scan_start))
         reconcile_messages = replay_messages
         bind_session_counts: list = []
         ledger_run, today = dict(k=0, pairs={}), self._ingest_cursor
