@@ -18148,7 +18148,6 @@
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _compress_occurrences=null",
-"attr _compress_run=sha12/len=a24b4be2c166/300",
 "attr _ingest_cursor=15",
 "attr _last_compression_status=\"sanitized\"",
 "attr _no_progress_ingest_generation=0",
@@ -18158,7 +18157,7 @@
 "attr _no_progress_public_rows=sha12/len=3dace5636f07/21060",
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
-"attrs count=145 sha256=3dc02c062c24d0425499468c2ff714da6074435224bb3ae4ccf443ecb10638b1"
+"attrs count=145 sha256=de8a5b15054baaf746f080f332e4d4a21bc446def9fab330eb81bb1e743f6abf"
 ],
 "stop-reason-retained": [
 "compress attempt=1",
@@ -18288,7 +18287,6 @@
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _compress_occurrences=null",
-"attr _compress_run=sha12/len=402c6c834b84/198",
 "attr _ingest_cursor=16",
 "attr _last_compression_noop_reason=sha12/len=e4bb51b72020/91",
 "attr _last_compression_status=\"sanitized\"",
@@ -18306,7 +18304,7 @@
 "attr _store_complete_excluded=[]",
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
-"attrs count=145 sha256=25265c9fc3733cbe681c84ec5f6894682ad4c106262e178d09caf1d22e5616e2"
+"attrs count=145 sha256=10be2d18b3b261b033a40d16badf4025cc74c9121ec8410b0e06549340ff299a"
 ],
 "stop-reason-retained-escape": [
 "compress attempt=1",
@@ -18473,7 +18471,6 @@
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _compress_occurrences=null",
-"attr _compress_run=sha12/len=9495f58715a8/182",
 "attr _dag=sha12/len=d158891b634f/343",
 "attr _ingest_cursor=16",
 "attr _last_compacted_store_id=4",
@@ -18499,7 +18496,7 @@
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",4]]",
 "attr compression_count=1",
-"attrs count=145 sha256=2ee3232237bd4864108a07a1f57360000dab6b9e6e815540639ebc2f1d0a59fe"
+"attrs count=145 sha256=e04d3b6ce6f9db9e832e4138644aa60543052b59dd9e6a3a51b68e7a5a1bd095"
 ],
 "stop-reason-unattributed": [
 "compress attempt=1",
@@ -18638,7 +18635,7 @@
 "attr _compress_hidden_rows_consumed=0",
 "attr _compress_host_rows_consumed=0",
 "attr _compress_occurrences=null",
-"attr _compress_run=sha12/len=5373e16e05c2/250",
+"attr _compress_run=sha12/len=a24b4be2c166/300",
 "attr _dag=sha12/len=e9089ed1d2e5/344",
 "attr _last_compacted_store_id=5",
 "attr _last_compression_noop_reason=\"selected leaf chunk lacks raw store lineage\"",
@@ -18662,7 +18659,7 @@
 "attr _survival_pass_observed=true",
 "attr _unattributed_leaf_warned=[[\"trace-conversation\",15]]",
 "attr compression_count=1",
-"attrs count=145 sha256=ccf83924b10fcfd21b87013b62b740c306c2d0d84cbe99481b5ee15ebd31ba35"
+"attrs count=145 sha256=26c466cc29bb70a26c56499716e9b27e94cc308df4782e53b5728c335799976e"
 ],
 "stop-refused-restore": [
 "compress attempt=1",
