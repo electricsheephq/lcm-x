@@ -393,6 +393,17 @@ def test_projection_keeps_the_preview_when_the_saved_output_cannot_be_read(tmp_p
     assert projection.rows[0][1]["content"] == marker and projection.problems == [problem]
 
 
+def test_projection_ignores_a_persisted_output_marker_quoted_mid_text(tmp_path):
+    """REGRESSION (#2187): a tool output that quotes the tag and a real saved-output path in its
+    middle keeps its own text; only a result that starts with the tag is a preview."""
+    folder, path, marker = _saved(tmp_path, "toolu_9.txt", b"another tool's full output\n")
+    text = f"grep found this in a log:\n{marker}\nend of match"
+    entry = _entry("user", [{"type": "tool_result", "tool_use_id": "toolu_1", "content": text}])
+    projection = project_entry(entry, folder=folder)
+    assert projection.rows[0][1]["content"] == text
+    assert projection.files == [] and projection.problems == []
+
+
 def test_content_digest_ignores_only_the_copy_envelope():
     entry = _entry("user", "hello", promptId="p1")
     copy = {**entry, "sessionId": "fork", "promptId": "p2"}
