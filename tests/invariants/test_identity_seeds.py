@@ -273,7 +273,8 @@ class StaleProofCarrierStored(AssertionError):
     """Only an extra carrier after cold resume with a stale durable proof."""
 
 
-@pytest.mark.xfail(strict=True, reason="#1286: changed sanitized output leaves the durable commit proof stale",
+@pytest.mark.xfail(strict=True, reason="#1286: changed sanitized output leaves the durable commit proof stale; visible surplus "
+                   "(generated_unproven); fix planned v0.30.x",
                    raises=StaleProofCarrierStored)
 @pytest.mark.parametrize(("counts", "compress_after"), [
     ((1, 1, 0), (0, 0, 2)),
@@ -1173,7 +1174,8 @@ def check_restart_scaffold(machine):
         raise
 
 
-@pytest.mark.xfail(strict=True, reason="#1286: cold published child lacks its parent emission proof",
+@pytest.mark.xfail(strict=True, reason="#1286: cold published child lacks its parent emission proof; visible surplus "
+                   "(generated_unproven); fix planned v0.30.x",
                    raises=RestartScaffoldStored)
 def test_restart_published_child_without_start_proof():
     """Non-default compression.in_place=False; check the next completed turn."""
@@ -1215,7 +1217,8 @@ def test_restart_published_child_after_start_control(monkeypatch):
 
 
 @pytest.mark.parametrize("point", ["in-place", "rotation-ended"])
-@pytest.mark.xfail(strict=True, reason="#1286: unadopted compaction supersedes the durable input emission",
+@pytest.mark.xfail(strict=True, reason="#1286: unadopted compaction supersedes the durable input emission; visible surplus "
+                   "(generated_unproven); fix planned v0.30.x",
                    raises=RestartScaffoldStored)
 def test_restart_before_recompression_adoption(point):
     """Default in-place window, plus rotation-ended with in_place=False."""

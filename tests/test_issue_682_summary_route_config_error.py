@@ -294,7 +294,10 @@ def _pinned_counter(monkeypatch):
 def _engine(tmp_path, sweep: bool = True) -> LCMEngine:
     engine = LCMEngine(config=LCMConfig(
         fresh_tail_count=2, leaf_chunk_tokens=400, context_threshold=0.001, threshold_full_sweep_enabled=sweep,
-        max_assembly_tokens=100_000, database_path=str(tmp_path / "lcm.db")))
+        max_assembly_tokens=100_000, database_path=str(tmp_path / "lcm.db"),
+        # The background rollup pass shares the circuit breaker; started late, it made a second host call before the
+        # task-default circuit opened. Rollups play no part in what these tests check.
+        temporal_rollups_enabled=False))
     engine.on_session_start("S", platform="telegram", context_length=200_000, conversation_id="conv")
     return engine
 

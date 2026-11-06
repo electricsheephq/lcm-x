@@ -603,7 +603,8 @@ TestGatewayReset = GatewayResetMachine.TestCase
 TestGatewayReset.settings = PROFILE
 
 
-RESTART_CHILD = "#1286: cold published child lacks its parent emission proof"
+RESTART_CHILD = ("#1286: cold published child lacks its parent emission proof; visible surplus "
+                 "(generated_unproven); fix planned v0.30.x")
 
 
 def interrupted_child_start(point, host, prior_emission, include_known_open):
@@ -619,7 +620,8 @@ def interrupted_child_start(point, host, prior_emission, include_known_open):
 
 KNOWN_OPEN[RESTART_CHILD] = interrupted_child_start
 
-RESTART_SUPERSEDED = "#1286: unadopted compaction supersedes the durable input emission"
+RESTART_SUPERSEDED = ("#1286: unadopted compaction supersedes the durable input emission; visible surplus "
+                      "(generated_unproven); fix planned v0.30.x")
 
 
 def interrupted_recompression(point, prior_emission, include_known_open):

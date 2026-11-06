@@ -4,7 +4,8 @@ table. #1124 reads canonical bindings for store-complete copy exclusions; #1403 
 as occurrence proof for NULL-stamp audit copies. Shadow writes fail open inside foreground savepoints;
 lock contention escapes to the ingest owner. Event counter keys are ``[replay.]class.outcome[.reason]``; ``skipped.no_uid`` stays in memory, so a no-uid
 host writes nothing. The shadow GATE is counted per binding in the table (``first_check`` / ``disagree_seen``),
-so a replayed prefix never inflates it. ``LCM_HOST_MESSAGE_UID=off`` does nothing; ``on`` runs as ``shadow``.
+so a replayed prefix never inflates it. ``LCM_HOST_MESSAGE_UID=off`` stops capture and new bindings (see ``config.host_message_uid_mode`` for the reads it
+stops and the one it does not); ``on`` runs as ``shadow``.
 From the first release, a persisted lineage key is ``<home_tag>:<root>`` (#836): one database shared by several
 Hermes homes never mixes two profiles' roots of the same session id."""
 from __future__ import annotations
