@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from hermes_lcm import readonly_store
 from hermes_lcm.readonly_store import _wal_header_state, open_readonly_connection
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="SQLite POSIX record locks")
@@ -68,6 +69,39 @@ def test_header_check_follows_replaced_inode(tmp_path, old_format, new_format):
     replacement.replace(db)
     assert db.stat().st_ino != inode
     assert _wal_header_state(db) is (new_format == 2)
+    assert _wal_header_state(db) is (new_format == 2)
+
+
+@pytest.mark.parametrize("old_format,new_format", [(1, 2), (2, 1)])
+@pytest.mark.parametrize("replacement_cached", [False, True])
+def test_header_check_replacement_between_stat_and_open(
+    tmp_path, monkeypatch, old_format, new_format, replacement_cached,
+):
+    db = tmp_path / "lcm.db"
+    replacement = tmp_path / "replacement.db"
+    db.write_bytes(b"SQLite format 3\x00\x10\x00" + bytes((old_format, old_format)))
+    replacement.write_bytes(b"SQLite format 3\x00\x10\x00" + bytes((new_format, new_format)))
+    if replacement_cached:
+        assert _wal_header_state(replacement) is (new_format == 2)
+    real_open = os.open
+    opened = []
+
+    def open_after_replacement(path, flags, *args, **kwargs):
+        if path == db and replacement.exists():
+            os.replace(replacement, db)
+            fd = real_open(path, flags, *args, **kwargs)
+            opened.append(fd)
+            return fd
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(readonly_store.os, "open", open_after_replacement)
+    assert _wal_header_state(db) is (new_format == 2)
+    assert opened
+    for key, fd in readonly_store._HEADER_FDS.items():
+        stat = os.fstat(fd)
+        assert key == (stat.st_dev, stat.st_ino)
+    if replacement_cached:
+        assert opened[0] in readonly_store._HEADER_RETAINED_FDS
     assert _wal_header_state(db) is (new_format == 2)
 
 
