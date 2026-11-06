@@ -135,6 +135,17 @@ def test_mixed_line_endings_do_not_take_the_crlf_fallback(tmp_path):
     assert recover_hermes_persisted_output_with_file_stat(marker, hermes_home=home) is None
     assert recover_hermes_persisted_output(marker, hermes_home=home) is None
 
+def test_translated_file_that_lost_its_final_lf_keeps_the_marker(tmp_path):
+    # Hermes held "P\nQ\n" (4 chars); the CRLF file lost its last byte, leaving
+    # "P\r\nQ\r". Its LF form has the right length but the wrong last character.
+    home = tmp_path / "hermes"
+    persisted_path = home / "cache" / "spillover" / "call_truncated_crlf.txt"
+    persisted_path.parent.mkdir(parents=True, exist_ok=True)
+    persisted_path.write_bytes(b"P\r\nQ\r")
+    marker = _marker(persisted_path, "P\nQ\n", preview="P")
+
+    assert recover_hermes_persisted_output_with_file_stat(marker, hermes_home=home) is None
+
 def test_ingest_and_replay_externalize_windows_crlf_spillover_losslessly(tmp_path):
     engine, output_dir = _engine(tmp_path)
     replay = None
