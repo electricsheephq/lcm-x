@@ -544,9 +544,10 @@ LCM-X for Claude Code is its own release unit, versioned by the plugin manifest
   The asset is `lcm-x-claude-code-<version>.tar.gz`, with its `.sha256` beside it. The build
   refuses a tag that does not name the manifest's version. The release body repeats the core
   commit and version: the tag workflow adds them from `bundle.json`.
-- A unit release needs two passes on its candidate:
-  - the unit gate: the audit gate, with its local-GC qualification;
-  - the CLI smoke (`scripts/claude_code_unit_smoke.py`). It needs #1216 on `main`.
+- A unit release passes the four-item gate in `bench/specs/RELEASE-READINESS-V1.md` ("Claude Code
+  unit releases") on its candidate: the audit gate (with its local-GC qualification) on real
+  sessions R1-R10, each with its record; the growth check; and the CLI smoke; with install records
+  beside its receipt. The CLI smoke (`scripts/claude_code_unit_smoke.py`) works as follows.
     - It unpacks the asset with no Hermes, in two runtime modes: a fresh venv of the running
       Python (3.11 or newer), and that Python found on `PATH` and run with `-I -S`.
     - It runs the `SessionStart`, `UserPromptSubmit`, `PostToolBatch` (20 times) and `Stop` hooks
