@@ -604,12 +604,14 @@ def test_failed_compress_pre_store_does_not_publish_boundary(host, monkeypatch, 
         result = child.compress(engine, original)
     aux = module("aux_session")
     assert engine._delegate_child_key("child") not in aux._DELEGATE_RESUME_BOUNDARIES
-    assert any("compression boundary not recorded: input not stored" in record.message for record in caplog.records)
+    # #2306: the input was not stored, so the compaction is skipped and the view comes back unchanged.
+    assert result == original
+    assert any("compaction skipped: input not stored" in record.message for record in caplog.records)
     later = {"role": "user", "content": "row 11"}
     for _ in range(2):
         child.turn(ctx, [*result, later], engine)
     contents = [row["content"] for row in child_rows(engine)]
-    assert all(contents.count(f"row {i}") == 1 for i in (9, 10, 11))
+    assert all(contents.count(f"row {i}") == 1 for i in range(1, 12))
 
 
 @pytest.mark.parametrize("shape", ["short", "tool-group"])

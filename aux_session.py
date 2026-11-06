@@ -916,12 +916,17 @@ class DelegateChildMixin:
             if self._compaction_is_closing():
                 return messages
             pre_store = self._store_delegate_child_turn(session_id, messages, platform=_DELEGATE_SOURCE, require_agent=True)
+            if pre_store is None:
+                # #2306: compacting now would drop rows that were never stored. Keep the view; the next
+                # compression or turn retries the store (the failure is already counted and warned).
+                self._note_delegate_child_fallback(session_id, "compaction skipped: input not stored")
+                return messages
             try:
                 if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
                     tail = self._store.get_session_tail(session_id, limit=1)
                     view = [msg for msg in messages
                             if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
-                    if pre_store is not None and tail and view and self._session_end_prefix_compare_identity(
+                    if tail and view and self._session_end_prefix_compare_identity(
                         tail[-1], session_id=session_id,
                     ) == self._session_end_prefix_compare_identity(view[-1], session_id=session_id):
                         stored_tail = tail
