@@ -83,7 +83,8 @@ def is_summary_context_length_error(exc: BaseException | None) -> bool:
         status = int(match.group(1))
     if status == 429 or getattr(exc, "status", None) == 429:
         return False
-    if any(token in message for token in _NOT_CONTEXT_LENGTH_TOKENS):
+    normalized = re.sub(r"[-_\s]+", " ", message)
+    if any(token.replace("_", " ") in normalized for token in _NOT_CONTEXT_LENGTH_TOKENS):
         return False
     return any(token in message for token in _CONTEXT_LENGTH_ERROR_TOKENS)
 
