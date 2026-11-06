@@ -34,11 +34,11 @@ needs312 = pytest.mark.skipif(sys.version_info < (3, 12), reason="sys.monitoring
 FROZEN = 1_800_000_000.0
 SECRET = "sk-recorder-secret-0123456789"
 SECRET_HOST = "https://secret-host.recorder.invalid"
-# The fallback keeps this regression file runnable against the old replayer for red proof.
-SQL_CLOCK_COLUMNS = getattr(replay_module, "SQL_CLOCK_COLUMNS", frozenset({
+# Columns stamped by SQLite's clock, which freezing Python's clock does not freeze (833d9a77).
+SQL_CLOCK_COLUMNS = frozenset({
     "lcm_lifecycle_state.updated_at", "lcm_rollup_invalidations.created_at", "lcm_assertion_sources.processed_at",
     "lcm_assertions.created_at", "lcm_assertion_relations.created_at", "lcm_assertion_sources.invalidated_at",
-    "lcm_migration_state.completed_at", "lcm_query_corpus_state.changed_at", "lcm_query_views.updated_at"}))
+    "lcm_migration_state.completed_at", "lcm_query_corpus_state.changed_at", "lcm_query_views.updated_at"})
 
 
 def _recorder():
@@ -2703,7 +2703,9 @@ def test_2263_17_home_change_cuts_prefix(lab, change):
 def test_2263_17_same_home_registration_keeps_coverage(lab):
     home = lab.home()
     _, first = lab.load(home)
-    _, second = lab.load(home / ".")
+    alias = lab.tmp / "same-home-link"
+    alias.symlink_to(home, target_is_directory=True)
+    _, second = lab.load(alias)
     rec = _recorder()
     for ctx in (first, second):
         ctx.offered.get_tool_schemas()
@@ -2715,6 +2717,7 @@ def test_2263_17_same_home_registration_keeps_coverage(lab):
     assert not rep.diffs
 
 
+@needs312
 def test_2263_s5_replay_root_timeout_restores_environment(lab):
     from tests import recorder_replay as rr
     module, ctx = lab.load(lab.home())
@@ -2758,3 +2761,304 @@ def test_2263_s4_exception_unwind_budget(lab):
     print("RECORDER UNWIND BUDGET", json.dumps({"off_s": off, "on_s": on, "overhead_us_per_frame": overhead}))
     scale = 1 if os.environ.get("RECORDER_BUDGET_STRICT") == "1" else 4
     assert on <= off * 20 + 0.5 * scale
+
+
+# PR #2269, review round 1: these regressions run against fd0ed824 for red proof.
+@needs312
+@pytest.mark.parametrize("registrations", [1, 2])
+def test_2269_r1_symlink_home_replays_without_extra_database(lab, registrations):
+    home = lab.home()
+    alias = lab.tmp / "home-link"
+    alias.symlink_to(home, target_is_directory=True)
+    for _ in range(registrations):
+        _, ctx = lab.load(alias)
+    ctx.offered.get_status()
+    rec = lab.stop()
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "symlink-replay", prepare=prepare)
+    assert rep.diffs == []
+    assert rep.rec["process_start"]["hermes_home"] == str(alias)
+    assert list(rep.store.parent.rglob("lcm.db")) == [rep.store]
+    assert all(Path(e._hermes_home) == rep.store.parent for e in rep.engines.values())
+
+
+@needs312
+def test_2269_r1_registration_captures_changed_yaml(lab):
+    yaml = pytest.importorskip("yaml")
+    home = lab.home()
+    engines = []
+    for threshold in (0.75, 0.42):
+        (home / "config.yaml").write_text(yaml.safe_dump({"lcm": {"context_threshold": threshold}}))
+        _, ctx = lab.load(home)
+        engines.append(ctx.offered)
+    expected = [e._config.context_threshold for e in engines]
+    assert expected == [0.75, 0.42]
+    ctx.offered.get_tool_schemas()
+    rec = lab.stop()
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "registration-yaml", prepare=prepare)
+    assert [e._config.context_threshold for e in rep.engines.values()] == expected
+    assert rep.diffs == []
+
+
+@needs312
+def test_2269_r1_refused_snapshot_is_not_replayable(lab, caplog):
+    module = load_plugin(REPO, prefix="hermes_lcm_rec")
+    lab.modules.append(module)
+    prepare(module)
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    lab.mp.setattr(rm, "_disk_room", lambda *args: False)
+    home = lab.home()
+    lab.host.home = home
+    lab.mp.setenv("LCM_RECORDER_ENABLED", "1")
+    lab.mp.setenv("LCM_RECORDER_DIR", str(home / "lcm-recorder"))
+    with caplog.at_level(logging.INFO):
+        ctx = FakeCtx()
+        module.register(ctx)
+    lab.engines.append(ctx.offered)
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    status = json.loads((rec.proc / "STATUS.json").read_text())
+    assert status["replayable"] is False
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    with pytest.raises(reader.RecordingError, match="not replayable"):
+        reader.read(rec.proc)
+    assert "LCM recorder on:" not in caplog.text
+    assert "refused" in caplog.text and "disk_floor" in caplog.text
+
+
+class _ReadOnlyRecorderCtx(FakeCtx):
+    def __setattr__(self, name, value):
+        if name == "register_hook":
+            raise AttributeError("read-only registrar")
+        super().__setattr__(name, value)
+
+
+@needs312
+def test_2269_r1_late_capture_loss_preserves_prefix_and_checkpoint(lab):
+    module, ctx = lab.load(prepared_home(lab))
+    rec = _recorder()
+    ctx.offered.get_tool_schemas()
+    rec._checkpoint(24)
+    assert rec.writer.drain(5)
+    rec.capture_ctx(_ReadOnlyRecorderCtx())
+    ctx.offered.get_status()
+    rec = lab.stop()
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    loss = next(e for e in reader.load_events(rec.proc) if e.get("lost_observation") == "ctx_capture_unavailable")
+    reading = reader.read(rec.proc)
+    assert reading["status"]["replayable"] is False
+    assert reading["cause"] == "ctx_capture_unavailable"
+    assert reading["prefix_end"] == loss["seq"] - 1
+    assert [e["name"] for e in reading["roots"]] == ["get_tool_schemas"]
+    assert all(max(reader._seqs(e)) < loss["seq"] for e in reading["events"])
+    checkpoint = reader.read(rec.proc, checkpoint=24)
+    assert checkpoint["sealed"]["through"] < loss["seq"]
+    assert checkpoint["roots"]
+    with sqlite3.connect(rec.proc / "checkpoint" / "24" / "lcm.db") as conn:
+        assert conn.execute("PRAGMA quick_check").fetchone() == ("ok",)
+
+
+@needs312
+def test_2269_r1_missing_payloads_still_refused_after_late_loss(lab):
+    module, ctx = lab.load(lab.home())
+    ctx.offered.get_tool_schemas()
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    rec.snapshot["payloads"] = "payloads_missing"
+    rec.capture_ctx(_ReadOnlyRecorderCtx())
+    rec = lab.stop()
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    with pytest.raises(reader.RecordingError, match="not replayable"):
+        reader.read(rec.proc)
+
+
+@needs312
+def test_2269_r1_first_registration_capture_loss_is_refused(lab):
+    module, ctx = lab.load(lab.home(), ctx=_ReadOnlyRecorderCtx())
+    ctx.offered.get_tool_schemas()
+    rec = lab.stop()
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    with pytest.raises(reader.RecordingError, match="not replayable"):
+        reader.read(rec.proc)
+
+
+@needs312
+def test_2269_r1_capture_loss_without_boundary_is_refused(lab):
+    module, ctx = lab.load(lab.home())
+    ctx.offered.get_tool_schemas()
+    rec = _recorder()
+    rec.ctx_capture = "unavailable"  # no corresponding loss event
+    rec = lab.stop()
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    with pytest.raises(reader.RecordingError, match="not replayable"):
+        reader.read(rec.proc)
+
+
+@needs312
+def test_2269_r1_abandoned_root_keeps_model_isolation(lab):
+    import types
+    module, ctx = lab.load(lab.home())
+    ctx.offered.get_tool_schemas()
+    rec = lab.stop()
+    calls, outcomes, stores = [], [], []
+    agent = importlib.import_module("agent")
+    real = types.ModuleType("agent.auxiliary_client")
+    real.call_llm = lambda: calls.append("real model")
+    lab.mp.setitem(sys.modules, "agent.auxiliary_client", real)
+    lab.mp.setattr(agent, "auxiliary_client", real, raising=False)
+    release, done = threading.Event(), threading.Event()
+    lab.mp.setattr(replay_module, "ROOT_TIMEOUT", 0.02)
+    def prepared(module):
+        prepare(module)
+        store = importlib.import_module(module.__name__ + ".store")
+        stores.append((store, store.secrets))
+        cls = importlib.import_module(module.__name__ + ".engine").LCMEngine
+        def stalled(self):
+            try:
+                assert release.wait(10)
+                from agent.auxiliary_client import call_llm
+                call_llm()
+            except replay_module.ReplayModelBlocked:
+                outcomes.append("blocked")
+            finally:
+                done.set()
+        lab.mp.setattr(cls, "get_tool_schemas", stalled)
+    env, path, wall, ns = dict(os.environ), list(sys.path), time.time, time.time_ns
+    try:
+        with pytest.raises(TimeoutError, match="replay root timed out") as error:
+            replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "abandoned", prepare=prepared)
+        assert dict(os.environ) == env and sys.path == path
+        assert time.time is wall and time.time_ns is ns
+        assert all(store.secrets is source for store, source in stores)
+        isolated = sys.modules.get("agent.auxiliary_client")
+    finally:
+        release.set()
+        assert done.wait(2)
+    assert calls == []
+    assert outcomes == ["blocked"]
+    assert "isolation kept" in str(error.value) and "1" in str(error.value)
+    assert sys.modules["agent.auxiliary_client"] is agent.auxiliary_client is isolated
+    assert dict(os.environ) == env and sys.path == path
+    assert time.time is wall and time.time_ns is ns
+    assert all(store.secrets is source for store, source in stores)
+
+
+def test_2269_r1_abandoned_token_gets_new_worker(monkeypatch):
+    pool = replay_module._Threads()
+    release = threading.Event()
+    monkeypatch.setattr(replay_module, "ROOT_TIMEOUT", 0.02)
+    try:
+        with pytest.raises(TimeoutError, match="replay root timed out"):
+            pool.run(1, lambda: release.wait(10))
+        assert pool.run(1, lambda: "next root") == ("return", "next root")
+    finally:
+        release.set()
+        pool.close()
+
+
+@needs312
+@pytest.mark.parametrize("failure", ["missing", "raises"])
+def test_2269_r1_host_import_failure_restores_environment_and_path(lab, failure):
+    _, ctx = lab.load(lab.home())
+    ctx.offered.get_tool_schemas()
+    rec = lab.stop()
+    host = lab.tmp / "bad-host"
+    host.mkdir()
+    if failure == "raises":
+        package = host / "agent"
+        package.mkdir()
+        (package / "__init__.py").write_text("raise RuntimeError('host import failed')\n")
+    lab.mp.delitem(sys.modules, "agent", raising=False)
+    lab.mp.setattr(sys, "path", [p for p in sys.path if not (Path(p) / "agent").exists()])
+    lab.mp.setenv("LCM_RECORDER_ENABLED", "original")
+    lab.mp.setenv("LCM_IMPORT_CLEANUP_SENTINEL", "original")
+    env, path = dict(os.environ), list(sys.path)
+    error = ModuleNotFoundError if failure == "missing" else RuntimeError
+    try:
+        with pytest.raises(error):
+            replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "import-cleanup", host_path=host)
+        assert dict(os.environ) == env
+        assert sys.path == path
+    finally:  # keep the red run from contaminating subsequent tests
+        os.environ.clear()
+        os.environ.update(env)
+        sys.path[:] = path
+
+
+@needs312
+def test_2269_r1_auxiliary_import_and_probe_are_not_calls(lab):
+    _, ctx = lab.load(lab.home())
+    ctx.offered.get_tool_schemas()
+    rec = lab.stop()
+    def prepared(module):
+        prepare(module)
+        cls = importlib.import_module(module.__name__ + ".engine").LCMEngine
+        original = cls.get_tool_schemas
+        def probe(self):
+            from agent.auxiliary_client import call_llm
+            import agent.auxiliary_client as auxiliary
+            assert callable(call_llm)
+            assert hasattr(auxiliary, "optional_probe")
+            return original(self)
+        lab.mp.setattr(cls, "get_tool_schemas", probe)
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "probe", prepare=prepared)
+    assert rep.blocked_calls == 0
+    assert rep.diffs == []
+
+
+@needs312
+def test_2269_r1_bound_lifecycle_status_has_no_clock_difference(lab):
+    _, ctx = lab.load(lab.home())
+    ctx.offered.on_session_start("bound", platform="cli")
+    assert ctx.offered.get_status()["lifecycle"]["current_bound_at"] is not None
+    rec = lab.stop()
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "lifecycle-clock", prepare=prepare)
+    assert rep.compared == 2
+    assert rep.diffs == []
+
+
+def test_2269_r1_lifecycle_clock_scrub_keeps_other_updated_at():
+    value = {"lifecycle": {"current_bound_at": 1, "updated_at": 2, "other": 3},
+             "message": {"current_bound_at": 4, "updated_at": 5}, "updated_at": 6}
+    expected = copy.deepcopy(value)
+    expected["lifecycle"].update(current_bound_at="<clock>", updated_at="<clock>")
+    assert scrub(value) == expected
+    assert json.loads(scrub(json.dumps(value))) == expected
+
+
+@needs312
+def test_2269_r1_ledger_salt_read_precedes_recorder_lock(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    store_class = importlib.import_module(module.__name__ + ".store").MessageStore
+    original, held = store_class.ingest_ledger_salt, []
+    def salt(self):
+        if sys._getframe(1).f_code.co_name == "_exit":
+            held.append(rec.lock._is_owned())
+        return original(self)
+    lab.mp.setattr(store_class, "ingest_ledger_salt", salt)
+    ctx.offered.on_session_start("salt-lock", platform="cli")
+    for n in range(2):
+        ctx.hooks["post_llm_call"][0](session_id="salt-lock", platform="cli", conversation_history=[
+            {"role": "user", "content": f"salt fact {n}"}])
+    rec = lab.stop()
+    assert held == [False]  # only the root that first initializes the ledger needs the salt
+    assert rec.counters["recorder.failed"] == 0
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    assert len([e for e in reader.read(rec.proc)["roots"] if e.get("ledger_salt")]) == 1
+
+
+@pytest.mark.parametrize("column", ["messages.timestamp", "messages.ingested_at", "summary_nodes.created_at",
+                                    "summary_nodes.earliest_at", "summary_nodes.latest_at"])
+def test_2269_r1_off_on_comparison_detects_python_timestamp_change(tmp_path, column):
+    db = tmp_path / "clock-columns.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE messages (id INTEGER, timestamp REAL, ingested_at REAL)")
+        conn.execute("CREATE TABLE summary_nodes (id INTEGER, created_at REAL, earliest_at REAL, latest_at REAL)")
+        conn.execute("INSERT INTO messages VALUES (1, 1, 1)")
+        conn.execute("INSERT INTO summary_nodes VALUES (1, 1, 1, 1)")
+    before = store_rows(db, excluded_columns=SQL_CLOCK_COLUMNS, excluded_prefixes=())
+    table, field = column.split(".")
+    with sqlite3.connect(db) as conn:
+        conn.execute(f"UPDATE {table} SET {field} = 2")
+    after = store_rows(db, excluded_columns=SQL_CLOCK_COLUMNS, excluded_prefixes=())
+    assert before[table] != after[table]

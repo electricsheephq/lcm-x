@@ -38,8 +38,10 @@ EXCLUDED_TOOL_RETURNS = frozenset({"lcm_expand_query"})
 # Elapsed-time fields (clock-driven, a declared gap), blanked in return values and JSON cells before comparing:
 # compaction.py:1762/:2775/:2946 and engine.py:976 ``duration_ms``; engine.py:1945/:2044 ``last_compaction_duration_ms``.
 # get_status's ``no_progress_hold.until`` is wall clock plus a monotonic remainder (engine.py:2390).
+# Its lifecycle binding and update timestamps also follow the replay clock.
 CLOCK_FIELDS = frozenset({"duration_ms", "last_compaction_duration_ms"})
-CLOCK_PATHS = frozenset({("no_progress_hold", "until")})
+CLOCK_PATHS = frozenset({("no_progress_hold", "until"), ("lifecycle", "current_bound_at"),
+                         ("lifecycle", "updated_at")})
 # SQL defaults and Python wall-clock writes; row identities remain in the comparison.
 SQL_CLOCK_COLUMNS = frozenset({
     "messages.timestamp", "messages.ingested_at", "summary_nodes.created_at", "summary_nodes.earliest_at",
@@ -69,11 +71,13 @@ class _AuxiliaryStub(types.ModuleType):
     def __getattr__(self, name):
         if name.startswith("__"):
             raise AttributeError(name)
-        caller = traceback.extract_stack(limit=3)[-2]
-        if self.replayer is not None:
-            self.replayer.blocked_calls += 1
-            self.replayer.diffs.append(("blocked_model", name, caller.filename, caller.lineno, caller.name))
-        raise ReplayModelBlocked(f"replay blocked agent.auxiliary_client.{name}")
+        def blocked(*args, **kwargs):
+            caller = traceback.extract_stack(limit=3)[-2]
+            if self.replayer is not None:
+                self.replayer.blocked_calls += 1
+                self.replayer.diffs.append(("blocked_model", name, caller.filename, caller.lineno, caller.name))
+            raise ReplayModelBlocked(f"replay blocked agent.auxiliary_client.{name}")
+        return blocked
 
 
 @contextmanager
@@ -238,6 +242,7 @@ class _Threads:
 
     def __init__(self):
         self.workers = {}
+        self.abandoned = []
 
     def run(self, token, fn):
         worker = self.workers.get(token)
@@ -265,13 +270,17 @@ class _Threads:
             done.set()
         worker[0].put(job)
         if not done.wait(ROOT_TIMEOUT):
+            self.abandoned.append(self.workers.pop(token))
+            worker[0].put(None)
             raise TimeoutError("replay root timed out")
         return box["status"], box["value"]
 
     def close(self):
         for inbox, thread in self.workers.values():
             inbox.put(None)
+        for inbox, thread in [*self.workers.values(), *self.abandoned]:
             thread.join(5)
+        return sum(thread.is_alive() for _, thread in self.abandoned)
 
 
 def _stub(*args, **kwargs):
@@ -615,11 +624,12 @@ def replay(proc, *, plugin_root, workdir, host_path=None, checkpoint=None, mutat
     module = config_module = original_descriptor = None
     auxiliary = _AuxiliaryStub()
     saved_auxiliary = sys.modules.get("agent.auxiliary_client")
-    agent = importlib.import_module("agent")
     missing = object()
-    saved_attribute = vars(agent).get("auxiliary_client", missing)
-    sys.modules["agent.auxiliary_client"] = agent.auxiliary_client = auxiliary
+    agent = None
     try:
+        agent = importlib.import_module("agent")
+        saved_attribute = vars(agent).get("auxiliary_client", missing)
+        sys.modules["agent.auxiliary_client"] = agent.auxiliary_client = auxiliary
         with HostModules(home) as host:
             module = load_plugin(plugin_root)
             _config_files(start.get("config_files") or {}, start, home, reader)
@@ -657,21 +667,24 @@ def replay(proc, *, plugin_root, workdir, host_path=None, checkpoint=None, mutat
             replayer.excluded_sessions = {s for s, marks in recording["marks"].items() if marks.get("aux_context")}
             return replayer
     finally:
+        abandoned = threads.close()
         sys.path[:] = saved_path
-        if saved_auxiliary is None:
-            sys.modules.pop("agent.auxiliary_client", None)
-        else:
-            sys.modules["agent.auxiliary_client"] = saved_auxiliary
-        if saved_attribute is missing:
-            vars(agent).pop("auxiliary_client", None)
-        else:
-            agent.auxiliary_client = saved_attribute
+        if agent is not None and not abandoned:
+            if saved_auxiliary is None:
+                sys.modules.pop("agent.auxiliary_client", None)
+            else:
+                sys.modules["agent.auxiliary_client"] = saved_auxiliary
+            if saved_attribute is missing:
+                vars(agent).pop("auxiliary_client", None)
+            else:
+                agent.auxiliary_client = saved_attribute
         if original_descriptor is not None:
             config_module.LCMConfig.from_env = original_descriptor
-        threads.close()
         for key in [k for k in os.environ if k.startswith("LCM_")]:
             os.environ.pop(key)
         os.environ.update(saved_env)
+        if abandoned:
+            raise TimeoutError(f"replay root timed out; isolation kept for {abandoned} abandoned worker(s)")
 
 
 def _inside_home(path, home):
@@ -763,7 +776,8 @@ def scrub(value, parent=None):
                 for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return type(value)(scrub(v) for v in value)
-    if isinstance(value, str) and value[:1] in "{[" and any(f in value for f in CLOCK_FIELDS):
+    if isinstance(value, str) and value[:1] in "{[" and any(
+            f in value for f in CLOCK_FIELDS | {key for _, key in CLOCK_PATHS}):
         try:
             return json.dumps(scrub(json.loads(value)))
         except ValueError:

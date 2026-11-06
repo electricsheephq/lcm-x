@@ -616,7 +616,7 @@ class Recorder:
         self._token(engine)
         self._resolve(type(engine))
         self.home = _hermes_home(engine)
-        home = str(self.home)
+        home = str(engine.__dict__.get("_hermes_home") or "")
         state_path = Path(engine._state_db_path())
         self.state_db = _StateDb(state_path)
         facts = self._process_facts(engine, home, state_path)
@@ -638,6 +638,9 @@ class Recorder:
             self._check_home(engine)
             token = self._token(engine)
             self._resolve(type(engine))
+            changed = self._config_files(engine)
+            if changed:
+                self._emit({"kind": "config_files", "files": changed}, single=True)
             self._emit({"kind": "register", "engine": token,
                         "hermes_home": str(engine.__dict__.get("_hermes_home") or ""),
                         "env": self._env_values(engine)}, single=True)
@@ -727,6 +730,7 @@ class Recorder:
         os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
 
     def _snapshot_refused(self):
+        self.snapshot = {"state": "refused", "cause": "disk_floor"}
         self.stopped = self.end_state = "disk_floor"
         self.lose("disk_floor")
         self.write_status()
@@ -1047,6 +1051,12 @@ class Recorder:
         if not entries or self.stopped == "fork":
             return
         entry = entries[0]
+        salt = None
+        if self.stopped is None and entry.root and entry.engine is not None and entry.rec is not None:
+            store = entry.engine.__dict__.get("_store")
+            if not entry.rec.get("_ledger_ready", False) and store is not None and \
+                    store.__dict__.get("_ingest_ledger_schema_ready"):
+                salt = store.ingest_ledger_salt()
         with self.lock:
             try:
                 if self.stopped is not None:
@@ -1080,13 +1090,9 @@ class Recorder:
                     rec["compression"] = [d.get("_last_compression_status"), d.get("_last_compression_noop_reason")]
                 if marks:
                     self._unsupported(rec, marks)
-                if entry.root and entry.engine is not None:
-                    store = entry.engine.__dict__.get("_store")
-                    if not rec.pop("_ledger_ready", False) and store is not None and \
-                            store.__dict__.get("_ingest_ledger_schema_ready"):
-                        salt = store.ingest_ledger_salt()
-                        if salt is not None:
-                            rec["ledger_salt"] = salt.hex()
+                rec.pop("_ledger_ready", None)
+                if salt is not None:
+                    rec["ledger_salt"] = salt.hex()
                 rec["seq_exit"] = self._next()
                 rec["t_exit"] = [time.time(), time.monotonic()]
                 self._emit(rec)
@@ -1562,6 +1568,7 @@ class Recorder:
                   "last_checkpoint": self.last_checkpoint, "end_state": self.end_state,
                   "ended": "ended without exit" if self.end_state in ("running", "gap", "cap") else self.end_state,
                   "ctx_capture": self.ctx_capture, "replayable": self.ctx_capture == "ok"
+                  and getattr(self, "snapshot", {}).get("state") != "refused"
                   and getattr(self, "snapshot", {}).get("payloads") != "payloads_missing",
                   "snapshot": getattr(self, "snapshot", None), "wall": self.wall}
         tmp = self.proc / f"STATUS.json.{os.getpid()}.tmp"
@@ -1732,7 +1739,10 @@ def install(ctx, engine) -> None:
             mon.set_events(tool, 0)
             mon.free_tool_id(tool)
             raise
-        logger.info("LCM recorder on: %s (tool id %d)", recorder.proc, tool)
+        if recorder.stopped == "disk_floor":
+            logger.warning("LCM recorder snapshot refused: disk_floor (%s)", recorder.proc)
+        else:
+            logger.info("LCM recorder on: %s (tool id %d)", recorder.proc, tool)
     except KeyboardInterrupt:
         raise
     except BaseException as exc:

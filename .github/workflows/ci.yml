@@ -208,7 +208,7 @@ jobs:
         run: |
           pip install ruamel.yaml==0.18.16 PyYAML==6.0.3
           python -m pytest tests/test_config_yaml_loaders.py tests/test_per_model_threshold.py -q -p no:cacheprovider
-          python -m pytest tests/test_recorder.py -q -p no:cacheprovider -k "yaml_configuration or config_file_changes or legacy_identity"
+          python -m pytest tests/test_recorder.py -q -p no:cacheprovider -k "yaml_configuration or config_file_changes or legacy_identity or load_config_reads_restored_yaml"
 
       - name: Run static validation
         run: |
