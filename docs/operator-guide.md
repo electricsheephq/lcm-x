@@ -1214,9 +1214,9 @@ from summaries. They remain inspectable later through
 
 Active-replay stubbing is on by default and requires ordinary large-output
 externalization. Newly ingested textual tool results above the first-sight token threshold (10,000)
-are durably externalized and immediately replaced in provider-visible replay,
-including results in the protected fresh tail. Preflight adopts that replay
-change even if no leaf compaction is eligible. At a compaction, a second historical
+are durably externalized at ingest, including results in the protected fresh tail.
+Below threshold, provider-visible replacement waits for the next real boundary;
+a size-only preflight can defer adopting the replay change. At a compaction, a second historical
 assembly pass replaces older eligible results from the aged threshold (2,000 tokens)
 before evaluating the assembly budget and respects the protected fresh tail. Tool roles, `tool_call_id` values, and
 compatible structured text block types/keys are retained; the historical pass
