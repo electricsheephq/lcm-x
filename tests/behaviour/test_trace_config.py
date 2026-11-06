@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from hermes_lcm.config import LCMConfig
-from scripts.golden_outcome_gate import main as outcome_gate
 from tests.behaviour.assembly_trace_harness import Canonical as AssemblyCanonical
 from tests.behaviour.compress_trace_harness import Canonical as CompressCanonical
 from tests.behaviour.ingest_trace_harness import IngestCanonical
