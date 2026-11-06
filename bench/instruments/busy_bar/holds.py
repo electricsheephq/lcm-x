@@ -25,6 +25,10 @@ else:
 
 WRITE_WORDS = {"INSERT", "UPDATE", "DELETE", "REPLACE"}
 
+# Design r3.7 (§5): the 2,000-new-row hold ratio is reported; it fails only above this
+# regression tripwire against v0.29.2 (r3.6's 1.25 bar no longer applies).
+TRIPWIRE = 2.0
+
 
 def windows(events: list[tuple[float, int, str]], begin: float, end: float) -> list[dict[str, Any]]:
     """Extract per-connection top-level windows; SAVEPOINT/RELEASE are neutral."""
@@ -165,11 +169,11 @@ def summarize(collected: dict[str, list]) -> dict[str, Any]:
     if len(collected["baseline"]) != len(collected["candidate"]):
         raise ValueError("unequal lock-probe run counts")
     failed = [key for key, value in statistics_by_tree["candidate"].items()
-              if value > 1.25 * statistics_by_tree["baseline"][key]]
+              if value > TRIPWIRE * statistics_by_tree["baseline"][key]]
     diagnostic = any(run.get("trace_diagnostic") for runs in collected.values() for run in runs)
     return {"tables": tables, "statistics": statistics_by_tree, "failed_statistics": failed,
             "verdict": "DIAGNOSTIC ONLY" if diagnostic else
-            "LOCK-RELATIVE FAIL" if failed else "LOCK-RELATIVE PASS"}
+            "LOCK-TRIPWIRE FAIL" if failed else "LOCK-TRIPWIRE PASS"}
 
 
 def report(result: dict[str, Any]) -> str:
@@ -179,10 +183,10 @@ def report(result: dict[str, Any]) -> str:
             values = " ".join(f"{row[key]:.3f}" if row[key] is not None else "unobserved" for key in (
                 "median_longest_ms", "p90_longest_ms", "median_first_start_ms", "median_call_ms"))
             lines.append(f"{name} {shape} {row['calls']} {values}")
-    lines.append("statistic baseline_ms candidate_ms limit_ms")
+    lines.append("statistic baseline_ms candidate_ms tripwire_ms ratio")
     for key, base in result["statistics"]["baseline"].items():
         candidate = result["statistics"]["candidate"][key]
-        lines.append(f"{key} {base:.3f} {candidate:.3f} {1.25 * base:.3f}")
+        lines.append(f"{key} {base:.3f} {candidate:.3f} {TRIPWIRE * base:.3f} {candidate / base if base else float('nan'):.3f}")
     lines.append(result["verdict"])
     if result["failed_statistics"]:
         lines.append("exceeded: " + ", ".join(result["failed_statistics"]))
@@ -234,7 +238,7 @@ def main() -> None:
     rendered = report(result)
     (args.outdir / "verdict.txt").write_text(rendered)
     print(rendered, end="")
-    raise SystemExit(0 if result["verdict"] in ("LOCK-RELATIVE PASS", "DIAGNOSTIC ONLY") else 1)
+    raise SystemExit(0 if result["verdict"] in ("LOCK-TRIPWIRE PASS", "DIAGNOSTIC ONLY") else 1)
 
 
 if __name__ == "__main__":

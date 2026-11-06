@@ -355,10 +355,10 @@ def test_holds_percentiles_and_relative_verdict() -> None:
             {"shape": "t", "position": 1, "longest_ms": n * multiplier,
              "first_start_ms": 2, "call_ms": 30}]} for n in range(1, 11)]
 
-    result = holds.summarize({"baseline": runs(1), "candidate": runs(1.25)})
-    assert result["verdict"] == "LOCK-RELATIVE PASS"
+    result = holds.summarize({"baseline": runs(1), "candidate": runs(2.0)})
+    assert result["verdict"] == "LOCK-TRIPWIRE PASS"
     assert result["tables"]["baseline"]["n"]["p90_longest_ms"] == 9
-    assert holds.summarize({"baseline": runs(1), "candidate": runs(1.26)})["verdict"] == "LOCK-RELATIVE FAIL"
+    assert holds.summarize({"baseline": runs(1), "candidate": runs(2.01)})["verdict"] == "LOCK-TRIPWIRE FAIL"
 
 
 @pytest.mark.parametrize("platform,size,offsets", [
@@ -601,7 +601,7 @@ def test_hold_position_and_rotating_longest_statistics() -> None:
         rows = []
         for number in range(10):
             calls = [{"shape": "n", "position": position, "longest_ms":
-                      2 if mode == "first" and position == 1 else
+                      3 if mode == "first" and position == 1 else
                       5 if mode == "rotating" and position == number % 6 + 1 else 1,
                       "first_start_ms": 0, "call_ms": 10} for position in range(1, 7)]
             rows.append({"journal_mode": "wal", "calls": calls + [
@@ -609,7 +609,7 @@ def test_hold_position_and_rotating_longest_statistics() -> None:
         return rows
 
     first = holds.summarize({"baseline": runs("base"), "candidate": runs("first")})
-    assert first["verdict"] == "LOCK-RELATIVE FAIL"
+    assert first["verdict"] == "LOCK-TRIPWIRE FAIL"
     assert first["failed_statistics"] == ["position-1", "run-longest"]
     rotating = holds.summarize({"baseline": runs("base"), "candidate": runs("rotating")})
     assert rotating["failed_statistics"] == ["run-longest"]
