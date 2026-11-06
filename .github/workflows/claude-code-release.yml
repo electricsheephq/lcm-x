@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing claude-code-v<version> tag to rebuild into its draft release
+        description: Existing claude-code-v<version> tag to build into a draft release (delete an old draft first)
         required: true
         type: string
 
@@ -49,6 +49,11 @@ jobs:
             exit 1
           fi
           commit=$(git rev-parse "refs/tags/$TAG^{commit}")
+          # A tag push is bound to the commit it pushed: a tag moved since then fails here.
+          if [[ "$GITHUB_EVENT_NAME" == push && "$commit" != "$GITHUB_SHA" ]]; then
+            echo "::error::$TAG now points at $commit, not the pushed $GITHUB_SHA"
+            exit 1
+          fi
           # A main commit: on main's first-parent line, so a merged PR branch's own commits do not count.
           if ! git rev-list --first-parent origin/main | grep -qx "$commit"; then
             echo "::error::$TAG ($commit) is not a commit of main's first-parent history"
@@ -65,7 +70,8 @@ jobs:
             exit 1
           fi
           prerelease=false
-          [[ "$version" == *-* ]] && prerelease=true
+          # Below 1.0.0 the unit publishes as a prerelease (RELEASE-READINESS-V1, "Claude Code unit releases").
+          [[ "$version" == *-* || "$version" == 0.* ]] && prerelease=true
           {
             echo "commit=$commit"
             echo "version=$version"
@@ -161,19 +167,18 @@ jobs:
         with:
           ref: refs/tags/${{ env.TAG }}
 
-      - name: Refuse a moved tag or a published release
+      # Create-only: the job never edits a release. Any release for the tag, draft or published,
+      # stops it, so a draft published while this runs is never changed; to rebuild, delete the draft.
+      - name: Refuse a moved tag or any existing release
         env:
           GH_TOKEN: ${{ github.token }}
           COMMIT: ${{ needs.verify.outputs.commit }}
         run: |
           test "$(git rev-parse HEAD)" = "$COMMIT"
-          if state=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>&1); then
-            if [[ "$state" != true ]]; then
-              echo "::error::$TAG already has a published release; a re-run only rebuilds its draft"
-              exit 1
-            fi
-          elif [[ "$state" != *"release not found"* ]]; then
-            echo "::error::could not read the release state for $TAG: $state"
+          existing=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[] | [.tag_name, .id] | @tsv' \
+            | awk -F '\t' -v tag="$TAG" '$1 == tag {print $2}')
+          if [[ -n "$existing" ]]; then
+            echo "::error::$TAG already has a release (draft or published); delete its draft to rebuild"
             exit 1
           fi
 
@@ -196,16 +201,12 @@ jobs:
           EOF
 
       - name: Create the draft GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
-        with:
-          tag_name: ${{ env.TAG }}
-          body_path: release-body.md
-          draft: true
-          prerelease: ${{ needs.verify.outputs.prerelease }}
-          make_latest: "false"
-          generate_release_notes: false
-          fail_on_unmatched_files: true
-          files: |
-            dist/lcm-x-claude-code-${{ needs.verify.outputs.version }}.tar.gz
-            dist/lcm-x-claude-code-${{ needs.verify.outputs.version }}.tar.gz.sha256
-            dist/bundle.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          flags=(--draft --verify-tag --latest=false)
+          [[ "$PRERELEASE" == true ]] && flags+=(--prerelease)
+          gh release create "$TAG" "${flags[@]}" --title "LCM-X for Claude Code $VERSION" --notes-file release-body.md \
+            "dist/lcm-x-claude-code-$VERSION.tar.gz" "dist/lcm-x-claude-code-$VERSION.tar.gz.sha256" dist/bundle.json
