@@ -188,9 +188,11 @@ def test_fts_integrity_checks_hold_their_connections_write_lock(tmp_path, monkey
 
         monkeypatch.setattr(command, "check_external_content_fts_integrity", check)
         monkeypatch.setattr(tools, "check_external_content_fts_integrity", check)
-        for run in (lambda: command._scan_fts_repair(engine), lambda: collect_doctor(engine),
-                    lambda: tools.lcm_doctor({}, engine=engine)):
+        # _scan_fts_repair checks both tables on the store connection.
+        for run, owners in ((lambda: command._scan_fts_repair(engine), {"store"}),
+                            (lambda: collect_doctor(engine), {"store", "dag"}),
+                            (lambda: tools.lcm_doctor({}, engine=engine), {"store", "dag"})):
             seen.clear()
             run()
-            assert seen and all(held for _owner, held in seen), seen
-            assert {owner for owner, _held in seen} <= {"store", "dag"}, seen
+            assert all(held for _owner, held in seen), seen
+            assert {owner for owner, _held in seen} == owners, seen
