@@ -4137,16 +4137,6 @@ def _lcm_recall_next_row(conn, session_id: str, store_id: int) -> dict[str, Any]
     return dict(found) if found is not None else None
 
 
-def _lcm_recall_delivered_pairs(entries, pairs, limit):
-    """Keep receipts whose reply the window delivers, also as a collapsed duplicate."""
-    delivered: set[Any] = set()
-    for entry in entries[:limit]:
-        if entry["hit"].get("kind") != "summary":
-            delivered.add(entry["hit"].get("store_id"))
-            delivered.update(entry["hit"].get("duplicate_store_ids", []))
-    return [pair for pair in pairs if pair["store_id"] in delivered]
-
-
 def _lcm_recall_adjacent_reply(
     engine, ordered, source_rows, *, limit, deadline, excluded, allowed, read_next=None,
 ):
@@ -4200,16 +4190,25 @@ def _lcm_recall_adjacent_reply(
                         and reply_seen < source_seen)):
                 continue
             store_id = int(neighbour["store_id"])
+            # Locate the source before moving anything: an earlier reply may have
+            # moved it as a copy, so match its store_id among message entries.
+            source_index = next((i for i, item in enumerate(placed)
+                                 if item["hit"].get("kind") != "summary"
+                                 and item["hit"].get("store_id") == hit["store_id"]), None)
             existing = next((i for i, entry in enumerate(placed)
                              if entry["hit"].get("kind") != "summary"
                              and (entry["hit"].get("store_id") == store_id
                                   or store_id in entry["hit"].get("duplicate_store_ids", []))), None)
+            if source_index is None or existing == source_index:
+                continue
             if existing is not None and existing < limit:
                 continue
             if existing is not None:
                 # A pool entry keeps its own scores, ranks and arms; it is only moved.
                 entry = placed.pop(existing)
                 entry = {**entry, "hit": dict(entry["hit"])}
+                if existing < source_index:
+                    source_index -= 1
             else:
                 reply = {
                     "kind": "message_excerpt", "store_id": store_id,
@@ -4224,9 +4223,6 @@ def _lcm_recall_adjacent_reply(
                 entry = {"hit": reply, "rrf_score": source["rrf_score"],
                          "_final_score": source["_final_score"], "ranks": {}}
             entry["hit"]["adjacent_to"] = hit["store_id"]
-            source_index = next((i for i, item in enumerate(placed) if item is source), None)
-            if source_index is None:
-                continue
             placed.insert(source_index + 1, entry)
             pairs.append({"store_id": store_id, "after_store_id": hit["store_id"]})
         if time.monotonic() >= deadline:
@@ -4242,7 +4238,8 @@ def _lcm_recall_adjacent_reply(
     finally:
         if conn is not None:
             conn.close()
-    return placed, _lcm_recall_delivered_pairs(placed, pairs, limit), None
+    # Every placed pair; delivery publishes those whose reply the final hits carry.
+    return placed, pairs, None
 
 
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
@@ -4749,8 +4746,6 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
         )
 
-    if adjacent_pairs:  # receipts name only replies the final window delivers
-        adjacent_pairs = _lcm_recall_delivered_pairs(ordered, adjacent_pairs, limit)
     _annotate_subagent_lineage(engine, [entry["hit"] for entry in ordered if isinstance(entry.get("hit"), dict)])
     session_delivery = None
     if kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) == "session":

@@ -417,7 +417,10 @@ def test_small_limit_sources_stay_in_window_without_error():
     assert reason is None
     assert read.call_count == 2  # only the two delivered entries are sources
     assert [e["hit"]["store_id"] for e in placed][:2] == [1, 2]
-    assert pairs == [{"store_id": 2, "after_store_id": 1}]
+    # The step returns every placed pair; delivery keeps those the final hits carry.
+    assert pairs == [{"store_id": 2, "after_store_id": 1}, {"store_id": 10, "after_store_id": 9}]
+    window = [{"kind": "message_excerpt", "store_id": e["hit"]["store_id"]} for e in placed[:2]]
+    assert recall_delivery._delivered_adjacent_receipts(window, pairs) == pairs[:1]
 
 
 def test_receipts_only_for_delivered_replies():
@@ -426,8 +429,10 @@ def test_receipts_only_for_delivered_replies():
     read = Mock(return_value={"store_id": 2, "session_id": "s", "conversation_id": "",
                               "role": "assistant", "content": "a"})
     placed, pairs, reason = _step(ordered, rows, read, limit=1)
-    assert reason is None and pairs == []
+    assert reason is None and pairs == [{"store_id": 2, "after_store_id": 1}]
     assert [e["hit"]["store_id"] for e in placed][:1] == [1]
+    window = [{"kind": "message_excerpt", "store_id": 1}]
+    assert recall_delivery._delivered_adjacent_receipts(window, pairs) == []
 
 
 def test_reply_already_delivered_as_collapsed_duplicate_is_not_repeated():
@@ -480,3 +485,238 @@ def test_text_or_invalid_observed_at_skips_only_the_time_check():
     rows[100]["observed_at"] = "2033-05-18T03:33:20+00:00"  # aware ISO text is honoured
     placed, pairs, reason = _step(ordered, rows, Mock(return_value=reply), limit=4)
     assert reason is None and pairs == []
+
+
+# -- Review round 2: receipts follow the final hits; no pool candidate is lost ----
+
+def receipts(payload):
+    return payload["provenance"].get("adjacent_reply", [])
+
+
+def assert_receipts_match_hits(payload):
+    """Every receipt names a delivered reply, and every delivered reply has one."""
+    delivered = {h["store_id"]: h for h in payload["hits"]}
+    for pair in receipts(payload):
+        assert pair["store_id"] in delivered or any(
+            pair["store_id"] in h.get("duplicate_store_ids", []) for h in payload["hits"])
+    marked = {h["store_id"] for h in payload["hits"] if "adjacent_to" in h}
+    assert marked <= {pair["store_id"] for pair in receipts(payload)} | {
+        h["store_id"] for h in payload["hits"]
+        if set(h.get("duplicate_store_ids", [])) & {p["store_id"] for p in receipts(payload)}}
+
+
+def test_inserted_reply_removed_by_seen_refs_has_no_receipt(ranked):
+    e, hits, replies = ranked
+    first = json.loads(invoke(e, detail="answer_ready", seen_refs=[]))
+    assert {"store_id": replies[0], "after_store_id": hits[0]} in receipts(first)
+    ref = next(h["exact_ref"] for h in first["hits"] if h["store_id"] == replies[0])
+    payload = json.loads(invoke(e, detail="answer_ready", seen_refs=[ref]))
+    assert replies[0] not in ids(payload)
+    assert all(pair["store_id"] != replies[0] for pair in receipts(payload))
+    assert {"store_id": replies[2], "after_store_id": hits[2]} in receipts(payload)
+    assert_receipts_match_hits(payload)
+
+
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
+def test_reply_removed_by_response_cap_has_no_receipt(ranked, monkeypatch, detail):
+    e, hits, replies = ranked
+    full = invoke(e, detail=detail)
+    assert len(receipts(json.loads(full))) == 2
+    for cap in range(len(full), 0, -25):
+        monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", cap)
+        raw = invoke(e, detail=detail)
+        payload = json.loads(raw)
+        if replies[2] not in ids(payload):
+            break
+    assert replies[0] in ids(payload) and replies[2] not in ids(payload)
+    assert receipts(payload) == [{"store_id": replies[0], "after_store_id": hits[0]}]
+    assert_receipts_match_hits(payload)
+    if detail == "answer_ready":
+        assert len(raw) <= cap
+
+
+def test_receipt_never_evicts_a_hit():
+    hit = {"kind": "message_excerpt", "store_id": 2, "adjacent_to": 1}
+    pairs = [{"store_id": 2, "after_store_id": 1}]
+
+    def fit(cap):
+        response = {"query": "q", "total_results": 1, "hits": [dict(hit)], "provenance": {}}
+        cap = cap if cap is not None else len(json.dumps(response, ensure_ascii=False))
+        encoded = recall_delivery._fit_answer_ready_response(
+            fts_anchor_info=None, response=response, response_char_cap=cap, expansion={},
+            delta_requested=False, arm_hits={}, adjacent_reply=pairs)
+        assert len(encoded) <= cap
+        return json.loads(encoded)
+
+    tight = fit(None)  # the hit fits exactly; the receipt does not
+    assert tight["hits"] == [hit] and "adjacent_reply" not in tight["provenance"]
+    assert fit(10_000)["provenance"]["adjacent_reply"] == pairs
+
+
+@pytest.fixture
+def pooled(recall_engine, monkeypatch):
+    """Rank-2 question's reply is itself a retrieved pool candidate, below the window."""
+    e = recall_engine
+    e._config.embeddings_enabled = False
+    e._config.recall_adjacent_reply = True
+    hits, replies = [], []
+    for i in range(4):
+        hits.append(e._store.append(f"s{i}", {"role": "user", "content":
+                                              f"needle value {i}" + (" ?" if i == 2 else "")}))
+        replies.append(e._store.append(f"s{i}", {"role": "assistant", "content":
+                                                 "needle answer 2" if i == 2 else f"answer {i}"}))
+    order = [*hits, replies[2]]
+    monkeypatch.setattr(tools.time, "time", lambda: 1700000000)
+    original = tools._lcm_recall_rerank
+
+    def rank(*a, **kw):
+        entries, status, scores = original(*a, **kw)
+        entries.sort(key=lambda entry: order.index(entry["hit"]["store_id"]))
+        return entries, status, scores
+
+    monkeypatch.setattr(tools, "_lcm_recall_rerank", rank)
+    return e, hits, replies
+
+
+def test_moved_reply_delivered_through_refill_has_receipt(pooled):
+    e, hits, replies = pooled
+    args = {"detail": "answer_ready", "limit": 3}
+    first = json.loads(invoke(e, **args, seen_refs=[]))
+    assert ids(first) == [hits[0], replies[0], hits[1]]
+    assert receipts(first) == [{"store_id": replies[0], "after_store_id": hits[0]}]
+    seen = [h["exact_ref"] for h in first["hits"] if h["store_id"] in (hits[0], hits[1])]
+    payload = json.loads(invoke(e, **args, seen_refs=seen))
+    # Refill reaches the moved reply (a retrieved candidate) right after its source.
+    assert ids(payload) == [replies[0], hits[2], replies[2]]
+    moved = payload["hits"][2]
+    assert moved["adjacent_to"] == hits[2] and "adjacent" in moved["arms"] and moved["arms"] != ["adjacent"]
+    assert receipts(payload) == [{"store_id": replies[0], "after_store_id": hits[0]},
+                                 {"store_id": replies[2], "after_store_id": hits[2]}]
+    assert_receipts_match_hits(payload)
+
+
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
+def test_collapsed_duplicate_reply_has_receipt(ranked, monkeypatch, detail):
+    e, hits, replies = ranked
+    original = tools.collapse_duplicate_candidates
+
+    def collapse(entries, rows):
+        out = original(entries, rows)
+        for entry in out:
+            if entry["hit"].get("store_id") == hits[3]:
+                entry["hit"]["duplicate_store_ids"] = [replies[0]]
+        return out
+
+    monkeypatch.setattr(tools, "collapse_duplicate_candidates", collapse)
+    payload = json.loads(invoke(e, detail=detail, limit=3))
+    # hits[3] carries hits[0]'s reply as a collapsed copy, so it moves after hits[0].
+    assert ids(payload) == [hits[0], hits[3], hits[1]]
+    assert payload["hits"][1]["adjacent_to"] == hits[0]
+    assert receipts(payload) == [{"store_id": replies[0], "after_store_id": hits[0]}]
+
+
+def _store_ids(entries):
+    return [entry["hit"]["store_id"] for entry in entries]
+
+
+def test_chained_moved_source_keeps_its_reply_in_the_pool():
+    # limit=3, ranked [A, B, C, D]: A's reply is a new row X, B's reply is C,
+    # C's reply is D; B and C are questions. Inserting X pushes C out of the
+    # window, B moves C (a copy) after itself, then C's reply D is moved after
+    # C's copy. D used to be popped and dropped because the copy was not found.
+    a, b, c, d, x = 10, 20, 21, 22, 11
+    ordered = [_entry("a", a, {0: 1}, 4), _entry("b", b, {0: 2}, 3),
+               _entry("b", c, {0: 3}, 2), _entry("b", d, {0: 4}, 1)]
+    rows = {a: {"session_id": "a", "conversation_id": "", "role": "user", "content": "x"},
+            b: {"session_id": "b", "conversation_id": "", "role": "user", "content": "b?"},
+            c: {"session_id": "b", "conversation_id": "", "role": "assistant", "content": "c?"}}
+    replies = {(a): (x, "assistant"), (b): (c, "assistant"), (c): (d, "user")}
+    read = Mock(side_effect=lambda sid, after: {
+        "store_id": replies[after][0], "session_id": sid, "conversation_id": "",
+        "role": replies[after][1], "content": "r"})
+    before = json.dumps(ordered)
+    placed, pairs, reason = _step(ordered, rows, read, limit=3)
+    assert reason is None and json.dumps(ordered) == before
+    assert _store_ids(placed) == [a, x, b, c, d]
+    assert pairs == [{"store_id": x, "after_store_id": a}, {"store_id": c, "after_store_id": b},
+                     {"store_id": d, "after_store_id": c}]
+    assert sorted(_store_ids(placed)) == sorted(_store_ids(ordered) + [x])
+
+
+def test_source_whose_reply_is_its_own_collapsed_copy_is_skipped():
+    ordered = [_entry("t", 9, {0: 1}, 3), _entry("s", 1, {0: 2}, 2)]
+    ordered[1]["hit"]["duplicate_store_ids"] = [2]
+    rows = {9: {"session_id": "t", "conversation_id": "", "role": "user", "content": "x"},
+            1: {"session_id": "s", "conversation_id": "", "role": "user", "content": "q?"}}
+    read = Mock(side_effect=lambda sid, after: {"store_id": after + 1, "session_id": sid,
+                                                "conversation_id": "", "role": "assistant",
+                                                "content": "a"})
+    placed, pairs, reason = _step(ordered, rows, read, limit=2)
+    assert reason is None
+    # 9's new reply pushes 1 out of the window; 1's reply is 1's own collapsed copy.
+    assert _store_ids(placed) == [9, 10, 1]
+    assert pairs == [{"store_id": 10, "after_store_id": 9}]
+
+
+def test_property_no_candidate_is_lost():
+    import random
+    from collections import Counter
+
+    rng = random.Random(2336)
+    shapes = Counter()
+    for case in range(500):
+        sessions = {f"s{n}": [100 * n + k for k in range(rng.randint(2, 6))] for n in range(rng.randint(1, 3))}
+        all_rows = {store_id: {"store_id": store_id, "session_id": sid, "conversation_id": "",
+                               "role": "user" if k % 2 == 0 else "assistant",
+                               "content": "q?" if rng.random() < 0.6 else "statement"}
+                    for sid, store_ids in sessions.items() for k, store_id in enumerate(store_ids)}
+        pool_ids = rng.sample(sorted(all_rows), rng.randint(1, len(all_rows)))
+        # Bias toward the chained shape: three consecutive rows of one session at ranks 1-3.
+        triples = [store_ids[j:j + 3] for store_ids in sessions.values()
+                   for j in range(len(store_ids) - 2) if set(store_ids[j:j + 3]) <= set(pool_ids)]
+        if triples and rng.random() < 0.5:
+            triple = rng.choice(triples)
+            others = [i for i in pool_ids if i not in triple]
+            pool_ids = others[:1] + triple + others[1:]
+        ordered = [_entry(all_rows[i]["session_id"], i, {0: n}, 1.0 / n)
+                   for n, i in enumerate(pool_ids, 1)]
+        absent = [i for i in all_rows if i not in pool_ids]
+        if absent and rng.random() < 0.2:
+            rng.choice(ordered)["hit"]["duplicate_store_ids"] = [rng.choice(absent)]
+        rows = {i: dict(all_rows[i]) for i in pool_ids}
+
+        def read(sid, after):
+            later = [i for i in sessions[sid] if i > after]
+            return dict(all_rows[later[0]]) if later else None
+
+        limit = rng.choice([1, 2, 3, 3, 3, 4, 5])
+        before = json.dumps(ordered)
+        placed, pairs, reason = _step(ordered, rows, read, limit=limit)
+        assert reason is None and json.dumps(ordered) == before, case
+
+        def holder(store_id, entries):
+            return next((n for n, entry in enumerate(entries)
+                         if entry["hit"]["store_id"] == store_id
+                         or store_id in entry["hit"].get("duplicate_store_ids", [])), None)
+
+        inserted = [p["store_id"] for p in pairs if holder(p["store_id"], ordered) is None]
+        assert Counter(_store_ids(placed)) == Counter(_store_ids(ordered) + inserted), case
+        paired = set()
+        for k, pair in enumerate(pairs):
+            reply_at = holder(pair["store_id"], placed)
+            assert _store_ids(placed).index(pair["after_store_id"]) < reply_at, case
+            assert placed[reply_at]["hit"]["adjacent_to"] == pair["after_store_id"], case
+            original = holder(pair["store_id"], ordered)
+            shapes["inserted" if original is None else "moved"] += 1
+            if pair["after_store_id"] in {p["store_id"] for p in pairs[:k]}:
+                shapes["moved_source"] += 1
+            if original is not None:
+                # It was below the window when moved: each earlier placement shifts it by at most one.
+                assert original + k >= limit, case
+                paired.add(placed[reply_at]["hit"]["store_id"])
+        # Nothing else moves: unpaired pool entries keep their relative order and carry no marker.
+        rest = [entry for entry in placed if entry["hit"]["store_id"] in set(pool_ids) - paired]
+        assert _store_ids(rest) == [i for i in pool_ids if i not in paired], case
+        assert all("adjacent_to" not in entry["hit"] for entry in rest), case
+    # Positive control: the generator reaches every shape, including a moved source's reply.
+    assert min(shapes[k] for k in ("inserted", "moved", "moved_source")) >= 5, shapes

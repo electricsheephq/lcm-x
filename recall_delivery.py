@@ -361,8 +361,11 @@ def deliver_recall(
         },
         "degraded": degraded,
     }
-    if adjacent_reply:
-        response["provenance"]["adjacent_reply"] = adjacent_reply
+    if adjacent_reply and detail != "answer_ready":
+        # Snippets hits are final here; answer_ready publishes after fitting.
+        receipts = _delivered_adjacent_receipts(hits_out, adjacent_reply)
+        if receipts:
+            response["provenance"]["adjacent_reply"] = receipts
     if adjacent_reply_unavailable is not None:
         response["provenance"]["adjacent_reply_unavailable"] = adjacent_reply_unavailable
     if rerank_enabled() and rerank_scores:
@@ -446,6 +449,7 @@ def deliver_recall(
             fts_anchor_info=fts_anchor_info, response=response,
             response_char_cap=response_char_cap, expansion=expansion,
             delta_requested=delta_requested, arm_hits=arm_hits,
+            adjacent_reply=adjacent_reply,
         )
         if delivery_order != "time":
             return encoded
@@ -484,6 +488,7 @@ def _fit_answer_ready_response(
     expansion: dict[str, Any],
     delta_requested: bool,
     arm_hits: dict[str, list[dict[str, Any]]],
+    adjacent_reply: list[dict[str, int]] | None = None,
 ) -> str:
     anchor_fired = bool(fts_anchor_info and fts_anchor_info.get("fired"))
     if anchor_fired:
@@ -552,7 +557,31 @@ def _fit_answer_ready_response(
             response["hits"], arm_hits
         )
         encoded = json.dumps(response, ensure_ascii=False)
+    receipts = _delivered_adjacent_receipts(response["hits"], adjacent_reply or [])
+    if receipts:
+        # Receipts name only replies the final hits carry, and are published
+        # only when they fit: a receipt never evicts a hit.
+        marked = {
+            **response,
+            "provenance": {**response["provenance"], "adjacent_reply": receipts},
+        }
+        marked_encoded = json.dumps(marked, ensure_ascii=False)
+        if len(marked_encoded) <= response_char_cap:
+            response["provenance"]["adjacent_reply"] = receipts
+            encoded = marked_encoded
     return encoded
+
+
+def _delivered_adjacent_receipts(
+    hits: list[dict[str, Any]], pairs: list[dict[str, int]]
+) -> list[dict[str, int]]:
+    """Keep receipts whose reply ``hits`` deliver, also as a collapsed duplicate."""
+    delivered: set[Any] = set()
+    for hit in hits:
+        if hit.get("kind") != "summary":
+            delivered.add(hit.get("store_id"))
+            delivered.update(hit.get("duplicate_store_ids", []))
+    return [pair for pair in pairs if pair["store_id"] in delivered]
 
 
 def _strip_hit_event_time(
