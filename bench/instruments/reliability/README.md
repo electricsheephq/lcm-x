@@ -105,7 +105,11 @@ the host reported `interrupted`. Any other assistant row is surplus.
   `supersedes` / `generated_unproven` explain their own row; an unordered `possible_replay_of` pair explains
   one endpoint only when both rows have the same B2 key in the same lineage. Relations are read from the whole
   store, but a pair across lineages or keys explains nothing. `composite`, `split` and absent relation tables
-  explain nothing. Maximum matching assigns distinct witnesses to distinct stored rows within each key, capped by
+  explain nothing. A key's expected and licensed copies are its earliest stored copies (by store ID), so only its
+  last *surplus* rows can be explained: a self relation counts only on such a row, and a pair explains only such an
+  endpoint. A relation on an expected copy (an edited revision's `supersedes`, say) never explains a later copy
+  that carries none, and a pair between two expected copies explains nothing.
+  Maximum matching assigns distinct witnesses to distinct stored rows within each key, capped by
   that key's unlicensed surplus; a stored row explains at most one copy of each key it holds, so an assistant row
   whose content and tool entries were stored twice explains one copy of each. A row whose `tool_calls` holds the
   same call entry twice can explain only one of those copies, so the other stays silent. Duplicate/reversed pairs and

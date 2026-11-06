@@ -155,6 +155,51 @@ def test_p1h_silent_examples_prefer_the_later_copy(tmp_path):
     assert [e["store_id"] for e in out["silent_surplus_examples"]] == [2]
 
 
+def _split(expected, rows, relations):
+    keys = []
+    out = multiset.score(expected, [(sid, "S", role, text) for sid, role, text in rows], surplus_keys=keys)
+    return out, multiset.split_surplus(keys, relations)
+
+
+@pytest.mark.parametrize("expected,rows,relations,want", [
+    # Review on #2291: the expected copy's own relation (an edited revision's supersedes) never explains a later
+    # unmarked re-store.
+    ([("user", "B")], [(1, "user", "B"), (2, "user", "B")], [(1, "supersedes", 0)], (1, 0, 1, [2])),
+    ([("user", "B")], [(1, "user", "B"), (2, "user", "B")], [(1, "generated_unproven", None)], (1, 0, 1, [2])),
+    # A self relation on the expected copy plus a pair: the pair explains one later copy, the last stays silent.
+    ([("user", "B")], [(1, "user", "B"), (2, "user", "B"), (3, "user", "B")],
+     [(1, "supersedes", 9), (2, "possible_replay_of", 1)], (2, 1, 1, [3])),
+    # A genuine repeat that the product marked as possible replay (two expected copies) does not explain a third,
+    # unmarked copy: the pair links two expected copies.
+    ([("user", "B")] * 2, [(1, "user", "B"), (2, "user", "B"), (3, "user", "B")],
+     [(2, "possible_replay_of", 1)], (1, 0, 1, [3])),
+    # Controls: a relation on the later copy still explains it, by itself or through a pair to the original.
+    ([("user", "B")], [(1, "user", "B"), (2, "user", "B")], [(2, "supersedes", None)], (1, 1, 0, [])),
+    ([("user", "B")], [(1, "user", "B"), (2, "user", "B")], [(1, "possible_replay_of", 2)], (1, 1, 0, [])),
+    ([("user", "B")], [(1, "user", "B"), (2, "user", "B")],
+     [(1, "generated_unproven", None), (2, "generated_unproven", None)], (1, 1, 0, [])),
+], ids=["supersedes-on-original", "unproven-on-original", "self-plus-pair", "pair-between-expected",
+        "later-self", "pair-to-original", "both-unproven"])
+def test_p1h_only_later_copies_can_be_explained(expected, rows, relations, want):
+    out, split = _split(expected, rows, relations)
+    assert (out["surplus_rows"], split["visible_surplus_rows"], split["silent_surplus_rows"],
+            [e["store_id"] for e in split["silent_surplus_examples"]]) == want
+
+
+def test_p1h_b2s_fails_when_only_the_original_carries_a_relation(monkeypatch):
+    # Scorer to gate: the reviewer's probe fails B2S; the control with the relation on the later copy passes.
+    for relations, want in (([(1, "supersedes", 0)], True), ([(2, "supersedes", None)], False)):
+        out, split = _split([("user", "B")], [(1, "user", "B"), (2, "user", "B")], relations)
+        numbers = {**FULL, **{k: out[k] for k in ("deficit_rows", "surplus_rows", "split_keys")},
+                   "visible_surplus_rows": split["visible_surplus_rows"],
+                   "silent_surplus_rows": split["silent_surplus_rows"]}
+        monkeypatch.setitem(ci.CELL_GATE, PERSISTENT, ("in-process", ("B2S",)))
+        rows = rows_for(PERSISTENT, "fixture", "in-process", ["B2"])
+        row = next(r for r in rows if r["cell"] == PERSISTENT)
+        row.update(verdict="FAIL", numbers={"B2": numbers})
+        assert bool(ci.gate(rows, set())) is want
+
+
 def test_p1h_tool_id_collection_keeps_full_keys_and_counts():
     rows = [(i, "S0", "tool", "result", None, "call-1") for i in range(1, 32)]
     ids = {}

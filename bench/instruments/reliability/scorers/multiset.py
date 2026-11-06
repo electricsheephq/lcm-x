@@ -440,8 +440,11 @@ def split_surplus(groups, relations):
 
     Flow: key quota -> unique self/pair witness -> stored row. Witness and row nodes belong to one key, so a row
     explains at most one copy of each key it holds: an assistant row whose content and tool entries were stored
-    twice explains one copy of each. Full ID lists include expected copies: the maximum decides which copies can
-    be surplus.
+    twice explains one copy of each. Full ID lists include expected copies. A key's expected and licensed copies
+    are its earliest stored copies (as for licences and silent examples), so only its last ``surplus`` rows by
+    store id can be explained: a self relation counts only on such a row, and a pair explains only such an
+    endpoint. A relation on an expected copy (an edited revision's ``supersedes``, say) never explains a later
+    unmarked copy.
     """
     graph, source, sink = defaultdict(dict), ("source",), ("sink",)
 
@@ -454,14 +457,18 @@ def split_surplus(groups, relations):
                     if kind == "possible_replay_of" and other is not None and sid != other})
     for index, (_key, surplus, ids) in enumerate(groups):
         quota, held = ("key", index), set(ids)
+        order = sorted(held)
+        later = set(order[max(0, len(order) - surplus):]) if surplus > 0 else set()  # copies that can be surplus
         edge(source, quota, surplus)
-        witnesses = [("self", sid) for sid in sorted(held & self_ids)]
-        witnesses += [("pair", a, b) for a, b in pairs if a in held and b in held]
+        witnesses = [("self", sid) for sid in sorted(later & self_ids)]
+        witnesses += [("pair", a, b) for a, b in pairs if a in held and b in held and (a in later or b in later)]
         for witness in witnesses:
             before, after = ("in", index, witness), ("out", index, witness)
             edge(quota, before)
             edge(before, after)
             for sid in witness[1:]:
+                if sid not in later:
+                    continue
                 row = ("row", index, sid)
                 edge(after, row)
                 edge(row, sink)
