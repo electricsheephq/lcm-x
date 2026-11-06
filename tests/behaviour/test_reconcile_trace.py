@@ -24,6 +24,7 @@ from tests.behaviour.reconcile_trace_harness import (
 
 @pytest.mark.parametrize("case", SCENARIOS, ids=lambda case: case.name)
 def test_reconcile_golden(case: Any, tmp_path: Path) -> None:
+    # #2293 step 1, M2: remove repeated folded-tail reads within the public ingest; keep replay decisions and state.
     expected: dict[str, list[str]] = json.loads(GOLDEN.read_text())
     actual = observe(case, tmp_path)
     difference = first_difference(expected[case.name], actual)

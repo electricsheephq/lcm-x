@@ -3569,9 +3569,14 @@ class ReconcileMixin:
         if not self._session_id:
             return None
         try:
-            payload = self._store.read_metadata_json(
-                self._folded_tail_lineage_metadata_key()
-            )
+            key = self._folded_tail_lineage_metadata_key()
+            cache = getattr(self._store, "_ingest_folded_tail_reads", None)
+            if cache is not None and key in cache:
+                payload = cache[key]
+            else:
+                payload = self._store.read_metadata_json(key)
+                if cache is not None:
+                    cache[key] = payload
             if not isinstance(payload, dict) or payload.get("version") != 1:
                 return None
             source_store_id = int(payload.get("source_store_id") or 0)
