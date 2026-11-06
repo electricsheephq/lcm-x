@@ -60,8 +60,9 @@ def test_reused_address_cannot_store_a_carried_ignored_placeholder(tmp_path, mon
         end_phase = engine._end_pre_leaf_phase
 
         def record_pass_keys(*args, **kwargs):
-            # Runs in compress()'s cleanup while the pass's own map is still installed.
-            pass_keys.extend(engine._compress_run.store_ids_by_message_id)
+            # Also runs mid-pass; its last call is in compress()'s cleanup, before the restore, so the final
+            # capture is the map the pass would otherwise leave behind.
+            pass_keys[:] = engine._compress_run.store_ids_by_message_id
             return end_phase(*args, **kwargs)
 
         monkeypatch.setattr(engine, "_end_pre_leaf_phase", record_pass_keys)
