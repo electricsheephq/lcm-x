@@ -285,6 +285,23 @@ def test_p1h_a_key_with_a_merge_consumed_copy_takes_the_worst_case(groups, relat
     assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == want
 
 
+@pytest.mark.parametrize("relations", [[(3, "supersedes", None)], [(1, "supersedes", None)], []],
+                         ids=["consumed-row-marked", "surplus-row-marked", "no-relation"])
+def test_p1h_an_embedded_reserved_copy_sends_its_key_to_the_worst_case(relations):
+    # Delta review on #2291: an embedded credit reserves row 1 for "alpha", so #804 takes the later A copy (row 3) as
+    # C's licensed part and row 1 is A's surplus. Store order cannot name the kept copy, so no relation explains it.
+    a, c = "alpha\n\nbeta", "alpha\n\nbeta\n\ngamma"
+    spans = [{"byte_offset": 0, "bytes": 5, "sha256": multiset.h("alpha")},
+             {"byte_offset": 7, "bytes": 4, "sha256": multiset.h("beta")}]
+    witness = {"witness": {"event_index": 0, "phase": "p", "turn": 1}, "spans": spans, "bytes": 11, "kind": "host_merge"}
+    host = {("user", multiset.h(a)): {"n": 1, "ids": [101], "span_witnesses": [witness], "span_capacity": 1},
+            ("user", multiset.h("gamma")): {"n": 1, "ids": [102]}}
+    out, split = _split([("user", "alpha"), ("user", c)], [(1, "user", a), (2, "user", "gamma"), (3, "user", a)],
+                        relations, host=host)
+    assert (out["deficit_rows"], out["surplus_rows"], out["split_keys"]) == (0, 1, 0)
+    assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == (0, 1)
+
+
 def test_p1h_b2s_fails_when_only_the_original_carries_a_relation(monkeypatch):
     # Scorer to gate: the reviewer's probe fails B2S; the control with the relation on the later copy passes.
     for relations, want in (([(1, "supersedes", 0)], True), ([(2, "supersedes", None)], False)):
