@@ -2525,10 +2525,7 @@ def test_2263_10_registration_loss_cuts_prefix(lab, cause):
     reader = importlib.import_module(module.__name__ + ".recorder_read")
     assert rec.lost == 1
     assert any(e.get("lost_observation") == cause for e in reader.load_events(rec.proc))
-    try:
-        reading = reader.read(rec.proc)
-    except reader.RecordingError:
-        return
+    reading = reader.read(rec.proc)
     assert reading["prefix_end"] <= before
     assert reading["cause"] == cause
 
