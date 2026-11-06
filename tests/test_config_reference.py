@@ -8,6 +8,9 @@ from hermes_lcm import config
 def test_reference_scalar_specs_match_constructor_defaults():
     defaults = config.LCMConfig()
     assert defaults.entities_enabled is False
+    assert defaults.recall_adjacent_reply is False
+    assert any(s.name == "recall_adjacent_reply" and s.env_key == "LCM_RECALL_ADJACENT_REPLY"
+               and s.py_type is bool for s in config.ENV_FIELD_SPECS)
     assert any(s.name == "entities_enabled" and s.env_key == "LCM_ENTITIES_ENABLED"
                for s in config.ENV_FIELD_SPECS)
     assert len({spec.env_key for spec in config.ENV_FIELD_SPECS}) == len(config.ENV_FIELD_SPECS)

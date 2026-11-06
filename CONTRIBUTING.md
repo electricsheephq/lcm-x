@@ -45,8 +45,9 @@ Use focused commits with clear subjects such as `fix: ...`, `docs: ...`, or `tes
 mix unrelated cleanup, generated secrets, customer data, live Hermes configuration, or local
 authentication state into a change.
 
-- Please don't change version numbers, create tags, or add release headings to
-  `CHANGELOG.md`. Maintainers cut releases; notes under `## Unreleased` are welcome.
+- Please don't change version numbers or create tags. Add a changelog fragment under
+  `changelog.d/` (see its README) instead of editing `CHANGELOG.md`; maintainers fold fragments into
+  `CHANGELOG.md` when they cut a release.
 
 ### Pull Requests
 

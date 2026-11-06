@@ -37,8 +37,12 @@ python -m bench.instruments.gate_kit.audit --state-db <hermes home>/state.db --l
 - `--log-tz`: the zoneinfo name the log times are written in (for example `UTC` or `Europe/Berlin`). Default: the
   audit machine's local zone. Pass the run host's zone when they differ: it decides whether a compaction or a
   recorder line came before a driver restart event. An unknown zone exits 2.
-- `--events`: the driver's event log, one JSON object per line: `{"t": epoch, "kind": "restart_cold" | "restart_warm"
-  | "undo_resend" | "delegate_prompt" | "compress_request", "session": id}`.
+- `--events`: the driver's event log (`drive.py`, below), one JSON object per line: `{"t": epoch, "kind":
+  "restart_cold" | "restart_cold_shared" | "restart_warm" | "undo_resend" | "delegate_prompt" |
+  "compress_request" | "compress_request_failed", "session": id, "detail":
+  short non-content text}`. Lines of any other kind (the driver also writes `turn`, `source2_session`,
+  `cancel_resend`, `context_window`, `host_exit`, `error` and a final `summary`) are ignored, so an ACP
+  cancel-and-resend never counts toward the undo-and-resend floor.
 - Exit 0 with the result written (the verdict is inside); exit 2 on an unreadable input. Stdout is a four-line summary.
 
 The output holds counts, rates, booleans, session ids and store ids only. Message content, tool arguments and
@@ -154,3 +158,90 @@ under `issue_1931.auxiliary_unproven`.
   ends is not marked: if the host held a user's text only behind such a carrier, its loss would not show here.
 - A log without the session decision line (builds before it) can show an auxiliary child as a child with 0 rows.
 - More than 10 silent copies of one key: the rest are counted but not listed, so they stay unattributed.
+
+## The driver (`drive.py`)
+`drive.py` runs the driven run against a prepared Hermes home and writes the events log the audit reads. It plans the
+operations from the seed and every section 5 floor x1.2 (rounded up), then runs them one at a time through two real
+host processes:
+
+| Entry point | Operations |
+|---|---|
+| `hermes acp` (`reliability/acp_driver.py`) | turns from a fixed prompt bank (plain questions, `read_file`/todo/`lcm_grep` tool prompts, word-for-word repeats of earlier tool prompts, long pasted text), `/compress` after a long-text turn, `delegate_task` prompts, cancel-and-resend (`session/cancel` while the prompt is in flight, then the same prompt; recorded as `cancel_resend`, half as many as the undo target, never counted as an undo), cold restarts (SIGKILL the process group, a new process, `session/load`) |
+| TUI gateway (`python -m tui_gateway.entry`) | the second host source (`tui` sessions), warm restarts (`session.close`, which ends the session in the context engine, then `session.resume` in the same process), undo-and-resend (`session.undo`, then the same prompt), `session.compress` |
+
+ACP has no session end and no undo, which is why the TUI gateway carries those three. Every planned restart follows a
+compaction in its session and is followed by more turns. Delegated children are counted from `state.db` (read-only)
+using the audit's ended, non-rotation subagent-child predicate, excluding proven AUXILIARY sessions in the host logs;
+when they fall short after the plan, the driver sends more delegate prompts, up to twice the target in total
+attempts (including failed attempts and those made by the plan). The summary separates attempts from completed prompts.
+
+```
+python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --hermes-src <host tree> \
+  --home <HERMES_HOME> --workdir <dir> --events <events.jsonl> [--turns N] [--children N] [--seed 2055] \
+  [--max-hours 6] [--prompt-timeout 600] [--cancel-after 2] [--append-events] [--dry-run]
+```
+- `--dry-run` prints the targets and the planned counts and exits. `--turns`/`--children` can raise a target, never
+  lower it below the floor x1.2.
+- A `--home`, `--workdir` or `--events` at or under the live `~/.hermes` is refused.
+- All CLI paths become absolute against the invoking directory before use, including the host Python and source tree;
+  the Python executable's symlink is preserved so its virtualenv and sibling `hermes` launcher remain in use.
+- A non-empty `--events` file is refused with exit 2 unless `--append-events` explicitly permits retaining its events.
+  A missing parent directory is created. If the events file cannot be written during the run, the run stops, both
+  hosts are shut down, the reason goes to stderr and the driver exits 4: do not audit that run.
+- A failed child count (`state.db` locked or unreadable) is an `error` event (`child_count_failed`).
+- The host processes get the invoking environment with `HERMES_HOME` set to the home and `HOME`/`TMPDIR` set to
+  `<workdir>/host-home`; their stderr goes to `<workdir>/host-logs/`. The read_file prompts name files the driver
+  writes under `<workdir>/notes/`.
+- A failed operation is an `error` event (a model error, a cancel that came too late, a JSON-RPC error with its code, a
+  host process that died) and the run continues; nothing is retried silently. A process that died is replaced on its
+  next operation; stored TUI sessions are resumed in the replacement gateway before use. A shared ACP process kill
+  records one `restart_cold` for the planned slot only after its load succeeds. Its siblings, like crash-affected ACP
+  and TUI sessions, get `restart_cold_shared` only after their reload or resume succeeds, with the kill time as
+  `killed_at`; a sibling never reloaded has no restart, so its compactions do not count toward
+  `compactions_then_restart`. Shared events support restart-copy attribution but never the cold-restart floor.
+  `restart_warm` requires a successful close and resume; `undo_resend` (TUI only) requires a completed first send, an
+  undo that removed rows and a completed second send. A rejected
+  first TUI send skips undo. After a successful close, a failed resume leaves the slot unbound so its next operation
+  resumes it again. `--max-hours` stops the plan and still writes the summary.
+- `compress_request` is recorded before the triggering long-text turn; `compress_result` records the later manual
+  compression outcome separately, so the audit's attribution window starts before automatic compaction can occur.
+  A failed long-text turn writes `compress_request_failed`; the audit excludes that request from attribution.
+  Inactive-host scans restart at byte zero when a log shrinks below the saved offset.
+- The events log never holds prompt or reply text: a prompt is its bank index (a test plants a sentinel to hold this).
+  The last line is `{"kind": "summary", "planned", "executed", "errors", "delegate", "context_length", ...}`.
+
+**Preparing the home.** The driver never reads, prints or edits keys or model config. The operator prepares:
+- the model through the home's own provider config (`model:` in `config.yaml` and the home's `.env`);
+- a small context window, `model.context_length` in `config.yaml`, so compactions follow from the long-text turns;
+  the driver reports the value the host uses (ACP `/context`) as a `context_window` event and in the summary;
+- `delegate_task` enabled: the `delegation` toolset in `platform_toolsets` for `acp` (and `tui`), with `file`, `todo`
+  and `context_engine`;
+- LCM-X installed and enabled as the context engine, with `plugins.load_timeout_seconds: 60` in `config.yaml`: under
+  the default 10 s a slow plugin load leaves a host on the built-in compressor, writing nothing to `lcm.db`;
+- a host tree whose TUI gateway has `session.close`, `session.resume` and `session.undo`, run from the host venv.
+
+Then checkpoint both databases once the run has stopped (the audit refuses a non-empty `-wal`; see "Run" above) and
+audit the run: `audit.py --state-db <home>/state.db --lcm-db <home>/lcm.db --log <home>/logs/agent.log --log
+<workdir>/host-logs/acp.stderr --events <events.jsonl> --out <result.json>`. Audit only a run whose events show no
+`lcm_inactive` error: after every operation the driver scans new bytes in each host's stderr and `<home>/logs/agent.log` for
+LCM-X's "LCM-X is NOT active in this process" notice and the host's "Context engine 'lcm-x' not found" fallback; on
+either it records `{"kind": "error", "detail": "lcm_inactive entry=<acp|tui> source=<file>"}`, stops the run and exits
+3, because that host's rows would otherwise read as a loss. The ACP host logs only to its stderr, as
+`<asctime> [<LEVEL>] <logger>: <message>` with no session field (acp_adapter/entry.py `_setup_logging`); the TUI
+gateway logs to `<home>/logs/agent.log`. The run ends with stdin EOF to both hosts (a `host_exit` event each), so the
+gateway ends its sessions before the audit reads the home.
+
+**Exit-3 recovery.** Raise `plugins.load_timeout_seconds` and rerun with a new `--events` path, preferably in a fresh
+prepared home. The audit scores every session in `state.db`, not only those in the events file, so in a retained home
+record the retry's start time and pass it to the audit as `--since`; otherwise the failed run's sessions read as
+deficits. Existing log bytes are excluded from inactive-host detection. Do not combine failed-run coverage with a fresh run:
+use `--append-events` only when intentionally retaining the earlier events and accounting for them in the audit.
+
+**Tests** (`tests/test_drive.py`): the planner (floors x1.2, deterministic, repeats, restart placement), the executor
+against stub processes (no prompt or reply text in the events, a late cancel is an error), the events contract with
+`audit.py --events`, and a host-backed smoke: 12 operations, one of each kind, through a real `hermes acp` and TUI
+gateway against the localhost fake provider (`reliability/fake_provider.py`, under `sandbox-exec` where present), then
+the audit over the home. The smoke takes its host from the reliability hosts file (`$LCM_RELIABILITY_HOSTS` or the
+default path; `$LCM_GATE_KIT_HOST` picks one by name) and skips with the reason when none is configured.
+
+**Claim class: `instrument`.** The driver produces the run; it proves nothing about the gate by itself.

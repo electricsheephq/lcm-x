@@ -63,6 +63,11 @@ Their corresponding `LCM_` environment keys take precedence. Invalid values keep
 the declared default and report a configuration warning. Aged `0` uses the first-sight
 value; an aged value above first-sight is capped at first-sight when used.
 
+`lcm.recall_summary_event_time` (default `false`) gives `lcm_recall` summary hits
+`event_time_start`/`event_time_end` from their sources' host times;
+`LCM_RECALL_SUMMARY_EVENT_TIME` takes precedence, and an invalid YAML value keeps
+`false` with a configuration warning.
+
 Local embeddings are on by default, with provider `fastembed`. The configured
 model remains empty; only fastembed supplies the effective default
 `BAAI/bge-small-en-v1.5`. Explicit models win with an explicit provider; runtime
@@ -182,6 +187,7 @@ The manifest continues to declare all 16 tools.
 ### Recall ranking
 
 - `LCM_RECALL_ARM_WEIGHTS` (default `fts=0.5,summary=1.0,chunk=1.0`): per-arm RRF weights for `lcm_recall`; see [docs/retrieval-tools.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/retrieval-tools.md).
+- `LCM_RECALL_ADJACENT_REPLY` (bool, default `false`; YAML `lcm.recall_adjacent_reply`, environment takes precedence): opt in to up to three next-row replies after the rank-1 raw hit and top-three question hits. Same session/conversation only, from the other role (user ↔ assistant), never older than the source by event time; skip tool, tool-call, empty and subagent replies; runs before the FTS anchor. Keeps the hit limit and candidate pool; citation, session-density and character caps remain. Internal recall and session delivery skip it. Failed reads/deadline discard the step with `provenance.adjacent_reply_unavailable`; successful moves appear in `provenance.adjacent_reply`. Not a tool argument.
 - `LCM_RECALL_FTS_ANCHOR` (default `true`, #950): with two or more arms, keeps the full-text arm's best match inside the `lcm_recall` ranked window when fusion pushed it out (at most one session displaced). The hit keeps its own score; `provenance.fts_anchor = {fired, position, delivered}` reports the move and whether the anchored hit is in the returned hits after `answer_ready` selection and the response cap (`delivered` is `null` when the anchor did not fire). Embeddings-off output is unchanged, and an `fts` weight of `0` turns it off. It is inert for `limit` below `4` (displacing one of three or fewer hits costs more than it gains; frozen in #950), and proactive recall does not use it. Set `false` to restore the previous order. Managed (evaOS fleet) profiles can set it only after a provisioning release adds it to the environment allowlist.
 
 ### Summary circuit
@@ -307,6 +313,8 @@ without changing its behavior until removal.
 | `LCM_RECALL_REFERENCE_STRICT` | `bool` | `true` | — | — |
 | `LCM_RECALL_DELIVERY_UNIT` | `str` | `"hits"` | `"hits"`, `"session"` | — |
 | `LCM_RECALL_DELIVERY_ORDER` | `str` | `"score"` | `"score"`, `"time"` | — |
+| `LCM_RECALL_SUMMARY_EVENT_TIME` | `bool` | `false` | — | — |
+| `LCM_RECALL_ADJACENT_REPLY` | `bool` | `false` | — | — |
 | `LCM_RECALL_FTS_ANCHOR` | `bool` | `true` | — | — |
 | `LCM_PROACTIVE_RECALL_ENABLED` | `bool` | `false` | — | — |
 | `LCM_PROACTIVE_RECALL_MIN_SCORE` | `float` | `0.01` | — | — |

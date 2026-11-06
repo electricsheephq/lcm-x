@@ -3205,6 +3205,105 @@ def _lcm_recall_event_time_rows(
     }, None
 
 
+# Numeric observed_at values _normalize_observed_at accepts as they stand: > 0
+# and before year 10000. SQL aggregates only these; every other stored form
+# (ISO text, out-of-range numbers) comes back for Python normalization.
+_OBSERVED_AT_SQL_SAFE = (
+    "typeof(m.observed_at) IN ('integer', 'real') "
+    "AND m.observed_at > 0 AND m.observed_at < 253402300800"
+)
+
+
+def _lcm_recall_summary_event_time_rows(
+    engine: "LCMEngine", node_ids: list[int], *, deadline: float
+) -> tuple[dict[int, dict[str, str]], str | None]:
+    """Read each summary node's event-time span, inside the deadline.
+
+    Returns ``({node_id: {"event_time_start", "event_time_end"}}, reason)``:
+    the MIN/MAX host ``observed_at`` over ALL the node's source messages,
+    walked through condensed nodes with no cap, in one statement for the whole
+    batch. A span over any stamped source carrying a ``carried_stamp`` relation
+    (the message path's ``time_uncertain: "carried"`` test) also gets
+    ``time_uncertain: "carried"``. Write times (``messages.timestamp``, ``earliest_at``/``latest_at``,
+    ``created_at``) are never used; a node with no stamped source is absent.
+    ``reason`` follows ``_lcm_recall_event_time_rows``: ``"deadline"`` or
+    ``"read_error"``, and then the mapping is empty (atomic), on the same
+    private read-only connection bounded by the remaining budget.
+    """
+    if time.monotonic() >= deadline:
+        return {}, "deadline"
+    expired = [False]
+
+    def interrupt_if_expired() -> int:
+        if time.monotonic() >= deadline:
+            expired[0] = True
+            return 1
+        return 0
+
+    conn: sqlite3.Connection | None = None
+    try:
+        db_path = Path(engine._store.db_path).resolve()
+        conn = sqlite3.connect(
+            f"{db_path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=max(0.001, deadline - time.monotonic()),
+        )
+        conn.execute("PRAGMA query_only=ON")
+        conn.set_progress_handler(interrupt_if_expired, 1000)
+        # Stores predating the optional relation table have no carried markers
+        # (the same fallback as MessageStore.get_carried_stamp_ids).
+        relation = "message_relations" if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
+        ).fetchone() else "(SELECT NULL AS store_id, NULL AS kind)"
+        rows = conn.execute(
+            f"""WITH RECURSIVE walk(root, source_type, source_id) AS (
+                    SELECT n.node_id, n.source_type, CAST(j.value AS INTEGER)
+                    FROM summary_nodes n, json_each(n.source_ids) j
+                    WHERE n.node_id IN ({",".join("?" for _ in node_ids)})
+                    UNION
+                    SELECT walk.root, child.source_type, CAST(j.value AS INTEGER)
+                    FROM walk JOIN summary_nodes child
+                      ON walk.source_type = 'nodes' AND child.node_id = walk.source_id
+                    JOIN json_each(child.source_ids) j
+                )
+                SELECT walk.root,
+                       MIN(CASE WHEN {_OBSERVED_AT_SQL_SAFE} THEN m.observed_at END),
+                       MAX(CASE WHEN {_OBSERVED_AT_SQL_SAFE} THEN m.observed_at END),
+                       group_concat(CASE WHEN typeof(m.observed_at) IN ('text', 'integer', 'real')
+                                         AND NOT ({_OBSERVED_AT_SQL_SAFE})
+                                    THEN json_quote(m.observed_at) END, ','),
+                       MAX(m.store_id IN (SELECT store_id FROM {relation} WHERE kind = 'carried_stamp'))
+                FROM walk JOIN messages m
+                  ON walk.source_type = 'messages' AND m.store_id = walk.source_id
+                WHERE m.observed_at IS NOT NULL
+                GROUP BY walk.root""",
+            [int(node_id) for node_id in node_ids],
+        ).fetchall()
+    except (sqlite3.Error, OSError) as exc:
+        logger.debug("lcm_recall summary event_time read failed: %s", exc)
+        if expired[0] or time.monotonic() >= deadline:
+            return {}, "deadline"
+        return {}, "read_error"
+    finally:
+        if conn is not None:
+            conn.close()
+    if time.monotonic() >= deadline:
+        return {}, "deadline"
+    spans: dict[int, dict[str, str]] = {}
+    for root, low, high, other, carried in rows:
+        values = [low, high, *(json.loads(f"[{other}]") if other else [])]
+        normalized = [v for v in map(_normalize_observed_at, values) if v is not None]
+        if normalized:
+            spans[int(root)] = {
+                key: datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                for key, value in (("event_time_start", min(normalized)),
+                                   ("event_time_end", max(normalized)))
+            }
+            if carried:
+                spans[int(root)]["time_uncertain"] = "carried"
+    return spans, None
+
+
 def _lcm_recall_answer_ready_content(
     engine: "LCMEngine",
     entries: list[dict[str, Any]],
@@ -4125,6 +4224,124 @@ def default_semantic_cpu_limited(config) -> bool:
             and effective_cpus() <= 2)
 
 
+_LCM_RECALL_ADJACENT_SQL = (
+    "SELECT store_id, session_id, conversation_id, role, source, tool_calls, content, "
+    "timestamp, observed_at FROM messages WHERE session_id = ? AND store_id > ? "
+    "ORDER BY store_id LIMIT 1"
+)
+
+
+def _lcm_recall_next_row(conn, session_id: str, store_id: int) -> dict[str, Any] | None:
+    """The next stored row of ``session_id`` after ``store_id`` (one indexed read)."""
+    found = conn.execute(_LCM_RECALL_ADJACENT_SQL, (session_id, int(store_id))).fetchone()
+    return dict(found) if found is not None else None
+
+
+def _lcm_recall_adjacent_reply(
+    engine, ordered, source_rows, *, limit, deadline, excluded, allowed, read_next=None,
+):
+    """Atomically place up to three same-conversation replies; never write rows.
+
+    A reply is the next stored row of the source's session when it comes from the
+    other conversational role (user/assistant) and is not older than the source.
+    Reads use a private read-only connection bounded by the recall deadline.
+    """
+    placed = list(ordered)
+    pairs = []
+    conn = None
+    try:
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        for rank, source in enumerate(ordered[:min(3, limit)]):
+            hit = source["hit"]
+            row = source_rows.get(hit.get("store_id"))
+            if (hit.get("kind") == "summary" or hit.get("node_id") is not None
+                    or row is None or row.get("role") not in ("user", "assistant")):
+                continue
+            if rank and not str(row.get("content") or "").strip().endswith("?"):
+                continue
+            session_id = row.get("session_id")
+            if (not session_id or session_id in excluded
+                    or (allowed is not None and session_id not in allowed)):
+                continue
+            if read_next is None:
+                uri = f"{Path(engine._store.db_path).resolve().as_uri()}?mode=ro"
+                conn = sqlite3.connect(uri, uri=True, timeout=max(0.001, deadline - time.monotonic()))
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA query_only=ON")
+                conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+                read_next = partial(_lcm_recall_next_row, conn)
+            neighbour = read_next(session_id, int(hit["store_id"]))
+            if time.monotonic() >= deadline:
+                raise TimeoutError
+            if neighbour is None:
+                continue
+            content = str(neighbour.get("content") or "")
+            sid = neighbour.get("session_id")
+            source_seen = _normalize_observed_at(row.get("observed_at"))
+            reply_seen = _normalize_observed_at(neighbour.get("observed_at"))
+            if (sid != session_id
+                    or (neighbour.get("conversation_id") or "") != (row.get("conversation_id") or "")
+                    or neighbour.get("role") not in ("user", "assistant")
+                    or neighbour.get("role") == row.get("role")
+                    or neighbour.get("tool_calls") or not content.strip()
+                    or neighbour.get("source") == _SUBAGENT_SOURCE
+                    or (source_seen is not None and reply_seen is not None
+                        and reply_seen < source_seen)):
+                continue
+            store_id = int(neighbour["store_id"])
+            # Locate the source before moving anything: an earlier reply may have
+            # moved it as a copy, so match its store_id among message entries.
+            source_index = next((i for i, item in enumerate(placed)
+                                 if item["hit"].get("kind") != "summary"
+                                 and item["hit"].get("store_id") == hit["store_id"]), None)
+            existing = next((i for i, entry in enumerate(placed)
+                             if entry["hit"].get("kind") != "summary"
+                             and (entry["hit"].get("store_id") == store_id
+                                  or store_id in entry["hit"].get("duplicate_store_ids", []))), None)
+            if source_index is None or existing == source_index:
+                continue
+            if existing is not None and existing < limit:
+                continue
+            if existing is not None:
+                # A pool entry keeps its own scores, ranks and arms; it is only moved.
+                entry = placed.pop(existing)
+                entry = {**entry, "hit": dict(entry["hit"])}
+                if existing < source_index:
+                    source_index -= 1
+            else:
+                reply = {
+                    "kind": "message_excerpt", "store_id": store_id,
+                    "session_id": sid, "role": neighbour.get("role"),
+                    "source": neighbour.get("source") or "",
+                    "timestamp": neighbour.get("timestamp") or 0,
+                    "content_offset": 0, "snippet": content[:_LCM_RECALL_SNIPPET_CHARS],
+                    "from_current_session": sid == engine.current_session_id,
+                }
+                reply["expand_hint"] = _lcm_recall_excerpt_expand_hint(reply)
+                # No arm ranks: the reply was not retrieved by any arm.
+                entry = {"hit": reply, "rrf_score": source["rrf_score"],
+                         "_final_score": source["_final_score"], "ranks": {}}
+            entry["hit"]["adjacent_to"] = hit["store_id"]
+            placed.insert(source_index + 1, entry)
+            pairs.append({"store_id": store_id, "after_store_id": hit["store_id"]})
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+    except TimeoutError:
+        return ordered, [], "deadline"
+    except sqlite3.OperationalError as exc:
+        if time.monotonic() >= deadline:
+            return ordered, [], "deadline"
+        return ordered, [], f"read_failed:{type(exc).__name__}"
+    except Exception as exc:  # noqa: BLE001 - optional read must never fail recall
+        return ordered, [], f"read_failed:{type(exc).__name__}"
+    finally:
+        if conn is not None:
+            conn.close()
+    # Every placed pair; delivery publishes those whose reply the final hits carry.
+    return placed, pairs, None
+
+
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     """Search the agent's entire memory (all conversations, all time) by meaning.
 
@@ -4589,9 +4806,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     ordered, arm_order, arm_weights = fuse_candidates(
         arm_hits, getattr(engine._config, "recall_arm_weights", None)
     )
-    ordered = collapse_duplicate_candidates(
-        ordered, duplicate_identity_rows(engine, ordered, deadline=deadline)
-    )
+    identity_rows = duplicate_identity_rows(engine, ordered, deadline=deadline)
+    ordered = collapse_duplicate_candidates(ordered, identity_rows)
     fts_arm_index = arm_order.index("fts") if "fts" in arm_order else None
     now = time.time()
     scope_session_ids = set(_recent._recent_conversation_scope_session_ids(engine))
@@ -4613,6 +4829,15 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     #    Proactive recall passes ``fts_anchor=False`` (an internal keyword, not
     #    a tool argument): it filters hits by a score floor after the call, so
     #    an FTS-only anchor below that floor would displace an eligible hit. --
+    # -- Optional adjacent replies (default OFF), before the FTS anchor so the
+    #    #950 anchor guarantee still holds over the final window. --
+    adjacent_pairs, adjacent_unavailable = [], None
+    if (kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) != "session"
+            and kwargs.get("adjacent_reply", getattr(engine._config, "recall_adjacent_reply", False))):
+        ordered, adjacent_pairs, adjacent_unavailable = _lcm_recall_adjacent_reply(
+            engine, ordered, identity_rows, limit=limit, deadline=deadline,
+            excluded=excluded_session_ids, allowed=candidate_session_ids,
+        )
     fts_anchor_info: dict[str, Any] | None = None
     if bool(kwargs.get("fts_anchor", True)) and bool(
         getattr(engine._config, "recall_fts_anchor", True)
@@ -4622,6 +4847,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         )
 
     _annotate_subagent_lineage(engine, [entry["hit"] for entry in ordered if isinstance(entry.get("hit"), dict)])
+    # Only the model's own call follows config; internal callers pin it off.
+    read_summary_event_time = (
+        partial(_lcm_recall_summary_event_time_rows, engine)
+        if kwargs.get("summary_event_time", getattr(engine._config, "recall_summary_event_time", False))
+        else None
+    )
     session_delivery = None
     if kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) == "session":
         from .recall_session import deliver_session
@@ -4631,6 +4862,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             event_time_fields=_lcm_recall_event_time,
             occurrence=include_occurrence_time,
             summary_leads=summary_leads,
+            **({"summary_event_time": read_summary_event_time} if read_summary_event_time else {}),
         )
     return recall_delivery.deliver_recall(
         ordered,
@@ -4675,7 +4907,10 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         ),
         rerank_enabled=lambda: bool(getattr(engine._config, "rerank_enabled", False)),
         session_delivery=session_delivery,
+        adjacent_reply=adjacent_pairs,
+        adjacent_reply_unavailable=adjacent_unavailable,
         delivery_order=kwargs.get("delivery_order", getattr(engine._config, "recall_delivery_order", "score")),
+        **({"read_summary_event_time": read_summary_event_time} if read_summary_event_time else {}),
     )
 
 

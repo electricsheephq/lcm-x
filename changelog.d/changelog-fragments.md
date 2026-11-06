@@ -1,0 +1,1 @@
+- Changed: changelog entries now go in changelog.d/ fragments, folded into this file at each release cut, so concurrent PRs no longer conflict on CHANGELOG.md.
