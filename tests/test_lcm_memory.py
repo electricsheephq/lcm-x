@@ -388,6 +388,24 @@ def test_punctuation_strip_reaches_fixed_point(seeded):
     assert call(engine, name='alex . .')['facts'] == expected
 
 
+def test_name_normalisation_linear_punctuation_strip_and_length_caps(seeded):
+    import time
+    from hermes_lcm import memory_tools
+
+    engine, _ = seeded
+    long_punct = '.' * 50_000 + ' Alex ' + '!' * 50_000
+    started = time.perf_counter()
+    assert memory_tools._name(long_punct) == 'alex'
+    assert memory_tools._name('.' * 50_000) == ''
+    assert time.perf_counter() - started < 0.5
+    cap = memory_tools._MAX_ENTITY_NAME_CHARS
+    assert 'error' not in call(engine, name='a' * cap, aliases=['b' * cap])
+    name_err = call(engine, name='a' * (cap + 1))
+    assert 'error' in name_err and str(cap) in name_err['error']
+    alias_err = call(engine, name='Alex', aliases=['b' * (cap + 1)])
+    assert 'error' in alias_err and str(cap) in alias_err['error']
+
+
 def test_carried_stamp_card_times(tmp_path):
     engine = make_engine(tmp_path, assertions=False)
     try:
