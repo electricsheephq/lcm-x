@@ -293,3 +293,112 @@ def test_unchanged_view_reuses_token_and_marker_hints(engines, monkeypatch):
     # Other replay helpers may build their own map; the protection call reuses it.
     assert names and names[0] is False
     assert markers and markers[0] is False
+
+
+def _tool_view():
+    seed = _m("user", "seed", 10.)
+    call = _m("assistant", "calling", 11.)
+    call["tool_calls"] = [{"id": "c1", "type": "function", "function": {"name": "search", "arguments": "{}"}}]
+    result = _m("tool", "result body", 12.)
+    result["tool_call_id"] = "c1"
+    return seed, call, result
+
+
+def _relation_kinds(engine, content):
+    conn = engine._store._conn
+    return {kind for (kind,) in conn.execute(
+        "SELECT r.kind FROM message_relations r JOIN messages m ON m.store_id=r.store_id "
+        "WHERE m.session_id='S' AND m.content=?", (content,))}
+
+
+def test_protection_reuses_precomputed_tool_names(engines, monkeypatch):
+    engine = engines()
+    seed, call, result = _tool_view()
+    engine._ingest_messages([seed])
+    in_protect, calls = [False], []
+    real_names = engine_module._tool_result_names
+
+    def names(messages):
+        calls.append(in_protect[0])
+        return real_names(messages)
+
+    real_protect = engine._protect_ingest_rows
+
+    def protect(**kwargs):
+        in_protect[0] = True
+        try:
+            return real_protect(**kwargs)
+        finally:
+            in_protect[0] = False
+
+    monkeypatch.setattr(engine_module, "_tool_result_names", names)
+    monkeypatch.setattr(engine, "_protect_ingest_rows", protect)
+    engine._ingest_messages([seed, call, result])
+    assert calls and calls[0] is False
+    assert True not in calls  # the protection step reuses the map built before BEGIN
+
+
+def test_protection_recomputes_tool_names_when_view_changes(engines, monkeypatch):
+    engine = engines()
+    seed, call, result = _tool_view()
+    engine._ingest_messages([seed])
+    hints = []
+    real_hints = engine_module.protect_messages_for_ingest
+
+    def protect(messages, **kwargs):
+        hints.append(list(kwargs.get("tool_name_hints") or []))
+        return real_hints(messages, **kwargs)
+
+    monkeypatch.setattr(engine_module, "protect_messages_for_ingest", protect)
+    real_atomic = engine._store.ingest_atomic
+
+    @contextmanager
+    def atomic(**kwargs):
+        # The host renames the call after the hints were built, before BEGIN.
+        call["tool_calls"][0]["function"]["name"] = "lookup"
+        with real_atomic(**kwargs):
+            yield
+
+    monkeypatch.setattr(engine._store, "ingest_atomic", atomic)
+    engine._ingest_messages([seed, call, result])
+    assert hints and hints[-1][-1] == "lookup"
+
+
+def test_marker_hint_reused_under_lock(engines, monkeypatch):
+    engine = engines()
+    seed = _m("user", "seed", 10.)
+    engine._ingest_messages([seed])
+    content = "[LCM overflow recovery] recovered reply"
+    locked = []
+    real_marker = engine._lcm_generated_marker
+
+    def marker(row):
+        if row.get("content") == content:
+            locked.append(engine._store._conn.in_transaction)
+        return real_marker(row)
+
+    monkeypatch.setattr(engine, "_lcm_generated_marker", marker)
+    engine._ingest_messages([seed, _m("assistant", content, 11.)])
+    assert locked and locked[0] is False
+    assert True not in locked  # the stored-marker step reuses the hint
+    assert "generated_unproven" in _relation_kinds(engine, content)
+
+
+def test_marker_hint_recomputed_when_row_changes(engines, monkeypatch):
+    engine = engines()
+    seed = _m("user", "seed", 10.)
+    engine._ingest_messages([seed])
+    content = "[LCM overflow recovery] recovered reply"
+    new = _m("assistant", "plain reply", 11.)
+    real_atomic = engine._store.ingest_atomic
+
+    @contextmanager
+    def atomic(**kwargs):
+        # The hint saw a plain reply; the row under the lock is generated text.
+        new["content"] = content
+        with real_atomic(**kwargs):
+            yield
+
+    monkeypatch.setattr(engine._store, "ingest_atomic", atomic)
+    engine._ingest_messages([seed, new])
+    assert "generated_unproven" in _relation_kinds(engine, content)
