@@ -163,6 +163,7 @@ Rules:
   - a SQLITE_BUSY_SNAPSHOT inside the transaction rolls it back, and the ingest retries once from classification;
   - the tests that pin the own-transaction rule change with them (tests/test_host_uid_shadow.py:1023-1044 and the ingest-trace golden test).
 - Faulted ingests close here (#1815: three shapes that duplicate or skip the retry). A failed transaction leaves no partial evidence, and the retry classifies again.
+- `get_status()["ingest_lock"]` reports bounded per-attempt lock-hold quantiles (measured to the end of the store's transaction block) and cumulative buckets, emission holds, respaced totals and busy attempts. Records carry route, attempt, outcome, hold_ms, view_rows, rows_classified, rows_written, bytes_written, respaced and busy (attempt failure and ledger-counter delta).
 - Each ingest counts its lock-hold time, rows classified, bytes written and re-spacings. These are the §5 instruments. Rank-5 DP cells and cost fallbacks are P2 counters; they are absent at P1, because rank 5 is P2 (r3.5).
 
 P1 shadow notes (P1b-2b, `LCM_INGEST_LEDGER=shadow`, default; `off` preserves Part A's SQL stream):
