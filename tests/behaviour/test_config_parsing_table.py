@@ -402,7 +402,9 @@ def test_key_inventory_is_complete():
     covered.update(row[0] for row in DYNAMIC_ROWS)
     covered.update({"LCM_ENABLE_SLASH_COMMAND", "LCM_DISABLED_TOOLS",
                     "LCM_ABSOLUTE_THRESHOLD_TOKENS", "LCM_HERMES_BASE_DIR", "LCM_EMBEDDING_API_KEY",
-                    "LCM_SENDER_CAPTURE"})
+                    "LCM_SENDER_CAPTURE",
+                    # Default-off recorder (#2243), read by register() and recorder.py; tests/test_recorder.py.
+                    "LCM_RECORDER_ENABLED", "LCM_RECORDER_DIR", "LCM_RECORDER_MAX_BYTES"})
     assert derive_environment_keys() == covered
 
 
