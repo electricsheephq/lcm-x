@@ -160,7 +160,8 @@ def _probe_bridge_class() -> type:
                     )
                 payload = json.loads(
                     lcm_tools.lcm_recall(
-                        {"query": query, "limit": limit}, engine=engine, delivery_order="score", adjacent_reply=False
+                        {"query": query, "limit": limit}, engine=engine, delivery_order="score", adjacent_reply=False,
+                        summary_event_time=False
                     )
                 )
             finally:

@@ -256,6 +256,7 @@ def _answer_ready_baseline(active_engine, question: str, payload: dict):
         },
         delivery_unit="hits",
         delivery_order="score", adjacent_reply=False,
+        summary_event_time=False,
     )
     recalled = json.loads(raw) if isinstance(raw, str) else raw
     hits = recalled.get("hits") if isinstance(recalled, dict) else None
@@ -336,7 +337,8 @@ def _pre_llm_context(active_engine, payload: dict) -> dict | None:
                 baseline_refs=baseline_refs,
                 question_as_of=question_date,
                 retrieve=lambda recall_args: active_engine.handle_tool_call(
-                    "lcm_recall", recall_args, delivery_unit="hits", delivery_order="score", adjacent_reply=False
+                    "lcm_recall", recall_args, delivery_unit="hits", delivery_order="score", adjacent_reply=False,
+                    summary_event_time=False,
                 ),
                 enabled=True,
                 render_baseline_context=baseline_was_internal,

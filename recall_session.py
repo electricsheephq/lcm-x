@@ -35,7 +35,7 @@ def session_schema(schema):
 
 
 def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, seen_refs,
-                    delta_requested, event_time_fields, occurrence, summary_leads):
+                    delta_requested, event_time_fields, occurrence, summary_leads, summary_event_time=None):
     encoder = tokens._get_encoder()
     count = partial(tokens.count_tokens_with_encoder, encoder=encoder)
     delivery = dict(unit="session", seed_limit=response["limit"], requested_seed_limit=response.get(
@@ -343,6 +343,15 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
         if conn is not None:
             conn.close()
         live_reads.close()
+    if summary_event_time is not None and delivery["summary_leads"]:
+        # Opt-in lead span (one read; atomic on failure). Leads are popped
+        # before any evidence group, so these fields never displace evidence.
+        spans, reason = summary_event_time(
+            [int(lead["node_id"]) for lead in delivery["summary_leads"]], deadline=deadline)
+        if reason is not None:
+            response["provenance"]["summary_event_time_unavailable"] = reason
+        for lead in delivery["summary_leads"]:
+            lead.update(spans.get(int(lead["node_id"]), {}))
     delivery["truncated"] = bool(delivery.get("stop_reason")) or any(
         not s["complete"] for s in delivery["sessions"])
     # Final metadata and escaped JSON count too: refit whole groups and delta.

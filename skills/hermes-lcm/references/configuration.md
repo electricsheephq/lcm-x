@@ -63,6 +63,11 @@ Their corresponding `LCM_` environment keys take precedence. Invalid values keep
 the declared default and report a configuration warning. Aged `0` uses the first-sight
 value; an aged value above first-sight is capped at first-sight when used.
 
+`lcm.recall_summary_event_time` (default `false`) gives `lcm_recall` summary hits
+`event_time_start`/`event_time_end` from their sources' host times;
+`LCM_RECALL_SUMMARY_EVENT_TIME` takes precedence, and an invalid YAML value keeps
+`false` with a configuration warning.
+
 Local embeddings are on by default, with provider `fastembed`. The configured
 model remains empty; only fastembed supplies the effective default
 `BAAI/bge-small-en-v1.5`. Explicit models win with an explicit provider; runtime
@@ -308,6 +313,7 @@ without changing its behavior until removal.
 | `LCM_RECALL_REFERENCE_STRICT` | `bool` | `true` | — | — |
 | `LCM_RECALL_DELIVERY_UNIT` | `str` | `"hits"` | `"hits"`, `"session"` | — |
 | `LCM_RECALL_DELIVERY_ORDER` | `str` | `"score"` | `"score"`, `"time"` | — |
+| `LCM_RECALL_SUMMARY_EVENT_TIME` | `bool` | `false` | — | — |
 | `LCM_RECALL_ADJACENT_REPLY` | `bool` | `false` | — | — |
 | `LCM_RECALL_FTS_ANCHOR` | `bool` | `true` | — | — |
 | `LCM_PROACTIVE_RECALL_ENABLED` | `bool` | `false` | — | — |

@@ -60,6 +60,35 @@ score order; ties keep score order. The default `score` preserves existing outpu
 Only time mode adds `provenance.delivery_order: "time"`; session delivery and
 internal recall consumers keep their existing order.
 
+Set `recall_summary_event_time: true` (or `LCM_RECALL_SUMMARY_EVENT_TIME=true`,
+which wins over the YAML key) to give model-called `lcm_recall` summary hits, and
+session-delivery summary leads, the span of their events:
+
+```yaml
+lcm:
+  recall_summary_event_time: true
+```
+
+`event_time_start` and `event_time_end` are the earliest and latest host
+`observed_at` over the summary's stored source messages, through condensed nodes,
+formatted like a message's `event_time`; sources without a host time, or no longer
+stored (for example after a session purge), do not count. When any stamped source carries a
+carried stamp, the summary also has `time_uncertain: "carried"`. A summary whose sources carry no host
+time has neither field. A summary hit's existing `timestamp` is unchanged: an LCM storage time
+(the node's `latest_at`, else its `created_at`), not an event time. Session leads carry no `timestamp`.
+The read runs inside the recall deadline; a late or failed read omits the fields
+from every summary and sets `provenance.summary_event_time_unavailable` to
+`deadline` or `read_error`. The fields count toward the response cap like
+`event_time`: a response over the cap drops them before any hit and sets
+`event_time_unavailable: true` (reason `response_cap`, or an earlier `deadline` or
+`read_error` reason, which is kept; the marker is left out only when it would itself
+evict a hit), so a missing span there says nothing about the summary. In session
+delivery, spans are added to summary leads after the leads are admitted. A lead
+whose span pushes the payload over the session budget is dropped whole, like any
+lead that does not fit, and this sets no marker. Over budget, summary leads are
+dropped before any evidence group, so a span never displaces evidence. Internal
+recall consumers keep their existing output.
+
 Set `recall_adjacent_reply=true` (or `LCM_RECALL_ADJACENT_REPLY=true`; default
 `false`) to insert the next stored reply after the rank-1 raw message hit and
 after question hits among ranks 1–3 of the delivered window. The reply stays in
