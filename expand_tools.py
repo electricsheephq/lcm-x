@@ -130,6 +130,9 @@ def lcm_expand(args: Dict[str, Any], **kwargs: Any) -> str:
     if engine is None:
         return _tools.json.dumps({"error": "LCM engine not initialized"})  # type: ignore[attr-defined, no-any-return]
 
+    request_started = (_tools.time.monotonic()
+                       if getattr(engine._config, "recall_honour_forget", False) else 0)
+
     externalized_ref = str(args.get("externalized_ref") or "").strip()
     raw_store_id_arg = args.get("store_id")
     raw_node_id_arg = args.get("node_id")
@@ -316,6 +319,9 @@ def lcm_expand(args: Dict[str, Any], **kwargs: Any) -> str:
                         "Externalized payload metadata is session-scoped; "
                         "cross-session ref is surfaced for traceability only and cannot be expanded in this version."
                     )
+        if getattr(engine._config, "recall_honour_forget", False):
+            _tools._annotate_forget_requested(engine, result, [result], deadline=request_started
+                + max(.001, float(getattr(engine._config, "embedding_query_timeout_s", 3.0))))
         return _tools.json.dumps(result)  # type: ignore[attr-defined, no-any-return]
 
     assert raw_node_id_arg is not None
@@ -343,6 +349,9 @@ def lcm_expand(args: Dict[str, Any], **kwargs: Any) -> str:
         }
         if session_id_explicit:
             result["session_id"] = node.session_id
+        if getattr(engine._config, "recall_honour_forget", False):
+            _tools._annotate_forget_requested(engine, result, messages, deadline=request_started
+                + max(.001, float(getattr(engine._config, "embedding_query_timeout_s", 3.0))))
         return _tools.json.dumps(result)  # type: ignore[attr-defined, no-any-return]
 
     if node.source_type == "nodes":

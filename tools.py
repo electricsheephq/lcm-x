@@ -17,7 +17,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Dict, TYPE_CHECKING
 
-from . import recall_delivery
+from . import forget_requests, recall_delivery
 from .cpu_capacity import effective_cpus
 from .externalize import (
     _inspect_top_level_json_string_fields_before_content as _externalized_top_level_fields_before_content,
@@ -2458,6 +2458,25 @@ def _lcm_grep_hybrid(
     return response
 
 
+def _annotate_forget_requested(engine, payload, rows, *, deadline, excluded=()):
+    if not getattr(engine._config, "recall_honour_forget", False):
+        return
+    forgets, stored, reason = forget_requests.read_forget_rows(
+        engine._store.db_path, [r["store_id"] for r in rows if r.get("store_id") is not None],
+        excluded=excluded, deadline=deadline,
+    )
+    if reason:
+        payload.setdefault("provenance", {})["forget_unavailable"] = reason
+        return
+    for row in rows:
+        original = stored.get(row.get("store_id"))
+        forget = forget_requests.covering_forget(original, forgets) if original else None
+        if forget:
+            stamp = forget_requests.event_time(forget)
+            row["forget_requested"] = {"forget_store_id": forget["store_id"],
+                                       "on": stamp[:10] if stamp else None}
+
+
 def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     """Search LCM history using full-text, semantic, or RRF hybrid retrieval."""
     request_started = time.monotonic()
@@ -2500,6 +2519,10 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
             payload = json.loads(_lcm_grep_full_text(retry_args, **kwargs))
             payload["query"] = query
             payload["retried"] = "any_term"
+        if getattr(engine._config, "recall_honour_forget", False):
+            _annotate_forget_requested(engine, payload, payload.get("results", []),
+                deadline=request_started + max(.001, float(getattr(engine._config, "embedding_query_timeout_s", 3.0))),
+                excluded=excluded_session_ids)
         return json.dumps(payload)
 
     timeout_s = max(
@@ -2509,10 +2532,13 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     deadline = request_started + timeout_s
     if time.monotonic() >= deadline:
         return json.dumps(_lcm_grep_deadline_error(mode, "tool_entry"))
-    if mode == "semantic":
-        return json.dumps(_lcm_grep_semantic(parsed_args, engine=engine, deadline=deadline))
-    if mode == "hybrid":
-        return json.dumps(_lcm_grep_hybrid(parsed_args, engine=engine, deadline=deadline))
+    if mode in {"semantic", "hybrid"}:
+        search = _lcm_grep_semantic if mode == "semantic" else _lcm_grep_hybrid
+        payload = search(parsed_args, engine=engine, deadline=deadline)
+        if getattr(engine._config, "recall_honour_forget", False):
+            _annotate_forget_requested(engine, payload, payload.get("results", []),
+                                       deadline=deadline, excluded=excluded_session_ids)
+        return json.dumps(payload)
     return json.dumps({
         "error": "mode must be one of: full_text, semantic, hybrid",
     })
@@ -4621,6 +4647,25 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
         )
 
+    forget_info = {}
+    forgets, forget_rows = [], {}
+    delivery_ordered = ordered
+    if getattr(engine._config, "recall_honour_forget", False):
+        forgets, forget_rows, reason = forget_requests.read_forget_rows(
+            engine._store.db_path,
+            [e["hit"]["store_id"] for e in ordered
+             if e["hit"].get("kind") != "summary" and e["hit"].get("store_id") is not None],
+            allowed=candidate_session_ids, deadline=deadline,
+        )
+        if reason:
+            forget_info["forget_unavailable"] = reason
+        else:
+            ordered, safe_count, receipts = forget_requests.withhold(
+                ordered, forget_rows, forgets, limit, engine.current_session_id)
+            delivery_ordered = ordered[:safe_count]
+            if receipts:
+                forget_info["forget_withheld"] = receipts
+
     _annotate_subagent_lineage(engine, [entry["hit"] for entry in ordered if isinstance(entry.get("hit"), dict)])
     session_delivery = None
     if kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) == "session":
@@ -4632,8 +4677,30 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             occurrence=include_occurrence_time,
             summary_leads=summary_leads,
         )
-    return recall_delivery.deliver_recall(
-        ordered,
+    session_forget_rows = {}
+    if session_delivery is not None and forgets:
+        original_delivery = session_delivery
+        session_orders = {r["session_id"]: r["session_order"]
+                          for r in [*forget_rows.values(), *forgets]}
+
+        def capture_event_time(row):
+            session_forget_rows[row["store_id"]] = {
+                **row, "session_order": session_orders.get(row["session_id"], float("inf"))}
+            return _lcm_recall_event_time(row)
+
+        def session_delivery(entries, envelope):
+            raw = original_delivery(entries, envelope, event_time_fields=capture_event_time)
+            payload = json.loads(raw)
+            receipts = forget_requests.filter_session_payload(
+                payload, session_forget_rows, forgets, engine.current_session_id)
+            if receipts:
+                forget_info["forget_withheld"] = list({r["store_id"]: r for r in
+                    [*forget_info.get("forget_withheld", []), *receipts]}.values())
+                return json.dumps(payload, ensure_ascii=False)
+            return raw
+
+    response = recall_delivery.deliver_recall(
+        delivery_ordered,
         query=query,
         limit=limit,
         requested_limit=requested_limit,
@@ -4676,6 +4743,20 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         rerank_enabled=lambda: bool(getattr(engine._config, "rerank_enabled", False)),
         session_delivery=session_delivery,
     )
+    if forget_info:
+        payload = json.loads(response)
+        payload["provenance"].update(forget_info)
+        if session_delivery is not None:
+            from .tokens import count_tokens
+            delivery = payload["provenance"]["delivery"]
+            for _ in range(10):
+                raw = json.dumps(payload, ensure_ascii=False)
+                size = (count_tokens(raw), len(raw))
+                if size == (delivery["response_tokens"], delivery["response_chars"]):
+                    return raw
+                delivery["response_tokens"], delivery["response_chars"] = size
+        return json.dumps(payload, ensure_ascii=False)
+    return response
 
 
 def lcm_describe(args: Dict[str, Any], **kwargs) -> str:

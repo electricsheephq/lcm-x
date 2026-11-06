@@ -142,3 +142,29 @@ return their existing `status: disabled` responses.
 ## Operator tools
 
 `lcm_status`, `lcm_inspect`, and `lcm_doctor` report health and metadata. They do not replace content retrieval.
+
+## Honouring forget requests
+
+Set `recall_honour_forget: true` in LCM configuration or
+`LCM_RECALL_HONOUR_FORGET=true` (default `false`) to withhold earlier message
+hits covered by command-form USER forget requests during automatic `lcm_recall`
+delivery, including proactive recall, the pre-answer baseline and evidence packs.
+The forget turn replaces covered hits where possible; uncovered pool hits refill
+remaining slots. Nothing is deleted or rewritten in the store. Summary hits are
+never withheld and may still contain the detail.
+
+Detection scans at most the 200 most recent keyword-matching user rows in the
+searched store/session scope under the request deadline. Requests need at least
+two detail words. The two preceding messages in the same session need 30% word
+coverage; other earlier messages need two shared detail words and 50% coverage.
+Cross-session order uses observed event time when available, otherwise session
+store order. Self and later turns are never covered.
+
+`provenance.forget_withheld` records `store_id`, `forget_store_id` and
+`forget_event_time` (null if unknown). A failed or expired read leaves delivery
+unchanged and sets `provenance.forget_unavailable` to `read_error` or `deadline`.
+This is conservative, bounded delivery suppression, not erasure or a guarantee
+that every paraphrase is found. Explicit `lcm_grep` and raw-message `lcm_expand`
+return covered rows unchanged with an added `forget_requested` object containing
+`forget_store_id` and `on` (event date or null). `lcm_describe` is metadata-only
+and unchanged. With the flag off, these reads and annotations are skipped.

@@ -300,6 +300,7 @@ without changing its behavior until removal.
 | `LCM_RECALL_REFERENCE_STRICT` | `bool` | `true` | — | — |
 | `LCM_RECALL_DELIVERY_UNIT` | `str` | `"hits"` | `"hits"`, `"session"` | — |
 | `LCM_RECALL_FTS_ANCHOR` | `bool` | `true` | — | — |
+| `LCM_RECALL_HONOUR_FORGET` | `bool` | `false` | — | — |
 | `LCM_PROACTIVE_RECALL_ENABLED` | `bool` | `false` | — | — |
 | `LCM_PROACTIVE_RECALL_MIN_SCORE` | `float` | `0.01` | — | — |
 | `LCM_PROACTIVE_RECALL_BUDGET_TOKENS` | `int` | `500` | — | — |
