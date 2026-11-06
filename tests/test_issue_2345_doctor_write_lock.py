@@ -132,6 +132,16 @@ def test_doctor_repair_apply_waits_for_a_concurrent_ingest(race):
     assert "backup_path:" in text
 
 
+def test_doctor_repair_apply_body_waits_without_the_backup_flush(race, monkeypatch):
+    # The backup flush already serializes the command above; this isolates the repair body itself.
+    monkeypatch.setattr(command, "backup_database", lambda engine: {
+        "ok": True, "db_path": race.db, "backup_path": race.db.with_suffix(".bak"), "backup_size": 0})
+    _run_race(race, command._doctor_repair_apply_text)
+
+    _assert_ingest_kept(race)
+    assert "status: ok" in race.doctor.get("result", ""), race.doctor
+
+
 def test_backup_flush_does_not_commit_half_an_ingest(race):
     _run_race(race, maintenance.backup_database)
 
