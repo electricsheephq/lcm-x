@@ -3,9 +3,9 @@ from __future__ import annotations
 """Immutable-first message store — the source of truth.
 
 Every message is persisted durably in SQLite. The normal model is append-only,
-with one narrow opt-in exception: already-externalized summarized tool-result
-rows may be rewritten to compact GC tombstones while preserving the original
-row identity (`store_id`) for DAG/source lookup.
+with a legacy GC rewrite seam retained for tests and old stores. Automatic
+compaction no longer rewrites summarized tool-result rows; old GC placeholders
+retain their row identity (`store_id`) for DAG/source lookup.
 """
 
 
@@ -447,6 +447,22 @@ def delete_session_lineage(conn: sqlite3.Connection, sessions_sql: str, args: tu
         conn.execute(f"DELETE FROM session_lineage WHERE child_session_id IN ({sessions_sql})", args)
 
 
+# Session-scoped tables owned outside core (the Claude Code capture ledger, docs/claude-code-adapter.md)
+# register a purge here. Both session delete paths (``delete_session_messages`` and the doctor clean
+# apply) run every registered purge on their own transaction, with the connection, a query that
+# selects the deleted session ids, and its arguments. Core never imports a registering module.
+_SESSION_PURGES: dict[str, Callable[[sqlite3.Connection, str, tuple], None]] = {}
+
+
+def register_session_purge(name: str, purge: Callable[[sqlite3.Connection, str, tuple], None]) -> None:
+    _SESSION_PURGES[name] = purge  # keyed by name: a reloaded module replaces its purge
+
+
+def run_session_purges(conn: sqlite3.Connection, sessions_sql: str, args: tuple = ()) -> None:
+    for purge in tuple(_SESSION_PURGES.values()):
+        purge(conn, sessions_sql, args)
+
+
 def _database_identity(path: Path, store: object) -> str:
     """#719: the file a store opens, however its path was spelled; ``:memory:`` is one per store."""
     if str(path) == ":memory:":
@@ -621,8 +637,8 @@ class MessageStore:
             config = self._ingest_protection_config
             if not config.embeddings_enabled:
                 return
-            from . import command, embedding_maintenance
-            if embedding_maintenance._automatic_chunks_allowed(config, command):
+            from . import embedding_provider
+            if embedding_provider._automatic_chunks_allowed(config):
                 return
             if self._conn.in_transaction and not (getattr(self, "_foreground_ingest_owner", False)
                                                   and self._transaction_owner.owns_connection(self._conn)):
@@ -801,6 +817,11 @@ class MessageStore:
                         else msg
                     )
                     for key, value in metadata_factory(metadata_message, store_id):
+                        if key.startswith("folded_tail_lineage:"):
+                            # A factory can supply arbitrary metadata keys. As
+                            # with write_metadata_json, do not cache after a
+                            # write that an enclosing savepoint may roll back.
+                            self._ingest_folded_tail_reads = None
                         conn.execute(
                             """
                             INSERT INTO metadata(key, value)
@@ -895,6 +916,7 @@ class MessageStore:
             delete_host_uid_bindings(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_chunk_inflight(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_session_lineage(self._conn, "SELECT ?", (session_id,))
+            run_session_purges(self._conn, "SELECT ?", (session_id,))
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),
@@ -1320,6 +1342,8 @@ class MessageStore:
                 self._conn.executescript(schema)
                 self._identity_anchor_schema_ready = True
                 self._carried_relation_connections.add(self._conn)
+                getattr(self, "_memory_relation_connections", {}).pop(self._conn, None)
+                getattr(self, "_memory_relation_generations", {}).pop(self._conn, None)
 
     # -- #2055 ingest ledger: additive schema with shadow ingest and emission writers --
 
@@ -1686,6 +1710,14 @@ class MessageStore:
         if batched:
             known = getattr(self, '_memory_relation_connections', {})
             self._memory_relation_connections = known
+            generations = getattr(self, '_memory_relation_generations', {})
+            self._memory_relation_generations = generations
+            data_version = None
+            if known.get(conn) is False:
+                data_version = (conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0])
+                if generations.get(conn) != data_version:
+                    known.pop(conn, None)
+                    generations.pop(conn, None)
             available = (conn in self._carried_relation_connections or known.get(conn, False)
                          or conn is self._conn and getattr(self, "_pending_relation_schema", False)
                          and self._transaction_owner.owns_connection(conn))
@@ -1693,8 +1725,13 @@ class MessageStore:
                 available = bool(conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
                 ).fetchone())
-                if not available or not conn.in_transaction:
+                if not available or not conn.in_transaction or not self._transaction_owner.owns_connection(conn):
                     known[conn] = available
+                    if not available:
+                        generations[conn] = (
+                            data_version if data_version is not None
+                            else (conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0])
+                        )
             relation = ('message_relations' if available
                         else '(SELECT NULL AS store_id, NULL AS kind)')
             return {int(r[0]) for r in conn.execute(
@@ -1709,6 +1746,8 @@ class MessageStore:
                 return set()
             if conn is self._conn and not conn.in_transaction:
                 self._carried_relation_connections.add(conn)
+                getattr(self, "_memory_relation_connections", {}).pop(conn, None)
+                getattr(self, "_memory_relation_generations", {}).pop(conn, None)
         if session_ids:
             # Collect the entire candidate ID set in SQL before session formatting,
             # including neighbors later rejected by the payload budget.
@@ -2012,6 +2051,11 @@ class MessageStore:
             return False
         wrote = False
         with self._write_lock:
+            if any(key.startswith("folded_tail_lineage:") for key in keys):
+                # Disable for the remainder of this attempt, including failed
+                # writes and enclosing savepoint rollbacks. A value read after
+                # a write must never survive rollback of that write.
+                self._ingest_folded_tail_reads = None
             for key in keys:
                 if skip_unchanged:
                     existing = conn.execute(
@@ -2042,6 +2086,7 @@ class MessageStore:
 
     @contextmanager
     def _ingest_atomic(self, *, admission_retry=False):
+        timing = {"hold_ms": None}
         with self._write_lock:
             if self._transaction_owner.owns(self._conn):
                 raise _SqliteSavepointError("Foreground ingest cannot join an enclosing transaction")
@@ -2056,18 +2101,54 @@ class MessageStore:
                     trace.ingest_admission = True
                 try:
                     with (_temporary_sqlite_busy_timeout([self._conn], 0) if admission_retry else nullcontext()):
+                        start_timer = self._start_lock_timer(timing, owner)
                         owner.enter_context(self.atomic(immediate=True))
+                        start_timer()
                 finally:
                     if trace is not None:
                         trace.ingest_admission = False
                 previous = getattr(self, "_foreground_ingest_owner", False)
                 self._foreground_ingest_owner = True
+                self._ingest_folded_tail_reads = {}
                 try:
-                    yield
+                    yield timing
                     if not self._conn.in_transaction:
                         raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT")
                 finally:
+                    self._ingest_folded_tail_reads = None
                     self._foreground_ingest_owner = previous
+
+    @staticmethod
+    def _start_lock_timer(timing, timer):
+        if timing is None:
+            return lambda: None
+        started = None
+        def start():
+            nonlocal started
+            try:
+                started = time.perf_counter()
+            except Exception as exc:
+                timing["telemetry_error"] = type(exc).__name__
+        try:
+            def finish():
+                if started is None:
+                    return
+                try:
+                    timing["hold_ms"] = (time.perf_counter() - started) * 1000
+                except Exception as exc:
+                    timing["telemetry_error"] = type(exc).__name__
+            timer.callback(finish)
+        except Exception as exc:
+            timing["telemetry_error"] = type(exc).__name__
+        return start
+
+    @contextmanager
+    def _timed_atomic(self, timing):
+        with ExitStack() as timer:
+            start_timer = self._start_lock_timer(timing, timer)
+            timer.enter_context(self.atomic(immediate=True))
+            start_timer()
+            yield
 
     def atomic(self, *, immediate: bool = False) -> AbstractContextManager[None]:
         """Own a transaction under the existing write lock, joining nested entries.
@@ -2106,6 +2187,7 @@ class MessageStore:
             self._identity_anchor_schema_ready = True
             self._carried_relation_connections.add(self._conn)
             getattr(self, "_memory_relation_connections", {}).pop(self._conn, None)
+            getattr(self, "_memory_relation_generations", {}).pop(self._conn, None)
         if getattr(self, "_pending_host_uid_schema", False):
             self._pending_host_uid_schema = False
             self._host_uid_schema_ready = True

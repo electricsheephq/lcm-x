@@ -117,7 +117,8 @@ def test_02_bindings_use_raw_view_before_redaction(engines):
     entries = ledger.decode_entries(vector["entries"])
     assert [e.ref for e in entries] == [b["occ_id"] for b in bindings]
     assert entries[0].uidset_digest is not None and entries[1].uidset_digest is None
-    assert not sql_rows(engine, "lineage_marks")
+    # P1g deliberately lifts X11: the store mark means examined through.
+    assert sql_rows(engine, "lineage_marks")[0]["max_store_id"] == stored[-1]["store_id"]
     assert engine._last_ingest_attribution["ledger_digest_ms"] >= 0
     assert engine._last_ingest_attribution["ledger_ms"] >= 0
 
@@ -249,12 +250,14 @@ def test_07_fail_open_and_owner_propagation(engines, monkeypatch, caplog, failur
             assert count(engine, key) == 1
             assert sum("ledger." + key in r.getMessage() for r in caplog.records) == 1
             assert all(not sql_rows(engine, table) for table in TABLES)
-            assert engine._store._conn.execute("SELECT 1 FROM ledger_meta WHERE key LIKE 'session_lineage:%'").fetchone() is None
+            # P1f: adoption commits independently of a later writer-savepoint failure.
+            persisted = engine._store._conn.execute("SELECT value FROM ledger_meta WHERE key='session_lineage:S'").fetchone()
+            assert persisted == ((engine._host_uid_lineage_key()[0],) if failure == "integrity" else None)
     assert calls and not engine._store._conn.in_transaction
 
 
 def test_08_read_only_drain_and_delegate_exclusions(engines):
-    """Lock-in: these paths leave existing ledger tables unchanged, even on Part A."""
+    """Queue is read-only; a decided drain writes a binding but no view; delegates stay excluded."""
     engine = engines()
     baseline = ledger_state(engine)
     locker = sqlite3.connect(engine._store.db_path)
@@ -268,7 +271,11 @@ def test_08_read_only_drain_and_delegate_exclusions(engines):
         locker.close()
     engine._retry_pending_session_tails()
     assert [r["content"] for r in engine._store.get_session_messages("S")] == ["frozen"]
-    assert ledger_state(engine) == baseline
+    bindings = sql_rows(engine, "occurrence_bindings")
+    assert len(bindings) == 1
+    assert bindings[0]["disposition"] == "stored" and bindings[0]["stamp"] == "10.0"
+    assert sql_rows(engine, "ingest_views") == baseline["ingest_views"]
+    baseline = ledger_state(engine)
     assert engine._append_delegate_child_rows("child", [_m("user", "child row", 20.)],
         {"parent_session_id": "S", "source": "parent_frame", "child_subagent_id": "", "parent_subagent_id": "", "child_role": ""}) == 1
     assert engine._store.get_session_messages("child")[0]["content"] == "child row"
@@ -336,6 +343,7 @@ def test_11_off_sql_matches_pinned_part_a(engines, monkeypatch):
 
     The expected statements were captured once from the Part A engine, so the test needs no git history.
     """
+    # #2293 step 1, M2: remove two redundant folded-tail SELECTs; keep the ledger-off write protocol.
     from tests.behaviour.reconcile_trace_harness import install_clock
     install_clock(monkeypatch)
     candidate = engines(mode="off", initialized=False)

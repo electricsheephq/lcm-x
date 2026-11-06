@@ -7,13 +7,14 @@ import time
 
 import pytest
 
-import hermes_lcm.engine as engine_module
+import hermes_lcm.maintenance_scheduler as maintenance_scheduler
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
 
-@pytest.fixture
-def engine(tmp_path):
+@pytest.fixture(params=["off", "shadow"])
+def engine(tmp_path, monkeypatch, request):
+    monkeypatch.setenv("LCM_INGEST_LEDGER", request.param)
     instance = LCMEngine(config=LCMConfig(
         database_path=str(tmp_path / "pending.db"), embeddings_enabled=False,
         temporal_rollups_enabled=False,
@@ -54,6 +55,35 @@ def _assert_history(engine, history):
     ]
     assert {r["conversation_id"] for r in _rows(engine)} == {"ended-conversation"}
     assert {r["source"] for r in _rows(engine)} == {"cli"}
+
+
+def _record_deadlines(monkeypatch, engine, *method_names):
+    """Observe the real clock read that supplies each deadline, without freezing time."""
+    monotonic = time.monotonic
+    caller_thread = threading.get_ident()
+    clock_reads = []
+    calls = {name: [] for name in method_names}
+
+    def read_clock():
+        now = monotonic()
+        # Background maintenance must not replace the caller's deadline origin.
+        if threading.get_ident() == caller_thread:
+            clock_reads.append(now)
+        return now
+
+    def watch(name):
+        original = getattr(engine, name)
+
+        def record(*args, **kwargs):
+            calls[name].append((clock_reads[-1], kwargs.get("deadline")))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(engine, name, record)
+
+    monkeypatch.setattr(time, "monotonic", read_clock)
+    for name in method_names:
+        watch(name)
+    return calls
 
 
 @pytest.mark.parametrize("replayed", [0, 1])
@@ -118,7 +148,10 @@ def test_shutdown_bound_and_remaining_count(engine, monkeypatch, caplog):
     _skip(engine, history)
     # A replay covers one row before the bounded shutdown attempt.
     engine.ingest(history[:3])
-    monkeypatch.setattr(engine_module, "_SESSION_END_SHUTDOWN_TIMEOUT_MS", 25, raising=False)
+    monkeypatch.setattr(maintenance_scheduler, "_SESSION_END_SHUTDOWN_TIMEOUT_MS", 25)
+    deadlines = _record_deadlines(
+        monkeypatch, engine, "_retry_pending_session_tails", "_warn_unflushed_session_tails",
+    )
     caplog.clear()  # HEAD warns at end; assert only the shutdown diagnostic here.
     locker = sqlite3.connect(str(engine._store.db_path), isolation_level=None)
     locker.execute("BEGIN IMMEDIATE")
@@ -127,7 +160,13 @@ def test_shutdown_bound_and_remaining_count(engine, monkeypatch, caplog):
         with caplog.at_level(logging.WARNING):
             engine.shutdown()
         elapsed = time.monotonic() - started
-        assert elapsed < 0.3
+        # A hang backstop with runner headroom; the clock/deadline oracle checks the 25 ms bound.
+        assert elapsed < 3.0
+        assert len(deadlines["_retry_pending_session_tails"]) == 1
+        clock_read, deadline = deadlines["_retry_pending_session_tails"][0]
+        assert deadline == pytest.approx(clock_read + 0.025, rel=0, abs=1e-9)
+        assert len(deadlines["_warn_unflushed_session_tails"]) == 1
+        assert deadlines["_warn_unflushed_session_tails"][0][1] == deadline
         assert locker.in_transaction  # The bound expires with the writer still held.
         warnings = [r.getMessage() for r in caplog.records if "raw-message ingest skipped" in r.getMessage()]
         assert len(warnings) == 1
@@ -173,8 +212,11 @@ def test_exit_lifecycle_lock_is_within_pending_retry_bound(engine, monkeypatch, 
     existing contract of waiting for active use (test_lcm_engine.py)."""
     history = _history()
     _skip(engine, history)
-    monkeypatch.setattr(engine_module, "_SESSION_END_SHUTDOWN_TIMEOUT_MS", 25, raising=False)
-    monkeypatch.setattr(engine_module, "_PENDING_TAIL_ENGINES", {engine}, raising=False)
+    monkeypatch.setattr(maintenance_scheduler, "_SESSION_END_SHUTDOWN_TIMEOUT_MS", 25)
+    monkeypatch.setattr(maintenance_scheduler, "_PENDING_TAIL_ENGINES", {engine})
+    deadlines = _record_deadlines(
+        monkeypatch, engine, "_exclusive_lifecycle", "_warn_unflushed_session_tails",
+    )
     acquired = threading.Event()
     release = threading.Event()
     released = threading.Event()
@@ -182,22 +224,29 @@ def test_exit_lifecycle_lock_is_within_pending_retry_bound(engine, monkeypatch, 
     def hold_lifecycle():
         with engine._stable_use_lock:
             acquired.set()
-            release.wait(1.0)  # A failing pre-fix run must still terminate.
+            # Outlast the generous backstop, but let a broken unbounded wait terminate.
+            release.wait(10.0)
         released.set()
 
     holder = threading.Thread(target=hold_lifecycle)
     holder.start()
     assert acquired.wait(1.0)
     embedding_waits = []
-    monkeypatch.setattr(engine_module._EMBEDDING_MAINTENANCE_SCHEDULER, "quiesce",
+    monkeypatch.setattr(maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER, "quiesce",
                         lambda timeout: embedding_waits.append(timeout) or True)
     caplog.clear()
     try:
         started = time.monotonic()
         with caplog.at_level(logging.WARNING):
-            engine_module._quiesce_embedding_maintenance()
+            maintenance_scheduler._quiesce_embedding_maintenance()
         elapsed = time.monotonic() - started
-        assert elapsed < 0.3
+        # A hang backstop with runner headroom; the clock/deadline oracle checks the 25 ms bound.
+        assert elapsed < 3.0
+        assert len(deadlines["_exclusive_lifecycle"]) == 1
+        clock_read, deadline = deadlines["_exclusive_lifecycle"][0]
+        assert deadline == pytest.approx(clock_read + 0.025, rel=0, abs=1e-9)
+        assert len(deadlines["_warn_unflushed_session_tails"]) == 1
+        assert deadlines["_warn_unflushed_session_tails"][0][1] == deadline
         assert not released.is_set(), "exit must return while the lifecycle lock remains held"
         assert len(_rows(engine)) == 2
         warnings = [r.getMessage() for r in caplog.records if "raw-message ingest skipped" in r.getMessage()]
@@ -205,7 +254,7 @@ def test_exit_lifecycle_lock_is_within_pending_retry_bound(engine, monkeypatch, 
         assert "unflushed=2" in warnings[0]
         assert "lifecycle lock" in warnings[0]
         assert "repeat" not in warnings[0] and "answer" not in warnings[0]
-        assert embedding_waits == [engine_module._EMBEDDING_EXIT_TIMEOUT_S]
+        assert embedding_waits == [maintenance_scheduler._EMBEDDING_EXIT_TIMEOUT_S]
     finally:
         release.set()
         holder.join(timeout=2.0)

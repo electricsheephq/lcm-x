@@ -369,11 +369,21 @@ def test_environment_read_inventory():
     allowed = {
         ("config.py", "lcm_env"): "sole resolver: explicit single-profile/old-host fallback",
         ("config.py", "from_env"): "identity check to distinguish routed snapshot from process mapping",
-        ("config.py", "_lcm_absolute_threshold_tokens_with_source"):
+        ("config.py", "_load_hermes_config_yaml_for_env"):
             "identity check to distinguish routed snapshot from process mapping",
         ("config.py", "containment_base_dir"): "LCM_HERMES_BASE_DIR: operator containment root stays process-wide",
         ("embedding_provider.py", "__init__"): "FASTEMBED_CACHE_PATH: process-wide model download cache",
         ("inactive_record.py", "_process_start"): "LC_ALL=C subprocess for ps process identity, not profile configuration",
+        ("__init__.py", "_engine_took_slot"): "HERMES_HOME: process launch identity for inactive-record ownership, not profile configuration",
+        ("adapters/claude-code/bin/lcmx_hook.py", "main"):
+            "Claude Code plugin hook: the harness's own variables (capture switch, config dir, plugin paths), "
+            "never Hermes profile configuration",
+        ("adapters/claude-code/bin/lcmx_mcp.py", "main"):
+            "Claude Code plugin launcher: the harness's own variables pick the capture store home",
+        ("mcp_reader.py", "apply_profile_environment"):
+            "lcm-x mcp reader process: replaces its own LCM_* view with the one profile it serves (#1192)",
+        ("mcp_reader.py", "disabled_tool_names"):
+            "lcm-x mcp reader process: LCM_DISABLED_TOOLS from that profile view, parsed as the engine does (#1192)",
         ("docs/process/evidence/1880-persisted-hold/compat_probe.py", "main"):
             "synthetic compatibility proof tool: isolated home and lazy-install controls only",
         ("docs/process/evidence/1880-persisted-hold/cost/cost_probe.py", "main"):
@@ -425,11 +435,14 @@ def test_environment_read_inventory():
                 failures.append(f"{relative}:{node.lineno}: unclassified environment read")
             if key == ("config.py", "lcm_env"):
                 assert isinstance(parents[node], ast.Return), "only the legacy mapping fallback is allowed"
-            if key in {("config.py", "from_env"), ("config.py", "_lcm_absolute_threshold_tokens_with_source")}:
+            if key in {("config.py", "from_env"), ("config.py", "_load_hermes_config_yaml_for_env")}:
                 assert isinstance(parents[node], ast.Compare) and isinstance(parents[node].ops[0], ast.IsNot)
             if key == ("embedding_provider.py", "__init__"):
                 call = parents.get(parents.get(node))
                 assert isinstance(call, ast.Call) and ast.literal_eval(call.args[0]) == "FASTEMBED_CACHE_PATH"
+            if key == ("__init__.py", "_engine_took_slot"):
+                call = parents.get(parents.get(node))
+                assert isinstance(call, ast.Call) and ast.literal_eval(call.args[0]) == "HERMES_HOME"
     assert not failures, "\n".join(failures)
     assert seen == set(allowed), "remove stale allowlist entries or check newly unclassified reads"
 
@@ -605,6 +618,117 @@ def test_stamped_scope_yaml_absolute_threshold_uses_bound_home(host, scheduled_p
         resolved = config.LCMConfig.from_env()
         assert resolved.absolute_threshold_tokens == 30000
         assert resolved.config_sources["absolute_threshold_tokens"] == "config_yaml:lcm.context_threshold_tokens"
+
+
+def test_stamped_scope_yaml_keys_use_bound_home(host, scheduled_profiles):
+    """A stamped B scope reads all of B's config.yaml keys even with launch home A (#2051)."""
+    module, _, home, mapping = scheduled_profiles
+    config = importlib.import_module(module.__name__ + ".config")
+    (home.parent / "launch" / "config.yaml").write_text(
+        "lcm:\n"
+        "  context_threshold: 0.55\n"
+        "  context_threshold_tokens: 20000\n"
+        "  model_thresholds:\n"
+        "    launch-model: 0.40\n"
+        "  summary_reasoning_effort: low\n"
+        "  expansion_reasoning_effort: minimal\n"
+        "  embedding_query_prefix: 'launch-q: '\n"
+        "  embedding_document_prefix: 'launch-d: '\n"
+        "  unknown_launch_key: true\n"
+        "compression:\n"
+        "  codex_gpt55_autoraise: false\n"
+        "auxiliary:\n"
+        "  compression:\n"
+        "    timeout: 45\n"
+    )
+    (home / "config.yaml").write_text(
+        "lcm:\n"
+        "  context_threshold: 0.67\n"
+        "  context_threshold_tokens: 30000\n"
+        "  model_thresholds:\n"
+        "    bound-model: 0.62\n"
+        "  summary_reasoning_effort: high\n"
+        "  expansion_reasoning_effort: medium\n"
+        "  embedding_query_prefix: 'bound-q: '\n"
+        "  embedding_document_prefix: 'bound-d: '\n"
+        "  unknown_bound_key: true\n"
+        "compression:\n"
+        "  codex_gpt55_autoraise: true\n"
+        "auxiliary:\n"
+        "  compression:\n"
+        "    timeout: 90\n"
+    )
+
+    with host.bind(None, mapping, bound_home=home):
+        from hermes_constants import get_hermes_home_override
+        assert get_hermes_home_override() is None
+        assert config.lcm_env_get("HERMES_HOME") == str(home)
+        resolved = config.LCMConfig.from_env()
+        assert resolved.context_threshold == pytest.approx(0.67)
+        assert resolved.config_sources["context_threshold"] == "config_yaml:lcm.context_threshold"
+        assert resolved.absolute_threshold_tokens == 30000
+        assert resolved.config_sources["absolute_threshold_tokens"] == "config_yaml:lcm.context_threshold_tokens"
+        assert resolved.model_thresholds == {"bound-model": pytest.approx(0.62)}
+        assert resolved.codex_gpt55_autoraise_enabled is True
+        assert resolved.config_sources["codex_gpt55_autoraise_enabled"] == "config_yaml:compression.codex_gpt55_autoraise"
+        assert resolved.summary_reasoning_effort == "high"
+        assert resolved.config_sources["summary_reasoning_effort"] == "config_yaml:lcm.summary_reasoning_effort"
+        assert resolved.expansion_reasoning_effort == "medium"
+        assert resolved.config_sources["expansion_reasoning_effort"] == "config_yaml:lcm.expansion_reasoning_effort"
+        assert resolved.summary_timeout_ms == 90000
+        assert resolved.config_sources["summary_timeout_ms"] == "config_yaml:auxiliary.compression.timeout"
+        assert resolved.embedding_query_prefix == "bound-q: "
+        assert resolved.embedding_document_prefix == "bound-d: "
+        assert resolved.ignored_config_yaml_lcm_keys == ["unknown_bound_key"]
+
+
+def test_stamped_scope_yaml_keys_missing_do_not_inherit_launch_home(host, scheduled_profiles):
+    """A stamped B scope with no config.yaml must not inherit launch home A's YAML (#2051)."""
+    module, _, home, mapping = scheduled_profiles
+    config = importlib.import_module(module.__name__ + ".config")
+    (home.parent / "launch" / "config.yaml").write_text(
+        "lcm:\n"
+        "  context_threshold: 0.55\n"
+        "  context_threshold_tokens: 20000\n"
+        "  model_thresholds:\n"
+        "    launch-model: 0.40\n"
+        "  summary_reasoning_effort: low\n"
+        "  expansion_reasoning_effort: minimal\n"
+        "  embedding_query_prefix: 'launch-q: '\n"
+        "  embedding_document_prefix: 'launch-d: '\n"
+        "  unknown_launch_key: true\n"
+        "compression:\n"
+        "  codex_gpt55_autoraise: false\n"
+        "auxiliary:\n"
+        "  compression:\n"
+        "    timeout: 45\n"
+    )
+    bound_yaml = home / "config.yaml"
+    if bound_yaml.exists():
+        bound_yaml.unlink()
+
+    with host.bind(None, mapping, bound_home=home):
+        from hermes_constants import get_hermes_home_override
+        assert get_hermes_home_override() is None
+        assert config.lcm_env_get("HERMES_HOME") == str(home)
+        resolved = config.LCMConfig.from_env()
+        defaults = config.LCMConfig()
+        assert resolved.context_threshold == pytest.approx(defaults.context_threshold)
+        assert resolved.config_sources["context_threshold"] == "default"
+        assert resolved.absolute_threshold_tokens == 0
+        assert resolved.config_sources["absolute_threshold_tokens"] == "default"
+        assert resolved.model_thresholds == {}
+        assert resolved.codex_gpt55_autoraise_enabled is True
+        assert resolved.config_sources["codex_gpt55_autoraise_enabled"] == "default"
+        assert resolved.summary_reasoning_effort == defaults.summary_reasoning_effort
+        assert resolved.config_sources["summary_reasoning_effort"] == "default"
+        assert resolved.expansion_reasoning_effort == defaults.expansion_reasoning_effort
+        assert resolved.config_sources["expansion_reasoning_effort"] == "default"
+        assert resolved.summary_timeout_ms == defaults.summary_timeout_ms
+        assert resolved.config_sources["summary_timeout_ms"] == "default"
+        assert resolved.embedding_query_prefix == defaults.embedding_query_prefix
+        assert resolved.embedding_document_prefix == defaults.embedding_document_prefix
+        assert resolved.ignored_config_yaml_lcm_keys == []
 
 
 @pytest.mark.parametrize("accessor", ["missing", "raises"])

@@ -521,10 +521,15 @@ def _engine_took_slot(ctx, engine, hermes_home: str) -> bool:
             holder_name,
             getattr(holder, "name", None),
         )
+    # A multiplex preflight can load a profile this process never serves.
+    # Publish same-home failures eagerly; defer foreign-home writes until use.
+    engine._inactive_load_record = {"elapsed_s": elapsed, "reason": reason}
     try:
-        from .inactive_record import write_inactive_record
+        process_home = Path(os.environ.get("HERMES_HOME") or "~/.hermes").expanduser().resolve()
+        if Path(hermes_home).expanduser().resolve() == process_home:
+            from .inactive_record import write_inactive_record
 
-        write_inactive_record(hermes_home, elapsed_s=elapsed, reason=reason)
+            write_inactive_record(hermes_home, elapsed_s=elapsed, reason=reason)
     except Exception as exc:
         logger.warning("LCM-X could not record the inactive state for /lcm doctor: %s", exc)
     return False
@@ -580,6 +585,9 @@ def register(ctx):
         hermes_home = lcm_env_get("HERMES_HOME", os.path.expanduser("~/.hermes"))
 
     engine = LCMEngine(config=config, hermes_home=hermes_home)
+    if _env_flag_enabled("LCM_RECORDER_ENABLED", default=False):  # #2243: off imports and installs nothing
+        from . import recorder
+        recorder.install(ctx, engine)
 
     # Hermes selects the engine whose ``name`` equals ``context.engine``; keep a
     # legacy ``context.engine: lcm`` config working, loudly (#471).

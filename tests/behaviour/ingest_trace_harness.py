@@ -61,7 +61,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_ingest_cursor", "_ingest_cursor_needs_reconcile", "_last_compacted_store_id",
     "_ingest_replay_redaction_changes",
     "_compress_commit_proof", "_last_emission_descriptors", "_compress_occurrences", "_compress_run",
-    "_config", "_hermes_home", "_store", "_dag", "_lifecycle", "_host_rewrite_store",
+    "_config", "_hermes_home", "_db_path", "_store", "_dag", "_lifecycle", "_host_rewrite_store",
     "_host_rewrite_overrides", "_host_rewrite_watch", "_last_active_replay_messages",
     "_last_active_replay_source_identities", "_last_ingest_reconciliation", "_retired_durable_proof",
     "_compiled_ignore_message_patterns", "_compression_boundary_ingest_pending",
@@ -83,6 +83,8 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_host_uid_lineage_cache", "_engine_uids_pending", "_engine_uids_recorded",
     "_pending_ingest_frontier", "_last_ingest_attribution", "_end_attribution", "_ingest_read_only",
     "_ingest_ledger_attempt", "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
+    "_ingest_lock_guard", "_ingest_lock_records", "_ingest_lock_totals", "_ingest_lock_warned",
+    "_ledger_rollback_failures_published", "_ledger_adopted", "_ledger_rebind_too_large", "_frozen_ledger_prepared", "_frozen_tail_reached",
     "_compress_calls", "_emission_handle",
 })
 Trace = list[str]
@@ -325,6 +327,9 @@ def recovery_receipts(engine: Any, value: Any) -> Any:
 
 def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
     state: dict[str, Any] = {}
+    # #2152: path-only state lookup uses binding metadata. Check it against the
+    # real store at every snapshot, without duplicating it into frozen outcomes.
+    assert Path(engine._db_path) == Path(engine._store.db_path), "storage binding path differs from open store"
     # Match address-keyed ledgers to the actual retained message objects before
     # serializing a set/map. These labels preserve sharing, never addresses.
     def register(value: Any) -> None:
@@ -343,9 +348,18 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
     for name in sorted(OBSERVED_ATTRIBUTES - {"_store", "_dag", "_lifecycle", "_host_rewrite_store"}):
         register(observed_attribute(engine, name))
     for name in sorted(OBSERVED_ATTRIBUTES - {"_last_ingest_attribution", "_ingest_ledger_attempt",
+                                            "_frozen_ledger_prepared",  # Transient attempt, cleared before return.
+                                            "_frozen_tail_reached",  # Queue-decision flag; pending tails retain the outcome.
                                             "_compress_calls", "_emission_handle",
-                                            "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned"}):
+                                            "_ledger_rollback_failures_published",
+                                            "_ledger_adopted",  # Commit-only optimization; observed in the attribute stream.
+                                            "_ledger_rebind_too_large",  # In-process cap memo; observed, not a durable outcome.
+                                            "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
+                                            # P1h lock-hold telemetry; no ingest decision reads it.
+                                            "_ingest_lock_guard", "_ingest_lock_records", "_ingest_lock_totals", "_ingest_lock_warned"}):
         value = observed_attribute(engine, name)
+        if name == "_db_path":
+            continue  # Observed by the binding assertion above.
         if name in {"_store", "_host_rewrite_store"}:
             value = {"present": value is not None}
         elif name == "_dag":

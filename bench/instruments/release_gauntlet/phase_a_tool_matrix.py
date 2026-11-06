@@ -153,6 +153,9 @@ def _load_inner(worktree, hermes_repo, release, snapshot, inserted_path):
     sys.modules["hermes_lcm"] = package
     names = ("assertion_store", "command", "config", "dag", "embedding_provider", "engine", "ingest_protection", "tools")
     modules = {name: importlib.import_module(f"hermes_lcm.{name}") for name in names}
+    if (worktree / "maintenance_scheduler.py").is_file():
+        # Trees from the scheduler move on keep the process-wide schedulers there.
+        modules["maintenance_scheduler"] = importlib.import_module("hermes_lcm.maintenance_scheduler")
 
     def cleanup():
         _restore_module_world(snapshot, inserted_path)
@@ -894,7 +897,7 @@ def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None 
             if world_cleanup is not None:
                 # Late maintenance must finish before the ambient home returns.
                 for name in ("_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER"):
-                    if not getattr(mod["engine"], name).quiesce(10.0):
+                    if not getattr(mod.get("maintenance_scheduler", mod["engine"]), name).quiesce(10.0):
                         preflight.append(f"HERMES_HOME maintenance did not quiesce: {name}")
                 # Restore the host interpreter's module world (agent.* and
                 # hermes_lcm families + the inserted sys.path entry): the

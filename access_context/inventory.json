@@ -858,7 +858,7 @@
   {
     "id": "cron-rollup-maintenance-scheduler",
     "category": "cron",
-    "module": "engine.py",
+    "module": "maintenance_scheduler.py",
     "entry_point": "_RollupMaintenanceScheduler",
     "authority_requirement": "write_scoped",
     "discloses": [
