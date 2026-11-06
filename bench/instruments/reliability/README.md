@@ -105,19 +105,22 @@ the host reported `interrupted`. Any other assistant row is surplus.
   `supersedes` / `generated_unproven` explain their own row; an unordered `possible_replay_of` pair explains
   one endpoint only when both rows have the same B2 key in the same lineage. Relations are read from the whole
   store, but a pair across lineages or keys explains nothing. `composite`, `split` and absent relation tables
-  explain nothing. A key's expected and licensed copies are its earliest stored copies (by store ID), so only its
-  last *surplus* rows can be explained: a self relation counts only on such a row, and a pair explains only such an
-  endpoint. A relation on an expected copy (an edited revision's `supersedes`, say) never explains a later copy
-  that carries none, and a pair between two expected copies explains nothing. Store order settles this only for
-  a key with at most one expected or licensed copy: with two or more (genuine repeats, host-licensed copies), a
-  silent re-store stored before a related later copy cannot be told apart, so the key counts its worst case:
-  every row without a self relation may be surplus, and pairs explain nothing there.
+  explain nothing. Copies are counted, not rows: a row whose `tool_calls` holds one call entry twice holds two
+  copies of that key. Store order identifies a key's expected copy only when the key keeps at most one copy
+  (expected, licensed or loose-allowed): that copy is its earliest stored copy (by store ID), so only its last
+  *surplus* copies can be explained. A self relation counts only on such a row and a pair explains only such an
+  endpoint, so a relation on the expected copy (an edited revision's `supersedes`, say) never explains a later
+  copy that carries none. A key that keeps two or more copies (genuine repeats, host-licensed copies) counts its
+  worst case, because a silent re-store stored before a related later copy cannot be told apart: its surplus
+  fills rows without a self relation first, then the self-related rows that hold the most copies, and each
+  self-related row it reaches explains one copy; pairs explain nothing there.
   Maximum matching assigns distinct witnesses to distinct stored rows within each key, capped by
   that key's unlicensed surplus; a stored row explains at most one copy of each key it holds, so an assistant row
   whose content and tool entries were stored twice explains one copy of each. A row whose `tool_calls` holds the
   same call entry twice can explain only one of those copies, so the other stays silent. Duplicate/reversed pairs and
   repeated self relations add no capacity. `silent_surplus_examples` are best-effort: up to 10 of the
-  highest-numbered unexplained rows of each key, usually the later copies.
+  highest-numbered rows of each key that still hold an unexplained copy, rows without a self relation first,
+  usually the later copies.
   Complete store-ID lists drive this split; existing truncated display lists stay as they are.
   `silent_surplus_examples` merges user, assistant and tool examples (up to 10, sorted by store ID/role/hash):
   `{store_id, role, sha256}`. Tool hashes are SHA256 of `json.dumps(key[1:], sort_keys=True)` (the existing

@@ -187,8 +187,9 @@ def test_p1h_a_host_licensed_copy_makes_the_key_fail_closed():
     # repeat (row 3) cannot be told apart, so the key's surplus stays silent (fail closed).
     ([("user", "B")] * 2, [(1, "user", "B"), (2, "user", "B"), (3, "user", "B")],
      [(3, "possible_replay_of", 1)], (1, 0, 1, [3])),
+    # The example is the unmarked row 2, the likely silent copy, not the marked row 3.
     ([("user", "B")] * 2, [(1, "user", "B"), (2, "user", "B"), (3, "user", "B")],
-     [(3, "supersedes", None)], (1, 0, 1, [3])),
+     [(3, "supersedes", None)], (1, 0, 1, [2])),
     # Controls: a relation on the later copy still explains it, by itself or through a pair to the original.
     ([("user", "B")], [(1, "user", "B"), (2, "user", "B")], [(2, "supersedes", None)], (1, 1, 0, [])),
     ([("user", "B")], [(1, "user", "B"), (2, "user", "B")], [(1, "possible_replay_of", 2)], (1, 1, 0, [])),
@@ -201,6 +202,45 @@ def test_p1h_only_later_copies_can_be_explained(expected, rows, relations, want)
     out, split = _split(expected, rows, relations)
     assert (out["surplus_rows"], split["visible_surplus_rows"], split["silent_surplus_rows"],
             [e["store_id"] for e in split["silent_surplus_examples"]]) == want
+
+
+KEY = ("assistant", "k")
+
+
+@pytest.mark.parametrize("groups,relations,want", [
+    # Delta review on #2291: a tool key's ids repeat a row whose tool_calls holds one entry twice. Row 2 holds both
+    # surplus copies and explains one of them; the other stays silent.
+    ([(KEY, 2, [1, 2, 2])], [(1, "generated_unproven", None), (2, "generated_unproven", None)], (1, 1, [2])),
+    # Counted as copies, [1, 1, 2] keeps two copies, so the key counts its worst case: the surplus copy can be one of
+    # the unmarked row's.
+    ([(KEY, 1, [1, 1, 2])], [(2, "supersedes", None)], (0, 1, [1])),
+    ([(KEY, 1, [5, 5, 6])], [(6, "generated_unproven", None)], (0, 1, [5])),
+    # Worst case over copies: row 2's copy and a second copy of row 1 can both be surplus; row 1 explains one.
+    ([(KEY, 2, [1, 1, 2, 3, 4])], [(1, "supersedes", None), (3, "supersedes", None), (4, "supersedes", None)],
+     (1, 1, [2])),
+    # Controls: a surplus copy inside a self-related row is explained by that row, in either branch.
+    ([(KEY, 1, [5, 5])], [(5, "generated_unproven", None)], (1, 0, [])),
+    ([(KEY, 1, [5, 5, 6])], [(5, "generated_unproven", None), (6, "generated_unproven", None)], (1, 0, [])),
+], ids=["repeated-later-row", "repeated-unmarked-row", "repeated-unmarked-row-unproven", "worst-case-over-copies",
+        "one-kept-copy-in-a-marked-row", "every-row-marked"])
+def test_p1h_split_counts_copies_not_rows(groups, relations, want):
+    split = multiset.split_surplus(groups, relations)
+    assert (split["visible_surplus_rows"], split["silent_surplus_rows"],
+            [e["store_id"] for e in split["silent_surplus_examples"]]) == want
+
+
+def test_p1h_a_row_that_holds_a_call_twice_explains_one_copy():
+    # Delta review on #2291, through the tool scorer: row 2's tool_calls holds the expected call twice, so the key's
+    # ids repeat row 2. Row 2's relation explains one of its copies; the other is silent, so B2S fails.
+    call = {"id": "call-1", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+    rows = [(1, "S0", "assistant", "", json.dumps([call]), None),
+            (2, "S0", "assistant", "", json.dumps([call, call]), None)]
+    ids, keys = {}, []
+    stored = tool_calls.stored_keys(rows, store_ids=ids)
+    out = tool_calls.compare(Counter({next(iter(stored)): 1}), set(), stored, store_ids=ids, surplus_keys=keys)
+    assert out["tool_surplus_rows"] == 2 and [k[2] for k in keys] == [[1, 2, 2]]
+    split = multiset.split_surplus(keys, [(1, "generated_unproven", None), (2, "generated_unproven", None)])
+    assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == (1, 1)
 
 
 def test_p1h_b2s_fails_when_only_the_original_carries_a_relation(monkeypatch):
