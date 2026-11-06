@@ -29,6 +29,7 @@ def test_reference_diagnostic_ranges():
 def test_reference_diagnostic_choices():
     assert {name: row[0] for name, row in config._ENV_CHOICES.items()} == {
         "recall_delivery_unit": ("hits", "session"),
+        "recall_delivery_order": ("score", "time"),
         "embedding_provider": (
             "voyage", "voyageai", "ollama", "fastembed", "fast-embed",
             "openai-compatible", "openai", "siliconflow",

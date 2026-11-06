@@ -1,812 +1,812 @@
 {
   "ingest": {
     "admission-aliases": {
-      "outcome_sha": "d4c0e95d9831c3380029c611954607bade2fc6723a59805e56081fd2a9831f17",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "0593d7ad103e873af09cbf8d1f21d0255c7511effd78d51afe3b47d8e4235d21",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "admission-empty": {
-      "outcome_sha": "805fd0090ecd7c8d012261a9cd75fb1c2d351f824c0a5c335f3608d6554feee0",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "c7bc595643a71b3be830330f4351514ee7948f47d5178b3536c8bad876597707",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "admission-full": {
-      "outcome_sha": "a9ea8af16a6a360638413ec95c121de5c9e969a97a7ebd904cf2a1d5986ec410",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "e79111f08534ff1495ef67029f7f8389ce05eec3d0e81374cf7627981d3ebb35",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "admission-ignored": {
-      "outcome_sha": "cf130c30d3abd36789162c77d73d8fc79afdf2603431209d9a9ee214891724a3",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "2ce42a058592995af41d44ebee2cb370d21de0ffaff0312cccbe0106386d5841",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "admission-no-session": {
-      "outcome_sha": "c4d03344f49782eaa66ba3c4c05cc21295bb8707eaec7bddc75c3464de9acdd3",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "5efaaf991553fde074dbe8039ea8e4eaf72247d2d8ba4f212e9ca444ba864882",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "admission-stateless": {
-      "outcome_sha": "1bf6346a5f31a1cc83e882f53b4eb87a1febc5f7eb09f91296d686faea1d7fe3",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a7994b4fb1f1e2e927f3d5b0ad82fddc5077e9b91c45c7005fbccc44356927d1",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "anchor-disabled": {
-      "outcome_sha": "dd43692fd1862cb024decab865b26f2c3003ea1dd7c63f1d8809ee6d5c4cff32",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "534691fa7acfcbca2d367a55025d5ec590e590f323188e512843def694baf7d1",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "anchor-remainder": {
-      "outcome_sha": "05b3ad6ff328a93c9fa7e6b86e636409053ebf0c2af377de3f47ab7eb739c1b3",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "df7c49926b8b8679373741685887bf17ead9668c5c3c5c68e1c17f158645675f",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "anchor-stamp-new-uid": {
-      "outcome_sha": "0c8fd25f1506416931b253d5b4bcbd8955eb099d81e88752f80a182643e81b5b",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "1b2c455faa1f34b989830290aba6547d7f38662a86a44db227047afb1246576e",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "anchor-stamp-replay": {
-      "outcome_sha": "12c9d6da86dbb8cbe1eb8702ba43c71425de46f3f5a85290b190acb37d878e3c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "76199a1429ac3955894800e9d815f99a0f255cbdcec28a8abf271928852de32b",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "anchor-version": {
-      "outcome_sha": "99f69f016e02be42fae55bf626e54b638204c4bd3f0d44d1ed8b4a2666ad6603",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "f963fc43415cb73599323214d4cd4d1bbd76bbdadff709026a2e850d248dbc2b",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "anchor-version-ignore": {
-      "outcome_sha": "0511ce9778ae264f07b5197c1a210baf96ba66774776c715922d5b79eef5c3a6",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "cbc7775e99ef90fda5a4778c8540750c1b80e3684ffdbe44e651a03e80ce4ddc",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "boundary-exhausted-other-digest": {
-      "outcome_sha": "c932bb8128a2f9929a96564e69ddf1f73cc86b8c70c49d800fd2e83b08b75233",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "fca747a433b2e0f8a2c8798b2ac873f31d85916b471edf03c7462a87943439a5",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "boundary-stored-counts-mixed": {
-      "outcome_sha": "2c975f138081d4bad8a38db3dd2465fc5e79aa46de21e87d16052c41174c046b",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "e1b77badd60c033601ad0c8701a6f26617b8cf4b5e183a6e281dc3ec2d07b02f",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "boundary-two-digests": {
-      "outcome_sha": "41f6a8c71b220a4d885c8cdc730a914b9bbda85e1a2a0f6dc6b97421854f991e",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "ce17c1cf1d0f271e8bfc6c48b3165c6ea725e81775a00141a03486fad33567ec",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "cache-absent": {
-      "outcome_sha": "12c9d6da86dbb8cbe1eb8702ba43c71425de46f3f5a85290b190acb37d878e3c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "76199a1429ac3955894800e9d815f99a0f255cbdcec28a8abf271928852de32b",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "cache-divergent-cache": {
-      "outcome_sha": "1134ecd39d18c06bb75cd0856cdfaa8095cb149884a68fff945ccc797b79707b",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "98effbe7a3d7b2efb2a58cbfa68570ff8659a709109ee6ef1f8ba01a5ea39a64",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "cache-empty-delta": {
-      "outcome_sha": "12c9d6da86dbb8cbe1eb8702ba43c71425de46f3f5a85290b190acb37d878e3c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "76199a1429ac3955894800e9d815f99a0f255cbdcec28a8abf271928852de32b",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "cache-new-stamp": {
-      "outcome_sha": "284d99accf670a54967fb8ad8f95baf2367a86f464e99e4fef7f37ab307e775a",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "b02325089b763f9cca164adfc8f3080fb3c10164ef267ec3878bb689852a0a74",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "cache-new-uid": {
-      "outcome_sha": "0c8fd25f1506416931b253d5b4bcbd8955eb099d81e88752f80a182643e81b5b",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "1b2c455faa1f34b989830290aba6547d7f38662a86a44db227047afb1246576e",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "cache-rewrite": {
-      "outcome_sha": "e48cb14212952f1081a3b0b222b6aa1ee9fe30a6cb315fa335e8c8ceeff7fefa",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "1872d7f8591a3ea88fa68ee0ad9cce55c9836e33362d8c2bd85100af9f2e82ef",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "cache-short-cache": {
-      "outcome_sha": "12c9d6da86dbb8cbe1eb8702ba43c71425de46f3f5a85290b190acb37d878e3c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "76199a1429ac3955894800e9d815f99a0f255cbdcec28a8abf271928852de32b",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-end-allow-end": {
-      "outcome_sha": "5e47d65e4e76e40e3767d1841a0d7e58967cbde27b85dedd67debf2d4442f010",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "8ce111b53575ca4f54d902b7fa1d6fd442e6d97befa30e4108ca1573dae85d8d",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-end-delta": {
-      "outcome_sha": "2fc4f6b5ae8400e12c556e445af46b87d7a4af0e32094018b076091d6da5f96a",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "613f8daa9165abb776ec2b43e78d4bcd391ef8eadc0c073e5f719eb4f1f4d21b",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-end-full": {
-      "outcome_sha": "5e47d65e4e76e40e3767d1841a0d7e58967cbde27b85dedd67debf2d4442f010",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "8ce111b53575ca4f54d902b7fa1d6fd442e6d97befa30e4108ca1573dae85d8d",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-end-new-uid": {
-      "outcome_sha": "d658e705f82edb9c2db11af29e4a82544782064d0bfbed5592190a93460e3301",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "49fe1fea31f8f6a38443155d48779a5c4c5b260a4d2fef9eae21eb05ddeb5fc4",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-metadata-conflict": {
-      "outcome_sha": "1d73ee4822d8f1eab9f0117530c63fe26dd6fa8b8bc514c152e69656cb37aa8b",
-      "reason": "#1286: a warm ingest stores a row out of host order, so the durable commit proof is re-keyed (two metadata writes: the proof and the host occurrence snapshot) and the later cold bind proves its cursor from it; the re-key's store reads add two host-rewrite cache entries; no return or alias outcome changed"
+      "outcome_sha": "6847ddda88dbc86c4a53429274e1b956dbf70d802ca7aabefa5d4552c6dfaa01",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-v2-allow-end": {
-      "outcome_sha": "5a4d2099d8089b9198faad7df5bd2e8fd14b0c76c8ab62df65fab9303286e504",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "38e93d4d1858e004c2b1bd9bb5872146ffb1b32e2f8838e8bbb72e5882af6b1e",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-v2-delta": {
-      "outcome_sha": "26b40c1f2bf7c76820e8d93b7a707b47c7a3363be99ee326ce1fe13e309f4198",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "c5b1e4564756d2784707f66c102e719cc96f7997a6f94c3e43f1ced2f02342c9",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-v2-full": {
-      "outcome_sha": "5a4d2099d8089b9198faad7df5bd2e8fd14b0c76c8ab62df65fab9303286e504",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "38e93d4d1858e004c2b1bd9bb5872146ffb1b32e2f8838e8bbb72e5882af6b1e",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-v2-new-uid": {
-      "outcome_sha": "af9e532a860e2e8f6cd593c5073797071ee7ecdcee0636311fd595843592a5ba",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "b195f9f8168174c54e56f8e064de35be885923a730de7933fc0ed21554d60ea6",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-v3-allow-end": {
-      "outcome_sha": "4ee11357a7adb6c0991029a5a9fa5518213b4be42a1854b773b961854c628924",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "1bb8b3d7c9ced56e26e76633ab0ece83ad0fabb5977427c3caa1b04f572b738d",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-v3-delta": {
-      "outcome_sha": "0d2e232c77a238016cf646541715e40ea1534605c9f0bc0eb4be6dc1de687f02",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "867513d9eb9e18ee6034a8650a8ec6837c6b43f16e0bcf2f53cb5d1393dc90f1",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-v3-full": {
-      "outcome_sha": "4ee11357a7adb6c0991029a5a9fa5518213b4be42a1854b773b961854c628924",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "1bb8b3d7c9ced56e26e76633ab0ece83ad0fabb5977427c3caa1b04f572b738d",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-v3-new-uid": {
-      "outcome_sha": "2153bca9754eccd10af1005d63cc54c5d06c5104e9348141325fce2e19552f23",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "39db8d378e10a48834bd47ebd012803d164528c8c2f42c98ec437cf910302ecd",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-v4-allow-end": {
-      "outcome_sha": "3ad9cf82a1cd2c98a702d474f968ab694ca0e3427565f665b627fffcdbd1c0a2",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "395b6b1dd2a2722c167badabcc1a899de89f282237226ee3e13dfd608a7f3cdb",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-v4-delta": {
-      "outcome_sha": "68710f3c72326f79a84b5d9d12fde24bb6e84a31f2304c0b33d69ff03cf2380b",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "b95eaf5585e20530c849c9adab1cfc56e4bbc8ac9a5ff60a50dd39f7c26d6c5a",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-v4-full": {
-      "outcome_sha": "3ad9cf82a1cd2c98a702d474f968ab694ca0e3427565f665b627fffcdbd1c0a2",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "395b6b1dd2a2722c167badabcc1a899de89f282237226ee3e13dfd608a7f3cdb",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "durable-v4-new-uid": {
-      "outcome_sha": "0a5704aeb5d26a82860e9ce38b1b865a446aefaf107bc42f0fdf43ae15c28ca7",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "e5f056ab444486431200ccedfb148bf27ad022bbf53f97990ceacb8ad8341e36",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "empty-all-ordinals": {
-      "outcome_sha": "ee6153c1df98fa617f1af800f7c328f47da3ea5d0368fccc6df7b266fd9ec604",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "523e2d176a46ca168714749e96df8aa85a385f4763908671a8895db15c45bedf",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "empty-child-placeholder-prefix": {
-      "outcome_sha": "4a65d4d8af23c6fd552570dd4983f01a72d8e27c6335489e2a15ba78aed97a34",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "75689358359270ed55fdcb8faf638f30f2c8d9d4a6fd46d72637b425bad7d8c0",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "ignored-changed": {
-      "outcome_sha": "2e5787291a7af9c97c6cfe69414f37576d1ecacce2615141569debb553ea2cd7",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "1c03457912dbd884da0ffd8391fc0a9e39ce4097db850534985b0acba3141367",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "ignored-delta": {
-      "outcome_sha": "e8f630f3dd3a0bc1716d41264e9f298f853a5aac2ff61e609d3436be6db40c6b",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "3bd446c872e66e2c7226a5ffdd1835659557b6a5ea903e876c84203b36a6d661",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "ignored-full": {
-      "outcome_sha": "58a614908fdf239f03135b8dcbc7fa39b3e908662707509a789ef114a539e992",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "cb4ae2f45a8432c9e66c79c6b3a06ff5b7051a65b3331836387813bc5a83947d",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "ignored-new": {
-      "outcome_sha": "c46b6a943ff59b3722d9f873d30c7ec251bb48bbbb796c470babf13f31265431",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "059fb5d9b1a3d83ca252d5140c699e975f8bbebd1bb41a78871d2d59f6141b3a",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "ignored-prefix": {
-      "outcome_sha": "43b9d840b6321bd0dfbe95caec1123a6d480c1312ac478c3959aa56ae58e04bb",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state; the cold cursor avoids repeating ignore-pattern accounting"
+      "outcome_sha": "19c5683a2f79a3faa7bdca6b87168df91bc5324b8748956bacbf950823705d9c",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "ignored-rewrite": {
-      "outcome_sha": "d8d5382e7623ec7ca7b88d34ded57eef447154ec26568a370a3545177cf37c1a",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "10433f52e2cdb8a40cd41ea91287f0beb5eb80231833f8ed12de07decf3e67e7",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "ignored-suffix": {
-      "outcome_sha": "a3f7b22d38fa9f7fabb1047bbd625a5001790fb79cf2096510578ee1fd912ff7",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
+      "outcome_sha": "ce7b96b202c22993066be7feedd133808e3483912a96ab2a9aeeafe7ce7bb7ad",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "ignored-warm": {
-      "outcome_sha": "627d3b776dac73070d0768f6a15e41487b0c3847ec8e34db7e16959588e76e3e",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "aadecacf2c373b94ebbf0ee8415dd1b0e45cdbc5752b01619ec8f3550310024d",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "marker-changed": {
-      "outcome_sha": "a9c56ae8fa14571a13cfd38a2f74b5bef0d7d588a327ad874293d3d1b4803369",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "9bdbfa43d9211c120c7d0524d458292eda62c995f6c83f189cc23ca44241f33a",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "marker-delta": {
-      "outcome_sha": "5e50f6a7a69ea280e535a75e0d10726857f9be9ba24b63dd52e47476963367d9",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state; the cold cursor avoids one duplicate persisted-output tool row; all distinct row payloads remain"
+      "outcome_sha": "d0615bfba9f60a92c68454ba32d13c786335eda1161fd2006b7b3834c75f0f6e",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "marker-full": {
-      "outcome_sha": "07fb332c63b3e3b70f6a6fd95bf2cccea747f0cc90daa95bcfc20b223741c06a",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state; the cold cursor avoids one duplicate persisted-output tool row; all distinct row payloads remain"
+      "outcome_sha": "9ce4d37cf8ec095814ad8ddbb2945c4299d26259ef5ac2a355cc21d6d7cce994",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "marker-new": {
-      "outcome_sha": "359e6ad7c0294bba0c98d40562bc6be3e1418cee28b2d6d6bfa843ca5a48c803",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "e2a8a06135a65f76f590acb49cb069f1ece041e26702ffbaadc68df0446a09f7",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "marker-prefix": {
-      "outcome_sha": "37afc547f414443ed972e483023ae37ae845a51dcd62ea7720956046a46fc139",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
+      "outcome_sha": "1ecdafe4db7999ac48151d1840e42ad3c64378755fbceba5488beaf58b86f382",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "marker-rewrite": {
-      "outcome_sha": "fd7216c4ad033add5c9496162e6a3ee5ec8b1a5a1086475e8d1141f3a6f958af",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state; the cold cursor avoids one duplicate persisted-output tool row; all distinct row payloads remain"
+      "outcome_sha": "4e72273abc41e59854090ed598bd4f50def7f87246d096931da5d23f2b918525",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "marker-suffix": {
-      "outcome_sha": "ea7b83cfd48a1ee2571e4b7fadc5225bd0164a64ec13ed905444baa4e884899b",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state; the cold cursor avoids one duplicate persisted-output tool row; all distinct row payloads remain"
+      "outcome_sha": "1ba8aff73cdb6e42d982ad485259e2a034ac4b83d317855248528cb8640e8479",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "marker-warm": {
-      "outcome_sha": "8ef7f956f59c0233a268f279aa2d515c62153d02981bc9fa58541383f5231b06",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves stamped re-deliveries of the same assistant and tool rows already stored, so they are not stored again (4 rows instead of 5); every distinct occurrence remains and no row is added"
+      "outcome_sha": "34f345dbc4002d0e4b52312e85689aa10dbfbb7baa59b20d2f9679c6f1d8790a",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "opaque-raw-stub-assistant-1": {
-      "outcome_sha": "1d5eab18ed89ed405a4b466e3536f081866150ad9bbc7bdad6235b3e7034da03",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "74c5e505fdf1d1c422eaa8a39e30b723f319c62c1b2d2d3adde0c07c280f87e2",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "opaque-raw-stub-assistant-2": {
-      "outcome_sha": "bfbdc1c761ef02593bc510b47dd566b710d73e664f78f0cbf1723600c81b8b76",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "3456fb00a3ac567b4b99d5b4ee5f4cdd1bd01173129f7621c44d13747aa9cf99",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "opaque-raw-stub-tool-1": {
-      "outcome_sha": "ce95697bd075f4e6af374053f4ec05f95302e335957d1903db1728fed6b5bc83",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "37a6581f1d5cb7925f3b18f9e8239e721bf8b07be70486f14b3212d2250c81ac",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "opaque-raw-stub-tool-2": {
-      "outcome_sha": "6a5343ae5fbd6eb66090c97713a8a09e2cd2a67e8ab2247458cc55a011d88573",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "ea46c06be26dc0d55a21d888bd8ee6e6d80edd72e3f78a05d4b7142922e8a4e1",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "opaque-raw-stub-user-1": {
-      "outcome_sha": "1e4216934f42f891dfb4c19df997485f5f8195cfbc430334a9c072a745a9dd7e",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "008af7ad4ddf047f181b25959bf7e8c9cb48348f4bf9d66d7f848626c96940c3",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "opaque-raw-stub-user-2": {
-      "outcome_sha": "808883c6e5071202ef28f4536db84d5792d18d9683b5cafc5fbe235dd3f2e703",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "c2d7eb33e9a464879408e6d856efc42f3e4a94e578f85575e98e4a4cb8ef9b14",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-0-1-all": {
-      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-0-1-generated": {
-      "outcome_sha": "7da53ec70efa894bdf6c2b8ea1451d71a009c02acbfe1e58980461cff88caf39",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "25a2da2ad738f05778ff133736543d6d8176ddc0be7fe989b79863d654498776",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-0-1-mixed": {
-      "outcome_sha": "2c975f138081d4bad8a38db3dd2465fc5e79aa46de21e87d16052c41174c046b",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "e1b77badd60c033601ad0c8701a6f26617b8cf4b5e183a6e281dc3ec2d07b02f",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-0-1-single": {
-      "outcome_sha": "644616b7c4a5736da231ded21674e051efd8ffab516fbd16c3523db4d7242bc2",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "db115af9fcc63e765f1e7afae4afd6ad1525814d56406866e06ee302ab024c2f",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-0-1-stored-counts": {
-      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-0-1-summary": {
-      "outcome_sha": "bd78516d7009fd547225a92bfa389f6513223f97257c365aa18115a8d0381a46",
-      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
+      "outcome_sha": "1c652fca1f84ff4dfc5213a9fa78b398014dfd5c7ab1e86650f9a61f4b779b12",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-0-2-all": {
-      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-0-2-generated": {
-      "outcome_sha": "7da53ec70efa894bdf6c2b8ea1451d71a009c02acbfe1e58980461cff88caf39",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "25a2da2ad738f05778ff133736543d6d8176ddc0be7fe989b79863d654498776",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-0-2-mixed": {
-      "outcome_sha": "fd47e3436df0ff560fa17915882e0a40875f695bcf62a755415dd9ef9c5901dd",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "0eb95c46e901f88bfb7106188d514733d75be4359deca7f816c56b84708d5cae",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-0-2-single": {
-      "outcome_sha": "644616b7c4a5736da231ded21674e051efd8ffab516fbd16c3523db4d7242bc2",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "db115af9fcc63e765f1e7afae4afd6ad1525814d56406866e06ee302ab024c2f",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-0-2-stored-counts": {
-      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-0-2-summary": {
-      "outcome_sha": "bd78516d7009fd547225a92bfa389f6513223f97257c365aa18115a8d0381a46",
-      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
+      "outcome_sha": "1c652fca1f84ff4dfc5213a9fa78b398014dfd5c7ab1e86650f9a61f4b779b12",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-1-1-all": {
-      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-1-1-generated": {
-      "outcome_sha": "eedc4681fc94616004e2a4416aab030eb5f4273d4f7982fafc0313c4bb232f08",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "289ce2b33ede7d4d48c6ef7270847e50578709650e6672e7a53ca36d172ff0ff",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-1-1-mixed": {
-      "outcome_sha": "2c975f138081d4bad8a38db3dd2465fc5e79aa46de21e87d16052c41174c046b",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "e1b77badd60c033601ad0c8701a6f26617b8cf4b5e183a6e281dc3ec2d07b02f",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-1-1-single": {
-      "outcome_sha": "644616b7c4a5736da231ded21674e051efd8ffab516fbd16c3523db4d7242bc2",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "db115af9fcc63e765f1e7afae4afd6ad1525814d56406866e06ee302ab024c2f",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-1-1-stored-counts": {
-      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-1-1-summary": {
-      "outcome_sha": "36222bba788399db205798aa2022e514c10ce9a82a86b7a3d1dd019e60f9b111",
-      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
+      "outcome_sha": "dc3b3e3daeb64f4d3608a4a6c61452c03ea8ef73c68c40706625d128391c550a",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-1-2-all": {
-      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-1-2-generated": {
-      "outcome_sha": "eedc4681fc94616004e2a4416aab030eb5f4273d4f7982fafc0313c4bb232f08",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "289ce2b33ede7d4d48c6ef7270847e50578709650e6672e7a53ca36d172ff0ff",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-1-2-mixed": {
-      "outcome_sha": "fd47e3436df0ff560fa17915882e0a40875f695bcf62a755415dd9ef9c5901dd",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "0eb95c46e901f88bfb7106188d514733d75be4359deca7f816c56b84708d5cae",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-1-2-single": {
-      "outcome_sha": "644616b7c4a5736da231ded21674e051efd8ffab516fbd16c3523db4d7242bc2",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "db115af9fcc63e765f1e7afae4afd6ad1525814d56406866e06ee302ab024c2f",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-1-2-stored-counts": {
-      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-1-2-summary": {
-      "outcome_sha": "bd78516d7009fd547225a92bfa389f6513223f97257c365aa18115a8d0381a46",
-      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
+      "outcome_sha": "1c652fca1f84ff4dfc5213a9fa78b398014dfd5c7ab1e86650f9a61f4b779b12",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-2-1-all": {
-      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-2-1-generated": {
-      "outcome_sha": "eedc4681fc94616004e2a4416aab030eb5f4273d4f7982fafc0313c4bb232f08",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "289ce2b33ede7d4d48c6ef7270847e50578709650e6672e7a53ca36d172ff0ff",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-2-1-mixed": {
-      "outcome_sha": "2c975f138081d4bad8a38db3dd2465fc5e79aa46de21e87d16052c41174c046b",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "e1b77badd60c033601ad0c8701a6f26617b8cf4b5e183a6e281dc3ec2d07b02f",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-2-1-single": {
-      "outcome_sha": "644616b7c4a5736da231ded21674e051efd8ffab516fbd16c3523db4d7242bc2",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "db115af9fcc63e765f1e7afae4afd6ad1525814d56406866e06ee302ab024c2f",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-2-1-stored-counts": {
-      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-2-1-summary": {
-      "outcome_sha": "36222bba788399db205798aa2022e514c10ce9a82a86b7a3d1dd019e60f9b111",
-      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
+      "outcome_sha": "dc3b3e3daeb64f4d3608a4a6c61452c03ea8ef73c68c40706625d128391c550a",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-2-2-all": {
-      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-2-2-generated": {
-      "outcome_sha": "eedc4681fc94616004e2a4416aab030eb5f4273d4f7982fafc0313c4bb232f08",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "289ce2b33ede7d4d48c6ef7270847e50578709650e6672e7a53ca36d172ff0ff",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-2-2-mixed": {
-      "outcome_sha": "fd47e3436df0ff560fa17915882e0a40875f695bcf62a755415dd9ef9c5901dd",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "0eb95c46e901f88bfb7106188d514733d75be4359deca7f816c56b84708d5cae",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-2-2-single": {
-      "outcome_sha": "644616b7c4a5736da231ded21674e051efd8ffab516fbd16c3523db4d7242bc2",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "db115af9fcc63e765f1e7afae4afd6ad1525814d56406866e06ee302ab024c2f",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-2-2-stored-counts": {
-      "outcome_sha": "0325a16547de1137c0e2708f0c54de2204f3611c3a7a21e176dd46989b16f708",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "placeholder-2-2-summary": {
-      "outcome_sha": "bd78516d7009fd547225a92bfa389f6513223f97257c365aa18115a8d0381a46",
-      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
+      "outcome_sha": "1c652fca1f84ff4dfc5213a9fa78b398014dfd5c7ab1e86650f9a61f4b779b12",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-consumed-consulted": {
-      "outcome_sha": "63f07512f4ecdc1b66088eadd07159856a02237704daf08ac6a7e42ac6d7d299",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "54e074dccfe522bc8649f26579589c25e8c753648f9f5685857d31a9ec03d5ec",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-consumed-divergent": {
-      "outcome_sha": "54137bab167c4255248b34b63d8485d0bc77c8d497117f2144c83574f0df0bff",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "b4d35a2583bb7fa23cadf854a714f67e115df0210e605f93def7c93670819464",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-consumed-foreign-conversation": {
-      "outcome_sha": "2d2f5366b452b02cb22b74773067e4df8e3da1200c9f4387d4638e004d8e3cd4",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "c8f3a8dbc98c8c051badd58dcdd50b143548be1eeebca7c43f888861c3e0de4e",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-consumed-foreign-session": {
-      "outcome_sha": "fc59462319d9208953675ffcbb15392c2bcf1581eb4706db24d0db900d3c4693",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "f82141a9f6868862f8caca4855b146ff39a0709326179d5fe06709d22a760b58",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-consumed-full": {
-      "outcome_sha": "bc5c0dd2c04c8f17fc25f2ad44447a207f14b37cb896e91cc238e04eae37fdb8",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "1716b27174a703aeb55a51b5bdeab9a58885b3c9366fb3f09712c823d631b6ed",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-consumed-input": {
-      "outcome_sha": "bc5c0dd2c04c8f17fc25f2ad44447a207f14b37cb896e91cc238e04eae37fdb8",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "1716b27174a703aeb55a51b5bdeab9a58885b3c9366fb3f09712c823d631b6ed",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-consumed-merge": {
-      "outcome_sha": "75777188f8f4948223560e5eb80e5732b0a1794442981251e8a68098b0a7e8c0",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "df8e97e6057b664969bdba97378abbd4ea2e9d8b37f0c1c6bd7f81de041022ab",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-consumed-missing-metadata": {
-      "outcome_sha": "736e7ed69abb0750ef57ed26e43e5673f4bd22a9032747bcb73468ac8f54de1c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "b6fc046aba9b1a026390322b8ddbaa3824810b18417a3a59a0577988bf58888c",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-consumed-new-stamp": {
-      "outcome_sha": "284d99accf670a54967fb8ad8f95baf2367a86f464e99e4fef7f37ab307e775a",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "b02325089b763f9cca164adfc8f3080fb3c10164ef267ec3878bb689852a0a74",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-consumed-new-uid": {
-      "outcome_sha": "0c8fd25f1506416931b253d5b4bcbd8955eb099d81e88752f80a182643e81b5b",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "1b2c455faa1f34b989830290aba6547d7f38662a86a44db227047afb1246576e",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-consumed-repair": {
-      "outcome_sha": "462a849d71b683173323c298f2998c8925f29f3839b75628914aa6f768c5d1e3",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "626e36bbb549c6572a9cd6a57aaf380cdde6902bc8cc0eabc45e2b23bc600a4e",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-consumed-short": {
-      "outcome_sha": "3b60ebb540b6acc48a8d7918819043c82bbe7f33229389a2b44b953f1ce928bb",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "cf3bbef2d74fd3e6ba73782813bb51f3ba2d25a643a0bb3b3910aca022c61584",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-consumed-zero": {
-      "outcome_sha": "4331f59e0ea21b29a98c11e4f3c0bf7028bfaf9b58c9ee8bf23ef98087552ed0",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "edf4f932684e13a813b18f5771701e5fa79d91a87c97d4187aee195688aa83f2",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-consulted": {
-      "outcome_sha": "111ad6878024573f47d564f34989054c7c9e928300cc8d6013b35aebdc25f305",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "1ce067366bcfca699d599f7ea083a0696c244c1ce9314829a155cf0ca146b3c0",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-divergent": {
-      "outcome_sha": "ce67651e6094e898c2f82c95d867459492d2787231b68f8d4fc02a00762cb9da",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "fbeb570beddd975cff227e22f7addf08cc48f6cc33410c939fe6f098f6a75efd",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-foreign-conversation": {
-      "outcome_sha": "b948f3732569dc6f6a335e370ad4bd5a6c6e004851bac6bd799639d4a8c83810",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "6f15d6153a655da54019862a14227d07d978a1a9df01e394992b32add5b010fb",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-foreign-session": {
-      "outcome_sha": "dbe8c69f5c5e080e0a74d4a9fc30bd2a14e43b1e13bdf5d6521ef21f70d6d7ce",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "11b74169b138d79555fbf4fcc50bc24a53bcb4a1f629691b4cf09fec835c567a",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-full": {
-      "outcome_sha": "bc5c0dd2c04c8f17fc25f2ad44447a207f14b37cb896e91cc238e04eae37fdb8",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "1716b27174a703aeb55a51b5bdeab9a58885b3c9366fb3f09712c823d631b6ed",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-input": {
-      "outcome_sha": "bc5c0dd2c04c8f17fc25f2ad44447a207f14b37cb896e91cc238e04eae37fdb8",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "1716b27174a703aeb55a51b5bdeab9a58885b3c9366fb3f09712c823d631b6ed",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-lossy": {
-      "outcome_sha": "631c124094c33cf943fc3756f8356ceed5e6ce0bde0c711574d6b752945bc0fb",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "c0292d7e9007840689ab526a78f2288ea6432681fef195ae914cc24df3fddd56",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-merge": {
-      "outcome_sha": "6afaa84e77c3bb1be80f34d4d29fc1b6b4b2af14f0945724b8af4721fea27872",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "652a9fca6eecbf0a261289ec0e75d49841609cf78374334e4e4b4faa1ae52c57",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-missing-metadata": {
-      "outcome_sha": "736e7ed69abb0750ef57ed26e43e5673f4bd22a9032747bcb73468ac8f54de1c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "b6fc046aba9b1a026390322b8ddbaa3824810b18417a3a59a0577988bf58888c",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-new-stamp": {
-      "outcome_sha": "284d99accf670a54967fb8ad8f95baf2367a86f464e99e4fef7f37ab307e775a",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "b02325089b763f9cca164adfc8f3080fb3c10164ef267ec3878bb689852a0a74",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-new-uid": {
-      "outcome_sha": "0c8fd25f1506416931b253d5b4bcbd8955eb099d81e88752f80a182643e81b5b",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "1b2c455faa1f34b989830290aba6547d7f38662a86a44db227047afb1246576e",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-remap": {
-      "outcome_sha": "ff20ec62360275c81a58a112d12a27894be9364d028134219b18d61b0dd09bc9",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "68b3232836d5d0b36d4e634dc48fbad1b9f3d0ec30f3a2ad46bf711519a6ac5c",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-remap-new-stamp": {
-      "outcome_sha": "ed4d8410510f56f2e8feacb02861ba8cb9aebd1bba5c3af820e8b06e392c9edf",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "fe10e0fe6a6f3db21253eba94b76289ae777b0ff4d364ee96c6ff9ab96d4af2a",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-repair": {
-      "outcome_sha": "6ec40135e3fd858257f394bc1defc5ecb253d12b2ae9ed6978843ba16f12d975",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "844e095f446a781036f69f6ee9d5005bed521026914120be757cd56c28cca364",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-short": {
-      "outcome_sha": "76d2a8b9bb83bfe17df691a52121488cb95342bc0d1aca4df16ec2e3e7976f4f",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "40f34afd18f43cbfdb54ce36bba718ce8baaa5def6dea32cce26d457b8e3f92d",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-native-zero": {
-      "outcome_sha": "ab38b157c298ab3b280de44f801d8dad71790ad0e05a85b191a4a197f86a4640",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "5295f87e0c692744890923ab038d8bdf4e581630f4b14edf9d4ad785458ceb95",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-output-consulted": {
-      "outcome_sha": "e3995cf1c36d1d2fe3b951e783bf52dad6dad3f64056525db735c82ada0adedc",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "97e3fcbe8e4b7d5fe73ce667de3a5a601103d8de09d0e86759bf9a6370a7e4fa",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-output-divergent": {
-      "outcome_sha": "e20457359a4c6f5682a36f5f95a6597646f0fc0b51966123f2ae8bc4062d9bfd",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "c2da69ee3aac25a5c559e40f3607a516c6bd23325649591f6df6fce279350657",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-output-foreign-conversation": {
-      "outcome_sha": "c54e80126a5bc966e459fdf9b46b2c04348bbea164ce43c3939e3e5893042b85",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "ac159421b3d5b4c45c5b862e8b28be4cd247f918ecf0684a3e011dd08fc8dfab",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-output-foreign-session": {
-      "outcome_sha": "5420777b688148bf856be565aa7635a84acc6a99a4d9569595e1fe1af499b9b1",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "9914a374e3162e392b7fcf6a775b25bc349fd44109d81e31f6bd19c46b815c09",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-output-full": {
-      "outcome_sha": "bc5c0dd2c04c8f17fc25f2ad44447a207f14b37cb896e91cc238e04eae37fdb8",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "1716b27174a703aeb55a51b5bdeab9a58885b3c9366fb3f09712c823d631b6ed",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-output-input": {
-      "outcome_sha": "bc5c0dd2c04c8f17fc25f2ad44447a207f14b37cb896e91cc238e04eae37fdb8",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "1716b27174a703aeb55a51b5bdeab9a58885b3c9366fb3f09712c823d631b6ed",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-output-merge": {
-      "outcome_sha": "ab7b407d1798fca6b9d988a83c91255909bf39338be55b621706103bcaad350d",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "fc04fec20cf190b2f9d43d14fdafdc6efc910b9588dbb8be7f369bf12201a58c",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-output-missing-metadata": {
-      "outcome_sha": "736e7ed69abb0750ef57ed26e43e5673f4bd22a9032747bcb73468ac8f54de1c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "b6fc046aba9b1a026390322b8ddbaa3824810b18417a3a59a0577988bf58888c",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-output-new-stamp": {
-      "outcome_sha": "284d99accf670a54967fb8ad8f95baf2367a86f464e99e4fef7f37ab307e775a",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "b02325089b763f9cca164adfc8f3080fb3c10164ef267ec3878bb689852a0a74",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-output-new-uid": {
-      "outcome_sha": "0c8fd25f1506416931b253d5b4bcbd8955eb099d81e88752f80a182643e81b5b",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "1b2c455faa1f34b989830290aba6547d7f38662a86a44db227047afb1246576e",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-output-repair": {
-      "outcome_sha": "f84307aae39d59fb23caaa2bdef1e531003fa822a6dc3a5272b309dc1b689ca7",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "114f6692ffb7735fe9fe6f9c65dc03d25922c78aa69e24e62aa11dbf754ac6b6",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-output-short": {
-      "outcome_sha": "bcbfe9605c96e6a4428b017129c1d638eaa638d7096ecd3b0847d0444ce319e9",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "f25bbf0e9d5ad8d039fe4516d6429a53a0db405cc48ebdc33b9cc3171871cc85",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "proof-output-zero": {
-      "outcome_sha": "16af7586bfee4ded0eb078ce0cd8a9133b1f76eaf76c40e8a7afad52dee545ed",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "85796e1e5475f3236a3e002272473b407f1ca2bf23e1253adedb4ac5c04960c2",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "protect-after-filter-copy": {
-      "outcome_sha": "e9ed3b41d911c806aa710ce3d60bd52da24eb9cd26e8f43ccf86a4f95748f216",
-      "reason": "P1e PR-A (#1440): a queued session-end tail now carries kind and its frozen ledger evidence; no other outcome changed"
+      "outcome_sha": "a246f570ceb20afd9d6e0a1a6da656443ea53b48be2bcd482654bc5a6fea5481",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "protect-large-assistant": {
-      "outcome_sha": "978bdce946042638ae228c9d702189795cc8300f839fa36ff4a4d86b8ef4722c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "6418a69566bfdbd6a040899f0c05c3d3c500cb59355d915cb1c913180de35140",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "protect-large-user": {
-      "outcome_sha": "3f97fa9ca138cd00b1b1020bd19f47c241dcf6117f9876d3058753e69a9c1d29",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "c0131ec17aab9c41fbb89f0d5df6606b54d070e7ec29ecf3bf536c398531f1c4",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "protect-path-error": {
-      "outcome_sha": "f10495541421f6cf5df4d9c92f846527c52de0df55607a6d66e7ba9a7508a9de",
-      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
+      "outcome_sha": "d933fb6aef7c84afad6f5cda73cec58201d22bd5918b8f82d17f0ca9af80a219",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "reconcile-tool-after-new": {
-      "outcome_sha": "2991ea58eb142f621e513dace8a4ff3ebfb90a18863e6f6aef5a51c039a55c71",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
+      "outcome_sha": "182e78afd9e928f6d5f91216a10a4e6143e21b6fe85c2bccf0cb3e7965e48008",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "repeated-equal-occurrences": {
-      "outcome_sha": "6c9ca3d51c8850c00c16ef49d814db811c715f68f328e6f8cccee8365991fa3b",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "480bf34f73468d8895de439c70c004e9e40216bbce40ebd09e4b9e8ae81a626e",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "repeated-tool-id": {
-      "outcome_sha": "b6927d0dc3ec9ecb9dc1a357ff714efce5a22038dc74590098ba0f45f5398ef8",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
+      "outcome_sha": "cd10319f8b730e9e5d52b44526525971561eca21fbf751846530d86f01e01568",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "replay-build-mapped-ignore": {
-      "outcome_sha": "705c4ffa4f898254f7662a813a8ec1a66409ef7062a038052f200dd2fc1adc17",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "4f38d7ab5c79110083ed38450964fa8943e381e2195d740426ddd4145cf83bdc",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "replay-build-quarantine-prefix": {
-      "outcome_sha": "981187f57076efaef9bd8603a8e0f01afef2c3dcb74fa5e4144a6b79c50bd8f4",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "7f793e447fd6dd979e04a190da8f6673b083e148d143e05e0cec82462c3870b2",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "row-filter-generated-append-error": {
-      "outcome_sha": "b73f7f2d3c6989b9b32a484eced9b468e33428a8d69d096131540815c19e519b",
-      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged. On main this failed ingest also committed an empty message_relations table without its rows; now it stores nothing, and after the next ingest the stored tables match main"
+      "outcome_sha": "f63f055c032e2140d3f301e90b88daec2292179d03f7148b290ec1e0927019fe",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "row-filter-ignore-ledger-lock": {
-      "outcome_sha": "da250781a4b031cbcb4d9fcc5f5ba60eba8b1bdbc1526164d694d5ae8a96efd5",
-      "reason": "P1e PR-A (#1440): a queued session-end tail now carries kind and its frozen ledger evidence; no other outcome changed"
+      "outcome_sha": "bd4cf4f02baa8557de7273d45dd274179ad180e328775ecab4138b1d88c26203",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "row-filter-ignored-append-error": {
-      "outcome_sha": "2b71d9dbacfaa2c179fc52d7420c71ad4c274f99b5f29ec11d2122f00b8e65f9",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "3f56ffe1f1390ddd00c7317496ceac8ef5f96f62dd807b8a07f8cdbb2dafcef7",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "scaffold-metadata": {
-      "outcome_sha": "c4915ab52bf90ba8ba842e4f49ac72d1a85b728d86765871684544e9f0488ee8",
-      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
+      "outcome_sha": "d184f6c9c5f1b291fc8a590c09f5d4805a71276ac938f3784e7bdcc65a8872bc",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "sequence-compaction": {
-      "outcome_sha": "a37af98893381354bb65922d9aa8dd335f0beb4a39aea6080a08ff925ba72389",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "f3e4d0a11d835be206842761ba7921f173e2a907ee648b0d7f4851f8bc4cf2ce",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "sequence-host-merge": {
-      "outcome_sha": "7fe1c25e04d8563141f80dbd2d8f2d4b19400043d8f1df5fdb663d38dc1c4474",
-      "reason": "#1286: the re-key trigger fires but keeps the existing proof (no metadata write); its store reads cache one host-rewrite lookup on the engine, which the state snapshot records; no return or alias outcome changed"
+      "outcome_sha": "a1980d8064636061dbd57068e51f8ca318ef6cfea08c2e4c0a4065687f37555d",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "sequence-rewrite": {
-      "outcome_sha": "fec61f779a38d4ebcee037628905e773d34f66ea31d5223b300efa79b933550d",
-      "reason": "#1286: the cold bind of a session that already held rows proves nothing from its stale proof, so it re-keys the proof (two metadata writes: the proof and the host occurrence snapshot) and the next cold bind proves its cursor (4 of 4) from it instead of reconciling from cursor 1 through the identity anchor; only the state outcomes changed, no return, raise or alias outcome"
+      "outcome_sha": "def18c33a9af3f5b192e295e53c2e85a8e14b84b435e3449398db30bf16cd407",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "sequence-rotation": {
-      "outcome_sha": "8bbb5c7d0ac702e19089ca444eb06b6f091133935e07c03e882b6e2e1b42f44e",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "47c5a4570caafab9cce0ccccc622e32d4fb5fa1cfeed041af5647ef275b77659",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "sqlite-append": {
-      "outcome_sha": "63aa55284cd9397586ae5f25cebbb891c9cb85425aef8f9ac140e6ee4355607d",
-      "reason": "P1b-1 (#2055): a failed ingest now rolls back its in-memory state and sets needs_reconcile (spec decision 4), and the state snapshot adds three engine attributes; stored rows unchanged"
+      "outcome_sha": "697bbc833a7d3826366179b5c331203aeb3923b4280c7a9bed2b5d33fc9aae0b",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "sqlite-duplicate-existing-tail": {
-      "outcome_sha": "e4a47bb3924e2e8c55c9298cbca8a5142e4259d0b2c5aa6ff87289eebd12e049",
-      "reason": "P1e PR-A (#1440): a queued session-end tail now carries kind and its frozen ledger evidence; no other outcome changed"
+      "outcome_sha": "7a32093374e4930c78ac782ab5e7cd54e8a94b1d0442d443782cbb2e80432a70",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "sqlite-duplicate-tail": {
-      "outcome_sha": "be703e9f962196e9c6ed7a89f341a3a701bb0cdd4dd8e5710a48e0543e8cba81",
-      "reason": "P1e PR-A (#1440): a queued session-end tail now carries kind and its frozen ledger evidence; no other outcome changed"
+      "outcome_sha": "ff597a1b4a91dce7619557468e0890f737185c516081f6b9532899b63b224488",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "sqlite-durable": {
-      "outcome_sha": "85fb46d00198bd22b91d5c164ddeb5903d69bdbcb69b7ed870ca4675bdf30aa7",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "832d945207d96944cf3c9f3e5dd7a53d4749e6977e031db126d6ceaa2839baad",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "sqlite-locked": {
-      "outcome_sha": "635c618292d0be5fe516ffeafc4b980bd321f017f6043e314b1c887afc9e38a7",
-      "reason": "P1e PR-A (#1440): a queued session-end tail now carries kind and its frozen ledger evidence; no other outcome changed"
+      "outcome_sha": "986e65b36029ea06cbe775c513c4ea29e89e1993bc117d684fb6b5f38bedd8c6",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "sqlite-locked-existing-tail": {
-      "outcome_sha": "8913da6e8d8910c3a5a29f6ed4f52b87354331d0e2b71dc93be5ef39e855d5f9",
-      "reason": "P1e PR-A (#1440): a queued session-end tail now carries kind and its frozen ledger evidence; no other outcome changed"
+      "outcome_sha": "f98196dd6fd2c535cdabfcad71af986c17f4706d0b4e7a320d08dbd56cd598e8",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "sqlite-metadata": {
-      "outcome_sha": "f8feea0fd166723728c6791646603d085af912d3869b7775e90f587834846890",
-      "reason": "P1c-2b-1 (#2055): the scenario stores a row carrying an LCM summary or scaffold marker, so ingest now writes its one generated_unproven relation (lazy relation table plus one row)"
+      "outcome_sha": "b61a8f6b8fc770f0d4453b3d8d970598d97125d856445a45126a5fe28cd9706c",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "sqlite-prematch": {
-      "outcome_sha": "41b68a337512aa9b9d5940e4d07669070a7b6cf904a5955af8b42c1a8f4f33f5",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "32357c872573a634184ccd08769ce3afa2f539f070a3829a4e411b1e797cb4c1",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "sqlite-probe": {
-      "outcome_sha": "a9ea8af16a6a360638413ec95c121de5c9e969a97a7ebd904cf2a1d5986ec410",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "e79111f08534ff1495ef67029f7f8389ce05eec3d0e81374cf7627981d3ebb35",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "sqlite-relation": {
-      "outcome_sha": "b3724e7fde7fbd907fc8fb6258e41a5f0b99d84f17f667b4868befb7ad4dc20b",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "b142e7987f30c8e8a8dc2d9c61302359edd2910979029a08f15781f4b38057c0",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "sqlite-snapshot": {
-      "outcome_sha": "15422467aa78792e9fa5771379a9d1cbab8881ea4e7c182dfb5ab3edd53ba039",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "4c0cd2fce3554e68481f14771bcf43c9c0b1545e97286c75e996aa08af8820f8",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tool-segments-after-new": {
-      "outcome_sha": "633e597101fff9a2ca677cc6e33a4105ad11ed951165a4e91042b014bf4a36ac",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "ee0bcc3f3a23d1ef78accdaa56d201699192a85f72252ab36d91da222f98908d",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tool-stub-host-held": {
-      "outcome_sha": "5ed364a1f316b20014fba80f61e3e448d73591a531e9e31a22529c8206268ae7",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "a2e7b5c1245bcc420c4c6a1f62b6878d3a238f3d16e75664d3426472cb0b6669",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tool-stub-pair": {
-      "outcome_sha": "65e98b251c579d0e1f437e88440e53c7e7de406e4b3bcd856eeb2800a2b465fb",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "4af76b264c812d8eac09de796f56dcdfe1d381c8b281d135dcfcaf0c0d2cedec",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tool-stub-recovery": {
-      "outcome_sha": "ad46c11b76ecfddcf43908ce4b50531b3811d431e9bebdd942e97ea50b14f655",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "56cec9faeae615ff14d78b91a19e6114a00728350469374527d5e667b9a4942e",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tool-stub-single": {
-      "outcome_sha": "d947f12b3a3771c5b4ef3c1cb2976ecd0a889afaeaf4546888b49524905fb251",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "5bafeeaf86e8422cb49f15a39963f33df04c83057c59959a20643c296e23b2bf",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tool-stub-warm": {
-      "outcome_sha": "d92a48d7259c0d48d5f8675048ae1f9d7566caf96c99e9fe15152c1bd59c8c5d",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "eccecfb6b2af319d7fbcaf59ef9e885e78e270c8b012c908542702e3384a1c40",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tools-changed": {
-      "outcome_sha": "eb401f8a9d8cdf0d6a88d1b3072b846136bb3880fc04f85c5632f2076a920703",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves stamped re-deliveries of the same assistant and tool rows already stored, so they are not stored again (7 rows instead of 9); every distinct occurrence remains and no row is added"
+      "outcome_sha": "3bb8d8aacfd5d7eafdbf042f02cdfae4c866d1b448eb29b1904b72d941bcc8b9",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tools-delta": {
-      "outcome_sha": "ac4852cc168100d6d24441397cec3ddaac37695198069e13e2fb9cee0bcb3458",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
+      "outcome_sha": "b921ab6034c297c3b769c6303cc3d85c10d2945051fd1e401a8e32abc01f39dc",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tools-full": {
-      "outcome_sha": "12c85096f619e11daee01565c1133b60c663d0d43bfe25ea8ec1a91a679c9c96",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
+      "outcome_sha": "eb40d6edadcd2cea93a197e4e0f6395e26a5ae4b2144c8e5df86bf6bc7a2913f",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tools-new": {
-      "outcome_sha": "f300a7e059328c9a46dea32458ae6e90d8674e195ce1387323da96b0432c0034",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "62a5c4b56f231d8361b2ec8b4e08dd8c995be30ddd01118f020456c54f2625d9",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tools-prefix": {
-      "outcome_sha": "1a98c2d697aba9b381a6319d646a896b528678286c467c2bed522d5276db68c9",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
+      "outcome_sha": "e66dd58d0d4ec4d4324dd1dc2951a16de63ff652305e094cfe2cba21747496a7",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tools-rewrite": {
-      "outcome_sha": "3a217a7b9b236116b7dd5a2caa1e5466d86d1c4f71c1aa4b74e334e1cd91ffdb",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
+      "outcome_sha": "69f039aae8b566c067f3e855a5816458cc96f35e522b8ea7a2e864b8538e0a61",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tools-suffix": {
-      "outcome_sha": "c5ee95318464128985136e6654bb6d95bd2d54ae82b47d3360629dad55c6fe0c",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves stamped re-deliveries of the same assistant and tool rows already stored, so they are not stored again (5 rows instead of 6); every distinct occurrence remains and no row is added"
+      "outcome_sha": "a99a74bc5f0ff88fd779c885993eea8c5c3e94af29447c5f53d8e680cdbae857",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tools-warm": {
-      "outcome_sha": "f272e15a34f5c06fd46de7c472f323c704e3186f1dec47d308f05cda8ed8a080",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves stamped re-deliveries of the same assistant and tool rows already stored, so they are not stored again (4 rows instead of 6); every distinct occurrence remains and no row is added"
+      "outcome_sha": "35dd333ae5ecb9e670ca962c413888621f09aaef715afca1918929428fa1a0a6",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "turns-changed": {
-      "outcome_sha": "9312c4cfc107410ffee0e8694b3b4d6ac6c6a15f2f2b47a7368bba6ba8fb5cc3",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "c3d5ac8eb376e4d7e1ec3849a679e4b43052a7e81cbfd6e3374f6cff4eedc647",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "turns-delta": {
-      "outcome_sha": "2fc4f6b5ae8400e12c556e445af46b87d7a4af0e32094018b076091d6da5f96a",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "613f8daa9165abb776ec2b43e78d4bcd391ef8eadc0c073e5f719eb4f1f4d21b",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "turns-full": {
-      "outcome_sha": "5e47d65e4e76e40e3767d1841a0d7e58967cbde27b85dedd67debf2d4442f010",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "8ce111b53575ca4f54d902b7fa1d6fd442e6d97befa30e4108ca1573dae85d8d",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "turns-new": {
-      "outcome_sha": "5623eaef3bdf620323e0f109e7751f551d6b39624b7b793a4fa98821544c5df7",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "6b7c9a5c6b8ec14050b06c6baba227b0591de4d2b701538af03a1bc423c3de70",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "turns-prefix": {
-      "outcome_sha": "592e434a16fee0d3b418db6998f81902ed751af801ddafd4bf5143887c14e162",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
+      "outcome_sha": "4f54ff1f9c5f9bf2a5e17a1322dbeb9b6c9afe287c40b1b05b49c8a28f6281c7",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "turns-rewrite": {
-      "outcome_sha": "cb58a1b3167e686d25298f7ffff5b70117d0ee0e41e8008831a27b63799a8769",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "12b745b5ecd8f53f3622ffea416366ea182786a1f07e1125d97edb6a33dea466",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "turns-suffix": {
-      "outcome_sha": "440389d6c4bf519220c02ca4169038e735b48ecded1ac2f1be16de8a7a0ea3ba",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
+      "outcome_sha": "35d2120d6411e3b01db06df93d6ea13a163480175d4e25597a25dcf79c42b8d0",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "turns-warm": {
-      "outcome_sha": "12c9d6da86dbb8cbe1eb8702ba43c71425de46f3f5a85290b190acb37d878e3c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "76199a1429ac3955894800e9d815f99a0f255cbdcec28a8abf271928852de32b",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "uid-bindings-new": {
-      "outcome_sha": "ea2d64a4b71ae4c8eb8e3eef4688ab701c1a9c74269b5a5bbacc5fd41635e399",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves an unstamped re-delivery of the same row with the same host uid already stored, so they are not stored again (1 rows instead of 2); every distinct occurrence remains and no row is added"
+      "outcome_sha": "690d2e5818b2cb5a75706a17e297c2d57c3b5d6ba4fa955d8bfa87fe8cca986f",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "uid-bindings-new-occurrence": {
-      "outcome_sha": "96106697daa621091437f94972c970b83473a24095f354cd8b0dcd90925be97b",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "784d36357b3268632f21ffbdad6a20746aee38b48421763de2bb5fd3de904bb4",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "uid-bindings-replay": {
-      "outcome_sha": "98723e792401a6d4d624ef178deb9838bfea789f519ac202232b70578e26fecb",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "59ddafb6d1d7b1b2d5b7a59281f8800dba2a82d287fd87a026e5781d161843f2",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "whitespace-changed": {
-      "outcome_sha": "bdf9c6bd98658b98c69b2f88920f5e7932445b9e76943c51c58cd6bfefe2841e",
-      "reason": "P1d (#2055 fix 2): the cold-start cursor candidate proves rows this session already stored, so the cold state records the larger cursor and its reconciliation record; stored rows and bindings equal the candidate-off run's"
+      "outcome_sha": "31ac0e72c0888ba9ac6c3133d8942ad312f734a3e1d1e74fb4d39a999c7b515d",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "whitespace-delta": {
-      "outcome_sha": "6f54eb8e02acbde772db17c82a4599de5811a2f16046243569c602135b6576b7",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "1c5d5fd42cb0997b3ad0922b08442ebd8190887ea1124f1b828ac92c93a3f9cb",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "whitespace-full": {
-      "outcome_sha": "9ae13effe5d0f82e1a370531812c310c4c9a6d284e9874db74146adf6465ba6b",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "a62875eaca00a25cf69598923f59663af4c2e2e1dff5fa2da8d1863b71964a97",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "whitespace-new": {
-      "outcome_sha": "fc561790bebde706a91e89bc6ce7614299356da69eef02d58f4111085ae6541c",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "08cab749ab77c7c31469c51407db392da229bd23c77a233d9e5cce818ef1e9a7",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "whitespace-prefix": {
-      "outcome_sha": "66a7d66d500fa6ec2b6a0f5944a6f9d9c3bc21527cbdfa9a4c539a0da0ef863b",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
+      "outcome_sha": "5c585ae92e1da6e4ed1c43c77123e8d97bd4c25e809c5274d04fa534dba97b48",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "whitespace-rewrite": {
-      "outcome_sha": "4a5f0e6d97f60a34140017ba2e0af8f7a2597baba43b81c941e952cc537b504a",
-      "reason": "P1g-1 (#2055): the exact lookup materializes the existing empty legacy relation table"
+      "outcome_sha": "02963cfd7e579babbd7ef1026efa8468cec2899e9bd4d2de283539547595d4c2",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "whitespace-suffix": {
-      "outcome_sha": "996aca9fe335cf1631f2a58578b89756157245de43c297436f31ff27a8fa30b2",
-      "reason": "P1g-1 (#2055): migrated refs supply the exact cold-cursor candidate and its reconciliation state"
+      "outcome_sha": "3e268c4a3cfceba3fef920d579215ace9105f3f1664ce128fe7c2b27163a8b83",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "whitespace-warm": {
-      "outcome_sha": "489a4f0037919e5b1d52091a36bb2899734904748c90824e88d093c63f3d6df6",
-      "reason": "P1b-1 (#2055): the ingest state snapshot adds the engine attributes _end_attribution, _ingest_read_only and _pending_ingest_frontier; no other outcome changed"
+      "outcome_sha": "11387fbb85cd8e938eb1d18700666034070207cba95cd8cf692adadd2be0463b",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     }
   },
   "compress": {

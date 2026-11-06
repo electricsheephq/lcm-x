@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- New: opt-in `recall_delivery_order="time"` / `LCM_RECALL_DELIVERY_ORDER=time` delivers the same selected `lcm_recall` hits oldest to newest by host observation time, with untimed hits and summaries last. The default `score`, session delivery, and internal recall retain their existing order.
+
 - Removed: cache-friendly follow-on condensation and transcript GC (#1246); their keys remain parsed and ignored with one warning per process when enabled, and legacy GC placeholders remain readable.
 
 - New: `scripts/lcm_x_mcp.py` (`lcm-x mcp`), a read-only stdio MCP server for Claude Code over one Hermes store. It serves `lcm_recall`, `lcm_grep`, `lcm_expand`, `lcm_load_session` and `lcm_describe` with their production schemas and outputs, opens the store read-only per call and never writes it; results carry `store_uuid` and degraded-mode flags. Hermes stores are unchanged: the reader derives `store_uuid` from the store file's identity (`store_uuid_source: derived`) unless a writer has stamped one. (#1192)
