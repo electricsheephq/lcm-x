@@ -385,6 +385,33 @@ prepends the policy. The canonical file and digest source is
 
 ## Troubleshooting
 
+### SQLite connection and descriptor counts
+
+Storage opens lazily on first real use. Once bound, an engine holds three core
+connections: `MessageStore`, `SummaryDAG` and `LifecycleStateStore`.
+`clone_for_agent()` creates independent runtime engines; each clone that opens
+storage gets its own connections. An unused registered prototype need not open any.
+See [`engine.py`](../engine.py) (`_ensure_storage`, `_bind_storage`, `clone_for_agent`)
+and [`sqlite_session.py`](../sqlite_session.py) (`open_connection`), which opens
+the handles for the core stores.
+
+Enabled assertion and entity stores each add a connection; query views and
+adaptive retrieval share one `QueryViewStore`. Vector stores, tool reads,
+integrity scans, stem backfill and embedding passes can add connections.
+Rollup maintenance opens a private DAG and rollup stores; a slow summarizer can
+keep them open past the maintenance budget. Pending session-end tails can retain
+engines or detached stores until drained or process exit. Shutdown also leaves
+connections open if compaction is still running, with an explicit warning.
+
+Count per process with `lsof -nP -p "$PID"`, using the configured database path
+from `lcm_status`. Separate numeric FD rows whose NAME is exactly that database
+from `-wal`, `-shm`, memory-map (`mem`) and deleted-file rows. A descriptor total
+is not a SQLite connection count: platform and SQLite state affect the ratio.
+Compare repeated samples with the same live agents and maintenance activity.
+Rising counts or deleted descriptors merit investigation; a flat total alone
+neither proves a leak nor proves every retained engine is necessary. Other
+processes, including dashboards, must be counted separately.
+
 ### `Could not apply live compression config` once per session
 
 On Hermes Desktop or the TUI, this warning comes from Hermes' live compression
@@ -399,8 +426,10 @@ settings do not update LCM-X's threshold.
 
 ### Session-end warning says `final messages may be absent` or `retry pending`
 
-The interrupted or SQLite-lock raw-flush warning includes `unflushed=N`: the pending message count
-before the final ingest attempt, without message content. The outer ingest/finalize warning includes
+The interrupted or SQLite-lock raw-flush warning includes `unflushed=N`: a cursor-based estimate
+before the final ingest attempt, not a durability count, without message content. While the ingest
+cursor awaits reconciliation (after a rebind, a lossy proof or a tail recovery), it reports
+`unflushed=unknown`. The outer ingest/finalize warning includes
 the same field only when ingest has not finished. The session-end SQLite busy timeout stays 50 ms.
 When a lock skip keeps the rows in memory, the warning says `retry pending at the next session start
 or end in this process, at engine shutdown, or at a normal interpreter exit (not os._exit)` and names
@@ -522,7 +551,7 @@ Useful environment variables:
 | `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `0.0` | Disabled at `0.0`; when set, permits critical-pressure bypasses for bounded deferred catch-up only |
 | `LCM_SURVIVAL_FIT` | `true` | When compaction cannot bring the returned list under the model window (a publication failure, a sweep deadline, a lock), drop the oldest whole user turns from live context until it fits; an oversized newest turn gets a bounded projection. Nothing is deleted: the rows stay stored and reachable with `lcm_grep` / `lcm_load_session`. Logs `LCM survival fit applied`, warns the user once, and `/lcm doctor` reports `survival_fit` |
 | `LCM_SURVIVAL_RESERVE` | `0.15` | Share of the model window the survival fit keeps free for the response and host overhead (the fit target is window x (1 - reserve), minus the observed host overhead) |
-| `LCM_HOST_MESSAGE_UID` | `shadow` | `shadow`: on a host that sends `message_uid`, records the row each uid was bound to in the droppable `host_uid_bindings` table and counts agreement with the existing identity matching; ingest, replay and emission are unchanged, and `/lcm doctor` reports `host_uid_*` counts only. `off`: no capture, no table writes, no counts and no log line. Under `shadow` and `on`, canonical uid evidence can also exclude a proven hidden re-ingest copy of an assistant message from leaf summary input (the row stays stored and searchable); `off` disables that. `on` behaves exactly like `shadow`: both record count-only would-reject alias UID-conflict diagnostics in the debug log without changing matching, stored rows, bindings, or ingest writes. `off` performs no UID/binding reads on this diagnostic path. Unknown values behave as `shadow` and log one warning. Bindings are deleted with their messages, and lineage keys are namespaced by Hermes home, so one database shared by several homes keeps them apart |
+| `LCM_HOST_MESSAGE_UID` | `shadow` | `shadow`: on a host that sends `message_uid`, records the row each uid was bound to in the droppable `host_uid_bindings` table and counts agreement with the existing identity matching; ingest, replay and emission are unchanged, and `/lcm doctor` reports `host_uid_*` counts only. `off`: no capture, no table writes, no counts and no log line. Under `shadow` and `on`, canonical uid evidence can also exclude a proven hidden re-ingest copy of an assistant message from leaf summary input (the row stays stored and searchable); `off` disables that. `on` behaves exactly like `shadow`: both record count-only would-reject alias UID-conflict diagnostics in the debug log without changing matching, stored rows, bindings, or ingest writes. `off` performs no UID/binding reads on this diagnostic path. One read is not gated: bindings stored by an earlier `shadow` run are still read as occurrence proof for NULL-stamp audit copies (#1403) after a switch to `off`. Unknown values behave as `shadow` and log one warning. Bindings are deleted with their messages, and lineage keys are namespaced by Hermes home, so one database shared by several homes keeps them apart |
 | `LCM_SUMMARY_MODEL` | auxiliary | Override summarization model |
 | `LCM_INGEST_LEDGER` | `shadow` | Foreground ingest records bindings, stamp observations and view vectors inside its transaction. On a cold or reconciled start, `shadow` also uses the ledger's occurrence-proven prefix as a cursor candidate. It can only move the cursor forward past rows proven stored or skipped by `LCM_IGNORE_MESSAGE_PATTERNS`, so it can change which incoming rows are stored. Ordinary isolated ledger failures fail open; busy errors still retry the ingest, and a lost owner transaction or savepoint error still rolls it back. `off` disables setup, ledger writes and the candidate, and restores the legacy cursor choice; unknown values mean `shadow` with one warning per process. Tail drain, delegated children and compaction do not write the ledger at P1b-2b. |
 | `LCM_SUMMARY_FALLBACK_MODELS` | empty | Comma-separated summarization models tried after `LCM_SUMMARY_MODEL` or the auxiliary task default fails |
@@ -1215,9 +1244,9 @@ from summaries. They remain inspectable later through
 
 Active-replay stubbing is on by default and requires ordinary large-output
 externalization. Newly ingested textual tool results above the first-sight token threshold (10,000)
-are durably externalized and immediately replaced in provider-visible replay,
-including results in the protected fresh tail. Preflight adopts that replay
-change even if no leaf compaction is eligible. At a compaction, a second historical
+are durably externalized at ingest, including results in the protected fresh tail.
+Below threshold, provider-visible replacement waits for the next real boundary;
+a size-only preflight can defer adopting the replay change. At a compaction, a second historical
 assembly pass replaces older eligible results from the aged threshold (2,000 tokens)
 before evaluating the assembly budget and respects the protected fresh tail. Tool roles, `tool_call_id` values, and
 compatible structured text block types/keys are retained; the historical pass

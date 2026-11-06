@@ -29248,8 +29248,9 @@ class TestExtractionDuringCompress:
 
         extraction_calls = []
 
-        def mock_extraction_llm(prompt, model="", timeout=None):
-            extraction_calls.append({"prompt": prompt, "model": model, "timeout": timeout})
+        def mock_extraction_llm(prompt, model="", timeout=None, deadline=None):
+            extraction_calls.append({"prompt": prompt, "model": model, "timeout": timeout,
+                                     "deadline": deadline})
             return "- Decided to use PostgreSQL\n- Will migrate by Friday"
 
         def mock_summary(**kwargs):
@@ -29268,6 +29269,8 @@ class TestExtractionDuringCompress:
         # Extraction was invoked with correct model
         assert len(extraction_calls) > 0
         assert extraction_calls[0]["model"] == "test-extract-model"
+        # #1149: the compress budget's absolute deadline reaches the extraction call
+        assert isinstance(extraction_calls[0]["deadline"], float)
 
         # Extraction prompt contains serialized message roles
         assert "[USER]:" in extraction_calls[0]["prompt"]
@@ -29300,7 +29303,7 @@ class TestExtractionDuringCompress:
         eng.context_length = 200000
         eng.threshold_tokens = 500
 
-        def failing_extraction_llm(prompt, model="", timeout=None):
+        def failing_extraction_llm(prompt, model="", timeout=None, deadline=None):
             raise RuntimeError("LLM service down")
 
         def mock_summary(**kwargs):

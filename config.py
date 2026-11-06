@@ -256,11 +256,13 @@ _host_message_uid_mode_warned = False
 
 
 def host_message_uid_mode() -> str:
-    """``LCM_HOST_MESSAGE_UID``: ``off`` disables UID capture and the UID-binding reads. ``shadow`` (default)
-    writes bindings and never skips a row on a UID alone, but its bindings are read as evidence: store-complete
-    copy exclusion (#1124), the NULL-stamp audit proof (#1403), the tail-rewind veto for a bound stored row, and
-    tool-segment replay binding. In every mode, an incoming ``message_uid`` on the row vetoes the stamp-tail
-    rewind. ``on`` behaves exactly like ``shadow``. Alias UID conflicts are count-only diagnostics (#1519).
+    """``LCM_HOST_MESSAGE_UID``: ``off`` disables UID capture and new bindings, and stops these binding reads:
+    store-complete copy exclusion (#1124), the tail-rewind veto for a bound stored row, tool-segment replay
+    binding, the survival-fit carrier split and the alias-conflict count. It does not stop the NULL-stamp audit
+    proof (#1403, ``identity_anchor``): bindings left from an earlier ``shadow`` run can still prove an
+    occurrence there after a switch to ``off``. ``shadow`` (default) writes bindings and never skips a row on a
+    UID alone, but its bindings are read as evidence by all of the above. In every mode, an incoming
+    ``message_uid`` on the row vetoes the stamp-tail rewind. ``on`` behaves exactly like ``shadow``. Alias UID conflicts are count-only diagnostics (#1519).
     An unknown value means ``shadow``, with one WARNING per process."""
     global _host_message_uid_mode_warned
     raw = (lcm_env_get("LCM_HOST_MESSAGE_UID") or "").strip().lower()
@@ -486,6 +488,8 @@ _SUPPORTED_LCM_CONFIG_YAML_KEYS = {
     "summary_reasoning_effort",
     "expansion_reasoning_effort",
     "embedding_query_prefix", "embedding_document_prefix",
+    "large_output_active_replay_stub_threshold_tokens",
+    "large_output_active_replay_stub_aged_threshold_tokens",
 }
 
 
@@ -1028,6 +1032,8 @@ _PARSER_BY_TYPE = {
 # Fields whose env reading needs provenance tracking or a computed default;
 # ``from_env`` handles these explicitly, so the uniform loop skips them.
 _SOURCE_TRACKED_ENV_FIELDS = frozenset({
+    "large_output_active_replay_stub_threshold_tokens",
+    "large_output_active_replay_stub_aged_threshold_tokens",
     "fresh_tail_count",
     "fresh_tail_max_tokens",
     "leaf_chunk_tokens",
@@ -1540,6 +1546,21 @@ class LCMConfig:
                 setattr(c, name, prefix_yaml[name])
 
         c.ignored_config_yaml_lcm_keys = _ignored_lcm_config_yaml_keys(cfg_yaml, env=env)
+
+        for name in ("large_output_active_replay_stub_threshold_tokens",
+                     "large_output_active_replay_stub_aged_threshold_tokens"):
+            default = getattr(c, name)
+            raw, source = _lcm_config_string_with_source("LCM_" + name.upper(), name, str(default), env=env)
+            warning = None
+            try:
+                value = int(raw)
+                if value < 500 and not (value == 0 and "_aged_" in name):
+                    raise ValueError("below floor")
+            except (ValueError, TypeError):
+                value, source = default, "default"
+                warning = f"invalid {name} ignored; use at least 500 tokens (aged 0 inherits first-sight)"
+            setattr(c, name, value)
+            _record(name, f"env:LCM_{name.upper()}" if source == "env" else source, warning)
 
         # Source-tracked fields (provenance recording and/or a computed default)
         # stay explicit; the uniform loop below skips them.

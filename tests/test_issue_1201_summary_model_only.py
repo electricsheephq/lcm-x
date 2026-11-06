@@ -148,7 +148,7 @@ print(json.dumps(dict(merged=merged, repairs=repairs)))
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.parametrize("key", ["model_only", "host_model_only"])
+@pytest.mark.parametrize("key", [None, "model_only", "host_model_only"])
 @pytest.mark.parametrize("sentinel_row", ["generated", "human"])
 def test_r5_pinned_host_sentinel_merge_keeps_human_visible(monkeypatch, key, sentinel_row):
     _host(monkeypatch, key)
@@ -179,7 +179,8 @@ def test_r5_pinned_host_sentinel_merge_keeps_human_visible(monkeypatch, key, sen
                 merged.append(msg)
         return merged
 
-    generated = {"role": "user", "content": "Generated context."}
+    generated = {"role": "user", "content": "Generated context.",
+                 "display_metadata": {"model_only": True, "origin": "lcm"}}
     human = {"role": "user", "content": "Human request must stay visible."}
     sentinel = generated if sentinel_row == "generated" else human
     sentinel["content"] = "\x00json:" + sentinel["content"]
@@ -188,6 +189,8 @@ def test_r5_pinned_host_sentinel_merge_keeps_human_visible(monkeypatch, key, sen
     merged = pinned_merge(rows)
     assert len(merged) == 1 and human["content"] in merged[0]["content"]
     assert not merged[0].get("display_metadata", {}).get(key), "merged human text was hidden"
+    assert not merged[0].get("display_metadata", {}).get("model_only")
+    assert merged[0]["display_metadata"]["origin"] == "lcm"
 
 
 def _r3_generated_merge_group_display(engine, monkeypatch, human):

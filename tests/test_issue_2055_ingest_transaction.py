@@ -1262,3 +1262,45 @@ def test_begin_waits_for_a_writer_within_the_existing_budget(ingest_case):
     assert released.is_set() and not errors and engine._ingest_failure_count == 0
     assert engine._last_ingest_attribution["busy_snapshot_retry"] is False
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
+
+
+def test_overlapping_ingests_on_one_engine_isolate_pending_frontier(ingest_case, monkeypatch):
+    """#2073: a second thread entering _ingest_messages waits for the write lock before touching _pending_ingest_frontier."""
+    engine, _seed, host = ingest_case
+    later = [*host, _m("assistant", "fresh reply", 21., "fresh-reply-uid")]
+    append = engine._store._append_protected_batch
+    first_in_append = threading.Event()
+    second_started = threading.Event()
+    errors = []
+
+    def second_ingest():
+        try:
+            second_started.set()
+            engine._ingest_messages(later)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=second_ingest)
+
+    def slow_append(*args, **kwargs):
+        result = append(*args, **kwargs)
+        if not first_in_append.is_set():
+            first_in_append.set()
+            thread.start()
+            assert second_started.wait(2)
+            # Give the second thread a window to reach _ingest_messages while the first still holds the transaction.
+            threading.Event().wait(0.05)
+        return result
+
+    monkeypatch.setattr(engine._store, "_append_protected_batch", slow_append)
+    try:
+        engine._ingest_messages(host)
+    finally:
+        thread.join(5)
+    assert not thread.is_alive() and not errors
+    assert [row["content"] for row in engine._store.get_session_messages("S")] == [
+        "seed", "seed reply", "fresh", "fresh reply"
+    ]
+    assert engine._ingest_cursor == len(later)
+    assert engine._frontier.cursor == len(later)
+    assert getattr(engine, "_pending_ingest_frontier", None) is None

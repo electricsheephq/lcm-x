@@ -245,3 +245,8 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   respin.
 - Agents preparing a release produce the rc tag and receipts; the GA cut itself follows the
   maintainers-own-releases rule above, which the release-manager delegation meets.
+- LCM-X for Claude Code is its own release unit: annotated `claude-code-v<version>` tags on a
+  `main` commit, with its own gate (the unit's audit gate on real sessions R1-R10, the growth check
+  and the CLI smoke) and no rc tag. The rc-first rule and Phases A-D above govern Hermes `v*`
+  releases only. The rules are in `bench/specs/RELEASE-READINESS-V1.md`, "Claude Code unit
+  releases"; the steps are in `docs/process/claude-code-unit-release.md`.

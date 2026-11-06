@@ -185,6 +185,9 @@ SPECIAL = {
     "leaf_target_max_tokens": (D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, HUGE),
     "summary_prompt_version": (1,) * 16,
     "stub_first_exit_target_ratio": (D, D, D, D, 1.0, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
+    # #1982: below the 500-token floor falls back to the default; the aged threshold also accepts 0.
+    "large_output_active_replay_stub_threshold_tokens": (D,) * 15 + (HUGE,),
+    "large_output_active_replay_stub_aged_threshold_tokens": (D, D, D, D, D, 0) + (D,) * 9 + (HUGE,),
 }
 
 

@@ -6,6 +6,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: the session-end raw-flush warning reports `unflushed=unknown` while the ingest cursor awaits reconciliation, and the count is described as a cursor-based estimate, not a durability count (#1364).
+- Fix: opt-in pre-compaction extraction installs its absolute deadline as the host stream deadline, so a slowly streaming extraction call stops at that deadline, as summary calls already do (#1149).
+- Fix: on hosts that advertise no model-only display key, a stale `model_only` marker is cleared from generated rows in a mixed user group, so merged human text stays visible (#1436).
 - New: opt-in `recall_delivery_order="time"` / `LCM_RECALL_DELIVERY_ORDER=time` delivers the same selected `lcm_recall` hits oldest to newest by host observation time, with untimed hits and summaries last. The default `score`, session delivery, and internal recall retain their existing order.
 - New: per-engine session decision and first-store/skipped INFO logs identify bind and bypass rules without message or pattern text (#2042).
 
@@ -13,6 +16,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 - New: `scripts/lcm_x_mcp.py` (`lcm-x mcp`), a read-only stdio MCP server for Claude Code over one Hermes store. It serves `lcm_recall`, `lcm_grep`, `lcm_expand`, `lcm_load_session` and `lcm_describe` with their production schemas and outputs, opens the store read-only per call and never writes it; results carry `store_uuid` and degraded-mode flags. Hermes stores are unchanged: the reader derives `store_uuid` from the store file's identity (`store_uuid_source: derived`) unless a writer has stamped one. (#1192)
 - Ingest records shadow ledger bindings, stamp observations and view vectors in its own transaction; `LCM_INGEST_LEDGER=off` disables this without changing stored rows (#2055).
+- Fix: a delegated child's compaction no longer drops rows it could not store first. When the store fails because the database is locked or busy, that compaction pass is skipped (status `noop`, warning `compaction skipped: input not stored`) and the next pass stores the full view first (#2306). Known limit: if the store fails for another reason, such as a disk or I/O error, the compaction still runs as before. The rows it drops from that child's view are lost, and a warning names the child session (`compression boundary not recorded: input not stored`). Planned fix: v0.30.x (#2321).
 - Fix: successful delegated-child resumes and store-only turns log at DEBUG without false fallback counts or skipped-ingest warnings; storage is unchanged (#2074).
 - Deprecated: `LCM_DEFERRED_MAINTENANCE_ENABLED` still works (off by default). Enabling it now adds one deprecation warning in `/lcm status`, `lcm_status` and the `lcm_doctor` configuration check; it is removed in v0.31.0 (#1246). `LCM_DEFERRED_MAINTENANCE_MAX_PASSES` only applies while it is on.
 
