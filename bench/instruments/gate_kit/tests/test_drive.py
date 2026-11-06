@@ -8,6 +8,7 @@ import re
 import sqlite3
 import sys
 import threading
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -56,6 +57,10 @@ def test_plan_repeats_are_word_for_word_and_restarts_are_never_last():
     assert sum(o["op"] == "repeat" for o in ops) == 12
     assert {o["slot"][0] for o in ops if o["op"] == "restart_warm"} == {"T"}
     assert {o["slot"][0] for o in ops if o["op"] == "restart_cold"} == {"A"}
+    # ACP has no undo: every undo-and-resend is on TUI; ACP cancel-and-resend is its own kind and never counted
+    assert {o["slot"][0] for o in ops if o["op"] == "undo_resend"} == {"T"}
+    assert {o["slot"][0] for o in ops if o["op"] == "cancel_resend"} == {"A"}
+    assert drive.planned_counts(ops)["undo_resend"] == sum(o["op"] == "undo_resend" for o in ops) == 12
 
 
 def test_dry_run_prints_counts(capsys):
@@ -339,8 +344,9 @@ def test_failed_resend_has_no_undo_event(tmp_path, monkeypatch, slot, stop):
     d.send(slot, 0)
     stops = iter(["cancelled" if slot.startswith("A") else "complete", stop])
     monkeypatch.setattr(d, "send", lambda *_a, **_kw: next(stops))
-    d.op({"op": "undo_resend", "slot": slot, "prompt": drive.CATS["undo"][0]})
-    assert not any(e["kind"] == "undo_resend" for e in audit.read_events(ev.path))
+    kind = "cancel_resend" if slot.startswith("A") else "undo_resend"
+    d.op({"op": kind, "slot": slot, "prompt": drive.CATS["undo"][0]})
+    assert not any(e["kind"] == kind for e in audit.read_events(ev.path))
 
 
 def test_busy_tui_resend_has_no_undo_event(tmp_path):
@@ -385,9 +391,48 @@ def test_failed_first_acp_send_skips_resend(tmp_path, stop):
     d.acp_sid("A1")
     calls = []
     d.acp.prompt = lambda *_a: (calls.append(1) or "", stop)
-    d.op({"op": "undo_resend", "slot": "A1", "prompt": drive.CATS["undo"][0]})
+    d.op({"op": "cancel_resend", "slot": "A1", "prompt": drive.CATS["undo"][0]})
     assert calls == [1] and ev.errors[f"turn_{stop}"] == 1
-    assert not any(e["kind"] == "undo_resend" for e in audit.read_events(ev.path))
+    assert not any(e["kind"] == "cancel_resend" for e in audit.read_events(ev.path))
+
+
+def test_shared_kill_sibling_restarts_only_after_its_reload(tmp_path):
+    """A sibling killed with the planned slot's process has no restart until it reloads, so a compaction in a
+    sibling that never reloads cannot count toward compactions_then_restart."""
+    d, ev, _log = stub_driver(tmp_path)
+    for slot in ("A1", "A2", "A3"):
+        d.acp_sid(slot)
+    before = time.time()
+    d.op({"op": "restart_cold", "slot": "A1"})
+    shared = lambda: [e for e in audit.read_events(ev.path) if e["kind"] == "restart_cold_shared"]  # noqa: E731
+    assert [e["kind"] for e in audit.read_events(ev.path) if e["kind"].startswith("restart")] == ["restart_cold"]
+    assert shared() == []  # A2 and A3 were killed but have not reloaded
+    d.send("A2", 0)
+    assert [e["detail"] for e in shared()] == ["slot=A2"] and shared()[0]["killed_at"] >= before
+    assert "A3" in d.cold_pending  # never reloaded: no restart recorded
+
+
+def test_event_log_failure_stops_the_run_and_shuts_down_both_hosts(tmp_path):
+    d, ev, _log = stub_driver(tmp_path)
+    d.acp_sid("A1")
+    d.tui_rt("T1")
+    ev.path = tmp_path / "unwritable"
+    ev.path.mkdir()  # opening a directory for append fails
+    with pytest.raises(drive.EventLogError):
+        d.run([{"op": "turn", "slot": "A1", "prompt": drive.CATS["plain"][0]}], drive.targets())
+    assert d.acp is None and d.tui is None
+
+
+def test_events_parent_is_created(tmp_path):
+    ev = drive.Events(tmp_path / "new" / "dir" / "events.jsonl")
+    ev.write("turn", "s", "x")
+    assert ev.path.is_file()
+
+
+def test_unreadable_state_db_is_an_error_event(tmp_path):
+    d, ev, _log = stub_driver(tmp_path)
+    (tmp_path / "state.db").write_bytes(b"not a database")
+    assert d.children() is None and ev.errors["child_count_failed"] == 1
 
 
 def test_failed_warm_resume_retries_before_next_turn(tmp_path):
@@ -523,9 +568,9 @@ def test_a_host_without_lcmx_stops_the_run(tmp_path, where, line):
 def test_a_late_cancel_is_an_error_not_an_undo(tmp_path):
     d, ev, _log = stub_driver(tmp_path)
     d.cancel_after = 5.0  # the stub ends the prompt first
-    d.run([{"op": "undo_resend", "slot": "A1", "prompt": drive.CATS["undo"][0]}], drive.targets())
+    d.run([{"op": "cancel_resend", "slot": "A1", "prompt": drive.CATS["undo"][0]}], drive.targets())
     kinds = [json.loads(x)["kind"] for x in ev.path.read_text().splitlines()]
-    assert "undo_resend" not in kinds and "error" in kinds
+    assert "cancel_resend" not in kinds and "undo_resend" not in kinds and "error" in kinds
 
 
 # -- the events contract with audit.py ------------------------------------------------------------------------------
@@ -630,7 +675,7 @@ SMOKE = [{"op": "turn", "slot": "A1", "prompt": drive.CATS["plain"][0]},
          {"op": "repeat", "slot": "A1", "prompt": SMOKE_TOOL},
          {"op": "compress", "slot": "A1", "prompt": drive.CATS["long"][0]},
          {"op": "delegate", "slot": "A1", "prompt": drive.CATS["delegate"][0]},
-         {"op": "undo_resend", "slot": "A1", "prompt": SMOKE_UNDO_ACP},
+         {"op": "cancel_resend", "slot": "A1", "prompt": SMOKE_UNDO_ACP},
          {"op": "restart_cold", "slot": "A1"},
          {"op": "turn", "slot": "A1", "prompt": drive.CATS["plain"][1]},
          {"op": "turn", "slot": "T1", "prompt": drive.CATS["plain"][2]},
@@ -682,8 +727,9 @@ def test_smoke_against_fake_provider_then_audit(tmp_path):
     exits = sorted(e["detail"] for e in lines if e["kind"] == "host_exit")
     assert exits == ["entry=acp returncode=0", "entry=tui returncode=0"], exits  # both ended their sessions by EOF
     kinds = Counter(e["kind"] for e in lines)
-    assert {k: kinds[k] for k in audit.EVENT_KINDS if kinds[k]} == {"restart_cold": 1, "restart_warm": 1, "undo_resend": 2,
+    assert {k: kinds[k] for k in audit.EVENT_KINDS if kinds[k]} == {"restart_cold": 1, "restart_warm": 1, "undo_resend": 1,
                                                         "delegate_prompt": 1, "compress_request": 1}
+    assert kinds["cancel_resend"] == 1  # recorded, never counted as an undo
     assert summary["delegate"]["children_in_state_db"] >= 1 and summary["context_length"] == 64000
     for db in ("state.db", "lcm.db"):  # the audit reads immutable files: open each once after the run to checkpoint
         con = sqlite3.connect(home / db)
@@ -702,7 +748,7 @@ def test_smoke_against_fake_provider_then_audit(tmp_path):
     sources = {result["parity"]["sessions"][s]["source"] for s in sessions}
     assert sources == {"acp", "tui"}
     cov = result["coverage"]
-    assert (cov["restarts_cold"]["value"], cov["restarts_warm"]["value"], cov["undo_resend"]["value"]) == (1, 1, 2)
+    assert (cov["restarts_cold"]["value"], cov["restarts_warm"]["value"], cov["undo_resend"]["value"]) == (1, 1, 1)
     per_source = {result["parity"]["sessions"][s]["source"]: {k: result["parity"]["lineages"][g][k] for k in (
         "expected_rows", "stored_rows", "missing_rows", "silent_surplus_rows")} for s in sessions
         for g in [result["parity"]["sessions"][s]["lineage"]]}

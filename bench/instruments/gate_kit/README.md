@@ -41,7 +41,8 @@ python -m bench.instruments.gate_kit.audit --state-db <hermes home>/state.db --l
   "restart_cold" | "restart_cold_shared" | "restart_warm" | "undo_resend" | "delegate_prompt" |
   "compress_request" | "compress_request_failed", "session": id, "detail":
   short non-content text}`. Lines of any other kind (the driver also writes `turn`, `source2_session`,
-  `context_window`, `host_exit`, `error` and a final `summary`) are ignored.
+  `cancel_resend`, `context_window`, `host_exit`, `error` and a final `summary`) are ignored, so an ACP
+  cancel-and-resend never counts toward the undo-and-resend floor.
 - Exit 0 with the result written (the verdict is inside); exit 2 on an unreadable input. Stdout is a four-line summary.
 
 The output holds counts, rates, booleans, session ids and store ids only. Message content, tool arguments and
@@ -165,7 +166,7 @@ host processes:
 
 | Entry point | Operations |
 |---|---|
-| `hermes acp` (`reliability/acp_driver.py`) | turns from a fixed prompt bank (plain questions, `read_file`/todo/`lcm_grep` tool prompts, word-for-word repeats of earlier tool prompts, long pasted text), `/compress` after a long-text turn, `delegate_task` prompts, cancel-and-resend (`session/cancel` while the prompt is in flight, then the same prompt), cold restarts (SIGKILL the process group, a new process, `session/load`) |
+| `hermes acp` (`reliability/acp_driver.py`) | turns from a fixed prompt bank (plain questions, `read_file`/todo/`lcm_grep` tool prompts, word-for-word repeats of earlier tool prompts, long pasted text), `/compress` after a long-text turn, `delegate_task` prompts, cancel-and-resend (`session/cancel` while the prompt is in flight, then the same prompt; recorded as `cancel_resend`, half as many as the undo target, never counted as an undo), cold restarts (SIGKILL the process group, a new process, `session/load`) |
 | TUI gateway (`python -m tui_gateway.entry`) | the second host source (`tui` sessions), warm restarts (`session.close`, which ends the session in the context engine, then `session.resume` in the same process), undo-and-resend (`session.undo`, then the same prompt), `session.compress` |
 
 ACP has no session end and no undo, which is why the TUI gateway carries those three. Every planned restart follows a
@@ -185,16 +186,21 @@ python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --
 - All CLI paths become absolute against the invoking directory before use, including the host Python and source tree;
   the Python executable's symlink is preserved so its virtualenv and sibling `hermes` launcher remain in use.
 - A non-empty `--events` file is refused with exit 2 unless `--append-events` explicitly permits retaining its events.
+  A missing parent directory is created. If the events file cannot be written during the run, the run stops, both
+  hosts are shut down, the reason goes to stderr and the driver exits 4: do not audit that run.
+- A failed child count (`state.db` locked or unreadable) is an `error` event (`child_count_failed`).
 - The host processes get the invoking environment with `HERMES_HOME` set to the home and `HOME`/`TMPDIR` set to
   `<workdir>/host-home`; their stderr goes to `<workdir>/host-logs/`. The read_file prompts name files the driver
   writes under `<workdir>/notes/`.
 - A failed operation is an `error` event (a model error, a cancel that came too late, a JSON-RPC error with its code, a
   host process that died) and the run continues; nothing is retried silently. A process that died is replaced on its
   next operation; stored TUI sessions are resumed in the replacement gateway before use. A shared ACP process kill
-  records one `restart_cold` for the planned slot only after its load succeeds. Siblings get `restart_cold_shared`
-  at the kill; crash-affected ACP and TUI sessions get it after reload/resume. Shared events support restart-copy
-  attribution but never the cold-restart floor. `restart_warm` requires a successful close and resume; `undo_resend`
-  requires a successful first send (ACP cancellation or TUI completion) and a successful second send. A rejected
+  records one `restart_cold` for the planned slot only after its load succeeds. Its siblings, like crash-affected ACP
+  and TUI sessions, get `restart_cold_shared` only after their reload or resume succeeds, with the kill time as
+  `killed_at`; a sibling never reloaded has no restart, so its compactions do not count toward
+  `compactions_then_restart`. Shared events support restart-copy attribution but never the cold-restart floor.
+  `restart_warm` requires a successful close and resume; `undo_resend` (TUI only) requires a completed first send, an
+  undo that removed rows and a completed second send. A rejected
   first TUI send skips undo. After a successful close, a failed resume leaves the slot unbound so its next operation
   resumes it again. `--max-hours` stops the plan and still writes the summary.
 - `compress_request` is recorded before the triggering long-text turn; `compress_result` records the later manual

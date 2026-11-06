@@ -47,6 +47,7 @@ EXIT_GRACE = 60.0  # seconds a host gets to exit on stdin EOF at the end of the 
 # host stores nothing in lcm.db, so its rows would read as a loss: the run stops (exit 3) before it reaches the audit.
 INACTIVE = re.compile(r"LCM-X is NOT active in this process|Context engine 'lcm(?:-x)?' not found")
 EXIT_LCM_INACTIVE = 3
+EXIT_EVENT_LOG = 4
 PLANNED_FLOORS = ("turns", "delegated_children", "compactions", "compactions_then_restart", "restarts_cold",
                   "restarts_warm", "undo_resend", "tool_calls", "tool_call_repeats")
 
@@ -131,16 +132,18 @@ def plan(seed: int, tg: dict) -> list[dict]:
         body[s].append({"op": "compress", "slot": s})
     for s in spread(tg["delegated_children"], acp):
         body[s].append({"op": "delegate", "slot": s, "prompt": CATS["delegate"][len(body[s]) % len(CATS["delegate"])]})
-    undo = tg["undo_resend"]
-    for s in spread(undo - undo // 2, acp) + spread(undo // 2, tui):
+    undo, cancels = tg["undo_resend"], tg["undo_resend"] // 2  # ACP has no undo: its cancel-and-resend is separate
+    for s in spread(undo, tui):
         body[s].append({"op": "undo_resend", "slot": s, "prompt": rng.choice(CATS["undo"])})
+    for s in spread(cancels, acp):
+        body[s].append({"op": "cancel_resend", "slot": s, "prompt": rng.choice(CATS["undo"])})
     repeats = tg["tool_call_repeats"]
     originals = max(tg["tool_calls"] - repeats, 1)
     tools = rng.sample(CATS["tool"], len(CATS["tool"]))
     tools = (tools * (originals // len(tools) + 1))[:originals]
     for s, ix in zip(spread(originals, acp + tui), tools):
         body[s].append({"op": "tool", "slot": s, "prompt": ix})
-    bearing = tg["tool_calls"] + tg["delegated_children"] + tg["compactions"] + undo  # prompts besides plain turns
+    bearing = tg["tool_calls"] + tg["delegated_children"] + tg["compactions"] + undo + cancels  # besides plain turns
     for s in spread(max(0, tg["turns"] - bearing), acp + tui):
         body[s].append({"op": "turn", "slot": s, "prompt": rng.choice(CATS["plain"])})
     for s in body:
@@ -185,16 +188,20 @@ def planned_counts(ops: list[dict]) -> dict:
     tool_prompts = [o["prompt"] for o in ops if o["op"] in ("tool", "repeat")]
     for ix in tool_prompts:
         seen[ix] += 1
-    bearing = ("turn", "tool", "repeat", "delegate", "compress", "undo_resend")
+    bearing = ("turn", "tool", "repeat", "delegate", "compress", "undo_resend", "cancel_resend")
     return {"turns": sum(kinds[k] for k in bearing), "delegated_children": kinds["delegate"],
             "compactions": kinds["compress"], "compactions_then_restart": then_restart,
             "restarts_cold": kinds["restart_cold"], "restarts_warm": kinds["restart_warm"],
-            "undo_resend": kinds["undo_resend"], "tool_calls": len(tool_prompts),
+            "undo_resend": kinds["undo_resend"], "cancel_resend": kinds["cancel_resend"], "tool_calls": len(tool_prompts),
             "tool_call_repeats": sum(n - 1 for n in seen.values()),
             "host_sources": len({o["slot"][0] for o in ops}), "ops": dict(kinds)}
 
 
 # -- events --------------------------------------------------------------------------------------------------------
+class EventLogError(RuntimeError):
+    """The events file cannot be written: the run stops (the operations' own error handling never catches this)."""
+
+
 class Events:
     """One JSON object per line, appended and flushed per event: kinds, session ids and short non-content details."""
 
@@ -202,11 +209,15 @@ class Events:
         self.path, self.errors = Path(path), Counter()
         if not append and self.path.exists() and self.path.stat().st_size:
             raise ValueError("--events exists and is non-empty; use a new path or --append-events to retain it")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def write(self, kind: str, session: str | None = None, detail: str = "", **extra) -> None:
         rec = {"t": time.time(), "kind": kind, "session": session, "detail": detail, **extra}
-        with open(self.path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec) + "\n")
+        try:
+            with open(self.path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec) + "\n")
+        except OSError as exc:
+            raise EventLogError(f"cannot write {self.path}: {exc}") from exc
         if kind == "error":
             self.errors[detail.split(" ", 1)[0]] += 1
 
@@ -293,6 +304,7 @@ class Driver:
         self.loaded: set[str] = set()
         self.tui_loaded: set[str] = set()
         self.cold_pending: set[str] = set()
+        self.killed_at: dict[str, float] = {}
         self.slots: dict[str, dict] = {}
         self.done, self.prompts, self.attempts = Counter(), Counter(), Counter()
         self.context = None
@@ -310,7 +322,7 @@ class Driver:
             self.loaded.add(slot)
             if slot in self.cold_pending:
                 self.ev.write("restart_cold" if planned_restart else "restart_cold_shared",
-                              self.slots[slot]["session"], f"slot={slot}")
+                              self.slots[slot]["session"], f"slot={slot}", killed_at=self.killed_at.pop(slot, None))
                 self.cold_pending.remove(slot)
         return self.slots[slot]["session"]
 
@@ -331,11 +343,12 @@ class Driver:
                                     session=res.get("stored_session_id") or self.slots[slot]["session"])
             self.tui_loaded.add(slot)
             if slot in self.cold_pending:
-                self.ev.write("restart_cold_shared", self.slots[slot]["session"], f"slot={slot}")
+                self.ev.write("restart_cold_shared", self.slots[slot]["session"], f"slot={slot}",
+                              killed_at=self.killed_at.pop(slot, None))
                 self.cold_pending.remove(slot)
         return self.slots[slot]["rt"]
 
-    def drop(self, which: str, graceful: bool = False, planned_slot: str | None = None) -> None:
+    def drop(self, which: str, graceful: bool = False) -> None:
         """SIGKILL the entry point's process group (a cold restart, a dead host), or end it gracefully: stdin EOF, so
         the host ends its sessions and exits by itself (AcpProcess.close escalates after EXIT_GRACE)."""
         proc = getattr(self, which)
@@ -344,16 +357,16 @@ class Driver:
                 proc.kill()
                 loaded = self.loaded if which == "acp" else self.tui_loaded
                 self.cold_pending.update(loaded)
-                if planned_slot is not None:
-                    for slot in sorted(loaded - {planned_slot}):
-                        self.ev.write("restart_cold_shared", self.slots[slot]["session"], f"slot={slot} shared_process=true")
-                        self.cold_pending.discard(slot)
+                killed = time.time()
+                for slot in loaded:  # a sibling's restart_cold_shared waits for its reload, with the kill time
+                    self.killed_at[slot] = killed
             elif getattr(proc, "process", None) is not None:
                 with contextlib.suppress(OSError):
                     proc.process.stdin.close()
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.process.wait(timeout=EXIT_GRACE)
             rc = proc.close()
+            setattr(self, which, None)
             if graceful:
                 self.ev.write("host_exit", None, f"entry={which} returncode={rc}")
         setattr(self, which, None)
@@ -424,13 +437,15 @@ class Driver:
                 res = self.tui.call("session.compress", {"session_id": self.tui_rt(slot)}, self.timeout)
                 result = "compressed" if res.get("compressed") else "not_compressed"
             self.ev.write("compress_result", self.slots[slot]["session"], f"slot={slot} manual={result}")
-        elif kind == "undo_resend" and slot.startswith("A"):
+        elif kind == "cancel_resend":  # ACP: cancel mid-turn, then the same prompt; never counted as an undo
             if self.send(slot, o["prompt"], cancel=True) != "cancelled":
                 self.ev.write("error", self.slots[slot]["session"], f"cancel_late slot={slot}")
                 return
             if self.send(slot, o["prompt"]) == "end_turn":
-                self.ev.write("undo_resend", self.slots[slot]["session"], f"slot={slot} via=acp_cancel")
+                self.ev.write("cancel_resend", self.slots[slot]["session"], f"slot={slot}")
         elif kind == "undo_resend":
+            if slot.startswith("A"):
+                raise ValueError("undo_resend needs a TUI slot: ACP has no undo (its cancel-and-resend is cancel_resend)")
             if self.send(slot, o["prompt"]) != "complete":
                 return  # send() already records the failed turn; never undo a previous turn
             removed = self.tui.call("session.undo", {"session_id": self.tui_rt(slot)}, self.timeout).get("removed")
@@ -441,7 +456,7 @@ class Driver:
                 self.ev.write("undo_resend", self.slots[slot]["session"], f"slot={slot} via=tui_undo removed={removed}")
         elif kind == "restart_cold":
             self.acp_sid(slot)
-            self.drop("acp", planned_slot=slot)
+            self.drop("acp")
             self.acp_sid(slot, planned_restart=True)  # count only after session/load succeeds
         elif kind == "restart_warm":
             rt = self.tui_rt(slot)
@@ -456,7 +471,9 @@ class Driver:
 
     def children(self) -> int | None:
         """This run's delegated children so far, read-only from state.db (audit.py counts them the same way,
-        with --since set to the run's start)."""
+        with --since set to the run's start). None without a state.db (no host has run); an unreadable one is an error."""
+        if not (self.home / "state.db").exists():
+            return None
         try:
             con = sqlite3.connect(f"file:{self.home / 'state.db'}?mode=ro", uri=True, timeout=5)
             try:
@@ -467,7 +484,8 @@ class Driver:
                            and (v["started"] or 0) >= self.run_start for s, v in sessions.items())
             finally:
                 con.close()
-        except (sqlite3.Error, OSError, ValueError):
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            self.ev.write("error", None, f"child_count_failed {type(exc).__name__}")
             return None
 
     def inactive(self, entry: str) -> list[tuple[str, str]]:
@@ -533,8 +551,14 @@ class Driver:
                 if self.stop_if_inactive("acp"):
                     stopped = "lcm_inactive"
         finally:
-            self.drop("acp", graceful=True)
-            self.drop("tui", graceful=True)
+            failure = None
+            for which in ("acp", "tui"):  # both hosts, even when the event log fails
+                try:
+                    self.drop(which, graceful=True)
+                except EventLogError as exc:
+                    failure = failure or exc
+            if failure is not None:
+                raise failure
         if stopped != "lcm_inactive" and self.stop_if_inactive("tui"):  # lines written while the hosts exited
             stopped = "lcm_inactive"
         summary = {"planned": planned_counts(ops), "executed": dict(self.done), "errors": dict(self.ev.errors),
@@ -586,7 +610,11 @@ def main(argv=None) -> int:
     env = host_env(dict(os.environ), a.home, a.workdir, a.hermes_src)
     d = Driver(python=a.hermes_python, src=a.hermes_src, home=a.home, workdir=a.workdir, events=events,
                env=env, prompt_timeout=a.prompt_timeout, max_hours=a.max_hours, cancel_after=a.cancel_after)
-    summary = d.run(ops, tg)
+    try:
+        summary = d.run(ops, tg)
+    except EventLogError as exc:
+        print(f"the run stopped: {exc}; both hosts were shut down; do not audit this run", file=sys.stderr)
+        return EXIT_EVENT_LOG
     print(json.dumps({k: summary[k] for k in ("executed", "errors", "delegate", "context_length", "stopped")},
                      sort_keys=True))
     if summary["exit"]:
