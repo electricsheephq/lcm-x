@@ -263,8 +263,9 @@ def test_proactive_ignores_time(ranked_engine, monkeypatch):
 
 def test_benchmark_callers_pin_score():
     root = Path(__file__).resolve().parents[1]
-    paths = ["bench/instruments/scale389/phase1a.py", "bench/instruments/local_catchup/recall.py",
-             "benchmarking/longmemeval.py",
+    # benchmarking/longmemeval.py and local_catchup build engines at default config
+    # (score order) and their tests fake lcm_recall, so they pass no kwarg.
+    paths = ["bench/instruments/scale389/phase1a.py",
              "benchmarks/qa-harness/src/providers/hermes-lcm/bridge/hermes_lcm_bridge.py"]
     for path in paths:
         calls = [node for node in ast.walk(ast.parse((root / path).read_text()))
