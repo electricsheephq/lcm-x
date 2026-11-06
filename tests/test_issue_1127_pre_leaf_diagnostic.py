@@ -100,8 +100,24 @@ def _seconds(line: str, name: str) -> float:
 
 
 @pytest.mark.parametrize("sweep", [True, False])
-def test_a_held_write_lock_is_attributed_to_the_slow_statement(tmp_path, summaries, caplog, sweep):
+def test_a_held_write_lock_is_attributed_to_the_slow_statement(tmp_path, summaries, caplog, monkeypatch, sweep):
     """The ingest INSERT waits ~1.2 s on the other connection's write lock; the hard bound is 0.5 s."""
+    import hermes_lcm.sqlite_util as sqlite_util
+
+    # #1526: under host load a later statement (a COMMIT) can also cross the 1 s slow threshold, so record every
+    # counted slow statement and assert on the one the held lock delays rather than on an exact count of 1.
+    counted: list[tuple[str, float]] = []
+    real_slow = sqlite_util.PhaseSqlTrace.slow
+
+    def recording_slow(trace, started, sql):
+        before = trace.slow_count
+        real_slow(trace, started, sql)
+        if trace.slow_count > before:
+            if getattr(trace, "ingest_admission", False) and str(sql) == "BEGIN IMMEDIATE":
+                sql = "INSERT INTO messages (ingest admission)"
+            counted.append((" ".join(str(sql).split()), sqlite_util._monotonic() - started))
+
+    monkeypatch.setattr(sqlite_util.PhaseSqlTrace, "slow", recording_slow)
     engine = _engine(tmp_path, foreground_hard_seconds=0.5, threshold_full_sweep_enabled=sweep)
     view = _view()
     try:
@@ -119,8 +135,15 @@ def test_a_held_write_lock_is_attributed_to_the_slow_statement(tmp_path, summari
         assert "unaccounted=" in line and "lock_wait=" in line
         match = re.search(r"slow_sql=(\d+)/(\d+\.\d)s slowest=(\d+\.\d)s \"([^\"]*)\"", line)
         assert match, line
-        assert int(match.group(1)) == 1 and float(match.group(2)) >= 1.0
-        assert match.group(4).startswith("INSERT INTO messages") and len(match.group(4)) <= 40
+        assert int(match.group(1)) == len(counted) >= 1 and float(match.group(2)) >= 1.0
+        held = [took for sql, took in counted if sql.startswith("INSERT INTO messages")]
+        assert held and max(held) >= 1.0, counted  # the INSERT that waited on the held lock is a slow statement
+        # On an idle host it is the slowest one, the statement the line names; under load a slow COMMIT may be.
+        assert len(match.group(4)) <= 40
+        if match.group(4).startswith("INSERT INTO messages"):
+            assert float(match.group(3)) >= 1.0
+        else:
+            assert match.group(4) == "COMMIT", counted
         assert "user turn" not in line and "alpha" not in line  # a template and figures, never content
         # The timing wrapper is gone once the phase ends.
         for part in (engine._store, engine._dag, engine._lifecycle):
