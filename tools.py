@@ -4124,20 +4124,39 @@ def default_semantic_cpu_limited(config) -> bool:
             and effective_cpus() <= 2)
 
 
+_LCM_RECALL_ADJACENT_SQL = (
+    "SELECT store_id, session_id, conversation_id, role, source, tool_calls, content, "
+    "timestamp, observed_at FROM messages WHERE session_id = ? AND store_id > ? "
+    "ORDER BY store_id LIMIT 1"
+)
+
+
+def _lcm_recall_next_row(conn, session_id: str, store_id: int) -> dict[str, Any] | None:
+    """The next stored row of ``session_id`` after ``store_id`` (one indexed read)."""
+    found = conn.execute(_LCM_RECALL_ADJACENT_SQL, (session_id, int(store_id))).fetchone()
+    return dict(found) if found is not None else None
+
+
 def _lcm_recall_adjacent_reply(
-    engine, ordered, source_rows, *, limit, deadline, excluded, allowed,
+    engine, ordered, source_rows, *, limit, deadline, excluded, allowed, read_next=None,
 ):
-    """Atomically place up to three same-conversation replies; never write rows."""
+    """Atomically place up to three same-conversation replies; never write rows.
+
+    A reply is the next stored row of the source's session when it comes from the
+    other conversational role (user/assistant) and is not older than the source.
+    Reads use a private read-only connection bounded by the recall deadline.
+    """
     placed = list(ordered)
     pairs = []
+    conn = None
     try:
         if time.monotonic() >= deadline:
             raise TimeoutError
-        for rank, source in enumerate(ordered[:3]):
+        for rank, source in enumerate(ordered[:min(3, limit)]):
             hit = source["hit"]
             row = source_rows.get(hit.get("store_id"))
             if (hit.get("kind") == "summary" or hit.get("node_id") is not None
-                    or row is None or row.get("role") == "tool"):
+                    or row is None or row.get("role") not in ("user", "assistant")):
                 continue
             if rank and not str(row.get("content") or "").strip().endswith("?"):
                 continue
@@ -4145,33 +4164,39 @@ def _lcm_recall_adjacent_reply(
             if (not session_id or session_id in excluded
                     or (allowed is not None and session_id not in allowed)):
                 continue
-            neighbours = _run_within_deadline(
-                lambda: engine._store.get_session_messages_after(
-                    session_id, hit["store_id"], limit=1,
-                ),
-                remaining_s=deadline - time.monotonic(),
-                name="lcm-recall-adjacent",
-            )
+            if read_next is None:
+                uri = f"{Path(engine._store.db_path).resolve().as_uri()}?mode=ro"
+                conn = sqlite3.connect(uri, uri=True, timeout=max(0.001, deadline - time.monotonic()))
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA query_only=ON")
+                conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+                read_next = partial(_lcm_recall_next_row, conn)
+            neighbour = read_next(session_id, int(hit["store_id"]))
             if time.monotonic() >= deadline:
                 raise TimeoutError
-            if not neighbours:
+            if neighbour is None:
                 continue
-            neighbour = neighbours[0]
             content = str(neighbour.get("content") or "")
             sid = neighbour.get("session_id")
-            if (sid != session_id or sid in excluded
-                    or (allowed is not None and sid not in allowed)
+            source_seen, reply_seen = row.get("observed_at"), neighbour.get("observed_at")
+            if (sid != session_id
                     or (neighbour.get("conversation_id") or "") != (row.get("conversation_id") or "")
-                    or neighbour.get("role") == "tool" or neighbour.get("tool_calls")
-                    or not content.strip() or neighbour.get("source") == _SUBAGENT_SOURCE):
+                    or neighbour.get("role") not in ("user", "assistant")
+                    or neighbour.get("role") == row.get("role")
+                    or neighbour.get("tool_calls") or not content.strip()
+                    or neighbour.get("source") == _SUBAGENT_SOURCE
+                    or (source_seen is not None and reply_seen is not None
+                        and float(reply_seen) < float(source_seen))):
                 continue
-            store_id = neighbour["store_id"]
+            store_id = int(neighbour["store_id"])
             existing = next((i for i, entry in enumerate(placed)
                              if entry["hit"].get("kind") != "summary"
-                             and entry["hit"].get("store_id") == store_id), None)
+                             and (entry["hit"].get("store_id") == store_id
+                                  or store_id in entry["hit"].get("duplicate_store_ids", []))), None)
             if existing is not None and existing < limit:
                 continue
             if existing is not None:
+                # A pool entry keeps its own scores, ranks and arms; it is only moved.
                 entry = placed.pop(existing)
                 entry = {**entry, "hit": dict(entry["hit"])}
             else:
@@ -4184,20 +4209,31 @@ def _lcm_recall_adjacent_reply(
                     "from_current_session": sid == engine.current_session_id,
                 }
                 reply["expand_hint"] = _lcm_recall_excerpt_expand_hint(reply)
-                entry = {"hit": reply}
-            entry.update(rrf_score=source["rrf_score"], _final_score=source["_final_score"],
-                         ranks=dict(source["ranks"]))
+                # No arm ranks: the reply was not retrieved by any arm.
+                entry = {"hit": reply, "rrf_score": source["rrf_score"],
+                         "_final_score": source["_final_score"], "ranks": {}}
             entry["hit"]["adjacent_to"] = hit["store_id"]
-            source_index = next(i for i, item in enumerate(placed) if item is source)
+            source_index = next((i for i, item in enumerate(placed) if item is source), None)
+            if source_index is None:
+                continue
             placed.insert(source_index + 1, entry)
             pairs.append({"store_id": store_id, "after_store_id": hit["store_id"]})
         if time.monotonic() >= deadline:
             raise TimeoutError
     except TimeoutError:
         return ordered, [], "deadline"
+    except sqlite3.OperationalError as exc:
+        if time.monotonic() >= deadline:
+            return ordered, [], "deadline"
+        return ordered, [], f"read_failed:{type(exc).__name__}"
     except Exception as exc:  # noqa: BLE001 - optional read must never fail recall
         return ordered, [], f"read_failed:{type(exc).__name__}"
-    return placed, pairs, None
+    finally:
+        if conn is not None:
+            conn.close()
+    delivered = {entry["hit"].get("store_id") for entry in placed[:limit]
+                 if entry["hit"].get("kind") != "summary"}
+    return placed, [pair for pair in pairs if pair["store_id"] in delivered], None
 
 
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
@@ -4687,6 +4723,15 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     #    Proactive recall passes ``fts_anchor=False`` (an internal keyword, not
     #    a tool argument): it filters hits by a score floor after the call, so
     #    an FTS-only anchor below that floor would displace an eligible hit. --
+    # -- Optional adjacent replies (default OFF), before the FTS anchor so the
+    #    #950 anchor guarantee still holds over the final window. --
+    adjacent_pairs, adjacent_unavailable = [], None
+    if (kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) != "session"
+            and kwargs.get("adjacent_reply", getattr(engine._config, "recall_adjacent_reply", False))):
+        ordered, adjacent_pairs, adjacent_unavailable = _lcm_recall_adjacent_reply(
+            engine, ordered, identity_rows, limit=limit, deadline=deadline,
+            excluded=excluded_session_ids, allowed=candidate_session_ids,
+        )
     fts_anchor_info: dict[str, Any] | None = None
     if bool(kwargs.get("fts_anchor", True)) and bool(
         getattr(engine._config, "recall_fts_anchor", True)
@@ -4695,13 +4740,10 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
         )
 
-    adjacent_pairs, adjacent_unavailable = [], None
-    if (kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) != "session"
-            and kwargs.get("adjacent_reply", getattr(engine._config, "recall_adjacent_reply", False))):
-        ordered, adjacent_pairs, adjacent_unavailable = _lcm_recall_adjacent_reply(
-            engine, ordered, identity_rows, limit=limit, deadline=deadline,
-            excluded=excluded_session_ids, allowed=candidate_session_ids,
-        )
+    if adjacent_pairs:  # receipts name only replies the final window delivers
+        delivered_ids = {entry["hit"].get("store_id") for entry in ordered[:limit]
+                         if entry["hit"].get("kind") != "summary"}
+        adjacent_pairs = [pair for pair in adjacent_pairs if pair["store_id"] in delivered_ids]
     _annotate_subagent_lineage(engine, [entry["hit"] for entry in ordered if isinstance(entry.get("hit"), dict)])
     session_delivery = None
     if kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) == "session":

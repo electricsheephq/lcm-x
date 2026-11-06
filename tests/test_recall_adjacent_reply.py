@@ -54,7 +54,7 @@ def test_off_identical_to_unset_and_internal_override(ranked, monkeypatch, detai
     e._config = SimpleNamespace(**{k: v for k, v in vars(e._config).items()
                                   if k != "recall_adjacent_reply"})
     read = Mock(side_effect=AssertionError("flag-off neighbour read"))
-    monkeypatch.setattr(e._store, "get_session_messages_after", read)
+    monkeypatch.setattr(tools, "_lcm_recall_next_row", read)
     unset = invoke(e, detail=detail)
     e._config.recall_adjacent_reply = False
     assert invoke(e, detail=detail) == unset
@@ -76,8 +76,8 @@ def test_rank_one_and_third_question_keep_limit_and_pool(ranked, monkeypatch, de
         return original(ordered, **kw)
 
     monkeypatch.setattr(recall_delivery, "deliver_recall", capture)
-    read = Mock(wraps=e._store.get_session_messages_after)
-    monkeypatch.setattr(e._store, "get_session_messages_after", read)
+    read = Mock(wraps=tools._lcm_recall_next_row)
+    monkeypatch.setattr(tools, "_lcm_recall_next_row", read)
     statements = []
     e._store.connection.set_trace_callback(statements.append)
     changes = e._store.connection.total_changes
@@ -94,7 +94,7 @@ def test_rank_one_and_third_question_keep_limit_and_pool(ranked, monkeypatch, de
         assert payload["hits"][index]["adjacent_to"] == payload["hits"][source]["store_id"]
         assert payload["hits"][index]["arms"] == ["adjacent"]
     assert read.call_count == 2
-    assert all(call.kwargs == {"limit": 1} for call in read.call_args_list)
+    assert [call.args[2] for call in read.call_args_list] == [hits[0], hits[2]]
     assert e._store.connection.total_changes == changes
     assert all(sql.lstrip().upper().startswith("SELECT") for sql in statements)
     assert len(raw) <= tools._LCM_RECALL_RESPONSE_CHAR_CAP
@@ -108,13 +108,13 @@ def unit_case():
                for n, i in enumerate(rows, 1)]
     neighbour = {"store_id": 9, "session_id": "s", "conversation_id": "c",
                  "role": "assistant", "content": "reply"}
-    store = SimpleNamespace(get_session_messages_after=Mock(return_value=[neighbour]))
-    return SimpleNamespace(_store=store, current_session_id="current"), entries, rows, neighbour
+    read = Mock(return_value=neighbour)
+    return SimpleNamespace(_store=SimpleNamespace(), current_session_id="current", _read=read), entries, rows, neighbour
 
 
 def apply(e, entries, rows, **kw):
     return tools._lcm_recall_adjacent_reply(e, entries, rows, **{
-        "limit": 3, "deadline": tools.time.monotonic() + 10, "excluded": set(), "allowed": None, **kw})
+        "limit": 3, "deadline": tools.time.monotonic() + 10, "excluded": set(), "allowed": None, "read_next": e._read, **kw})
 
 
 @pytest.mark.parametrize("delivered", [True, False])
@@ -131,8 +131,10 @@ def test_existing_neighbour_stays_or_moves_without_duplication(delivered):
     else:
         assert [x["hit"]["store_id"] for x in result] == [1, 9, 3, 5]
         assert pairs == [{"store_id": 9, "after_store_id": 1}]
-        assert result[1]["_final_score"] == entries[0]["_final_score"]
-        assert result[1]["rrf_score"] == entries[0]["rrf_score"]
+        # A moved pool entry keeps its own scores and ranks; it is only repositioned.
+        assert result[1]["_final_score"] == entries[3]["_final_score"]
+        assert result[1]["rrf_score"] == entries[3]["rrf_score"]
+        assert result[1]["ranks"] == entries[3]["ranks"]
 
 
 @pytest.mark.parametrize("case", ["tool", "tool_calls", "empty", "subagent", "end",
@@ -142,7 +144,7 @@ def test_ineligible_is_noop(case):
     e, entries, rows, neighbour = unit_case()
     entries = entries[:1]
     if case == "end":
-        e._store.get_session_messages_after.return_value = []
+        e._read.return_value = None
     elif case == "summary":
         entries[0]["hit"]["kind"] = "summary"
     elif case == "chunk_only":
@@ -164,17 +166,17 @@ def test_ineligible_is_noop(case):
     kw = {"excluded": {"s"}} if case == "excluded" else {"allowed": []} if case == "allowed" else {}
     result, pairs, reason = apply(e, entries, rows, **kw)
     assert result == entries and pairs == [] and reason is None
-    assert e._store.get_session_messages_after.call_count <= 1
+    assert e._read.call_count <= 1
 
 
 def test_max_three_reads_and_original_top_three_sources():
     e, entries, rows, neighbour = unit_case()
-    def read(sid, source, *, limit):
-        return [{**neighbour, "store_id": source + 1}]
-    e._store.get_session_messages_after.side_effect = read
+    def read(sid, source):
+        return {**neighbour, "store_id": source + 1}
+    e._read.side_effect = read
     result, pairs, reason = apply(e, entries, rows, limit=10)
     assert reason is None
-    assert e._store.get_session_messages_after.call_count == 3
+    assert e._read.call_count == 3
     assert pairs == [{"store_id": i + 1, "after_store_id": i} for i in (1, 3, 5)]
     assert [x["hit"]["store_id"] for x in result] == [1, 2, 3, 4, 5, 6, 7]
 
@@ -183,10 +185,10 @@ def test_max_three_reads_and_original_top_three_sources():
 def test_failure_rolls_back_whole_step(failure, monkeypatch):
     e, entries, rows, neighbour = unit_case()
     before = json.dumps(entries)
-    e._store.get_session_messages_after.side_effect = [[neighbour], RuntimeError("private error must not escape")]
+    e._read.side_effect = [neighbour, RuntimeError("private error must not escape")]
     kw = {}
     if failure == "deadline":
-        e._store.get_session_messages_after.side_effect = [[neighbour], TimeoutError()]
+        e._read.side_effect = [neighbour, TimeoutError()]
     elif failure == "expired":
         kw["deadline"] = -1
     elif failure == "overrun":
@@ -202,7 +204,7 @@ def test_failure_rolls_back_whole_step(failure, monkeypatch):
                                          (TimeoutError(), "deadline")])
 def test_failure_provenance_no_ranking_change(ranked, monkeypatch, error, reason):
     e, hits, _ = ranked
-    monkeypatch.setattr(e._store, "get_session_messages_after", Mock(side_effect=error))
+    monkeypatch.setattr(tools, "_lcm_recall_next_row", Mock(side_effect=error))
     payload = json.loads(invoke(e))
     assert ids(payload) == hits
     assert payload["provenance"]["adjacent_reply_unavailable"] == reason
@@ -217,7 +219,7 @@ def test_session_delivery_is_byte_identical(ranked, monkeypatch):
     e._config.recall_adjacent_reply = False
     before = invoke(e)
     e._config.recall_adjacent_reply = True
-    monkeypatch.setattr(e._store, "get_session_messages_after", Mock(side_effect=AssertionError("read")))
+    monkeypatch.setattr(tools, "_lcm_recall_next_row", Mock(side_effect=AssertionError("read")))
     assert invoke(e) == before
 
 
@@ -230,10 +232,18 @@ def test_existing_caps_still_apply(ranked, monkeypatch, detail):
     assert len(json.loads(payload_raw)["hits"]) <= 6
 
 
+def reply_from_other_role(e):
+    """The shared fixture stores both rows as user turns; a reply must come from the other role."""
+    e._store.connection.execute(
+        "UPDATE messages SET role = 'assistant' WHERE content LIKE 'unrelated neighbor%'")
+    e._store.connection.commit()
+
+
 @pytest.mark.parametrize("consumer", ["pack", "proposal", "auto", "requirements", "adaptive", "baseline"])
 def test_internal_consumers_pin_off_with_model_positive_control(internal_recall, monkeypatch, consumer):
     from hermes_lcm import answer_contract, evidence_compiler, evidence_pack
     e, plugin = internal_recall
+    reply_from_other_role(e)
     args = {"query": "needle", "detail": "answer_ready"}
     def consume(*a, retrieve, **kw):
         return {"context": retrieve(args)}
@@ -271,6 +281,7 @@ def test_internal_consumers_pin_off_with_model_positive_control(internal_recall,
 
 def test_proactive_pins_off_with_model_positive_control(internal_recall, monkeypatch):
     e, _ = internal_recall
+    reply_from_other_role(e)
     e._config.proactive_recall_min_score = 0
     monkeypatch.setattr(e, "_proactive_recall_eligible", lambda: True, raising=False)
     monkeypatch.setattr(e, "_newest_user_message_text", lambda _: "needle", raising=False)
@@ -336,3 +347,110 @@ def test_no_default_or_preset_reaches_the_flag(monkeypatch):
     for preset in presets.shipped_presets():
         assert "recall_adjacent_reply" not in preset.runtime_env
         assert "LCM_RECALL_ADJACENT_REPLY" not in json.dumps(preset.runtime_env)
+
+
+# -- Review round 1 regressions -------------------------------------------------
+
+def _entry(sid, store, ranks, score):
+    return {"hit": {"kind": "message_excerpt", "store_id": store, "session_id": sid},
+            "ranks": ranks, "rrf_score": score, "_final_score": score}
+
+
+def _step(ordered, rows, read, *, limit):
+    return tools._lcm_recall_adjacent_reply(
+        SimpleNamespace(_store=SimpleNamespace(), current_session_id="cur"), ordered, rows,
+        limit=limit, deadline=tools.time.monotonic() + 5, excluded=set(), allowed=None,
+        read_next=read)
+
+
+def test_fts_anchor_still_inside_window_after_replies():
+    from hermes_lcm.retrieval_core import place_fts_anchor
+    limit = 4
+    ordered = [_entry(f"s{i}", 10 * i, {1: i}, 1.0 / (i + 1)) for i in range(1, 6)]
+    ordered.append(_entry("s9", 50, {0: 1}, 0.001))
+    rows = {e["hit"]["store_id"]: {"session_id": e["hit"]["session_id"], "conversation_id": "c",
+                                   "role": "user", "content": "q?"} for e in ordered}
+    read = Mock(side_effect=lambda sid, after: {"store_id": after + 1, "session_id": sid,
+                                                "conversation_id": "c", "role": "assistant",
+                                                "content": "a"})
+    placed, pairs, reason = _step(ordered, rows, read, limit=limit)
+    assert reason is None and pairs
+    arm_hits = {"fts": [{"kind": "message_excerpt", "store_id": 50}], "chunk": [{}]}
+    anchored, info = place_fts_anchor(placed, arm_hits, ["fts", "chunk"], limit)
+    assert info["fired"]
+    assert [e["hit"]["store_id"] for e in anchored].index(50) < limit
+    # lcm_recall places replies before the anchor step, so the #950 guarantee holds.
+    source = Path(tools.__file__).read_text()
+    body = source[source.index("def lcm_recall("):]
+    assert body.index("_lcm_recall_adjacent_reply(") < body.index("place_fts_anchor(")
+
+
+@pytest.mark.parametrize("case", ["older", "same_role", "user_after_user"])
+def test_reply_must_be_other_role_and_not_older(case):
+    ordered = [_entry("s", 100, {0: 1}, 3)]
+    rows = {100: {"session_id": "s", "conversation_id": "", "role": "user", "content": "x",
+                  "observed_at": 2_000_000_000.0}}
+    reply = {"store_id": 101, "session_id": "s", "conversation_id": "", "role": "assistant",
+             "content": "reply", "observed_at": 2_000_000_100.0}
+    if case == "older":
+        reply["observed_at"] = 1_000_000_000.0  # a re-stored or imported row, years older
+    elif case == "same_role":
+        rows[100]["role"] = "assistant"
+    else:
+        reply["role"] = "user"
+    placed, pairs, reason = _step(ordered, rows, Mock(return_value=reply), limit=4)
+    assert placed == ordered and pairs == [] and reason is None
+    reply.update(role="assistant", observed_at=2_000_000_100.0)
+    rows[100]["role"] = "user"
+    placed, pairs, reason = _step(ordered, rows, Mock(return_value=reply), limit=4)
+    assert pairs == [{"store_id": 101, "after_store_id": 100}]
+
+
+def test_small_limit_sources_stay_in_window_without_error():
+    ordered = [_entry("s", 1, {0: 1}, 3), _entry("t", 9, {0: 2}, 2), _entry("s", 2, {0: 3}, 1)]
+    rows = {e["hit"]["store_id"]: {"session_id": e["hit"]["session_id"], "conversation_id": "",
+                                   "role": "user", "content": "q?"} for e in ordered}
+    read = Mock(side_effect=lambda sid, after: {"store_id": after + 1, "session_id": sid,
+                                                "conversation_id": "", "role": "assistant",
+                                                "content": "a"})
+    placed, pairs, reason = _step(ordered, rows, read, limit=2)
+    assert reason is None
+    assert read.call_count == 2  # only the two delivered entries are sources
+    assert [e["hit"]["store_id"] for e in placed][:2] == [1, 2]
+    assert pairs == [{"store_id": 2, "after_store_id": 1}]
+
+
+def test_receipts_only_for_delivered_replies():
+    ordered = [_entry("s", 1, {0: 1}, 3), _entry("t", 9, {0: 2}, 2)]
+    rows = {1: {"session_id": "s", "conversation_id": "", "role": "user", "content": "x"}}
+    read = Mock(return_value={"store_id": 2, "session_id": "s", "conversation_id": "",
+                              "role": "assistant", "content": "a"})
+    placed, pairs, reason = _step(ordered, rows, read, limit=1)
+    assert reason is None and pairs == []
+    assert [e["hit"]["store_id"] for e in placed][:1] == [1]
+
+
+def test_reply_already_delivered_as_collapsed_duplicate_is_not_repeated():
+    ordered = [_entry("s", 1, {0: 1}, 3), _entry("t", 9, {0: 2}, 2)]
+    ordered[1]["hit"]["duplicate_store_ids"] = [2]
+    rows = {1: {"session_id": "s", "conversation_id": "", "role": "user", "content": "x"}}
+    read = Mock(return_value={"store_id": 2, "session_id": "s", "conversation_id": "",
+                              "role": "assistant", "content": "same text"})
+    placed, pairs, reason = _step(ordered, rows, read, limit=4)
+    assert placed == ordered and pairs == [] and reason is None
+
+
+def test_reads_use_a_private_read_only_connection(ranked, monkeypatch):
+    e, hits, replies = ranked
+    seen = []
+    original = tools._lcm_recall_next_row
+
+    def spy(conn, sid, store_id):
+        seen.append(conn)
+        return original(conn, sid, store_id)
+
+    monkeypatch.setattr(tools, "_lcm_recall_next_row", spy)
+    payload = json.loads(invoke(e))
+    assert payload["provenance"]["adjacent_reply"]
+    assert seen and all(conn is not e._store.connection for conn in seen)
+    assert len({id(conn) for conn in seen}) == 1

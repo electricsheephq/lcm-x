@@ -214,7 +214,7 @@ def deliver_recall(
             "arms": arms,
         }
         if hit.get("adjacent_to") is not None:
-            item.update(adjacent_to=hit["adjacent_to"], arms=["adjacent"])
+            item.update(adjacent_to=hit["adjacent_to"], arms=[*arms, "adjacent"])
         if hit.get("lineage"):  # #1931: a delegated subagent's hit names its parent session
             item.update(parent_session_id=hit.get("parent_session_id"), lineage=hit["lineage"])
         if hit.get("kind") == "summary":
