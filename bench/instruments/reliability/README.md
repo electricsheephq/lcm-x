@@ -98,6 +98,38 @@ the host reported `interrupted`. Any other assistant row is surplus.
   existing edge-whitespace rule; tool-result hashes remain exact). Missing/unreadable payloads or
   absent content are real deficits and fail B2; `numbers.B2.externalized` reports resolved/unresolved
   counts, loss reasons and up to 10 store ids, separately from ordinary deficits.
+- **B2 visibility split (P1h, design r3.5 §5).** `numbers.B2.visible_surplus_rows` and
+  `silent_surplus_rows` partition only the existing unlicensed user, assistant and tool surplus, across all
+  stored lineages. B2's verdict, existing numbers and `failed_bars.B2` stay unchanged. Host-parity licences,
+  embedded credits, merges and projections retain their existing accounting.
+  `supersedes` / `generated_unproven` explain their own row; an unordered `possible_replay_of` pair explains
+  one endpoint only when both rows have the same B2 key in the same lineage. Relations are read from the whole
+  store, but a pair across lineages or keys explains nothing. `composite`, `split` and absent relation tables
+  explain nothing. Copies are counted, not rows: a row whose `tool_calls` holds one call entry twice holds two
+  copies of that key. Store order identifies a key's expected copy only when the key keeps at most one copy
+  (expected, licensed or loose-allowed): that copy is its earliest stored copy (by store ID), so only its last
+  *surplus* copies can be explained. A self relation counts only on such a row and a pair explains only such an
+  endpoint, so a relation on the expected copy (an edited revision's `supersedes`, say) never explains a later
+  copy that carries none. A key that keeps two or more copies (genuine repeats, host-licensed copies) counts its
+  worst case, because a silent re-store stored before a related later copy cannot be told apart: its surplus
+  fills rows without a self relation first, then the self-related rows that hold the most copies, and each
+  self-related row it reaches explains one copy; pairs explain nothing there. A copy that a host merge record
+  consumed as a composite's part is a kept copy of its key and stays in the key's ID list. A key takes the worst
+  case whatever it keeps when its ID list holds such a consumed copy or a copy an embedded credit reserved: #823
+  merges and #804 licensed parts pick their copies around reserved rows, so store order no longer identifies the
+  kept copy.
+  Maximum matching assigns distinct witnesses to distinct stored rows within each key, capped by
+  that key's unlicensed surplus; a stored row explains at most one copy of each key it holds, so an assistant row
+  whose content and tool entries were stored twice explains one copy of each. A row whose `tool_calls` holds the
+  same call entry twice can explain only one of those copies, so the other stays silent. Duplicate/reversed pairs and
+  repeated self relations add no capacity. `silent_surplus_examples` are best-effort: up to 10 of the
+  highest-numbered rows of each key that still hold an unexplained copy, rows without a self relation first,
+  usually the later copies.
+  Complete store-ID lists drive this split; existing truncated display lists stay as they are.
+  `silent_surplus_examples` merges user, assistant and tool examples (up to 10, sorted by store ID/role/hash):
+  `{store_id, role, sha256}`. Tool hashes are SHA256 of `json.dumps(key[1:], sort_keys=True)` (the existing
+  tool key without its lineage, with default JSON separators); call/malformed-call roles are `assistant`.
+  Examples are deterministic representatives among rows left unexplained by the matching.
 - **Host-parity licence (D-A, DESIGN-436 REVISION 2 P-HOST; `scorers/host_parity.py`).** A stored USER-row surplus
   of a B2 key (or a B1 user tag) in lineage L is licensed only up to what the cell's own host state.db holds in L:
   `min(surplus, host_count - expected)`, floored at 0. host_count is what one host view holds: the most ACTIVE rows
@@ -376,6 +408,15 @@ at B1/B2. The last three gate on UID-capable hosts; stamp-only failures remain e
 and #1501/#1506 targets via `ISSUE_HOSTS`. Other continuity cells remain outside the gate.
 On runtime hosts, R1 `publication-failure/rotation-child-persistent` gates only on derived `B2D`: a B2 FAIL
 with a positive or missing deficit count; B1 mismatches and B2 surplus remain accepted under #1588, independently of #1797's open state.
+
+`B2S` is an available exact-cell CI predicate beside `B2D`: any deficit (including tool/externalized
+loss), positive silent surplus, or missing/invalid visibility split fails closed. Invalid means any of the
+counts is missing, not an int or negative, or `visible_surplus_rows + silent_surplus_rows` differs from
+`surplus_rows + tool_surplus_rows`. A split assistant reply (`split_keys` above 0) also fails B2S: the scorer
+counts no deficit for a split key whatever its expected count, so a split could hide a lost copy. Visible
+surplus alone passes B2S while still failing B2. B2S checks
+receipts even on a reported PASS. A B2S-gated row reported UNSUPPORTED, INCONCLUSIVE or any verdict other than
+PASS or FAIL fails closed even when its counts are clean, because its scenario was not proven. This change promotes no `CELL_GATE` entry and does not prove that the P1 gate passes.
 
 ### Claim boundary
 R2 proves the plugin's behaviour through a real `hermes acp` process on the pinned host shas, with every model route

@@ -113,7 +113,7 @@ def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[di
         where = f"{r['verdict']} {r['host']} {r['cell']} ({r.get('transport', 'in-process')})"
         if r["verdict"] == "ERROR":
             problems.append(f"{where}: {str(r.get('reason', ''))[:200]}")
-        elif r["verdict"] == "FAIL" and in_gate_set(r["cell"]):
+        elif (r["verdict"] == "FAIL" or "B2S" in CELL_GATE.get(r["cell"], ("", ()))[1]) and in_gate_set(r["cell"]):
             targets = set(r.get("targets") or [])
             open_targets = targets & open_issues
             transport = r.get("transport", "in-process")
@@ -130,6 +130,27 @@ def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[di
                     deficit = b2.get("deficit_rows")
                     if deficit is None or deficit > 0:
                         failed.add("B2D")
+                if "B2S" in bars:
+                    b2 = (r.get("numbers") or {}).get("B2") or {}
+                    n = {k: b2.get(k) for k in ("deficit_rows", "silent_surplus_rows", "visible_surplus_rows",
+                                                "surplus_rows", "tool_surplus_rows", "tool_missing_rows",
+                                                "split_keys")}
+                    ext = b2.get("externalized")
+                    n["externalized"] = ext.get("deficit_rows") if isinstance(ext, dict) else None
+                    # Fail closed: a proven verdict (PASS, or FAIL with its bars), every count present and a
+                    # non-negative int, and the split covers all surplus. An UNSUPPORTED or INCONCLUSIVE row
+                    # did not prove its scenario, so clean counts never satisfy B2S. A split assistant reply
+                    # fails too: the scorer counts no deficit for a split key whatever its expected count, so
+                    # two expected copies matched by one split pair hide a lost copy.
+                    if (r["verdict"] not in ("PASS", "FAIL")
+                            or any(type(v) is not int or v < 0 for v in n.values())
+                            or n["visible_surplus_rows"] + n["silent_surplus_rows"]
+                            != n["surplus_rows"] + n["tool_surplus_rows"]
+                            or n["deficit_rows"] or n["silent_surplus_rows"] or n["tool_missing_rows"]
+                            or n["externalized"] or n["split_keys"]):
+                        failed.add("B2S")
+                if not failed and r["verdict"] != "FAIL":
+                    continue
                 if failed:
                     failed &= set(bars) | ({"B9"} if lane == "acp-process" and r["host"] == "upstream-uid" else set())
                     if not failed:
