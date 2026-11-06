@@ -107,7 +107,8 @@ the host reported `interrupted`. Any other assistant row is surplus.
   store, but a pair across lineages or keys explains nothing. `composite`, `split` and absent relation tables
   explain nothing. Maximum matching assigns distinct witnesses to distinct stored rows within each key, capped by
   that key's unlicensed surplus; a stored row explains at most one copy of each key it holds, so an assistant row
-  whose content and tool entries were stored twice explains one copy of each. Duplicate/reversed pairs and
+  whose content and tool entries were stored twice explains one copy of each. A row whose `tool_calls` holds the
+  same call entry twice can explain only one of those copies, so the other stays silent. Duplicate/reversed pairs and
   repeated self relations add no capacity. `silent_surplus_examples` are best-effort: up to 10 of the
   highest-numbered unexplained rows of each key, usually the later copies.
   Complete store-ID lists drive this split; existing truncated display lists stay as they are.

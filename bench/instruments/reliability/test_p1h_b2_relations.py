@@ -186,6 +186,7 @@ FULL = {"deficit_rows": 0, "silent_surplus_rows": 0, "visible_surplus_rows": 0, 
     ({**FULL, "tool_missing_rows": None}, [], "PASS", True),
     ({**FULL, "externalized": {"deficit_rows": None}}, [], "PASS", True),
     ({**FULL, "externalized": {}}, [], "PASS", True),
+    ({**FULL, "externalized": [1]}, [], "PASS", True),
     # Review finding 3: the split must cover all surplus.
     ({**FULL, "surplus_rows": 9}, ["B2"], "FAIL", True),
     ({**FULL, "visible_surplus_rows": 1, "surplus_rows": 2}, ["B2"], "FAIL", True),

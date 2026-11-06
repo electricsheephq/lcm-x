@@ -134,7 +134,8 @@ def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[di
                     b2 = (r.get("numbers") or {}).get("B2") or {}
                     n = {k: b2.get(k) for k in ("deficit_rows", "silent_surplus_rows", "visible_surplus_rows",
                                                 "surplus_rows", "tool_surplus_rows", "tool_missing_rows")}
-                    n["externalized"] = (b2.get("externalized") or {}).get("deficit_rows")
+                    ext = b2.get("externalized")
+                    n["externalized"] = ext.get("deficit_rows") if isinstance(ext, dict) else None
                     # Fail closed: every count present and a non-negative int, and the split covers all surplus.
                     if (any(type(v) is not int or v < 0 for v in n.values())
                             or n["visible_surplus_rows"] + n["silent_surplus_rows"]
