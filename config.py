@@ -490,6 +490,7 @@ _SUPPORTED_LCM_CONFIG_YAML_KEYS = {
     "embedding_query_prefix", "embedding_document_prefix",
     "large_output_active_replay_stub_threshold_tokens",
     "large_output_active_replay_stub_aged_threshold_tokens",
+    "recall_summary_event_time",
 }
 
 
@@ -974,6 +975,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("recall_reference_strict", "LCM_RECALL_REFERENCE_STRICT", bool),
     _EnvFieldSpec("recall_delivery_unit", "LCM_RECALL_DELIVERY_UNIT", str),
     _EnvFieldSpec("recall_delivery_order", "LCM_RECALL_DELIVERY_ORDER", str),
+    _EnvFieldSpec("recall_summary_event_time", "LCM_RECALL_SUMMARY_EVENT_TIME", bool),
     _EnvFieldSpec("recall_fts_anchor", "LCM_RECALL_FTS_ANCHOR", bool),
     _EnvFieldSpec("proactive_recall_enabled", "LCM_PROACTIVE_RECALL_ENABLED", bool),
     _EnvFieldSpec("proactive_recall_min_score", "LCM_PROACTIVE_RECALL_MIN_SCORE", float),
@@ -1351,6 +1353,10 @@ class LCMConfig:
     recall_reference_strict: bool = True
     recall_delivery_unit: str = "hits"
     recall_delivery_order: str = "score"
+    # Opt-in: model-called lcm_recall summary hits carry event_time_start/end,
+    # the MIN/MAX host observed_at over all their source messages (never write
+    # time). Default-off keeps every response byte-identical.
+    recall_summary_event_time: bool = False
     # lcm_recall FTS anchor slot: with two or more arms, the FTS arm's best
     # message is kept inside the delivered window (at most one session evicted).
     # Evidence (#950): frozen LongMemEval-M LOCAL replay, R@10 0.898 -> 0.905 (470 q).
@@ -1718,6 +1724,17 @@ class LCMConfig:
         c.recall_delivery_order = c.recall_delivery_order.strip().lower()
         if c.recall_delivery_order not in ("score", "time"):
             c.recall_delivery_order = "score"
+        # The environment (applied above) wins; otherwise lcm.recall_summary_event_time.
+        raw, source = _lcm_config_string_with_source(
+            "LCM_RECALL_SUMMARY_EVENT_TIME", "recall_summary_event_time", "", env=env)
+        if source.startswith("config_yaml:"):
+            normalized = raw.strip().lower()
+            if normalized in ("1", "true", "yes", "on", "0", "false", "no", "off"):
+                c.recall_summary_event_time = normalized in ("1", "true", "yes", "on")
+                _record("recall_summary_event_time", source)
+            else:
+                _record("recall_summary_event_time", "default",
+                        f"invalid {source[len('config_yaml:'):]}={raw!r} ignored; using false")
 
         # Pattern-list overrides carry a source sidecar and stay explicit.
         raw_sensitive_patterns = lcm_env_get("LCM_SENSITIVE_PATTERNS")

@@ -16,7 +16,10 @@ from .reasoning import resolve_occurrence_time
 from .retrieval_core import _hit_identity
 from .store import _normalize_observed_at
 
-_EVENT_TIME_KEYS = ("event_time", "event_time_source", "time_uncertain")
+# Optional time fields the response cap strips before it drops a hit. The
+# summary span keys appear only with ``read_summary_event_time`` (opt-in).
+_EVENT_TIME_KEYS = ("event_time", "event_time_source", "time_uncertain",
+                    "event_time_start", "event_time_end")
 
 
 def deliver_recall(
@@ -61,6 +64,7 @@ def deliver_recall(
     rerank_enabled: Callable[[], bool],
     session_delivery: Callable[..., str] | None = None,
     delivery_order: str = "score",
+    read_summary_event_time: Callable[..., tuple[dict[int, dict[str, str]], str | None]] | None = None,
 ) -> str:
     """Deliver ranked entries without changing retrieval or host-read policy."""
     if session_delivery is not None:
@@ -70,6 +74,7 @@ def deliver_recall(
         options.pop("ordered")
         options.pop("session_delivery")
         options["delivery_order"] = "score"
+        options["read_summary_event_time"] = None
         response = json.loads(_deliver_hits([], **options))
         response["provenance"].pop("answer_ready", None)
         return session_delivery(ordered, response)
@@ -190,6 +195,21 @@ def deliver_recall(
         if event_time_unavailable_reason is not None:
             event_time_rows.clear()
             event_time_unread_ids = set(event_time_ids)
+    # Opt-in summary span: one batched read of the deliverable summary nodes.
+    # A failed read omits the span from every summary hit (atomic).
+    summary_event_time: dict[int, dict[str, str]] = {}
+    summary_event_time_unavailable: str | None = None
+    summary_node_ids = list(dict.fromkeys(
+        int(entry["hit"]["node_id"])
+        for entry in selected_entries[:limit]
+        if entry["hit"].get("kind") == "summary" and entry["hit"].get("node_id") is not None
+    )) if read_summary_event_time is not None else []
+    if summary_node_ids:
+        summary_event_time, summary_event_time_unavailable = read_summary_event_time(
+            summary_node_ids, deadline=deadline
+        )
+        if summary_event_time_unavailable is not None:
+            summary_event_time = {}
     event_time_unavailable = False
     hits_out: list[dict[str, Any]] = []
     # Characters each delivered hit's optional event-time fields add on top of
@@ -217,6 +237,8 @@ def deliver_recall(
             item["node_id"] = hit.get("node_id")
             if hit.get("store_id") is not None:
                 item["store_id"] = hit.get("store_id")
+            if hit.get("node_id") is not None:
+                item.update(summary_event_time.get(int(hit["node_id"]), {}))
         else:
             item["store_id"] = hit.get("store_id")
             if hit.get("duplicate_store_ids"):
@@ -233,7 +255,10 @@ def deliver_recall(
             hydrated = answer_ready_content.get(_hit_identity(hit))
             if hydrated is not None:
                 item.update({k: v for k, v in hydrated.items() if k not in _EVENT_TIME_KEYS})
-                item.update(event_time_fields(event_time_rows.get(int(hit.get("store_id") or 0))))
+                # Off: a summary sharing a message's store_id keeps taking that
+                # message's event time (pinned). On: a summary never does.
+                if read_summary_event_time is None or hit.get("kind") != "summary":
+                    item.update(event_time_fields(event_time_rows.get(int(hit.get("store_id") or 0))))
             if delta_requested:
                 exact_ref = _exact_ref(hit, hydrated)
                 if exact_ref is not None:
@@ -381,6 +406,8 @@ def deliver_recall(
         response["event_time_unavailable_reason"] = event_time_unavailable_reason
     if requested_limit > limit_cap:
         response["limit_clamped_from"] = requested_limit
+    if summary_event_time_unavailable is not None:
+        response["provenance"]["summary_event_time_unavailable"] = summary_event_time_unavailable
     if detail == "answer_ready":
         expansion = {
             "expanded_hit_count": sum("content" in hit for hit in hits_out),

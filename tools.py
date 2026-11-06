@@ -3204,6 +3204,95 @@ def _lcm_recall_event_time_rows(
     }, None
 
 
+# Numeric observed_at values _normalize_observed_at accepts as they stand: > 0
+# and before year 10000. SQL aggregates only these; every other stored form
+# (ISO text, out-of-range numbers) comes back for Python normalization.
+_OBSERVED_AT_SQL_SAFE = (
+    "typeof(m.observed_at) IN ('integer', 'real') "
+    "AND m.observed_at > 0 AND m.observed_at < 253402300800"
+)
+
+
+def _lcm_recall_summary_event_time_rows(
+    engine: "LCMEngine", node_ids: list[int], *, deadline: float
+) -> tuple[dict[int, dict[str, str]], str | None]:
+    """Read each summary node's event-time span, inside the deadline.
+
+    Returns ``({node_id: {"event_time_start", "event_time_end"}}, reason)``:
+    the MIN/MAX host ``observed_at`` over ALL the node's source messages,
+    walked through condensed nodes with no cap, in one statement for the whole
+    batch. Write times (``messages.timestamp``, ``earliest_at``/``latest_at``,
+    ``created_at``) are never used; a node with no stamped source is absent.
+    ``reason`` follows ``_lcm_recall_event_time_rows``: ``"deadline"`` or
+    ``"read_error"``, and then the mapping is empty (atomic), on the same
+    private read-only connection bounded by the remaining budget.
+    """
+    if time.monotonic() >= deadline:
+        return {}, "deadline"
+    expired = [False]
+
+    def interrupt_if_expired() -> int:
+        if time.monotonic() >= deadline:
+            expired[0] = True
+            return 1
+        return 0
+
+    conn: sqlite3.Connection | None = None
+    try:
+        db_path = Path(engine._store.db_path).resolve()
+        conn = sqlite3.connect(
+            f"{db_path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=max(0.001, deadline - time.monotonic()),
+        )
+        conn.execute("PRAGMA query_only=ON")
+        conn.set_progress_handler(interrupt_if_expired, 1000)
+        rows = conn.execute(
+            f"""WITH RECURSIVE walk(root, source_type, source_id) AS (
+                    SELECT n.node_id, n.source_type, CAST(j.value AS INTEGER)
+                    FROM summary_nodes n, json_each(n.source_ids) j
+                    WHERE n.node_id IN ({",".join("?" for _ in node_ids)})
+                    UNION
+                    SELECT walk.root, child.source_type, CAST(j.value AS INTEGER)
+                    FROM walk JOIN summary_nodes child
+                      ON walk.source_type = 'nodes' AND child.node_id = walk.source_id
+                    JOIN json_each(child.source_ids) j
+                )
+                SELECT walk.root,
+                       MIN(CASE WHEN {_OBSERVED_AT_SQL_SAFE} THEN m.observed_at END),
+                       MAX(CASE WHEN {_OBSERVED_AT_SQL_SAFE} THEN m.observed_at END),
+                       group_concat(CASE WHEN typeof(m.observed_at) IN ('text', 'integer', 'real')
+                                         AND NOT ({_OBSERVED_AT_SQL_SAFE})
+                                    THEN json_quote(m.observed_at) END, ',')
+                FROM walk JOIN messages m
+                  ON walk.source_type = 'messages' AND m.store_id = walk.source_id
+                WHERE m.observed_at IS NOT NULL
+                GROUP BY walk.root""",
+            [int(node_id) for node_id in node_ids],
+        ).fetchall()
+    except (sqlite3.Error, OSError) as exc:
+        logger.debug("lcm_recall summary event_time read failed: %s", exc)
+        if expired[0] or time.monotonic() >= deadline:
+            return {}, "deadline"
+        return {}, "read_error"
+    finally:
+        if conn is not None:
+            conn.close()
+    if time.monotonic() >= deadline:
+        return {}, "deadline"
+    spans: dict[int, dict[str, str]] = {}
+    for root, low, high, other in rows:
+        values = [low, high, *(json.loads(f"[{other}]") if other else [])]
+        normalized = [v for v in map(_normalize_observed_at, values) if v is not None]
+        if normalized:
+            spans[int(root)] = {
+                key: datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                for key, value in (("event_time_start", min(normalized)),
+                                   ("event_time_end", max(normalized)))
+            }
+    return spans, None
+
+
 def _lcm_recall_answer_ready_content(
     engine: "LCMEngine",
     entries: list[dict[str, Any]],
@@ -4621,6 +4710,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         )
 
     _annotate_subagent_lineage(engine, [entry["hit"] for entry in ordered if isinstance(entry.get("hit"), dict)])
+    # Only the model's own call follows config; internal callers pin it off.
+    read_summary_event_time = (
+        partial(_lcm_recall_summary_event_time_rows, engine)
+        if kwargs.get("summary_event_time", getattr(engine._config, "recall_summary_event_time", False))
+        else None
+    )
     session_delivery = None
     if kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) == "session":
         from .recall_session import deliver_session
@@ -4630,6 +4725,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             event_time_fields=_lcm_recall_event_time,
             occurrence=include_occurrence_time,
             summary_leads=summary_leads,
+            **({"summary_event_time": read_summary_event_time} if read_summary_event_time else {}),
         )
     return recall_delivery.deliver_recall(
         ordered,
@@ -4675,6 +4771,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         rerank_enabled=lambda: bool(getattr(engine._config, "rerank_enabled", False)),
         session_delivery=session_delivery,
         delivery_order=kwargs.get("delivery_order", getattr(engine._config, "recall_delivery_order", "score")),
+        **({"read_summary_event_time": read_summary_event_time} if read_summary_event_time else {}),
     )
 
 

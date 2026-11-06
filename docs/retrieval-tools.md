@@ -60,6 +60,24 @@ score order; ties keep score order. The default `score` preserves existing outpu
 Only time mode adds `provenance.delivery_order: "time"`; session delivery and
 internal recall consumers keep their existing order.
 
+Set `recall_summary_event_time: true` (or `LCM_RECALL_SUMMARY_EVENT_TIME=true`,
+which wins over the YAML key) to give model-called `lcm_recall` summary hits, and
+session-delivery summary leads, the span of their events:
+
+```yaml
+lcm:
+  recall_summary_event_time: true
+```
+
+`event_time_start` and `event_time_end` are the earliest and latest host
+`observed_at` over all the summary's source messages, through condensed nodes,
+formatted like a message's `event_time`. A summary whose sources carry no host
+time has neither field; the existing `timestamp` (LCM's write time) is unchanged.
+The read runs inside the recall deadline; a late or failed read omits the fields
+from every summary and sets `provenance.summary_event_time_unavailable` to
+`deadline` or `read_error`. The fields count toward the response cap like
+`event_time`. Internal recall consumers keep their existing output.
+
 ### Retrieval contract
 
 LCM retrieval tools default to current-session scope. `lcm_grep` accepts

@@ -274,6 +274,7 @@
     "recall_scan_budget_s": 0.0,
     "recall_scan_max_rows": 0,
     "recall_scan_rows": 25000,
+    "recall_summary_event_time": false,
     "rerank_enabled": false,
     "rerank_margin": 0.0,
     "rerank_model": "rerank-2.5-lite",

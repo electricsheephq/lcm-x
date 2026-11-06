@@ -5797,7 +5797,7 @@ class LCMEngine(
         handler = handlers.get(name)
         if handler:
             return handler(args, engine=self,
-                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order"}})
+                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "summary_event_time"}})
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
@@ -10071,6 +10071,7 @@ class LCMEngine(
                 fts_anchor=False,
                 delivery_unit="hits",
                 delivery_order="score",
+                summary_event_time=False,
             )
             payload = json.loads(raw)
         except EmbeddingPrivacyPolicyError as exc:
