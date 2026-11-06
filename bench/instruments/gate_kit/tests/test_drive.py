@@ -256,7 +256,7 @@ def test_driver_events_feed_audit_events(tmp_path):
 # -- host-backed smoke ---------------------------------------------------------------------------------------------
 def smoke_host():
     """A reliability host (hosts file: --hosts-file / $LCM_RELIABILITY_HOSTS / the default) whose tree has both entry
-    points; $LCM_GATE_KIT_HOST picks one by name."""
+    points; $LCM_GATE_KIT_HOST names it (the smoke skips without it)."""
     from bench.instruments.reliability import hosts
     path = hosts.hosts_file(None)
     if not path.is_file():
@@ -266,7 +266,12 @@ def smoke_host():
     except (OSError, ValueError) as exc:
         return None, f"hosts file unusable: {exc}"
     want = os.environ.get("LCM_GATE_KIT_HOST")
-    for name, h in sorted(found.items(), key=lambda kv: (kv[0] != want, kv[0] != "r34.15-0.21.5", kv[0])):
+    if not want:
+        # Some hosts reach the network at start (blocked by the smoke's sandbox) or cannot load LCM-X; name one.
+        return None, "set LCM_GATE_KIT_HOST to a reliability host that runs without network and loads LCM-X"
+    for name, h in sorted(found.items(), key=lambda kv: (kv[0] != want, kv[0])):
+        if name != want:
+            continue
         src = Path(h["src"])
         undo = src / "tui_gateway" / "methods_session.py"
         if (Path(h["python"]).parent / "hermes").exists() and undo.is_file() and "session.undo" in undo.read_text():
