@@ -11,10 +11,12 @@ from typing import Any
 
 if __package__:
     from .cells import CELLS
-    from .driver import DEFAULT_B_VIEW_ROWS, DEFAULT_K, DEFAULT_SEED, DEFAULT_WINDOW_MS
+    from .driver import (DEFAULT_B_VIEW_ROWS, DEFAULT_K, DEFAULT_SEED, DEFAULT_WINDOW_MS,
+                         identity_reasons, prescribed_operations)
 else:
     from cells import CELLS
-    from driver import DEFAULT_B_VIEW_ROWS, DEFAULT_K, DEFAULT_SEED, DEFAULT_WINDOW_MS
+    from driver import (DEFAULT_B_VIEW_ROWS, DEFAULT_K, DEFAULT_SEED, DEFAULT_WINDOW_MS,
+                        identity_reasons, prescribed_operations)
 
 
 def nonstandard_workload(name: str, runs: list[dict[str, Any]]) -> list[str]:
@@ -57,6 +59,10 @@ def comparison(baseline: list[dict[str, Any]], candidate: list[dict[str, Any]]) 
                 reasons.append(f"{name}: {cell} run {number} has driver errors")
             if run.get("inconclusive") or any(record.get("inconclusive") for record in run["operations"]):
                 reasons.append(f"{name}: {cell} run {number} is inconclusive (non-busy raise)")
+            # Equal exposure across ledgers is not enough: each run must be the driver's prescribed sequence.
+            if Counter((record["engine"], record["op"]) for record in run["operations"]) != \
+                    prescribed_operations(cell, run["k"]):
+                reasons.append(f"{name}: {cell} run {number} is not the prescribed operation sequence")
             for record in run["operations"]:
                 owner, op, busy = record["engine"], record["op"], record["busy"]
                 if owner not in ("A", "B") or op not in ("ingest", "compress", "session-end") or type(busy) is not bool:
@@ -98,9 +104,14 @@ def extension_cells(baseline: list[dict[str, Any]], candidate: list[dict[str, An
 
 def evaluate(baseline: list[dict[str, Any]], candidate: list[dict[str, Any]],
              control_baseline: list[dict[str, Any]] | None = None,
-             control_candidate: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+             control_candidate: list[dict[str, Any]] | None = None,
+             baseline_identity_override: bool = False) -> dict[str, Any]:
     result = comparison(baseline, candidate)
     reasons = result["reasons"]
+    # Production, control and extension ledgers of a role are one tree; baseline is v0.29.2 GA.
+    reasons.extend(identity_reasons({"baseline": baseline + (control_baseline or []),
+                                     "candidate": candidate + (control_candidate or [])},
+                                    baseline_identity_override))
     extensions = extension_cells(baseline, candidate)
     result["extension_cells"] = extensions
     result["initial_tables"] = comparison([run for run in baseline if run["run"] < 20],
@@ -145,6 +156,8 @@ def evaluate(baseline: list[dict[str, Any]], candidate: list[dict[str, Any]],
                                         ("control baseline", control_baseline or []),
                                         ("control candidate", control_candidate or []))
               for reason in nonstandard_workload(name, runs)]
+    if baseline_identity_override:
+        short.append("baseline identity override: a smoke, never a gate verdict")
     result["gate_session"] = not short
     if short and result["verdict"] != "INCONCLUSIVE":
         result["verdict"] = result["verdict"].replace("GATE", "SMOKE")
@@ -191,11 +204,14 @@ def main() -> None:
     parser.add_argument("candidate", type=Path)
     parser.add_argument("--control-baseline", type=Path)
     parser.add_argument("--control-candidate", type=Path)
+    parser.add_argument("--baseline-identity-override", action="store_true",
+                        help="accept a baseline other than v0.29.2 GA; the verdict is a smoke")
     args = parser.parse_args()
     try:
         result = evaluate(read(args.baseline), read(args.candidate),
                           read(args.control_baseline) if args.control_baseline else None,
-                          read(args.control_candidate) if args.control_candidate else None)
+                          read(args.control_candidate) if args.control_candidate else None,
+                          args.baseline_identity_override)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"INCONCLUSIVE: invalid ledger ({type(exc).__name__})")
         raise SystemExit(2) from exc

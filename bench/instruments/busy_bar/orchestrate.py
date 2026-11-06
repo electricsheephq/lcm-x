@@ -73,6 +73,8 @@ def main() -> None:
     parser.add_argument("--b-view-rows", type=int, default=driver.DEFAULT_B_VIEW_ROWS)
     parser.add_argument("--seed", type=int, default=driver.DEFAULT_SEED)
     parser.add_argument("--window-ms", type=float, default=driver.DEFAULT_WINDOW_MS)
+    parser.add_argument("--baseline-identity-override", action="store_true",
+                        help="accept a baseline other than v0.29.2 GA; the verdict is a smoke")
     args = parser.parse_args()
     if min(args.runs, args.k, args.b_view_rows) < 1 or args.window_ms < 0:
         parser.error("runs, k and b-view-rows must be positive; window-ms must be nonnegative")
@@ -93,7 +95,8 @@ def main() -> None:
                     output.write(json.dumps(row) + "\n")
     control = collect(args.baseline_tree, args.candidate_tree, control_dir, args.runs,
                       args.k, args.b_view_rows, args.seed, args.window_ms, 100, args.work_root / "control")
-    result = gate.evaluate(prod["baseline"], prod["candidate"], control["baseline"], control["candidate"])
+    result = gate.evaluate(prod["baseline"], prod["candidate"], control["baseline"], control["candidate"],
+                           args.baseline_identity_override)
     rendered = gate.report(result)
     (args.outdir / "verdict.txt").write_text(rendered)
     (args.outdir / "verdict.json").write_text(json.dumps(result, indent=2) + "\n")

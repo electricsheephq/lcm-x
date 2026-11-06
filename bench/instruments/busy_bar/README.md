@@ -40,7 +40,21 @@ for PASS, 1 for FAIL, and 2 for INCONCLUSIVE (or a failed driver operation). A g
 the full session (runs 0-19 of every cell in both trees, 0-79 for an extended cell; ten runs per tree for
 holds) and the workload below unchanged (K=2, 2,000-row B views, W=400 ms, seed 2055+i; holds: 2,000 rows);
 anything shorter or different prints SMOKE PASS/FAIL (holds: LOCK-SMOKE PASS/FAIL) and exits 3. Holds are
-INCONCLUSIVE when any 2,000-new-row call shows no observed hold or a baseline statistic is 0 (a blind monitor).
+INCONCLUSIVE when any 2,000-new-row call shows no observed hold, a hold or statistic is not finite and
+positive (NaN and inf never reach the tripwire), or a run lacks its proof: a distinct `run_id`, shape-n calls
+whose `view_rows` and `rows_stored` equal the run's rows, `ingest_failures` 0 on every call, and a monitor whose
+samples cover every call.
+
+Tree identity: every busy ledger row and holds run records `tree_identity`, the tree's `plugin.yaml` version plus a
+sha256 over its product `.py` files (relative path and content hash, sorted; top-level `tests`, `bench`,
+`benchmarks`, `benchmarking`, `scripts`, `docs`, `release`, `skills`, `companions`, hidden and `__pycache__`
+directories excluded), computed by the driver or probe from the tree path it was given. The baseline must be the
+v0.29.2 GA tree (`driver.BASELINE_IDENTITY`, computed from a `git archive` extract of `7594beb7`); production,
+control and extension ledgers of one role must share one identity; the candidate must differ from the baseline.
+Anything else is INCONCLUSIVE. `--baseline-identity-override` (orchestrator, gate, holds) skips only the v0.29.2
+check and makes the verdict a smoke. Each busy run must also contain exactly the operations the driver prescribes
+(`driver.prescribed_operations`, a dry run of `cells.sequence` with K B ingests per A operation); equally
+incomplete ledgers are INCONCLUSIVE, not a pass.
 
 ## Workload and schedule
 

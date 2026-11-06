@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import importlib.util
 import json
 import logging
 import os
 import random
+import re
 import sqlite3
 import socket
 import sys
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
@@ -28,6 +31,57 @@ DEFAULT_BUSY_TIMEOUT_MS = None
 DEFAULT_SEED = 2055
 DEFAULT_WINDOW_MS = 400
 COUNTERS = {"compress": "ledger.emission_busy", "session-end": "ledger.tail.busy_at_end"}
+# Top-level directories of a tree that ship no plugin code; every other .py file is product.
+NON_PRODUCT = frozenset({"tests", "bench", "benchmarks", "benchmarking", "scripts", "docs",
+                         "release", "skills", "companions"})
+# tree_identity() of the v0.29.2 GA tree (rc1 7594beb7), extracted with `git archive`.
+BASELINE_IDENTITY = {"plugin_version": "0.29.2", "product_sha256": "786a313b89189433b98c97d56ba90fc2cd6ac734b5f022719e5068304ac7236c"}
+
+
+def tree_identity(tree: Path) -> dict[str, Any]:
+    """The tree's plugin.yaml version and a sha256 over its product .py paths and contents."""
+    names = []
+    for root, dirs, files in os.walk(tree):
+        here = Path(root).relative_to(tree)
+        dirs[:] = [name for name in dirs if not name.startswith(".") and name != "__pycache__"
+                   and not (here == Path(".") and name in NON_PRODUCT)]
+        names += [(here / name).as_posix() for name in files if name.endswith(".py")]
+    digest = hashlib.sha256()
+    for name in sorted(names):
+        digest.update(f"{name}\0{hashlib.sha256((tree / name).read_bytes()).hexdigest()}\n".encode())
+    manifest = tree / "plugin.yaml"
+    match = re.search(r"^version:\s*[\"']?([^\"'\s#]+)", manifest.read_text(), re.M) if manifest.is_file() else None
+    return {"plugin_version": match.group(1) if match else None, "product_sha256": digest.hexdigest()}
+
+
+def identity_reasons(roles: dict[str, list[dict[str, Any]]], override: bool = False) -> list[str]:
+    """Every ledger of a role shares one tree; baseline is v0.29.2 GA (unless overridden) and differs from candidate."""
+    reasons: list[str] = []
+    found: dict[str, Any] = {}
+    for role, rows in roles.items():
+        identities = {json.dumps(row.get("tree_identity"), sort_keys=True) for row in rows}
+        if len(identities) != 1 or identities == {"null"}:
+            reasons.append(f"{role}: ledgers do not share one recorded tree identity")
+        else:
+            found[role] = json.loads(identities.pop())
+    if "baseline" in found and not override and found["baseline"] != BASELINE_IDENTITY:
+        reasons.append(f"baseline tree is not the v0.29.2 GA tree: {found['baseline']}")
+    if "baseline" in found and found.get("candidate") == found["baseline"]:
+        reasons.append("candidate tree identity equals the baseline's")
+    return reasons
+
+
+def prescribed_operations(cell: str, k: int) -> Counter:
+    """Dry-run cells.sequence, the driver's canonical schedule: each A operation releases K B ingests."""
+    found: Counter = Counter()
+
+    def operation(engine: Any, owner: str, op: str, call: Callable[[], Any], view_rows: int) -> None:
+        found[(owner, op)] += 1
+        found[("B", "ingest")] += k
+
+    stub = type("Stub", (), {"on_session_start": lambda *args, **kwargs: None})()
+    cells.sequence(cell, stub, lambda: stub, operation)
+    return found
 
 
 def exception_chain(exc: BaseException | None) -> list[dict[str, Any]]:
@@ -368,6 +422,7 @@ def main() -> None:
         if not callable(getattr(engine_module.LCMEngine, method, None)):
             raise RuntimeError(f"needed public method missing: {method}")
     offline_setup(engine_module)
+    identity = tree_identity(args.tree.resolve())
     capture = Capture()
     root = logging.getLogger()
     debug_capture(capture)
@@ -378,7 +433,7 @@ def main() -> None:
                 result = run(args.cell, args.work / f"run-{number}", config_module,
                              engine_module, capture, args.k, args.b_view_rows, args.busy_timeout_ms,
                              args.seed + number, args.window_ms)
-                result["run"] = number
+                result["run"], result["tree_identity"] = number, identity
                 output.write(json.dumps(result) + "\n")
                 output.flush()
                 failed |= bool(result["errors"]) or result["inconclusive"]

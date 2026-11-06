@@ -90,10 +90,52 @@ def test_real_operation_combines_counter_and_root_log() -> None:
     assert operations.records[0]["signals"] == ["write-lock-recovery", "ledger.emission_busy"]
 
 
-def ledger(busy: int) -> list[dict]:
-    return [{"cell": cell, "run": 0, "k": 2, "b_view_rows": 2000, "busy_timeout_ms": None, "seed": 2055, "window_ms": 400, "offsets_ms": [1, 2, 3], "errors": [], "operations": [
-        {"engine": owner, "op": ("ingest", "compress", "session-end")[index], "busy": index < busy}
-        for owner in ("A", "B") for index in range(3)]} for cell in cells.CELLS]
+def ledger(busy: int, k: int = 2) -> list[dict]:
+    """One run per cell with the driver's prescribed operations; each engine's first `busy` operations are busy."""
+    rows = []
+    for cell in cells.CELLS:
+        prescribed = driver.prescribed_operations(cell, k)
+        operations = []
+        for owner in ("A", "B"):
+            ops = [op for op in ("ingest", "compress", "session-end") for _ in range(prescribed[(owner, op)])]
+            operations += [{"engine": owner, "op": op, "busy": index < busy} for index, op in enumerate(ops)]
+        rows.append({"cell": cell, "run": 0, "k": k, "b_view_rows": 2000, "busy_timeout_ms": None, "seed": 2055,
+                     "window_ms": 400, "offsets_ms": [1, 2, 3], "errors": [], "operations": operations})
+    return rows
+
+
+CANDIDATE_IDENTITY = {"plugin_version": "candidate", "product_sha256": "0" * 64}
+
+
+def stamp(rows: list[dict] | None, identity: dict) -> list[dict] | None:
+    """The driver records its tree's identity in every ledger row; a fixture's own value wins."""
+    return None if rows is None else [{"tree_identity": identity, **row} for row in rows]
+
+
+def evaluate(baseline: list[dict], candidate: list[dict], control_baseline: list[dict] | None = None,
+             control_candidate: list[dict] | None = None, **kwargs: object) -> dict:
+    """gate.evaluate on ledgers from the v0.29.2 GA baseline and a distinct candidate tree."""
+    return gate.evaluate(stamp(baseline, driver.BASELINE_IDENTITY), stamp(candidate, CANDIDATE_IDENTITY),
+                         stamp(control_baseline, driver.BASELINE_IDENTITY),
+                         stamp(control_candidate, CANDIDATE_IDENTITY), **kwargs)
+
+
+def summarize(collected: dict[str, list], **kwargs: object) -> dict:
+    """holds.summarize on runs carrying the proof fields holds.probe writes; a fixture's own values win."""
+    proven: dict[str, list] = {}
+    for name, runs in collected.items():
+        proven[name] = []
+        for number, run in enumerate(runs):
+            calls = [{"view_rows": run["rows"] + 2 if call["shape"] == "t" else run["rows"],
+                      "rows_stored": 2 if call["shape"] == "t" else run["rows"], "ingest_failures": 0,
+                      "begin_ns": 10 * index + 1, "end_ns": 10 * index + 5, **call}
+                     for index, call in enumerate(run["calls"])]
+            proven[name].append({
+                "run_id": f"{name}-{number}",
+                "tree_identity": driver.BASELINE_IDENTITY if name == "baseline" else CANDIDATE_IDENTITY,
+                "monitor": {"samples": [[0, 0], [10 * len(calls) + 10, 0]], "intervals": {"max_ms": 0.2}},
+                **run, "calls": calls})
+    return holds.summarize(proven, **kwargs)
 
 
 def control(busy: int) -> list[dict]:
@@ -114,17 +156,18 @@ def smoke(verdict: str) -> str:
     (0, 0, "GATE PASS"), (0, 1, "GATE FAIL"),
 ])
 def test_gate_counts(base: int, candidate: int, expected: str) -> None:
-    result = gate.evaluate(ledger(base), ledger(candidate), control(1), control(1))
+    result = evaluate(ledger(base), ledger(candidate), control(1), control(1))
     assert result["verdict"] == smoke(expected) and not result["gate_session"]
     rendered = gate.report(result)
     assert smoke(expected) in rendered
-    assert "TOTAL total 24" in rendered
+    total = sum(sum(driver.prescribed_operations(cell, 2).values()) for cell in cells.CELLS)
+    assert f"TOTAL total {total}" in rendered
 
 
 def test_gate_regression_in_one_cell_cannot_hide_in_total() -> None:
     baseline, candidate = ledger(1), ledger(0)
     candidate[0] = ledger(3)[0]
-    result = gate.evaluate(baseline, candidate, control(1), control(1))
+    result = evaluate(baseline, candidate, control(1), control(1))
     assert result["verdict"] == "SMOKE FAIL"
     assert result["failed_cells"] == ["ingest"]
 
@@ -146,13 +189,15 @@ def test_gate_mismatched_or_incomplete_exposure_is_inconclusive(damage: str) -> 
         candidate[0]["errors"] = ["B:RuntimeError"]
     else:
         candidate.append(deepcopy(candidate[0]))
-    assert gate.evaluate(baseline, candidate, control(1), control(1))["verdict"] == "INCONCLUSIVE"
+    assert evaluate(baseline, candidate, control(1), control(1))["verdict"] == "INCONCLUSIVE"
 
 
 def test_gate_cli_writes_verdict(tmp_path: Path) -> None:
     paths = [tmp_path / name for name in ("baseline.jsonl", "candidate.jsonl", "control-base.jsonl", "control-cand.jsonl")]
     for index, path in enumerate(paths):
-        path.write_text("".join(json.dumps(row) + "\n" for row in (ledger(1) if index < 2 else control(1))))
+        rows = stamp(ledger(1) if index < 2 else control(1),
+                     driver.BASELINE_IDENTITY if index % 2 == 0 else CANDIDATE_IDENTITY)
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     result = subprocess.run([sys.executable, str(Path(gate.__file__)), *map(str, paths[:2]),
                              "--control-baseline", str(paths[2]), "--control-candidate", str(paths[3])],
                             capture_output=True, text=True, timeout=30)
@@ -168,6 +213,7 @@ def test_orchestrator_serial_interleaving(tmp_path: Path, monkeypatch: pytest.Mo
         cell, output = command[4], Path(command[5])
         row = next(row for row in (control(1) if "--busy-timeout-ms" in command else ledger(1))
                    if row["cell"] == cell)
+        row["tree_identity"] = driver.BASELINE_IDENTITY if seen[-1] == "baseline" else CANDIDATE_IDENTITY
         output.write_text(json.dumps(row) + "\n")
         return SimpleNamespace(returncode=0)
 
@@ -203,6 +249,7 @@ def test_current_tree_smoke_totals_only(tmp_path: Path, cell: str) -> None:
     assert result["b_view_sizes"] == [2] * (2 * cells.A_OPERATIONS[cell])
     assert all(row["busy_timeout_ms"] == 5000 for row in result["applied_timeouts"])
     assert result["totals"]["total"]["operations"] == cells.A_OPERATIONS[cell] + len(result["b_view_sizes"])
+    assert result["tree_identity"] == driver.tree_identity(tree)
 
 
 def test_fixed_exposure_ignores_simulated_tree_durations() -> None:
@@ -237,14 +284,14 @@ def test_fixed_exposure_ignores_simulated_tree_durations() -> None:
 
 @pytest.mark.parametrize("missing", ["baseline", "candidate"])
 def test_zero_control_is_inconclusive(missing: str) -> None:
-    result = gate.evaluate(ledger(0), ledger(1), control(0 if missing == "baseline" else 1),
+    result = evaluate(ledger(0), ledger(1), control(0 if missing == "baseline" else 1),
                            control(0 if missing == "candidate" else 1))
     assert result["verdict"] == "INCONCLUSIVE"
     assert any(missing + " has 0 busy" in reason for reason in result["reasons"])
 
 
 def test_control_busy_regression_never_gates() -> None:
-    result = gate.evaluate(ledger(0), ledger(0), control(1), control(3))
+    result = evaluate(ledger(0), ledger(0), control(1), control(3))
     assert result["verdict"] == "SMOKE PASS"
 
 
@@ -259,7 +306,7 @@ def test_control_must_match_production_exposure(damage: str) -> None:
         scaled[0]["busy_timeout_ms"] = 99
     else:
         scaled[0]["errors"] = ["driver bug"]
-    assert gate.evaluate(ledger(1), ledger(1), control(1), scaled)["verdict"] == "INCONCLUSIVE"
+    assert evaluate(ledger(1), ledger(1), control(1), scaled)["verdict"] == "INCONCLUSIVE"
 
 
 def test_seeded_arrivals_are_identical_across_trees() -> None:
@@ -360,10 +407,10 @@ def test_holds_percentiles_and_relative_verdict() -> None:
             {"shape": "t", "position": 1, "longest_ms": n * multiplier,
              "first_start_ms": 2, "call_ms": 30}]} for n in range(1, 11)]
 
-    result = holds.summarize({"baseline": runs(1), "candidate": runs(2.25)})
+    result = summarize({"baseline": runs(1), "candidate": runs(2.25)})
     assert result["verdict"] == "LOCK-TRIPWIRE PASS"
     assert result["tables"]["baseline"]["n"]["p90_longest_ms"] == 9
-    assert holds.summarize({"baseline": runs(1), "candidate": runs(2.26)})["verdict"] == "LOCK-TRIPWIRE FAIL"
+    assert summarize({"baseline": runs(1), "candidate": runs(2.26)})["verdict"] == "LOCK-TRIPWIRE FAIL"
 
 
 @pytest.mark.parametrize("platform,size,offsets", [
@@ -531,8 +578,7 @@ def test_debug_caught_exception_attribution(wrapped: bool, other_thread: bool) -
 def test_gate_exact_tolerance(base: int, candidate: int, expected: str) -> None:
     def rows(count: int) -> list[dict]:
         result = ledger(0)
-        # Seven attempts in this fixture; only the first cell has busy operations.
-        result[0]["operations"] += [{"engine": "A", "op": "ingest", "busy": False}]
+        # Only the first cell (nine prescribed operations) has busy operations.
         for record in result[0]["operations"][:count]:
             record["busy"] = True
         return result
@@ -543,7 +589,7 @@ def test_gate_exact_tolerance(base: int, candidate: int, expected: str) -> None:
             row["busy_timeout_ms"] = 100
             for record in row["operations"]:
                 record["busy"] = True
-    assert gate.evaluate(rows(base), rows(candidate), cb, cc)["verdict"] == smoke(expected)
+    assert evaluate(rows(base), rows(candidate), cb, cc)["verdict"] == smoke(expected)
 
 
 def test_control_requires_every_class_in_each_tree() -> None:
@@ -552,7 +598,7 @@ def test_control_requires_every_class_in_each_tree() -> None:
         for record in row["operations"]:
             if record["op"] == "session-end":
                 record["busy"] = False
-    result = gate.evaluate(ledger(0), ledger(0), control(1), scaled)
+    result = evaluate(ledger(0), ledger(0), control(1), scaled)
     assert result["verdict"] == "INCONCLUSIVE"
     assert any("candidate has 0 busy session-end" in reason for reason in result["reasons"])
 
@@ -560,7 +606,7 @@ def test_control_requires_every_class_in_each_tree() -> None:
 def test_one_nonbusy_raise_makes_gate_inconclusive() -> None:
     candidate = ledger(0)
     candidate[0]["operations"][0]["inconclusive"] = True
-    assert gate.evaluate(ledger(0), candidate, control(1), control(1))["verdict"] == "INCONCLUSIVE"
+    assert evaluate(ledger(0), candidate, control(1), control(1))["verdict"] == "INCONCLUSIVE"
 
 
 @pytest.mark.parametrize("base,candidate,extended_base,extended_candidate,expected", [
@@ -590,7 +636,7 @@ def test_small_count_extension(base: int, candidate: int, extended_base: int,
             for record in row["operations"]:
                 record["busy"] = True
     if should_extend:
-        assert gate.evaluate(baseline, cand, cb, cc)["verdict"] == "INCONCLUSIVE"
+        assert evaluate(baseline, cand, cb, cc)["verdict"] == "INCONCLUSIVE"
         # Preserve first twenty counts; place the additional busy records in extension runs.
         def extend(first: list[dict], initial_busy: int, final_busy: int) -> list[dict]:
             extra = runs(0, 80)[80:]
@@ -599,7 +645,7 @@ def test_small_count_extension(base: int, candidate: int, extended_base: int,
             return first + extra
         baseline = extend(baseline, base, extended_base)
         cand = extend(cand, candidate, extended_candidate)
-    result = gate.evaluate(baseline, cand, cb, cc)
+    result = evaluate(baseline, cand, cb, cc)
     assert result["verdict"] == expected
     assert result["initial_tables"]["baseline"]["ingest"]["total"]["busy"] == base
     assert result["tables"]["candidate"]["ingest"]["total"]["busy"] == extended_candidate
@@ -619,15 +665,15 @@ def test_hold_position_and_rotating_longest_statistics() -> None:
                 {"shape": "t", "longest_ms": 1, "first_start_ms": 0, "call_ms": 10}]})
         return rows
 
-    first = holds.summarize({"baseline": runs("base"), "candidate": runs("first")})
+    first = summarize({"baseline": runs("base"), "candidate": runs("first")})
     assert first["verdict"] == "LOCK-TRIPWIRE FAIL"
     assert first["failed_statistics"] == ["position-1", "run-longest"]
-    rotating = holds.summarize({"baseline": runs("base"), "candidate": runs("rotating")})
+    rotating = summarize({"baseline": runs("base"), "candidate": runs("rotating")})
     assert rotating["failed_statistics"] == ["run-longest"]
     assert "position-1" in holds.report(first)
     diagnostic = runs("base")
     diagnostic[0]["trace_diagnostic"] = True
-    assert holds.summarize({"baseline": runs("base"), "candidate": diagnostic})["verdict"] == "DIAGNOSTIC ONLY"
+    assert summarize({"baseline": runs("base"), "candidate": diagnostic})["verdict"] == "DIAGNOSTIC ONLY"
 
 
 def test_isolation_and_shipped_default_readback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -651,6 +697,7 @@ def test_orchestrator_extends_only_selected_production_cell(tmp_path: Path, monk
         seen.append((name, cell, number, scaled))
         row = next(row for row in (control(1) if scaled else ledger(0)) if row["cell"] == cell)
         row["seed"] = seed
+        row["tree_identity"] = driver.BASELINE_IDENTITY if name == "baseline" else CANDIDATE_IDENTITY
         if not scaled and cell == "ingest":
             first_busy = 1 if name == "baseline" else 3
             row["operations"][0]["busy"] = number < first_busy or 20 <= number < 23
@@ -680,10 +727,10 @@ def test_orchestrator_extends_only_selected_production_cell(tmp_path: Path, monk
 
 
 def test_only_a_full_session_gates() -> None:
-    def session(runs: int) -> list[dict]:
+    def session(runs: int, k: int = 2) -> list[dict]:
         rows = []
         for number in range(runs):
-            for row in ledger(0):
+            for row in ledger(0, k):
                 row["run"], row["seed"] = number, 2055 + number
                 rows.append(row)
         return rows
@@ -696,15 +743,15 @@ def test_only_a_full_session_gates() -> None:
                 record["busy"] = True
         return rows
 
-    full = gate.evaluate(session(20), session(20), scaled(session(20)), scaled(session(20)))
+    full = evaluate(session(20), session(20), scaled(session(20)), scaled(session(20)))
     assert full["verdict"] == "GATE PASS" and full["gate_session"]
-    short = gate.evaluate(session(19), session(19), scaled(session(19)), scaled(session(19)))
+    short = evaluate(session(19), session(19), scaled(session(19)), scaled(session(19)))
     assert short["verdict"] == "SMOKE PASS" and not short["gate_session"]
     assert any("has 19 runs, a gate session needs 20" in reason for reason in short["reasons"])
     assert gate.EXIT[short["verdict"]] == 3
     for key, value in (("b_view_rows", 2), ("k", 1), ("window_ms", 0), ("seed", 7)):
-        reduced = [dict(row, **{key: value}) for row in session(20)]
-        result = gate.evaluate(reduced, reduced, scaled(reduced), scaled(reduced))
+        reduced = [dict(row, **{key: value}) for row in session(20, value if key == "k" else 2)]
+        result = evaluate(reduced, reduced, scaled(reduced), scaled(reduced))
         assert result["verdict"] == "SMOKE PASS" and not result["gate_session"], key
         assert any(f"{key}={value!r}, the gate workload is" in reason for reason in result["reasons"]), key
 
@@ -717,17 +764,174 @@ def test_blind_or_short_hold_sessions_never_gate() -> None:
             {"shape": "t", "position": 1, "longest_ms": 0, "first_start_ms": None, "call_ms": 30}]}
             for n in range(1, count + 1)]
 
-    blind = holds.summarize({"baseline": runs(1, blind=True), "candidate": runs(1, blind=True)})
+    blind = summarize({"baseline": runs(1, blind=True), "candidate": runs(1, blind=True)})
     assert blind["verdict"] == "INCONCLUSIVE"
     assert any("no observed hold" in reason for reason in blind["reasons"])
-    assert holds.summarize({"baseline": runs(1), "candidate": runs(1, blind=True)})["verdict"] == "INCONCLUSIVE"
-    short = holds.summarize({"baseline": runs(1, 3), "candidate": runs(1, 3)})
+    assert summarize({"baseline": runs(1), "candidate": runs(1, blind=True)})["verdict"] == "INCONCLUSIVE"
+    short = summarize({"baseline": runs(1, 3), "candidate": runs(1, 3)})
     assert short["verdict"] == "LOCK-SMOKE PASS"
-    assert holds.summarize({"baseline": runs(1, 3), "candidate": runs(3, 3)})["verdict"] == "LOCK-SMOKE FAIL"
-    assert holds.summarize({"baseline": runs(1), "candidate": runs(1)})["verdict"] == "LOCK-TRIPWIRE PASS"
+    assert summarize({"baseline": runs(1, 3), "candidate": runs(3, 3)})["verdict"] == "LOCK-SMOKE FAIL"
+    assert summarize({"baseline": runs(1), "candidate": runs(1)})["verdict"] == "LOCK-TRIPWIRE PASS"
     small = {"baseline": runs(1), "candidate": runs(1)}
     for run in small["candidate"]:
         run["rows"] = 2
-    reduced = holds.summarize(small)
+    reduced = summarize(small)
     assert reduced["verdict"] == "LOCK-SMOKE PASS"
     assert any("a gate session uses 2000" in reason for reason in reduced["reasons"])
+
+
+def hold_runs(count: int = 10) -> list[dict]:
+    return [{"journal_mode": "wal", "rows": 2000, "calls": [
+        {"shape": "n", "position": position, "longest_ms": n, "first_start_ms": 2, "call_ms": 30}
+        for position in range(1, 7)] + [
+        {"shape": "t", "position": 1, "longest_ms": n, "first_start_ms": 2, "call_ms": 30}]}
+        for n in range(1, count + 1)]
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+@pytest.mark.parametrize("scope", ["one", "all"])
+@pytest.mark.parametrize("tree", ["baseline", "candidate"])
+def test_nonfinite_holds_are_inconclusive(tree: str, scope: str, value: float) -> None:
+    collected = {"baseline": hold_runs(), "candidate": hold_runs()}
+    calls = [call for run in collected[tree] for call in run["calls"] if call["shape"] == "n"]
+    for call in calls[:1] if scope == "one" else calls:
+        call["longest_ms"] = value
+    result = summarize(collected)
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert any(reason.startswith(f"{tree}: ") and "nonfinite" in reason for reason in result["reasons"])
+
+
+@pytest.mark.parametrize("damage", ["copies", "run-id", "view-rows", "rows-stored", "ingest-failure",
+                                    "failure-unrecorded", "monitor-failed", "monitor-short", "call-times"])
+def test_hold_summary_needs_distinct_proven_runs(damage: str) -> None:
+    collected = {"baseline": hold_runs(), "candidate": hold_runs()}
+    run, call = collected["candidate"][0], collected["candidate"][0]["calls"][0]
+    if damage == "copies":
+        run["run_id"] = "one-run"
+        collected["candidate"] = [deepcopy(run) for _ in range(10)]
+    elif damage == "run-id":
+        run["run_id"] = None
+    elif damage == "view-rows":
+        call["view_rows"] = 2
+    elif damage == "rows-stored":
+        call["rows_stored"] = 0
+    elif damage == "ingest-failure":
+        run["calls"][-1]["ingest_failures"] = 1
+    elif damage == "failure-unrecorded":
+        call["ingest_failures"] = None
+    elif damage == "monitor-failed":
+        run["monitor"] = {}
+    elif damage == "monitor-short":
+        run["monitor"] = {"samples": [[0, 0], [20, 0]], "intervals": {"max_ms": 0.2}}
+    else:
+        call["begin_ns"] = None
+    assert summarize({"baseline": hold_runs(), "candidate": hold_runs()})["verdict"] == "LOCK-TRIPWIRE PASS"
+    result = summarize(collected)
+    assert result["verdict"] == "INCONCLUSIVE", result["reasons"]
+
+
+@pytest.mark.parametrize("damage", ["baseline", "missing", "mixed", "same"])
+def test_hold_tree_identity(damage: str) -> None:
+    collected = {"baseline": hold_runs(), "candidate": hold_runs()}
+    if damage == "baseline":
+        for run in collected["baseline"]:
+            run["tree_identity"] = {"plugin_version": "0.29.1", "product_sha256": "1" * 64}
+    elif damage == "missing":
+        collected["candidate"][0]["tree_identity"] = None
+    elif damage == "mixed":
+        collected["candidate"][0]["tree_identity"] = {"plugin_version": "other", "product_sha256": "2" * 64}
+    else:
+        for run in collected["candidate"]:
+            run["tree_identity"] = driver.BASELINE_IDENTITY
+    result = summarize(collected)
+    assert result["verdict"] == "INCONCLUSIVE"
+    if damage == "baseline":
+        assert any("not the v0.29.2 GA tree" in reason for reason in result["reasons"])
+        override = summarize(collected, baseline_identity_override=True)
+        assert override["verdict"] == "LOCK-SMOKE PASS"
+        assert any("baseline identity override" in reason for reason in override["reasons"])
+
+
+def gate_session(k: int = 2) -> list[dict]:
+    rows = []
+    for number in range(20):
+        for row in ledger(0, k):
+            row["run"], row["seed"] = number, 2055 + number
+            rows.append(row)
+    return rows
+
+
+def busy_control(rows: list[dict]) -> list[dict]:
+    rows = deepcopy(rows)
+    for row in rows:
+        row["busy_timeout_ms"] = 100
+        for record in row["operations"]:
+            record["busy"] = True
+    return rows
+
+
+@pytest.mark.parametrize("removed", [("B", "ingest"), ("A", "compress"), ("A", "session-end")])
+def test_equally_incomplete_workloads_never_pass(removed: tuple) -> None:
+    full = gate_session()
+    assert evaluate(full, full, busy_control(full), busy_control(full))["verdict"] == "GATE PASS"
+    reduced = deepcopy(full)
+    for row in reduced:
+        row["operations"] = [record for record in row["operations"]
+                             if (record["engine"], record["op"]) != removed]
+    result = evaluate(reduced, deepcopy(reduced), busy_control(reduced), busy_control(reduced))
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert any("not the prescribed operation sequence" in reason for reason in result["reasons"])
+
+
+def test_prescribed_operations_follow_the_driver_schedule() -> None:
+    for cell in cells.CELLS:
+        for k in (1, 2):
+            found = driver.prescribed_operations(cell, k)
+            assert sum(count for (owner, _), count in found.items() if owner == "A") == cells.A_OPERATIONS[cell]
+            assert found[("B", "ingest")] == k * cells.A_OPERATIONS[cell]
+    assert driver.prescribed_operations("compress", 2)[("A", "compress")] == 1
+    assert driver.prescribed_operations("session-end", 2)[("A", "session-end")] == 1
+
+
+@pytest.mark.parametrize("damage", ["baseline", "control", "extension", "missing", "same"])
+def test_gate_tree_identity(damage: str) -> None:
+    baseline, candidate = gate_session(), gate_session()
+    cb, cc = busy_control(baseline), busy_control(candidate)
+    other = {"plugin_version": "0.29.1", "product_sha256": "1" * 64}
+    if damage == "baseline":
+        for row in baseline + cb:
+            row["tree_identity"] = other
+    elif damage == "control":
+        for row in cb:
+            row["tree_identity"] = other
+    elif damage == "extension":
+        baseline[-1]["tree_identity"] = other
+    elif damage == "missing":
+        candidate[0]["tree_identity"] = None
+    else:
+        for row in candidate + cc:
+            row["tree_identity"] = driver.BASELINE_IDENTITY
+    result = evaluate(baseline, candidate, cb, cc)
+    assert result["verdict"] == "INCONCLUSIVE"
+    if damage == "baseline":
+        assert any("not the v0.29.2 GA tree" in reason for reason in result["reasons"])
+        override = evaluate(baseline, candidate, cb, cc, baseline_identity_override=True)
+        assert override["verdict"] == "SMOKE PASS" and not override["gate_session"]
+        assert gate.EXIT[override["verdict"]] == 3
+
+
+def test_tree_identity_hashes_product_python_only(tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    for name, text in (("plugin.yaml", "name: x\nversion: 0.29.2\n"), ("engine.py", "A = 1\n"),
+                       ("teams/store.py", "B = 1\n"), ("tests/test_x.py", "C = 1\n"),
+                       ("bench/tool.py", "D = 1\n"), ("__pycache__/engine.py", "E = 1\n"),
+                       (".hidden/x.py", "F = 1\n")):
+        (tree / name).parent.mkdir(parents=True, exist_ok=True)
+        (tree / name).write_text(text)
+    first = driver.tree_identity(tree)
+    assert first["plugin_version"] == "0.29.2" and len(first["product_sha256"]) == 64
+    for name in ("tests/test_x.py", "bench/tool.py", "__pycache__/engine.py", ".hidden/x.py"):
+        (tree / name).write_text("changed = 1\n")
+    assert driver.tree_identity(tree) == first
+    (tree / "teams/store.py").write_text("B = 2\n")
+    assert driver.tree_identity(tree)["product_sha256"] != first["product_sha256"]

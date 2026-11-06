@@ -108,11 +108,12 @@ def probe(tree: Path, work: Path, rows: int, trace: bool = False) -> dict[str, A
             # hold the lock briefly and could pass the tripwire, so it fails the probe instead.
             stored = engine._store._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] - stored_before
             expected = len(host_view) if shape == "n" else len(host_view) - len(views[-2][2])
-            if stored != expected or getattr(engine, "_consecutive_ingest_failures", 0) != failures_before:
+            failures = getattr(engine, "_consecutive_ingest_failures", 0) - failures_before
+            if stored != expected or failures:
                 raise RuntimeError(f"{shape} call {position} stored {stored} rows, expected {expected}, "
                                    "or recorded an ingest failure")
             call = {"shape": shape, "position": position, "view_rows": len(host_view),
-                    "rows_stored": stored,
+                    "rows_stored": stored, "ingest_failures": failures,
                     "begin_ns": begin, "end_ns": end, "call_ms": (end - begin) / 1e6}
             if trace:
                 call["trace"] = events.copy()
@@ -131,7 +132,8 @@ def probe(tree: Path, work: Path, rows: int, trace: bool = False) -> dict[str, A
                                 "hold_ms": (end - start) / 1e6} for start, end in found]
             call["longest_ms"] = max(((end - start) / 1e6 for start, end in found), default=0)
             call["first_start_ms"] = (found[0][0] - call["begin_ns"]) / 1e6 if found else None
-        return {"tree": str(tree), "rows": rows, "journal_mode": journal,
+        return {"tree": str(tree), "tree_identity": driver.tree_identity(tree), "run_id": uuid.uuid4().hex,
+                "rows": rows, "journal_mode": journal,
                 "effective_defaults": driver.effective_defaults(config_module),
                 "trace_diagnostic": trace, "monitor": observed, "calls": results}
     finally:
@@ -146,7 +148,24 @@ def probe(tree: Path, work: Path, rows: int, trace: bool = False) -> dict[str, A
                 sqlite3.connect = original_connect
 
 
-def summarize(collected: dict[str, list]) -> dict[str, Any]:
+def unsupported(run: dict[str, Any]) -> str | None:
+    """Why a run is not a monitored probe of full, failure-free views, if it is not (#2301 review)."""
+    calls = run["calls"]
+    if any(call.get("view_rows") != run.get("rows") or call.get("rows_stored") != run.get("rows")
+           for call in calls if call["shape"] == "n"):
+        return "a shape-n call did not present and store its full view"
+    if any(call.get("ingest_failures") != 0 for call in calls):
+        return "a call recorded an ingest failure or none was recorded"
+    monitor_result = run.get("monitor") or {}
+    samples = monitor_result.get("samples") or []
+    begins, ends = [call.get("begin_ns") for call in calls], [call.get("end_ns") for call in calls]
+    if (not samples or "intervals" not in monitor_result or None in begins + ends
+            or samples[0][0] > min(begins) or samples[-1][0] < max(ends)):
+        return "the monitor did not complete over every call"
+    return None
+
+
+def summarize(collected: dict[str, list], baseline_identity_override: bool = False) -> dict[str, Any]:
     tables: dict[str, Any] = {}
     statistics_by_tree: dict[str, dict[str, float]] = {}
     for name, runs in collected.items():
@@ -183,11 +202,23 @@ def summarize(collected: dict[str, list]) -> dict[str, Any]:
     failed = [key for key, value in statistics_by_tree["candidate"].items()
               if value > TRIPWIRE * statistics_by_tree["baseline"][key]]
     diagnostic = any(run.get("trace_diagnostic") for runs in collected.values() for run in runs)
-    # A blind monitor must never pass: every 2,000-new-row call holds the write lock.
-    reasons = [f"{name}: {sum(1 for run in runs for call in run['calls'] if call['shape'] == 'n' and not call['longest_ms'])}"
-               " shape-n calls with no observed hold" for name, runs in collected.items()
-               if any(call["shape"] == "n" and not call["longest_ms"] for run in runs for call in run["calls"])]
-    reasons += [f"baseline statistic {key} is 0" for key, value in statistics_by_tree["baseline"].items() if not value]
+    # A blind monitor must never pass: every 2,000-new-row call holds the write lock. NaN and inf
+    # compare false against the tripwire, so only finite positive holds can be compared at all.
+    def unobserved(run: dict[str, Any]) -> int:
+        return sum(1 for call in run["calls"] if call["shape"] == "n"
+                   and not (isinstance(call["longest_ms"], (int, float)) and math.isfinite(call["longest_ms"])
+                            and call["longest_ms"] > 0))
+
+    reasons = [f"{name}: {sum(map(unobserved, runs))} shape-n calls with no observed hold (or a nonfinite one)"
+               for name, runs in collected.items() if any(map(unobserved, runs))]
+    reasons += [f"{name} statistic {key} is {value}" for name, values in statistics_by_tree.items()
+                for key, value in values.items() if not (math.isfinite(value) and value > 0)]
+    reasons += [f"{name} run {number}: {why}" for name, runs in collected.items()
+                for number, run in enumerate(runs) if (why := unsupported(run))]
+    run_ids = [run.get("run_id") for runs in collected.values() for run in runs]
+    if None in run_ids or len(set(run_ids)) != len(run_ids):
+        reasons.append("run ids are missing or repeated; each counted run must be a distinct probe")
+    reasons += driver.identity_reasons(collected, baseline_identity_override)
     verdict = ("DIAGNOSTIC ONLY" if diagnostic else "INCONCLUSIVE" if reasons else
                "LOCK-TRIPWIRE FAIL" if failed else "LOCK-TRIPWIRE PASS")
     if verdict.startswith("LOCK-TRIPWIRE") and len(collected["baseline"]) != GATE_RUNS:
@@ -197,6 +228,9 @@ def summarize(collected: dict[str, list]) -> dict[str, Any]:
     if verdict.startswith("LOCK-TRIPWIRE") and rows:
         verdict = verdict.replace("TRIPWIRE", "SMOKE")  # The gate session uses 2,000-new-row views.
         reasons.append(f"rows={rows}; a gate session uses {GATE_ROWS}")
+    if verdict.startswith("LOCK-TRIPWIRE") and baseline_identity_override:
+        verdict = verdict.replace("TRIPWIRE", "SMOKE")
+        reasons.append("baseline identity override: a smoke, never a gate verdict")
     return {"tables": tables, "statistics": statistics_by_tree, "failed_statistics": failed,
             "reasons": reasons, "verdict": verdict}
 
@@ -238,6 +272,8 @@ def main() -> None:
     parser.add_argument("--rows", type=int, default=GATE_ROWS)
     parser.add_argument("--work-root", type=Path,
                         default=Path(tempfile.gettempdir()) / ("busy-bar-holds-" + uuid.uuid4().hex))
+    parser.add_argument("--baseline-identity-override", action="store_true",
+                        help="accept a baseline other than v0.29.2 GA; the verdict is a smoke")
     args = parser.parse_args()
     if min(args.runs, args.rows) < 1:
         parser.error("runs and rows must be positive")
@@ -259,7 +295,7 @@ def main() -> None:
             with (args.outdir / f"{prefix}.log").open("x") as log:
                 subprocess.run(command, env=env, stdout=log, stderr=log, check=True, timeout=120)
             collected[name].append(json.loads(output.read_text()))
-    result = summarize(collected)
+    result = summarize(collected, args.baseline_identity_override)
     (args.outdir / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
     rendered = report(result)
     (args.outdir / "verdict.txt").write_text(rendered)
