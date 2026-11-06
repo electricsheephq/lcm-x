@@ -64,11 +64,45 @@ logged without content and capture catches up on a later run.
 | Hook | What the adapter does | Waits? |
 |---|---|---|
 | `SessionStart` (`startup`, `resume`, `fork`, `clear`, `compact`) | Spool the session; start the worker. A new session's transcript may not exist yet. The `fork` payload names no parent: the parent is found by the fork's copied uuids (below). | No |
-| `UserPromptSubmit`, `PostToolBatch`, `PostCompact` | Spool; start the worker only if none is running. `PostToolBatch` fires once per batch of tool calls, also inside subagents (with `agent_id`). | No |
+| `UserPromptSubmit`, `PostCompact` | Spool; start the worker only if none is running. | No |
+| `PostToolBatch` | Spool; start a worker, which exits at once if one is running: this async hook never probes the lock (step 1 below). It fires once per batch of tool calls, also inside subagents (with `agent_id`). | No |
 | `Stop`, `StopFailure` | Spool; the worker drains the transcript, then settles (below). `StopFailure` replaces `Stop` when the turn ends on an API error. | No |
 | `SubagentStop` | Spool the subagent transcript (`<session>/subagents/agent-<id>.jsonl`) as a child lineage. Internal agents (`agent_type` empty) are captured and tagged; R0 saw the compaction summarizer fire it with a transcript path that does not exist, which is logged with nothing to ingest. | No |
 | `PreCompact` | Drain synchronously, bounded to 10 s, only when the store lock is free; it never waits for the lock. If a worker holds it, the hook returns at once (`worker_running`) and the holder takes the spooled record. The hook logs `drained` only for a worker-confirmed complete drain, otherwise `drain_bound` (the worker's deadline ended it), `drain_incomplete` (work left for another reason), `drain_failed:<code>` or `drain_timeout`; any of these but a refused store then starts a detached worker for the rest (`+worker`), or leaves it to the worker that has taken the lock since (`+holder`). The drain captures only; it never embeds. The hook kills a drain still running 2 s after its bound. | Bounded, never on the lock |
 | `SessionEnd` | Spool; start a detached drain and return at once. | No |
+
+`PostToolBatch` is registered `async`, so Claude Code does not wait for it (#2141). The other hooks
+stay synchronous:
+- the worker settles a transcript only after an end event (`Stop`, `StopFailure`, `SubagentStop`,
+  `SessionEnd`, `PreCompact`);
+- a later hook copies how the session started from `SessionStart`'s record, so that record is
+  written first;
+- in `-p`, Claude Code kills an async hook still running when the session exits.
+
+An async hook killed while it writes leaves at most a temporary dotfile, which the worker never
+reads. One that finishes after a later hook replaces that hook's record. If that was an end event's
+record, the worker skips the settle, and the next run's sweep captures any line the settle would
+have waited for. The async hook never takes the store lock (step 1 below), so its death never
+leaves a synchronous hook waiting on it. A test kills the hook before and after it writes its
+record, in a session that goes on and at a `-p` exit, and finds every row stored.
+
+Each hook writes one line to `logs/hook.log` in the home: the event, the session id, the outcome and
+its in-process milliseconds (`ms`), without content or paths. For #2164 the line also carries `t0`,
+the wall-clock second the hook's own code began, so a row joins Claude Code's debug line for the same
+run and the gap before `t0` is the start-up of the shell and the interpreter, and `phases`, the
+milliseconds of each step that ran, in order:
+- `imports`;
+- `read` (the payload) and `spool`;
+- `runtime` (finding the runtime and the worker) and `probe` (the lock);
+- `subprocess` (its import), then `start` (a detached worker). For `PreCompact` it is instead
+  `drain` (the bounded run) and `recheck` (the lock again), with `start` if a worker takes the rest;
+- `log`, the log's own set-up.
+
+Each step ends when the next begins, and a run that returns early or fails logs the step it was in.
+So the steps after `imports` add up to about `ms`: each is rounded on its own, and they begin just
+after `ms` starts and end just after it stops. Neither counts the writing of the line itself. The steps
+use a monotonic clock, while `t0` and `t` are wall-clock times. These are measurements only: nothing
+reads them to decide anything.
 
 ### Spool and worker handshake
 
@@ -77,7 +111,11 @@ lock held and starts nobody. The handshake closes it:
 
 1. **Hook:** write the spool record first (one file per session or subagent, atomic replace, with a
    nanosecond `seq`), then probe the lock. Free: start a detached worker. Held: the holder will see
-   the record (step 3).
+   the record (step 3). The probe holds the lock for an instant, and a hook or a starting worker
+   that meets it gives way, so a hook probes only once it has found a runtime and the worker
+   script: the prober must be able to start the worker itself. The async `PostToolBatch` hook
+   never probes, since Claude Code may kill it at any point, mid-probe too. It starts a worker on
+   every tool batch, and a worker that finds the lock held exits before it loads any store code.
 2. **Claim by rename:** the worker renames `<key>.json` to `<key>.claimed` before reading it. A hook
    firing meanwhile writes a new `<key>.json` and never touches the claimed file, so no record is
    deleted unread. The worker deletes the claimed file only after that transcript's batch commits. A
@@ -86,6 +124,9 @@ lock held and starts nobody. The handshake closes it:
 3. **Exit:** the worker releases the lock, then rescans the spool. If a record is there, it retakes
    the lock without blocking and loops. If another worker holds the lock, that worker acquired it
    after the record was written, and every worker scans after acquiring, so it sees the record.
+   A probe (step 1) holds the lock without scanning, but a prober that finds the lock free goes on
+   to a scan: a hook starts a worker, and a starting worker takes the lock. A prober killed before
+   then leaves the record for the next worker run.
 4. **Settle:** after draining a transcript to its end, the worker re-checks it until the file is
    quiet (bounded to about 2 s): R0 found the final reply not yet written at `Stop` in 2 of 4 runs.
 5. **Sweep:** every worker run also checks each registered transcript, with its `subagents/` and
@@ -275,6 +316,47 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
   `lcm_load_session`, `lcm_describe`) search across sessions. The `StoreReader` and `handle()`
   signatures stay as they are. #1216 gets two behaviour changes in its own PR: host-neutral error
   texts, and the offline check re-reads the header once before refusing.
+- **Reader override.** A valid `reader-override.json` in the store home makes the server start
+  another reader in place of the plain one. Something outside the plugin writes the file to opt in
+  and removes it to opt out; the plugin never writes it. Each harness reads the file in its own home.
+  - The file is `{"version": 1, "command": ["<absolute path>", "<arg>", ...]}`. `version` is the
+    integer 1, `command` is a non-empty array of strings whose first item is the absolute path of
+    an executable file, and other keys are ignored.
+  - The plugin starts `command` on the same stdio and adds one environment variable,
+    `LCMX_LOCAL_READER_CMD`: a JSON array holding the exact argv the plugin would have run for the
+    plain reader. The rest of the environment passes through unchanged.
+  - With no file, the plain reader starts and nothing is logged. The plain reader also starts, and
+    one line on the server's stderr names the reason, when the file is not a regular file (a FIFO
+    or a device is never read), cannot be read, is not valid JSON, has a field of the wrong type, a
+    `version` other than 1, an empty `command`, or a first item that is relative, missing or not
+    executable. The same holds when starting the command fails with an OS error, such as a script
+    whose interpreter is gone.
+  - Another local user must not be able to choose the command. So the plain reader also starts when
+    the file is not owned by the user the server runs as, or when `command`'s first item is owned
+    by anyone but that user or root (root owns system interpreters), or when either one is
+    writable by group or others.
+  - Nor may another local user replace or redirect the command before it starts (#2261). Resolving
+    `command[0]` looks entries up in `/`, in each folder on the way, and in the folder of each
+    symlink on it, and each such folder must pass: owned by that user or root, and writable by
+    nobody else. A folder writable by others fails, except a sticky one whose entry belongs to that
+    user or root. A folder writable by its group passes only when the group's members (its listed
+    members and every user whose primary group it is, read when the check runs) are that user and
+    root; groups nested in another group are not expanded. Members are only trusted where the host's
+    user database is provably local, since a directory service may not list its users: on Linux,
+    glibc, with every `passwd` and `group` line of `nsswitch.conf`, and any `initgroups` line,
+    naming only `files`, `systemd` or `altfiles`; on macOS, a search path in use
+    (`dscl /Search -read / SearchPath`) of local nodes only (`/Local/...` and `/BSD/local`, not an
+    NIS domain under `/BSD/`). Anything else fails such a folder:
+    another C library, no `nsswitch.conf`, a node that is not local, an error or a timeout. The check
+    runs once per launch and is never stored. The line on stderr names the folder; for a folder
+    writable by its group it names the group too, and says when the user database is not provably
+    local. The command then starts by its configured path, not its resolved one:
+    once every folder passes, nobody else can redirect it, and a venv's Python finds its venv from
+    the path it was started by. Script arguments are not checked, nor are a script's `#!`
+    interpreter, the `PATH` search of `#!/usr/bin/env`, or folder ACLs.
+  - Once started, the override owns recall. The plugin does not supervise it; falling back to
+    `LCMX_LOCAL_READER_CMD` on its own failures is the override's job. The file is read only when
+    the plain reader could start; otherwise the server reports the missing setup step as before.
 - **Between worker runs.** When the last connection to a WAL store closes, SQLite deletes the
   `-wal` and `-shm` files, and the reader refuses a WAL store without them. So the worker
   checkpoints and switches the store to rollback mode (`journal_mode=DELETE`) before it exits; the
@@ -311,6 +393,11 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
 Grok Build runs Claude Code plugins and `~/.claude/settings.json` hooks, with differences the
 hook entry handles:
 
+- Grok reads `.grok-plugin/plugin.json` before `.claude-plugin/plugin.json`, and the `hooks` path
+  it names (`.grok-plugin/hooks.json`) replaces `hooks/hooks.json`. Grok's hook runner drops
+  `args`, so that file holds the same hooks in the shell form
+  (`python3 -I -S "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"`). Grok sets `CLAUDE_PLUGIN_ROOT` for
+  plugin hooks. Until real Grok sessions (R11), only a static check of this layout covers it.
 - Detect Grok by `GROK_SESSION_ID` or camelCase keys (`hookEventName`, `sessionId`) and
   normalise the payload.
 - Grok sessions get their own store home (`~/.lcm-x/grok-build`, `LCMX_GROK_HOME`), so each store
@@ -320,17 +407,34 @@ hook entry handles:
   for long paths; never the newest session as a guess.
 - The end-of-session `Stop` (reason not `end_turn`) and `SessionEnd` (1.5 s budget) are
   observe-only: logged, never spooled, so they cannot replace a pending record.
-- The Grok reader (`updates.jsonl`) is experimental and off (`LCMX_GROK_CAPTURE=1` enables it)
-  until a real-session proof shows tool results are complete, `/compact` and `/rewind` never
+- The Grok reader (`updates.jsonl`) is not in this release, so the hook refuses every Grok event
+  (`grok_capture_off`) and spools nothing; no setting enables it. It lands only after a
+  real-session proof shows tool results are complete, `/compact` and `/rewind` never
   rewrite the file, and event ids are stable. Without stable ids, uid = session, line index and
   line digest; a rewritten file starts a new generation.
 
 ## Runtime and failure modes
 
-- The hook entry runs on the system `python3` (3.9 or newer, stdlib only). The worker and the MCP
+- Claude Code starts the hook in exec form (`hooks/hooks.json`): `python3` found on `PATH`, with
+  `${CLAUDE_PLUGIN_ROOT}` substituted in its arguments and no shell before it, which saves the
+  shell's start (about 4 ms per synchronous hook on the measurement machine, #2141). The exec form
+  needs Claude Code 2.1.139 or later, the release that added `args`. The adapter is tested on
+  2.1.314 and later. Grok Build drops `args`, so it has its own hooks file in the shell form (see
+  "Grok Build"). A test keeps the two files the same apart from the command form.
+- The hook entry runs on the system `python3` (3.9 or newer, stdlib only), started with `-I -S`:
+  the user's `PYTHONPATH`, `PYTHONHOME`, user site-packages and `.pth` files never reach it. Each
+  module loads only on the path that needs it: a synchronous hook that finds the worker running
+  loads no `subprocess`, and with a set-up runtime no `shutil` either (#2141). Under `-I`, Apple's
+  system Python (Xcode or the Command Line Tools) loses its bytecode cache in
+  `~/Library/Caches/com.apple.python` and stops writing one, so each start compiled the standard
+  library from source and took about twice as long. Before its standard-library imports, the hook gives that
+  Python back the cache and the writing it has without `-I`; any other Python keeps its own. The worker and the MCP
   server need Python 3.11 or newer with LCM-X's dependencies: `LCMX_PYTHON`, else a venv in the
   plugin's data directory (`CLAUDE_PLUGIN_DATA`, which survives plugin updates and is removed on
-  uninstall), else `<home>/venv`.
+  uninstall), else `<home>/venv`. A relative `LCMX_PYTHON` or `LCMX_PACKAGE_ROOT` is refused, as
+  a relative home is: the hook checks paths from the project folder, while the worker runs in the
+  store home. Hooks then record `runtime_missing` or `package_missing`, records wait in the spool,
+  and the server names the setting.
   - **Zero steps** when a Python 3.11+ exists. Without `LCMX_PYTHON` or a venv, the plugin finds
     one on the hook's `PATH`: the hook's own `python3` if it is 3.11+, else `python3.14` down to
     `python3.11`. Only absolute `PATH` entries are searched: a relative one would name the project
@@ -439,9 +543,11 @@ LCM-X for Claude Code is its own release unit, versioned by the plugin manifest
   - the CLI smoke (`scripts/claude_code_unit_smoke.py`). It needs #1216 on `main`.
     - It unpacks the asset with no Hermes, in two runtime modes: a fresh venv of the running
       Python (3.11 or newer), and that Python found on `PATH` and run with `-I -S`.
-    - It runs each hook's registered command from `hooks/hooks.json` through the shell, as Claude
-      Code does, on a synthetic transcript. It then waits for the worker those hooks started; it
-      never runs a worker itself.
+    - It runs the `SessionStart`, `UserPromptSubmit`, `PostToolBatch` (20 times) and `Stop` hooks
+      registered in `hooks/hooks.json` as Claude Code does: in exec form, with `python3` found on
+      `PATH`, `${CLAUDE_PLUGIN_ROOT}` substituted in the arguments and no shell. It runs them on a
+      synthetic transcript and waits for each, `async` ones included. It then
+      waits for the worker those hooks started; it never runs a worker itself.
     - It passes when every hook run logged a started or running worker, no spool record failed,
       `bundle.json` names the commit and core version, and the reader, started from `.mcp.json`,
       finds a planted string and returns its stored source.

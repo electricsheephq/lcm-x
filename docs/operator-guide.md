@@ -403,12 +403,14 @@ The interrupted or SQLite-lock raw-flush warning includes `unflushed=N`: the pen
 before the final ingest attempt, without message content. The outer ingest/finalize warning includes
 the same field only when ingest has not finished. The session-end SQLite busy timeout stays 50 ms.
 When a lock skip keeps the rows in memory, the warning says `retry pending at the next session start
-or shutdown`: the same process retries them at the next session start or session end, and for up to
-5 s at shutdown or process exit. If rows remain after that, a warning ending `after shutdown retry;
+or end in this process, at engine shutdown, or at a normal interpreter exit (not os._exit)` and names
+the session (`session=<id>`): the same process retries them at the next session start or session end,
+and for up to 5 s at engine shutdown or a normal interpreter exit. If rows remain after that, a warning ending `after shutdown retry;
 final messages may be absent from the plugin-local store unflushed=N` gives the rows still
 unflushed. Resuming the same session and ingesting its full history also recovers the tail without
-duplicates. An abrupt exit, or another process holding the write lock for the whole shutdown bound,
-can still leave the tail absent (#1160).
+duplicates. An abrupt exit, a host that leaves through `os._exit` without calling the engine's shutdown (the
+Hermes gateway until NousResearch/hermes-agent#87328; #2253), or another process holding the write
+lock for the whole shutdown bound, can still leave the tail absent (#1160).
 
 ### `hermes plugins` shows `lcm-x (not found)` but LCM tools exist
 
@@ -1610,8 +1612,8 @@ Result flags. Every result is the production JSON object prefixed with
 | Field | Meaning |
 | --- | --- |
 | `store_uuid` | The store's id. Hermes does not stamp one, so for a Hermes store it is derived from the file's identity (its path, device and inode), with `store_uuid_source: derived`. It stays the same while the file stays in place; a copy, a move to another volume or a restore that replaces the file gets a new id, so ids a client qualified with the old one are refused as `foreign_store` (bare ids still work). A store whose writer stamped an id in its metadata reports that id, with `store_uuid_source: metadata`. |
-| `reader.degraded` | `embedding_identity_mismatch`: the store's active embedding identity (provider, model, revision, dimension, dtype) differs from the reader's model. `provider_unavailable`: no local model is cached (the server never downloads one), or the profile uses a cloud provider, which the reader never calls. Either way only full text answers. |
-| `reader.tokenizer` | `estimate` while the tokenizer is not loaded (the server waits up to 30 s at start); content cut by token budget can then differ from Hermes' cut. |
+| `reader.degraded` | `embedding_identity_mismatch`: the store's active embedding identity (provider, model, revision, dimension, dtype) differs from the reader's model. `provider_unavailable`: no local model is cached (the server never downloads one), the profile uses a cloud provider, which the reader never calls, or the model is still warming up after the server started. Either way only full text answers. |
+| `reader.tokenizer` | `estimate` while the tokenizer is not loaded; content cut by token budget can then differ from Hermes' cut. The server answers at once and loads the tokenizer and the query model in the background, so its first calls can be `estimate` and `provider_unavailable`. |
 | `reader.capabilities` | Optional parts of the store: FTS indexes, the stem index, embeddings, chunk vectors, the summary provenance sidecar, lifecycle state. A missing one degrades that feature instead of failing the call. |
 
 Ids in tool arguments (`store_id`, `node_id`, `session_id`, `externalized_ref`,
