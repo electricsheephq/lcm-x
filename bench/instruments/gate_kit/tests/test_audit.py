@@ -54,13 +54,15 @@ class Home:
         self.state, self.lcm = self.dir / "state.db", self.dir / "lcm.db"
         with sqlite3.connect(self.state) as con:
             con.execute("create table sessions (id text primary key, source text not null, parent_session_id text,"
-                        " started_at real not null, ended_at real, end_reason text)")
+                        " started_at real not null, ended_at real, end_reason text,"
+                        " rewind_count integer not null default 0)")
             con.execute("create table messages (id integer primary key autoincrement, session_id text not null,"
                         " role text not null, content text, tool_call_id text, tool_calls text, tool_name text,"
                         " timestamp real not null, _compressed_summary integer not null default 0,"
                         " active integer not null default 1, compacted integer not null default 0)")
             for i, (sid, (source, parent, ended, reason, *started)) in enumerate(sessions.items()):
-                con.execute("insert into sessions values (?,?,?,?,?,?)",
+                con.execute("insert into sessions (id, source, parent_session_id, started_at, ended_at, end_reason)"
+                            " values (?,?,?,?,?,?)",
                             (sid, source, parent, started[0] if started else 1000.0 + i, ended, reason))
             for n, (sid, m) in enumerate(host):
                 con.execute("insert into messages (session_id, role, content, tool_call_id, tool_calls, timestamp,"
@@ -70,7 +72,8 @@ class Home:
                              m.get("_active", 1), m.get("_compacted", 0)))
         store = MessageStore(self.lcm)
         self.ids = [store.append(sid, {k: v for k, v in m.items() if not k.startswith("_")}
-                                 | ({"timestamp": 1700000000.0 + n} if n in stamps else {}))
+                                 | ({"timestamp": 1700000000.0 + n} if n in stamps else {})
+                                 | ({"timestamp": m["_obs"]} if "_obs" in m else {}))
                     for n, (sid, m) in enumerate(host if stored is None else stored)]
         if relations:
             store.add_message_relations([[(s, kind, o, None, None)] for s, kind, o in relations])
@@ -232,6 +235,72 @@ def test_1674_needs_its_stamped_witness_in_the_rows_own_session(tmp_path):
     assert out["exempted_surplus"]["store_ids"]["unattributed"] == [2]
 
 
+T0 = 1700000100.0  # host timestamps of the undo tests (valid epoch seconds, so LCM-X keeps them as observed_at)
+
+
+def undone(msg, ts):
+    return dict(msg, _ts=ts, _active=0)  # rewind_to_message: active = 0, compacted left 0
+
+
+def stamped(msg, ts):
+    return dict(msg, _obs=ts)
+
+
+def undo_home(tmp_path, extra=(), relations=()):
+    """Turn 1, then turn 2 undone and re-sent: the host holds the undone rows inactive, LCM-X keeps them."""
+    host = [("S1", dict(m, _ts=T0 + n)) for n, (_s, m) in enumerate(turn(1))] + [
+        ("S1", undone(u("question 2"), T0 + 20)), ("S1", undone(a("answer 2"), T0 + 21)),
+        ("S1", dict(u("question 2"), _ts=T0 + 30)), ("S1", dict(a("answer 2"), _ts=T0 + 31))]
+    stored = [("S1", stamped(m, m["_ts"])) for _s, m in host] + list(extra)
+    home = Home(tmp_path, ONE, host, stored=stored, relations=relations)
+    with sqlite3.connect(home.state) as con:
+        con.execute("update sessions set rewind_count = 1 where id = 'S1'")
+    return home.run()
+
+
+def test_undo_and_resend_is_retained_not_surplus(tmp_path):
+    out = undo_home(tmp_path)
+    t = out["parity"]["totals"]
+    assert (t["expected_rows"], t["missing_rows"], t["surplus_rows"], t["silent_surplus_rows"]) == (4, 0, 0, 0)
+    assert out["undo_retained"] == {"rows": 2, "store_ids": [3, 4], "host_rewind_count": {"S1": 1}}
+    assert out["m3"]["denominator"] == 6
+
+
+@pytest.mark.parametrize("copy", [u("question 2"), stamped(u("question 2"), T0 + 99)], ids=["null-observed", "other-observed"])
+def test_a_replayed_copy_of_an_undone_row_stays_silent(tmp_path, copy):
+    out = undo_home(tmp_path, extra=[("S1", copy)])
+    assert out["undo_retained"]["store_ids"] == [3, 4]
+    assert out["parity"]["totals"]["silent_surplus_rows"] == 1
+    assert out["exempted_surplus"]["store_ids"]["unattributed"] == [7]
+
+
+def test_one_undone_row_excuses_one_stored_copy(tmp_path):
+    out = undo_home(tmp_path, extra=[("S1", stamped(u("question 2"), T0 + 20))])
+    assert out["undo_retained"]["rows"] == 2  # one copy of the undone prompt and the undone reply
+    assert out["parity"]["totals"]["silent_surplus_rows"] == 1
+
+
+def test_undo_retained_rows_are_not_in_m3(tmp_path):
+    out = undo_home(tmp_path, relations=[(3, "possible_replay_of", 5)])
+    assert out["undo_retained"]["store_ids"] == [3, 4] and out["m3"]["numerator"] == 0
+
+
+GENERATED = "[Recent Summary (d0, node 1)]\n" + S + " summary of the earlier turns"
+
+
+@pytest.mark.parametrize("related", [True, False])
+def test_a_generated_first_row_is_visible_only_with_its_relation(tmp_path, related):
+    # #1286: LCM-X's own generated first row (a summary carrier) stored as a raw row. Its generated_unproven relation
+    # makes it visible surplus and an M3 row; without the relation it is silent surplus.
+    stored = [("S1", {"role": "user", "content": GENERATED})] + turn(1)
+    out = Home(tmp_path, ONE, turn(1), stored=stored,
+               relations=[(1, "generated_unproven", None)] if related else []).run()
+    t = out["parity"]["totals"]
+    assert (t["visible_surplus_rows"], t["silent_surplus_rows"]) == ((1, 0) if related else (0, 1))
+    assert out["m3"]["store_ids"] == ([1] if related else [])
+    assert out["exempted_surplus"]["store_ids"]["unattributed"] == ([] if related else [1])
+
+
 def test_m3_rate_and_ids(tmp_path):
     host = turn(1) + turn(2)
     out = Home(tmp_path, ONE, host, relations=[(2, "generated_unproven", None), (4, "supersedes", None)]).run()
@@ -296,6 +365,24 @@ def test_2203_routes(tmp_path, name, reason, limit):
     line = route("S1", name, 0, 3, 3).replace("reason=some reason text", f"reason={reason}")
     ex = attribution(tmp_path, [line], [("S1", u("question 1"))])
     assert ex["store_ids"][limit] == [3]
+
+
+def test_a_recorder_line_logged_to_two_files_is_one_ingest(tmp_path):
+    line = route("S1", "S3", 0, 3, 3)
+    out = Home(tmp_path, ONE, turn(1), stored=turn(1) + [("S1", u("question 1"))], stamps={0}).run([line, line])
+    assert out["recorder"]["storing_ingests"] == 1
+    assert out["exempted_surplus"]["store_ids"]["#2203"] == [3]
+
+
+def test_a_row_with_content_and_a_tool_call_counts_once_in_the_exempted_fraction(tmp_path):
+    speak_and_call = dict(call("c1"), content=f"{S} let me read it")
+    host = [("S1", u("question 1")), ("S1", speak_and_call), ("S1", result("c1"))]
+    out = Home(tmp_path, ONE, host, stored=host + [("S1", speak_and_call)], stamps={0}).run(
+        [route("S1", "S3", 0, 4, 4)])
+    ex = out["exempted_surplus"]
+    assert out["parity"]["totals"]["silent_surplus_rows"] == 2  # one copy each of its content key and its call key
+    assert ex["store_ids"]["#2203"] == [4] and ex["exempted_rows"] == 1 and ex["fraction"] == 1 / 4
+    assert ex["unattributed_silent_rows"] == 0
 
 
 def test_2203_needs_an_unstamped_copy(tmp_path):
@@ -377,6 +464,31 @@ def test_log_tz_decides_whether_a_compaction_precedes_a_restart(tmp_path, tz, co
     log = "2026-11-06 10:00:00,000 INFO [S1] hermes_lcm.compaction: LCM compaction #1: done\n"
     out = Home(tmp_path, ONE, turn(1)).run([log], [{"t": restart, "kind": "restart_cold", "session": "S1"}], log_tz=tz)
     assert out["coverage"]["compactions_then_restart"]["value"] == counted
+
+
+ACP_AT = datetime(2026, 11, 6, 10, 0, 30, tzinfo=timezone.utc).timestamp()
+ACP_LINE = "2026-11-06 10:00:30 [INFO] hermes_plugins.hermes_lcm_x.compaction: LCM compaction #1: 9 messages → 4{}\n"
+
+
+@pytest.mark.parametrize("request_at,suffix,attributed", [
+    (ACP_AT - 20, "", True),  # the driver's compress_request 20 s before the line
+    (ACP_AT - 600, "", False),  # too long before: no session, counted in compactions only
+    (None, " session=S1", True),  # the message names its session
+], ids=["nearest-request", "no-request-in-window", "session-in-message"])
+def test_acp_stderr_compaction_lines(tmp_path, request_at, suffix, attributed):
+    # acp_adapter/entry.py logs "<asctime> [<LEVEL>] <logger>: <message>" to stderr, with no session field.
+    events = [{"t": ACP_AT + 60, "kind": "restart_cold", "session": "S1"}]
+    if request_at is not None:
+        events.append({"t": request_at, "kind": "compress_request", "session": "S1"})
+    out = Home(tmp_path, ONE, turn(1)).run([ACP_LINE.format(suffix)], events, log_tz="UTC")
+    assert out["coverage"]["compactions"]["value"] == 1
+    assert out["coverage"]["compactions_then_restart"]["value"] == int(attributed)
+    assert out["coverage_basis"]["compactions_without_session"] == int(not attributed)
+
+
+def test_acp_stderr_lines_of_other_loggers_do_not_count(tmp_path):
+    line = "2026-11-06 10:00:30 [INFO] agent.context_compressor: LCM compaction #1: 9 messages → 4\n"
+    assert Home(tmp_path, ONE, turn(1)).run([line])["coverage"]["compactions"]["value"] == 0
 
 
 def test_unknown_log_tz_is_an_input_error(tmp_path):
@@ -488,6 +600,19 @@ def test_a_stored_only_session_whose_payloads_are_all_unreadable_is_kept(tmp_pat
     assert out["parity"]["lineages"]["GHOST"]["externalized_unresolved"] == 1
     assert out["gate"]["bars"]["externalized_unresolved"] == {"value": 1, "pass": False}
     assert out["gate"]["verdict"] == "GATE FAIL"
+
+
+def test_a_symlinked_database_is_checked_beside_its_target(tmp_path):
+    home = Home(tmp_path, ONE, turn(1))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    target = elsewhere / "lcm.db"
+    home.lcm.rename(target)
+    home.lcm.symlink_to(target)
+    Path(f"{target}-wal").write_bytes(b"pending pages")
+    with pytest.raises(SystemExit) as stop:
+        audit.main(["--state-db", str(home.state), "--lcm-db", str(home.lcm), "--out", str(tmp_path / "r.json")])
+    assert stop.value.code == 2 and not (tmp_path / "r.json").exists()
 
 
 def test_an_unresolved_externalized_payload_fails_its_own_bar(tmp_path):

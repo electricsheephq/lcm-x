@@ -38,12 +38,20 @@ FLOORS = {"turns": 200, "delegated_children": 10, "compactions": 20, "compaction
 BAR = 0.01  # the 1% bar of the exempted surplus and of M3 (section 5)
 DELEGATE_SOURCE = "subagent"  # aux_session.py:807 _DELEGATE_SOURCE: a delegate child's state.db sessions.source
 NOT_ENTRY_SOURCES = frozenset({DELEGATE_SOURCE, "tool"})  # child sessions, not host entry points
-# Log lines, in either Hermes format (hermes_logging.py _LOG_FORMAT and _LOG_FORMAT_VERBOSE):
-# "<asctime> <LEVEL>[ [<session>]] <logger>: <message>" or "<asctime> - <logger> - <LEVEL>[ [<session>]] - <message>".
+# Log lines, in the Hermes formats (hermes_logging.py _LOG_FORMAT and _LOG_FORMAT_VERBOSE):
+# "<asctime> <LEVEL>[ [<session>]] <logger>: <message>" or "<asctime> - <logger> - <LEVEL>[ [<session>]] - <message>";
+# and the ACP host's stderr format, which has no session field (acp_adapter/entry.py _setup_logging):
+# "<asctime> [<LEVEL>] <logger>: <message>".
 # A pattern counts only in the message of a line whose logger is LCM-X's (a module of the hermes_lcm package).
 LOG_LINE = re.compile(r"^(?P<ts>\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d)(?:[,.]\d+)? (?:"
                       r"(?P<level>[A-Z]+)(?: \[(?P<sid>[^\]\s]+)\])? (?P<logger>[\w.]+): |"
-                      r"- (?P<logger2>[\w.]+) - (?P<level2>[A-Z]+)(?: \[(?P<sid2>[^\]\s]+)\])? - )(?P<msg>.*)$")
+                      r"- (?P<logger2>[\w.]+) - (?P<level2>[A-Z]+)(?: \[(?P<sid2>[^\]\s]+)\])? - |"
+                      r"\[(?P<level3>[A-Z]+)\] (?P<logger3>[\w.]+): )(?P<msg>.*)$")
+MESSAGE_SESSION = re.compile(r"\bsession=([^\s,;)]+)")
+# A compaction line without a session is tied to the driver's compress_request for a session when the line falls
+# within this window around the request (seconds before, after): log times have one-second resolution, and the
+# compaction follows the request after the summary model call.
+COMPRESS_REQUEST_WINDOW = (2.0, 120.0)
 LCM_LOGGER = re.compile(r"(?:^|\.)hermes_lcm(?:_x)?(?:\.|$)")
 COMPACTION = re.compile(r"LCM compaction #\d+:")  # compaction.py:2910, one line per published LCM pass
 # A session LCM classes AUXILIARY (stores nothing): engine.py:2770's late reclassification, and the #2042 session
@@ -71,15 +79,16 @@ RESTARTS = ("restart_cold", "restart_warm")
 def ro(path: Path) -> sqlite3.Connection:
     """Read-only and immutable: SQLite neither writes nor creates a -wal/-shm file (the run must have stopped).
     An immutable open does not read a -wal file either, so a non-empty one is refused: its pages would be missed."""
-    if not path.is_file():
-        raise FileNotFoundError(f"{path.name} does not exist")
+    if not Path(path).is_file():
+        raise FileNotFoundError(f"{Path(path).name} does not exist")
+    path = Path(path).resolve()  # SQLite opens the link's target, so its -wal and -journal sit beside the target
     wal = Path(f"{path}-wal")
     if wal.is_file() and wal.stat().st_size:
         raise ValueError(f"{path.name} has a non-empty -wal file: stop the run and checkpoint the database first")
     journal = Path(f"{path}-journal")
     if journal.is_file() and journal.stat().st_size:  # a hot rollback journal: an interrupted write not rolled back
         raise ValueError(f"{path.name} has a non-empty -journal file: open it once with its owner to roll it back")
-    return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
+    return sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)
 
 
 def columns(con, table: str) -> set:
@@ -107,14 +116,17 @@ def opt(cols: set, name: str, default: str) -> str:
 def read_host(path: Path):
     with ro(path) as con:
         sc, mc = columns(con, "sessions"), columns(con, "messages")
-        sessions = {r[0]: dict(zip(("source", "parent", "started", "ended", "end_reason"), r[1:])) for r in con.execute(
-            "select id, " + ", ".join(opt(sc, c, d) for c, d in (("source", "''"), ("parent_session_id", "NULL"),
-                                                                    ("started_at", "0"), ("ended_at", "NULL"),
-                                                                    ("end_reason", "NULL"))) + " from sessions")}
+        sessions = {r[0]: dict(zip(("source", "parent", "started", "ended", "end_reason", "rewind_count"), r[1:]))
+                    for r in con.execute("select id, " + ", ".join(opt(sc, c, d) for c, d in (
+                        ("source", "''"), ("parent_session_id", "NULL"), ("started_at", "0"), ("ended_at", "NULL"),
+                        ("end_reason", "NULL"), ("rewind_count", "NULL"))) + " from sessions")}
+        # Displayed: active, or archived history. Undone: soft-deleted by a rewind (hermes_state_messages.py
+        # rewind_to_message sets active = 0 and leaves compacted = 0); without the compacted column none is known.
         displayed = "(active = 1 OR compacted = 1)" if "compacted" in mc else "1"
+        undone = "(active = 0 AND compacted = 0)" if {"active", "compacted"} <= mc else "0"
         rows = con.execute("select id, session_id, role, content, " + ", ".join(opt(mc, c, d) for c, d in (
             ("tool_calls", "NULL"), ("tool_call_id", "NULL"), ("_compressed_summary", "0"), ("timestamp", "NULL"),
-            ("tool_name", "NULL"))) + f", {displayed} from messages order by id").fetchall()
+            ("tool_name", "NULL"))) + f", {displayed}, {undone} from messages order by id").fetchall()
     return sessions, rows, "compacted" in mc
 
 
@@ -172,7 +184,7 @@ def host_expected(rows, group, markers, scored=None):
     header, prefixes = markers
     per_segment, first = Counter(), {}
     for row in rows:
-        rid, sid, role, content, calls, call_id, summary, ts, tool_name, displayed = row
+        rid, sid, role, content, calls, call_id, summary, ts, tool_name, displayed = row[:10]
         if summary or not displayed:
             continue
         identity = (group(sid), display_key(role, content, ts, call_id, calls, tool_name))
@@ -241,28 +253,77 @@ def log_time(stamp: str, tz):
 
 def read_logs(paths, tz=None):
     """LCM-X's own log lines: compactions (deduplicated across files), AUXILIARY lines and recorder lines."""
-    out = {"compactions": set(), "auxiliary": defaultdict(set), "ingests": [], "untagged_compactions": 0}
+    out, seen_ingests = {"compactions": set(), "auxiliary": defaultdict(set), "ingests": []}, set()
     for path in paths:
         for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
             m = LOG_LINE.match(line)
-            if not m or not LCM_LOGGER.search(m["logger"] or m["logger2"]):
+            if not m or not LCM_LOGGER.search(m["logger"] or m["logger2"] or m["logger3"]):
                 continue
             sid, msg, at = m["sid"] or m["sid2"], m["msg"], log_time(m["ts"], tz)
             if COMPACTION.match(msg):
-                if sid:
-                    out["compactions"].add((sid, at, msg))  # a line logged to two files counts once
-                else:
-                    out["untagged_compactions"] += 1
+                in_message = MESSAGE_SESSION.search(msg)
+                # A line logged to two files counts once; no session yet means none in the line (ACP stderr).
+                out["compactions"].add((sid or (in_message.group(1) if in_message else None), at, msg))
             if hit := RECLASSIFIED.match(msg):
                 out["auxiliary"][hit.group(1)].add("first_ingest_reclassification")
             if hit := DECISION.match(msg):
                 out["auxiliary"][hit.group(1)].add(hit.group(2) or "")
             if hit := ROUTE.match(msg):
-                out["ingests"].append({"session": hit["session"], "route": hit["route"].strip().replace(" ", "_"),
-                                       "reason": hit["reason"].strip(), "cursor": int(hit["cursor"]), "at": at,
-                                       "range": (int(hit["a"]), int(hit["b"])), "rows": int(hit["rows"]),
-                                       "pairs": int(hit["pairs"]), "stripped": int(hit["stripped"])})
+                record = {"session": hit["session"], "route": hit["route"].strip().replace(" ", "_"),
+                          "reason": hit["reason"].strip(), "cursor": int(hit["cursor"]), "at": at,
+                          "range": (int(hit["a"]), int(hit["b"])), "rows": int(hit["rows"]),
+                          "pairs": int(hit["pairs"]), "stripped": int(hit["stripped"])}
+                identity = tuple(sorted(record.items()))
+                if identity not in seen_ingests:  # a line logged to two files is one ingest
+                    seen_ingests.add(identity)
+                    out["ingests"].append(record)
     return out
+
+
+def undo_retained_rows(stored_rows, host_rows):
+    """Stored rows that are a host undo's retained occurrence: neither expected nor surplus.
+
+    A TUI undo soft-deletes the undone rows in the host (hermes_state_messages.py rewind_to_message: active = 0, with
+    compacted left 0), so they are not displayed and not expected; LCM-X keeps the copy it stored and stores the
+    resend as a new occurrence. A stored row is undo_retained when the host holds an undone row (``host_rows``:
+    active = 0 and compacted = 0) of the same session and the same row key, and the stored row's observed_at equals
+    that host row's timestamp, which proves it is that occurrence. Each undone host row excuses at most one stored
+    copy; a stored row with NULL observed_at (an unstamped host) is never excused.
+    ``stored_rows``: (store_id, session, role, content, tool_calls, tool_call_id, observed_at)."""
+    def key(role, content, calls, call_id):
+        return role, multiset.norm(content or ""), call_id, tuple(sorted(
+            map(repr, tool_calls.stored_keys([(0, "", role, content, calls, call_id)]))))
+
+    pool = Counter()
+    for rid, sid, role, content, calls, call_id, _summary, ts, *_rest in host_rows:
+        if ts is not None:
+            pool[(sid, key(role, content, calls, call_id), float(ts))] += 1
+    excused = []
+    for store_id, session, role, content, calls, call_id, observed in sorted(stored_rows):
+        slot = (session, key(role, content, calls, call_id), float(observed)) if observed is not None else None
+        if slot is not None and pool[slot] > 0:
+            pool[slot] -= 1
+            excused.append(store_id)
+    return excused
+
+
+def attribute_compactions(lines, events):
+    """Give each compaction line without a session the session of the nearest unused driver compress_request whose
+    time it falls within (COMPRESS_REQUEST_WINDOW); a line left without one keeps None (it counts toward compactions,
+    never toward compactions_then_restart). Returns the lines and how many stayed without a session."""
+    requests = sorted((float(e.get("t") or 0), str(e.get("session") or "")) for e in events or ()
+                      if e["kind"] == "compress_request")
+    used, out = set(), []
+    for sid, at in lines:
+        if sid is None and at is not None:
+            near = [(abs(at - t), i) for i, (t, _s) in enumerate(requests) if i not in used
+                    and t - COMPRESS_REQUEST_WINDOW[0] <= at <= t + COMPRESS_REQUEST_WINDOW[1]]
+            if near:
+                i = min(near)[1]
+                used.add(i)
+                sid = requests[i][1]
+        out.append((sid, at))
+    return out, sum(1 for sid, _at in out if sid is None)
 
 
 def auxiliary_sessions(lines: dict) -> tuple[set, set]:
@@ -390,6 +451,10 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
         if audited(r[0]):
             by_lineage[group(r[1])].append((*r, extra[r[0]][6]))
     lost_ids = [s for s in ext["store_ids"] if audited(s)]  # unreadable payloads: kept, even with no readable row
+    retained = set(undo_retained_rows([r for rows in by_lineage.values() for r in rows],
+                                      [r for r in host_rows if r[10] and r[1] in scored]))
+    for g, rows in by_lineage.items():  # kept rows of an undone occurrence: out of parity, surplus and M3's numerator
+        by_lineage[g] = [r for r in rows if r[0] not in retained]
     lost = Counter(group(extra[s][1]) for s in lost_ids)
     parity, silent_rows = {}, []
     for g in sorted(roots | set(by_lineage) | set(lost)):
@@ -407,7 +472,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     totals = {k: sum(p[k] for p in parity.values()) for k in keys}
     zero = sorted(g for g, p in parity.items() if p["host_session"] and p["expected_rows"] and not p["stored_rows"])
     per_session = Counter(r[1] for r in stored)
-    window_ids = {r[0] for rows in by_lineage.values() for r in rows} | set(lost_ids)
+    window_ids = {r[0] for rows in by_lineage.values() for r in rows} | set(lost_ids) | retained
     audited_sessions = scored | {extra[i][1] for i in window_ids}
     denominator = len(window_ids)
 
@@ -426,9 +491,11 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
         events = [e for e in events if str(e.get("session") or "") in audited_sessions
                   and (since is None or float(e.get("t") or 0) >= since)]
     kinds = Counter(e["kind"] for e in events) if events is not None else None
-    # Compaction lines: deduplicated, tagged with a scored session, and inside the window when one is given.
-    compaction_lines = sorted((sid, at) for sid, at, _msg in log["compactions"]
-                              if sid in audited_sessions and (since is None or at >= since))
+    # Compaction lines: deduplicated, inside the window when one is given, of an audited session or of none.
+    compaction_lines = sorted(((sid, at) for sid, at, _msg in log["compactions"]
+                               if (sid is None or sid in audited_sessions) and (since is None or at >= since)),
+                              key=lambda c: (c[1], c[0] or ""))
+    compaction_lines, unattributed_compactions = attribute_compactions(compaction_lines, events)
     restarts = None
     if events is not None:
         restarts = defaultdict(list)
@@ -436,7 +503,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
             if e["kind"] in RESTARTS:
                 restarts[group(str(e.get("session") or ""))].append(float(e.get("t") or 0))
     then_restart = "unknown" if not logs or restarts is None else sum(
-        1 for sid, at in compaction_lines if any(t > at for t in restarts.get(group(sid), ())))
+        1 for sid, at in compaction_lines if sid and any(t > at for t in restarts.get(group(sid), ())))
     value = {"turns": turns, "delegated_children": sum(1 for k in buckets["A"] if k in parity),
              "compactions": len(compaction_lines) if logs else "unknown", "compactions_then_restart": then_restart,
              "tool_calls": sum(calls.values()), "tool_call_repeats": sum(n - 1 for n in calls.values()),
@@ -446,9 +513,11 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     value["restarts"] = value["restarts_cold"] + value["restarts_warm"] if kinds is not None else "unknown"
     coverage = {k: {"value": value[k], "floor": f, "met": isinstance(value[k], int) and value[k] >= f}
                 for k, f in FLOORS.items()}
-    coverage_basis = {"compactions": "log lines 'LCM compaction #' of LCM-X's logger, tagged with a scored session, "
-                                     "deduplicated (compaction.py:2910)" if logs else "no log given",
-                      "untagged_compaction_lines": log["untagged_compactions"],
+    coverage_basis = {"compactions": "log lines 'LCM compaction #' of LCM-X's logger, deduplicated (compaction.py:2910);"
+                                     " a line without a session takes its message's session=, else the nearest"
+                                     " driver compress_request, else counts only here" if logs else "no log given",
+                      "compactions_without_session": unattributed_compactions,
+                      "compress_request_window_s": list(COMPRESS_REQUEST_WINDOW),
                       "store_depth0_message_leaves": sum(n for s, n in leaves.items() if group(s) in parity),
                       "delegated_children": "ended, scored #1931 bucket A children",
                       "host_sources": "distinct sessions.source in the window, without subagent and tool",
@@ -464,7 +533,8 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
         uid[src]["rows_with_canonical_uid"] += int(uids is not None and sid in uids)
 
     # M3: rows carrying generated_unproven, or the store_id side of a possible_replay_of pair.
-    doubt = sorted({s for s, kind, _o in relations if kind in ("possible_replay_of", "generated_unproven")} & window_ids)
+    doubt = sorted({s for s, kind, _o in relations if kind in ("possible_replay_of", "generated_unproven")}
+                   & window_ids - retained)
     m3 = {"numerator": len(doubt), "denominator": denominator, "store_ids": doubt,
           "rate": len(doubt) / denominator if denominator else 0.0}
 
@@ -484,10 +554,13 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     session_restarts = None if restarts is None else {s: restarts.get(group(s), []) for s in sessions}
     attributed = attribute_silent_surplus(sorted(silent_rows, key=lambda r: r[0]), ingests, observed, user_rows,
                                           session_restarts)
-    exempt = sum(len(attributed[k]) for k in ("#1674", "#2203"))
-    unattributed = totals["silent_surplus_rows"] - exempt
-    exempted = {"per_limit": {k: len(v) for k, v in attributed.items()},
-                "store_ids": {k: v for k, v in attributed.items()}, "exempted_rows": exempt,
+    # Silent surplus counts copies per key, so a row holding two keys (content and a tool call) is listed once per
+    # key; the gate's unattributed count stays in copies, and the row-based fraction counts distinct store ids.
+    exempt_copies = sum(len(attributed[k]) for k in ("#1674", "#2203"))
+    exempt = len(set(attributed["#1674"]) | set(attributed["#2203"]))
+    unattributed = totals["silent_surplus_rows"] - exempt_copies
+    exempted = {"per_limit": {k: len(set(v)) for k, v in attributed.items()},
+                "store_ids": {k: sorted(set(v)) for k, v in attributed.items()}, "exempted_rows": exempt,
                 "unattributed_silent_rows": unattributed, "stored_rows": denominator,
                 "fraction": exempt / denominator if denominator else 0.0}
     exempted["met"] = exempted["fraction"] <= BAR
@@ -527,7 +600,10 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
                                     for s, v in sessions.items() if group(s) in parity}},
             "coverage": coverage, "coverage_basis": coverage_basis,
             "uid_coverage": {"table": "present" if uids is not None else "table absent", "per_source": dict(uid)},
-            "m3": m3, "recorder": recorder, "exempted_surplus": exempted, "issue_1931": issue_1931,
+            "m3": m3, "recorder": recorder,
+            "undo_retained": {"rows": len(retained), "store_ids": sorted(retained),
+                              "host_rewind_count": {s: sessions[s]["rewind_count"] for s in sorted(scored)
+                                                    if sessions[s]["rewind_count"]}}, "exempted_surplus": exempted, "issue_1931": issue_1931,
             "gate": {"bars": bars, "verdict": verdict}}
 
 
