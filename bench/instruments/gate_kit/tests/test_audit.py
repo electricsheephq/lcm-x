@@ -194,6 +194,13 @@ def test_a_repeat_split_across_segments_is_expected_twice(tmp_path):
     assert out["parity"]["totals"]["missing_rows"] == 1
 
 
+def test_two_identical_sends_in_one_batch_both_count(tmp_path):
+    # One insert batch stamps every row with one time, so both rows share a display identity; both are still expected.
+    host = [("S1", dict(u("yes"), _ts=5.0)), ("S1", dict(u("yes"), _ts=5.0)), ("S1", a("ok"))]
+    out = Home(tmp_path, ONE, host, stored=host[1:]).run()
+    assert out["parity"]["totals"]["expected_rows"] == 3 and out["parity"]["totals"]["missing_rows"] == 1
+
+
 def test_in_place_rewound_rows_are_not_expected(tmp_path):
     host = turn(1) + [("S1", dict(u("question 2"), _active=0)),  # rewound: not displayed
                       ("S1", dict(u("question 3"), _active=0, _compacted=1))]  # archived history: displayed
@@ -300,9 +307,16 @@ def test_a_frame_marker_auxiliary_subagent_child_stays_scored(tmp_path):
             "parent=P decision=auxiliary reason=frame_marker engine=lcm\n")
     out = Home(tmp_path, {k: v for k, v in CHILDREN.items() if k != "B1"}, turn(1, "P") + turn(2, "A1"),
                stored=turn(1, "P")).run([line])
-    assert out["issue_1931"]["auxiliary_excluded"] == []
+    assert out["issue_1931"]["auxiliary_excluded"] == [] and out["issue_1931"]["auxiliary_unproven"] == ["A1"]
     assert out["issue_1931"]["A"]["zero_row_children"] == ["A1"] and out["issue_1931"]["pass_A"] is False
     assert out["parity"]["zero_row_lineages"] == ["A1"]
+
+
+def test_a_frame_marker_auxiliary_top_level_session_stays_scored(tmp_path):
+    line = ("2026-11-06 10:00:00,000 INFO hermes_lcm.engine: LCM session decision: session=S1 platform=cli parent=- "
+            "decision=auxiliary reason=frame_marker engine=lcm\n")
+    out = Home(tmp_path, ONE, turn(1), stored=[]).run([line])
+    assert out["issue_1931"]["auxiliary_unproven"] == ["S1"] and out["parity"]["zero_row_lineages"] == ["S1"]
 
 
 def test_lines_of_other_loggers_or_mid_message_do_not_count(tmp_path):
@@ -425,9 +439,10 @@ def test_output_holds_no_content_and_sources_open_read_only(tmp_path, capsys):
     assert sorted(p.name for p in home.dir.iterdir()) == files  # immutable=1: no -wal or -shm beside the sources
 
 
-def test_a_non_empty_wal_file_is_refused(tmp_path):
+@pytest.mark.parametrize("suffix", ["-wal", "-journal"])
+def test_a_non_empty_wal_or_hot_journal_is_refused(tmp_path, suffix):
     home = Home(tmp_path, ONE, turn(1))
-    Path(f"{home.lcm}-wal").write_bytes(b"pending pages")
+    Path(f"{home.lcm}{suffix}").write_bytes(b"pending pages")
     with pytest.raises(SystemExit) as stop:
         audit.main(["--state-db", str(home.state), "--lcm-db", str(home.lcm), "--out", str(tmp_path / "r.json")])
     assert stop.value.code == 2 and not (tmp_path / "r.json").exists()

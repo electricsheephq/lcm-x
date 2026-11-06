@@ -50,8 +50,8 @@ COMPACTION = re.compile(r"LCM compaction #\d+:")  # compaction.py:2910, one line
 # decision line. aux_session.py:1015-1021 (_delegate_child_link) classes the #1931 AUXILIARY case without a line.
 RECLASSIFIED = re.compile(r"LCM reclassified session (\S+) as auxiliary at first ingest")
 DECISION = re.compile(r"LCM session decision: session=(\S+) .*?\bdecision=auxiliary\b(?:.*?\breason=(\S+))?")
-# A decision=auxiliary line on a subagent child excludes it only for these reasons: a frame_marker decision is logged
-# for an unproven child, which is the #1931 bypass itself, so that child stays scored.
+# A decision=auxiliary line excludes a session only for these reasons: a frame_marker decision is logged for an
+# unproven child, which is the #1931 bypass itself, so that session stays scored (listed as auxiliary_unproven).
 AUX_PROVEN_REASONS = frozenset({"background_review", "toolsets_memory_only"})
 # The #2305 route recorder (engine.py _log_ingest_route): one line per ingest that stores rows. The reason is free
 # text (spaces, parentheses), so it is matched lazily; route spaces become underscores (normalised again here).
@@ -76,6 +76,9 @@ def ro(path: Path) -> sqlite3.Connection:
     wal = Path(f"{path}-wal")
     if wal.is_file() and wal.stat().st_size:
         raise ValueError(f"{path.name} has a non-empty -wal file: stop the run and checkpoint the database first")
+    journal = Path(f"{path}-journal")
+    if journal.is_file() and journal.stat().st_size:  # a hot rollback journal: an interrupted write not rolled back
+        raise ValueError(f"{path.name} has a non-empty -journal file: open it once with its owner to roll it back")
     return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
 
 
@@ -157,29 +160,41 @@ def host_expected(rows, group, markers):
     Hermes keeps a rotation parent's originals in the closed parent and gives the child only the compressed handoff
     (hermes_state_compression.py _publish_compression_child_on_conn); an in-place compaction archives the displayed
     history (active = 0, compacted = 1) and rewinds the originals of the carried tail (active = 0, compacted = 0)
-    (hermes_state_messages.py). The displayed rows are ``active = 1 OR compacted = 1`` and the lineage display collapses
-    rows by display identity (``display_key``), so a key's expected count is the number of distinct display identities
-    holding it across every segment of the lineage. The host's summary row (``_compressed_summary``) and user rows that
+    (hermes_state_messages.py). The displayed rows are ``active = 1 OR compacted = 1``, and the lineage display collapses
+    rows by display identity (``display_key``) across segments. One insert batch stamps all its rows with one time
+    (hermes_state_messages.py _insert_message_rows), so two identical sends in one batch share an identity: an
+    identity's count is therefore the most displayed rows any one segment (session) holds of it, and a key's expected
+    count is the sum of those over the distinct identities of the lineage. A carried copy is not counted twice, and a
+    double within a segment still counts twice. The host's summary row (``_compressed_summary``) and user rows that
     begin with LCM-X's own generated-carrier markers are not expected."""
     header, prefixes = markers
-    seen, count, texts, excluded = set(), defaultdict(Counter), {}, Counter()
-    for rid, sid, role, content, calls, call_id, summary, ts, tool_name, displayed in rows:
-        g = group(sid)
-        identity = (g, display_key(role, content, ts, call_id, calls, tool_name))
-        if summary or not displayed or identity in seen:
+    per_segment, first = Counter(), {}
+    for row in rows:
+        rid, sid, role, content, calls, call_id, summary, ts, tool_name, displayed = row
+        if summary or not displayed:
             continue
-        seen.add(identity)
+        identity = (group(sid), display_key(role, content, ts, call_id, calls, tool_name))
+        per_segment[(identity, sid)] += 1
+        first.setdefault(identity, row)
+    copies = Counter()
+    for (identity, _sid), n in per_segment.items():
+        copies[identity] = max(copies[identity], n)
+    count, texts, excluded = defaultdict(Counter), {}, Counter()
+    for identity, n in copies.items():
+        g = identity[0]
+        rid, sid, role, content, calls, call_id = first[identity][:6]
         if role in ("user", "assistant") and multiset.norm(content or ""):
             head = (content or "").lstrip()
             if role == "user" and (header.match(head) or head.startswith(prefixes)):
-                excluded[g] += 1  # an LCM generated carrier the host persisted: LCM's own output, never expected
+                excluded[g] += n  # an LCM generated carrier the host persisted: LCM's own output, never expected
             else:
                 key = (role, multiset.h(content))
                 texts[key] = content
-                count[g][key] += 1
+                count[g][key] += n
         if role in ("tool", "assistant"):
-            count[g].update(k for k in tool_calls.stored_keys([(rid, sid, role, content, calls, call_id)], lambda _s: g)
-                            if k[1] != "malformed_tool_calls")
+            for k in tool_calls.stored_keys([(rid, sid, role, content, calls, call_id)], lambda _s: g):
+                if k[1] != "malformed_tool_calls":
+                    count[g][k] += n
     out = {}
     for g, keys in count.items():
         items = [(k[0], texts[k]) for k, n in sorted(keys.items(), key=repr) if k[0] in ("user", "assistant")
@@ -243,13 +258,13 @@ def read_logs(paths, tz=None):
     return out
 
 
-def auxiliary_sessions(sessions: dict, lines: dict) -> set:
-    """Sessions excluded as AUXILIARY. The first-ingest reclassification (engine.py:2770) always excludes; a
-    decision=auxiliary line excludes a subagent child only with a proven reason (AUX_PROVEN_REASONS), any other session
-    whatever its reason."""
-    return {s for s, reasons in lines.items()
-            if "first_ingest_reclassification" in reasons or reasons & AUX_PROVEN_REASONS
-            or sessions.get(s, {}).get("source") != DELEGATE_SOURCE}
+def auxiliary_sessions(lines: dict) -> tuple[set, set]:
+    """(excluded, unproven). A session is excluded as AUXILIARY when the first-ingest reclassification (engine.py:2770)
+    names it, or a decision=auxiliary line names it with a proven reason (AUX_PROVEN_REASONS), whatever its source.
+    Any other decision=auxiliary session (a frame_marker reason, say) stays scored and is listed as unproven."""
+    excluded = {s for s, reasons in lines.items()
+                if "first_ingest_reclassification" in reasons or reasons & AUX_PROVEN_REASONS}
+    return excluded, set(lines) - excluded
 
 
 def read_events(path):
@@ -346,7 +361,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     log = read_logs(logs, log_tz)
     events = read_events(events_path)
     group = lineage_of(sessions)
-    aux = auxiliary_sessions(sessions, log["auxiliary"])
+    aux, aux_unproven = auxiliary_sessions(log["auxiliary"])
     in_window = {s for s, v in sessions.items() if since is None or (v["started"] or 0) >= since}
     roots = {group(s) for s in in_window if group(s) in in_window and group(s) not in aux}
     expected, carriers = host_expected([r for r in host_rows if group(r[1]) in roots], group,
@@ -469,6 +484,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     issue_1931["pass_A"] = (a["missing_rows"] == 0 and a["silent_surplus_rows"] == 0 and a["lineage_present"] == a["n"]
                             and not a["zero_row_children"] and a["n"] >= 5)
     issue_1931["auxiliary_excluded"] = sorted(aux)
+    issue_1931["auxiliary_unproven"] = sorted(aux_unproven)
 
     deficits = totals["missing_rows"] + totals["split_assistant_keys"]
     bars = {"zero_row_sessions": {"value": len(zero), "pass": not zero},

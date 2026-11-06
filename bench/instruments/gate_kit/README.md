@@ -16,7 +16,7 @@ python -m bench.instruments.gate_kit.audit --state-db <hermes home>/state.db --l
 ```
 - Both databases are opened through `mode=ro&immutable=1` file URIs: never written, and no `-wal` or `-shm` file is
   created beside them. An immutable open does not read a `-wal` file, so a database with a non-empty `-wal` beside it
-  is refused (exit 2): checkpoint it first (open it once after the run has stopped, or copy it with its `-wal` and
+  is refused (exit 2), as is one with a non-empty (hot) rollback `-journal`: checkpoint or roll it back first (open it once after the run has stopped, or copy it with its `-wal` and
   checkpoint the copy).
 - `--since`: only host sessions started at or after it, and compaction lines logged at or after it (a naive ISO time
   is UTC). Stored rows under a session the host does not know count when ingested at or after it.
@@ -41,8 +41,9 @@ an in-place compaction archives the displayed history (`active = 0, compacted = 
 carried tail (`active = 0, compacted = 0`). The displayed rows are `active = 1 OR compacted = 1`, and the display
 collapses rows with the same display identity: role, content (edge-stripped, as B2 keys it), timestamp and tool
 fields, or a tool-calling assistant row's call ids. A carried handoff copy takes its original's timestamp, so it
-collapses with it; a genuine repeat has its own timestamp. A key's expected count is the number of distinct display
-identities holding it across every segment of the lineage. Host summary rows (`_compressed_summary`) and user rows
+collapses with it; a genuine repeat has its own timestamp. One insert batch stamps all its rows with one time, so two
+identical sends in one batch share an identity: an identity counts as many times as the most displayed rows any one
+segment holds of it, and a key's expected count is the sum of those over the lineage's distinct identities. Host summary rows (`_compressed_summary`) and user rows
 that begin with LCM-X's own generated-carrier markers are not expected.
 
 Stored rows are scored with the reliability harness's B2 instruments, unchanged: `multiset.score` (user and assistant
@@ -88,9 +89,9 @@ surplus.
 A session LCM-X classes AUXILIARY stores nothing, so it is not scored. It is excluded when LCM-X's
 `LCM reclassified session <id> as auxiliary at first ingest` line names it, or when the session decision line
 `LCM session decision: session=<id> ... decision=auxiliary reason=<token>` names it with reason `background_review` or
-`toolsets_memory_only`. On a non-subagent session any decision=auxiliary reason excludes it. A subagent child
-classed auxiliary for any other reason (`frame_marker`, logged for an unproven child: the #1931 bypass) stays scored
-in bucket A.
+`toolsets_memory_only`, whatever its source. A session classed auxiliary for any other reason (`frame_marker`,
+logged for an unproven child: the #1931 bypass) stays scored, in bucket A when it is a subagent child, and is listed
+under `issue_1931.auxiliary_unproven`.
 
 ## What it does not prove
 - The run itself: that the driver covered every reliability shape, that the host and rc trees are the ones named,
