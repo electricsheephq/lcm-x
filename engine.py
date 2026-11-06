@@ -7562,15 +7562,14 @@ class LCMEngine(
                                 (self._session_id, json.dumps(sorted(attempt["stored"].values())))))
                             keys = {(role, call_id, calls, name) for _, role, _, call_id, calls, name, _ in new_rows}
                             earlier, stripped_earlier = {}, {}
+                            # One linear scan over the session's earlier rows (index order), filtered by key in
+                            # Python: a per-key join re-scans the key set for every row and holds the lock far longer.
                             for sid, role, content, call_id, calls, name, stamp in conn.execute(
-                                "SELECT m.store_id,m.role,m.content,m.tool_call_id,m.tool_calls,m.tool_name,m.observed_at "
-                                "FROM json_each(?) k JOIN messages m ON m.session_id=? "
-                                "AND m.role IS json_extract(k.value,'$[0]') "
-                                "AND m.tool_call_id IS json_extract(k.value,'$[1]') "
-                                "AND m.tool_calls IS json_extract(k.value,'$[2]') "
-                                "AND m.tool_name IS json_extract(k.value,'$[3]') "
-                                "WHERE m.store_id<? ORDER BY m.store_id",
-                                (json.dumps(sorted(keys, key=repr)), self._session_id, first)):
+                                "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at "
+                                "FROM messages WHERE session_id=? AND store_id<? ORDER BY store_id",
+                                (self._session_id, first)):
+                                if (role, call_id, calls, name) not in keys:
+                                    continue
                                 earlier.setdefault((role, content, call_id, calls, name), []).append((sid, stamp))
                                 stripped = ingest_ledger.stripped_replay_content(content)
                                 if stripped is not None:
@@ -7589,7 +7588,7 @@ class LCMEngine(
                                     candidates = index.get((role, stripped if strip else content, call_id, calls, name), ())
                                     if candidates:
                                         candidate_ids.add(sid)
-                                    if stripped is None and (strip or call_id is None and calls is None):
+                                    if stripped is None and (strip or not call_id and not calls):
                                         continue
                                     target = next((old for old, old_stamp in candidates if old not in used
                                                    and (stamp is None or old_stamp is None or stamp == old_stamp)), None)

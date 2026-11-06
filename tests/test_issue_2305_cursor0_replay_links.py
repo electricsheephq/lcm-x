@@ -388,3 +388,21 @@ def test_21_recorder_direct_off_current_session_end(tmp_path, caplog):
             f"stored={rows[1]['store_id']}-{rows[1]['store_id']} rows=1 replay_pairs=0 stripped=0")
     finally:
         engine.shutdown()
+
+
+def test_22_earlier_rows_are_read_in_one_linear_scan(host):
+    # The link pass reads the session's earlier rows once; a per-key join re-scans the key set for every row and
+    # holds the ingest write lock for seconds on a tool-heavy session (#2335 review).
+    host.tool_turn()
+    copies = deepcopy(host.live[-3:-1])
+    host.restart()
+    statements = []
+    host.engine._store._conn.set_trace_callback(statements.append)
+    try:
+        host.engine.ingest([{"role": "user", "content": "different head", "timestamp": host.stamp()}, *copies])
+    finally:
+        host.engine._store._conn.set_trace_callback(None)
+    _assert_cursor0(host.engine)
+    assert len(_pairs(host.engine)) == 2
+    earlier = [sql for sql in statements if "FROM messages" in sql and "store_id<" in sql.replace(" ", "")]
+    assert len(earlier) == 1 and not any("json_extract(k.value" in sql for sql in statements)
