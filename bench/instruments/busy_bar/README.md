@@ -58,6 +58,13 @@ incomplete ledgers are INCONCLUSIVE, not a pass.
 
 ## Workload and schedule
 
+`success_wall_ms` reports `n`, `p50`, `p95`, and `max` (milliseconds, nearest-rank
+percentiles) per operation kind and overall, per cell and per tree. It is
+**reported, not gated; includes any SQLite busy wait**. Only judged calls with
+no exception, busy signal, or inconclusive flag count; untimed older records are
+omitted. The comparison adds candidate/baseline `p95_ratio` per kind and overall
+(null if either p95 is missing or the baseline p95 is zero). Verdicts are unchanged.
+
 Both engines use the same database and isolated home, with distinct sessions and
 conversation ids A/B. B is created, bound, driven, and shut down on its own thread;
 A runs on the main thread. Startup completes before contention begins. Each counted A operation releases one fixed batch of B operations. Setup, session
