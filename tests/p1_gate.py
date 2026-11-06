@@ -34,7 +34,9 @@ def store_outcome(conn, expected):
     for sid, session, conversation, role, content, call_id, calls in conn.execute(
             "SELECT store_id,session_id,conversation_id,role,content,tool_call_id,tool_calls FROM messages"):
         ids[(conversation or session, role, content, call_id, _calls(calls))].append(sid)
-        stored[sid] = (session, role, content)  # verifies stripped-content replay links, as the B2 scorer does
+        # Verifies stripped-content replay links, as the B2 scorer does. The identity keeps the lineage (the
+        # oracle's grouping) and the session, so a link never crosses either boundary.
+        stored[sid] = ((conversation or session, session), role, content)
     relations = (list(conn.execute("SELECT store_id,kind,related_store_id FROM message_relations"))
                  if conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else [])
     missing = wanted - Counter({key: len(rows) for key, rows in ids.items()})
@@ -45,10 +47,6 @@ def store_outcome(conn, expected):
                            for key, n in sorted(missing.items(), key=lambda item: repr(item[0]))],
                 visible=split["visible_surplus_rows"], silent=split["silent_surplus_rows"],
                 silent_store_ids=sorted({row["store_id"] for row in split["silent_surplus_examples"]}))
-
-
-class GateFailure(AssertionError):
-    """A gate cell that is expected to fail raises this; gate_result counts any strict-xfail cell as FAIL."""
 
 
 def gate_result(receipts, *, strict_xfail_cells=()):

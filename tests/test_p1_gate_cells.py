@@ -14,6 +14,26 @@ from tests.test_issue_2055_ingest_transaction import durable, _no_background_mai
 from tests.test_issue_2055_ingest_ledger_writes import engines as engines
 
 
+@pytest.mark.parametrize("relations,wanted", [
+    ([], (0, 0, 1)),
+    ([(3, "possible_replay_of", 1)], (0, 0, 1)),  # the original is in another conversation: no evidence
+    ([(3, "possible_replay_of", 2)], (0, 1, 0)),
+])
+def test_store_outcome_replay_link_stays_inside_its_conversation(relations, wanted):
+    # One session holds two conversations. A copy linked to an equal row of the other conversation stays silent.
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute("CREATE TABLE messages(store_id,session_id,conversation_id,role,content,tool_call_id,tool_calls)")
+        conn.execute("CREATE TABLE message_relations(store_id,kind,related_store_id)")
+        expected = {**expect_from_view([_m("assistant", "D")], "conv"),
+                    **expect_from_view([_m("assistant", "D")], "foreign")}
+        conn.executemany("INSERT INTO messages VALUES (?,?,?,?,?,?,?)", [
+            (1, "S", "conv", "assistant", "D", None, None), (2, "S", "foreign", "assistant", "D", None, None),
+            (3, "S", "foreign", "assistant", "D", None, None)])
+        conn.executemany("INSERT INTO message_relations VALUES (?,?,?)", relations)
+        outcome = store_outcome(conn, expected)
+    assert (outcome["loss"], outcome["visible"], outcome["silent"]) == wanted, outcome
+
+
 @pytest.mark.parametrize("shape,relations,wanted", [
     ("duplicate", [], (0, 0, 1)),
     ("duplicate", [(2, "supersedes", 1)], (0, 1, 0)),
@@ -196,7 +216,7 @@ os._exit(0)
         assert durable(fresh) == before
         fresh.ingest(view)
         fresh.ingest(view)
-        # Crash adds zero rows: this differential must pass before the expected failure.
+        # Crash adds zero rows, and the crash run's outcome equals the no-crash control's.
         assert host.rows() == control_rows
         outcome = store_outcome(fresh._store._conn, expected)
         assert outcome == control_outcome
