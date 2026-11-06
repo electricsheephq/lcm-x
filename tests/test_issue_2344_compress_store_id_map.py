@@ -74,3 +74,28 @@ def test_reused_address_cannot_store_a_carried_ignored_placeholder(tmp_path, mon
         assert all(PLACEHOLDER not in str(row["content"]) for row in stored)
     finally:
         engine.shutdown()
+
+
+def test_map_is_restored_when_pass_cleanup_raises(tmp_path, monkeypatch):
+    engine = _engine(tmp_path)
+    try:
+        engine.on_session_start("old-session", platform="telegram", context_length=1000, conversation_id="conv")
+        before = engine._compress_run.store_ids_by_message_id
+
+        def broken_cleanup(*_args, **_kwargs):
+            raise RuntimeError("cleanup failed")
+
+        monkeypatch.setattr(engine, "_end_pre_leaf_phase", broken_cleanup)
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            engine.compress(
+                [
+                    {"role": "user", "content": "visible backlog before rollover " + "v" * 200},
+                    {"role": "user", "content": "api_key=sk-ignore...cdef duplicate ignored"},
+                    {"role": "user", "content": "api_key=sk-ignore...cdef duplicate ignored"},
+                ],
+                current_tokens=10_000, force=True,
+            )
+        assert engine._compress_run.store_ids_by_message_id is before
+    finally:
+        monkeypatch.undo()
+        engine.shutdown()

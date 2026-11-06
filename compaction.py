@@ -888,20 +888,20 @@ class CompactionMixin:
                     return fitted
             raise
         finally:
-            self._end_pre_leaf_phase(budget, "stopped")
-            self._last_compress_leaves = (self._hold_conversation_key(), budget.leaves)
-            self._compress_forced_overflow = False
-            self._foreground_budget = None
-            if thread_context is not None:
-                thread_context.foreground_budget = None
             try:
-                if returned is not None and returned is not messages:
-                    self._compress_exit_write(returned, exit_capture)
-            finally:
+                self._end_pre_leaf_phase(budget, "stopped")
+                self._last_compress_leaves = (self._hold_conversation_key(), budget.leaves)
+                self._compress_forced_overflow = False
+                self._foreground_budget = None
+                if thread_context is not None:
+                    thread_context.foreground_budget = None
                 try:
-                    self._finish_foreground_budget(budget, returned, current_tokens if (current_tokens or 0) > 0 else messages)
+                    if returned is not None and returned is not messages:
+                        self._compress_exit_write(returned, exit_capture)
                 finally:
-                    store_id_scope.__exit__(None, None, None)
+                    self._finish_foreground_budget(budget, returned, current_tokens if (current_tokens or 0) > 0 else messages)
+            finally:
+                store_id_scope.__exit__(None, None, None)  # #2344: last, even if the cleanup above raises
 
     def _compress_bypassed(self, messages, current_tokens, focus_topic, force):
         """Bypassed calls own a local budget; only child diagnostics are thread-local."""
