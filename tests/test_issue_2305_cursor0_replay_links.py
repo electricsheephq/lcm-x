@@ -444,3 +444,21 @@ def test_24_stamped_copies_take_the_oldest_allowed_target(host, monkeypatch):
     assert len(sources) == 4
     assert _pairs(host.engine) == [(sources[0], targets[1]), (sources[2], targets[0]), (sources[3], targets[2])]
     assert _counts(host.engine)["ledger.replay_pairs.cursor0_unlinked"] == 1
+
+
+def test_25_a_rebound_conversation_never_spends_the_previous_conversations_rows(host):
+    # #2335 review: a same-session rebind to another conversation. Its rows repeat the earlier conversation's reply,
+    # but a replay target must share the copy's conversation as well as its session.
+    host.turn(reply="ok")
+    earlier = [r["store_id"] for r in host.engine._store.get_session_messages(SID) if r["content"] == "ok"]
+    host.engine.shutdown()
+    host.engine = engine = LCMEngine(config=host.engine._config, hermes_home=str(host.tmp_path / "home"))
+    host.engines.append(engine)
+    engine.on_session_start(SID, platform="telegram", conversation_id="other-conversation", context_length=200_000)
+    engine.ingest([{"role": "system", "content": "system prompt"},
+                   {"role": "user", "content": "different head", "timestamp": host.stamp()},
+                   {"role": "assistant", "content": "ok"}])
+    rows = engine._store.get_session_messages(SID)
+    later = [r["store_id"] for r in rows if r["content"] == "ok" and r["store_id"] not in earlier]
+    assert earlier and later  # both conversations stored their own reply
+    assert not [pair for pair in _pairs(engine) if pair[1] in earlier]

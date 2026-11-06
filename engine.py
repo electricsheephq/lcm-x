@@ -7633,25 +7633,27 @@ class LCMEngine(
                     try:
                         with _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
                             first = min(attempt["stored"].values())
+                            # A copy and its target share the session and the conversation: a same-session rebind
+                            # to another conversation never spends the earlier conversation's rows.
                             new_rows = list(conn.execute(
-                                "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at "
+                                "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at,conversation_id "
                                 "FROM messages WHERE session_id=? AND store_id IN "
                                 "(SELECT value FROM json_each(?)) ORDER BY store_id",
                                 (self._session_id, json.dumps(sorted(attempt["stored"].values())))))
-                            keys = {(role, call_id, calls, name) for _, role, _, call_id, calls, name, _ in new_rows}
+                            keys = {(conv, role, call_id, calls, name) for _, role, _, call_id, calls, name, _, conv in new_rows}
                             earlier, stripped_earlier = {}, {}
                             # One linear scan over the session's earlier rows (index order), filtered by key in
                             # Python: a per-key join re-scans the key set for every row and holds the lock far longer.
-                            for sid, role, content, call_id, calls, name, stamp in conn.execute(
-                                "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at "
+                            for sid, role, content, call_id, calls, name, stamp, conv in conn.execute(
+                                "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at,conversation_id "
                                 "FROM messages WHERE session_id=? AND store_id<? ORDER BY store_id",
                                 (self._session_id, first)):
-                                if (role, call_id, calls, name) not in keys:
+                                if (conv, role, call_id, calls, name) not in keys:
                                     continue
-                                earlier.setdefault((role, content, call_id, calls, name), []).append((sid, stamp))
+                                earlier.setdefault((conv, role, content, call_id, calls, name), []).append((sid, stamp))
                                 stripped = ingest_ledger.stripped_replay_content(content)
                                 if stripped is not None:
-                                    stripped_earlier.setdefault((role, stripped, call_id, calls, name), []).append((sid, stamp))
+                                    stripped_earlier.setdefault((conv, role, stripped, call_id, calls, name), []).append((sid, stamp))
                             used = {row[0] for row in conn.execute(
                                 "SELECT related_store_id FROM message_relations "
                                 "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if conn.execute(
@@ -7677,11 +7679,11 @@ class LCMEngine(
                                 return lane[at] if at < len(lane) else None
                             # Complete the exact pass before any stripped copy can spend a target.
                             for strip, index in ((False, earlier), (True, stripped_earlier)):
-                                for sid, role, content, call_id, calls, name, stamp in new_rows:
+                                for sid, role, content, call_id, calls, name, stamp, conv in new_rows:
                                     if sid in linked:
                                         continue
                                     stripped = ingest_ledger.stripped_replay_content(content)
-                                    candidates = index.get((role, stripped if strip else content, call_id, calls, name), ())
+                                    candidates = index.get((conv, role, stripped if strip else content, call_id, calls, name), ())
                                     if candidates:
                                         candidate_ids.add(sid)
                                     if stripped is None and (strip or not call_id and not calls):
