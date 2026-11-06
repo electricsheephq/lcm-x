@@ -441,8 +441,9 @@ class Driver:
             if self.send(slot, o["prompt"], cancel=True) != "cancelled":
                 self.ev.write("error", self.slots[slot]["session"], f"cancel_late slot={slot}")
                 return
-            if self.send(slot, o["prompt"]) == "end_turn":
-                self.ev.write("cancel_resend", self.slots[slot]["session"], f"slot={slot}")
+            if self.send(slot, o["prompt"]) != "end_turn":
+                return  # a failed resend is not executed: no event, no count
+            self.ev.write("cancel_resend", self.slots[slot]["session"], f"slot={slot}")
         elif kind == "undo_resend":
             if slot.startswith("A"):
                 raise ValueError("undo_resend needs a TUI slot: ACP has no undo (its cancel-and-resend is cancel_resend)")
@@ -452,8 +453,9 @@ class Driver:
             if not removed:
                 self.ev.write("error", self.slots[slot]["session"], f"undo_removed_nothing slot={slot}")
                 return
-            if self.send(slot, o["prompt"]) == "complete":
-                self.ev.write("undo_resend", self.slots[slot]["session"], f"slot={slot} via=tui_undo removed={removed}")
+            if self.send(slot, o["prompt"]) != "complete":
+                return  # a failed resend is not executed: no event, no count
+            self.ev.write("undo_resend", self.slots[slot]["session"], f"slot={slot} via=tui_undo removed={removed}")
         elif kind == "restart_cold":
             self.acp_sid(slot)
             self.drop("acp")
@@ -552,10 +554,10 @@ class Driver:
                     stopped = "lcm_inactive"
         finally:
             failure = None
-            for which in ("acp", "tui"):  # both hosts, even when the event log fails
+            for which in ("acp", "tui"):  # both hosts, even when the event log or one host's shutdown fails
                 try:
                     self.drop(which, graceful=True)
-                except EventLogError as exc:
+                except Exception as exc:  # noqa: BLE001 - re-raised below once both hosts were attempted
                     failure = failure or exc
             if failure is not None:
                 raise failure

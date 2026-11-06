@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -345,8 +346,9 @@ def test_failed_resend_has_no_undo_event(tmp_path, monkeypatch, slot, stop):
     stops = iter(["cancelled" if slot.startswith("A") else "complete", stop])
     monkeypatch.setattr(d, "send", lambda *_a, **_kw: next(stops))
     kind = "cancel_resend" if slot.startswith("A") else "undo_resend"
-    d.op({"op": kind, "slot": slot, "prompt": drive.CATS["undo"][0]})
+    d.guarded({"op": kind, "slot": slot, "prompt": drive.CATS["undo"][0]})
     assert not any(e["kind"] == kind for e in audit.read_events(ev.path))
+    assert d.done[kind] == 0  # a failed resend is not counted as executed
 
 
 def test_busy_tui_resend_has_no_undo_event(tmp_path):
@@ -421,6 +423,20 @@ def test_event_log_failure_stops_the_run_and_shuts_down_both_hosts(tmp_path):
     with pytest.raises(drive.EventLogError):
         d.run([{"op": "turn", "slot": "A1", "prompt": drive.CATS["plain"][0]}], drive.targets())
     assert d.acp is None and d.tui is None
+
+
+def test_a_failed_host_shutdown_still_shuts_down_the_other(tmp_path):
+    d, _ev, _log = stub_driver(tmp_path)
+    d.acp_sid("A1")
+    d.tui_rt("T1")
+    tui = d.tui
+
+    def stuck():
+        raise subprocess.TimeoutExpired("hermes acp", 5)
+    d.acp.close = stuck
+    with pytest.raises(subprocess.TimeoutExpired):
+        d.run([], drive.targets())
+    assert d.tui is None and tui is not None
 
 
 def test_events_parent_is_created(tmp_path):
