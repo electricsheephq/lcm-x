@@ -179,7 +179,7 @@ def summarize(collected: dict[str, list]) -> dict[str, Any]:
     reasons += [f"baseline statistic {key} is 0" for key, value in statistics_by_tree["baseline"].items() if not value]
     verdict = ("DIAGNOSTIC ONLY" if diagnostic else "INCONCLUSIVE" if reasons else
                "LOCK-TRIPWIRE FAIL" if failed else "LOCK-TRIPWIRE PASS")
-    if verdict.startswith("LOCK-TRIPWIRE") and len(collected["baseline"]) < GATE_RUNS:
+    if verdict.startswith("LOCK-TRIPWIRE") and len(collected["baseline"]) != GATE_RUNS:
         verdict = verdict.replace("TRIPWIRE", "SMOKE")  # The gate session is ten runs per tree.
         reasons.append(f"{len(collected['baseline'])} runs per tree; a gate session needs {GATE_RUNS}")
     return {"tables": tables, "statistics": statistics_by_tree, "failed_statistics": failed,
