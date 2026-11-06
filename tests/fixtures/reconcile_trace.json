@@ -892,6 +892,7 @@
 "sql shape=29 _store COMMIT",
 "sql #29 79663c1d3b43/6",
 "log DEBUG LCM attribution phase=ingest lock_hold_ms=0.000 rows_written=1 bytes_written=0 busy_snapshot_retry=False",
+"log DEBUG LCM ingest route: session=S route=advanced_cursor cursor=4 reason=replayed durable tail stored=5-5 rows=1 replay_pairs=0 stripped=0",
 "log DEBUG Per-turn ingest OK: session=S msgs=5 cursor=5",
 "return null",
 "attr _compiled_ignore_message_patterns=[]",
