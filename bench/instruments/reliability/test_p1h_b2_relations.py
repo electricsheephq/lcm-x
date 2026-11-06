@@ -243,6 +243,25 @@ def test_p1h_a_row_that_holds_a_call_twice_explains_one_copy():
     assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == (1, 1)
 
 
+@pytest.mark.parametrize("relations,want", [
+    # Bot review on #2291: a host merge record consumes rows 1 and 2 as the expected composite's parts, and row 3
+    # re-stores part "alpha" with a pair to row 1. The consumed copy is a kept copy pinned by the record, so the pair
+    # explains row 3.
+    ([(3, "possible_replay_of", 1)], (1, 0)),
+    # Controls: a pair to the consumed copy of another key (row 2, "beta") explains nothing; so does no relation.
+    ([(3, "possible_replay_of", 2)], (0, 1)),
+    ([], (0, 1)),
+], ids=["pair-to-consumed-part", "pair-to-other-part", "no-relation"])
+def test_p1h_a_merge_consumed_copy_is_a_pair_partner(relations, want):
+    composite = "alpha\n\nbeta"
+    parts = [("user", multiset.h("alpha")), ("user", multiset.h("beta"))]
+    host = {("user", multiset.h(composite)): {"n": 1, "ids": [9], "merges": [{"host_row_id": 9, "parts": parts}]}}
+    out, split = _split([("user", composite)], [(1, "user", "alpha"), (2, "user", "beta"), (3, "user", "alpha")],
+                        relations, host=host)
+    assert (out["deficit_rows"], out["surplus_rows"]) == (0, 1)
+    assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == want
+
+
 def test_p1h_b2s_fails_when_only_the_original_carries_a_relation(monkeypatch):
     # Scorer to gate: the reviewer's probe fails B2S; the control with the relation on the later copy passes.
     for relations, want in (([(1, "supersedes", 0)], True), ([(2, "supersedes", None)], False)):

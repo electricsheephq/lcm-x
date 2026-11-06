@@ -113,7 +113,9 @@ the host reported `interrupted`. Any other assistant row is surplus.
   copy that carries none. A key that keeps two or more copies (genuine repeats, host-licensed copies) counts its
   worst case, because a silent re-store stored before a related later copy cannot be told apart: its surplus
   fills rows without a self relation first, then the self-related rows that hold the most copies, and each
-  self-related row it reaches explains one copy; pairs explain nothing there.
+  self-related row it reaches explains one copy; pairs explain nothing there. A copy that a host merge record
+  consumed as a composite's part is a kept copy pinned by that record, outside this store-order count, and a
+  `possible_replay_of` pair from a later copy to it explains that later copy.
   Maximum matching assigns distinct witnesses to distinct stored rows within each key, capped by
   that key's unlicensed surplus; a stored row explains at most one copy of each key it holds, so an assistant row
   whose content and tool entries were stored twice explains one copy of each. A row whose `tool_calls` holds the
