@@ -129,24 +129,32 @@ host processes:
 | `hermes acp` (`reliability/acp_driver.py`) | turns from a fixed prompt bank (plain questions, `read_file`/todo/`lcm_grep` tool prompts, word-for-word repeats of earlier tool prompts, long pasted text), `/compress` after a long-text turn, `delegate_task` prompts, cancel-and-resend (`session/cancel` while the prompt is in flight, then the same prompt), cold restarts (SIGKILL the process group, a new process, `session/load`) |
 | TUI gateway (`python -m tui_gateway.entry`) | the second host source (`tui` sessions), warm restarts (`session.close`, which ends the session in the context engine, then `session.resume` in the same process), undo-and-resend (`session.undo`, then the same prompt), `session.compress` |
 
-ACP has no session end and no undo, which is why the TUI gateway carries those three. Every restart follows a
+ACP has no session end and no undo, which is why the TUI gateway carries those three. Every planned restart follows a
 compaction in its session and is followed by more turns. Delegated children are counted from `state.db` (read-only);
-when they fall short after the plan, the driver sends more delegate prompts, up to twice the target.
+when they fall short after the plan, the driver sends more delegate prompts, up to twice the target in total
+attempts (including failed attempts and those made by the plan). The summary separates attempts from completed prompts.
 
 ```
 python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --hermes-src <host tree> \
   --home <HERMES_HOME> --workdir <dir> --events <events.jsonl> [--turns N] [--children N] [--seed 2055] \
-  [--max-hours 6] [--prompt-timeout 600] [--cancel-after 2] [--dry-run]
+  [--max-hours 6] [--prompt-timeout 600] [--cancel-after 2] [--append-events] [--dry-run]
 ```
 - `--dry-run` prints the targets and the planned counts and exits. `--turns`/`--children` can raise a target, never
   lower it below the floor x1.2.
 - A `--home`, `--workdir` or `--events` at or under the live `~/.hermes` is refused.
+- All CLI paths become absolute against the invoking directory before use, including the host Python and source tree;
+  the Python executable's symlink is preserved so its virtualenv and sibling `hermes` launcher remain in use.
+- A non-empty `--events` file is refused with exit 2 unless `--append-events` explicitly permits retaining its events.
 - The host processes get the invoking environment with `HERMES_HOME` set to the home and `HOME`/`TMPDIR` set to
   `<workdir>/host-home`; their stderr goes to `<workdir>/host-logs/`. The read_file prompts name files the driver
   writes under `<workdir>/notes/`.
 - A failed operation is an `error` event (a model error, a cancel that came too late, a JSON-RPC error with its code, a
   host process that died) and the run continues; nothing is retried silently. A process that died is replaced on its
-  next operation. `--max-hours` stops the plan and still writes the summary.
+  next operation; stored TUI sessions are resumed in the replacement gateway before use. A shared ACP process kill
+  records one `restart_cold` event per bound session, including siblings of the selected slot; the summary's executed
+  restart count counts scheduled operations. `--max-hours` stops the plan and still writes the summary.
+- `compress_request` is recorded before the triggering long-text turn; `compress_result` records the later manual
+  compression outcome separately, so the audit's attribution window starts before automatic compaction can occur.
 - The events log never holds prompt or reply text: a prompt is its bank index (a test plants a sentinel to hold this).
   The last line is `{"kind": "summary", "planned", "executed", "errors", "delegate", "context_length", ...}`.
 
@@ -163,13 +171,17 @@ python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --
 Then checkpoint both databases once the run has stopped (the audit refuses a non-empty `-wal`; see "Run" above) and
 audit the run: `audit.py --state-db <home>/state.db --lcm-db <home>/lcm.db --log <home>/logs/agent.log --log
 <workdir>/host-logs/acp.stderr --events <events.jsonl> --out <result.json>`. Audit only a run whose events show no
-`lcm_inactive` error: after every operation the driver scans each host's stderr and `<home>/logs/agent.log` for
+`lcm_inactive` error: after every operation the driver scans new bytes in each host's stderr and `<home>/logs/agent.log` for
 LCM-X's "LCM-X is NOT active in this process" notice and the host's "Context engine 'lcm-x' not found" fallback; on
 either it records `{"kind": "error", "detail": "lcm_inactive entry=<acp|tui> source=<file>"}`, stops the run and exits
 3, because that host's rows would otherwise read as a loss. The ACP host logs only to its stderr, as
 `<asctime> [<LEVEL>] <logger>: <message>` with no session field (acp_adapter/entry.py `_setup_logging`); the TUI
 gateway logs to `<home>/logs/agent.log`. The run ends with stdin EOF to both hosts (a `host_exit` event each), so the
 gateway ends its sessions before the audit reads the home.
+
+**Exit-3 recovery.** Raise `plugins.load_timeout_seconds` in the prepared home and rerun with a new `--events` path.
+Existing log bytes are excluded from inactive-host detection. Do not combine failed-run coverage with a fresh run:
+use `--append-events` only when intentionally retaining the earlier events and accounting for them in the audit.
 
 **Tests** (`tests/test_drive.py`): the planner (floors x1.2, deterministic, repeats, restart placement), the executor
 against stub processes (no prompt or reply text in the events, a late cancel is an error), the events contract with

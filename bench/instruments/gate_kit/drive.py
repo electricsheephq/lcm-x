@@ -197,8 +197,10 @@ def planned_counts(ops: list[dict]) -> dict:
 class Events:
     """One JSON object per line, appended and flushed per event: kinds, session ids and short non-content details."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, append: bool = False):
         self.path, self.errors = Path(path), Counter()
+        if not append and self.path.exists() and self.path.stat().st_size:
+            raise ValueError("--events exists and is non-empty; use a new path or --append-events to retain it")
 
     def write(self, kind: str, session: str | None = None, detail: str = "", **extra) -> None:
         rec = {"t": time.time(), "kind": kind, "session": session, "detail": detail, **extra}
@@ -276,6 +278,9 @@ class Driver:
         logs = self.logs = workdir / "host-logs"
         logs.mkdir(parents=True, exist_ok=True)
         self.scanned: dict[Path, int] = {}
+        for path in (logs / "acp.stderr", logs / "tui.stderr", self.home / "logs" / "agent.log"):
+            with contextlib.suppress(OSError):
+                self.scanned[path] = path.stat().st_size
         acp_argv = [*wrap, str(Path(python).parent / "hermes"), "acp"]
         tui_env = {**env, "PYTHONPATH": str(src)}
         self.make_acp = acp_factory or (lambda: AD.AcpProcess(acp_argv, env, workdir, logs / "acp.stderr"))
@@ -283,8 +288,9 @@ class Driver:
                                                         logs / "tui.stderr"))
         self.acp = self.tui = None
         self.loaded: set[str] = set()
+        self.tui_loaded: set[str] = set()
         self.slots: dict[str, dict] = {}
-        self.done, self.prompts = Counter(), Counter()
+        self.done, self.prompts, self.attempts = Counter(), Counter(), Counter()
         self.context = None
 
     # processes and sessions
@@ -303,11 +309,19 @@ class Driver:
     def tui_rt(self, slot: str) -> str:
         if self.tui is None:
             self.tui = self.make_tui()
+            self.tui_loaded = set()
             self.tui.ready(self.timeout)
         if slot not in self.slots:
             res = self.tui.call("session.create", {"cwd": str(self.workdir)}, self.timeout)
             self.slots[slot] = {"rt": res["session_id"], "session": res.get("stored_session_id") or res["session_id"]}
+            self.tui_loaded.add(slot)
             self.ev.write("source2_session", self.slots[slot]["session"], f"slot={slot} entry=tui_gateway")
+        elif slot not in self.tui_loaded:
+            res = self.tui.call("session.resume", {"session_id": self.slots[slot]["session"], "omit_messages": True},
+                                self.timeout)
+            self.slots[slot].update(rt=res["session_id"],
+                                    session=res.get("stored_session_id") or self.slots[slot]["session"])
+            self.tui_loaded.add(slot)
         return self.slots[slot]["rt"]
 
     def drop(self, which: str, graceful: bool = False) -> None:
@@ -317,6 +331,9 @@ class Driver:
         if proc is not None:
             if not graceful:
                 proc.kill()
+                if which == "acp":
+                    for slot in sorted(self.loaded):
+                        self.ev.write("restart_cold", self.slots[slot]["session"], f"slot={slot} shared_process=true")
             elif getattr(proc, "process", None) is not None:
                 with contextlib.suppress(OSError):
                     proc.process.stdin.close()
@@ -376,6 +393,8 @@ class Driver:
             if self.context is None and slot.startswith("A") and stop == "end_turn":
                 self.probe_context(slot)
         elif kind == "compress":
+            self.acp_sid(slot) if slot.startswith("A") else self.tui_rt(slot)
+            self.ev.write("compress_request", self.slots[slot]["session"], f"slot={slot}")
             self.send(slot, o["prompt"])
             if slot.startswith("A"):
                 reply, _stop = self.acp.prompt(self.acp_sid(slot), "/compress", self.timeout)
@@ -383,7 +402,7 @@ class Driver:
             else:
                 res = self.tui.call("session.compress", {"session_id": self.tui_rt(slot)}, self.timeout)
                 result = "compressed" if res.get("compressed") else "not_compressed"
-            self.ev.write("compress_request", self.slots[slot]["session"], f"slot={slot} manual={result}")
+            self.ev.write("compress_result", self.slots[slot]["session"], f"slot={slot} manual={result}")
         elif kind == "undo_resend" and slot.startswith("A"):
             if self.send(slot, o["prompt"], cancel=True) != "cancelled":
                 self.ev.write("error", self.slots[slot]["session"], f"cancel_late slot={slot}")
@@ -402,7 +421,6 @@ class Driver:
             self.acp_sid(slot)
             self.drop("acp")
             self.acp_sid(slot)  # a new process, initialize, session/load
-            self.ev.write("restart_cold", self.slots[slot]["session"], f"slot={slot}")
         elif kind == "restart_warm":
             rt = self.tui_rt(slot)
             closed = self.tui.call("session.close", {"session_id": rt}, self.timeout).get("closed")
@@ -449,6 +467,7 @@ class Driver:
         return bool(bad)
 
     def guarded(self, o: dict) -> None:
+        self.attempts[o["op"]] += 1
         try:
             self.op(o)
         except AD.ProcessGone as exc:
@@ -474,7 +493,7 @@ class Driver:
                     break
             # Children are counted from state.db: keep prompting until the target or the attempt budget (2x).
             extra, delegates = 0, CATS["delegate"]
-            while stopped is None and self.done["delegate"] < 2 * tg["delegated_children"]:
+            while stopped is None and self.attempts["delegate"] < 2 * tg["delegated_children"]:
                 n = self.children()
                 if n is None or n >= tg["delegated_children"]:
                     break
@@ -493,6 +512,7 @@ class Driver:
         summary = {"planned": planned_counts(ops), "executed": dict(self.done), "errors": dict(self.ev.errors),
                    "prompts_by_category": dict(self.prompts),
                    "delegate": {"prompts": self.done["delegate"], "extra_prompts": extra,
+                                "attempts": self.attempts["delegate"],
                                 "children_in_state_db": self.children()},
                    "context_length": self.context, "stopped": stopped, "sessions": len(self.slots)}
         self.ev.write("summary", None, "end of run", **summary)
@@ -507,6 +527,7 @@ def main(argv=None) -> int:
     ap.add_argument("--home", type=Path, required=True, help="the prepared HERMES_HOME (never the live ~/.hermes)")
     ap.add_argument("--workdir", type=Path, required=True)
     ap.add_argument("--events", type=Path, required=True)
+    ap.add_argument("--append-events", action="store_true", help="explicitly retain and append to a non-empty events file")
     ap.add_argument("--turns", type=int, help="at least this many prompts (never below the floor x1.2)")
     ap.add_argument("--children", type=int, help="at least this many delegated children (never below the floor x1.2)")
     ap.add_argument("--seed", type=int, default=2055)
@@ -518,6 +539,9 @@ def main(argv=None) -> int:
     for name in ("home", "workdir", "events"):
         if under_real_hermes(getattr(a, name)):
             ap.error(f"--{name} must not be at or under the live ~/.hermes")
+    for name in ("home", "workdir", "events", "hermes_src"):
+        setattr(a, name, getattr(a, name).expanduser().resolve())
+    a.hermes_python = str(Path(a.hermes_python).expanduser().absolute())  # retain the venv executable's symlink
     tg = targets(a.turns, a.children)
     ops = plan(a.seed, tg)
     if a.dry_run:
@@ -525,10 +549,14 @@ def main(argv=None) -> int:
         return 0
     if not (a.home / "config.yaml").is_file():
         ap.error(f"{a.home} has no config.yaml: prepare the home first (see the gate_kit README)")
+    try:
+        events = Events(a.events, append=a.append_events)
+    except ValueError as exc:
+        ap.error(str(exc))
     a.workdir.mkdir(parents=True, exist_ok=True)
     write_notes(a.workdir)
     env = host_env(dict(os.environ), a.home, a.workdir, a.hermes_src)
-    d = Driver(python=a.hermes_python, src=a.hermes_src, home=a.home, workdir=a.workdir, events=Events(a.events),
+    d = Driver(python=a.hermes_python, src=a.hermes_src, home=a.home, workdir=a.workdir, events=events,
                env=env, prompt_timeout=a.prompt_timeout, max_hours=a.max_hours, cancel_after=a.cancel_after)
     summary = d.run(ops, tg)
     print(json.dumps({k: summary[k] for k in ("executed", "errors", "delegate", "context_length", "stopped")},

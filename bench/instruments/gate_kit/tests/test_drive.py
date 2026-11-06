@@ -151,12 +151,142 @@ class StubTui:
 
 def stub_driver(tmp_path, workdir_name=S):
     workdir = tmp_path / workdir_name  # the prompts name files under it: the sentinel is in every tool prompt
-    workdir.mkdir()
+    workdir.mkdir(exist_ok=True)
     ev = drive.Events(tmp_path / "events.jsonl")
     log = []
     d = drive.Driver(python="unused", src=tmp_path, home=tmp_path, workdir=workdir, events=ev, env={},
                      cancel_after=0.05, acp_factory=lambda: StubAcp(log), tui_factory=StubTui)
     return d, ev, log
+
+
+def test_gateway_replacement_resumes_each_stored_session(tmp_path):
+    d, ev, _log = stub_driver(tmp_path)
+    d.send("T1", 0)
+    d.send("T2", 1)
+    stored = {slot: s["session"] for slot, s in d.slots.items()}
+    old = d.tui
+
+    def gone(*_args):
+        raise drive.AD.ProcessGone("gateway exited")
+
+    old.call = gone
+    d.guarded({"op": "turn", "slot": "T1", "prompt": 2})
+    assert d.tui is None
+    for slot in stored:
+        d.send(slot, 3)
+        assert d.tui.live[d.slots[slot]["rt"]] == stored[slot]
+    assert sum(json.loads(x)["kind"] == "source2_session" for x in ev.path.read_text().splitlines()) == 2
+
+
+def test_failed_delegates_consume_plan_and_topup_attempt_budget(tmp_path, monkeypatch):
+    d, _ev, _log = stub_driver(tmp_path)
+    attempts = []
+
+    def fail(*_args, **_kwargs):
+        attempts.append(1)
+        if len(attempts) == 5:  # bound the broken implementation without waiting for its deadline
+            d.stop_at = 0
+        raise drive.AD.DriverError("delegate failed")
+
+    monkeypatch.setattr(d, "send", fail)
+    monkeypatch.setattr(d, "children", lambda: 0)
+    summary = d.run([{"op": "delegate", "slot": "A1", "prompt": drive.CATS["delegate"][0]}],
+                    {"delegated_children": 1})
+    assert len(attempts) == 2 and summary["stopped"] is None
+    assert summary["delegate"]["extra_prompts"] == 1
+    assert summary["delegate"]["attempts"] == 2 and summary["delegate"]["prompts"] == 0
+
+
+def test_cli_paths_are_absolute_for_hosts_and_prompts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / "config.yaml").touch()
+    (tmp_path / "venv" / "bin").mkdir(parents=True)
+    (tmp_path / "host-python").touch()
+    (tmp_path / "venv" / "bin" / "python").symlink_to(tmp_path / "host-python")
+
+    def run(d, _ops, _tg):
+        assert all(p.is_absolute() for p in (d.src, d.home, d.workdir, d.ev.path))
+        assert d.src == tmp_path / "src" and d.home == tmp_path / "home"
+        assert d.ev.path == tmp_path / "events.jsonl"
+        made = []
+        monkeypatch.setattr(drive.AD, "AcpProcess", lambda *a: made.append(a))
+        monkeypatch.setattr(drive, "Gateway", lambda *a: made.append(a))
+        d.make_acp()
+        d.make_tui()
+        assert made[0][0][0] == str(tmp_path / "venv" / "bin" / "hermes")
+        assert made[1][0][0] == str(tmp_path / "venv" / "bin" / "python")
+        for argv, env, cwd, stderr in made:
+            assert Path(argv[0]).is_absolute() and cwd.is_absolute() and stderr.is_absolute()
+            assert all(Path(env[k]).is_absolute() for k in ("HERMES_HOME", "HOME", "TMPDIR", "HERMES_PYTHON_SRC_ROOT"))
+        assert made[1][1]["PYTHONPATH"] == str(tmp_path / "src")
+        assert str(tmp_path / "run" / "notes" / "note-00.txt") in drive.prompt_text(drive.CATS["tool"][0], d.workdir)
+        return dict(executed={}, errors={}, delegate={}, context_length=None, stopped=None, exit=0)
+
+    monkeypatch.setattr(drive.Driver, "run", run)
+    assert drive.main(["--hermes-python", "venv/bin/python", "--hermes-src", "src", "--home", "home",
+                       "--workdir", "run", "--events", "events.jsonl"]) == 0
+
+
+@pytest.mark.parametrize("where", ["acp.stderr", "tui.stderr", "agent.log"])
+def test_inactive_scan_ignores_old_lines_but_reads_new_ones(tmp_path, where):
+    target = tmp_path / ("logs" if where == "agent.log" else "work/host-logs") / where
+    target.parent.mkdir(parents=True)
+    warning = "LCM-X is NOT active in this process\n"
+    target.write_text(warning)
+    d, _ev, _log = stub_driver(tmp_path, "work")
+    assert d.inactive("tui") == []
+    with target.open("a") as fh:
+        fh.write(warning)
+    assert d.inactive("tui") == [("acp" if where == "acp.stderr" else "tui", where)]
+    assert d.inactive("tui") == []
+
+
+@pytest.mark.parametrize("slot", ["A1", "T1"])
+def test_compress_request_precedes_triggering_turn(tmp_path, monkeypatch, slot):
+    d, ev, _log = stub_driver(tmp_path)
+    send = d.send
+
+    def trigger(*args):
+        assert ev.path.exists(), "compress_request must be written before the triggering turn"
+        requests = [json.loads(x) for x in ev.path.read_text().splitlines() if json.loads(x)["kind"] == "compress_request"]
+        assert len(requests) == 1 and requests[0]["session"] == d.slots[slot]["session"]
+        return send(*args)
+
+    monkeypatch.setattr(d, "send", trigger)
+    d.op({"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]})
+    events = [json.loads(x) for x in ev.path.read_text().splitlines()]
+    assert sum(e["kind"] == "compress_request" for e in events) == 1
+    assert any(e["kind"] == "compress_result" and "manual=compressed" in e["detail"] for e in events)
+
+
+def test_shared_acp_restart_records_all_bound_sessions(tmp_path):
+    d, ev, log = stub_driver(tmp_path)
+    for slot in ("A1", "A2", "A3"):
+        d.send(slot, 0)
+    d.op({"op": "restart_cold", "slot": "A1"})
+    for slot in ("A2", "A3"):
+        d.send(slot, 1)
+    restarts = [json.loads(x) for x in ev.path.read_text().splitlines() if json.loads(x)["kind"] == "restart_cold"]
+    assert Counter(e["session"] for e in restarts) == Counter(s["session"] for s in d.slots.values())
+    assert all(f"load {s['session']}" in log for s in d.slots.values())
+
+
+def test_nonempty_events_refused_unless_append_is_explicit(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "events.jsonl"
+    stale = '{"kind":"restart_cold","session":"stale","t":1}\n'
+    path.write_text(stale)
+    (tmp_path / "config.yaml").touch()
+    monkeypatch.setattr(drive, "plan", lambda *_args: [])
+    argv = ["--hermes-python", "unused", "--hermes-src", str(tmp_path), "--home", str(tmp_path),
+            "--workdir", str(tmp_path / "work"), "--events", str(path)]
+    with pytest.raises(SystemExit) as exc:
+        drive.main(argv)
+    assert exc.value.code == 2 and "--append-events" in capsys.readouterr().err
+    assert path.read_text() == stale and not (tmp_path / "work").exists()
+    assert drive.main([*argv, "--append-events"]) == 0
+    assert path.read_text().startswith(stale)
+    assert json.loads(path.read_text().splitlines()[-1])["kind"] == "summary"
 
 
 def test_events_carry_no_prompt_or_reply_text(tmp_path):
@@ -173,7 +303,7 @@ def test_events_carry_no_prompt_or_reply_text(tmp_path):
     assert summary["executed"] == summary["planned"]["ops"] and summary["errors"] == {} and summary["exit"] == 0
     assert summary["context_length"] == 32000
     kinds = Counter(e["kind"] for e in lines)
-    assert kinds["restart_cold"] == 6 and kinds["restart_warm"] == 6 and kinds["undo_resend"] == 12
+    assert kinds["restart_cold"] > 6 and kinds["restart_warm"] == 6 and kinds["undo_resend"] == 12
     assert kinds["source2_session"] == drive.TUI_SLOTS and kinds["delegate_prompt"] == 12
     assert log.count("kill") >= 6 and lines[-1]["kind"] == "summary"
 
@@ -244,7 +374,8 @@ def test_driver_events_feed_audit_events(tmp_path):
                        "--events", str(ev.path), "--out", str(out)]) == 0
     cov = json.loads(out.read_text())["coverage"]
     ex = summary["executed"]
-    assert cov["restarts_cold"]["value"] == ex["restart_cold"] == 6
+    cold_events = sum(json.loads(x)["kind"] == "restart_cold" for x in ev.path.read_text().splitlines())
+    assert cov["restarts_cold"]["value"] == cold_events > ex["restart_cold"] == 6
     assert cov["restarts_warm"]["value"] == ex["restart_warm"] == 6
     assert cov["undo_resend"]["value"] == ex["undo_resend"] == 12
     assert cov["restarts"]["met"] and cov["host_sources"]["value"] == 2
