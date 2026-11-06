@@ -992,3 +992,27 @@ def test_lookup_fact_cap_honors_caller_limit(tmp_path, count):
         assert len(call(engine, action='list', limit=1)['entities']) == 1
     finally:
         engine.shutdown()
+
+
+def test_batched_negative_relation_probe_invalidates_after_other_engine_writes_carried_stamp(tmp_path):
+    first = make_engine(tmp_path, assertions=False)
+    second = make_engine(tmp_path, assertions=False)
+    try:
+        previous = first._store.append('one', {'role': 'user', 'content': 'Previous turn.', 'timestamp': 1690000000})
+        carried = first._store.append('one', {'role': 'user', 'content': 'Quinn carried turn.', 'timestamp': 1690000000})
+        # First engine looks up when message_relations does not exist yet.
+        initial = call(first, name='Quinn')
+        assert initial['first_seen'].get('time_uncertain') is None
+        assert first._store._memory_relation_connections.get(first._store.connection) is False
+        # Second engine on the same database creates message_relations and writes the first carried_stamp row.
+        second._store.add_message_relations([[(carried, 'carried_stamp', previous, None, 1690000000.0)]])
+        # First engine's next lookup must invalidate the stale negative probe and report time_uncertain: carried.
+        updated = call(first, name='Quinn')
+        entries = [updated['first_seen'], updated['last_seen']]
+        for session in updated['sessions']:
+            entries.extend([session['first_seen'], session['last_seen'], *session['snippets']])
+        assert all(entry.get('time_uncertain') == 'carried' for entry in entries)
+        assert first._store._memory_relation_connections.get(first._store.connection) is True
+    finally:
+        second.shutdown()
+        first.shutdown()
