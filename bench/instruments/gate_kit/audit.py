@@ -74,8 +74,9 @@ ROUTE = re.compile(r"^LCM ingest route: session=(?P<session>\S+) route=(?P<route
 ROUTE_2305 = "persisted_batch"  # at cursor 0: reconcile.py "persisted ambiguous delta", the #2305 shape
 # The pending-tail retry logs its match rule as the reason (engine.py _match_pending_tail): only these mark a drain.
 TAIL_RULES = frozenset({"digest", "off", "no_ledger", "salt_changed", "read_failed"})
-EVENT_KINDS = ("restart_cold", "restart_warm", "undo_resend", "delegate_prompt", "compress_request")
-RESTARTS = ("restart_cold", "restart_warm")
+EVENT_KINDS = ("restart_cold", "restart_cold_shared", "restart_warm", "undo_resend", "delegate_prompt",
+               "compress_request", "compress_request_failed")
+RESTARTS = ("restart_cold", "restart_cold_shared", "restart_warm")
 
 
 def ro(path: Path) -> sqlite3.Connection:
@@ -115,13 +116,17 @@ def opt(cols: set, name: str, default: str) -> str:
     return name if name in cols else f"{default} as {name}"
 
 
+def read_sessions(con):
+    sc = columns(con, "sessions")
+    return {r[0]: dict(zip(("source", "parent", "started", "ended", "end_reason", "rewind_count"), r[1:]))
+            for r in con.execute("select id, " + ", ".join(opt(sc, c, d) for c, d in (
+                ("source", "''"), ("parent_session_id", "NULL"), ("started_at", "0"), ("ended_at", "NULL"),
+                ("end_reason", "NULL"), ("rewind_count", "NULL"))) + " from sessions")}
+
+
 def read_host(path: Path):
     with ro(path) as con:
-        sc, mc = columns(con, "sessions"), columns(con, "messages")
-        sessions = {r[0]: dict(zip(("source", "parent", "started", "ended", "end_reason", "rewind_count"), r[1:]))
-                    for r in con.execute("select id, " + ", ".join(opt(sc, c, d) for c, d in (
-                        ("source", "''"), ("parent_session_id", "NULL"), ("started_at", "0"), ("ended_at", "NULL"),
-                        ("end_reason", "NULL"), ("rewind_count", "NULL"))) + " from sessions")}
+        sessions, mc = read_sessions(con), columns(con, "messages")
         # Displayed: active, or archived history. Undone: soft-deleted by a rewind (hermes_state_messages.py
         # rewind_to_message sets active = 0 and leaves compacted = 0); without the compacted column none is known.
         displayed = "(active = 1 OR compacted = 1)" if "compacted" in mc else "1"
@@ -139,6 +144,12 @@ def compression_child(sid: str, sessions: dict) -> bool:
     p = sessions.get(s["parent"] or "")
     return bool(p and p["end_reason"] == "compression" and p["source"] == s["source"]
                 and (p["ended"] is None or (s["started"] or 0) >= p["ended"] - 1))
+
+
+def eligible_child(sid: str, sessions: dict) -> bool:
+    """An ended, non-rotation child; callers also restrict source and scored sessions."""
+    s = sessions[sid]
+    return bool(s["parent"] and s["ended"] is not None and not compression_child(sid, sessions))
 
 
 def lineage_of(sessions: dict):
@@ -413,8 +424,15 @@ def attribute_compactions(lines, events):
     """Give each compaction line without a session the session of the nearest unused driver compress_request whose
     time it falls within (COMPRESS_REQUEST_WINDOW); a line left without one keeps None (it counts toward compactions,
     never toward compactions_then_restart). Returns the lines and how many stayed without a session."""
-    requests = sorted((float(e.get("t") or 0), str(e.get("session") or "")) for e in events or ()
-                      if e["kind"] == "compress_request")
+    requests, pending = [], {}
+    for e in events or ():
+        sid = str(e.get("session") or "")
+        if e["kind"] == "compress_request":
+            pending[sid] = len(requests)
+            requests.append((float(e.get("t") or 0), sid))
+        elif e["kind"] == "compress_request_failed" and sid in pending:
+            requests[pending.pop(sid)] = None
+    requests = sorted(r for r in requests if r is not None)
     used, out = set(), []
     for sid, at in lines:
         if sid is None and at is not None:
@@ -512,7 +530,7 @@ def attribute_silent_surplus(silent, ingests, observed, user_rows, restarts, in_
     recorder PR's engine.py (``_log_ingest_route`` at 7140-7160).
     ``silent``: [(store_id, session, [(store_id, session)] of the copies of its key)]; ``observed``: store_id -> observed_at;
     ``user_rows``: store_id -> (session, text) for stored user rows (compared in memory only); ``restarts``: lineage ->
-    driver restart times (restart_cold, restart_warm), or None without --events; ``in_order``: ``view_order``'s check.
+    driver restart times (restart_cold, restart_cold_shared, restart_warm), or None without --events; ``in_order``: ``view_order``'s check.
     #1674 and #2203 need the view-order condition (no host insertion or reordering) on the session's stored rows
     before the copy: "unplaced" leaves the row unattributed; "ambiguous" (repeated text) lists it under
     ``order_ambiguous``, a hand check, not an exemption. #2203 also needs an earlier copy of the key in the session.
@@ -655,7 +673,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     buckets = {"A": [], "B": []}
     for s in sorted(scored):
         v = sessions[s]
-        if v["parent"] and v["ended"] is not None and not compression_child(s, sessions):
+        if eligible_child(s, sessions):
             buckets["A" if v["source"] == DELEGATE_SOURCE else "B"].append(s)
 
     # Coverage floors (section 5, "The driven run").
