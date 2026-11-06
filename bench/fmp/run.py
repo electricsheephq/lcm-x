@@ -182,7 +182,7 @@ def canary(args, client, dataset_sha, q):
         if status.startswith("error:"):
             events = []
             for path in paths:
-                for line in path.read_text(errors="replace").splitlines() if path.exists() else []:
+                for line in path.read_text(errors="replace").split("\n") if path.exists() else []:
                     try:
                         event = json.loads(line)
                     except ValueError:  # A timed-out stream may end mid-event.
@@ -421,7 +421,7 @@ def check_arms(runs, output=None):
         manifests.append(manifest)
         if manifest.get("delivery") != "single":
             raise ValueError("check-arms requires single delivery")
-        rows = [json.loads(line) for line in (directory / "answers.jsonl").read_text().splitlines() if line.strip()]
+        rows = [json.loads(line) for line in (directory / "answers.jsonl").read_text().split("\n") if line.strip()]
         by_id, hits, estimates = {r["qid"]: r for r in rows}, {}, []
         counts = dict(role_lines=0, speaker_lines=0, summary_lines=0, missing_labels=0, missing_recall=0)
         for qid, row in by_id.items():

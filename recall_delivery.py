@@ -14,6 +14,7 @@ from typing import Any
 
 from .reasoning import resolve_occurrence_time
 from .retrieval_core import _hit_identity
+from .store import _normalize_observed_at
 
 _EVENT_TIME_KEYS = ("event_time", "event_time_source", "time_uncertain")
 
@@ -59,6 +60,7 @@ def deliver_recall(
     read_occurrence_source: Callable[[int], tuple[dict, dict | None]],
     rerank_enabled: Callable[[], bool],
     session_delivery: Callable[..., str] | None = None,
+    delivery_order: str = "score",
 ) -> str:
     """Deliver ranked entries without changing retrieval or host-read policy."""
     if session_delivery is not None:
@@ -67,6 +69,7 @@ def deliver_recall(
         options = dict(locals())
         options.pop("ordered")
         options.pop("session_delivery")
+        options["delivery_order"] = "score"
         response = json.loads(_deliver_hits([], **options))
         response["provenance"].pop("answer_ready", None)
         return session_delivery(ordered, response)
@@ -431,12 +434,38 @@ def deliver_recall(
                 "observation_is_not_occurrence": True,
             }
 
-        return _fit_answer_ready_response(
+        encoded = _fit_answer_ready_response(
             fts_anchor_info=fts_anchor_info, response=response,
             response_char_cap=response_char_cap, expansion=expansion,
             delta_requested=delta_requested, arm_hits=arm_hits,
         )
-    return json.dumps(response)
+        if delivery_order != "time":
+            return encoded
+    elif delivery_order != "time":
+        return json.dumps(response)
+
+    # Both size-cap passes and event-time stripping run in score order first.
+    # Sort only survivors, using the existing read even if their date was
+    # stripped for space. Python's stable sort preserves score order on ties.
+    def event_time_key(hit: dict[str, Any]) -> tuple[bool, float]:
+        row = event_time_rows.get(int(hit.get("store_id") or 0), {})
+        observed_at = (
+            _normalize_observed_at(row.get("observed_at"))
+            if hit.get("kind") != "summary" else None
+        )
+        return observed_at is None, observed_at if observed_at is not None else 0.0
+
+    hits_out.sort(key=event_time_key)
+    ensure_ascii = detail != "answer_ready"
+    # Reordering keeps the encoded length; the marker is extra, so it is added
+    # only when it still fits the response cap (never by dropping a hit).
+    unmarked = json.dumps(response, ensure_ascii=ensure_ascii)
+    response["provenance"]["delivery_order"] = "time"
+    marked = json.dumps(response, ensure_ascii=ensure_ascii)
+    # answer_ready caps the whole envelope; snippets budgets hits only.
+    if detail == "answer_ready" and len(marked) > response_char_cap:
+        return unmarked
+    return marked
 
 
 def _fit_answer_ready_response(

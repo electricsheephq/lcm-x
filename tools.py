@@ -4674,6 +4674,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         ),
         rerank_enabled=lambda: bool(getattr(engine._config, "rerank_enabled", False)),
         session_delivery=session_delivery,
+        delivery_order=kwargs.get("delivery_order", getattr(engine._config, "recall_delivery_order", "score")),
     )
 
 
