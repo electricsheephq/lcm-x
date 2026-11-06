@@ -193,6 +193,30 @@ companion selected across host updates: the host records its dependency, while
 ordinary LCM-X version updates leave the stable carrier manifest unchanged.
 Disabling or uninstalling the carrier may remove fastembed on the next sync.
 
+### Source checkouts: check optional host extras after enabling the companion
+
+A Hermes source checkout installed outside the host installer may have no recorded
+extras. Enabling the companion can build a new plugin generation environment that
+drops extras such as `acp`: LCM-X still loads, but an ACP editor transport can fail
+to start with an import error. After enabling, check each extra you use with the
+Python interpreter from the plugin generation reported by Hermes, for example:
+
+```bash
+<plugin-python> -c 'import acp'
+```
+
+If it is missing, read the `acp` optional dependency in **that Hermes checkout's**
+`pyproject.toml` and install its exact pinned requirement into that same environment:
+
+```bash
+uv pip install --python <plugin-python> '<host-pinned-acp-requirement>'
+```
+
+Replace both placeholders with the active generation's interpreter and the host's
+requirement. `hermes pm install --extra acp` can refuse before environment sync on
+these checkouts when the tool closure is absent. Recheck the import, then restart
+Hermes and retry ACP. A later generation sync can drop a manual install again.
+
 If fastembed is missing after an update, install or enable the companion, restart
 Hermes and run `/lcm doctor`; background preparation and catch-up fill the gap. The
 store and existing vectors are preserved while recall degrades to full text.
