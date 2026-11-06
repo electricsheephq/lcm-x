@@ -363,8 +363,16 @@ def test_validate_release_checks_last_commit_when_origin_main_missing(tmp_path):
 
 
 def test_plugin_manifest_lists_all_registered_tools():
+    import yaml
+
     repo_root = Path(__file__).resolve().parent.parent
     manifest = (repo_root / "plugin.yaml").read_text(encoding="utf-8")
+    parsed = yaml.safe_load(manifest)
+    assert parsed["config_schema"] == {
+        "voyage_api_key": {"type": "secret", "env": "VOYAGE_API_KEY"},
+        "embedding_api_key": {"type": "secret", "env": "LCM_EMBEDDING_API_KEY"},
+    }
+    assert not {"VOYAGE_API_KEY", "LCM_EMBEDDING_API_KEY"} & set(parsed.get("requires_env", []))
 
     for tool_name in ALL_LCM_TOOLS:
         assert f"  - {tool_name}\n" in manifest
