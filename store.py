@@ -2091,6 +2091,8 @@ class MessageStore:
 
     @staticmethod
     def _start_lock_timer(timing, timer):
+        if timing is None:
+            return lambda: None
         started = None
         def start():
             nonlocal started

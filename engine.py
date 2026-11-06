@@ -6785,7 +6785,11 @@ class LCMEngine(
                 raise ValueError("invalid occurrence snapshot")
             snapshot["proof_sha256"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         # Helpers defer their commits to this owner; no exception is swallowed before rollback.
-        with self._emission_lock_record(len(proof.get("output") or ())) as timing, self._store._timed_atomic(timing):
+        store, conn = self._store, self._store._conn
+        nested = store._transaction_owner.owns(conn) or conn.in_transaction
+        with (contextlib.nullcontext() if nested else
+              self._emission_lock_record(len(proof.get("output") or ()))) as timing, (
+                store._timed_atomic(timing) if timing is not None else store.atomic(immediate=True)):
             super()._write_compress_commit_proof_payload(proof, payload)
             self._store.write_metadata_json(
                 [self._replay_snapshot_metadata_key("host_occurrence_snapshot")],
@@ -7171,7 +7175,7 @@ class LCMEngine(
     def _record_ingest_lock(self, sample, attribution, error=None):
         if sample is None:
             return
-        if sample["route"] == "emission" and sample["hold_ms"] == 0 and error is None:
+        if sample["route"] == "emission" and sample["hold_ms"] is None and error is None:
             return
         if "telemetry_error" in sample:
             raise RuntimeError(sample["telemetry_error"])
@@ -7179,14 +7183,14 @@ class LCMEngine(
         previous = sample.pop("counts")
         sample.update(outcome="busy" if error is not None and _is_ingest_busy_error(error) else
                       "rollback" if error is not None else "commit",
-                      rows_written=attribution.get("rows_written", 0),
-                      bytes_written=attribution.get("bytes_written", 0),
+                      rows_written=attribution.get("rows_written", 0) if error is None else 0,
+                      bytes_written=attribution.get("bytes_written", 0) if error is None else 0,
                       respaced=counts.get("ledger.respaced", 0) - previous.get("ledger.respaced", 0),
                       busy=dict(attempt=bool(error is not None and _is_ingest_busy_error(error)),
                                 ledger=sum(v - previous.get(k, 0) for k, v in counts.items()
                                            if k.startswith("ledger.") and "busy" in k)))
         hold = sample["hold_ms"]
-        bucket = "le_50_ms" if hold is None or hold <= 50 else "le_250_ms" if hold <= 250 else "gt_250_ms"
+        bucket = "no_hold" if hold is None else "le_50_ms" if hold <= 50 else "le_250_ms" if hold <= 250 else "gt_250_ms"
         with self._ingest_lock_guard:
             self._ingest_lock_records.append(sample)
             self._ingest_lock_totals[bucket] += 1
@@ -7199,7 +7203,7 @@ class LCMEngine(
     def _emission_lock_record(self, view_rows):
         sample = self._ingest_telemetry(self._new_ingest_lock_record, range(view_rows), 1)
         if sample is not None:
-            sample.update(route="emission", rows_classified=0)
+            sample.update(route="emission", rows_classified=0, hold_ms=None)
         error = None
         try:
             yield sample
@@ -7219,8 +7223,8 @@ class LCMEngine(
         with self._ingest_lock_guard:
             records, totals = list(self._ingest_lock_records), self._ingest_lock_totals.copy()
         return dict(summary(r for r in records if r["view_rows"] <= 2000 and r["route"] != "emission"),
-                    buckets={k: totals[k] for k in ("le_50_ms", "le_250_ms", "gt_250_ms")},
-                    small_view_buckets={k: totals["small_" + k] for k in ("le_50_ms", "le_250_ms", "gt_250_ms")},
+                    buckets={k: totals[k] for k in ("no_hold", "le_50_ms", "le_250_ms", "gt_250_ms")},
+                    small_view_buckets={k: totals["small_" + k] for k in ("no_hold", "le_50_ms", "le_250_ms", "gt_250_ms")},
                     emission=summary(r for r in records if r["route"] == "emission"),
                     respaced_total=totals["respaced_total"], busy_attempts=totals["busy_attempts"])
 

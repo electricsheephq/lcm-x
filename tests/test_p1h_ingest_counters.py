@@ -1,5 +1,7 @@
 """P1h PR1: per-attempt, fail-open telemetry; no ingest decisions change."""
 import copy
+import hashlib
+import json
 import logging
 import sqlite3
 import threading
@@ -246,3 +248,156 @@ def test_rollback_record_preserves_exception_and_zero_rows(engines, monkeypatch)
         engine._ingest_messages([_m("user", "not committed", 1.)])
     assert records(engine)[-1]["outcome"] == "rollback"
     assert engine._store.get_session_count("S") == 0
+
+
+@pytest.mark.parametrize("body_fails", [False, True])
+def test_r4_proof_write_survives_missing_record(engines, monkeypatch, body_fails):
+    engine = engines()
+    proof = dict(output=[], output_metadata=[])
+    payload = dict(effective_sha256=[])
+    original = engine._store.write_metadata_json
+
+    def fail_setup(*args):
+        raise ValueError("telemetry setup failure")
+
+    def write(keys, serialized, **kwargs):
+        result = original(keys, serialized, **kwargs)
+        if body_fails and "host_occurrence_snapshot" in keys[0]:
+            raise ValueError("proof body failure")
+        return result
+
+    monkeypatch.setattr(engine, "_new_ingest_lock_record", fail_setup)
+    monkeypatch.setattr(engine._store, "write_metadata_json", write)
+    before = list(engine._store._conn.execute("SELECT key,value FROM metadata ORDER BY key"))
+    if body_fails:
+        with pytest.raises(ValueError, match="proof body failure"):
+            engine._write_compress_commit_proof_payload(proof, payload)
+        assert list(engine._store._conn.execute("SELECT key,value FROM metadata ORDER BY key")) == before
+    else:
+        engine._write_compress_commit_proof_payload(proof, payload)
+        values = [row[0] for row in engine._store._conn.execute("SELECT value FROM metadata")]
+        assert json.dumps(payload, sort_keys=True) in values
+        snapshot = dict(output_metadata=[], output_length=0,
+                        proof_sha256=hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest())
+        assert json.dumps(snapshot, sort_keys=True) in values
+    assert not engine._store._conn.in_transaction
+    assert engine._ingest_ledger_counters["telemetry.failed"] == 1
+
+
+@pytest.mark.parametrize("body_fails", [False, True])
+def test_r4_timed_atomic_accepts_none(engines, body_fails):
+    engine = engines()
+    def write():
+        with engine._store._timed_atomic(None):
+            engine._store.write_metadata_json(["r4-none"], "true")
+            if body_fails:
+                raise ValueError("timer body failure")
+    if body_fails:
+        with pytest.raises(ValueError, match="timer body failure"):
+            write()
+    else:
+        write()
+    assert list(engine._store._conn.execute("SELECT value FROM metadata WHERE key='r4-none'")) == (
+        [] if body_fails else [("true",)])
+
+
+def test_r4_busy_emission_begin_has_no_hold(engines):
+    engine = engines()
+    conn = engine._store._conn
+    with sqlite3.connect(engine._store.db_path, timeout=.01) as blocker:
+        blocker.execute("BEGIN IMMEDIATE")
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            with engine._emission_lock_record(1) as timing, engine._emission_owner(
+                    engine._store.ingest_ledger_salt(), timing):
+                pytest.fail("busy BEGIN must not enter the body")
+        assert not conn.in_transaction
+    sample, = records(engine)
+    assert (sample["route"], sample["outcome"], sample["hold_ms"]) == ("emission", "busy", None)
+    assert engine.get_status()["ingest_lock"]["emission"] == dict(
+        samples=0, p90_ms=None, p99_ms=None, max_ms=None)
+
+
+def test_r4_rekey_inside_ingest_has_no_emission_record(engines, tmp_path, monkeypatch):
+    from tests.test_issue_1286_cleanup_rewrite_proof import Host, _commit_cleanup, _turns
+
+    host = Host(tmp_path / "rekey")
+    try:
+        _turns(host, "reasoning")
+        _commit_cleanup(host, "reasoning")
+        engine = host.engine
+        original = engine._rekey_durable_commit_proof
+        calls = []
+
+        def rekey(messages):
+            assert engine._store._transaction_owner.owns(engine._store._conn)
+            before = engine._durable_commit_proof_payload()
+            original(messages)
+            assert engine._durable_commit_proof_payload() != before
+            calls.append(1)
+
+        monkeypatch.setattr(engine, "_rekey_durable_commit_proof", rekey)
+        host.live.insert(2, _m("user", "insert before cursor", host.stamp()))
+        start, rows = len(records(engine)), host.stored()
+        host.turn()
+        assert calls == [1]
+        sample, = records(engine)[start:]
+        assert (sample["route"], sample["outcome"]) == ("foreground", "commit")
+        assert sample["rows_written"] == host.stored() - rows > 0
+        assert sample["hold_ms"] > 0
+    finally:
+        host.close()
+
+
+def test_r4_holdless_attempt_has_own_bucket(engines):
+    engine = engines()
+    for size, hold in [(1, None), (2001, None), (1, 2.)]:
+        sample = engine._new_ingest_lock_record(range(size), 1)
+        sample["hold_ms"] = hold
+        engine._record_ingest_lock(sample, {}, sqlite3.OperationalError("database is locked") if hold is None else None)
+    status = engine.get_status()["ingest_lock"]
+    assert status["buckets"]["no_hold"] == 2
+    assert status["small_view_buckets"]["no_hold"] == 1
+    assert status["buckets"]["le_50_ms"] == status["small_view_buckets"]["le_50_ms"] == 1
+    assert sum(status["buckets"].values()) == 3
+    assert sum(status["small_view_buckets"].values()) == 2
+    assert status["samples"] == 1
+
+
+@pytest.mark.parametrize("busy", [False, True])
+def test_r4_late_rollback_reports_no_durable_writes(engines, monkeypatch, busy):
+    engine = engines()
+    error = sqlite3.OperationalError("database is locked") if busy else ValueError("late failure")
+    def fail(*args):
+        assert engine._last_ingest_attribution["rows_written"] == 1
+        assert engine._last_ingest_attribution["bytes_written"] > 0
+        raise error
+    monkeypatch.setattr(engine, "_write_ingest_ledger", fail)
+    with pytest.raises(type(error), match=str(error)):
+        engine._ingest_messages([_m("user", "rolled back", 1.)])
+    assert len(records(engine)) == (2 if busy else 1)
+    for sample in records(engine):
+        assert sample["outcome"] == ("busy" if busy else "rollback")
+        assert sample["rows_written"] == sample["bytes_written"] == 0
+    assert engine._store.get_session_count("S") == 0
+
+
+def test_r4_hold_starts_after_begin_succeeds(engines, monkeypatch):
+    engine = engines()
+    class DelayedBegin:
+        def __init__(self, conn):
+            self.conn, self.begins = conn, 0
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+        def execute(self, sql, *args):
+            if sql == "BEGIN IMMEDIATE":
+                self.begins += 1
+                time.sleep(.15)
+            return self.conn.execute(sql, *args)
+    conn = DelayedBegin(engine._store._conn)
+    monkeypatch.setattr(engine._store, "_conn", conn)
+    started = time.perf_counter()
+    engine._ingest_messages([_m("user", "after admission", 1.)])
+    elapsed = (time.perf_counter() - started) * 1000
+    assert conn.begins == 1 and elapsed >= 150
+    assert records(engine)[-1]["hold_ms"] < 100
+    assert engine._store.get_session_count("S") == 1
