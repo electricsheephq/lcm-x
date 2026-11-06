@@ -49,8 +49,9 @@ jobs:
             exit 1
           fi
           commit=$(git rev-parse "refs/tags/$TAG^{commit}")
-          if ! git merge-base --is-ancestor "$commit" origin/main; then
-            echo "::error::$TAG ($commit) is not on main"
+          # A main commit: on main's first-parent line, so a merged PR branch's own commits do not count.
+          if ! git rev-list --first-parent origin/main | grep -qx "$commit"; then
+            echo "::error::$TAG ($commit) is not a commit of main's first-parent history"
             exit 1
           fi
           version=$(git show "$commit:adapters/claude-code/.claude-plugin/plugin.json" \
@@ -59,7 +60,7 @@ jobs:
             echo "::error::$TAG does not match the plugin version $version at that commit"
             exit 1
           fi
-          if [[ ! -s ".github/release-notes/$TAG.md" ]]; then
+          if [[ -z "$(git show "$commit:.github/release-notes/$TAG.md" 2>/dev/null)" ]]; then
             echo "::error::Missing curated release notes: .github/release-notes/$TAG.md"
             exit 1
           fi
@@ -128,7 +129,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: CLI smoke of the unit built from the tag (venv and found runtimes)
+      # venv mode runs the matrix Python; found mode runs whatever python3 the runner's PATH gives
+      # the hooks (the smoke's own PATH rule), so the matrix varies only the venv leg.
+      - name: CLI smoke of the unit built from the tag (venv on the matrix Python, then found)
         env:
           COMMIT: ${{ needs.verify.outputs.commit }}
         run: |
@@ -158,12 +161,19 @@ jobs:
         with:
           ref: refs/tags/${{ env.TAG }}
 
-      - name: Refuse to touch a published release
+      - name: Refuse a moved tag or a published release
         env:
           GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ needs.verify.outputs.commit }}
         run: |
-          if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" == false ]]; then
-            echo "::error::$TAG already has a published release; a re-run only rebuilds its draft"
+          test "$(git rev-parse HEAD)" = "$COMMIT"
+          if state=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>&1); then
+            if [[ "$state" != true ]]; then
+              echo "::error::$TAG already has a published release; a re-run only rebuilds its draft"
+              exit 1
+            fi
+          elif [[ "$state" != *"release not found"* ]]; then
+            echo "::error::could not read the release state for $TAG: $state"
             exit 1
           fi
 
