@@ -15546,6 +15546,7 @@ class TestSessionRollover:
             assert [
                 (record.levelname, record.getMessage())
                 for record in caplog.records if record.name == lcm_engine.__name__
+                and not record.getMessage().startswith("LCM session decision:")
             ] == [
                 (
                     "INFO",

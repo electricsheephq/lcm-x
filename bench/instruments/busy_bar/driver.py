@@ -8,6 +8,7 @@ import importlib
 import importlib.util
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -31,6 +32,8 @@ DEFAULT_BUSY_TIMEOUT_MS = None
 DEFAULT_SEED = 2055
 DEFAULT_WINDOW_MS = 400
 COUNTERS = {"compress": "ledger.emission_busy", "session-end": "ledger.tail.busy_at_end"}
+WALL_NOTE = "reported, not gated; includes any SQLite busy wait"
+WALL_KINDS = ("ingest", "compress", "session-end", "overall")
 # Top-level directories of a tree that ship no plugin code; every other .py file is product.
 NON_PRODUCT = frozenset({"tests", "bench", "benchmarks", "benchmarking", "scripts", "docs",
                          "release", "skills", "companions"})
@@ -102,6 +105,21 @@ def exception_chain(exc: BaseException | None) -> list[dict[str, Any]]:
 
 def is_busy(exc: BaseException | None) -> bool:
     return any(error["busy"] for error in exception_chain(exc))
+
+
+def success_wall_ms(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Nearest-rank percentiles of successful judged calls; old ledgers may lack timing."""
+    result: dict[str, Any] = {"note": WALL_NOTE}
+    for kind in WALL_KINDS:
+        values = sorted(record["wall_ms"] for record in records
+                        if (kind == "overall" or record["op"] == kind)
+                        and not any(record.get(key) for key in ("error", "busy", "inconclusive"))
+                        and record.get("wall_ms") is not None)
+        result[kind] = {"n": len(values),
+                        "p50": values[math.ceil(len(values) * .50) - 1] if values else None,
+                        "p95": values[math.ceil(len(values) * .95) - 1] if values else None,
+                        "max": values[-1] if values else None}
+    return result
 
 
 def isolated_environment(work: Path) -> None:
@@ -203,6 +221,7 @@ class Operations:
                 counted["signals"].append("sqlite-exception")
             self.records.append({"op": op, "engine": owner, "thread": thread,
                                  "begin": begin, "end": end, "view_rows": view_rows,
+                                 "wall_ms": (end - begin) * 1000,
                                  "counter_before": before, "counter_after": after,
                                  "error": error, "sqlite_message": message, "exceptions": chain,
                                  "inconclusive": error is not None and not raised_busy, **counted})
@@ -393,6 +412,7 @@ def run(cell: str, directory: Path, config_module: Any, engine_module: Any,
             "candidate_counters": candidate, "b_batches": ticks,
             "b_view_sizes": [tick["view_rows"] for tick in ticks],
             "operations": records, "totals": totals, "errors": errors,
+            "success_wall_ms": success_wall_ms(records),
             "inconclusive": any(record["inconclusive"] for record in records),
             "effective_defaults": effective_defaults(config_module),
             "logs": capture.records.copy()}
