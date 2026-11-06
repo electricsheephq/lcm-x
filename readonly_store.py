@@ -53,6 +53,14 @@ BUSY_TIMEOUT_MS = 5_000
 _OPTIONAL_CORE_TABLES = frozenset({"lcm_lifecycle_state", "messages_fts", "nodes_fts"})
 _WAL_HEADER_OFFSET = 18  # SQLite header bytes 18/19 (write/read format) == 2 in WAL mode
 
+# Closing ANY fd for an inode drops this process's SQLite POSIX locks on it.
+# Never close these fds, even after replacement: retain them for the process lifetime.
+# A replaced store's old inode stays open (its disk space is not freed) until process exit.
+# The cache grows with the distinct database inodes (including replacements) we see.
+_HEADER_FDS: dict[tuple[int, int], int] = {}
+_HEADER_RETAINED_FDS: list[int] = []
+_HEADER_FDS_LOCK = threading.Lock()
+
 # Structural FTS verdicts are cached per process: the probe COUNT(*)s the content
 # table and the docsize shadow table, which is O(rows) on a large store.
 _FTS_STRUCTURAL_CACHE: dict[tuple[str, str], bool] = {}
@@ -82,8 +90,24 @@ def _wal_header_state(db_path: str | Path) -> bool | None:
     journal, or WAL with both sidecars). None: the file cannot be read, or its header is short."""
     path = Path(db_path)
     try:
-        with path.open("rb") as handle:
-            header = handle.read(_WAL_HEADER_OFFSET + 2)
+        if hasattr(os, "pread"):
+            resolved = path.resolve()
+            with _HEADER_FDS_LOCK:
+                stat = resolved.stat()
+                key = (stat.st_dev, stat.st_ino)
+                fd = _HEADER_FDS.get(key)
+                if fd is None:
+                    fd = os.open(resolved, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+                    stat = os.fstat(fd)
+                    key = (stat.st_dev, stat.st_ino)
+                    if key in _HEADER_FDS:
+                        _HEADER_RETAINED_FDS.append(fd)
+                    else:
+                        _HEADER_FDS[key] = fd
+            header = os.pread(fd, _WAL_HEADER_OFFSET + 2, 0)
+        else:  # Windows has no pread and does not use POSIX record locks.
+            with path.open("rb") as handle:
+                header = handle.read(_WAL_HEADER_OFFSET + 2)
     except OSError:
         return None
     if len(header) < _WAL_HEADER_OFFSET + 2:

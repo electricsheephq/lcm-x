@@ -44,20 +44,25 @@ def test_failed_pre_compaction_store_skips_compaction_and_loses_nothing(
     calls = []
     locker = None
     if failure == "real-lock":
-        # A writer on another connection holds the write lock during the first pre-store only; the child's
-        # busy_timeout is lowered from production's 30 s so the test waits 0.2 s.
-        engine._store.connection.execute("PRAGMA busy_timeout=200")
-        locker = sqlite3.connect(str(engine._store.db_path), timeout=0, isolation_level=None)
+        # A writer on another connection holds the write lock during the first pre-store only. The locker waits
+        # its turn for the lock (another writer may hold it for a moment), so taking it never fails; the store's
+        # busy_timeout is lowered from production's 30 s to 0.2 s for that one locked call and then restored,
+        # so later stores keep the normal wait.
+        connection = engine._store.connection
+        locker = sqlite3.connect(str(engine._store.db_path), timeout=30, isolation_level=None)
         real_store = engine._store_delegate_child_turn
 
         def pre_store_under_lock(*args, **kwargs):
             calls.append(args)
             if len(calls) != 1:
                 return real_store(*args, **kwargs)
+            busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
             locker.execute("BEGIN IMMEDIATE")
+            connection.execute("PRAGMA busy_timeout=200")
             try:
                 return real_store(*args, **kwargs)
             finally:
+                connection.execute(f"PRAGMA busy_timeout={int(busy_timeout)}")
                 locker.execute("ROLLBACK")
 
         monkeypatch.setattr(engine, "_store_delegate_child_turn", pre_store_under_lock)
