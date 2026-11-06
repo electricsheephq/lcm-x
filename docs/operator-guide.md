@@ -385,6 +385,33 @@ prepends the policy. The canonical file and digest source is
 
 ## Troubleshooting
 
+### SQLite connection and descriptor counts
+
+Storage opens lazily on first real use. Once bound, an engine holds three core
+connections: `MessageStore`, `SummaryDAG` and `LifecycleStateStore`.
+`clone_for_agent()` creates independent runtime engines; each clone that opens
+storage gets its own connections. An unused registered prototype need not open any.
+See [`engine.py`](../engine.py) (`_ensure_storage`, `_bind_storage`, `clone_for_agent`)
+and [`sqlite_session.py`](../sqlite_session.py) (`open_connection`), which opens
+the handles for the core stores.
+
+Enabled assertion and entity stores each add a connection; query views and
+adaptive retrieval share one `QueryViewStore`. Vector stores, tool reads,
+integrity scans, stem backfill and embedding passes can add connections.
+Rollup maintenance opens a private DAG and rollup stores; a slow summarizer can
+keep them open past the maintenance budget. Pending session-end tails can retain
+engines or detached stores until drained or process exit. Shutdown also leaves
+connections open if compaction is still running, with an explicit warning.
+
+Count per process with `lsof -nP -p "$PID"`, using the configured database path
+from `lcm_status`. Separate numeric FD rows whose NAME is exactly that database
+from `-wal`, `-shm`, memory-map (`mem`) and deleted-file rows. A descriptor total
+is not a SQLite connection count: platform and SQLite state affect the ratio.
+Compare repeated samples with the same live agents and maintenance activity.
+Rising counts or deleted descriptors merit investigation; a flat total alone
+neither proves a leak nor proves every retained engine is necessary. Other
+processes, including dashboards, must be counted separately.
+
 ### `Could not apply live compression config` once per session
 
 On Hermes Desktop or the TUI, this warning comes from Hermes' live compression
@@ -1215,9 +1242,9 @@ from summaries. They remain inspectable later through
 
 Active-replay stubbing is on by default and requires ordinary large-output
 externalization. Newly ingested textual tool results above the first-sight token threshold (10,000)
-are durably externalized and immediately replaced in provider-visible replay,
-including results in the protected fresh tail. Preflight adopts that replay
-change even if no leaf compaction is eligible. At a compaction, a second historical
+are durably externalized at ingest, including results in the protected fresh tail.
+Below threshold, provider-visible replacement waits for the next real boundary;
+a size-only preflight can defer adopting the replay change. At a compaction, a second historical
 assembly pass replaces older eligible results from the aged threshold (2,000 tokens)
 before evaluating the assembly budget and respects the protected fresh tail. Tool roles, `tool_call_id` values, and
 compatible structured text block types/keys are retained; the historical pass

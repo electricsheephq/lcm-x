@@ -644,6 +644,8 @@ The [generated scalar environment reference](skills/hermes-lcm/references/config
 
 Most installs only need `plugins.enabled` and `context.engine: lcm-x`.
 
+In Hermes Desktop, Settings ▸ Plugins ▸ hermes-lcm-x offers masked inputs for `VOYAGE_API_KEY` and `LCM_EMBEDDING_API_KEY`; secret values are stored in the profile's `.env`, never `config.yaml`.
+
 `LCM_SQLITE_MMAP_SIZE` sets the SQLite memory-map size in bytes (default
 `268435456`, unchanged). On SD-card or single-board hosts, set
 `LCM_SQLITE_MMAP_SIZE=0`: a storage read error on a mapped page kills the process
