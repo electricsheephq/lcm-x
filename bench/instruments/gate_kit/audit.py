@@ -79,15 +79,16 @@ RESTARTS = ("restart_cold", "restart_warm")
 def ro(path: Path) -> sqlite3.Connection:
     """Read-only and immutable: SQLite neither writes nor creates a -wal/-shm file (the run must have stopped).
     An immutable open does not read a -wal file either, so a non-empty one is refused: its pages would be missed."""
-    if not path.is_file():
-        raise FileNotFoundError(f"{path.name} does not exist")
+    if not Path(path).is_file():
+        raise FileNotFoundError(f"{Path(path).name} does not exist")
+    path = Path(path).resolve()  # SQLite opens the link's target, so its -wal and -journal sit beside the target
     wal = Path(f"{path}-wal")
     if wal.is_file() and wal.stat().st_size:
         raise ValueError(f"{path.name} has a non-empty -wal file: stop the run and checkpoint the database first")
     journal = Path(f"{path}-journal")
     if journal.is_file() and journal.stat().st_size:  # a hot rollback journal: an interrupted write not rolled back
         raise ValueError(f"{path.name} has a non-empty -journal file: open it once with its owner to roll it back")
-    return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
+    return sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)
 
 
 def columns(con, table: str) -> set:
@@ -252,7 +253,7 @@ def log_time(stamp: str, tz):
 
 def read_logs(paths, tz=None):
     """LCM-X's own log lines: compactions (deduplicated across files), AUXILIARY lines and recorder lines."""
-    out = {"compactions": set(), "auxiliary": defaultdict(set), "ingests": []}
+    out, seen_ingests = {"compactions": set(), "auxiliary": defaultdict(set), "ingests": []}, set()
     for path in paths:
         for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
             m = LOG_LINE.match(line)
@@ -268,10 +269,14 @@ def read_logs(paths, tz=None):
             if hit := DECISION.match(msg):
                 out["auxiliary"][hit.group(1)].add(hit.group(2) or "")
             if hit := ROUTE.match(msg):
-                out["ingests"].append({"session": hit["session"], "route": hit["route"].strip().replace(" ", "_"),
-                                       "reason": hit["reason"].strip(), "cursor": int(hit["cursor"]), "at": at,
-                                       "range": (int(hit["a"]), int(hit["b"])), "rows": int(hit["rows"]),
-                                       "pairs": int(hit["pairs"]), "stripped": int(hit["stripped"])})
+                record = {"session": hit["session"], "route": hit["route"].strip().replace(" ", "_"),
+                          "reason": hit["reason"].strip(), "cursor": int(hit["cursor"]), "at": at,
+                          "range": (int(hit["a"]), int(hit["b"])), "rows": int(hit["rows"]),
+                          "pairs": int(hit["pairs"]), "stripped": int(hit["stripped"])}
+                identity = tuple(sorted(record.items()))
+                if identity not in seen_ingests:  # a line logged to two files is one ingest
+                    seen_ingests.add(identity)
+                    out["ingests"].append(record)
     return out
 
 
@@ -549,10 +554,13 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     session_restarts = None if restarts is None else {s: restarts.get(group(s), []) for s in sessions}
     attributed = attribute_silent_surplus(sorted(silent_rows, key=lambda r: r[0]), ingests, observed, user_rows,
                                           session_restarts)
-    exempt = sum(len(attributed[k]) for k in ("#1674", "#2203"))
-    unattributed = totals["silent_surplus_rows"] - exempt
-    exempted = {"per_limit": {k: len(v) for k, v in attributed.items()},
-                "store_ids": {k: v for k, v in attributed.items()}, "exempted_rows": exempt,
+    # Silent surplus counts copies per key, so a row holding two keys (content and a tool call) is listed once per
+    # key; the gate's unattributed count stays in copies, and the row-based fraction counts distinct store ids.
+    exempt_copies = sum(len(attributed[k]) for k in ("#1674", "#2203"))
+    exempt = len(set(attributed["#1674"]) | set(attributed["#2203"]))
+    unattributed = totals["silent_surplus_rows"] - exempt_copies
+    exempted = {"per_limit": {k: len(set(v)) for k, v in attributed.items()},
+                "store_ids": {k: sorted(set(v)) for k, v in attributed.items()}, "exempted_rows": exempt,
                 "unattributed_silent_rows": unattributed, "stored_rows": denominator,
                 "fraction": exempt / denominator if denominator else 0.0}
     exempted["met"] = exempted["fraction"] <= BAR

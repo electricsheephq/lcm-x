@@ -367,6 +367,24 @@ def test_2203_routes(tmp_path, name, reason, limit):
     assert ex["store_ids"][limit] == [3]
 
 
+def test_a_recorder_line_logged_to_two_files_is_one_ingest(tmp_path):
+    line = route("S1", "S3", 0, 3, 3)
+    out = Home(tmp_path, ONE, turn(1), stored=turn(1) + [("S1", u("question 1"))], stamps={0}).run([line, line])
+    assert out["recorder"]["storing_ingests"] == 1
+    assert out["exempted_surplus"]["store_ids"]["#2203"] == [3]
+
+
+def test_a_row_with_content_and_a_tool_call_counts_once_in_the_exempted_fraction(tmp_path):
+    speak_and_call = dict(call("c1"), content=f"{S} let me read it")
+    host = [("S1", u("question 1")), ("S1", speak_and_call), ("S1", result("c1"))]
+    out = Home(tmp_path, ONE, host, stored=host + [("S1", speak_and_call)], stamps={0}).run(
+        [route("S1", "S3", 0, 4, 4)])
+    ex = out["exempted_surplus"]
+    assert out["parity"]["totals"]["silent_surplus_rows"] == 2  # one copy each of its content key and its call key
+    assert ex["store_ids"]["#2203"] == [4] and ex["exempted_rows"] == 1 and ex["fraction"] == 1 / 4
+    assert ex["unattributed_silent_rows"] == 0
+
+
 def test_2203_needs_an_unstamped_copy(tmp_path):
     ex = attribution(tmp_path, [route("S1", "S3", 0, 3, 3)], [("S1", u("question 1"))], stamps=frozenset({0, 2}))
     assert ex["store_ids"]["#2203"] == [] and ex["store_ids"]["unattributed"] == [3]
@@ -582,6 +600,19 @@ def test_a_stored_only_session_whose_payloads_are_all_unreadable_is_kept(tmp_pat
     assert out["parity"]["lineages"]["GHOST"]["externalized_unresolved"] == 1
     assert out["gate"]["bars"]["externalized_unresolved"] == {"value": 1, "pass": False}
     assert out["gate"]["verdict"] == "GATE FAIL"
+
+
+def test_a_symlinked_database_is_checked_beside_its_target(tmp_path):
+    home = Home(tmp_path, ONE, turn(1))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    target = elsewhere / "lcm.db"
+    home.lcm.rename(target)
+    home.lcm.symlink_to(target)
+    Path(f"{target}-wal").write_bytes(b"pending pages")
+    with pytest.raises(SystemExit) as stop:
+        audit.main(["--state-db", str(home.state), "--lcm-db", str(home.lcm), "--out", str(tmp_path / "r.json")])
+    assert stop.value.code == 2 and not (tmp_path / "r.json").exists()
 
 
 def test_an_unresolved_externalized_payload_fails_its_own_bar(tmp_path):
