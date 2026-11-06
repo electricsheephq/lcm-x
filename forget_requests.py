@@ -48,6 +48,11 @@ _FTS_QUERY = ('forget OR remember OR remembering OR memory OR memorize OR retain
               'OR "know this" OR "know about" OR "ignore what"')
 
 
+def request_text(text: str) -> str:
+    """Use the same unquoted prose for detection and coverage detail words."""
+    return _NON_REQUEST_TEXT.sub(" ", text).replace("’", "'").replace("‘", "'")
+
+
 def is_forget_request(text: str, role: str = "user") -> bool:
     text = _NON_REQUEST_TEXT.sub(" ", text).replace("’", "'").replace("‘", "'")
     return role.lower() == "user" and any(p.search(text) for p in _PATTERNS)
@@ -70,13 +75,16 @@ def covers(row: dict, forget: dict) -> bool:
     earlier = row["store_id"] < forget["store_id"]
     if row.get("observed_at") is not None and forget.get("observed_at") is not None:
         earlier = earlier and row["observed_at"] <= forget["observed_at"]
-    words = forget_content_words(forget.get("content") or "")
+    words = forget_content_words(request_text(forget.get("content") or ""))
     if not earlier or len(words) < 2:
         return False
     shared = len(words & forget_content_words(row.get("content") or ""))
     adjacent = (row["session_id"] == forget["session_id"]
                 and row["store_id"] in forget.get("previous_ids", ()))
-    return (adjacent and shared / len(words) >= .3) or (shared >= 2 and shared / len(words) >= .5)
+    # A question never states the detail to be forgotten.
+    if str(row.get("content") or "").rstrip().endswith("?"):
+        return False
+    return adjacent and shared / len(words) >= .3
 
 
 def event_time(row: dict) -> str | None:
