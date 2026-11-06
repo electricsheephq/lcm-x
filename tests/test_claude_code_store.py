@@ -1270,6 +1270,42 @@ def test_a_lineage_whose_first_batch_fails_is_retried_by_the_sweep(tmp_path, hom
         store.close()
 
 
+def test_a_final_reply_after_a_late_async_record_replaced_the_end_record_is_captured_by_the_next_run(
+        tmp_path, home, hermes, monkeypatch):
+    """REGRESSION (#2262): an async PostToolBatch record that lands after the session's end record
+    replaces it in the spool (one record per session), so the worker skips the settle. A final reply
+    written after that drain waits for the next run, whose sweep captures it from the cursor: every
+    transcript line in order, once. The transcript stays the source, so nothing is lost."""
+    path = _transcript(tmp_path, CONVERSATION[:-1])
+    hook = _hook()
+    _record(hook, home, path, event="Stop")
+    _record(hook, home, path, event="PostToolBatch")  # the late async hook
+    [spooled] = list((home / "spool").glob("*.json"))
+    assert json.loads(spooled.read_text(encoding="utf-8"))["event"] == "PostToolBatch"
+    settled = []
+    monkeypatch.setattr(cc, "_settle", lambda *args: settled.append(args))
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
+    assert settled == []  # no end record was left to settle
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(CONVERSATION[-1]) + "\n")
+    final = "The word is ochre."
+    store = _open(home, hermes)
+    try:  # negative control: without the next run the final reply is absent
+        assert final not in [row[2] for row in _rows(store)]
+    finally:
+        store.close()
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]  # no fresh hook
+    store = _open(home, hermes)
+    try:
+        assert [row[1:3] for row in _rows(store)] == [("user", "find the secret word"),
+                                                      ("assistant", "Reading notes."),
+                                                      ("tool", "the secret word is ochre"),
+                                                      ("assistant", final)]
+    finally:
+        store.close()
+    assert not cc.pending(home)
+
+
 # -- round 2 re-review regressions -----------------------------------------------------
 
 def test_a_reader_cannot_attach_while_the_store_is_switched_after_close(home, hermes, monkeypatch):
