@@ -3,8 +3,10 @@ import importlib
 import io
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tarfile
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BASELINE = "v0.28.0"
@@ -43,11 +45,23 @@ def resolve(ref):
 
 
 def materialize(ref, cache_dir):
+    """Extract once per sha. Parallel workers (#1410) each extract into their own temp dir beside the target
+    and rename it into place; a worker that loses the race drops its copy and uses the winner's tree."""
     sha = resolve(ref)
     destination = Path(cache_dir) / sha
     if not destination.exists():
         archive = subprocess.run(["git", "-C", str(ROOT), "archive", sha], check=True, capture_output=True).stdout
-        destination.mkdir(parents=True)
-        with tarfile.open(fileobj=io.BytesIO(archive)) as source:
-            source.extractall(destination, filter="data")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=f".{sha}.", dir=destination.parent))
+        try:
+            with tarfile.open(fileobj=io.BytesIO(archive)) as source:
+                source.extractall(staging, filter="data")
+            try:
+                os.replace(staging, destination)
+            except OSError:
+                if not destination.is_dir():  # not a concurrent winner: a real failure
+                    raise
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
     return destination
