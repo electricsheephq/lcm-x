@@ -74,7 +74,8 @@ lcm:
 formatted like a message's `event_time`; sources without a host time, or no longer
 stored (for example after a session purge), do not count. When any stamped source carries a
 carried stamp, the summary also has `time_uncertain: "carried"`. A summary whose sources carry no host
-time has neither field; the existing `timestamp` (LCM's write time) is unchanged.
+time has neither field. A summary hit's existing `timestamp` is unchanged: an LCM storage time
+(the node's `latest_at`, else its `created_at`), not an event time. Session leads carry no `timestamp`.
 The read runs inside the recall deadline; a late or failed read omits the fields
 from every summary and sets `provenance.summary_event_time_unavailable` to
 `deadline` or `read_error`. The fields count toward the response cap like
