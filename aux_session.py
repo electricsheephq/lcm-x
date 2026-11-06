@@ -83,6 +83,18 @@ def explicit_subagent_lineage(session_id: str) -> Dict[str, str]:
 
 
 class AuxiliarySessionMixin:
+    def _log_auxiliary_session_decision(self, session_id, *, platform="", parent=""):
+        agent = self._delegate_child_agent(session_id)
+        auxiliary = agent is not None and _is_auxiliary_agent(agent)
+        record = explicit_subagent_lineage(session_id)
+        decision = "delegate_child" if not auxiliary and (record or agent is not None and _is_delegate_agent(agent)) else "auxiliary"
+        reason = ("background_review" if "background_review" in (
+            getattr(agent, "_memory_write_origin", ""), getattr(agent, "_memory_write_context", "")
+        ) else "toolsets_memory_only") if auxiliary else "subagent_start" if record else "frame_marker"
+        parent = parent or record.get("parent_session_id", "") or str(getattr(agent, "_parent_session_id", "") or "")
+        self._log_session_decision(session_id, decision, reason, platform=platform, parent=parent)
+        return reason
+
     def _thread_context_auxiliary_stack(self) -> list[str]:
         stack = getattr(self._thread_context, "auxiliary_session_stack", None)
         if stack is None:
@@ -1017,6 +1029,7 @@ class DelegateChildMixin:
         """The parent link of a DELEGATE child, or None for an AUXILIARY or unproven session."""
         agent = self._delegate_child_agent(session_id)
         if agent is not None and _is_auxiliary_agent(agent):
+            self._log_auxiliary_session_decision(session_id, platform=platform)
             _DELEGATE_AUXILIARY_IDS.add(self._delegate_child_key(session_id))
             return None  # AUXILIARY wins over every delegate signal
         if self._delegate_child_key(session_id) in _DELEGATE_AUXILIARY_IDS:
@@ -1053,6 +1066,9 @@ class DelegateChildMixin:
             parent_platform = self._lcm_session_last_platform.get(parent, "") or self._host_session_parent(parent)[1]
         if self._session_id_matches_lcm_bypass_filters(parent, platform=parent_platform):
             return None
+        self._log_session_decision(session_id, "delegate_child",
+                                   "state_db_subagent" if source == "state_db" else "frame_marker" if source == "parent_frame" else source,
+                                   platform=platform, parent=parent)
         return {
             "parent_session_id": parent, "source": source,
             "child_subagent_id": record.get("child_subagent_id") or str(getattr(agent, "_subagent_id", "") or ""),

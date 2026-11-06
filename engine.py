@@ -1004,6 +1004,7 @@ class LCMEngine(
         self._last_stub_first_exit: Optional[dict[str, int]] = None
         self._stub_first_exit_now: Optional[dict[str, int]] = None
         self._diagnostic_engine_token = next(_DIAGNOSTIC_ENGINE_TOKENS)
+        self._session_diagnostic_logs: set[tuple] = set()
         self._compress_commit_reason, self._compress_commit_publication = "no_proof", "local"
         self._end_attribution = None
         self._compress_calls = 0  # #1116: which compress() a stub-first proof came from
@@ -2765,6 +2766,7 @@ class LCMEngine(
             return False
 
         self._mark_thread_context_stateless(session_id)
+        self._log_auxiliary_session_decision(session_id, platform=self._session_platform)
         self._restore_foreground_after_late_auxiliary_reclassification(session_id)
         logger.info(
             "LCM reclassified session %s as auxiliary at first ingest after bind-time detection missed",
@@ -2827,9 +2829,11 @@ class LCMEngine(
         are skipped (no duplicates).
         """
         if self._maybe_reclassify_current_session_as_auxiliary_before_message_ingest():
+            self._log_bypassed_ingest()
             self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
             return
         if self._bypasses_lcm_context_management():
+            self._log_bypassed_ingest()
             self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
             return
         if self._session_id and messages:
@@ -3941,6 +3945,13 @@ class LCMEngine(
         finally:
             # Publish after every metadata path, including rejected stale/invalid inputs.
             self._publish_ingest_context_window()
+            self._log_session_decision(
+                self._session_id, "ignored" if self._session_ignored else "stateless" if self._session_stateless else "store",
+                "ignore_pattern" if self._session_ignored else (
+                    "bypass_lineage" if self._lcm_current_start_allows_bypass_lineage else "stateless_pattern"
+                ) if self._session_stateless else "default",
+                platform=self._session_platform, parent=str(kwargs.get("parent_session_id") or ""),
+            )
 
     def _apply_session_start_runtime_metadata(self, session_id: str, kwargs: Dict[str, Any]) -> None:
         self._session_id = session_id
@@ -4857,6 +4868,7 @@ class LCMEngine(
                     ),
                 )
                 self._handoff_delegate_child_compression(old_session_id, session_id)
+                self._log_auxiliary_session_decision(session_id, platform=requested_platform, parent=old_session_id)
                 logger.info(
                     "LCM auxiliary session %s compressed to %s — keeping boundary stateless",
                     old_session_id,
@@ -4926,6 +4938,9 @@ class LCMEngine(
                 )
             else:
                 self._register_auxiliary_session(session_id)
+            self._log_auxiliary_session_decision(
+                session_id, platform=str(kwargs.get("platform") or ""), parent=explicit_parent_id,
+            )
             logger.info(
                 "LCM session %s is a live child of bound session %s — treating it as auxiliary/stateless",
                 session_id,
@@ -6101,21 +6116,21 @@ class LCMEngine(
         if not self._logged_filter_config:
             if self._config.ignore_session_patterns:
                 logger.info(
-                    "LCM ignore_session_patterns from %s: %s",
+                    "LCM ignore_session_patterns from %s: count=%d",
                     self._config.ignore_session_patterns_source,
-                    ", ".join(self._config.ignore_session_patterns),
+                    len(self._config.ignore_session_patterns),
                 )
             if self._config.stateless_session_patterns:
                 logger.info(
-                    "LCM stateless_session_patterns from %s: %s",
+                    "LCM stateless_session_patterns from %s: count=%d",
                     self._config.stateless_session_patterns_source,
-                    ", ".join(self._config.stateless_session_patterns),
+                    len(self._config.stateless_session_patterns),
                 )
             if self._config.ignore_message_patterns:
                 logger.info(
-                    "LCM ignore_message_patterns from %s: %s",
+                    "LCM ignore_message_patterns from %s: count=%d",
                     self._config.ignore_message_patterns_source,
-                    ", ".join(self._config.ignore_message_patterns),
+                    len(self._config.ignore_message_patterns),
                 )
             self._logged_filter_config = True
         if self._session_ignored:
@@ -6132,6 +6147,43 @@ class LCMEngine(
             )
 
     # -- Internal: message ingestion ---------------------------------------
+
+    def _log_session_decision(self, session_id, decision, reason, *, platform="", parent=""):
+        try:
+            key = (self._diagnostic_engine_token, session_id, decision, reason)
+            with self._auxiliary_session_lock:
+                if not session_id or key in self._session_diagnostic_logs:
+                    return
+                self._session_diagnostic_logs.add(key)
+                logger.info("LCM session decision: session=%s platform=%s parent=%s decision=%s reason=%s engine=%s",
+                            session_id, platform or "-", parent or "-", decision, reason, self._diagnostic_engine_token)
+        except Exception:
+            pass  # Diagnostics cannot change bind or storage outcomes.
+
+    def _log_session_ingest_outcome(self, session_id, *, rows=0, reason=""):
+        try:
+            if not session_id or not (rows > 0 or reason):
+                return
+            kind = "first store" if rows > 0 else "skipped"
+            key = (self._diagnostic_engine_token, session_id, kind)
+            with self._auxiliary_session_lock:
+                if key in self._session_diagnostic_logs:
+                    return
+                self._session_diagnostic_logs.add(key)
+                if rows > 0:
+                    logger.info("LCM session first store: session=%s rows=%d", session_id, rows)
+                else:
+                    logger.info("LCM session skipped: session=%s reason=%s", session_id, reason)
+        except Exception:
+            pass  # Diagnostics cannot turn a durable ingest into failure.
+
+    def _append_off_current_session_end_suffix(self, session_id, suffix, **kwargs):
+        if session_id and suffix and kwargs.get("source") != "subagent":
+            self._log_session_decision(session_id, "store", "off_current_s3",
+                                       platform=self._lcm_session_last_platform.get(session_id, ""))
+        stored = super()._append_off_current_session_end_suffix(session_id, suffix, **kwargs)
+        self._log_session_ingest_outcome(session_id, rows=len(stored))
+        return stored
 
     def _schedule_ingest_cursor_reconciliation(self) -> None:
         """Mark existing-session rebinds for cursor repair on next ingest."""
@@ -6947,6 +6999,7 @@ class LCMEngine(
         self._no_progress_ingest_generation = self._ingest_failure_count
         self._ingest_replay_redaction_changes = {}
         if self._current_binding_stores_nothing():
+            self._log_bypassed_ingest()
             if not self._session_id:
                 logger.debug("Ingest skipped: no session_id")
             else:
@@ -7124,6 +7177,7 @@ class LCMEngine(
                 active_replay_messages = active  # Keep the public ingest frame's protection observation.
                 _ = protected_messages, replay_messages, active_replay_messages
             try:
+                self._log_session_ingest_outcome(self._session_id, rows=attribution["rows_written"])
                 logger.debug("LCM attribution phase=ingest lock_hold_ms=%.3f rows_written=%d "
                              "bytes_written=%d busy_snapshot_retry=%s", attribution["lock_hold_ms"],
                              attribution["rows_written"], attribution["bytes_written"],
