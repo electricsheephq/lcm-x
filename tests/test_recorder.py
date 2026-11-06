@@ -7,6 +7,7 @@ import importlib
 import itertools
 import json
 import logging
+import math
 import os
 import shutil
 import sqlite3
@@ -23,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from tests import recorder_replay as replay_module
 from tests.recorder_replay import FakeCtx, HostModules, compare_stores, load_plugin, replay, scrub, store_rows, \
     stand_in_error, unload_plugin, write_state_db
 
@@ -32,12 +34,7 @@ needs312 = pytest.mark.skipif(sys.version_info < (3, 12), reason="sys.monitoring
 FROZEN = 1_800_000_000.0
 SECRET = "sk-recorder-secret-0123456789"
 SECRET_HOST = "https://secret-host.recorder.invalid"
-# Columns SQLite stamps from its own clock, which freezing Python's clock does not freeze. DEFAULT stamps:
-# lcm_lifecycle_state.updated_at (db_bootstrap.py:802), lcm_rollup_invalidations.created_at (:917, :1269),
-# lcm_assertion_sources.processed_at (:2120), lcm_assertions.created_at (:2159), lcm_assertion_relations.created_at
-# (:2183). Statement stamps: lcm_assertion_sources.invalidated_at (:2277, :2287), lcm_migration_state.completed_at
-# (:2563, :3307), lcm_query_corpus_state.changed_at (query_view_store.py:390, :408, :437), lcm_query_views.updated_at
-# (:421, :450).
+# Columns stamped by SQLite's clock, which freezing Python's clock does not freeze (833d9a77).
 SQL_CLOCK_COLUMNS = frozenset({
     "lcm_lifecycle_state.updated_at", "lcm_rollup_invalidations.created_at", "lcm_assertion_sources.processed_at",
     "lcm_assertions.created_at", "lcm_assertion_relations.created_at", "lcm_assertion_sources.invalidated_at",
@@ -777,6 +774,8 @@ def test_writer_stall_admits_one_oversized_view_then_gaps(lab, monkeypatch):
     monkeypatch.setattr(recorder_module, "MAX_QUEUE_BYTES", 1 << 16)
     big = [{"role": "user", "content": "x" * 50, "n": i} for i in range(2_000)]
     engine.on_turn_complete(big)
+    # Git provenance subprocesses are outside the recorder admission cost.
+    monkeypatch.setattr(engine, "get_runtime_identity", lambda: {})
     started = time.monotonic()
     for _ in range(20):
         engine.get_status()
@@ -1087,7 +1086,7 @@ def test_turn_path_budget(lab):
         steady[-1] = rec_samples[-1]
         rec._enter, rec._exit = type(rec)._enter.__get__(rec), type(rec)._exit.__get__(rec)
     numbers["steady_median_ms"] = statistics.median(steady) * 1000
-    numbers["steady_p99_ms"] = sorted(steady)[int(len(steady) * 0.99) - 1] * 1000
+    numbers["steady_p99_ms"] = sorted(steady)[math.ceil(len(steady) * 0.99) - 1] * 1000
     equal = []
     for _ in range(30):
         fresh = [{k: (v.encode().decode() if isinstance(v, str) else copy.deepcopy(v)) for k, v in m.items()}
@@ -1099,7 +1098,7 @@ def test_turn_path_budget(lab):
         equal.append(samples[-1])
         rec._enter, rec._exit = type(rec)._enter.__get__(rec), type(rec)._exit.__get__(rec)
     numbers["equal_strings_median_ms"] = statistics.median(equal) * 1000
-    numbers["equal_strings_p99_ms"] = sorted(equal)[int(len(equal) * 0.99) - 1] * 1000
+    numbers["equal_strings_p99_ms"] = sorted(equal)[math.ceil(len(equal) * 0.99) - 1] * 1000
     edited = []
     for i in range(30):
         state["view"][1000 + i]["content"] = f"rewritten {i}"
@@ -1563,10 +1562,13 @@ def test_fix_r1_fork_child_stops_without_inherited_lock(lab):
         def fork_child():
             pid = os.fork()
             if pid == 0:
-                if rec.stopped != "fork":
+                try:
+                    if rec.stopped != "fork":
+                        os._exit(1)
+                    ctx.offered.get_status()
+                    rec._atexit()
+                except BaseException:
                     os._exit(1)
-                ctx.offered.get_status()
-                rec._atexit()
                 os._exit(0)
             _, status = os.waitpid(pid, 0)
             held.status = status
@@ -1603,7 +1605,9 @@ def test_fix_r1_c9_start_failure_stops_writer(lab):
     lab.mp.setattr(rm._Writer, "start", start)
     lab.mp.setattr(rm.Recorder, "_resolve", boom)
     lab.mp.setenv("LCM_RECORDER_ENABLED", "1")
-    module.register(FakeCtx())
+    ctx = FakeCtx()
+    module.register(ctx)
+    lab.engines.append(ctx.offered)
     assert writers
     writers[0].join(1)
     assert not writers[0].is_alive()
@@ -2274,3 +2278,803 @@ def test_fix_r3_09_chain_walk_reaches_as_deep_as_the_lineage_read(lab):
         conn.execute("UPDATE sessions SET model_config = 'm' WHERE id = 's0'")
     conn.close()
     assert db.changes(["s257"])["s0"][6] == "m"
+
+
+# #2263: each required-item regression also runs against the unmodified #2257 replayer.
+@needs312
+@pytest.mark.parametrize("site", ["start", "_snapshot", "_checkpoint", "_capture_payloads"])
+def test_2263_01_disk_floor(lab, site):
+    home = prepared_home(lab)
+    payload = home / "lcm-large-outputs" / "floor.json"
+    payload.parent.mkdir(exist_ok=True)
+    payload.write_bytes(b"x" * 8192)
+    module = load_plugin(REPO, prefix="hermes_lcm_rec")
+    lab.modules.append(module)
+    prepare(module)
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    size = (home / "lcm.db").stat().st_size
+    need = 8192 if site == "_capture_payloads" else size + (8192 if site in ("start", "_snapshot") else 0)
+    real_usage = shutil.disk_usage
+    def usage(path):
+        if any(f.name == site for f in traceback.extract_stack()):
+            return real_usage(path)._replace(free=need + rm.DISK_FLOOR - 1)
+        return real_usage(path)
+    lab.mp.setattr(shutil, "disk_usage", usage)
+    lab.host.home = home
+    lab.mp.setenv("LCM_RECORDER_ENABLED", "1")
+    lab.mp.setenv("LCM_RECORDER_DIR", str(home / "lcm-recorder"))
+    ctx = FakeCtx()
+    module.register(ctx)
+    lab.engines.append(ctx.offered)
+    rec = _recorder()
+    assert rec is not None
+    assert rec.writer.drain(10)
+    assert isinstance(ctx.offered.get_status(), dict)
+    if site in ("start", "_snapshot"):
+        assert rec.stopped == "disk_floor"
+        status = json.loads((rec.proc / "STATUS.json").read_text())
+        assert status["first_cause"]["cause"] == "disk_floor"
+        assert not list((rec.proc / "events").glob("*.jsonl"))
+        assert not (rec.proc / "snapshot" / "lcm.db").exists()
+    elif site == "_checkpoint":
+        rec._checkpoint(24)
+        rec.writer.drain(10)
+        assert rec.counters["recorder.checkpoint_skipped"] == 1
+        assert rec.last_checkpoint is None
+    else:
+        assert rec.counters["recorder.payload_copy_skipped"] == 1
+        assert rec.payload_snapshot["cause"] == "disk_floor"
+        assert not (rec.proc / "snapshot" / "large-outputs" / payload.name).exists()
+
+
+@needs312
+def test_2263_02_replay_blocks_direct_model_calls(lab):
+    home = lab.home()
+    module, ctx = lab.load(home)
+    ctx.offered.on_session_start("model", platform="cli")
+    ctx.hooks["post_llm_call"][0](session_id="model", platform="cli", conversation_history=[
+        {"role": "user", "content": "ledger balance 42"}])
+    expand = importlib.import_module(module.__name__ + ".expand_query_tools")
+    lab.mp.setattr(expand, "_synthesize_expansion_answer", lambda **kw: "balance 42")
+    result = json.loads(ctx.tools["lcm_expand_query"]({"prompt": "What balance?", "query": "ledger"}))
+    assert result.get("answer") == "balance 42", result
+    rec = lab.stop()
+    fake = lab.tmp / "fake-host"
+    package = fake / "agent"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    sentinel = lab.tmp / "model-was-called"
+    (package / "auxiliary_client.py").write_text(
+        f"from pathlib import Path\ndef call_llm(**kw):\n    Path({str(sentinel)!r}).write_text('called')\n"
+        "    raise TimeoutError('fake model')\n")
+    for name in ("agent", "agent.auxiliary_client"):
+        lab.mp.delitem(sys.modules, name, raising=False)
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "blocked", host_path=fake, prepare=prepare)
+    assert not sentinel.exists()
+    assert rep.blocked_calls == 1
+    assert any(d[0] == "blocked_model" for d in rep.diffs)
+    assert "agent.auxiliary_client" not in sys.modules
+
+
+@needs312
+@pytest.mark.parametrize("source", ["effective", "env", "config_file"])
+def test_2263_03_extraction_paths_are_contained(lab, source):
+    module, ctx = lab.load(lab.home())
+    ctx.offered.get_status()
+    rec = lab.stop()
+    escape = lab.tmp / "outside-extractions"
+    def mutate(recording, reader):
+        start = recording["process_start"]
+        if source == "effective":
+            start["config"]["extraction_enabled"] = True
+            start["config"]["extraction_output_path"] = str(escape)
+        elif source == "env":
+            recording["events"].insert(1, {"kind": "env", "values": {"LCM_EXTRACTION_OUTPUT_PATH": str(escape)}})
+        else:
+            recording["events"].insert(1, {"kind": "config_files", "files": {
+                str(Path(start["hermes_home"]) / "config.yaml"): {
+                    "values": {"lcm": {"extraction_enabled": True, "extraction_output_path": str(escape)}}}}})
+    with pytest.raises(ValueError, match="outside replay home"):
+        replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "contained", prepare=prepare, mutate=mutate)
+    assert not escape.exists()
+
+
+def test_2263_04_longest_home_mapping(tmp_path):
+    from tests.recorder_replay import _replay_path
+    old = tmp_path / "original"
+    profile = old / "profiles" / "worker"
+    home = tmp_path / "replay"
+    start = {"db_path": str(old / "lcm.db"), "hermes_home": str(old),
+             "replay_homes": {str(profile): str(home / "profile-0")}}
+    assert _replay_path(profile / "out", start, home) == str(home / "profile-0" / "out")
+
+
+@needs312
+def test_2263_05_second_registration_replays(lab):
+    home = prepared_home(lab)
+    _, first = lab.load(home)
+    _, second = lab.load(home)
+    for ctx in (first, second):
+        ctx.offered.on_session_start("second", platform="cli")
+        ctx.offered.should_compress(100)
+    rec = lab.stop()
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "registrations", prepare=prepare)
+    assert not rep.diffs
+    assert len(rep.engines) == 2
+    assert rep.engines[1] is not rep.engines[2]
+
+
+@needs312
+def test_2263_05_foreign_add_records_nothing(lab):
+    _, first = lab.load(lab.home())
+    rec = _recorder()
+    other = type(first.offered)(hermes_home=str(lab.home("foreign")))
+    lab.engines.append(other)
+    assert other not in rec.engines
+    other._db_path = str(lab.tmp / "foreign.db")
+    rec.writer.drain(5)
+    seq, count = rec.last_seq, len(rec.engines)
+    ctx = FakeCtx()
+    rec.add(ctx, other)
+    assert rec.last_seq == seq
+    assert len(rec.engines) == count
+    assert "register_hook" not in vars(ctx)
+
+
+@needs312
+def test_2263_06_new_ledger_salt_replays(lab):
+    home = lab.home()
+    module, ctx = lab.load(home)
+    ctx.offered.on_session_start("new-ledger", platform="cli")
+    ctx.hooks["post_llm_call"][0](session_id="new-ledger", platform="cli", conversation_history=[
+        {"role": "user", "content": "new ledger fact"}])
+    ctx.offered.shutdown()
+    rec = lab.stop()
+    assert rec.snapshot["state"] == "no_database"
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "ledger-replay", prepare=prepare)
+    expected, actual = store_rows(home / "lcm.db"), store_rows(rep.store)
+    for table in ("ledger_meta", "ledger_emissions", "occurrence_bindings", "stamp_observations"):
+        assert expected[table] == actual[table], table
+    assert not rep.diffs
+
+
+@needs312
+def test_2263_07_real_clock_replays_a_day_later(lab):
+    home = prepared_home(lab)
+    _, ctx = lab.load(home)
+    ctx.offered.on_session_start("clock", platform="cli", conversation_id="clock-conversation")
+    ctx.hooks["post_llm_call"][0](session_id="clock", platform="cli", conversation_history=[
+        {"role": "user", "content": "clocked fact"}])
+    ctx.offered.shutdown()
+    rec = lab.stop()
+    wall = time.time
+    lab.mp.setattr(time, "time", lambda: wall() + 86400)
+    seen = []
+    def prepared(module):
+        prepare(module)
+        cls = importlib.import_module(module.__name__ + ".engine").LCMEngine
+        original = cls.on_session_start
+        def start(self, *args, **kwargs):
+            seen.append(time.time())
+            return original(self, *args, **kwargs)
+        lab.mp.setattr(cls, "on_session_start", start)
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "clock-replay", prepare=prepared)
+    roots = [e for e in rep.rec["roots"] if e["name"] == "on_session_start"]
+    assert abs(seen[0] - roots[0]["t_enter"][0]) < 2
+    assert not compare_stores(home / "lcm.db", rep.store)
+    assert not rep.diffs
+
+
+def test_2263_08_real_embedding_table_excluded(tmp_path):
+    a, b = tmp_path / "a.db", tmp_path / "b.db"
+    for path, value in ((a, "original"), (b, "different")):
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE lcm_embedding_vectors (vector TEXT)")
+            conn.execute("INSERT INTO lcm_embedding_vectors VALUES (?)", (value,))
+        conn.close()
+    assert compare_stores(a, b) == {}
+
+
+@needs312
+def test_2263_08_fresh_table_inventory(lab):
+    from tests.recorder_replay import EXCLUDED_TABLE_PREFIXES
+    home = prepared_home(lab)
+    bootstrap = importlib.import_module(lab.modules[-1].__name__ + ".db_bootstrap")
+    with sqlite3.connect(home / "lcm.db") as conn:
+        for ensure in (bootstrap.ensure_embedding_tables, bootstrap.ensure_chunk_tables,
+                       bootstrap.ensure_assertion_tables, bootstrap.ensure_entity_tables):
+            ensure(conn)
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    compared = {"messages", "metadata", "summary_nodes", "summary_node_provenance", "node_message_links",
+                "node_parent_links", "session_graphs", "lcm_migration_state", "lcm_lifecycle_state",
+                "ledger_meta", "ledger_emissions", "occurrence_bindings", "stamp_observations", "lineage_marks", "ingest_views",
+                "host_uid_bindings", "session_lineage", "message_relations", "lcm_query_corpus_state",
+                "lcm_query_views", "lcm_query_view_sources", "lcm_query_view_versions"}
+    assert {t for t in tables if not t.startswith(EXCLUDED_TABLE_PREFIXES)} <= compared
+    assert all(t.startswith(EXCLUDED_TABLE_PREFIXES) for t in tables if t.startswith("lcm_embedding_"))
+
+
+@needs312
+def test_2263_09_summary_key_miss_is_difference(recorded, lab):
+    def mutate(recording, reader):
+        summary = next(e for e in recording["events"] if e["kind"] == "summary")
+        summary["args"]["prompt_sha256"] = "mutated-prompt"
+    rep = replay(recorded["proc"], plugin_root=REPO, workdir=lab.tmp / "key-miss", prepare=prepare, mutate=mutate)
+    assert rep.key_misses == 1
+    assert any(d[0] == "summary_key_miss" for d in rep.diffs)
+
+
+@needs312
+@pytest.mark.parametrize("cause", ["ctx_capture_unavailable", "uncapturable"])
+def test_2263_10_registration_loss_cuts_prefix(lab, cause):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    ctx.offered.get_status()
+    before = rec.last_seq
+    if cause == "ctx_capture_unavailable":
+        class ReadOnlyCtx:
+            __slots__ = ()
+            def register_hook(self, *args):
+                pass
+        rec.capture_ctx(ReadOnlyCtx())
+    else:
+        rec._register("tool", ("uncapturable", len), {})
+    ctx.offered.get_status()
+    assert rec.writer.drain(5)
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    assert rec.lost == 1
+    assert any(e.get("lost_observation") == cause for e in reader.load_events(rec.proc))
+    reading = reader.read(rec.proc)
+    assert reading["prefix_end"] <= before
+    assert reading["cause"] == cause
+
+
+@needs312
+@pytest.mark.parametrize("attr", ["_foreground_rebind_session_id", "_foreground_rebind_parent_session_id"])
+def test_2263_11_foreground_rebind_rows(lab, attr):
+    home = lab.home()
+    state_row(home, "active")
+    state_row(home, "rebind")
+    module, ctx = lab.load(home)
+    ctx.offered.on_session_start("active", platform="cli")
+    rec = _recorder()
+    setattr(ctx.offered, attr, "rebind")
+    with sqlite3.connect(home / "state.db") as conn:
+        conn.execute("UPDATE sessions SET end_reason='outside-chain' WHERE id='rebind'")
+    conn.close()
+    ctx.offered.get_status()
+    rec.writer.drain(5)
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    rows = [e["rows"] for e in reader.read(rec.proc)["events"] if e["kind"] == "sessions"]
+    assert any(r.get("rebind", [None] * 6)[5] == "outside-chain" for r in rows)
+
+
+@needs312
+def test_2263_12_command_context_uses_bound_profile(lab):
+    import types
+    module, ctx = lab.load(lab.home())
+    config = importlib.import_module(module.__name__ + ".config")
+    mapping = dict(os.environ, HERMES_SESSION_ID="bound-session", HERMES_SESSION_KEY="bound-key",
+                   HERMES_SESSION_PROFILE="bound-profile")
+    scope = types.ModuleType("agent.secret_scope")
+    scope.serves_routed_profile = lambda: True
+    scope.current_secret_scope = lambda: mapping
+    scope.current_secret_scope_home = lambda: str(lab.host.home)
+    import agent
+    lab.mp.setattr(agent, "secret_scope", scope, raising=False)
+    lab.mp.setitem(sys.modules, "agent.secret_scope", scope)
+    lab.mp.setitem(sys.modules, "gateway.session_context", None)
+    for name in ("HERMES_SESSION_ID", "HERMES_SESSION_KEY", "HERMES_SESSION_PROFILE"):
+        lab.mp.setenv(name, "wrong-global")
+    ctx.commands["lcm"]("status")
+    rec = lab.stop()
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    command = next(e for e in reader.read(rec.proc)["roots"] if e["kind"] == "command")
+    for name in ("HERMES_SESSION_ID", "HERMES_SESSION_KEY", "HERMES_SESSION_PROFILE"):
+        assert command["context"][name] == config.lcm_env_get(name) == module._session_context_value(name)
+
+
+@needs312
+def test_2263_13_command_profile_refusal_replays(lab):
+    module, ctx = lab.load(lab.home())
+    import types
+    constants = types.ModuleType("hermes_constants")
+    constants.profile_name_for_home = lambda home: "recorded-profile" if Path(home) == lab.host.home else ""
+    lab.mp.setitem(sys.modules, "hermes_constants", constants)
+    lab.host.context.update(HERMES_SESSION_ID="s", HERMES_SESSION_PROFILE="other-profile")
+    result = ctx.commands["lcm"]("status")
+    assert "profile" in str(result).lower(), result
+    rec = lab.stop()
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "profile-refusal", prepare=prepare)
+    assert rep.compared == 1
+    assert not rep.diffs
+
+
+@needs312
+def test_2263_14_replay_host_load_config_reads_restored_yaml(lab):
+    yaml = pytest.importorskip("yaml")
+    home = lab.home()
+    values = {"lcm": {"context_threshold": 0.73}, "context": {"engine": "lcm"}}
+    (home / "config.yaml").write_text(yaml.safe_dump(values))
+    # Model the recording host even when this test runs against the old harness for red proof.
+    lab.mp.setattr(sys.modules["hermes_cli.config"], "load_config", lambda: values)
+    module, ctx = lab.load(home)
+    identity = importlib.import_module(module.__name__ + ".plugin_identity")
+    assert identity.load_hermes_config()["lcm"] == values["lcm"]
+    ctx.offered.get_status()
+    rec = lab.stop()
+    seen = []
+    def prepared(module):
+        prepare(module)
+        identity = importlib.import_module(module.__name__ + ".plugin_identity")
+        seen.append(identity.load_hermes_config())
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "host-config", prepare=prepared)
+    assert seen == [values]
+    assert rep.engines[1].name == "lcm"
+    assert rep.compared == 1
+    assert not rep.diffs
+
+
+@needs312
+@pytest.mark.parametrize("reader_state", ["missing", "raises"])
+def test_2263_15_replay_reader_comes_from_harness(lab, reader_state):
+    module, ctx = lab.load(lab.home())
+    ctx.offered.get_tool_schemas()  # get_status includes paths that differ in the copied tree
+    rec = lab.stop()
+    plugin_root = lab.tmp / "plugin-copy"
+    shutil.copytree(REPO, plugin_root, ignore=shutil.ignore_patterns(
+        ".git", "__pycache__", ".pytest_cache", ".ruff_cache"))
+    reader = plugin_root / "recorder_read.py"
+    if reader_state == "missing":
+        reader.unlink()
+    else:
+        reader.write_text("raise RuntimeError('replayed tree reader must not be imported')\n")
+    rep = replay(rec.proc, plugin_root=plugin_root, workdir=lab.tmp / "harness-reader", prepare=prepare)
+    assert Path(rep.reader.__file__).resolve() == REPO / "recorder_read.py"
+    assert rep.compared == 1
+    assert not rep.diffs
+
+
+@needs312
+@pytest.mark.parametrize("name", ["lcm_expand_query", "lcm_grep"])
+def test_2263_16_dispatch_tool_return_exclusion(lab, name):
+    _, ctx = lab.load(lab.home())
+    ctx.offered.on_session_start("empty", platform="cli")
+    result = json.loads(ctx.offered.handle_tool_call(name, {"prompt": "What balance?", "query": "absent"}))
+    assert "error" not in result, result
+    rec = lab.stop()
+    roots = []
+    def mutate(recording, reader):
+        root = next(e for e in recording["events"] if e.get("name") == "handle_tool_call")
+        assert root["kind"] == "engine" and root["status"] == "return"
+        root["result"] = "mutated tool return"
+        roots.append(root["seq_enter"])
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "dispatch", prepare=prepare, mutate=mutate)
+    assert rep.blocked_calls == 0
+    differences = [d for d in rep.diffs if d[:3] == (roots[0], "handle_tool_call", "result")]
+    assert bool(differences) == (name != "lcm_expand_query"), rep.diffs
+
+
+@needs312
+@pytest.mark.parametrize("change", ["add", "rebind"])
+def test_2263_17_home_change_cuts_prefix(lab, change):
+    home, other_home = lab.home(), lab.home("other")
+    state_row(home, "shared-session", source="first-home")
+    state_row(other_home, "shared-session", source="second-home")
+    module, ctx = lab.load(home)
+    rec = _recorder()
+    if change == "add":
+        engine = type(ctx.offered)(hermes_home=str(other_home))
+        lab.engines.append(engine)
+        engine._db_path = ctx.offered._db_path
+        rec.add(FakeCtx(), engine)
+    else:
+        engine = ctx.offered
+        engine._hermes_home = str(other_home)
+    engine._session_id = "shared-session"
+    state_row(home, "shared-session", source="wrong-home-after-start")
+    for _ in range(2):
+        engine.get_tool_schemas()
+    assert rec.writer.drain(5)
+    assert rec.stopped is None
+    assert rec.counters["recorder.hermes_home_changed"] == 1
+    assert rec.counters["recorder.coverage_lost"] == 1
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    events = reader.load_events(rec.proc)
+    loss = next(e for e in events if e.get("lost_observation") == "hermes_home_changed")
+    roots = [e for e in events if e.get("name") == "get_tool_schemas" and e.get("engine") == rec.engines[engine]]
+    assert len(roots) == 2  # diagnosis continues after the loss
+    assert loss["seq"] <= roots[0]["seq_enter"]
+    assert not any(e["kind"] == "sessions" and e["seq"] > loss["seq"] for e in events)
+    reading = reader.read(rec.proc)
+    assert reading["prefix_end"] <= roots[0]["seq_enter"]
+    assert reading["cause"] == "hermes_home_changed"
+
+
+@needs312
+def test_2263_17_same_home_registration_keeps_coverage(lab):
+    home = lab.home()
+    _, first = lab.load(home)
+    alias = lab.tmp / "same-home-link"
+    alias.symlink_to(home, target_is_directory=True)
+    _, second = lab.load(alias)
+    rec = _recorder()
+    for ctx in (first, second):
+        ctx.offered.get_tool_schemas()
+    rec = lab.stop()
+    assert rec.counters["recorder.hermes_home_changed"] == 0
+    assert rec.counters["recorder.coverage_lost"] == 0
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "same-home", prepare=prepare)
+    assert len(rep.engines) == 2
+    assert not rep.diffs
+
+
+@needs312
+def test_2263_s5_replay_root_timeout_restores_environment(lab):
+    from tests import recorder_replay as rr
+    module, ctx = lab.load(lab.home())
+    ctx.offered.get_status()
+    rec = lab.stop()
+    release = threading.Event()
+    lab.mp.setattr(rr, "ROOT_TIMEOUT", 0.02)
+    env = {k: v for k, v in os.environ.items() if k.startswith("LCM_")}
+    wall = time.time
+    def prepared(module):
+        prepare(module)
+        cls = importlib.import_module(module.__name__ + ".engine").LCMEngine
+        lab.mp.setattr(cls, "get_status", lambda self: release.wait(10))
+    try:
+        with pytest.raises(TimeoutError, match="replay root timed out"):
+            replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "timeout", prepare=prepared)
+        assert {k: v for k, v in os.environ.items() if k.startswith("LCM_")} == env
+        assert time.time is wall
+    finally:
+        release.set()
+
+
+@needs312
+def test_2263_s4_exception_unwind_budget(lab):
+    def unwind(depth):
+        if depth:
+            return unwind(depth - 1)
+        raise ValueError("unwind workload")
+    def batch():
+        start = time.perf_counter()
+        for _ in range(10000):
+            try:
+                unwind(8)
+            except ValueError:
+                pass
+        return time.perf_counter() - start
+    off = statistics.median(batch() for _ in range(5))
+    lab.load(lab.home())
+    on = statistics.median(batch() for _ in range(5))
+    overhead = (on - off) / 90000 * 1_000_000
+    print("RECORDER UNWIND BUDGET", json.dumps({"off_s": off, "on_s": on, "overhead_us_per_frame": overhead}))
+    scale = 1 if os.environ.get("RECORDER_BUDGET_STRICT") == "1" else 4
+    assert on <= off * 20 + 0.5 * scale
+
+
+# PR #2269, review round 1: these regressions run against fd0ed824 for red proof.
+@needs312
+@pytest.mark.parametrize("registrations", [1, 2])
+def test_2269_r1_symlink_home_replays_without_extra_database(lab, registrations):
+    home = lab.home()
+    alias = lab.tmp / "home-link"
+    alias.symlink_to(home, target_is_directory=True)
+    for _ in range(registrations):
+        _, ctx = lab.load(alias)
+    ctx.offered.get_status()
+    rec = lab.stop()
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "symlink-replay", prepare=prepare)
+    assert rep.diffs == []
+    assert rep.rec["process_start"]["hermes_home"] == str(alias)
+    assert list(rep.store.parent.rglob("lcm.db")) == [rep.store]
+    assert all(Path(e._hermes_home) == rep.store.parent for e in rep.engines.values())
+
+
+@needs312
+def test_2269_r2_registration_env_becomes_the_env_baseline(lab):
+    """A second registration under other LCM_* values, then a root under the first values: replay applies the
+    registration's environment, so the recorder must emit an env event that restores the first values."""
+    lab.mp.setenv("LCM_CONTEXT_THRESHOLD", "0.75")
+    home = lab.home()
+    _, first = lab.load(home)
+    first.offered.get_status()
+    rec = _recorder()
+    lab.mp.setenv("LCM_CONTEXT_THRESHOLD", "0.42")
+    lab.load(home)
+    lab.mp.setenv("LCM_CONTEXT_THRESHOLD", "0.75")
+    first.offered.get_status()
+    assert rec.writer.drain(5)
+    events = recorder_module_events(rec)
+    last = max(i for i, e in enumerate(events) if e["kind"] == "register")
+    assert events[last]["env"].get("LCM_CONTEXT_THRESHOLD") == "0.42"
+    assert any(e["kind"] == "env" and e["values"].get("LCM_CONTEXT_THRESHOLD") == "0.75" for e in events[last + 1:])
+    rec = lab.stop()
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "registration-env", prepare=prepare)
+    assert rep.diffs == []
+
+
+@needs312
+def test_2269_r1_registration_captures_changed_yaml(lab):
+    yaml = pytest.importorskip("yaml")
+    home = lab.home()
+    engines = []
+    for threshold in (0.75, 0.42):
+        (home / "config.yaml").write_text(yaml.safe_dump({"lcm": {"context_threshold": threshold}}))
+        _, ctx = lab.load(home)
+        engines.append(ctx.offered)
+    expected = [e._config.context_threshold for e in engines]
+    assert expected == [0.75, 0.42]
+    ctx.offered.get_tool_schemas()
+    rec = lab.stop()
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "registration-yaml", prepare=prepare)
+    assert [e._config.context_threshold for e in rep.engines.values()] == expected
+    assert rep.diffs == []
+
+
+@needs312
+def test_2269_r1_refused_snapshot_is_not_replayable(lab, caplog):
+    module = load_plugin(REPO, prefix="hermes_lcm_rec")
+    lab.modules.append(module)
+    prepare(module)
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    lab.mp.setattr(rm, "_disk_room", lambda *args: False)
+    home = lab.home()
+    lab.host.home = home
+    lab.mp.setenv("LCM_RECORDER_ENABLED", "1")
+    lab.mp.setenv("LCM_RECORDER_DIR", str(home / "lcm-recorder"))
+    with caplog.at_level(logging.INFO):
+        ctx = FakeCtx()
+        module.register(ctx)
+    lab.engines.append(ctx.offered)
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    status = json.loads((rec.proc / "STATUS.json").read_text())
+    assert status["replayable"] is False
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    with pytest.raises(reader.RecordingError, match="not replayable"):
+        reader.read(rec.proc)
+    assert "LCM recorder on:" not in caplog.text
+    assert "refused" in caplog.text and "disk_floor" in caplog.text
+
+
+class _ReadOnlyRecorderCtx(FakeCtx):
+    def __setattr__(self, name, value):
+        if name == "register_hook":
+            raise AttributeError("read-only registrar")
+        super().__setattr__(name, value)
+
+
+@needs312
+def test_2269_r1_late_capture_loss_preserves_prefix_and_checkpoint(lab):
+    module, ctx = lab.load(prepared_home(lab))
+    rec = _recorder()
+    ctx.offered.get_tool_schemas()
+    rec._checkpoint(24)
+    assert rec.writer.drain(5)
+    rec.capture_ctx(_ReadOnlyRecorderCtx())
+    ctx.offered.get_status()
+    rec = lab.stop()
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    loss = next(e for e in reader.load_events(rec.proc) if e.get("lost_observation") == "ctx_capture_unavailable")
+    reading = reader.read(rec.proc)
+    assert reading["status"]["replayable"] is False
+    assert reading["cause"] == "ctx_capture_unavailable"
+    assert reading["prefix_end"] == loss["seq"] - 1
+    assert [e["name"] for e in reading["roots"]] == ["get_tool_schemas"]
+    assert all(max(reader._seqs(e)) < loss["seq"] for e in reading["events"])
+    checkpoint = reader.read(rec.proc, checkpoint=24)
+    assert checkpoint["sealed"]["through"] < loss["seq"]
+    assert checkpoint["roots"]
+    with sqlite3.connect(rec.proc / "checkpoint" / "24" / "lcm.db") as conn:
+        assert conn.execute("PRAGMA quick_check").fetchone() == ("ok",)
+
+
+@needs312
+def test_2269_r1_missing_payloads_still_refused_after_late_loss(lab):
+    module, ctx = lab.load(lab.home())
+    ctx.offered.get_tool_schemas()
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    rec.snapshot["payloads"] = "payloads_missing"
+    rec.capture_ctx(_ReadOnlyRecorderCtx())
+    rec = lab.stop()
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    with pytest.raises(reader.RecordingError, match="not replayable"):
+        reader.read(rec.proc)
+
+
+@needs312
+def test_2269_r1_first_registration_capture_loss_is_refused(lab):
+    module, ctx = lab.load(lab.home(), ctx=_ReadOnlyRecorderCtx())
+    ctx.offered.get_tool_schemas()
+    rec = lab.stop()
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    with pytest.raises(reader.RecordingError, match="not replayable"):
+        reader.read(rec.proc)
+
+
+@needs312
+def test_2269_r1_capture_loss_without_boundary_is_refused(lab):
+    module, ctx = lab.load(lab.home())
+    ctx.offered.get_tool_schemas()
+    rec = _recorder()
+    rec.ctx_capture = "unavailable"  # no corresponding loss event
+    rec = lab.stop()
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    with pytest.raises(reader.RecordingError, match="not replayable"):
+        reader.read(rec.proc)
+
+
+@needs312
+def test_2269_r1_abandoned_root_keeps_model_isolation(lab):
+    import types
+    module, ctx = lab.load(lab.home())
+    ctx.offered.get_tool_schemas()
+    rec = lab.stop()
+    calls, outcomes, stores = [], [], []
+    agent = importlib.import_module("agent")
+    real = types.ModuleType("agent.auxiliary_client")
+    real.call_llm = lambda: calls.append("real model")
+    lab.mp.setitem(sys.modules, "agent.auxiliary_client", real)
+    lab.mp.setattr(agent, "auxiliary_client", real, raising=False)
+    release, done = threading.Event(), threading.Event()
+    lab.mp.setattr(replay_module, "ROOT_TIMEOUT", 0.02)
+    def prepared(module):
+        prepare(module)
+        store = importlib.import_module(module.__name__ + ".store")
+        stores.append((store, store.secrets))
+        cls = importlib.import_module(module.__name__ + ".engine").LCMEngine
+        def stalled(self):
+            try:
+                assert release.wait(10)
+                from agent.auxiliary_client import call_llm
+                call_llm()
+            except replay_module.ReplayModelBlocked:
+                outcomes.append("blocked")
+            finally:
+                done.set()
+        lab.mp.setattr(cls, "get_tool_schemas", stalled)
+    env, path, wall, ns = dict(os.environ), list(sys.path), time.time, time.time_ns
+    try:
+        with pytest.raises(TimeoutError, match="replay root timed out") as error:
+            replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "abandoned", prepare=prepared)
+        assert dict(os.environ) == env and sys.path == path
+        assert time.time is wall and time.time_ns is ns
+        assert all(store.secrets is source for store, source in stores)
+        isolated = sys.modules.get("agent.auxiliary_client")
+    finally:
+        release.set()
+        assert done.wait(2)
+    assert calls == []
+    assert outcomes == ["blocked"]
+    assert "isolation kept" in str(error.value) and "1" in str(error.value)
+    assert sys.modules["agent.auxiliary_client"] is agent.auxiliary_client is isolated
+    assert dict(os.environ) == env and sys.path == path
+    assert time.time is wall and time.time_ns is ns
+    assert all(store.secrets is source for store, source in stores)
+
+
+def test_2269_r1_abandoned_token_gets_new_worker(monkeypatch):
+    pool = replay_module._Threads()
+    release = threading.Event()
+    monkeypatch.setattr(replay_module, "ROOT_TIMEOUT", 0.02)
+    try:
+        with pytest.raises(TimeoutError, match="replay root timed out"):
+            pool.run(1, lambda: release.wait(10))
+        assert pool.run(1, lambda: "next root") == ("return", "next root")
+    finally:
+        release.set()
+        pool.close()
+
+
+@needs312
+@pytest.mark.parametrize("failure", ["missing", "raises"])
+def test_2269_r1_host_import_failure_restores_environment_and_path(lab, failure):
+    _, ctx = lab.load(lab.home())
+    ctx.offered.get_tool_schemas()
+    rec = lab.stop()
+    host = lab.tmp / "bad-host"
+    host.mkdir()
+    if failure == "raises":
+        package = host / "agent"
+        package.mkdir()
+        (package / "__init__.py").write_text("raise RuntimeError('host import failed')\n")
+    lab.mp.delitem(sys.modules, "agent", raising=False)
+    lab.mp.setattr(sys, "path", [p for p in sys.path if not (Path(p) / "agent").exists()])
+    lab.mp.setenv("LCM_RECORDER_ENABLED", "original")
+    lab.mp.setenv("LCM_IMPORT_CLEANUP_SENTINEL", "original")
+    env, path = dict(os.environ), list(sys.path)
+    error = ModuleNotFoundError if failure == "missing" else RuntimeError
+    try:
+        with pytest.raises(error):
+            replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "import-cleanup", host_path=host)
+        assert dict(os.environ) == env
+        assert sys.path == path
+    finally:  # keep the red run from contaminating subsequent tests
+        os.environ.clear()
+        os.environ.update(env)
+        sys.path[:] = path
+
+
+@needs312
+def test_2269_r1_auxiliary_import_and_probe_are_not_calls(lab):
+    _, ctx = lab.load(lab.home())
+    ctx.offered.get_tool_schemas()
+    rec = lab.stop()
+    def prepared(module):
+        prepare(module)
+        cls = importlib.import_module(module.__name__ + ".engine").LCMEngine
+        original = cls.get_tool_schemas
+        def probe(self):
+            from agent.auxiliary_client import call_llm
+            import agent.auxiliary_client as auxiliary
+            assert callable(call_llm)
+            assert hasattr(auxiliary, "optional_probe")
+            return original(self)
+        lab.mp.setattr(cls, "get_tool_schemas", probe)
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "probe", prepare=prepared)
+    assert rep.blocked_calls == 0
+    assert rep.diffs == []
+
+
+@needs312
+def test_2269_r1_bound_lifecycle_status_has_no_clock_difference(lab):
+    _, ctx = lab.load(lab.home())
+    ctx.offered.on_session_start("bound", platform="cli")
+    assert ctx.offered.get_status()["lifecycle"]["current_bound_at"] is not None
+    rec = lab.stop()
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "lifecycle-clock", prepare=prepare)
+    assert rep.compared == 2
+    assert rep.diffs == []
+
+
+def test_2269_r1_lifecycle_clock_scrub_keeps_other_updated_at():
+    value = {"lifecycle": {"current_bound_at": 1, "updated_at": 2, "other": 3},
+             "message": {"current_bound_at": 4, "updated_at": 5}, "updated_at": 6}
+    expected = copy.deepcopy(value)
+    expected["lifecycle"].update(current_bound_at="<clock>", updated_at="<clock>")
+    assert scrub(value) == expected
+    assert json.loads(scrub(json.dumps(value))) == expected
+
+
+@needs312
+def test_2269_r1_ledger_salt_read_precedes_recorder_lock(lab):
+    module, ctx = lab.load(lab.home())
+    rec = _recorder()
+    store_class = importlib.import_module(module.__name__ + ".store").MessageStore
+    original, held = store_class.ingest_ledger_salt, []
+    def salt(self):
+        if sys._getframe(1).f_code.co_name == "_exit":
+            held.append(rec.lock._is_owned())
+        return original(self)
+    lab.mp.setattr(store_class, "ingest_ledger_salt", salt)
+    ctx.offered.on_session_start("salt-lock", platform="cli")
+    for n in range(2):
+        ctx.hooks["post_llm_call"][0](session_id="salt-lock", platform="cli", conversation_history=[
+            {"role": "user", "content": f"salt fact {n}"}])
+    rec = lab.stop()
+    assert held == [False]  # only the root that first initializes the ledger needs the salt
+    assert rec.counters["recorder.failed"] == 0
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    assert len([e for e in reader.read(rec.proc)["roots"] if e.get("ledger_salt")]) == 1
+
+
+@pytest.mark.parametrize("column", ["messages.timestamp", "messages.ingested_at", "summary_nodes.created_at",
+                                    "summary_nodes.earliest_at", "summary_nodes.latest_at"])
+def test_2269_r1_off_on_comparison_detects_python_timestamp_change(tmp_path, column):
+    db = tmp_path / "clock-columns.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE messages (id INTEGER, timestamp REAL, ingested_at REAL)")
+        conn.execute("CREATE TABLE summary_nodes (id INTEGER, created_at REAL, earliest_at REAL, latest_at REAL)")
+        conn.execute("INSERT INTO messages VALUES (1, 1, 1)")
+        conn.execute("INSERT INTO summary_nodes VALUES (1, 1, 1, 1)")
+    before = store_rows(db, excluded_columns=SQL_CLOCK_COLUMNS, excluded_prefixes=())
+    table, field = column.split(".")
+    with sqlite3.connect(db) as conn:
+        conn.execute(f"UPDATE {table} SET {field} = 2")
+    after = store_rows(db, excluded_columns=SQL_CLOCK_COLUMNS, excluded_prefixes=())
+    assert before[table] != after[table]

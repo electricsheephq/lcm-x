@@ -158,6 +158,15 @@ def read(proc, *, checkpoint=None, verify=True) -> dict:
         if sealed["through"] + 1 < end:
             end, cause = sealed["through"] + 1, "checkpoint"
     prefix = [e for e in raw if max(_seqs(e)) < end]
+    if status.get("replayable") is False:
+        snapshot = status.get("snapshot") or {}
+        capture_loss = next((e for e in ordered if e.get("kind") == "loss"
+                             and e.get("lost_observation") == "ctx_capture_unavailable"), None)
+        if not (status.get("ctx_capture") == "unavailable" and snapshot.get("state") != "refused"
+                and snapshot.get("payloads") != "payloads_missing" and capture_loss is not None
+                and any(e.get("parent_seq") is None and "seq_enter" in e
+                        and e["seq_exit"] < capture_loss["seq"] for e in prefix)):
+            raise RecordingError("STATUS: recording is not replayable")
     decoder = _Decoder(root, verify)
     slots = sorted([(e.get("seq", e.get("seq_enter")), 0, e) for e in prefix]
                    + [(e["seq_exit"], 1, e) for e in prefix if "seq_exit" in e], key=lambda s: (s[0], s[1]))

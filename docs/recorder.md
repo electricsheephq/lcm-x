@@ -11,12 +11,12 @@ created.
 | --- | --- | --- |
 | `LCM_RECORDER_ENABLED` | `false` | Install the recorder at plugin registration. |
 | `LCM_RECORDER_DIR` | `$HERMES_HOME/lcm-recorder/` | Where recordings go. |
-| `LCM_RECORDER_MAX_BYTES` | 20 GiB | Cap on event segments and blobs (snapshots and checkpoints are not counted). |
+| `LCM_RECORDER_MAX_BYTES` | 20 GiB | Cap on event segments and shared blobs across every recording under `LCM_RECORDER_DIR` (snapshots and checkpoints are not counted). |
 
 All three are read with the profile-scoped environment at registration; restart the host to change them. On Python
 3.11 the flag logs one warning and installs nothing. If `sys.monitoring` tool ids 3 and 4 are both taken, it logs one
-warning and installs nothing. One recorder serves the whole process; a second registration (another profile's
-PluginManager) adds its engine to the same recording.
+warning and installs nothing. One recorder serves the whole process; a second registration (PluginManager) adds its
+engine to the same recording when it uses the same database; foreign engines are skipped.
 
 ## What is recorded
 
@@ -50,24 +50,33 @@ PluginManager) adds its engine to the same recording.
 ```
 
 Each Hermes process gets its own directory. Two directories on the same database whose wall-time ranges overlap are
-flagged `overlap` by the reader. The initial payload copy finishes before monitoring starts; a separate writer
+flagged `overlap` by the reader. Payload files are pinned before monitoring starts; a separate writer
 thread writes queued events while the host's turn thread copies values.
+
+`PY_UNWIND` cannot be enabled locally: its callback runs for every unwound Python frame in the process, including
+code outside LCM. In the exception-heavy lab test (`test_2263_s4_exception_unwind_budget`), 10,000 exceptions unwinding
+nine frames took 4.99 ms with recording off and 9.59 ms with it on: about 0.051 microseconds extra per frame. The test
+prints the measurement and applies a generous scaled bound; this number describes that workload.
 
 ## Privacy
 
-Recordings are local files only and hold message content. Directories are created 0700 and files 0600. A profile
-backup that copies `$HERMES_HOME` copies the recording too. Secrets are not written: the values passed to
+Recordings capture host inputs before LCM ingest filters: sensitive-pattern redaction and ignore and stateless
+session patterns do not reduce what the recorder stores. Recordings are local files only and hold message content.
+Directories are created 0700 and files 0600. A profile backup that copies `$HERMES_HOME` copies the recording too. Secrets are not written: the values passed to
 `update_model(api_key=..., base_url=...)`, `session_db`, and any `LCM_*` key or config field whose name has a whole
 `_`-separated segment matching KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL or AUTH are recorded only as set or unset.
 
 ## Limits, coverage and the replayable prefix
 
 - **Cap and disk floor:** when the recording reaches `LCM_RECORDER_MAX_BYTES`, or free disk falls below 20 GiB, a
-  `cap` event is written and recording stops. LCM keeps running unchanged.
+  `cap` event is written and recording stops. The cap spans every recording under `LCM_RECORDER_DIR`, including
+  shared `blobs/`. Other recordings' bytes are counted when a recorder starts, so recorders running at the same time
+  can together pass the cap; each still stops at the disk floor. Before snapshots, payload copies and checkpoints, free space minus the planned write must remain
+  at least 20 GiB. A refused snapshot records `disk_floor` in STATUS and writes no events. LCM keeps running unchanged.
 - **Queue admission:** the writer queue admits at most 10,000 events or 512 MiB; an event refused there writes a
   `gap` event and recording stops.
 - **Coverage ends:** recording stops being complete at the first of: a gap, the cap, a value that cannot be copied
-  (`unsupported`), a lost observation, a root stack mismatch, or a recorder failure (`recorder.failed`; the failure
+  (`unsupported`), `hermes_home_changed`, a lost observation, a root stack mismatch, or a recorder failure (`recorder.failed`; the failure
   never reaches the engine or Hermes). `STATUS.json` names the first cause and its seq.
 - **Replayable prefix:** the reader returns events up to the first missing seq or the first coverage end, whichever
   comes first. A missing, torn or hash-mismatched blob cuts the prefix before its event with a `blob_*` cause.
@@ -103,3 +112,10 @@ backup that copies `$HERMES_HOME` copies the recording too. Secrets are not writ
 snapshot paths. `tests/recorder_replay.py` is a mini-replayer: it loads the plugin against a fake Hermes context,
 restores the snapshot, drives the recorded roots in order on one thread per recorded thread, serves recorded summary
 attempts and persisted-output inputs, restores the recorded effective configuration in the replay home, and compares every root's return and the in-scope tables.
+
+Replaying a recording that captured a `config.yaml` needs PyYAML; the harness imports it only then.
+
+A root that exceeds the replayer's per-root timeout is abandoned and the replay fails. If its worker thread is still
+running after a 5 s grace period, the error says "isolation kept" and the model-call block stays installed while that
+thread is alive. The environment, `sys.path`, the clock and the secrets are restored as usual, so an abandoned root
+that later reads an `LCM_*` setting sees the caller's value. Treat the process as spent after such a failure.
