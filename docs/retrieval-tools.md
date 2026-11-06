@@ -70,14 +70,18 @@ lcm:
 ```
 
 `event_time_start` and `event_time_end` are the earliest and latest host
-`observed_at` over all the summary's source messages, through condensed nodes,
-formatted like a message's `event_time`; when any stamped source carries a
+`observed_at` over the summary's stored source messages, through condensed nodes,
+formatted like a message's `event_time`; sources without a host time, or no longer
+stored (for example after a session purge), do not count. When any stamped source carries a
 carried stamp, the summary also has `time_uncertain: "carried"`. A summary whose sources carry no host
 time has neither field; the existing `timestamp` (LCM's write time) is unchanged.
 The read runs inside the recall deadline; a late or failed read omits the fields
 from every summary and sets `provenance.summary_event_time_unavailable` to
 `deadline` or `read_error`. The fields count toward the response cap like
-`event_time`. Internal recall consumers keep their existing output.
+`event_time`: a response over the cap drops them before any hit and sets
+`event_time_unavailable: true` (reason `response_cap`, or an earlier `deadline` or
+`read_error` reason, which is kept; the marker is left out only when it would itself
+evict a hit), so a missing span there says nothing about the summary. Internal recall consumers keep their existing output.
 
 ### Retrieval contract
 
