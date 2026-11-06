@@ -81,7 +81,12 @@ from every summary and sets `provenance.summary_event_time_unavailable` to
 `event_time`: a response over the cap drops them before any hit and sets
 `event_time_unavailable: true` (reason `response_cap`, or an earlier `deadline` or
 `read_error` reason, which is kept; the marker is left out only when it would itself
-evict a hit), so a missing span there says nothing about the summary. Internal recall consumers keep their existing output.
+evict a hit), so a missing span there says nothing about the summary. In session
+delivery, spans are added to summary leads after the leads are admitted. A lead
+whose span pushes the payload over the session budget is dropped whole, like any
+lead that does not fit, and this sets no marker. Over budget, summary leads are
+dropped before any evidence group, so a span never displaces evidence. Internal
+recall consumers keep their existing output.
 
 ### Retrieval contract
 
