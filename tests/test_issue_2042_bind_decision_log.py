@@ -245,8 +245,8 @@ def test_resident_engine_conflict_skip_deduplicates_by_engine_and_session(host, 
         assert parent._store.get_session_count("unbound") == 0
         assert parent._store.get_session_count("other") == 0
     assert lines(caplog, "LCM session skipped:") == [
-        "LCM session skipped: session=unbound reason=not_delegate",
-        "LCM session skipped: session=other reason=not_delegate",
+        "LCM session skipped: session=unbound reason=resident_engine_conflict",
+        "LCM session skipped: session=other reason=resident_engine_conflict",
     ] * 2
     assert sum("skipped ingest: stable engine use ended with resident_engine_conflict" in record.getMessage()
                for record in caplog.records) == 6
@@ -384,7 +384,7 @@ def test_stale_auxiliary_compression_logs_new_session(engines, caplog, monkeypat
 @pytest.mark.parametrize("shape,reason", [
     ("auxiliary", "auxiliary"), ("remembered", "auxiliary_lineage"),
     ("require_agent", "no_agent"), ("filtered", "bypass_pattern"),
-    ("unproven", "not_delegate"), ("no_parent", "no_parent"),
+    ("unproven", None), ("no_parent", "no_parent"),
     ("self_parent", "no_parent"), ("ignored_parent", "ignored_parent"),
     ("filtered_parent", "parent_bypass_pattern"),
 ])
@@ -407,8 +407,9 @@ def test_each_delegate_link_rejection_logs_skip(engines, caplog, monkeypatch, sh
     try:
         for _ in range(2):
             assert engine._delegate_child_link(session, require_agent=shape == "require_agent") is None
-        assert lines(caplog, "LCM session skipped:", session) == [
-            f"LCM session skipped: session={session} reason={reason}"]
+        # An unproven child is not a skip: the caller still picks the session's route.
+        assert lines(caplog, "LCM session skipped:", session) == (
+            [] if reason is None else [f"LCM session skipped: session={session} reason={reason}"])
         assert engine._store.get_session_count(session) == 0
         assert engine._session_id == "parent"
     finally:

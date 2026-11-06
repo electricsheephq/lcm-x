@@ -6178,8 +6178,9 @@ class LCMEngine(
         try:
             if not session_id or not (rows > 0 or reason):
                 return
-            kind = "first store" if rows > 0 else "skipped"
-            key = (self._diagnostic_engine_token, session_id, kind)
+            # One first-store line per session; one skipped line per distinct reason, so an
+            # earlier skip on another path cannot hide a later reason (#2042).
+            key = (self._diagnostic_engine_token, session_id, "first store" if rows > 0 else ("skipped", reason))
             if self._claim_session_diagnostic(key):
                 if rows > 0:
                     logger.info("LCM session first store: session=%s rows=%d", session_id, rows)

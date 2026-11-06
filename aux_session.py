@@ -1062,7 +1062,7 @@ class DelegateChildMixin:
         source, parent = (stored_link["source"], stored_link["parent_session_id"]) if stored_link else next(
             ((name, value) for name, value in [("compression", compression_parent), *candidates] if value), ("", ""))
         if not delegate:
-            self._log_session_ingest_outcome(session_id, reason="not_delegate")
+            # Not a skip: the caller still decides this session's route (#2042).
             return None
         if not parent or parent == session_id:
             self._note_delegate_child_fallback(session_id, "rows not stored: no parent identity resolves")
