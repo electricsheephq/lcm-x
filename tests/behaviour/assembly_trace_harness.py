@@ -521,7 +521,7 @@ def observe(case: Scenario, root: Path) -> Trace:
                 cls = getattr(importlib.import_module('hermes_lcm.' + module_name), class_name)
                 for name, method in vars(cls).items():
                     if not name.startswith('_') and inspect.isfunction(method):
-                        services[method.__code__] = module_name + '.' + name
+                        services[inspect.unwrap(method).__code__] = module_name + '.' + name
             calls: dict[int, str] = {}
             entries = 0
             lineage_loaded: set[int] = set()
