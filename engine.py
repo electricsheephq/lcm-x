@@ -5810,7 +5810,7 @@ class LCMEngine(
         handler = handlers.get(name)
         if handler:
             return handler(args, engine=self,
-                           **{k: v for k, v in kwargs.items() if k == "delivery_unit"})
+                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order"}})
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
@@ -7880,7 +7880,7 @@ class LCMEngine(
         unchanged_prefix_occurrences = set()
         proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.
         accepted_compaction_prefix = 0
-        proof = getattr(self, "_compress_commit_proof", None)
+        proof = stored_proof = getattr(self, "_compress_commit_proof", None)
         if proof and proof.get("durable") is False:
             metadata = proof.get("output_metadata")
             if (not isinstance(metadata, list) or len(metadata) != len(proof.get("output") or ())
@@ -7901,6 +7901,7 @@ class LCMEngine(
             # (#259: visible duplication beats silent loss). One-shot: a later
             # reconciled cursor that equals len(output) must not re-arm it.
             proof["consulted"] = True
+            stored_proof["consulted"] = True  # #1451 item 4: a container-checked copy must not hide the mark.
             # #1529: like the durable matcher, guard positions in the COMPLETE
             # host list, not the candidate prefix (later results permit salvage).
             recent_tools = _hermes_salvage_protected_positions(messages)
@@ -10114,6 +10115,7 @@ class LCMEngine(
                 # FTS-only anchor under the floor would displace an eligible hit.
                 fts_anchor=False,
                 delivery_unit="hits",
+                delivery_order="score",
             )
             payload = json.loads(raw)
         except EmbeddingPrivacyPolicyError as exc:

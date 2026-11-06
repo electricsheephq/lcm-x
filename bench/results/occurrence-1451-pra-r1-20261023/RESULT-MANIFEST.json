@@ -78,6 +78,12 @@
       "role": "headline",
       "sha256": "60e96dc2227b1e495a2ec67395833fe268158c4f3b07777c87997fdcc556b7b3",
       "bytes": 21680
+    },
+    {
+      "path": "RESULT.md",
+      "role": "headline",
+      "sha256": "5b4044baee7b15e07763e210484538e725231c149443442d08ef9345282118cd",
+      "bytes": 3488
     }
   ],
   "rescore": {

@@ -6,6 +6,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- New: opt-in `recall_delivery_order="time"` / `LCM_RECALL_DELIVERY_ORDER=time` delivers the same selected `lcm_recall` hits oldest to newest by host observation time, with untimed hits and summaries last. The default `score`, session delivery, and internal recall retain their existing order.
 - New: per-engine session decision and first-store/skipped INFO logs identify bind and bypass rules without message or pattern text (#2042).
 
 - Removed: cache-friendly follow-on condensation and transcript GC (#1246); their keys remain parsed and ignored with one warning per process when enabled, and legacy GC placeholders remain readable.

@@ -461,3 +461,15 @@ def test_retrieve_empty_optional_array_matches_omission(
         assert changed == set(), with_empty
     else:
         assert changed
+
+
+def test_bundled_reference_documents_empty_array_contract():
+    root = Path(__file__).resolve().parents[1]
+    reference = (root / 'skills/hermes-lcm/references/recall-tools.md').read_text()
+    source = (root / 'docs/retrieval-tools.md').read_text()
+    externalized_note = source.split('- `externalized_refs` is optional,', 1)[1].split('\n\n', 1)[0]
+    assert '- `externalized_refs` is optional,' + externalized_note in reference
+    note = reference.split('## Empty optional arrays\n', 1)[1].split('\n## ', 1)[0]
+    assert all(f'`{arg}' in note for arg in ('externalized_refs', 'lcm_query_state(kinds=[]',
+                                          'lcm_expand_query(session_ids=[]', 'seen_refs=[]'))
+    assert "`detail='answer_ready'`" in note and 'cursor contract, even when empty' in note
