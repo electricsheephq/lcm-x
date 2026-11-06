@@ -6116,21 +6116,21 @@ class LCMEngine(
         if not self._logged_filter_config:
             if self._config.ignore_session_patterns:
                 logger.info(
-                    "LCM ignore_session_patterns from %s: count=%d",
+                    "LCM ignore_session_patterns from %s: %s",
                     self._config.ignore_session_patterns_source,
-                    len(self._config.ignore_session_patterns),
+                    ", ".join(self._config.ignore_session_patterns),
                 )
             if self._config.stateless_session_patterns:
                 logger.info(
-                    "LCM stateless_session_patterns from %s: count=%d",
+                    "LCM stateless_session_patterns from %s: %s",
                     self._config.stateless_session_patterns_source,
-                    len(self._config.stateless_session_patterns),
+                    ", ".join(self._config.stateless_session_patterns),
                 )
             if self._config.ignore_message_patterns:
                 logger.info(
-                    "LCM ignore_message_patterns from %s: count=%d",
+                    "LCM ignore_message_patterns from %s: %s",
                     self._config.ignore_message_patterns_source,
-                    len(self._config.ignore_message_patterns),
+                    ", ".join(self._config.ignore_message_patterns),
                 )
             self._logged_filter_config = True
         if self._session_ignored:

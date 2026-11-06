@@ -891,6 +891,7 @@
 "sql #17 16a4a5d5aeab/28",
 "sql shape=29 _store COMMIT",
 "sql #29 79663c1d3b43/6",
+"log INFO LCM session first store: session=S rows=1",
 "log DEBUG LCM attribution phase=ingest lock_hold_ms=0.000 rows_written=1 bytes_written=0 busy_snapshot_retry=False",
 "log DEBUG Per-turn ingest OK: session=S msgs=5 cursor=5",
 "return null",
