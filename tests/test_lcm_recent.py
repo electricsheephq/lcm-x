@@ -754,3 +754,32 @@ def test_recent_fallback_releases_transaction_on_lineage_exception(
         engine, window, "conversation", 10
     ) == []
     assert connection.in_transaction is False
+
+
+def test_recent_coverage_read_failure_uses_leaf_fallback(recent_parts, monkeypatch, caplog):
+    engine, store = recent_parts
+    current, previous = engine.current_session_id, "previous"
+    _add_leaf(engine._dag, previous, date(2026, 7, 15), "retained previous leaf")
+    store.drain_invalidations()
+    _ready(store, "day", "2026-07-15", current)
+    monkeypatch.setattr(recent_module, "_recent_conversation_scope_session_ids",
+                        lambda _engine: [current, previous])
+    connection = engine._dag.connection
+
+    def execute(sql, *args):
+        if "SELECT 1" in sql and "summary_nodes" in sql:
+            raise sqlite3.OperationalError("injected coverage read failure")
+        return connection.execute(sql, *args)
+
+    class FailingCoverage:
+        def __getattr__(self, name):
+            return execute if name == "execute" else getattr(connection, name)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._dag, "_conn", FailingCoverage())
+        result = json.loads(lcm_recent({"period": "date:2026-07-15"}, engine=engine))
+    assert result["mode"] == "leaf_summary_fallback"
+    assert result["fallback_reason"] == "rollups_span_multiple_sessions"
+    assert "retained previous leaf" in {s["content"] for s in result["sections"]}
+    assert "coverage read failed" in caplog.text
+    assert any(record.levelname == "WARNING" for record in caplog.records)
