@@ -7640,6 +7640,8 @@ class LCMEngine(
                                 "FROM messages WHERE session_id=? AND store_id IN "
                                 "(SELECT value FROM json_each(?)) ORDER BY store_id",
                                 (self._session_id, json.dumps(sorted(attempt["stored"].values())))))
+                            # Legacy rows may hold a padded or NULL id for the same conversation: compare normalized.
+                            new_rows = [(*row[:7], _normalize_conversation_id_value(row[7])) for row in new_rows]
                             keys = {(conv, role, call_id, calls, name) for _, role, _, call_id, calls, name, _, conv in new_rows}
                             earlier, stripped_earlier = {}, {}
                             # One linear scan over the session's earlier rows (index order), filtered by key in
@@ -7648,6 +7650,7 @@ class LCMEngine(
                                 "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at,conversation_id "
                                 "FROM messages WHERE session_id=? AND store_id<? ORDER BY store_id",
                                 (self._session_id, first)):
+                                conv = _normalize_conversation_id_value(conv)
                                 if (conv, role, call_id, calls, name) not in keys:
                                     continue
                                 earlier.setdefault((conv, role, content, call_id, calls, name), []).append((sid, stamp))

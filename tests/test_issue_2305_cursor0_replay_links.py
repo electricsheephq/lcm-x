@@ -462,3 +462,14 @@ def test_25_a_rebound_conversation_never_spends_the_previous_conversations_rows(
     later = [r["store_id"] for r in rows if r["content"] == "ok" and r["store_id"] not in earlier]
     assert earlier and later  # both conversations stored their own reply
     assert not [pair for pair in _pairs(engine) if pair[1] in earlier]
+
+
+def test_26_padded_legacy_conversation_ids_still_link_within_their_conversation(host):
+    # #2335 review: legacy stores can hold a padded (or NULL) id for the same conversation. Ids are compared through
+    # the store's normalizer, so the earlier rows remain targets; a blank id is not a wildcard (test_25).
+    targets = _ok_candidates(host)
+    conn = host.engine._store._conn
+    conn.execute("UPDATE messages SET conversation_id = ' ' || conversation_id || ' ' WHERE session_id = ?", (SID,))
+    conn.commit()
+    sources = _ingest_copies(host, [{"role": "assistant", "content": "ok"}] * 2)
+    assert _pairs(host.engine) == list(zip(sources, targets[:2]))
