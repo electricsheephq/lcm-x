@@ -108,6 +108,7 @@ NON_TURN_PATH_FILES = {
     "expand_query_tools.py",  # Explicit lcm_expand_query tool handler only.
     "expand_tools.py",  # Explicit lcm_describe/lcm_expand tool handlers only.
     "expansion_evidence.py",  # Explicit expansion context/provenance only.
+    "forget_requests.py",  # Default-off, read-only recall-time forget detection.
     "guidance.py",  # Exported policy loader unused by default prompt.
     "host_evidence.py",  # Unwired opt-in host evidence helper.
     "inactive_record.py",  # Inactive-plugin diagnostic receipts only.
