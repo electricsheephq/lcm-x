@@ -38,7 +38,8 @@ Run without `nice` where sandbox policy denies it. Driver runs default to one; e
 directory. Orchestrator refuses an existing output directory. Exit status is 0
 for PASS, 1 for FAIL, and 2 for INCONCLUSIVE (or a failed driver operation). A gate verdict needs
 the full session (runs 0-19 of every cell in both trees, 0-79 for an extended cell; ten runs per tree for
-holds); anything shorter prints SMOKE PASS/FAIL (holds: LOCK-SMOKE PASS/FAIL) and exits 3. Holds are
+holds) and the workload below unchanged (K=2, 2,000-row B views, W=400 ms, seed 2055+i; holds: 2,000 rows);
+anything shorter or different prints SMOKE PASS/FAIL (holds: LOCK-SMOKE PASS/FAIL) and exits 3. Holds are
 INCONCLUSIVE when any 2,000-new-row call shows no observed hold or a baseline statistic is 0 (a blind monitor).
 
 ## Workload and schedule

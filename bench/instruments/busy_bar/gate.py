@@ -11,8 +11,21 @@ from typing import Any
 
 if __package__:
     from .cells import CELLS
+    from .driver import DEFAULT_B_VIEW_ROWS, DEFAULT_K, DEFAULT_SEED, DEFAULT_WINDOW_MS
 else:
     from cells import CELLS
+    from driver import DEFAULT_B_VIEW_ROWS, DEFAULT_K, DEFAULT_SEED, DEFAULT_WINDOW_MS
+
+
+def nonstandard_workload(name: str, runs: list[dict[str, Any]]) -> list[str]:
+    """The README's gate workload: K writes, a B view of DEFAULT_B_VIEW_ROWS new rows, window W, seed 2055+i."""
+    found = set()
+    for run in runs:
+        want = {"k": DEFAULT_K, "b_view_rows": DEFAULT_B_VIEW_ROWS, "window_ms": DEFAULT_WINDOW_MS,
+                "seed": DEFAULT_SEED + run["run"]}
+        found.update(f"{name}: {key}={run.get(key)!r}, the gate workload is {value!r}"
+                     for key, value in want.items() if run.get(key) != value)
+    return sorted(found)
 
 
 def read(path: Path) -> list[dict[str, Any]]:
@@ -127,6 +140,11 @@ def evaluate(baseline: list[dict[str, Any]], candidate: list[dict[str, Any]],
              for cell in CELLS for name, runs in (("baseline", baseline), ("candidate", candidate))
              if (got := {run["run"] for run in runs if run["cell"] == cell})
              != (want := set(range(80 if cell in extensions else 20)))]
+    # A gate verdict also needs the README's workload in every ledger; anything else is a smoke (#2301 review).
+    short += [reason for name, runs in (("baseline", baseline), ("candidate", candidate),
+                                        ("control baseline", control_baseline or []),
+                                        ("control candidate", control_candidate or []))
+              for reason in nonstandard_workload(name, runs)]
     result["gate_session"] = not short
     if short and result["verdict"] != "INCONCLUSIVE":
         result["verdict"] = result["verdict"].replace("GATE", "SMOKE")

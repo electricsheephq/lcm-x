@@ -29,6 +29,7 @@ WRITE_WORDS = {"INSERT", "UPDATE", "DELETE", "REPLACE"}
 # regression tripwire against v0.29.2 (r3.6's 1.25 bar no longer applies).
 TRIPWIRE = 2.25
 GATE_RUNS = 10
+GATE_ROWS = 2000
 
 
 def windows(events: list[tuple[float, int, str]], begin: float, end: float) -> list[dict[str, Any]]:
@@ -192,6 +193,10 @@ def summarize(collected: dict[str, list]) -> dict[str, Any]:
     if verdict.startswith("LOCK-TRIPWIRE") and len(collected["baseline"]) != GATE_RUNS:
         verdict = verdict.replace("TRIPWIRE", "SMOKE")  # The gate session is ten runs per tree.
         reasons.append(f"{len(collected['baseline'])} runs per tree; a gate session needs {GATE_RUNS}")
+    rows = sorted({run.get("rows") for runs in collected.values() for run in runs} - {GATE_ROWS})
+    if verdict.startswith("LOCK-TRIPWIRE") and rows:
+        verdict = verdict.replace("TRIPWIRE", "SMOKE")  # The gate session uses 2,000-new-row views.
+        reasons.append(f"rows={rows}; a gate session uses {GATE_ROWS}")
     return {"tables": tables, "statistics": statistics_by_tree, "failed_statistics": failed,
             "reasons": reasons, "verdict": verdict}
 
@@ -230,7 +235,7 @@ def main() -> None:
     parser.add_argument("outdir", type=Path)
     parser.add_argument("--trace", action="store_true", help="diagnostic only; disables verdict")
     parser.add_argument("--runs", type=int, default=10)
-    parser.add_argument("--rows", type=int, default=2000)
+    parser.add_argument("--rows", type=int, default=GATE_ROWS)
     parser.add_argument("--work-root", type=Path,
                         default=Path(tempfile.gettempdir()) / ("busy-bar-holds-" + uuid.uuid4().hex))
     args = parser.parse_args()

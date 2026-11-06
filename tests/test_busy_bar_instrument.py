@@ -354,7 +354,7 @@ def test_write_window_extraction(trace: list, expected: list) -> None:
 
 def test_holds_percentiles_and_relative_verdict() -> None:
     def runs(multiplier: float) -> list:
-        return [{"journal_mode": "wal", "calls": [
+        return [{"journal_mode": "wal", "rows": 2000, "calls": [
             {"shape": "n", "position": position, "longest_ms": n * multiplier,
              "first_start_ms": 2, "call_ms": 30} for position in range(1, 7)] + [
             {"shape": "t", "position": 1, "longest_ms": n * multiplier,
@@ -486,6 +486,9 @@ def test_debug_caught_exception_attribution(wrapped: bool, other_thread: bool) -
     operations = driver.Operations(capture, False)
     logger = logging.getLogger("hermes_lcm.test-busy-bar")
     previous = logging.getLogger().level
+    # debug_capture lowers every hermes_lcm logger; restore them all, or later tests on this worker run at DEBUG.
+    lcm_levels = {name: logging.getLogger(name).level for name in list(logging.Logger.manager.loggerDict)
+                  if name == "hermes_lcm" or name.startswith("hermes_lcm.")}
     driver.debug_capture(capture)
 
     def caught(code: int) -> None:
@@ -515,6 +518,9 @@ def test_debug_caught_exception_attribution(wrapped: bool, other_thread: bool) -
     finally:
         logging.getLogger().removeHandler(capture)
         logging.getLogger().setLevel(previous)
+        for name in list(logging.Logger.manager.loggerDict):
+            if name == "hermes_lcm" or name.startswith("hermes_lcm."):
+                logging.getLogger(name).setLevel(lcm_levels.get(name, logging.NOTSET))
     assert [row["busy"] for row in operations.records] == [not other_thread, False, False]
     assert not any(row["inconclusive"] for row in operations.records)
     assert all(row["level"] == "DEBUG" for row in capture.records)
@@ -609,7 +615,7 @@ def test_hold_position_and_rotating_longest_statistics() -> None:
                       3 if mode == "first" and position == 1 else
                       5 if mode == "rotating" and position == number % 6 + 1 else 1,
                       "first_start_ms": 0, "call_ms": 10} for position in range(1, 7)]
-            rows.append({"journal_mode": "wal", "calls": calls + [
+            rows.append({"journal_mode": "wal", "rows": 2000, "calls": calls + [
                 {"shape": "t", "longest_ms": 1, "first_start_ms": 0, "call_ms": 10}]})
         return rows
 
@@ -696,11 +702,16 @@ def test_only_a_full_session_gates() -> None:
     assert short["verdict"] == "SMOKE PASS" and not short["gate_session"]
     assert any("has 19 runs, a gate session needs 20" in reason for reason in short["reasons"])
     assert gate.EXIT[short["verdict"]] == 3
+    for key, value in (("b_view_rows", 2), ("k", 1), ("window_ms", 0), ("seed", 7)):
+        reduced = [dict(row, **{key: value}) for row in session(20)]
+        result = gate.evaluate(reduced, reduced, scaled(reduced), scaled(reduced))
+        assert result["verdict"] == "SMOKE PASS" and not result["gate_session"], key
+        assert any(f"{key}={value!r}, the gate workload is" in reason for reason in result["reasons"]), key
 
 
 def test_blind_or_short_hold_sessions_never_gate() -> None:
     def runs(multiplier: float, count: int = 10, blind: bool = False) -> list:
-        return [{"journal_mode": "wal", "calls": [
+        return [{"journal_mode": "wal", "rows": 2000, "calls": [
             {"shape": "n", "position": position, "longest_ms": 0 if blind else n * multiplier,
              "first_start_ms": 2, "call_ms": 30} for position in range(1, 7)] + [
             {"shape": "t", "position": 1, "longest_ms": 0, "first_start_ms": None, "call_ms": 30}]}
@@ -714,3 +725,9 @@ def test_blind_or_short_hold_sessions_never_gate() -> None:
     assert short["verdict"] == "LOCK-SMOKE PASS"
     assert holds.summarize({"baseline": runs(1, 3), "candidate": runs(3, 3)})["verdict"] == "LOCK-SMOKE FAIL"
     assert holds.summarize({"baseline": runs(1), "candidate": runs(1)})["verdict"] == "LOCK-TRIPWIRE PASS"
+    small = {"baseline": runs(1), "candidate": runs(1)}
+    for run in small["candidate"]:
+        run["rows"] = 2
+    reduced = holds.summarize(small)
+    assert reduced["verdict"] == "LOCK-SMOKE PASS"
+    assert any("a gate session uses 2000" in reason for reason in reduced["reasons"])
