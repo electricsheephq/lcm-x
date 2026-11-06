@@ -722,13 +722,10 @@ def _call_llm_for_summary(prompt: str, max_tokens: int,
         validated, failed_check, tolerated = _check_summary_contract(sanitized, contract_nonce, max_tokens)
         if sanitized and contract_nonce and not validated:
             _summary_call.contract = failed_check
-            last_line = sanitized.rstrip().splitlines()[-1].strip()
-            prefix = "hint" if _normalize_expand_hint(last_line)[0] else (
-                "tag" if last_line.startswith("<") else "other")
             logger.warning(
                 "LCM summary discarded output that violated the integrity contract "
-                "(model=%s, check=%s, reply_chars=%d, last_line_chars=%d, last_line_prefix=%s); escalating",
-                model or "<default>", failed_check, len(sanitized), len(last_line), prefix,
+                "(model=%s, check=%s); escalating",
+                model or "<default>", failed_check,
             )
             logger.info("LCM summary contract shape: check=%s last_line=%s", failed_check, _summary_contract_shape(sanitized))
         elif validated and tolerated:
