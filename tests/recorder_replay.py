@@ -413,6 +413,13 @@ class Replayer:
         return value
 
     # -- driving ------------------------------------------------------------------------------------
+    def tool_name(self, event):
+        if event["kind"] == "tool":
+            return event["name"]
+        if event["kind"] == "engine" and event["name"] == "handle_tool_call":
+            return self.value((event.get("args") or {}).get("name"), "name")
+        return None
+
     def call(self, event):
         kind, name, args = event["kind"], event["name"], event.get("args") or {}
         positional, kwonly, star, starstar = event["sig"]
@@ -531,7 +538,7 @@ class Replayer:
                 self.diffs.append((event["seq_enter"], event["name"], "exception", event["exception"]["type"],
                                    type(value).__qualname__))
             return
-        if event["kind"] == "tool" and event["name"] in EXCLUDED_TOOL_RETURNS:
+        if self.tool_name(event) in EXCLUDED_TOOL_RETURNS:
             return
         expected, actual = scrub(self.recorded(event.get("result"))), scrub(self.normalize(value))
         if expected != actual:

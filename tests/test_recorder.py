@@ -2639,6 +2639,82 @@ def test_2263_15_replay_reader_comes_from_harness(lab, reader_state):
     assert not rep.diffs
 
 
+@needs312
+@pytest.mark.parametrize("name", ["lcm_expand_query", "lcm_grep"])
+def test_2263_16_dispatch_tool_return_exclusion(lab, name):
+    _, ctx = lab.load(lab.home())
+    ctx.offered.on_session_start("empty", platform="cli")
+    result = json.loads(ctx.offered.handle_tool_call(name, {"prompt": "What balance?", "query": "absent"}))
+    assert "error" not in result, result
+    rec = lab.stop()
+    roots = []
+    def mutate(recording, reader):
+        root = next(e for e in recording["events"] if e.get("name") == "handle_tool_call")
+        assert root["kind"] == "engine" and root["status"] == "return"
+        root["result"] = "mutated tool return"
+        roots.append(root["seq_enter"])
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "dispatch", prepare=prepare, mutate=mutate)
+    assert rep.blocked_calls == 0
+    differences = [d for d in rep.diffs if d[:3] == (roots[0], "handle_tool_call", "result")]
+    assert bool(differences) == (name != "lcm_expand_query"), rep.diffs
+
+
+@needs312
+@pytest.mark.parametrize("change", ["add", "rebind"])
+def test_2263_17_home_change_cuts_prefix(lab, change):
+    home, other_home = lab.home(), lab.home("other")
+    state_row(home, "shared-session", source="first-home")
+    state_row(other_home, "shared-session", source="second-home")
+    module, ctx = lab.load(home)
+    rec = _recorder()
+    if change == "add":
+        engine = type(ctx.offered)(hermes_home=str(other_home))
+        lab.engines.append(engine)
+        engine._db_path = ctx.offered._db_path
+        rec.add(FakeCtx(), engine)
+    else:
+        engine = ctx.offered
+        engine._hermes_home = str(other_home)
+    engine._session_id = "shared-session"
+    state_row(home, "shared-session", source="wrong-home-after-start")
+    for _ in range(2):
+        engine.get_tool_schemas()
+    assert rec.writer.drain(5)
+    assert rec.stopped is None
+    assert rec.counters["recorder.hermes_home_changed"] == 1
+    assert rec.counters["recorder.coverage_lost"] == 1
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    events = reader.load_events(rec.proc)
+    loss = next(e for e in events if e.get("lost_observation") == "hermes_home_changed")
+    roots = [e for e in events if e.get("name") == "get_tool_schemas" and e.get("engine") == rec.engines[engine]]
+    assert len(roots) == 2  # diagnosis continues after the loss
+    assert loss["seq"] <= roots[0]["seq_enter"]
+    assert not any(e["kind"] == "sessions" and e["seq"] > loss["seq"] for e in events)
+    try:
+        reading = reader.read(rec.proc)
+    except reader.RecordingError:
+        pass
+    else:
+        assert reading["prefix_end"] <= roots[0]["seq_enter"]
+        assert reading["cause"] == "hermes_home_changed"
+
+
+@needs312
+def test_2263_17_same_home_registration_keeps_coverage(lab):
+    home = lab.home()
+    _, first = lab.load(home)
+    _, second = lab.load(home / ".")
+    rec = _recorder()
+    for ctx in (first, second):
+        ctx.offered.get_tool_schemas()
+    rec = lab.stop()
+    assert rec.counters["recorder.hermes_home_changed"] == 0
+    assert rec.counters["recorder.coverage_lost"] == 0
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "same-home", prepare=prepare)
+    assert len(rep.engines) == 2
+    assert not rep.diffs
+
+
 def test_2263_s5_replay_root_timeout_restores_environment(lab):
     from tests import recorder_replay as rr
     module, ctx = lab.load(lab.home())

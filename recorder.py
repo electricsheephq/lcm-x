@@ -91,6 +91,13 @@ def is_secret_name(name: str) -> bool:
     return name in SET_ONLY_NAMES or any(part in _SECRET_MARKS for part in str(name).upper().split("_"))
 
 
+def _hermes_home(engine) -> Path:
+    from .config import lcm_env_get
+
+    home = engine.__dict__.get("_hermes_home") or lcm_env_get("HERMES_HOME") or "~/.hermes"
+    return Path(home).expanduser().resolve()
+
+
 class Tag:
     """A value recorded by kind: engine token, set/unset, unsupported, uncapturable or a set's items."""
     __slots__ = ("kind", "value")
@@ -544,6 +551,7 @@ class Recorder:
         self.stopped = None
         self.end_state = "running"
         self.engines = weakref.WeakKeyDictionary()
+        self.home_changed = weakref.WeakSet()
         self.engine_ids = itertools.count(1)
         self.engine_classes: tuple = ()
         self.threads = weakref.WeakKeyDictionary()
@@ -607,7 +615,8 @@ class Recorder:
         self.writer.total_bytes = self._existing_bytes()
         self._token(engine)
         self._resolve(type(engine))
-        home = str(engine.__dict__.get("_hermes_home") or "")
+        self.home = _hermes_home(engine)
+        home = str(self.home)
         state_path = Path(engine._state_db_path())
         self.state_db = _StateDb(state_path)
         facts = self._process_facts(engine, home, state_path)
@@ -626,6 +635,7 @@ class Recorder:
         if self.stopped is not None or self._foreign(engine):
             return
         with self.lock:
+            self._check_home(engine)
             token = self._token(engine)
             self._resolve(type(engine))
             self._emit({"kind": "register", "engine": token,
@@ -1112,6 +1122,15 @@ class Recorder:
         except OSError:
             return True
 
+    def _check_home(self, engine) -> bool:
+        if engine is None or _hermes_home(engine) == self.home:
+            return True
+        if engine not in self.home_changed:
+            self.home_changed.add(engine)
+            self.counters["recorder.hermes_home_changed"] += 1
+            self.lose("hermes_home_changed")
+        return False
+
     def _session_of(self, code, loc, engine) -> str:
         for holder in (loc, loc.get("kwargs"), loc.get("payload"), loc.get("info")):
             if isinstance(holder, dict) and isinstance(holder.get("session_id"), str) and holder["session_id"]:
@@ -1290,6 +1309,8 @@ class Recorder:
             self.attr_base[token] = now
 
     def _before_root(self, engine, kind, code, loc, frame):
+        if not self._check_home(engine):
+            return  # the pinned state database belongs to the recording's home
         self._diff_attrs()
         env = self._env_values(self.engine)
         digest = hash(json.dumps(plain(env), sort_keys=True))
@@ -1484,7 +1505,7 @@ class Recorder:
         self.marks.setdefault(session or "", Counter())[name] += 1
 
     def lose(self, cause, seq=None):
-        if cause in ("ctx_capture_unavailable", "uncapturable"):
+        if cause in ("ctx_capture_unavailable", "uncapturable", "hermes_home_changed"):
             self.lost += 1
             self._emit({"kind": "loss", "lost_observation": cause}, single=True)
         self.counters["recorder.coverage_lost"] += 1
@@ -1692,7 +1713,7 @@ def install(ctx, engine) -> None:
             return
         from .config import lcm_env_get
 
-        home = engine.__dict__.get("_hermes_home") or lcm_env_get("HERMES_HOME") or "~/.hermes"
+        home = _hermes_home(engine)
         root = Path(lcm_env_get("LCM_RECORDER_DIR") or Path(home) / "lcm-recorder").expanduser()
         mon.use_tool_id(tool, TOOL_NAME)
         recorder = None

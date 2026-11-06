@@ -75,7 +75,7 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
 - **Queue admission:** the writer queue admits at most 10,000 events or 512 MiB; an event refused there writes a
   `gap` event and recording stops.
 - **Coverage ends:** recording stops being complete at the first of: a gap, the cap, a value that cannot be copied
-  (`unsupported`), a lost observation, a root stack mismatch, or a recorder failure (`recorder.failed`; the failure
+  (`unsupported`), `hermes_home_changed`, a lost observation, a root stack mismatch, or a recorder failure (`recorder.failed`; the failure
   never reaches the engine or Hermes). `STATUS.json` names the first cause and its seq.
 - **Replayable prefix:** the reader returns events up to the first missing seq or the first coverage end, whichever
   comes first. A missing, torn or hash-mismatched blob cuts the prefix before its event with a `blob_*` cause.
