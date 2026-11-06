@@ -644,7 +644,18 @@ def test_a_rotation_child_holding_more_copies_than_its_earlier_parent_expects_th
     assert out["parity"]["lineages"]["P"]["expected_rows"] == 1 and out["parity"]["totals"]["missing_rows"] == 1
 
 
-CARRIER = "[Recent Summary (d0, node 1)]\n" + S + " summary\n[Expand for details: lcm_expand(node_id=1)]"
+CARRIER = "[Recent Summary (d0, node 1)]\n" + S + " leaf\n[Expand for details: ]"  # node 1 as Home(nodes=) writes it
+NODE = [("S1", [1])]
+
+
+def outcome(out):
+    """The verdict on the data alone: the unit homes meet no coverage floor, hold no #1931 bucket A, and are so small
+    that any exempted row is over the 1% bar."""
+    bars = out["gate"]["bars"]
+    if not all(v["pass"] for b, v in bars.items()
+               if b not in ("coverage_floors", "issue_1931_pass_A", "exempted_surplus_fraction")):
+        return "FAIL"
+    return "HAND CHECK" if out["gate"].get("hand_checks") or out["exempted_surplus"]["exempted_rows"] else "PASS"
 
 
 @pytest.mark.parametrize("separator", ["\n\n", "\n\n---\n\n"])
@@ -652,27 +663,92 @@ def test_a_user_request_merged_behind_a_summary_carrier_is_expected(tmp_path, se
     merged = {"role": "user", "content": CARRIER + separator + S + " the unique request"}
     host = [("S1", merged), ("S1", a("answer"))]
     (tmp_path / "lost").mkdir()
-    lost = Home(tmp_path / "lost", ONE, host, stored=[("S1", a("answer"))]).run()
-    assert lost["parity"]["totals"]["missing_rows"] == 1 and lost["gate"]["verdict"] == "GATE FAIL"
+    lost = Home(tmp_path / "lost", ONE, host, stored=[("S1", a("answer"))], nodes=NODE).run()
+    assert lost["parity"]["totals"]["missing_rows"] == 1 and outcome(lost) == "FAIL"
     (tmp_path / "kept").mkdir()
-    kept = Home(tmp_path / "kept", ONE, host, stored=[("S1", u("the unique request")), ("S1", a("answer"))]).run()
-    assert kept["parity"]["totals"]["missing_rows"] == kept["parity"]["totals"]["surplus_rows"] == 0
-    assert kept["parity"]["lineages"]["S1"]["host_carrier_rows_excluded"] == 0
+    kept = Home(tmp_path / "kept", ONE, host, stored=[("S1", u("the unique request")), ("S1", a("answer"))], nodes=NODE).run()
+    assert outcome(kept) == "PASS" and kept["parity"]["lineages"]["S1"]["host_carrier_rows_excluded"] == 0
 
 
-def test_a_carrier_merged_onto_a_copy_of_a_kept_user_row_expects_it_once(tmp_path):
-    # The host keeps the user's row and persists a merged copy of it behind the summary: one occurrence, as LCM-X's
-    # merged-pair match counts it.
-    merged = {"role": "user", "content": CARRIER + "\n\n" + S + " question 1"}
-    out = Home(tmp_path, ONE, turn(1) + [("S1", merged)], stored=turn(1)).run()
-    assert out["parity"]["totals"]["expected_rows"] == 2 and out["parity"]["totals"]["missing_rows"] == 0
+@pytest.mark.parametrize("later", [0.0, 100.0], ids=["same-time", "later"])
+def test_a_carrier_repeating_a_kept_user_rows_text_is_never_a_pass(tmp_path, later):
+    # Scout: "continue" at T, then a carrier merged with "continue" at T+100: a second occurrence, or the host's merged
+    # copy of the first; a hand check. The same text at the same time is one occurrence (control: PASS).
+    merged = {"role": "user", "content": CARRIER + "\n\n" + S + " continue", "_ts": T0 + later}
+    host = [("S1", dict(u("continue"), _ts=T0)), ("S1", dict(a("ok"), _ts=T0 + 1)), ("S1", merged)]
+    out = Home(tmp_path, ONE, host, stored=host[:2], nodes=NODE).run()
+    assert outcome(out) == ("HAND CHECK" if later else "PASS")
+    assert out["gate"]["hand_checks"] == ([{"reason": "merged_carrier_repeat", "lineage": "S1", "host_ids": [3]}]
+                                          if later else [])
 
 
-def test_a_carrier_with_no_user_text_is_still_not_expected(tmp_path):
+CHAIN = {"P": ("cli", None, 1000.5, "compression", 100.0), "P2": ("cli", "P", 1002.0, "compression", 1001.0),
+         "P3": ("cli", "P2", 3000.0, "user_exit", 1002.5)}
+
+
+@pytest.mark.parametrize("replay", [False, None, T0 + 99], ids=["no-replay", "null-observed", "other-observed"])
+@pytest.mark.parametrize("carried", [True, False], ids=["carried-time", "own-time"])
+def test_two_carriers_of_one_occurrence_leave_a_replay_surplus(tmp_path, replay, carried):
+    # Astra: one plain occurrence and two rotation children's different carriers holding it; an unmarked replay of it
+    # is surplus and fails. Without the replay (control) it passes, or is a hand check when the carriers have their own
+    # times (each could be a resend).
+    def merged(node, ts):
+        return dict(role="user", content=CARRIER.replace("node 1", f"node {node}") + "\n\n" + S + " continue", _ts=ts)
+    host = [("P", dict(u("continue"), _ts=T0)), ("P2", merged(1, T0 if carried else T0 + 50)),
+            ("P3", merged(2, T0 if carried else T0 + 60))]
+    stored = [("P", stamped(u("continue"), T0))] + (
+        [] if replay is False else [("P3", u("continue") if replay is None else stamped(u("continue"), replay))])
+    out = Home(tmp_path, CHAIN, host, stored=stored, nodes=[("P3", [1]), ("P3", [2])]).run()
+    assert outcome(out) == ("FAIL" if replay is not False else "PASS" if carried else "HAND CHECK")
+    assert out["exempted_surplus"]["store_ids"]["unattributed"] == ([] if replay is False else [2])
+
+
+@pytest.mark.parametrize("node", [False, True], ids=["no-node", "node-in-store"])
+def test_a_summary_shaped_row_is_a_carrier_only_when_its_node_is_in_the_store(tmp_path, node):
+    # Astra: a user message in summary shape with no node behind it is the user's own content, so losing it fails.
     host = [("S1", {"role": "user", "content": CARRIER})] + turn(1)
-    out = Home(tmp_path, ONE, host, stored=turn(1)).run()
+    out = Home(tmp_path, ONE, host, stored=turn(1), nodes=NODE if node else ()).run()
+    assert outcome(out) == ("PASS" if node else "FAIL")
+    assert out["parity"]["lineages"]["S1"]["host_carrier_rows_excluded"] == int(node)
+
+
+@pytest.mark.parametrize("line", [("S3", 0), ("advanced_cursor", 2)])
+@pytest.mark.parametrize("in_order", [False, True], ids=["A-B-A-B", "A-A-B-B"])
+def test_a_repeated_prompt_stored_out_of_order_is_not_exempted(tmp_path, line, in_order):
+    # Astra: host A, A, B; stored A, B, A, B: the second A was stored after B, so the stored rows cannot follow the
+    # host's in order and the duplicate B is unattributed. Stored A, A, B, B (control) keeps its exemption.
+    go, done = u("go"), a("done")
+    stored = [go, go, done, done] if in_order else [go, done, go, done]
+    out = Home(tmp_path, ONE, [("S1", go), ("S1", go), ("S1", done)], stored=[("S1", m) for m in stored],
+               stamps={2 if in_order else 1}).run([route("S1", *line, 3, 4)], RESTART_BEFORE)
+    limit = "#2203" if line[0] == "S3" else "#1674"
+    assert out["exempted_surplus"]["store_ids"][limit if in_order else "unattributed"] == [4]
+    assert outcome(out) == ("HAND CHECK" if in_order else "FAIL")
+
+
+def test_repeated_text_that_leaves_the_order_ambiguous_is_a_hand_check(tmp_path):
+    # The host undid "go" and the user sent it again; the store holds one "go": which host row it is, is ambiguous.
+    host = [("S1", undone(u("go"), T0)), ("S1", dict(u("go"), _ts=T0 + 1)), ("S1", dict(a("done"), _ts=T0 + 2))]
+    out = Home(tmp_path, ONE, host, stored=[("S1", u("go")), ("S1", a("done")), ("S1", a("done"))]).run(
+        [route("S1", "S3", 0, 3, 3)])
+    assert out["exempted_surplus"]["store_ids"]["order_ambiguous"] == [3] and outcome(out) == "HAND CHECK"
+    assert {"reason": "view_order_ambiguous", "store_ids": [3]} in out["gate"]["hand_checks"]
+
+
+def test_a_symlinked_state_db_reads_payloads_beside_its_target(tmp_path):
+    ref = "payload-c1.json"
+    placeholder = (f"[Externalized tool output: tool=read_file; tool_call_id=c1; chars=10; bytes=10; "
+                   f'read it with lcm_expand(externalized_ref="{ref}"); ref={ref}]')
+    host = turn(1) + [("S1", call("c1")), ("S1", result("c1"))]
+    home = Home(tmp_path, ONE, host, stored=host[:3] + [("S1", dict(result("c1"), content=placeholder))])
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / audit.externalized.PAYLOAD_DIRNAME).mkdir(parents=True)
+    (elsewhere / audit.externalized.PAYLOAD_DIRNAME / ref).write_text(json.dumps({"content": result("c1")["content"]}))
+    home.state.rename(elsewhere / "state.db")
+    home.state.symlink_to(elsewhere / "state.db")
+    out = home.run()
+    assert out["gate"]["bars"]["externalized_unresolved"] == {"value": 0, "pass": True}
     assert out["parity"]["totals"]["missing_rows"] == 0
-    assert out["parity"]["lineages"]["S1"]["host_carrier_rows_excluded"] == 1
 
 
 @pytest.mark.parametrize("line", [("S3", 0), ("advanced_cursor", 2)])

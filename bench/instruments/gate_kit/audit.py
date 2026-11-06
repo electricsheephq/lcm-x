@@ -168,24 +168,27 @@ def display_key(role, content, ts, call_id, calls, tool_name):
     return (role, multiset.norm(content) if role in ("user", "assistant") else content, ts, call_id, calls, tool_name)
 
 
-def carrier_remainder(content, header):
+def carrier_remainder(content, header, nodes, same_lineage):
     """A host user row's text with a leading LCM summary carrier taken off, as LCM-X reads it (engine.py
     _generated_context_carrier_remainder; the stored row is the user's own row, which LCM-X matches by this remainder,
     reconcile.py _merged_pair_row): hosts that repair role alternation merge LCM's user-role summary with the next
-    user row (``prev + "\\n\\n" + next``). The carrier is one or more parts
-    ``[<Label> Summary (dN, node N)]\\n<summary>\\n[Expand for details: <hint>]`` joined by ``\\n\\n---\\n\\n``, then
-    ``\\n\\n---\\n\\n`` or ``\\n\\n`` and the row. The parts are delimited by that structure here (LCM-X also verifies
-    them against its DAG). Returns the content unchanged without a leading part, and "" for a carrier with no row."""
+    user row (``prev + "\\n\\n" + next``). Each part ``[<Label> Summary (dN, node N)]\\n<summary>\\n[Expand for
+    details: <hint>]`` must match its node in the store byte for byte, as LCM-X's verifier requires (engine.py
+    _verified_lcm_summary_prefix: dag.get_node, the node's depth, the rendered part): ``nodes`` holds summary_nodes
+    (dag.py:208) as node_id -> (session_id, depth, summary, expand_hint). The node's session must be in the row's
+    lineage (``same_lineage``; LCM-X checks its bound session, and a rotation moves the nodes to the newest child).
+    Parts joined by ``\\n\\n---\\n\\n``, then ``\\n\\n---\\n\\n`` or ``\\n\\n`` and the row. Returns the content
+    unchanged when any part does not verify (the row is then ordinary user content), "" for a carrier with no row."""
     text, pos, parts = (content or "").lstrip(), 0, 0
-    while header.match(text, pos):
-        expand = text.find("\n[Expand for details:", pos)
-        if expand < 0:
-            break
-        end = next((i for i in range(expand, len(text)) if text[i] == "]" and text.startswith("\n\n", i + 1)
-                    or text[i] == "]" and i + 1 == len(text)), None)
-        if end is None:
-            break
-        pos, parts = end + 1, parts + 1
+    while hit := header.match(text, pos):
+        node = nodes.get(int(hit.group(2)))
+        if node is None or node[1] != int(hit.group(1)) or not same_lineage(node[0]):
+            return content
+        label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(node[1], f"Depth-{node[1]}")
+        part = f"[{label} Summary (d{node[1]}, node {hit.group(2)})]\n{node[2]}\n[Expand for details: {node[3] or ''}]"
+        if not text.startswith(part, pos):
+            return content
+        pos, parts = pos + len(part), parts + 1
         if not (text.startswith("\n\n---\n\n", pos) and header.match(text, pos + 7)):
             break
         pos += 7
@@ -199,7 +202,7 @@ def carrier_remainder(content, header):
     return content
 
 
-def host_expected(rows, group, markers, scored=None):
+def host_expected(rows, group, markers, strip, scored=None):
     """Per lineage: (role, text) items and the tool-key Counter, counted as the host's lineage display counts rows.
 
     Hermes keeps a rotation parent's originals in the closed parent and gives the child only the compressed handoff
@@ -212,53 +215,71 @@ def host_expected(rows, group, markers, scored=None):
     expected count is the sum of those over the distinct identities of the lineage. A carried copy is not counted
     twice, and a double within a segment still counts twice. The host's summary row (``_compressed_summary``) is not
     expected, nor is a user row that is only an LCM-X generated carrier; a user row that begins with LCM's summary
-    carrier and goes on with the user's own text is expected as that text (``carrier_remainder``), but only beyond the
-    rows of that text the lineage already expects: the host merges a copy of a user row it keeps. A row that begins
+    carrier verified in the store and goes on with the user's own text is that text (``strip``): one occurrence with
+    a row of the same text and timestamp. A merged row of a text the lineage also holds at another timestamp may be
+    the host's merged copy of that row (a rotation handoff stamps it anew) or a resend: it is not counted, and it is
+    listed for a hand check (``merged_carrier_repeat``); a text held only by merged rows counts its first. A row that begins
     with one of LCM-X's prefix carriers (objective, task list, overflow recovery) is not expected: where such a carrier
     ends is not marked. ``scored``: the sessions in the audit window; only their rows are expected, and an identity's
     copies in an unscored segment of the lineage (a row carried from a parent that started before the window) are the
-    parent's rows: the scored segments expect only the occurrences beyond the most any unscored segment holds."""
-    header, prefixes = markers
-    per_segment, first = Counter(), {}
+    parent's rows: the scored segments expect only the occurrences beyond the most any unscored segment holds.
+    Returns (expected per lineage, carrier rows excluded per lineage, hand checks)."""
+    _header, prefixes = markers
+    per_segment, first, plain, merged = Counter(), {}, set(), set()
     for row in rows:
         rid, sid, role, content, calls, call_id, summary, ts, tool_name, displayed = row[:10]
         if summary or not displayed:
             continue
-        identity = (group(sid), display_key(role, content, ts, call_id, calls, tool_name))
-        per_segment[(identity, sid)] += 1
-        first.setdefault(identity, row)
+        text = strip(content, sid) if role == "user" else content
+        identity = (group(sid), display_key(role, text, ts, call_id, calls, tool_name))
+        first.setdefault(identity, (row, text))
+        if text == content:
+            plain.add(identity)
+            per_segment[(identity, sid)] += 1
+        else:  # merged rows of one text and time are one occurrence, and the same one as a plain row of it
+            merged.add((identity, sid))
+    for slot in merged - set(per_segment):
+        per_segment[slot] = 1
     copies, earlier = Counter(), Counter()
     for (identity, sid), n in per_segment.items():
         held = earlier if scored is not None and sid not in scored else copies
         held[identity] = max(held[identity], n)
     copies.subtract(earlier)  # per occurrence: a child that holds more copies than its earlier parent expects the rest
-    count, merged, texts, excluded = defaultdict(Counter), defaultdict(Counter), {}, Counter()
+    by_text = defaultdict(list)  # (lineage, user text) -> its identities, plain ones first, then by timestamp
+    for identity in sorted((i for i, n in copies.items() if n > 0), key=lambda i: (i not in plain, i[1][2] or 0)):
+        if identity[1][0] == "user" and multiset.norm(first[identity][1] or ""):
+            by_text[(identity[0], multiset.norm(first[identity][1]))].append(identity)
+    hand_checks = []
+    for (g, _text), identities in by_text.items():
+        dropped = [i for i in identities[1:] if i not in plain]
+        if dropped:
+            hand_checks.append({"reason": "merged_carrier_repeat", "lineage": g,
+                                "host_ids": sorted(first[i][0][0] for i in dropped)})
+            for identity in dropped:
+                copies[identity] = 0
+    count, texts, excluded = defaultdict(Counter), {}, Counter()
     for identity, n in copies.items():
         g = identity[0]
-        rid, sid, role, content, calls, call_id = first[identity][:6]
+        (rid, sid, role, content, calls, call_id), text = first[identity][0][:6], first[identity][1]
         if n <= 0:
             continue
         if role in ("user", "assistant") and multiset.norm(content or ""):
-            text = carrier_remainder(content, header) if role == "user" else content
             if role == "user" and (not multiset.norm(text) or text.lstrip().startswith(prefixes)):
                 excluded[g] += n  # an LCM generated carrier the host persisted: LCM's own output, never expected
             else:
                 key = (role, multiset.h(text))
                 texts[key] = text
-                (merged if text != content else count)[g][key] += n
+                count[g][key] += n
         if role in ("tool", "assistant"):
             for k in tool_calls.stored_keys([(rid, sid, role, content, calls, call_id)], lambda _s: g):
                 if k[1] != "malformed_tool_calls":
                     count[g][k] += n
-    for g, keys in merged.items():  # a merged carrier's text is new only beyond the plain rows that hold it
-        for key, n in keys.items():
-            count[g][key] = max(count[g][key], n)
     out = {}
     for g, keys in count.items():
         items = [(k[0], texts[k]) for k, n in sorted(keys.items(), key=repr) if k[0] in ("user", "assistant")
                  for _ in range(n)]
         out[g] = (items, Counter({k: n for k, n in keys.items() if k[0] not in ("user", "assistant")}))
-    return out, excluded
+    return out, excluded, hand_checks
 
 
 def read_store(path: Path):
@@ -279,7 +300,10 @@ def read_store(path: Path):
         leaves = Counter(r[0] for r in con.execute(
             "select session_id from summary_nodes where depth = 0 and source_type = 'messages'")) \
             if has_table(con, "summary_nodes") else Counter()  # dag.py:208-221
-    return rows, relations, uids, lineage, leaves
+        nodes = {r[0]: r[1:] for r in con.execute(
+            "select node_id, session_id, depth, summary, expand_hint from summary_nodes")} \
+            if has_table(con, "summary_nodes") else {}
+    return rows, relations, uids, lineage, leaves, nodes
 
 
 def log_time(stamp: str, tz, frac=None):
@@ -326,13 +350,13 @@ def row_key(role, content, calls, call_id):
         map(repr, tool_calls.stored_keys([(0, "", role, content, calls, call_id)]))))
 
 
-def host_row_key(row, header):
-    """``row_key`` of a host row, a user row's merged summary carrier taken off as LCM-X takes it off."""
-    _rid, _sid, role, content, calls, call_id = row[:6]
-    return row_key(role, carrier_remainder(content, header) if role == "user" else content, calls, call_id)
+def host_row_key(row, strip):
+    """``row_key`` of a host row, a user row's verified summary carrier taken off (``strip``)."""
+    _rid, sid, role, content, calls, call_id = row[:6]
+    return row_key(role, strip(content, sid) if role == "user" else content, calls, call_id)
 
 
-def undo_retained_rows(stored_rows, host_rows, header):
+def undo_retained_rows(stored_rows, host_rows, strip):
     """Stored rows that are a host undo's retained occurrence: neither expected nor surplus.
 
     A TUI undo soft-deletes the undone rows in the host (hermes_state_messages.py rewind_to_message: active = 0, with
@@ -348,7 +372,7 @@ def undo_retained_rows(stored_rows, host_rows, header):
     pool, live = Counter(), set()
     for row in host_rows:
         if row[7] is not None and (row[9] or row[10]):
-            slot = (row[1], host_row_key(row, header), float(row[7]))
+            slot = (row[1], host_row_key(row, strip), float(row[7]))
             if row[9]:
                 live.add(slot)
             else:
@@ -399,20 +423,21 @@ def read_events(path):
     return [e for e in events if isinstance(e, dict) and e.get("kind") in EVENT_KINDS]
 
 
-def view_order(host_rows, stored_rows, header):
+def view_order(host_rows, stored_rows, strip):
     """Section 5's view-order condition of #1674 and #2203, as far as the store and the host establish it: returns
-    ``in_order(session, upto)``, true when the session's stored rows up to store id ``upto`` follow the host's rows of
-    that session in order. The host's rows are every row it keeps (displayed or undone, not its summary row) in id
-    order, a carried clone that repeats an earlier row's key and timestamp dropped; the view an ingest saw is a prefix
-    of them. Each stored row is matched, in store-id order, to the next host row of its key after the last match; a
-    stored row with none is accepted only as a re-stored copy of a row already matched (the surplus itself), so a
-    host insertion stored before or with the copy (a #2305 insert) or a reordering leaves the session unordered.
+    ``in_order(session, copy)``: "ordered", "ambiguous" or "unplaced" for the session's stored rows before store id
+    ``copy``. The host's rows are every row it keeps (displayed or undone, not its summary row) in id order, a carried
+    clone that repeats an earlier row's key and timestamp dropped; the view an ingest saw is a prefix of them. Each
+    stored row takes one host row of its key, each host row at most once, in order, with no exception: "unplaced"
+    when no such matching exists (a host insertion stored before the copy, as a #2305 insert drained through a retry
+    route, a reordering, or an earlier re-stored copy). "ambiguous" when repeated text allows more than one matching
+    (the earliest and the latest matching up to the same last host row differ); else "ordered".
     ``stored_rows``: (store_id, session, role, content, tool_calls, tool_call_id), content resolved."""
     host, seen = defaultdict(list), set()
     for row in host_rows:
         if row[6] or not (row[9] or row[10]):
             continue
-        slot = (row[1], host_row_key(row, header), row[7])
+        slot = (row[1], host_row_key(row, strip), row[7])
         if slot not in seen:
             seen.add(slot)
             host[row[1]].append(slot[1])
@@ -420,17 +445,18 @@ def view_order(host_rows, stored_rows, header):
     for store_id, session, role, content, calls, call_id in sorted(stored_rows):
         stored[session].append((store_id, row_key(role, content, calls, call_id)))
 
-    def in_order(session, upto):
-        keys, pos, matched = host.get(session, []), 0, set()
-        for store_id, key in stored[session]:
-            if store_id > upto:
-                break
-            if key in keys[pos:]:
-                pos = keys.index(key, pos) + 1
-            elif key not in matched:
-                return False
-            matched.add(key)
-        return True
+    def in_order(session, copy):
+        keys, prefix, earliest = host.get(session, []), [k for i, k in stored[session] if i < copy], []
+        for key in prefix:
+            if key not in keys[earliest[-1] + 1 if earliest else 0:]:
+                return "unplaced"
+            earliest.append(keys.index(key, earliest[-1] + 1 if earliest else 0))
+        latest, pos = [], earliest[-1] if earliest else -1
+        for key in reversed(prefix):
+            pos = max(i for i in range(pos + 1) if keys[i] == key)
+            latest.append(pos)
+            pos -= 1
+        return "ordered" if earliest == latest[::-1] else "ambiguous"
     return in_order
 
 
@@ -443,11 +469,12 @@ def attribute_silent_surplus(silent, ingests, observed, user_rows, restarts, in_
     ``silent``: [(store_id, session, [(store_id, session)] of the copies of its key)]; ``observed``: store_id -> observed_at;
     ``user_rows``: store_id -> (session, text) for stored user rows (compared in memory only); ``restarts``: lineage ->
     driver restart times (restart_cold, restart_warm), or None without --events; ``in_order``: ``view_order``'s check.
-    #1674 and #2203 need the view-order condition (no host insertion or reordering): a row whose session's stored rows,
-    through the end of the recorder line's range, do not follow the host's rows in order is not attributed to either.
+    #1674 and #2203 need the view-order condition (no host insertion or reordering) on the session's stored rows
+    before the copy: "unplaced" leaves the row unattributed; "ambiguous" (repeated text) lists it under
+    ``order_ambiguous``, a hand check, not an exemption. #2203 also needs an earlier copy of the key in the session.
     An exempted row is still a hand check: the verdict is then GATE PASS PENDING HAND CHECK, never GATE PASS."""
-    out = {"#1674": [], "#2203": [], "#1674_needs_manual_check": [], "#849_needs_manual_check": [],
-           "#1961_needs_manual_check": [], "unattributed": []}
+    out = {"#1674": [], "#2203": [], "order_ambiguous": [], "#1674_needs_manual_check": [],
+           "#849_needs_manual_check": [], "#1961_needs_manual_check": [], "unattributed": []}
     prompts = defaultdict(list)  # session -> [(store_id, edge-stripped user text)]
     for other, (s, t) in user_rows.items():
         if multiset.norm(t):
@@ -458,7 +485,8 @@ def attribute_silent_surplus(silent, ingests, observed, user_rows, restarts, in_
         if len(lines) == 1:
             route, cursor, reason = lines[0]["route"], lines[0]["cursor"], lines[0]["reason"]
             # #1674 and #2203 both need an unstamped copy and the view-order condition (``in_order``).
-            eligible = observed.get(sid) is None and in_order(session, lines[0]["range"][1])
+            order = in_order(session, sid) if observed.get(sid) is None else "unplaced"
+            eligible, held = order != "unplaced", "#1674" if order == "ordered" else "order_ambiguous"
             text = multiset.norm(user_rows.get(sid, (None, ""))[1])
             if route == ROUTE_2305 and cursor == 0:
                 pass  # #2305's cursor-0 persisted batch: never exempted, never #1674 (section 5)
@@ -474,15 +502,16 @@ def attribute_silent_surplus(silent, ingests, observed, user_rows, restarts, in_
                 if restarts is None or lines[0]["at"] is None:
                     limit = "#1674_needs_manual_check"
                 elif any(t < lines[0]["at"] for t in restarts.get(session, ())):
-                    limit = "#1674"
+                    limit = held
             # #2203: a cold-start retry of a queued tail, through the ingest (route "cold", engine.py:7141) or the S3
             # retry (route "S3", engine.py:11794); or the exit drain, route "session_end" logged by the pending-tail
             # retry with exiting=True (engine.py:11844), told apart from an ordinary session-end flush (also
             # "session_end", engine.py:7142) by its reason, the tail match rule. The copy is unstamped, and the view
             # differs from the stored rows by no host insertion or reordering (``eligible``). "warm_tail" (a retry
             # that is not the exit drain) is neither section 5 shape, so it is not attributed.
-            elif eligible and (route in ("cold", "S3") or (route == "session_end" and reason in TAIL_RULES)):
-                limit = "#2203"
+            elif eligible and any(other < sid and other_session == session for other, other_session in ids) and (
+                    route in ("cold", "S3") or (route == "session_end" and reason in TAIL_RULES)):
+                limit = "#2203" if order == "ordered" else "order_ambiguous"
             # #849 (a composite of an unanswered prompt and the next prompt across a restart): the recorder has no
             # composite-path route, so only the row's shape is checked here, in memory: a user row whose text is
             # another prompt plus "\n\n" plus a user row stored apart in the same session.
@@ -521,7 +550,7 @@ def score_lineage(g, items, tools, rows, relations):
 
 def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, log_tz=None) -> dict:
     sessions, host_rows, has_compacted = read_host(state_db)
-    stored, relations, uids, store_lineage, leaves = read_store(lcm_db)
+    stored, relations, uids, store_lineage, leaves, nodes = read_store(lcm_db)
     log = read_logs(logs, log_tz)
     events = read_events(events_path)
     group = lineage_of(sessions)
@@ -532,8 +561,13 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     scored = in_window - aux
     roots = {group(s) for s in scored}
     markers = plugin_tree.carrier_markers(REPO)
-    expected, carriers = host_expected([r for r in host_rows if group(r[1]) in roots], group, markers, scored)
-    resolved, ext, _ids = externalized.resolve([r[:6] for r in stored], state_db.parent)
+
+    def strip(content, sid):  # a user row's text behind a summary carrier its store verifies (``carrier_remainder``)
+        return carrier_remainder(content, markers[0], nodes, lambda s: group(s) == group(sid))
+    expected, carriers, hand_checks = host_expected([r for r in host_rows if group(r[1]) in roots], group, markers,
+                                                    strip, scored)
+    # Payloads sit beside the state.db the link points to, not beside a symlink to it.
+    resolved, ext, _ids = externalized.resolve([r[:6] for r in stored], Path(state_db).resolve().parent)
     extra = {r[0]: r for r in stored}
 
     def audited(store_id):  # a scored session's row, or a row under no host session stored in the window
@@ -547,7 +581,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
             by_lineage[group(r[1])].append((*r, extra[r[0]][6]))
     lost_ids = [s for s in ext["store_ids"] if audited(s)]  # unreadable payloads: kept, even with no readable row
     retained = set(undo_retained_rows([r for rows in by_lineage.values() for r in rows],
-                                      [r for r in host_rows if r[1] in scored], markers[0]))
+                                      [r for r in host_rows if r[1] in scored], strip))
     for g, rows in by_lineage.items():  # kept rows of an undone occurrence: out of parity, surplus and M3's numerator
         by_lineage[g] = [r for r in rows if r[0] not in retained]
     lost = Counter(group(extra[s][1]) for s in lost_ids)
@@ -649,21 +683,26 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     user_rows = {r[0]: (r[1], r[3]) for r in resolved if r[2] == "user"}
     session_restarts = None if restarts is None else {s: restarts.get(group(s), []) for s in sessions}
     attributed = attribute_silent_surplus(sorted(silent_rows, key=lambda r: r[0]), ingests, observed, user_rows,
-                                          session_restarts, view_order(host_rows, resolved, markers[0]))
+                                          session_restarts, view_order(host_rows, resolved, strip))
     # Silent surplus counts copies per key, so a row holding two keys (content and a tool call) is listed once per
     # key; the gate's unattributed count stays in copies, and the row-based fraction counts distinct store ids.
-    exempt_copies = sum(len(attributed[k]) for k in ("#1674", "#2203"))
+    # An order_ambiguous row is held for a hand check: not unattributed, and counted in the fraction like an exemption.
+    exempt_copies = sum(len(attributed[k]) for k in ("#1674", "#2203", "order_ambiguous"))
     exempt_ids = set(attributed["#1674"]) | set(attributed["#2203"])
+    held_ids = exempt_ids | set(attributed["order_ambiguous"])
     exempt = len(exempt_ids)
     unattributed = totals["silent_surplus_rows"] - exempt_copies
     exempted = {"per_limit": {k: len(set(v)) for k, v in attributed.items()},
                 "store_ids": {k: sorted(set(v)) for k, v in attributed.items()}, "exempted_rows": exempt,
                 "unattributed_silent_rows": unattributed, "unattributed_silent_rows_unit": "key copies",
                 # Distinct store rows among them; rows past split_surplus's 10-example list have no id, each counted.
-                "unattributed_silent_distinct_rows": len({r[0] for r in silent_rows} - exempt_ids)
+                "unattributed_silent_distinct_rows": len({r[0] for r in silent_rows} - held_ids)
                 + totals["silent_unlisted_rows"], "stored_rows": denominator,
-                "fraction": exempt / denominator if denominator else 0.0}
+                "fraction": len(held_ids) / denominator if denominator else 0.0}
     exempted["met"] = exempted["fraction"] <= BAR
+    for limit, reason in (("#1674", "exempted_1674"), ("#2203", "exempted_2203"), ("order_ambiguous", "view_order_ambiguous")):
+        if attributed[limit]:
+            hand_checks.append({"reason": reason, "store_ids": sorted(set(attributed[limit]))})
 
     issue_1931 = {}
     for name, kids in buckets.items():
@@ -692,7 +731,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     data_bars = [b for b in bars if b != "coverage_floors"]
     verdict = "GATE FAIL" if not all(bars[b]["pass"] for b in data_bars) else \
         "INCOMPLETE" if not bars["coverage_floors"]["pass"] or not ingests else \
-        "GATE PASS PENDING HAND CHECK" if exempt else "GATE PASS"
+        "GATE PASS PENDING HAND CHECK" if hand_checks else "GATE PASS"
     return {"instrument": "gate-kit-audit-v1", "claim_class": "instrument",
             "inputs": {"since": since, "logs": len(logs), "events": events is not None, "log_tz": log_tz},
             "parity": {"totals": totals, "lineages": parity, "zero_row_lineages": zero,
@@ -704,7 +743,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
             "undo_retained": {"rows": len(retained), "store_ids": sorted(retained),
                               "host_rewind_count": {s: sessions[s]["rewind_count"] for s in sorted(scored)
                                                     if sessions[s]["rewind_count"]}}, "exempted_surplus": exempted, "issue_1931": issue_1931,
-            "gate": {"bars": bars, "verdict": verdict}}
+            "gate": {"bars": bars, "verdict": verdict, "hand_checks": hand_checks}}
 
 
 def out_refusal(out: Path, inputs, databases):

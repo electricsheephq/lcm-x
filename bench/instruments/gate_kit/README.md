@@ -56,9 +56,12 @@ identity counts as many times as the most displayed rows any one segment holds o
 the sum of those over the lineage's distinct identities. With `--since`, a scored segment expects only the copies of
 an identity beyond the most any earlier, unscored segment holds. Host summary rows (`_compressed_summary`) are not
 expected. A user row that begins with LCM's summary carrier (`[<Label> Summary (dN, node N)]` parts, each ending
-`[Expand for details: ...]`, as the host merges it with the next user row) is expected as the user text behind the
-carrier, as LCM-X matches it, but only beyond the plain rows of that text the lineage already expects (the merge
-copies a user row the host keeps); a row that is only a carrier, or begins with one of LCM-X's prefix carriers (objective,
+`[Expand for details: ...]`, as the host merges it with the next user row) is the user text behind the carrier, as
+LCM-X matches it, only when every part matches its node in the store byte for byte (LCM-X's verifier, engine.py
+`_verified_lcm_summary_prefix`; the node's session in the row's lineage); otherwise the whole row is ordinary user
+content. A merged row is one occurrence with a row of the same text and timestamp. A merged row of a text the lineage
+also holds at another timestamp may be the host's merged copy (a rotation handoff stamps it anew) or a resend: it is
+not counted and is listed for a hand check (`merged_carrier_repeat`). A row that is only a verified carrier, or begins with one of LCM-X's prefix carriers (objective,
 task list, overflow recovery), is not expected.
 
 Stored rows are scored with the reliability harness's B2 instruments, unchanged: `multiset.score` (user and assistant
@@ -75,13 +78,13 @@ rows), `tool_calls.stored_keys`/`compare` (tool calls and results), `externalize
 | `recorder` | `LCM ingest route:` lines per route; the #2305 rate (`persisted_batch` at cursor 0 over storing ingests); stripped links per replay pair; `recorder absent` when there is no line. |
 | `exempted_surplus` | silent surplus rows exempted under #1674 or #2203, rows listed for a hand check, unattributed rows, store ids for each, and the exempted fraction against the 1% bar. The fraction counts distinct store rows: a row with content and a tool call is one row under two keys. `unattributed_silent_rows` (the bar's value) counts key copies; `unattributed_silent_distinct_rows` counts store rows. The rules are `attribute_silent_surplus`. |
 | `issue_1931` | buckets A (`source = 'subagent'`) and B (any other source) of ended non-rotation children: n, children with 0 rows, missing, silent surplus, lineage rows matching the host parent; `pass_A`; AUXILIARY sessions excluded. |
-| `gate` | each bar's value and pass, and the verdict. |
+| `gate` | each bar's value and pass, the verdict, and `hand_checks`: each reason the verdict is held for a hand check (`merged_carrier_repeat` with host ids, `exempted_1674`, `exempted_2203` and `view_order_ambiguous` with store ids). |
 
 Bars: no lineage with expected rows and none stored; no exact-content deficit; no unresolved externalized payload (the
 unresolved row is also a deficit of the host row it held, as in B2); no unattributed silent surplus; exempted surplus
 at most 1%; M3 at most 1%; every floor met; #1931 PASS(A). The verdict is `GATE FAIL` when a data bar fails, else
-`INCOMPLETE` when a floor is unmet or the recorder is absent, else `GATE PASS PENDING HAND CHECK` when any row was
-exempted (its store ids are listed per limit), else `GATE PASS`.
+`INCOMPLETE` when a floor is unmet or the recorder is absent, else `GATE PASS PENDING HAND CHECK` when `hand_checks`
+names any reason, else `GATE PASS`.
 
 ## Surplus limits and recorder routes
 A silent surplus row is attributed only from the one `LCM ingest route:` line of its session whose stored range holds
@@ -97,10 +100,13 @@ it; none or several leave it unattributed. Route tokens are the recorder's (spac
 | #1961 carrier merge | `foreground` at cursor 0 (a warm engine) | the carrier merge needs the host view | hand check; stays silent |
 | #2305 | `persisted_batch` at cursor 0 | | never exempted |
 
-View order (`view_order`): the session's stored rows, through the end of the recorder line's range, follow the host's
-rows of the session (displayed or undone, in id order, carried clones dropped) in order; a stored row that matches no
-later host row passes only as a re-stored copy of a row already matched. A host insertion stored before or with the
-copy (a #2305 insert drained through a retry route) or a reordering fails it, and the row stays unattributed.
+View order (`view_order`): the session's stored rows before the copy each take one host row of the session
+(displayed or undone, in id order, carried clones dropped), each host row at most once, in order, with no exception.
+When no such matching exists (a host insertion stored before the copy, as a #2305 insert drained through a retry
+route, a reordering, or an earlier re-stored copy) the row stays unattributed. When repeated text allows more than one
+matching, the row is listed under `order_ambiguous`: a hand check, not an exemption (it counts in the fraction). #2203
+also needs an earlier copy of the key in the session. A rewrite that stores two rows again exempts only the first:
+the second's prefix holds the first copy, which no host row takes.
 
 `session_end` without a tail rule is an ordinary session-end flush, and `warm_tail` is a tail retry that is not the
 exit drain; neither is a section 5 shape, so they are not attributed. Rows listed for a hand check count as silent
@@ -125,9 +131,7 @@ under `issue_1931.auxiliary_unproven`.
   best-effort, and a copy it rewrote (a pruned tool result) keeps no match: such a copy counts as one more expected
   row, so the audit errs toward reporting a deficit, never toward hiding one. A host without the `compacted` column
   counts every row as displayed. The host's user-handoff normalisation is not repeated.
-- A summary carrier's parts are delimited by their structure, not verified against LCM-X's DAG as LCM-X does. A
-  merged carrier's text counts only beyond the plain rows that hold it, so a genuine resend of a text that the host
-  also merged behind a carrier counts once. A row
+- `--state-db` may be a symlink: externalized payloads are read beside its target. A row
   that begins with a prefix carrier (objective, task list, overflow recovery) is not expected, since where the carrier
   ends is not marked: if the host held a user's text only behind such a carrier, its loss would not show here.
 - A log without the session decision line (builds before it) can show an auxiliary child as a child with 0 rows.
