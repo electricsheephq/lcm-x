@@ -7,6 +7,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 ## Unreleased
 
 - Fix: the `lcm_memory` schema advertises the 256-character limit on `name` and each `aliases` entry that the tool already enforces, so a model sees the limit before calling (#1944 follow-up).
+- New: opt-in `recall_adjacent_reply` / `LCM_RECALL_ADJACENT_REPLY=true` places next-turn replies after the best raw recall hit and top-three question hits, within the existing hit limit and caps. Default-off, read-only, deadline-bounded; internal recall and session delivery retain their behavior.
 - Fix: compaction no longer leaves its per-pass message-to-store-id map in engine state after the pass. A later ingest could match a reused memory address against that stale map and store a carried "message ignored" placeholder as a real row (an extra row, nothing lost; v0.30.0 "0 silent surplus") (#2344).
 - Fix: `/lcm doctor clean apply`, `/lcm doctor repair apply`, the backup flush and the doctor FTS integrity checks take the store write lock, so a command that lands during a multi-row ingest waits for it to commit instead of rolling back or half-committing its rows (#2345).
 - Fix: the session-end raw-flush warning reports `unflushed=unknown` while the ingest cursor awaits reconciliation, and the count is described as a cursor-based estimate, not a durability count (#1364).

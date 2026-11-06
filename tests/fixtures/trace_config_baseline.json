@@ -95,6 +95,7 @@
     "proactive_recall_min_score": 0.01,
     "proactive_recall_provider": "",
     "query_views_enabled": false,
+    "recall_adjacent_reply": false,
     "recall_arm_weights": {
       "chunk": 1.0,
       "fts": 0.5,
