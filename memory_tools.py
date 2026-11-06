@@ -62,16 +62,17 @@ def _assertions(store, names, limit):
             FROM active GROUP BY namespace, subject_key ORDER BY namespace, subject_key LIMIT ?''',
             (CURRENT_EXTRACTION_VERSION, limit)).fetchall()
         return {'entities': [dict(row) for row in rows]}
+    fact_limit = min(limit, 200)
     marks = ','.join('?' for _ in names)
     namespaces = ','.join('?' for _ in _NAMESPACES)
     rows = conn.execute(f'''WITH active AS ({base}), matching AS (
         SELECT * FROM active WHERE namespace IN ({namespaces}) AND
         _lcm_entity_name(substr(subject_key,instr(subject_key,':')+1)) IN ({marks}))
         SELECT *, (SELECT count(DISTINCT namespace) FROM matching) AS namespace_count
-        FROM matching ORDER BY observed_at DESC, assertion_id LIMIT 201''',
-        [CURRENT_EXTRACTION_VERSION, *_NAMESPACES, *names]).fetchall()
+        FROM matching ORDER BY observed_at DESC, assertion_id LIMIT ?''',
+        [CURRENT_EXTRACTION_VERSION, *_NAMESPACES, *names, fact_limit + 1]).fetchall()
     facts = []
-    for row in rows[:200]:
+    for row in rows[:fact_limit]:
         store._validate_source_provenance(
             content=row['current_content'], expected_sha256=row['source_content_sha256'],
             span_start=row['source_span_start'], span_end=row['source_span_end'],
@@ -79,7 +80,7 @@ def _assertions(store, names, limit):
         facts.append({**{key: row[key] for key in ('subject_key', 'predicate_key', 'value_text',
                                                   'observed_at', 'source_store_id')},
                       'store_id': row['source_store_id']})
-    return {'facts': facts, 'facts_status': 'enabled', 'facts_truncated': len(rows) > 200,
+    return {'facts': facts, 'facts_status': 'enabled', 'facts_truncated': len(rows) > fact_limit,
             'ambiguous': bool(rows and rows[0]['namespace_count'] > 1)}
 
 
