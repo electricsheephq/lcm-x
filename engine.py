@@ -7644,7 +7644,7 @@ class LCMEngine(
                             new_rows = [(*row[:7], _normalize_conversation_id_value(row[7])) for row in new_rows]
                             keys = {(conv, role, call_id, calls, name) for _, role, _, call_id, calls, name, _, conv in new_rows}
                             # Only an earlier row whose content or stripped content equals a copy's can be a target,
-                            # so the scan keeps those rows alone: memory is bounded by the batch, not the session.
+                            # so the scan keeps those rows alone, not every earlier row of the session.
                             exact_wanted = {(conv, role, content, call_id, calls, name)
                                             for _, role, content, call_id, calls, name, _, conv in new_rows}
                             stripped_wanted = {(conv, role, ingest_ledger.stripped_replay_content(content), call_id, calls, name)
