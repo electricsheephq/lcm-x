@@ -1326,7 +1326,10 @@ def test_kept_conflict_exit_warning_names_the_stamp_conflict(engines, monkeypatc
                 locker.close()
         before = count(engine, "tail.unflushed")
         caplog.clear()
-        engine._retry_pending_session_tails(exiting=True)
+        # #2256: the shutdown budget, as shutdown() passes it; the 50 ms default could expire under CI load
+        # before the exit count ran, leaving the conservative "SQLite lock" label and the whole view count.
+        engine._retry_pending_session_tails(exiting=True, deadline=time.monotonic()
+                                            + maintenance_scheduler._SESSION_END_SHUTDOWN_TIMEOUT_MS / 1000)
         assert engine._pending_session_tails == [tail]
         rows = committed_rows(tail["store"].db_path, "S")
         absent_suffix = int(not any(r["content"] == "absent reply" for r in rows))
