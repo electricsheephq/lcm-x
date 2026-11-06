@@ -1,0 +1,188 @@
+name: Claude Code release
+
+# LCM-X for Claude Code is its own release unit (docs/claude-code-adapter.md, "Release mechanics").
+# Its tags are claude-code-v<version>; release.yml and plugin-payload.yml match v* (a prefix
+# glob), so they never fire on them. This workflow drafts the release; the release manager
+# publishes the draft by hand.
+on:
+  push:
+    tags: ["claude-code-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing claude-code-v<version> tag to rebuild into its draft release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: claude-code-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.tag.outputs.commit }}
+      version: ${{ steps.tag.outputs.version }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: Verify the tag, its version and its release notes
+        id: tag
+        run: |
+          [[ "$TAG" == claude-code-v* ]] || { echo "::error::$TAG is not a claude-code-v<version> tag"; exit 1; }
+          git check-ref-format "refs/tags/$TAG"
+          # Read the tag object and main from origin itself, not the checkout's copies.
+          git fetch --force --no-tags origin "+refs/tags/$TAG:refs/tags/$TAG" "+refs/heads/main:refs/remotes/origin/main"
+          if [[ "$(git cat-file -t "refs/tags/$TAG")" != tag ]]; then
+            echo "::error::$TAG is a lightweight tag; a unit release needs an annotated tag"
+            exit 1
+          fi
+          commit=$(git rev-parse "refs/tags/$TAG^{commit}")
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "::error::$TAG ($commit) is not on main"
+            exit 1
+          fi
+          version=$(git show "$commit:adapters/claude-code/.claude-plugin/plugin.json" \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])')
+          if [[ "$TAG" != "claude-code-v$version" ]]; then
+            echo "::error::$TAG does not match the plugin version $version at that commit"
+            exit 1
+          fi
+          if [[ ! -s ".github/release-notes/$TAG.md" ]]; then
+            echo "::error::Missing curated release notes: .github/release-notes/$TAG.md"
+            exit 1
+          fi
+          prerelease=false
+          [[ "$version" == *-* ]] && prerelease=true
+          {
+            echo "commit=$commit"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Build the unit asset
+        env:
+          COMMIT: ${{ needs.verify.outputs.commit }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$COMMIT"
+          python scripts/build_claude_code_unit.py "$TAG" --out dist/
+          cd dist
+          sha256sum -c "lcm-x-claude-code-$VERSION.tar.gz.sha256"
+          # bundle.json is written only inside the archive; attach a copy beside it.
+          tar -xzf "lcm-x-claude-code-$VERSION.tar.gz" --strip-components=1 "lcm-x-claude-code-$VERSION/bundle.json"
+          python - <<'EOF'
+          import json, os
+          bundle = json.load(open("bundle.json"))
+          expected = {"unit": os.environ["VERSION"], "ref": os.environ["TAG"], "core_commit": os.environ["COMMIT"]}
+          assert all(bundle[key] == value for key, value in expected.items()), bundle
+          EOF
+          ls -l
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: claude-code-unit
+          path: dist/
+          if-no-files-found: error
+
+  smoke:
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: CLI smoke of the unit built from the tag (venv and found runtimes)
+        env:
+          COMMIT: ${{ needs.verify.outputs.commit }}
+        run: |
+          test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$COMMIT"
+          mkdir -p smoke
+          status=0
+          for runtime in venv found; do
+            python scripts/claude_code_unit_smoke.py --ref "$TAG" --runtime "$runtime" > "smoke/smoke-$runtime.json" || status=1
+            cat "smoke/smoke-$runtime.json"
+          done
+          exit "$status"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: claude-code-smoke-py${{ matrix.python-version }}
+          path: smoke/
+          if-no-files-found: error
+
+  release:
+    needs: [verify, build, smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      - name: Refuse to touch a published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" == false ]]; then
+            echo "::error::$TAG already has a published release; a re-run only rebuilds its draft"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: claude-code-unit
+          path: dist/
+
+      - name: Create the draft GitHub Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          tag_name: ${{ env.TAG }}
+          body_path: .github/release-notes/${{ env.TAG }}.md
+          draft: true
+          prerelease: ${{ needs.verify.outputs.prerelease }}
+          make_latest: "false"
+          generate_release_notes: false
+          fail_on_unmatched_files: true
+          files: |
+            dist/lcm-x-claude-code-${{ needs.verify.outputs.version }}.tar.gz
+            dist/lcm-x-claude-code-${{ needs.verify.outputs.version }}.tar.gz.sha256
+            dist/bundle.json
