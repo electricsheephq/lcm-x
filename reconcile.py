@@ -334,6 +334,11 @@ class _TailReplayRun:
     native_prefix_digests: dict[int, str] = field(init=False)
     engine_prefix_digests: dict[int, str] = field(init=False)
     session_end_prefix_digests: dict[int, str] = field(init=False)
+    # Pure identity transforms, scoped to this reconciliation invocation.
+    generationless_identities: dict[
+        tuple[str, str, str, str, str], tuple[str, str, str, str, str]
+    ] = field(default_factory=dict, init=False)
+    generationless_sanitized_tail: list[tuple[str, str, str, str, str]] | None = field(default=None, init=False)
 
 
 @dataclass(eq=False, repr=False)
@@ -1998,13 +2003,20 @@ class ReconcileMixin:
         )
         matches_inline_generation_cleanup_tail = False
         if candidate_has_unrecoverable_persisted_marker:
-            generationless_sanitized_tail = [
-                self._strip_inline_persisted_output_generation_identity(identity)
-                for identity in sanitized_replay_tail
-            ]
+            def generationless_identity(identity):
+                cached = run.generationless_identities.get(identity)
+                if cached is None:
+                    cached = self._strip_inline_persisted_output_generation_identity(identity)
+                    run.generationless_identities[identity] = cached
+                return cached
+
+            if run.generationless_sanitized_tail is None:
+                run.generationless_sanitized_tail = [
+                    generationless_identity(identity) for identity in sanitized_replay_tail
+                ]
+            generationless_sanitized_tail = run.generationless_sanitized_tail
             generationless_candidate_prefix = [
-                self._strip_inline_persisted_output_generation_identity(identity)
-                for identity in candidate_prefix
+                generationless_identity(identity) for identity in candidate_prefix
             ]
             matches_inline_generation_cleanup_tail = self._matches_store_tail_suffix(
                 generationless_sanitized_tail,
