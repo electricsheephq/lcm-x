@@ -222,7 +222,7 @@ def test_negative_control_kill_after_the_reply_is_flushed(tmp_path, monkeypatch)
 
 
 
-@pytest.mark.xfail(strict=True, reason="out of scope (ruled on 2026-10-01 in #546, closed): #519 T4: after R1 stored T17 as the child's first row, a second restart restores "
+@pytest.mark.xfail(strict=True, reason="not planned (ruled on 2026-10-01 in #546, closed): #519 T4: after R1 stored T17 as the child's first row, a second restart restores "
                    "T16 + '\\n\\n' + T17 (the host's restore-time merge). #535 N1's composite arm accepts it at the last "
                    "output position, but the durable walk's post-proof row check (proof_identity(messages[index]) != "
                    "proof_identity(row, stored_row=True, with_host_rewrite=True)) compares that composite with stored row "
