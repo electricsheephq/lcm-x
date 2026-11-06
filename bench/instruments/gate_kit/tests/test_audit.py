@@ -45,7 +45,8 @@ def turn(i, sid="S1"):
 
 
 class Home:
-    """``sessions``: {id: (source, parent, ended_at, end_reason)}; host and store rows: [(session, message)]."""
+    """``sessions``: {id: (source, parent, ended_at, end_reason)}; host and store rows: [(session, message)]. A host
+    row's timestamp is its own unless the message names one (``_ts``): a carried handoff copy takes its original's."""
 
     def __init__(self, tmp_path, sessions, host, stored=None, *, relations=(), lineage=(), nodes=(), stamps=()):
         self.dir = tmp_path / "home"
@@ -55,16 +56,21 @@ class Home:
             con.execute("create table sessions (id text primary key, source text not null, parent_session_id text,"
                         " started_at real not null, ended_at real, end_reason text)")
             con.execute("create table messages (id integer primary key autoincrement, session_id text not null,"
-                        " role text not null, content text, tool_call_id text, tool_calls text, timestamp real not null,"
-                        " active integer not null default 1)")
-            for i, (sid, (source, parent, ended, reason)) in enumerate(sessions.items()):
-                con.execute("insert into sessions values (?,?,?,?,?,?)", (sid, source, parent, 1000.0 + i, ended, reason))
-            for sid, m in host:
-                con.execute("insert into messages (session_id, role, content, tool_call_id, tool_calls, timestamp)"
-                            " values (?,?,?,?,?,?)", (sid, m["role"], m.get("content"), m.get("tool_call_id"),
-                                                       json.dumps(m["tool_calls"]) if m.get("tool_calls") else None, 1.0))
+                        " role text not null, content text, tool_call_id text, tool_calls text, tool_name text,"
+                        " timestamp real not null, _compressed_summary integer not null default 0,"
+                        " active integer not null default 1, compacted integer not null default 0)")
+            for i, (sid, (source, parent, ended, reason, *started)) in enumerate(sessions.items()):
+                con.execute("insert into sessions values (?,?,?,?,?,?)",
+                            (sid, source, parent, started[0] if started else 1000.0 + i, ended, reason))
+            for n, (sid, m) in enumerate(host):
+                con.execute("insert into messages (session_id, role, content, tool_call_id, tool_calls, timestamp,"
+                            " active, compacted) values (?,?,?,?,?,?,?,?)",
+                            (sid, m["role"], m.get("content"), m.get("tool_call_id"),
+                             json.dumps(m["tool_calls"]) if m.get("tool_calls") else None, m.get("_ts", 2000.0 + n),
+                             m.get("_active", 1), m.get("_compacted", 0)))
         store = MessageStore(self.lcm)
-        self.ids = [store.append(sid, dict(m, **({"timestamp": 1700000000.0 + n} if n in stamps else {})))
+        self.ids = [store.append(sid, {k: v for k, v in m.items() if not k.startswith("_")}
+                                 | ({"timestamp": 1700000000.0 + n} if n in stamps else {}))
                     for n, (sid, m) in enumerate(host if stored is None else stored)]
         if relations:
             store.add_message_relations([[(s, kind, o, None, None)] for s, kind, o in relations])
@@ -141,20 +147,58 @@ def test_child_buckets(tmp_path):
     assert (a_["n"], a_["zero_row_children"], a_["missing_rows"]) == (1, ["A1"], 2)
     assert (b_["n"], b_["zero_row_children"], b_["missing_rows"]) == (1, ["B1"], 2)
     assert out["issue_1931"]["pass_A"] is False
-    assert out["parity"]["zero_row_lineages"] == ["A1"]  # the B child is reported, not gated
-    assert out["parity"]["lineages"]["B1"]["gates"] is False
-    assert out["parity"]["totals"]["missing_rows"] == 2
+    assert out["parity"]["zero_row_lineages"] == ["A1", "B1"]  # whole-run parity counts bucket B too
+    assert out["parity"]["totals"]["missing_rows"] == 4
+
+
+def test_a_b_child_with_a_missing_row_fails_the_gate(tmp_path):
+    host = turn(1, "P") + turn(2, "A1") + turn(3, "B1")
+    out = Home(tmp_path, CHILDREN, host, stored=host[:-1]).run()
+    assert out["issue_1931"]["B"]["missing_rows"] == 1 and out["parity"]["totals"]["missing_rows"] == 1
+    assert out["gate"]["bars"]["exact_content_deficits"] == {"value": 1, "pass": False}
+    assert out["gate"]["verdict"] == "GATE FAIL"
+
+
+def test_a_b_child_with_nothing_expected_is_reported_not_gated(tmp_path):
+    host = turn(1, "P") + turn(2, "A1")
+    out = Home(tmp_path, CHILDREN, host).run()
+    assert out["issue_1931"]["B"]["zero_row_children"] == ["B1"]
+    assert out["parity"]["zero_row_lineages"] == [] and out["gate"]["bars"]["zero_row_sessions"]["pass"]
+
+
+def test_a_top_level_session_with_zero_rows_fails(tmp_path):
+    out = Home(tmp_path, ONE, turn(1), stored=[]).run()
+    assert out["parity"]["zero_row_lineages"] == ["S1"]
+    assert out["gate"]["bars"]["zero_row_sessions"] == {"value": 1, "pass": False}
 
 
 def test_lineage_row_counts_for_bucket_a_and_rotation_child_joins_its_parent(tmp_path):
     sessions = {"P": ("cli", None, 1000.5, "compression"), "P2": ("cli", "P", 3000.0, "user_exit"),
                 "A1": ("subagent", "P2", 2500.0, "completed")}
-    host = turn(1, "P") + turn(1, "P2") + turn(2, "P2") + turn(3, "A1")  # P2 re-issues turn 1
-    stored = turn(1, "P") + turn(2, "P2") + turn(3, "A1")
+    carried = [("P2", dict(m, _ts=2000.0 + n)) for n, (_s, m) in enumerate(turn(1, "P"))]  # the handoff copy
+    host = turn(1, "P") + carried + turn(2, "P2") + [("P2", u("question 1"))] + turn(3, "A1")  # then a real repeat
+    stored = turn(1, "P") + turn(2, "P2") + [("P2", u("question 1"))] + turn(3, "A1")
     out = Home(tmp_path, sessions, host, stored=stored, lineage=[("A1", "P2")]).run()
     assert out["parity"]["sessions"]["P2"]["lineage"] == "P"
+    assert out["parity"]["lineages"]["P"]["expected_rows"] == 5
     assert out["parity"]["totals"]["missing_rows"] == out["parity"]["totals"]["surplus_rows"] == 0
     assert out["issue_1931"]["A"]["lineage_present"] == 1 and out["issue_1931"]["B"]["n"] == 0
+
+
+def test_a_repeat_split_across_segments_is_expected_twice(tmp_path):
+    # A parent's originals stay in the parent; the child holds only the handoff. The same text sent once in each
+    # segment is two occurrences (the most copies in one segment would be one).
+    sessions = {"P": ("cli", None, 1000.5, "compression"), "P2": ("cli", "P", 3000.0, "user_exit")}
+    host = [("P", u("yes")), ("P2", u("yes"))]
+    out = Home(tmp_path, sessions, host, stored=host[:1]).run()
+    assert out["parity"]["totals"]["missing_rows"] == 1
+
+
+def test_in_place_rewound_rows_are_not_expected(tmp_path):
+    host = turn(1) + [("S1", dict(u("question 2"), _active=0)),  # rewound: not displayed
+                      ("S1", dict(u("question 3"), _active=0, _compacted=1))]  # archived history: displayed
+    out = Home(tmp_path, ONE, host, stored=turn(1) + [("S1", u("question 3"))]).run()
+    assert out["parity"]["totals"]["missing_rows"] == 0 and out["parity"]["totals"]["expected_rows"] == 3
 
 
 def test_m3_rate_and_ids(tmp_path):
@@ -173,9 +217,12 @@ def test_recorder_parsing_and_2305_rates(tmp_path):
     assert (r["storing_ingests"], r["rate_2305"], r["stripped_per_replay_pair"]) == (4, 1 / 4, 0.25)
 
 
-def attribution(tmp_path, log, stored_extra, stamps=frozenset({0}), host=None):
+RESTART_BEFORE = [{"t": 0.0, "kind": "restart_cold", "session": "S1"}]
+
+
+def attribution(tmp_path, log, stored_extra, stamps=frozenset({0}), host=None, events=RESTART_BEFORE):
     host = host or turn(1)
-    return Home(tmp_path, ONE, host, stored=host + stored_extra, stamps=stamps).run(log)["exempted_surplus"]
+    return Home(tmp_path, ONE, host, stored=host + stored_extra, stamps=stamps).run(log, events)["exempted_surplus"]
 
 
 @pytest.mark.parametrize("line", [None, ("persisted_batch", 0), ("advanced_cursor", 2), ("advanced_cursor", 0)])
@@ -193,6 +240,23 @@ def test_1674_needs_an_earlier_stamped_copy(tmp_path):
     assert ex["store_ids"]["#1674"] == [] and ex["store_ids"]["unattributed"] == [3]
 
 
+@pytest.mark.parametrize("events,limit", [(None, "#1674_needs_manual_check"), ([], "unattributed"),
+                                          ([{"t": 4e9, "kind": "restart_warm", "session": "S1"}], "unattributed"),
+                                          ([{"t": 0.0, "kind": "restart_cold", "session": "S9"}], "unattributed"),
+                                          (RESTART_BEFORE, "#1674")], ids=["no-events", "none", "after", "other", "before"])
+def test_1674_needs_a_restart_before_the_recorder_line(tmp_path, events, limit):
+    ex = attribution(tmp_path, [route("S1", "advanced_cursor", 2, 3, 3)], [("S1", u("question 1"))], events=events)
+    assert ex["store_ids"][limit] == [3]
+    assert ex["exempted_rows"] == (limit == "#1674")
+
+
+@pytest.mark.parametrize("lines", [[route("S1", "S3", 0, 3, 3), route("S1", "S3", 0, 2, 4)], [route("S9", "S3", 0, 3, 3)]],
+                         ids=["overlapping", "other-session"])
+def test_attribution_needs_exactly_one_line_of_the_rows_session(tmp_path, lines):
+    ex = attribution(tmp_path, ["".join(lines)], [("S1", u("question 1"))])
+    assert ex["store_ids"]["unattributed"] == [3]
+
+
 @pytest.mark.parametrize("name,reason,limit", [("S3", "tail retry", "#2203"), ("cold", "append", "#2203"),
                                                ("session_end", "digest", "#2203"),
                                                ("session_end", "append", "unattributed"),
@@ -201,6 +265,11 @@ def test_2203_routes(tmp_path, name, reason, limit):
     line = route("S1", name, 0, 3, 3).replace("reason=some reason text", f"reason={reason}")
     ex = attribution(tmp_path, [line], [("S1", u("question 1"))])
     assert ex["store_ids"][limit] == [3]
+
+
+def test_2203_needs_an_unstamped_copy(tmp_path):
+    ex = attribution(tmp_path, [route("S1", "S3", 0, 3, 3)], [("S1", u("question 1"))], stamps=frozenset({0, 2}))
+    assert ex["store_ids"]["#2203"] == [] and ex["store_ids"]["unattributed"] == [3]
 
 
 def test_849_and_1961_are_listed_for_a_hand_check_and_stay_silent(tmp_path):
@@ -226,6 +295,37 @@ def test_auxiliary_children_are_excluded(tmp_path, line):
     assert out["parity"]["zero_row_lineages"] == [] and out["parity"]["totals"]["missing_rows"] == 0
 
 
+def test_a_frame_marker_auxiliary_subagent_child_stays_scored(tmp_path):
+    line = ("2026-11-06 10:00:00,000 INFO hermes_lcm.engine: LCM session decision: session=A1 platform=subagent "
+            "parent=P decision=auxiliary reason=frame_marker engine=lcm\n")
+    out = Home(tmp_path, {k: v for k, v in CHILDREN.items() if k != "B1"}, turn(1, "P") + turn(2, "A1"),
+               stored=turn(1, "P")).run([line])
+    assert out["issue_1931"]["auxiliary_excluded"] == []
+    assert out["issue_1931"]["A"]["zero_row_children"] == ["A1"] and out["issue_1931"]["pass_A"] is False
+    assert out["parity"]["zero_row_lineages"] == ["A1"]
+
+
+def test_lines_of_other_loggers_or_mid_message_do_not_count(tmp_path):
+    log = ("2026-11-06 10:00:00,000 INFO [S1] gateway.run: LCM ingest route: session=S1 route=S3 cursor=0 reason=x "
+           "stored=3-3 rows=1 replay_pairs=0 stripped=0\n"
+           "2026-11-06 10:00:00,000 INFO [S1] hermes_lcm.engine: quoted: LCM compaction #1: done\n"
+           "2026-11-06 10:00:00,000 INFO hermes_lcm.engine: echo LCM session decision: session=S1 platform=cli parent=- "
+           "decision=auxiliary reason=background_review engine=lcm\n")
+    out = Home(tmp_path, ONE, turn(1)).run([log])
+    assert out["recorder"]["present"] is False and out["coverage"]["compactions"]["value"] == 0
+    assert out["issue_1931"]["auxiliary_excluded"] == [] and "S1" in out["parity"]["lineages"]
+
+
+def test_compaction_lines_are_deduplicated_and_limited_to_scored_sessions_in_the_window(tmp_path):
+    inside = datetime(2026, 11, 6, 10, 0, tzinfo=timezone.utc).timestamp()
+    sessions = {"OLD": ("cli", None, None, None, inside - 7200), "S1": ("cli", None, None, None, inside - 60)}
+    line = "{} INFO [{}] hermes_lcm.compaction: LCM compaction #{}: done\n"
+    log = (line.format("2026-11-06 10:00:00,000", "S1", 1) + line.format("2026-11-06 10:00:05,000", "S1", 2)
+           + line.format("2026-11-06 10:00:06,000", "OLD", 1) + line.format("2026-11-06 08:00:00,000", "S1", 1))
+    out = Home(tmp_path, sessions, turn(1, "OLD") + turn(2, "S1")).run([log, log], since=inside - 3600, log_tz="UTC")
+    assert out["coverage"]["compactions"]["value"] == 2  # S1's two in-window lines, each logged to both files
+
+
 def test_a_store_decision_is_not_auxiliary(tmp_path):
     line = ("2026-11-06 10:00:00,000 INFO hermes_lcm.engine: LCM session decision: session=A1 platform=subagent "
             "parent=P decision=delegate_child reason=subagent_start engine=lcm\n")
@@ -249,7 +349,7 @@ def test_unknown_log_tz_is_an_input_error(tmp_path):
     assert stop.value.code == 2
 
 
-def floor_run(tmp_path, *, compactions=20):
+def floor_run(tmp_path, *, compactions=20, recorder=True, replay=False):
     sessions = {"P": ("cli", None, 9000.0, "user_exit"), "T": ("telegram", None, 9000.0, "user_exit")}
     host, lineage = [], []
     for k in range(5):
@@ -264,8 +364,13 @@ def floor_run(tmp_path, *, compactions=20):
     events = [{"t": 1e10, "kind": k, "session": "P"} for k in ("restart_cold", "restart_warm", "undo_resend")
               for _ in range(5)] + [{"t": 1e10, "kind": "undo_resend", "session": "P"}] * 5
     log = "".join(f"2026-11-06 10:00:{i:02d},000 INFO [P] hermes_lcm.compaction: LCM compaction #{i + 1}: done\n"
-                  for i in range(compactions)) + route("P", "foreground", 0, 1, 2)
-    home = Home(tmp_path, sessions, host, lineage=lineage, nodes=[("P", [11])])
+                  for i in range(compactions)) + (route("P", "foreground", 0, 1, 2) if recorder else "")
+    stored, stamps = host, ()
+    if replay:  # one #1674 copy of P's first prompt (host row 10), after a restart
+        stored, stamps = host + [("P", u("question 0"))], {10}
+        log += route("P", "advanced_cursor", 2, len(host) + 1, len(host) + 1)
+        events = events + [{"t": 0.0, "kind": "restart_cold", "session": "P"}]
+    home = Home(tmp_path, sessions, host, stored, lineage=lineage, nodes=[("P", [11])], stamps=stamps)
     return home.run([log], events)
 
 
@@ -275,7 +380,7 @@ def test_every_floor_met_gives_gate_pass_and_an_unmet_floor_gives_incomplete(tmp
     assert {k: c["value"] for k, c in out["coverage"].items()} == {
         "turns": 196, "delegated_children": 5, "compactions": 20, "compactions_then_restart": 20, "restarts": 10,
         "restarts_cold": 5, "restarts_warm": 5, "undo_resend": 10, "tool_calls": 50, "tool_call_repeats": 10,
-        "host_sources": 3}
+        "host_sources": 2}  # cli and telegram; subagent children are not entry points
     assert out["coverage_basis"]["store_depth0_message_leaves"] == 1
     failing = {k for k, c in out["coverage"].items() if not c["met"]}
     assert failing == {"turns", "delegated_children"}
@@ -285,6 +390,13 @@ def test_every_floor_met_gives_gate_pass_and_an_unmet_floor_gives_incomplete(tmp
     monkeypatch.setitem(audit.FLOORS, "delegated_children", 5)
     (tmp_path / "pass").mkdir()
     assert floor_run(tmp_path / "pass")["gate"]["verdict"] == "GATE PASS"
+    (tmp_path / "absent").mkdir()
+    absent = floor_run(tmp_path / "absent", recorder=False)
+    assert absent["recorder"]["status"] == "recorder absent" and absent["gate"]["verdict"] == "INCOMPLETE"
+    (tmp_path / "replay").mkdir()
+    replay = floor_run(tmp_path / "replay", replay=True)
+    assert replay["exempted_surplus"]["store_ids"]["#1674"] == [493]  # 492 host rows, then the copy
+    assert replay["gate"]["verdict"] == "GATE PASS PENDING HAND CHECK"
 
 
 def test_no_events_reports_unknown_floors(tmp_path):
@@ -303,9 +415,29 @@ def test_output_holds_no_content_and_sources_open_read_only(tmp_path, capsys):
     host = turn(1) + [("S1", call("c1")), ("S1", result("c1"))] + turn(2)
     home = Home(tmp_path, ONE, host, stored=host[:3] + [host[0]], relations=[(4, "possible_replay_of", 1)])
     before = {p: p.read_bytes() for p in (home.state, home.lcm)}
+    files = sorted(p.name for p in home.dir.iterdir())
     out = tmp_path / "result.json"
     assert audit.main(["--state-db", str(home.state), "--lcm-db", str(home.lcm), "--out", str(out)]) == 0
     text, printed = out.read_text(), capsys.readouterr().out
     assert S not in text and S not in printed and "verdict: GATE FAIL" in printed
     assert json.loads(text)["parity"]["totals"]["missing_rows"] == 3  # the result and turn 2
     assert {p: p.read_bytes() for p in before} == before
+    assert sorted(p.name for p in home.dir.iterdir()) == files  # immutable=1: no -wal or -shm beside the sources
+
+
+def test_a_non_empty_wal_file_is_refused(tmp_path):
+    home = Home(tmp_path, ONE, turn(1))
+    Path(f"{home.lcm}-wal").write_bytes(b"pending pages")
+    with pytest.raises(SystemExit) as stop:
+        audit.main(["--state-db", str(home.state), "--lcm-db", str(home.lcm), "--out", str(tmp_path / "r.json")])
+    assert stop.value.code == 2 and not (tmp_path / "r.json").exists()
+
+
+def test_an_unresolved_externalized_payload_fails_its_own_bar(tmp_path):
+    ref = "missing-payload.json"
+    placeholder = (f"[Externalized tool output: tool=read_file; tool_call_id=c1; chars=10; bytes=10; "
+                   f'read it with lcm_expand(externalized_ref="{ref}"); ref={ref}]')
+    host = turn(1) + [("S1", call("c1")), ("S1", result("c1"))]
+    out = Home(tmp_path, ONE, host, stored=host[:3] + [("S1", dict(result("c1"), content=placeholder))]).run()
+    assert out["gate"]["bars"]["externalized_unresolved"] == {"value": 1, "pass": False}
+    assert out["parity"]["totals"]["missing_rows"] == 1  # the host's result is a deficit too, as in B2
