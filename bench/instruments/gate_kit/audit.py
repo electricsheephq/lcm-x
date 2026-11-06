@@ -359,6 +359,10 @@ def read_logs(paths, tz=None):
                 if identity not in seen_ingests:  # a line logged to two files is one ingest
                     seen_ingests.add(identity)
                     out["ingests"].append(record)
+    # ACP stderr omits the session: prefer a matching session-bearing file record, while keeping distinct sessions.
+    session_records = {(at, msg) for sid, at, msg in out["compactions"] if sid is not None}
+    out["compactions"] = {(sid, at, msg) for sid, at, msg in out["compactions"]
+                          if sid is not None or (at, msg) not in session_records}
     return out
 
 
@@ -686,7 +690,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     value = {"turns": turns, "delegated_children": sum(1 for k in buckets["A"] if k in parity),
              "compactions": len(compaction_lines) if logs else "unknown", "compactions_then_restart": then_restart,
              "tool_calls": sum(calls.values()), "tool_call_repeats": sum(n - 1 for n in calls.values()),
-             "host_sources": len({sessions[s]["source"] for s in in_window} - NOT_ENTRY_SOURCES)}
+             "host_sources": len({sessions[s]["source"] for s in scored} - NOT_ENTRY_SOURCES)}
     for name, kind in (("restarts_cold", "restart_cold"), ("restarts_warm", "restart_warm"), ("undo_resend", "undo_resend")):
         value[name] = kinds[kind] if kinds is not None else "unknown"
     value["restarts"] = value["restarts_cold"] + value["restarts_warm"] if kinds is not None else "unknown"
@@ -699,7 +703,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
                       "compress_request_window_s": list(COMPRESS_REQUEST_WINDOW),
                       "store_depth0_message_leaves": sum(n for s, n in leaves.items() if group(s) in parity),
                       "delegated_children": "ended, scored #1931 bucket A children",
-                      "host_sources": "distinct sessions.source in the window, without subagent and tool",
+                      "host_sources": "distinct scored sessions.source in the window, without subagent and tool",
                       "restarts_undo": "driver events" if events is not None else "no events given",
                       "expected_rows": "host display identity per lineage" if has_compacted else
                                        "host display identity per lineage (no compacted column: every row displayed)"}
@@ -797,16 +801,17 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
 
 
 def out_refusal(out: Path, inputs, databases):
-    """Why ``--out`` may not be written, or None: it is (or resolves to, or is a hard link of) an input, or it sits in
-    a database's directory, beside the -wal and -journal files the audit must not disturb."""
+    """Why ``--out`` may not be written, or None: it is (or resolves to, or is a hard link of) an input, or it sits
+    in or under a database's directory (including the audited home's externalized payloads)."""
     target = out.resolve()
     for path in inputs:
         if path is not None and Path(path).exists() and (
                 target == Path(path).resolve() or out.exists() and os.path.samefile(out, path)):
             return f"--out is the input {Path(path).name}"
     for db in databases:
-        if target.parent in (Path(db).resolve().parent, Path(db).absolute().parent):
-            return f"--out is in the directory of {Path(db).name}: write the result elsewhere"
+        if (target.is_relative_to(Path(db).resolve().parent)
+                or out.absolute().is_relative_to(Path(db).absolute().parent)):
+            return f"--out is under the directory of {Path(db).name}: write the result elsewhere"
     return None
 
 
@@ -833,7 +838,10 @@ def main(argv=None) -> int:
     ap.add_argument("--log-tz", help="zoneinfo name the log times are in (default: this machine's local zone)")
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args(argv)
-    refusal = out_refusal(a.out, [a.state_db, a.lcm_db, a.events, *a.log], [a.state_db, a.lcm_db])
+    inputs = [a.state_db, a.lcm_db, a.events, *a.log]
+    # Protect payload targets too, including files symlinked out of the audited home.
+    inputs.extend((a.state_db.resolve().parent / externalized.PAYLOAD_DIRNAME).glob("*"))
+    refusal = out_refusal(a.out, inputs, [a.state_db, a.lcm_db])
     if refusal:
         ap.exit(2, f"audit refused: {refusal}\n")
     try:
