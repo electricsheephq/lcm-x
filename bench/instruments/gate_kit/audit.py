@@ -72,8 +72,9 @@ ROUTE = re.compile(r"^LCM ingest route: session=(?P<session>\S+) route=(?P<route
 ROUTE_2305 = "persisted_batch"  # at cursor 0: reconcile.py "persisted ambiguous delta", the #2305 shape
 # The pending-tail retry logs its match rule as the reason (engine.py _match_pending_tail): only these mark a drain.
 TAIL_RULES = frozenset({"digest", "off", "no_ledger", "salt_changed", "read_failed"})
-EVENT_KINDS = ("restart_cold", "restart_warm", "undo_resend", "delegate_prompt", "compress_request")
-RESTARTS = ("restart_cold", "restart_warm")
+EVENT_KINDS = ("restart_cold", "restart_cold_shared", "restart_warm", "undo_resend", "delegate_prompt",
+               "compress_request", "compress_request_failed")
+RESTARTS = ("restart_cold", "restart_cold_shared", "restart_warm")
 
 
 def ro(path: Path) -> sqlite3.Connection:
@@ -311,8 +312,15 @@ def attribute_compactions(lines, events):
     """Give each compaction line without a session the session of the nearest unused driver compress_request whose
     time it falls within (COMPRESS_REQUEST_WINDOW); a line left without one keeps None (it counts toward compactions,
     never toward compactions_then_restart). Returns the lines and how many stayed without a session."""
-    requests = sorted((float(e.get("t") or 0), str(e.get("session") or "")) for e in events or ()
-                      if e["kind"] == "compress_request")
+    requests, pending = [], {}
+    for e in events or ():
+        sid = str(e.get("session") or "")
+        if e["kind"] == "compress_request":
+            pending[sid] = len(requests)
+            requests.append((float(e.get("t") or 0), sid))
+        elif e["kind"] == "compress_request_failed" and sid in pending:
+            requests[pending.pop(sid)] = None
+    requests = sorted(r for r in requests if r is not None)
     used, out = set(), []
     for sid, at in lines:
         if sid is None and at is not None:
@@ -350,7 +358,7 @@ def attribute_silent_surplus(silent, ingests, observed, user_rows, restarts):
     recorder PR's engine.py (``_log_ingest_route`` at 7140-7160).
     ``silent``: [(store_id, session, [(store_id, session)] of the copies of its key)]; ``observed``: store_id -> observed_at;
     ``user_rows``: store_id -> (session, text) for stored user rows (compared in memory only); ``restarts``: lineage ->
-    driver restart times (restart_cold, restart_warm), or None without --events.
+    driver restart times (restart_cold, restart_cold_shared, restart_warm), or None without --events.
     An exempted row is still a hand check: the verdict is then GATE PASS PENDING HAND CHECK, never GATE PASS."""
     out = {"#1674": [], "#2203": [], "#1674_needs_manual_check": [], "#849_needs_manual_check": [],
            "#1961_needs_manual_check": [], "unattributed": []}

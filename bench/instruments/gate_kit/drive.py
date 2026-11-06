@@ -289,12 +289,13 @@ class Driver:
         self.acp = self.tui = None
         self.loaded: set[str] = set()
         self.tui_loaded: set[str] = set()
+        self.cold_pending: set[str] = set()
         self.slots: dict[str, dict] = {}
         self.done, self.prompts, self.attempts = Counter(), Counter(), Counter()
         self.context = None
 
     # processes and sessions
-    def acp_sid(self, slot: str) -> str:
+    def acp_sid(self, slot: str, planned_restart: bool = False) -> str:
         if self.acp is None:
             self.acp, self.loaded = self.make_acp(), set()
             self.acp.initialize(self.timeout)
@@ -304,6 +305,10 @@ class Driver:
         elif slot not in self.loaded:  # a new process binds the session (ACP _restore from state.db)
             self.acp.load_session(self.slots[slot]["session"], self.workdir, self.timeout)
             self.loaded.add(slot)
+            if slot in self.cold_pending:
+                self.ev.write("restart_cold" if planned_restart else "restart_cold_shared",
+                              self.slots[slot]["session"], f"slot={slot}")
+                self.cold_pending.remove(slot)
         return self.slots[slot]["session"]
 
     def tui_rt(self, slot: str) -> str:
@@ -322,18 +327,24 @@ class Driver:
             self.slots[slot].update(rt=res["session_id"],
                                     session=res.get("stored_session_id") or self.slots[slot]["session"])
             self.tui_loaded.add(slot)
+            if slot in self.cold_pending:
+                self.ev.write("restart_cold_shared", self.slots[slot]["session"], f"slot={slot}")
+                self.cold_pending.remove(slot)
         return self.slots[slot]["rt"]
 
-    def drop(self, which: str, graceful: bool = False) -> None:
+    def drop(self, which: str, graceful: bool = False, planned_slot: str | None = None) -> None:
         """SIGKILL the entry point's process group (a cold restart, a dead host), or end it gracefully: stdin EOF, so
         the host ends its sessions and exits by itself (AcpProcess.close escalates after EXIT_GRACE)."""
         proc = getattr(self, which)
         if proc is not None:
             if not graceful:
                 proc.kill()
-                if which == "acp":
-                    for slot in sorted(self.loaded):
-                        self.ev.write("restart_cold", self.slots[slot]["session"], f"slot={slot} shared_process=true")
+                loaded = self.loaded if which == "acp" else self.tui_loaded
+                self.cold_pending.update(loaded)
+                if planned_slot is not None:
+                    for slot in sorted(loaded - {planned_slot}):
+                        self.ev.write("restart_cold_shared", self.slots[slot]["session"], f"slot={slot} shared_process=true")
+                        self.cold_pending.discard(slot)
             elif getattr(proc, "process", None) is not None:
                 with contextlib.suppress(OSError):
                     proc.process.stdin.close()
@@ -395,7 +406,14 @@ class Driver:
         elif kind == "compress":
             self.acp_sid(slot) if slot.startswith("A") else self.tui_rt(slot)
             self.ev.write("compress_request", self.slots[slot]["session"], f"slot={slot}")
-            self.send(slot, o["prompt"])
+            try:
+                stop = self.send(slot, o["prompt"])
+            except (AD.DriverError, OSError, KeyError, ValueError):
+                self.ev.write("compress_request_failed", self.slots[slot]["session"], f"slot={slot}")
+                raise
+            if stop not in ("end_turn", "complete"):
+                self.ev.write("compress_request_failed", self.slots[slot]["session"], f"slot={slot}")
+                return
             if slot.startswith("A"):
                 reply, _stop = self.acp.prompt(self.acp_sid(slot), "/compress", self.timeout)
                 result = "compressed" if reply.startswith("Context compressed") else "not_compressed"
@@ -407,23 +425,26 @@ class Driver:
             if self.send(slot, o["prompt"], cancel=True) != "cancelled":
                 self.ev.write("error", self.slots[slot]["session"], f"cancel_late slot={slot}")
                 return
-            self.send(slot, o["prompt"])
-            self.ev.write("undo_resend", self.slots[slot]["session"], f"slot={slot} via=acp_cancel")
+            if self.send(slot, o["prompt"]) == "end_turn":
+                self.ev.write("undo_resend", self.slots[slot]["session"], f"slot={slot} via=acp_cancel")
         elif kind == "undo_resend":
             self.send(slot, o["prompt"])
             removed = self.tui.call("session.undo", {"session_id": self.tui_rt(slot)}, self.timeout).get("removed")
             if not removed:
                 self.ev.write("error", self.slots[slot]["session"], f"undo_removed_nothing slot={slot}")
                 return
-            self.send(slot, o["prompt"])
-            self.ev.write("undo_resend", self.slots[slot]["session"], f"slot={slot} via=tui_undo removed={removed}")
+            if self.send(slot, o["prompt"]) == "complete":
+                self.ev.write("undo_resend", self.slots[slot]["session"], f"slot={slot} via=tui_undo removed={removed}")
         elif kind == "restart_cold":
             self.acp_sid(slot)
-            self.drop("acp")
-            self.acp_sid(slot)  # a new process, initialize, session/load
+            self.drop("acp", planned_slot=slot)
+            self.acp_sid(slot, planned_restart=True)  # count only after session/load succeeds
         elif kind == "restart_warm":
             rt = self.tui_rt(slot)
             closed = self.tui.call("session.close", {"session_id": rt}, self.timeout).get("closed")
+            if not closed:
+                self.ev.write("error", self.slots[slot]["session"], f"warm_not_closed slot={slot}")
+                return
             res = self.tui.call("session.resume", {"session_id": self.slots[slot]["session"], "omit_messages": True},
                                 self.timeout)
             self.slots[slot].update(rt=res["session_id"],
@@ -451,11 +472,12 @@ class Driver:
                           (entry, self.home / "logs" / "agent.log")):
             try:
                 with open(path, "rb") as fh:
-                    fh.seek(self.scanned.get(path, 0))
+                    offset = self.scanned.get(path, 0)
+                    fh.seek(offset if os.fstat(fh.fileno()).st_size >= offset else 0)
                     new = fh.read()
+                    self.scanned[path] = fh.tell()
             except OSError:
                 continue
-            self.scanned[path] = self.scanned.get(path, 0) + len(new)
             if INACTIVE.search(new.decode("utf-8", "replace")):
                 found.append((who, path.name))
         return found

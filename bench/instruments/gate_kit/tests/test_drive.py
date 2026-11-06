@@ -176,6 +176,8 @@ def test_gateway_replacement_resumes_each_stored_session(tmp_path):
         d.send(slot, 3)
         assert d.tui.live[d.slots[slot]["rt"]] == stored[slot]
     assert sum(json.loads(x)["kind"] == "source2_session" for x in ev.path.read_text().splitlines()) == 2
+    shared = [e for e in audit.read_events(ev.path) if e["kind"] == "restart_cold_shared"]
+    assert Counter(e["session"] for e in shared) == Counter(stored.values())
 
 
 def test_failed_delegates_consume_plan_and_topup_attempt_budget(tmp_path, monkeypatch):
@@ -262,14 +264,126 @@ def test_compress_request_precedes_triggering_turn(tmp_path, monkeypatch, slot):
 
 def test_shared_acp_restart_records_all_bound_sessions(tmp_path):
     d, ev, log = stub_driver(tmp_path)
-    for slot in ("A1", "A2", "A3"):
+    slots = [f"A{i}" for i in range(1, 7)]
+    for slot in slots:
         d.send(slot, 0)
     d.op({"op": "restart_cold", "slot": "A1"})
-    for slot in ("A2", "A3"):
+    for slot in slots[1:]:
         d.send(slot, 1)
-    restarts = [json.loads(x) for x in ev.path.read_text().splitlines() if json.loads(x)["kind"] == "restart_cold"]
+    events = audit.read_events(ev.path)
+    assert [e["session"] for e in events if e["kind"] == "restart_cold"] == [d.slots["A1"]["session"]]
+    restarts = [e for e in events if e["kind"] in ("restart_cold", "restart_cold_shared")]
     assert Counter(e["session"] for e in restarts) == Counter(s["session"] for s in d.slots.values())
     assert all(f"load {s['session']}" in log for s in d.slots.values())
+    home = minimal_home(tmp_path, {s["session"]: "acp" for s in d.slots.values()})
+    out = audit.audit(home / "state.db", home / "lcm.db", events_path=ev.path)
+    assert out["coverage"]["restarts_cold"]["value"] == 1
+
+
+def test_failed_planned_load_has_no_cold_restart(tmp_path):
+    d, ev, log = stub_driver(tmp_path)
+    d.send("A1", 0)
+
+    class FailedLoad(StubAcp):
+        def load_session(self, *_args):
+            raise drive.AD.DriverError("load failed")
+
+    d.make_acp = lambda: FailedLoad(log)
+    d.guarded({"op": "restart_cold", "slot": "A1"})
+    assert not any(e["kind"] == "restart_cold" for e in audit.read_events(ev.path))
+
+
+def test_acp_crash_records_shared_only_after_reload(tmp_path):
+    d, ev, _log = stub_driver(tmp_path)
+    for slot in ("A1", "A2"):
+        d.send(slot, 0)
+
+    def gone(*_args):
+        raise drive.AD.ProcessGone("host exited")
+
+    d.acp.prompt = gone
+    d.guarded({"op": "turn", "slot": "A1", "prompt": 0})
+    assert not any(e["kind"] in audit.RESTARTS for e in audit.read_events(ev.path))
+    for slot in ("A1", "A2"):
+        d.send(slot, 0)
+    assert Counter(e["kind"] for e in audit.read_events(ev.path)) == {"restart_cold_shared": 2}
+
+
+@pytest.mark.parametrize("slot", ["A1", "T1"])
+@pytest.mark.parametrize("stop", ["submit_busy", "session_error", "cancelled"])
+def test_failed_resend_has_no_undo_event(tmp_path, monkeypatch, slot, stop):
+    d, ev, _log = stub_driver(tmp_path)
+    d.send(slot, 0)
+    stops = iter(["cancelled" if slot.startswith("A") else "complete", stop])
+    monkeypatch.setattr(d, "send", lambda *_a, **_kw: next(stops))
+    d.op({"op": "undo_resend", "slot": slot, "prompt": drive.CATS["undo"][0]})
+    assert not any(e["kind"] == "undo_resend" for e in audit.read_events(ev.path))
+
+
+def test_busy_tui_resend_has_no_undo_event(tmp_path):
+    d, ev, _log = stub_driver(tmp_path)
+    d.tui_rt("T1")
+    call, submits = d.tui.call, []
+
+    def busy(method, params, timeout):
+        if method == "prompt.submit":
+            submits.append(1)
+            if len(submits) == 2:
+                return {"status": "busy"}
+        return call(method, params, timeout)
+
+    d.tui.call = busy
+    d.op({"op": "undo_resend", "slot": "T1", "prompt": drive.CATS["undo"][0]})
+    assert len(submits) == 2 and not any(e["kind"] == "undo_resend" for e in audit.read_events(ev.path))
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_failed_warm_restart_has_no_event(tmp_path, closed):
+    d, ev, _log = stub_driver(tmp_path)
+    d.tui_rt("T1")
+
+    def fail(method, *_args):
+        if method == "session.close":
+            return {"closed": closed}
+        if not closed:
+            return {"session_id": "resumed"}
+        raise drive.AD.DriverError("resume failed")
+
+    d.tui.call = fail
+    d.guarded({"op": "restart_warm", "slot": "T1"})
+    assert not any(e["kind"] == "restart_warm" for e in audit.read_events(ev.path))
+    assert ev.errors
+
+
+@pytest.mark.parametrize("slot", ["A1", "T1"])
+@pytest.mark.parametrize("raises", [False, True])
+def test_failed_compress_request_is_not_attributed(tmp_path, monkeypatch, slot, raises):
+    d, ev, _log = stub_driver(tmp_path)
+
+    def fail(*_args):
+        if raises:
+            raise drive.AD.ProcessGone("host exited")
+        return "submit_busy"
+
+    monkeypatch.setattr(d, "send", fail)
+    d.guarded({"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]})
+    events = [json.loads(x) for x in ev.path.read_text().splitlines()]
+    request = next(e for e in events if e["kind"] == "compress_request")
+    assert any(e["kind"] == "compress_request_failed" and e["session"] == request["session"] for e in events)
+    assert audit.attribute_compactions([(None, request["t"])], audit.read_events(ev.path)) == ([(None, request["t"])], 1)
+    ev.write("compress_request", request["session"], t=request["t"] + 300)
+    assert audit.attribute_compactions([(None, request["t"] + 300)], audit.read_events(ev.path)) == (
+        [(request["session"], request["t"] + 300)], 0)
+
+
+def test_inactive_scan_rescans_a_truncated_log(tmp_path):
+    d, _ev, _log = stub_driver(tmp_path)
+    path = d.logs / "acp.stderr"
+    path.write_text("old log\n" * 100)
+    assert d.inactive("acp") == []
+    path.write_text("LCM-X is NOT active in this process\n")
+    assert d.inactive("acp") == [("acp", "acp.stderr")]
+    assert d.inactive("acp") == []
 
 
 def test_nonempty_events_refused_unless_append_is_explicit(tmp_path, monkeypatch, capsys):
@@ -303,7 +417,7 @@ def test_events_carry_no_prompt_or_reply_text(tmp_path):
     assert summary["executed"] == summary["planned"]["ops"] and summary["errors"] == {} and summary["exit"] == 0
     assert summary["context_length"] == 32000
     kinds = Counter(e["kind"] for e in lines)
-    assert kinds["restart_cold"] > 6 and kinds["restart_warm"] == 6 and kinds["undo_resend"] == 12
+    assert kinds["restart_cold"] == 6 and kinds["restart_warm"] == 6 and kinds["undo_resend"] == 12
     assert kinds["source2_session"] == drive.TUI_SLOTS and kinds["delegate_prompt"] == 12
     assert log.count("kill") >= 6 and lines[-1]["kind"] == "summary"
 
@@ -375,13 +489,13 @@ def test_driver_events_feed_audit_events(tmp_path):
     cov = json.loads(out.read_text())["coverage"]
     ex = summary["executed"]
     cold_events = sum(json.loads(x)["kind"] == "restart_cold" for x in ev.path.read_text().splitlines())
-    assert cov["restarts_cold"]["value"] == cold_events > ex["restart_cold"] == 6
+    assert cov["restarts_cold"]["value"] == cold_events == ex["restart_cold"] == 6
     assert cov["restarts_warm"]["value"] == ex["restart_warm"] == 6
     assert cov["undo_resend"]["value"] == ex["undo_resend"] == 12
     assert cov["restarts"]["met"] and cov["host_sources"]["value"] == 2
     # every kind audit.py knows is one the driver writes
     written = {json.loads(x)["kind"] for x in ev.path.read_text().splitlines()}
-    assert set(audit.EVENT_KINDS) <= written
+    assert set(audit.EVENT_KINDS) - {"compress_request_failed"} <= written
 
 
 # -- host-backed smoke ---------------------------------------------------------------------------------------------
@@ -494,7 +608,7 @@ def test_smoke_against_fake_provider_then_audit(tmp_path):
     exits = sorted(e["detail"] for e in lines if e["kind"] == "host_exit")
     assert exits == ["entry=acp returncode=0", "entry=tui returncode=0"], exits  # both ended their sessions by EOF
     kinds = Counter(e["kind"] for e in lines)
-    assert {k: kinds[k] for k in audit.EVENT_KINDS} == {"restart_cold": 1, "restart_warm": 1, "undo_resend": 2,
+    assert {k: kinds[k] for k in audit.EVENT_KINDS if kinds[k]} == {"restart_cold": 1, "restart_warm": 1, "undo_resend": 2,
                                                         "delegate_prompt": 1, "compress_request": 1}
     assert summary["delegate"]["children_in_state_db"] >= 1 and summary["context_length"] == 64000
     for db in ("state.db", "lcm.db"):  # the audit reads immutable files: open each once after the run to checkpoint

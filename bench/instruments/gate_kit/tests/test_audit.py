@@ -343,7 +343,9 @@ def test_1674_needs_an_earlier_stamped_copy(tmp_path):
 @pytest.mark.parametrize("events,limit", [(None, "#1674_needs_manual_check"), ([], "unattributed"),
                                           ([{"t": 4e9, "kind": "restart_warm", "session": "S1"}], "unattributed"),
                                           ([{"t": 0.0, "kind": "restart_cold", "session": "S9"}], "unattributed"),
-                                          (RESTART_BEFORE, "#1674")], ids=["no-events", "none", "after", "other", "before"])
+                                          (RESTART_BEFORE, "#1674"),
+                                          ([{"t": 0.0, "kind": "restart_cold_shared", "session": "S1"}], "#1674")],
+                         ids=["no-events", "none", "after", "other", "before", "shared"])
 def test_1674_needs_a_restart_before_the_recorder_line(tmp_path, events, limit):
     ex = attribution(tmp_path, [route("S1", "advanced_cursor", 2, 3, 3)], [("S1", u("question 1"))], events=events)
     assert ex["store_ids"][limit] == [3]

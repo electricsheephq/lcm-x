@@ -33,7 +33,8 @@ python -m bench.instruments.gate_kit.audit --state-db <hermes home>/state.db --l
   audit machine's local zone. Pass the run host's zone when they differ: it decides whether a compaction or a
   recorder line came before a driver restart event. An unknown zone exits 2.
 - `--events`: the driver's event log (`drive.py`, below), one JSON object per line: `{"t": epoch, "kind":
-  "restart_cold" | "restart_warm" | "undo_resend" | "delegate_prompt" | "compress_request", "session": id, "detail":
+  "restart_cold" | "restart_cold_shared" | "restart_warm" | "undo_resend" | "delegate_prompt" |
+  "compress_request" | "compress_request_failed", "session": id, "detail":
   short non-content text}`. Lines of any other kind (the driver also writes `turn`, `source2_session`,
   `context_window`, `host_exit`, `error` and a final `summary`) are ignored.
 - Exit 0 with the result written (the verdict is inside); exit 2 on an unreadable input. Stdout is a four-line summary.
@@ -151,10 +152,14 @@ python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --
 - A failed operation is an `error` event (a model error, a cancel that came too late, a JSON-RPC error with its code, a
   host process that died) and the run continues; nothing is retried silently. A process that died is replaced on its
   next operation; stored TUI sessions are resumed in the replacement gateway before use. A shared ACP process kill
-  records one `restart_cold` event per bound session, including siblings of the selected slot; the summary's executed
-  restart count counts scheduled operations. `--max-hours` stops the plan and still writes the summary.
+  records one `restart_cold` for the planned slot only after its load succeeds. Siblings get `restart_cold_shared`
+  at the kill; crash-affected ACP and TUI sessions get it after reload/resume. Shared events support restart-copy
+  attribution but never the cold-restart floor. `restart_warm` requires a successful close and resume; `undo_resend`
+  requires a successful second send. `--max-hours` stops the plan and still writes the summary.
 - `compress_request` is recorded before the triggering long-text turn; `compress_result` records the later manual
   compression outcome separately, so the audit's attribution window starts before automatic compaction can occur.
+  A failed long-text turn writes `compress_request_failed`; the audit excludes that request from attribution.
+  Inactive-host scans restart at byte zero when a log shrinks below the saved offset.
 - The events log never holds prompt or reply text: a prompt is its bank index (a test plants a sentinel to hold this).
   The last line is `{"kind": "summary", "planned", "executed", "errors", "delegate", "context_length", ...}`.
 
