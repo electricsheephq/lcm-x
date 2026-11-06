@@ -406,6 +406,15 @@ def test_name_normalisation_linear_punctuation_strip_and_length_caps(seeded):
     assert 'error' in alias_err and str(cap) in alias_err['error']
 
 
+
+def test_schema_advertises_the_handler_length_cap():
+    """#1944 follow-up: the model sees the same 256-character cap the handler enforces."""
+    from hermes_lcm import memory_tools, schemas
+
+    props = schemas.LCM_MEMORY["parameters"]["properties"]
+    assert props["name"]["maxLength"] == memory_tools._MAX_ENTITY_NAME_CHARS
+    assert props["aliases"]["items"]["maxLength"] == memory_tools._MAX_ENTITY_NAME_CHARS
+
 def test_carried_stamp_card_times(tmp_path):
     engine = make_engine(tmp_path, assertions=False)
     try:
@@ -636,7 +645,7 @@ def test_fresh_env_identity_and_schema_size(tmp_path, monkeypatch):
             if flag == '1':
                 memory = schemas.pop()
                 assert memory['name'] == 'lcm_memory'
-                assert len(json.dumps(memory).encode()) == 863
+                assert len(json.dumps(memory).encode()) == 899  # +36: maxLength on name and aliases (#1944 follow-up)
             output['schemas'] = json.dumps(schemas)
             outputs.append(output)
         finally:

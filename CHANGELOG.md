@@ -6,6 +6,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: the `lcm_memory` schema advertises the 256-character limit on `name` and each `aliases` entry that the tool already enforces, so a model sees the limit before calling (#1944 follow-up).
 - Fix: the session-end raw-flush warning reports `unflushed=unknown` while the ingest cursor awaits reconciliation, and the count is described as a cursor-based estimate, not a durability count (#1364).
 - Fix: opt-in pre-compaction extraction installs its absolute deadline as the host stream deadline, so a slowly streaming extraction call stops at that deadline, as summary calls already do (#1149).
 - Fix: on hosts that advertise no model-only display key, a stale `model_only` marker is cleared from generated rows in a mixed user group, so merged human text stays visible (#1436).
