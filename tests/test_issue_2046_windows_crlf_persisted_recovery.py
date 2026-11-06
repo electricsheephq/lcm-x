@@ -123,6 +123,18 @@ def test_fail_safe_rejects_crlf_spill_file_with_count_or_preview_mismatch(tmp_pa
     ) is None
 
 
+def test_mixed_line_endings_do_not_take_the_crlf_fallback(tmp_path):
+    # A file with a bare LF was not produced by a Windows text-mode write, so
+    # the LF fallback must not apply even when its LF form matches the marker.
+    home = tmp_path / "hermes"
+    persisted_path = home / "cache" / "spillover" / "call_mixed_endings.txt"
+    persisted_path.parent.mkdir(parents=True, exist_ok=True)
+    persisted_path.write_bytes(b"P\nY\r\n")
+    marker = _marker(persisted_path, "P\nY\n", preview="P")
+
+    assert recover_hermes_persisted_output_with_file_stat(marker, hermes_home=home) is None
+    assert recover_hermes_persisted_output(marker, hermes_home=home) is None
+
 def test_ingest_and_replay_externalize_windows_crlf_spillover_losslessly(tmp_path):
     engine, output_dir = _engine(tmp_path)
     replay = None

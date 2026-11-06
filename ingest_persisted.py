@@ -263,18 +263,17 @@ def recover_hermes_persisted_output_with_file_stat(
     preview_prefix = _persisted_output_preview_prefix(text)
     if not preview_prefix:
         return None
-    candidates = [recovered]
-    # Hermes counts the in-memory text before a Windows text-mode write may
-    # expand LF to CRLF. Keep exact content authoritative when it already
-    # matches; only try the canonical LF form when the on-disk representation
-    # cannot satisfy the marker's character contract.
-    if "\r\n" in recovered:
+    # Exact content is authoritative when it already meets the marker's contract.
+    if len(recovered) == expected_chars and recovered.startswith(preview_prefix):
+        return recovered, file_stat
+    # Hermes counts the in-memory text before a Windows text-mode write expands
+    # every LF to CRLF. Try the LF form only when the file has no bare LF (every
+    # "\n" belongs to a "\r\n"); a mixed-ending file was not produced by that
+    # translation, so it keeps the marker instead.
+    if "\r\n" in recovered and recovered.count("\n") == recovered.count("\r\n"):
         canonical = recovered.replace("\r\n", "\n")
-        if canonical != recovered:
-            candidates.append(canonical)
-    for candidate in candidates:
-        if len(candidate) == expected_chars and candidate.startswith(preview_prefix):
-            return candidate, file_stat
+        if len(canonical) == expected_chars and canonical.startswith(preview_prefix):
+            return canonical, file_stat
     return None
 
 
