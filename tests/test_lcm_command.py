@@ -5,6 +5,7 @@ from pathlib import Path
 import importlib.util
 import sqlite3
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,7 @@ from hermes_lcm.dag import SummaryNode
 from hermes_lcm.db_bootstrap import check_external_content_fts_integrity
 from hermes_lcm.diagnostics import doctor_guidance_for_check
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.sqlite_session import TransactionOwner
 from hermes_lcm.store import build_message_fts_spec
 
 
@@ -1390,6 +1392,7 @@ def test_lcm_doctor_repair_dry_run_works_with_read_only_database(tmp_path):
 
     class FakeStore:
         _conn = ro_conn
+        _write_lock = threading.RLock()
 
         @property
         def connection(self):
@@ -1779,8 +1782,11 @@ def test_clean_apply_stages_250001_sessions_and_bounds_node_purge_batches(tmp_pa
         assert connection is conn
         batches.append(list(batch))
 
+    lock = threading.RLock()  # #2345: clean apply owns its transaction under the store write lock
+    owner = TransactionOwner(lock)
     engine = SimpleNamespace(
-        _store=SimpleNamespace(connection=conn),
+        _store=SimpleNamespace(connection=conn, _write_lock=lock,
+                               atomic=lambda immediate=False: owner.atomic(conn, immediate=immediate)),
         _session_id="",
         _purge_embeddings_for_nodes=purge,
     )
