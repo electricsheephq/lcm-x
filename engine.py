@@ -8961,6 +8961,7 @@ class LCMEngine(
                 session_id=self._session_id or "",
                 model=extraction_model,
                 timeout=timeout,
+                deadline=deadline,
             )
         except Exception as e:
             logger.warning("Pre-compaction extraction failed (non-blocking): %s", e)

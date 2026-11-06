@@ -699,7 +699,7 @@ def _call_llm_for_summary(prompt: str, max_tokens: int,
             call_kwargs["timeout"] = timeout
         if _accepts_route_info(call_llm):  # #682: the host names the provider/model it used
             call_kwargs["route_info"] = route_info
-        with _host_stream_deadline_scope():
+        with _host_stream_deadline_scope(getattr(_summary_call, "stream_deadline", None)):
             response = call_llm(**call_kwargs)
         content = response.choices[0].message.content
         if not isinstance(content, str):
@@ -980,9 +980,8 @@ def _host_stream_deadline_seam() -> bool:
         getattr(host, "_current_aux_stream_deadline", None))
 
 
-def _host_stream_deadline_scope():
+def _host_stream_deadline_scope(deadline: float | None):
     """#605 D4: run the call inside min(host deadline, budget deadline) where the host exports the seam."""
-    deadline = getattr(_summary_call, "stream_deadline", None)
     if deadline is None:
         return contextlib.nullcontext()
     try:
