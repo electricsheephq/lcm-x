@@ -176,7 +176,8 @@ store. Summary hits are never withheld and may still contain the detail.
 
 Detection uses the existing full-text index to select at most the 200 newest
 user rows matching prefix terms `forget*`, `remember*`, `memor*`, `retain*`,
-`store*` or the supported disregard, ignore, know and keep-in-mind forms
+the store request phrasings (such as "store what" or "stored my") or the supported
+disregard, ignore, know and keep-in-mind forms
 in the searched store/session scope under the request deadline, then applies
 conservative request patterns. If the index is absent, a keyword scan is used.
 Subagent-source rows, fenced/inline code, blockquote lines and double-quoted
@@ -196,7 +197,8 @@ Self and later turns are never covered, even when event times are missing.
 withholding, not every covered row in the candidate pool. All covered pool rows
 are excluded from refill. In session mode receipts describe removed delivered
 rows. `fts_anchor` provenance describes ranking before withholding.
-If receipts exceed the response character budget, entries are dropped from the
+In `answer_ready` and session delivery (which carry a response character budget),
+if receipts exceed that budget, entries are dropped from the
 end and `provenance.forget_withheld_omitted` records their count. Withheld rows
 stay withheld, and `forget_unavailable` is always retained.
 A failed or expired read leaves delivery

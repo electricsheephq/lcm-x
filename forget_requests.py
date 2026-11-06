@@ -197,7 +197,7 @@ def withhold(ordered, rows, forgets, limit, current_session):
 def filter_session_payload(payload, rows, forgets, current_session, *, seen_refs=()):
     """Session expansion may introduce covered neighbours beyond ranked seeds."""
     hits, receipts, affected_sessions = [], [], set()
-    for hit in payload["hits"]:
+    for hit in payload.get("hits", []):
         row = rows.get(hit.get("store_id"))
         f = covering_forget(row, forgets) if row else None
         if f is None:
@@ -253,7 +253,7 @@ def encode_payload(payload, *, char_cap=None):
             for _ in range(10):
                 raw = json.dumps(payload, ensure_ascii=False)
                 size = (count_tokens(raw), len(raw))
-                if size == (delivery["response_tokens"], delivery["response_chars"]):
+                if size == (delivery.get("response_tokens"), delivery.get("response_chars")):
                     return raw
                 delivery["response_tokens"], delivery["response_chars"] = size
         return json.dumps(payload, ensure_ascii=False)
