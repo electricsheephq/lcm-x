@@ -116,8 +116,7 @@ STORED_STATE_EVENTS = {
 NEW_FAMILY_NOISE = {
     "summary_chain": [[head, "changed"] for head in (
         "accepts", "admit", "allows", "hung_route", "in_config_episode", "log", "note_route",
-        "provenance", "provider", "record_call", "record_config_error", "record_failure",
-        "record_hang", "record_rejection", "record_success", "spend", "stop", "return_helper",
+        "provenance", "provider", "record_call", "spend", "stop", "return_helper",
     )],
     "backfill": ["sql changed", "log changed", "store enter changed", "store exit changed",
                  "store raises changed", "connection changed", "provider changed", "files changed",
@@ -125,6 +124,30 @@ NEW_FAMILY_NOISE = {
                  "callback changed", "document changed", "reopen changed", "race changed",
                  "commit raises changed", "teardown raises changed"],
 }
+
+
+@pytest.mark.parametrize("head", ["record_success", "record_hang", "record_failure",
+                                 "record_rejection", "record_config_error"])
+@pytest.mark.parametrize("mutation", ["delete", "change"])
+def test_summary_chain_breaker_writes_require_printed_digest(head, mutation, capsys):
+    current = golden((ROOT / "tests/fixtures/summary_chain_trace.json").read_text(encoding="utf-8"))
+    name, events, index = next(
+        (name, events, index) for name, events in current.items()
+        for index, event in enumerate(events) if event[0] == head
+    )
+    changed = list(events)
+    if mutation == "delete":
+        del changed[index]
+    else:
+        changed[index] = [*changed[index], "changed"]
+    base, new = {name: events}, {name: changed}
+    assert compare("summary_chain", base, new, {}) == 1
+    output = capsys.readouterr().out
+    assert f"summary_chain/{name}: changed (UNLISTED)" in output
+    digest = next(line for line in output.splitlines() if '"outcome_sha":' in line)
+    entry = json.loads("{" + digest + ', "reason": "Accepted breaker change"}')
+    assert entry["outcome_sha"] == outcome_sha(outcomes("summary_chain", changed))
+    assert compare("summary_chain", base, new, {name: entry}) == 0
 
 
 @pytest.mark.parametrize("family,event", [(family, event) for family, events in STORED_STATE_EVENTS.items()

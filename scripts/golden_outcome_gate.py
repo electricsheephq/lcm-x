@@ -25,8 +25,9 @@ OUTCOME_HEADS = {
     # Assembly: output rows/identity, caller input/identity, persisted payloads and stored rows/DAG.
     "assembly": ("row ", "result aliases ", "input after ", "input aliases after ", "payload ",
                  "after _store ", "after _dag "),
-    # Summary chain: structured events for returned text, propagated failures and final provenance/budget.
-    "summary_chain": ("return", "raise", "state"),
+    # Summary chain: returned text, propagated failures, final state and circuit-breaker writes.
+    "summary_chain": ("return", "raise", "state", "record_success", "record_hang",
+                      "record_failure", "record_rejection", "record_config_error"),
     # Backfill: persisted tables/cursors at checkpoints and reopen, final state and operator results.
     "backfill": ("discovery state ", "accepted checkpoint ", "reopened state ", "after ",
                  "return type ", "report fields ", "rendered ", "runner raises "),
