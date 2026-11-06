@@ -97,9 +97,12 @@ def test_response_cap_keeps_score_survivors(delivery, detail):
         score_raw = invoke(detail=detail, response_char_cap=cap)
         score = json.loads(score_raw)
         timed_raw = invoke(detail=detail, response_char_cap=cap, delivery_order="time")
-        # answer_ready caps the whole envelope; snippets budgets hits only. Either
-        # way time mode is never longer than score mode once past the cap.
-        assert len(timed_raw) <= max(cap, len(score_raw))
+        # answer_ready caps the whole envelope; snippets budgets hits only, so
+        # there time mode is score mode plus the provenance marker exactly.
+        if detail == "answer_ready":
+            assert len(timed_raw) <= cap
+        else:
+            assert len(timed_raw) == len(score_raw) + len(', "delivery_order": "time"')
         timed = json.loads(timed_raw)
         ids = [hit["store_id"] for hit in score["hits"]]
         assert 0 < len(ids) < 6
