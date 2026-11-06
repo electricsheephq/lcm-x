@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcmx-r2-adjacent/benchmarking/types.py
+# hypothesis_version: 6.141.1
+
+[0.0, '1', 'Canary', 'LCMPolicy', 'ReplayFixture', 'ReplayMetrics', 'active_canary_recall', 'active_message_count', 'benchmark_profile', 'canaries', 'compaction_attempts', 'compression_count', 'condensation_fanin', 'context_length', 'context_threshold', 'dag_nodes', 'database_path', 'elapsed_ms', 'expected_query', 'failures', 'fixture_name', 'fixture_tags', 'fresh_tail_count', 'fresh_tail_tokens', 'hermes_home', 'id', 'leaf_chunk_tokens', 'messages', 'name', 'none', 'notes', 'on', 'policy_name', 'policy_version', 'prompt_tokens_after', 'prompt_tokens_before', 'store_messages', 'summary_failure_mode', 'summary_level', 'tags', 'threshold_tokens', 'total_canaries', 'true', 'value', 'yes']

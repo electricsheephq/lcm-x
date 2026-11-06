@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcmx-r2-adjacent/sqlite_util.py
+# hypothesis_version: 6.141.1
+
+[0.0, 1.0, 255, '"', "'", 'BEGIN IMMEDIATE', 'COMMIT', 'PRAGMA busy_timeout', 'ROLLBACK', '_T', '_lcm_real', '_lcm_trace', 'busy', 'ingest_admission', 'lcm_ingest', 'locked', 'sqlite_errorcode', 'sqlite_errorname']

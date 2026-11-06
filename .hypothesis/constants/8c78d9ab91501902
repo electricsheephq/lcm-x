@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcmx-r2-adjacent/benchmarking/standalone.py
+# hypothesis_version: 6.141.1
+
+[0.75, 100, 'ContextEngine', 'agent', 'agent.context_engine', 'completion_tokens', 'compression_count', 'context_engine', 'context_length', 'error', 'last_prompt_tokens', 'prompt_tokens', 'threshold_tokens', 'total_tokens', 'usage_percent']

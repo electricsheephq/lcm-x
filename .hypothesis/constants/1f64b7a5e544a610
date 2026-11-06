@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcmx-r2-adjacent/claude_code_capture.py
+# hypothesis_version: 6.141.1
+
+[1024, ',', ':', '<persisted-output>', 'agent-name', 'api-request', 'api-request-blob', 'api-request-shape', 'arguments', 'assistant', 'atis-latch', 'attachment', 'bridge-session', 'claude-code', 'claude-code-v1', 'content', 'cost-state', 'custom-title', 'file-history-delta', 'frame-link', 'function', 'history-suppression', 'id', 'image', 'input', 'isApiErrorMessage', 'isCompactSummary', 'isMeta', 'last-prompt', 'message', 'mode', 'name', 'path', 'persistedOutputPath', 'pr-link', 'projected', 'promptId', 'queue-operation', 'raw_only', 'rb', 'role', 'sessionId', 'shared_raw', 'subagents', 'summary', 'surrogatepass', 'system', 'text', 'timestamp', 'tool', 'tool-results', 'toolUseResult', 'tool_call_id', 'tool_calls', 'tool_result', 'tool_use', 'tool_use_id', 'tools-used', 'type', 'unknown_type', 'user', 'utf-8', 'uuid']

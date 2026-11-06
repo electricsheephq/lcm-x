@@ -417,7 +417,7 @@ def test_running_compress_reader_uses_pass_store_ids(tmp_path, monkeypatch):
     """The provider boundary observes the current pass map, not a preflight map."""
     pin_char_counter(monkeypatch)
     with engine_context(tmp_path, window=200_000, fresh_tail_count=2, leaf_chunk_tokens=400,
-                        ignore_message_patterns=["never-match-fixture"],
+                        ignore_message_patterns=["never-match-fixture"], temporal_rollups_enabled=False,
                         large_output_externalization_enabled=False) as engine:
         objects, reads, observed = {}, [], []
         build = engine._get_store_id_map_for_messages

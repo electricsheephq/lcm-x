@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcmx-r2-adjacent/message_patterns.py
+# hypothesis_version: 6.141.1
+
+[0.05, 'pattern', 'timeout']

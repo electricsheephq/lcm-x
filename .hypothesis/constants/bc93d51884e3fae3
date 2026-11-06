@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcmx-r2-adjacent/teams/catalog.py
+# hypothesis_version: 6.141.1
+
+[100, ',', ', ', '<unreadable>', '?', 'active', 'allowed', 'capability', 'collection_id', 'created_at', 'denial_reason', 'detail', 'event_id', 'grants', 'in_transaction', 'kind', 'lcm_teams_audit', 'lcm_teams_principals', 'lcm_teams_requests', 'lcm_teams_revisions', 'lcm_teams_tenants', 'membership_revision', 'occurred_at', 'operation', 'own', 'payload_digest', 'policy_revision', 'principal_id', 'read', 'recorded_at', 'request_id', 'result_json', 'revocation_epoch', 'shared', 'status', 'suspended', 'teams_catalog_v1', 'tenant_id', 'updated_at']

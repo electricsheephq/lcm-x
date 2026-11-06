@@ -233,9 +233,9 @@ def _stamp_generated_model_only(messages, generated_rows, *, copy_rows: bool = F
     Hermes keeps the first row's metadata. A group containing human text must
     remain visible; a group made entirely by LCM can stay model-only.
     """
-    key = _model_only_display_metadata_key() if generated_rows else None
-    if key is None:
+    if not generated_rows:
         return
+    key = _model_only_display_metadata_key()
     generated_ids = {id(row) for row in generated_rows}
     hide_keys = _model_only_display_metadata_keys()
     start = 0
@@ -256,6 +256,8 @@ def _stamp_generated_model_only(messages, generated_rows, *, copy_rows: bool = F
                 continue
             original = row.get("display_metadata") or {}
             if generated_only:
+                if key is None:
+                    continue
                 metadata = {**original, key: True}
             else:
                 metadata = {k: v for k, v in original.items() if k not in hide_keys}
@@ -5391,7 +5393,7 @@ class LCMEngine(
                 session_id,
             )
             return
-        unflushed = max(0, len(messages) - self._ingest_cursor)
+        unflushed = "unknown" if self._ingest_cursor_needs_reconcile else max(0, len(messages) - self._ingest_cursor)
         pending_before = len(self._pending_session_tails)
         ingest_finished = False
         try:
@@ -5422,7 +5424,7 @@ class LCMEngine(
                 except KeyboardInterrupt:
                     logger.warning(
                         "LCM session-end raw-message ingest interrupted; "
-                        "final messages may be absent from the plugin-local store unflushed=%d",
+                        "final messages may be absent from the plugin-local store unflushed=%s",
                         unflushed,
                     )
                     return
@@ -5431,7 +5433,7 @@ class LCMEngine(
                         self._ledger_count("ledger.tail.busy_at_end")
                         logger.warning(
                             "LCM session-end raw-message ingest skipped due to SQLite lock after short wait; "
-                            "%s: %s session=%s unflushed=%d",
+                            "%s: %s session=%s unflushed=%s",
                             "retry pending at the next session start or end in this process, at engine shutdown, or at a normal interpreter exit (not os._exit)"
                             if len(self._pending_session_tails) > pending_before
                             else "final messages may be absent from the plugin-local store",
@@ -8961,6 +8963,7 @@ class LCMEngine(
                 session_id=self._session_id or "",
                 model=extraction_model,
                 timeout=timeout,
+                deadline=deadline,
             )
         except Exception as e:
             logger.warning("Pre-compaction extraction failed (non-blocking): %s", e)

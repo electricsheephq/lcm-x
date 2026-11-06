@@ -1,812 +1,812 @@
 {
   "ingest": {
     "admission-aliases": {
-      "outcome_sha": "0593d7ad103e873af09cbf8d1f21d0255c7511effd78d51afe3b47d8e4235d21",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "c43d66e19fb324916f6f7c7fe2a13cece1263b8b6d73dc825d49d042aa5be8b0",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "admission-empty": {
-      "outcome_sha": "c7bc595643a71b3be830330f4351514ee7948f47d5178b3536c8bad876597707",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "8559d1c6787c9192ca2db4bf00310443414c618aa5cc30d242bf0584f71abc1d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "admission-full": {
-      "outcome_sha": "e79111f08534ff1495ef67029f7f8389ce05eec3d0e81374cf7627981d3ebb35",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "75ef8732b1cfa13523983c3c392341dc5fab3e49501544e7e7ec6f520621ebd5",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "admission-ignored": {
-      "outcome_sha": "2ce42a058592995af41d44ebee2cb370d21de0ffaff0312cccbe0106386d5841",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "c1c04bff836ec09b1ce3c9c06c7999c20a0545ee1330807fde763f89d4574c83",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "admission-no-session": {
-      "outcome_sha": "5efaaf991553fde074dbe8039ea8e4eaf72247d2d8ba4f212e9ca444ba864882",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "9fd886fca24005588fd249fd0131c52725e49254e88ad8c395c6e7815f06439b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "admission-stateless": {
-      "outcome_sha": "a7994b4fb1f1e2e927f3d5b0ad82fddc5077e9b91c45c7005fbccc44356927d1",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "04fc2675cbcc6144d2ffb48936396fa102bc0bc5fca69da2cc5e9393a0af7ad8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "anchor-disabled": {
-      "outcome_sha": "534691fa7acfcbca2d367a55025d5ec590e590f323188e512843def694baf7d1",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "f9db413587e27eeb1cf519983cc3406f3a439f029af65d8068da12af79419581",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "anchor-remainder": {
-      "outcome_sha": "df7c49926b8b8679373741685887bf17ead9668c5c3c5c68e1c17f158645675f",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "d77b7d7fc5dcf40bc0a2c495cd069eee0cbab3f7500a9054b19364cfe2b96efc",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "anchor-stamp-new-uid": {
-      "outcome_sha": "1b2c455faa1f34b989830290aba6547d7f38662a86a44db227047afb1246576e",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "anchor-stamp-replay": {
-      "outcome_sha": "76199a1429ac3955894800e9d815f99a0f255cbdcec28a8abf271928852de32b",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "21e6992058975e99ff6ec24b66a93fc2bc099e17c350c4d04af3c9e264479745",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "anchor-version": {
-      "outcome_sha": "f963fc43415cb73599323214d4cd4d1bbd76bbdadff709026a2e850d248dbc2b",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "711fa0ca5737097a262f7c871a7295b3fd0bb261162fdb6f327912855d5c283c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "anchor-version-ignore": {
-      "outcome_sha": "cbc7775e99ef90fda5a4778c8540750c1b80e3684ffdbe44e651a03e80ce4ddc",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "cd08bbfd20dd860f95b81eef49ad0893269d69e8663892928ba1649a3293f987",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "boundary-exhausted-other-digest": {
-      "outcome_sha": "fca747a433b2e0f8a2c8798b2ac873f31d85916b471edf03c7462a87943439a5",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "62a26b9a61c2c93420bc38a6e9522fa49b03e6481288e162df7f7c02bf92937c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "boundary-stored-counts-mixed": {
-      "outcome_sha": "e1b77badd60c033601ad0c8701a6f26617b8cf4b5e183a6e281dc3ec2d07b02f",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "d13ff7499b7fb729e2150a15553d3f1e2f1d8f184ac4aa3916b7edb408d9aad6",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "boundary-two-digests": {
-      "outcome_sha": "ce17c1cf1d0f271e8bfc6c48b3165c6ea725e81775a00141a03486fad33567ec",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "0f09cc6c85e0399a2c9b72ee92e7c1a7f86633eeb28daa6389a30156e2dff5f4",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "cache-absent": {
-      "outcome_sha": "76199a1429ac3955894800e9d815f99a0f255cbdcec28a8abf271928852de32b",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "21e6992058975e99ff6ec24b66a93fc2bc099e17c350c4d04af3c9e264479745",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "cache-divergent-cache": {
-      "outcome_sha": "98effbe7a3d7b2efb2a58cbfa68570ff8659a709109ee6ef1f8ba01a5ea39a64",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "189daf034a7162cd1af214d94466823d1a385d9f03e9485d9a0dbb2b50f6b926",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "cache-empty-delta": {
-      "outcome_sha": "76199a1429ac3955894800e9d815f99a0f255cbdcec28a8abf271928852de32b",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "21e6992058975e99ff6ec24b66a93fc2bc099e17c350c4d04af3c9e264479745",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "cache-new-stamp": {
-      "outcome_sha": "b02325089b763f9cca164adfc8f3080fb3c10164ef267ec3878bb689852a0a74",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "08dcd26a03130270a6a3dd74d05c9abf964788f5222469cb08edebef91bc8c47",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "cache-new-uid": {
-      "outcome_sha": "1b2c455faa1f34b989830290aba6547d7f38662a86a44db227047afb1246576e",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "cache-rewrite": {
-      "outcome_sha": "1872d7f8591a3ea88fa68ee0ad9cce55c9836e33362d8c2bd85100af9f2e82ef",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "00bf8a5efdfc48ed1ebfd8763790c0ee6bf2e62758c9d29c5dce9e5c2b786aef",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "cache-short-cache": {
-      "outcome_sha": "76199a1429ac3955894800e9d815f99a0f255cbdcec28a8abf271928852de32b",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "21e6992058975e99ff6ec24b66a93fc2bc099e17c350c4d04af3c9e264479745",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-end-allow-end": {
-      "outcome_sha": "8ce111b53575ca4f54d902b7fa1d6fd442e6d97befa30e4108ca1573dae85d8d",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "ee6a090cc46fb06e55bba1f0c4828b97657e19a5cf7e162b6f03dd9098afe0da",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-end-delta": {
-      "outcome_sha": "613f8daa9165abb776ec2b43e78d4bcd391ef8eadc0c073e5f719eb4f1f4d21b",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "e763b7e88499398a30bcf8ff0ff94a8f53c8b71e3bb65f7fbfca7be90dd54517",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-end-full": {
-      "outcome_sha": "8ce111b53575ca4f54d902b7fa1d6fd442e6d97befa30e4108ca1573dae85d8d",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "ee6a090cc46fb06e55bba1f0c4828b97657e19a5cf7e162b6f03dd9098afe0da",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-end-new-uid": {
-      "outcome_sha": "49fe1fea31f8f6a38443155d48779a5c4c5b260a4d2fef9eae21eb05ddeb5fc4",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "ae5660bb9747f76b156878d9e81369526ac3e25fd24338772de18de50e9ceb9b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-metadata-conflict": {
-      "outcome_sha": "6847ddda88dbc86c4a53429274e1b956dbf70d802ca7aabefa5d4552c6dfaa01",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "c011c058510f146eb96fe4fe3bae603214738626b466ae0398d3fee182ec77cb",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-v2-allow-end": {
-      "outcome_sha": "38e93d4d1858e004c2b1bd9bb5872146ffb1b32e2f8838e8bbb72e5882af6b1e",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "7812ba51b6aa7e0ed4a99221d14d45f20e9939da25bdfcab579b507176896ea8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-v2-delta": {
-      "outcome_sha": "c5b1e4564756d2784707f66c102e719cc96f7997a6f94c3e43f1ced2f02342c9",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "c31b1c7a37fccd80d9e076d72e75037d6b736ad6bc7e9161f7356a9642f61910",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-v2-full": {
-      "outcome_sha": "38e93d4d1858e004c2b1bd9bb5872146ffb1b32e2f8838e8bbb72e5882af6b1e",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "7812ba51b6aa7e0ed4a99221d14d45f20e9939da25bdfcab579b507176896ea8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-v2-new-uid": {
-      "outcome_sha": "b195f9f8168174c54e56f8e064de35be885923a730de7933fc0ed21554d60ea6",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "b3ba3d6773c804fd439fb3351abb3d90defe98b14ec279f1cb71690e9091c621",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-v3-allow-end": {
-      "outcome_sha": "1bb8b3d7c9ced56e26e76633ab0ece83ad0fabb5977427c3caa1b04f572b738d",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "244964efedb0d3cd2d1a985470c3d3a478316aef0127b626edab4ba07a65ce65",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-v3-delta": {
-      "outcome_sha": "867513d9eb9e18ee6034a8650a8ec6837c6b43f16e0bcf2f53cb5d1393dc90f1",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "817ca3f962343f65a5670309001b43be32242120d5e96162da4626f9e8d17fcc",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-v3-full": {
-      "outcome_sha": "1bb8b3d7c9ced56e26e76633ab0ece83ad0fabb5977427c3caa1b04f572b738d",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "244964efedb0d3cd2d1a985470c3d3a478316aef0127b626edab4ba07a65ce65",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-v3-new-uid": {
-      "outcome_sha": "39db8d378e10a48834bd47ebd012803d164528c8c2f42c98ec437cf910302ecd",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "090743d4f4bfef56ca46db1663f11dbe5dba25a74527ca6cb858b44e291a97d8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-v4-allow-end": {
-      "outcome_sha": "395b6b1dd2a2722c167badabcc1a899de89f282237226ee3e13dfd608a7f3cdb",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "7ab69666a8d5babcafef9e73bdb351cb399018d6b318d221b8842329390b5190",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-v4-delta": {
-      "outcome_sha": "b95eaf5585e20530c849c9adab1cfc56e4bbc8ac9a5ff60a50dd39f7c26d6c5a",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "80a57497233dcfa8dae38ae2c0738a04b4b42f5c502a3503afc818a63edc3644",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-v4-full": {
-      "outcome_sha": "395b6b1dd2a2722c167badabcc1a899de89f282237226ee3e13dfd608a7f3cdb",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "7ab69666a8d5babcafef9e73bdb351cb399018d6b318d221b8842329390b5190",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-v4-new-uid": {
-      "outcome_sha": "e5f056ab444486431200ccedfb148bf27ad022bbf53f97990ceacb8ad8341e36",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "6042f9d2fed0abc4a8f4b7b899f5588b989db0058cdf848a289d53fbc1e0eb88",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "empty-all-ordinals": {
-      "outcome_sha": "523e2d176a46ca168714749e96df8aa85a385f4763908671a8895db15c45bedf",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "4bbd3c4b338fc6f68aa2e6e81483a727509bb8a14a8622a028a54cc619ec02a1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "empty-child-placeholder-prefix": {
-      "outcome_sha": "75689358359270ed55fdcb8faf638f30f2c8d9d4a6fd46d72637b425bad7d8c0",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "eda20414f824c0caf5fbb3a850b97b2eaecc895e0e1bd2dff5d4ad9f4bd68a63",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "ignored-changed": {
-      "outcome_sha": "1c03457912dbd884da0ffd8391fc0a9e39ce4097db850534985b0acba3141367",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "8520b7eaf3d8f64d1d7e4c06bf670b1bebf0750a3ea20c3ebffa58836376c142",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "ignored-delta": {
-      "outcome_sha": "3bd446c872e66e2c7226a5ffdd1835659557b6a5ea903e876c84203b36a6d661",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "87774324fcc0f6171667ec3579b0400419e3198e6724801a40f7125389f1ae6a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "ignored-full": {
-      "outcome_sha": "cb4ae2f45a8432c9e66c79c6b3a06ff5b7051a65b3331836387813bc5a83947d",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "ec820852096da24d3d79a70045662c82370d673c56962851c8449ed145152fa1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "ignored-new": {
-      "outcome_sha": "059fb5d9b1a3d83ca252d5140c699e975f8bbebd1bb41a78871d2d59f6141b3a",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "90262e63a8117f670a7b1cc0b2d4be0abc2ac2b55f799157336cdfed357f8907",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "ignored-prefix": {
-      "outcome_sha": "19c5683a2f79a3faa7bdca6b87168df91bc5324b8748956bacbf950823705d9c",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "bb5dc23e6f79dea459fd1664769f3884d26d2a202e2a1015e055785c8e90d001",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "ignored-rewrite": {
-      "outcome_sha": "10433f52e2cdb8a40cd41ea91287f0beb5eb80231833f8ed12de07decf3e67e7",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "e66677a239a5ebc4179fba048424350bf30f1af0287dae7c515fa81705f64685",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "ignored-suffix": {
-      "outcome_sha": "ce7b96b202c22993066be7feedd133808e3483912a96ab2a9aeeafe7ce7bb7ad",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "4dc93d7ced361e5de601634c65db1c528dd8b5747566a1bfbaf5662d7a9260fb",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "ignored-warm": {
-      "outcome_sha": "aadecacf2c373b94ebbf0ee8415dd1b0e45cdbc5752b01619ec8f3550310024d",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "2c0da4c00965bd16f1214072716809a5c5012533bc29ace7c5c2f4648825bbe7",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "marker-changed": {
-      "outcome_sha": "9bdbfa43d9211c120c7d0524d458292eda62c995f6c83f189cc23ca44241f33a",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "6e1ac81a4d4d6f9e6bd0468d141860c041057f6e2621e341b41c8275eebcc04a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "marker-delta": {
-      "outcome_sha": "d0615bfba9f60a92c68454ba32d13c786335eda1161fd2006b7b3834c75f0f6e",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "d4a514a2bc0c242d710bd89c449f02696db5b95b4b7ecb2d723ca689b5c9195f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "marker-full": {
-      "outcome_sha": "9ce4d37cf8ec095814ad8ddbb2945c4299d26259ef5ac2a355cc21d6d7cce994",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "d23aa535139b1769c9cd682016e64c99000b5e9ca587fd1bc42121851546c8e4",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "marker-new": {
-      "outcome_sha": "e2a8a06135a65f76f590acb49cb069f1ece041e26702ffbaadc68df0446a09f7",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "9a8669a798968ce4b8d0fb304fc40ff824d19466b7e699dc89ed7e27f60135a1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "marker-prefix": {
-      "outcome_sha": "1ecdafe4db7999ac48151d1840e42ad3c64378755fbceba5488beaf58b86f382",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "baa6b23ffc635d72cd8bca10d61ce90aa0c3b1f9cafad9bfc7d6822ac38ab47f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "marker-rewrite": {
-      "outcome_sha": "4e72273abc41e59854090ed598bd4f50def7f87246d096931da5d23f2b918525",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "d65802c92733638f2911987538fba86b0474234cd41d91470bc084ce70a37183",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "marker-suffix": {
-      "outcome_sha": "1ba8aff73cdb6e42d982ad485259e2a034ac4b83d317855248528cb8640e8479",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "9cac57b16546435fff63093ff05f83f42c9f995afaeeb67fdadd1c88d54ec25d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "marker-warm": {
-      "outcome_sha": "34f345dbc4002d0e4b52312e85689aa10dbfbb7baa59b20d2f9679c6f1d8790a",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "ad49857cbbdbb469465bc8dd8d327a029b1c4b1ff7b316d38c6b0965384509e6",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "opaque-raw-stub-assistant-1": {
-      "outcome_sha": "74c5e505fdf1d1c422eaa8a39e30b723f319c62c1b2d2d3adde0c07c280f87e2",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "dc1935da3468b17c7f73d6333ec01c697f9065625e5bf1e46c36b94aa875bec1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "opaque-raw-stub-assistant-2": {
-      "outcome_sha": "3456fb00a3ac567b4b99d5b4ee5f4cdd1bd01173129f7621c44d13747aa9cf99",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "10a302c54a3bfbab608b765761b33c1ea9d5a2bf7d81630b3614a63c9b68a9e5",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "opaque-raw-stub-tool-1": {
-      "outcome_sha": "37a6581f1d5cb7925f3b18f9e8239e721bf8b07be70486f14b3212d2250c81ac",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "319e3a03b6849b3293dfb919b77108fc80cda158ff8904d9a7c844ccb0706741",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "opaque-raw-stub-tool-2": {
-      "outcome_sha": "ea46c06be26dc0d55a21d888bd8ee6e6d80edd72e3f78a05d4b7142922e8a4e1",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "54ab1d9b9f4904047ed255be7dd57110a7decd241ab57972b57be02b9af180cf",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "opaque-raw-stub-user-1": {
-      "outcome_sha": "008af7ad4ddf047f181b25959bf7e8c9cb48348f4bf9d66d7f848626c96940c3",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "b4347c406bb1a988fa014997a79bc1adb1828bdf82d5d5c6e49da4f666ecf263",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "opaque-raw-stub-user-2": {
-      "outcome_sha": "c2d7eb33e9a464879408e6d856efc42f3e4a94e578f85575e98e4a4cb8ef9b14",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "e2a4434ce752b66e2407b4f72e1095ba09aa875c6fd7455ac85ba5750bd5943a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-1-all": {
-      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-1-generated": {
-      "outcome_sha": "25a2da2ad738f05778ff133736543d6d8176ddc0be7fe989b79863d654498776",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "ea84885198f75f3c4af2bd2bb596a837b027758504b6f4980d7dfa355f4bd60a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-1-mixed": {
-      "outcome_sha": "e1b77badd60c033601ad0c8701a6f26617b8cf4b5e183a6e281dc3ec2d07b02f",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "d13ff7499b7fb729e2150a15553d3f1e2f1d8f184ac4aa3916b7edb408d9aad6",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-1-single": {
-      "outcome_sha": "db115af9fcc63e765f1e7afae4afd6ad1525814d56406866e06ee302ab024c2f",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "7d8395a93865650755dfa0d3236dd6a13faadc8ac216d2cd6469b2cbb919689e",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-1-stored-counts": {
-      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-1-summary": {
-      "outcome_sha": "1c652fca1f84ff4dfc5213a9fa78b398014dfd5c7ab1e86650f9a61f4b779b12",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-2-all": {
-      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-2-generated": {
-      "outcome_sha": "25a2da2ad738f05778ff133736543d6d8176ddc0be7fe989b79863d654498776",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "ea84885198f75f3c4af2bd2bb596a837b027758504b6f4980d7dfa355f4bd60a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-2-mixed": {
-      "outcome_sha": "0eb95c46e901f88bfb7106188d514733d75be4359deca7f816c56b84708d5cae",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "772996163e9c688f0f71b4fad65f01ad9ff9e42120678569ed4d360b124acf84",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-2-single": {
-      "outcome_sha": "db115af9fcc63e765f1e7afae4afd6ad1525814d56406866e06ee302ab024c2f",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "7d8395a93865650755dfa0d3236dd6a13faadc8ac216d2cd6469b2cbb919689e",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-2-stored-counts": {
-      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-2-summary": {
-      "outcome_sha": "1c652fca1f84ff4dfc5213a9fa78b398014dfd5c7ab1e86650f9a61f4b779b12",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-1-all": {
-      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-1-generated": {
-      "outcome_sha": "289ce2b33ede7d4d48c6ef7270847e50578709650e6672e7a53ca36d172ff0ff",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-1-mixed": {
-      "outcome_sha": "e1b77badd60c033601ad0c8701a6f26617b8cf4b5e183a6e281dc3ec2d07b02f",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "d13ff7499b7fb729e2150a15553d3f1e2f1d8f184ac4aa3916b7edb408d9aad6",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-1-single": {
-      "outcome_sha": "db115af9fcc63e765f1e7afae4afd6ad1525814d56406866e06ee302ab024c2f",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "7d8395a93865650755dfa0d3236dd6a13faadc8ac216d2cd6469b2cbb919689e",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-1-stored-counts": {
-      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-1-summary": {
-      "outcome_sha": "dc3b3e3daeb64f4d3608a4a6c61452c03ea8ef73c68c40706625d128391c550a",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "ba58f43d40a473da5b15cd163debf6fc025aa3de0b26d80bf161c180c469c70a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-2-all": {
-      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-2-generated": {
-      "outcome_sha": "289ce2b33ede7d4d48c6ef7270847e50578709650e6672e7a53ca36d172ff0ff",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-2-mixed": {
-      "outcome_sha": "0eb95c46e901f88bfb7106188d514733d75be4359deca7f816c56b84708d5cae",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "772996163e9c688f0f71b4fad65f01ad9ff9e42120678569ed4d360b124acf84",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-2-single": {
-      "outcome_sha": "db115af9fcc63e765f1e7afae4afd6ad1525814d56406866e06ee302ab024c2f",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "7d8395a93865650755dfa0d3236dd6a13faadc8ac216d2cd6469b2cbb919689e",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-2-stored-counts": {
-      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-2-summary": {
-      "outcome_sha": "1c652fca1f84ff4dfc5213a9fa78b398014dfd5c7ab1e86650f9a61f4b779b12",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-1-all": {
-      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-1-generated": {
-      "outcome_sha": "289ce2b33ede7d4d48c6ef7270847e50578709650e6672e7a53ca36d172ff0ff",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-1-mixed": {
-      "outcome_sha": "e1b77badd60c033601ad0c8701a6f26617b8cf4b5e183a6e281dc3ec2d07b02f",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "d13ff7499b7fb729e2150a15553d3f1e2f1d8f184ac4aa3916b7edb408d9aad6",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-1-single": {
-      "outcome_sha": "db115af9fcc63e765f1e7afae4afd6ad1525814d56406866e06ee302ab024c2f",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "7d8395a93865650755dfa0d3236dd6a13faadc8ac216d2cd6469b2cbb919689e",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-1-stored-counts": {
-      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-1-summary": {
-      "outcome_sha": "dc3b3e3daeb64f4d3608a4a6c61452c03ea8ef73c68c40706625d128391c550a",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "ba58f43d40a473da5b15cd163debf6fc025aa3de0b26d80bf161c180c469c70a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-2-all": {
-      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-2-generated": {
-      "outcome_sha": "289ce2b33ede7d4d48c6ef7270847e50578709650e6672e7a53ca36d172ff0ff",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-2-mixed": {
-      "outcome_sha": "0eb95c46e901f88bfb7106188d514733d75be4359deca7f816c56b84708d5cae",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "772996163e9c688f0f71b4fad65f01ad9ff9e42120678569ed4d360b124acf84",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-2-single": {
-      "outcome_sha": "db115af9fcc63e765f1e7afae4afd6ad1525814d56406866e06ee302ab024c2f",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "7d8395a93865650755dfa0d3236dd6a13faadc8ac216d2cd6469b2cbb919689e",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-2-stored-counts": {
-      "outcome_sha": "a1030db84e1e27cc02562d532fe86150354f9bd8068d06d0d658d14dfa9da900",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-2-summary": {
-      "outcome_sha": "1c652fca1f84ff4dfc5213a9fa78b398014dfd5c7ab1e86650f9a61f4b779b12",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-consulted": {
-      "outcome_sha": "54e074dccfe522bc8649f26579589c25e8c753648f9f5685857d31a9ec03d5ec",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "8e46667fc820aacc4a51c27c3a847f98372ae5c29f903ab2798a30be70615765",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-divergent": {
-      "outcome_sha": "b4d35a2583bb7fa23cadf854a714f67e115df0210e605f93def7c93670819464",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "49914b8334a5e9d0064a56eded094bc0e72ffaff1b0169b9be3357aa8432298f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-foreign-conversation": {
-      "outcome_sha": "c8f3a8dbc98c8c051badd58dcdd50b143548be1eeebca7c43f888861c3e0de4e",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "83082056f6429beabc420d50ac1633e975c23080fb7f88244be04f97090f69b7",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-foreign-session": {
-      "outcome_sha": "f82141a9f6868862f8caca4855b146ff39a0709326179d5fe06709d22a760b58",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "77b474ed29b63ec3243149fab411d8135a6b4da2caa4932da124a530555840fc",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-full": {
-      "outcome_sha": "1716b27174a703aeb55a51b5bdeab9a58885b3c9366fb3f09712c823d631b6ed",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-input": {
-      "outcome_sha": "1716b27174a703aeb55a51b5bdeab9a58885b3c9366fb3f09712c823d631b6ed",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-merge": {
-      "outcome_sha": "df8e97e6057b664969bdba97378abbd4ea2e9d8b37f0c1c6bd7f81de041022ab",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "0b10a59029bc2ace2cf5de483595be4b794509526a221190f456f9078bd10b66",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-missing-metadata": {
-      "outcome_sha": "b6fc046aba9b1a026390322b8ddbaa3824810b18417a3a59a0577988bf58888c",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "b0cfc7cd1928d2e1e2b66f0d890b3c8453e887f48d5be0a16d44eb77e36b5d95",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-new-stamp": {
-      "outcome_sha": "b02325089b763f9cca164adfc8f3080fb3c10164ef267ec3878bb689852a0a74",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "08dcd26a03130270a6a3dd74d05c9abf964788f5222469cb08edebef91bc8c47",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-new-uid": {
-      "outcome_sha": "1b2c455faa1f34b989830290aba6547d7f38662a86a44db227047afb1246576e",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-repair": {
-      "outcome_sha": "626e36bbb549c6572a9cd6a57aaf380cdde6902bc8cc0eabc45e2b23bc600a4e",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "f46f796daf16a901daa72535feabfce5ed539ff6748d6d5e4773d117615ae8c5",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-short": {
-      "outcome_sha": "cf3bbef2d74fd3e6ba73782813bb51f3ba2d25a643a0bb3b3910aca022c61584",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "0302e2d84ef1908e3acc267b7ffe21e6f6b1907e9424590dded2dd02aa8bd19a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-zero": {
-      "outcome_sha": "edf4f932684e13a813b18f5771701e5fa79d91a87c97d4187aee195688aa83f2",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "8687a9b62bc6d4db21f07048102f6441f845f7386277c02da753511f82cbbcf9",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-consulted": {
-      "outcome_sha": "1ce067366bcfca699d599f7ea083a0696c244c1ce9314829a155cf0ca146b3c0",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "2d4df9926f7884d0974eea87c0934f656515f9e6016fa6803249cdb877174d11",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-divergent": {
-      "outcome_sha": "fbeb570beddd975cff227e22f7addf08cc48f6cc33410c939fe6f098f6a75efd",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "968cc16fb4dcdf83b6d9aa45f060f5ab8eccf847c4f835ace24ee0223426d785",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-foreign-conversation": {
-      "outcome_sha": "6f15d6153a655da54019862a14227d07d978a1a9df01e394992b32add5b010fb",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "dd441365c8d9086a0abb238fea4222954078ab91136961f62eeb7a7f68e28eb3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-foreign-session": {
-      "outcome_sha": "11b74169b138d79555fbf4fcc50bc24a53bcb4a1f629691b4cf09fec835c567a",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "e4e947ccbcd823f0c779fbd1c8c7117785ab8773b02a8c574dad971522588704",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-full": {
-      "outcome_sha": "1716b27174a703aeb55a51b5bdeab9a58885b3c9366fb3f09712c823d631b6ed",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-input": {
-      "outcome_sha": "1716b27174a703aeb55a51b5bdeab9a58885b3c9366fb3f09712c823d631b6ed",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-lossy": {
-      "outcome_sha": "c0292d7e9007840689ab526a78f2288ea6432681fef195ae914cc24df3fddd56",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "c08fe605cbf31f94545c73d947d2ecdcad6117eeac40685cca2523bd134a6622",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-merge": {
-      "outcome_sha": "652a9fca6eecbf0a261289ec0e75d49841609cf78374334e4e4b4faa1ae52c57",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "6879eb5a85dc378221af8e407bf154874ed5033db4fb98e054bc2a971cecab84",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-missing-metadata": {
-      "outcome_sha": "b6fc046aba9b1a026390322b8ddbaa3824810b18417a3a59a0577988bf58888c",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "b0cfc7cd1928d2e1e2b66f0d890b3c8453e887f48d5be0a16d44eb77e36b5d95",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-new-stamp": {
-      "outcome_sha": "b02325089b763f9cca164adfc8f3080fb3c10164ef267ec3878bb689852a0a74",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "08dcd26a03130270a6a3dd74d05c9abf964788f5222469cb08edebef91bc8c47",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-new-uid": {
-      "outcome_sha": "1b2c455faa1f34b989830290aba6547d7f38662a86a44db227047afb1246576e",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-remap": {
-      "outcome_sha": "68b3232836d5d0b36d4e634dc48fbad1b9f3d0ec30f3a2ad46bf711519a6ac5c",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "c5a7e78a3835c388cf7c6420afc2163d97794693da10b4fbad5de9d5d325bfd3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-remap-new-stamp": {
-      "outcome_sha": "fe10e0fe6a6f3db21253eba94b76289ae777b0ff4d364ee96c6ff9ab96d4af2a",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "0648d15a9fd72b897dfc9e7f096aa8dc9359fc05b8f542ac455f1adda6efa750",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-repair": {
-      "outcome_sha": "844e095f446a781036f69f6ee9d5005bed521026914120be757cd56c28cca364",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "e8402a3833bc0674effbe8f88aef6fa66798a0aef081eca6cf681a620137e3bb",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-short": {
-      "outcome_sha": "40f34afd18f43cbfdb54ce36bba718ce8baaa5def6dea32cce26d457b8e3f92d",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "36628838e8d8068637689639c67900c5bfb7d1ccdc67539e397a6e91f2d8315f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-zero": {
-      "outcome_sha": "5295f87e0c692744890923ab038d8bdf4e581630f4b14edf9d4ad785458ceb95",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "25bb80cfffa596d31211ac40cfa632b0b2687651eaeea53083e4dd07a88a7019",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-consulted": {
-      "outcome_sha": "97e3fcbe8e4b7d5fe73ce667de3a5a601103d8de09d0e86759bf9a6370a7e4fa",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "f1a5b2d99b8db10526b1358dc2ad5ae599867fe623a9aa4db534eb9c2d769891",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-divergent": {
-      "outcome_sha": "c2da69ee3aac25a5c559e40f3607a516c6bd23325649591f6df6fce279350657",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "caa96355e725f000148dccecc994454f876ca9253d704864adfe0085e292983a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-foreign-conversation": {
-      "outcome_sha": "ac159421b3d5b4c45c5b862e8b28be4cd247f918ecf0684a3e011dd08fc8dfab",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "5ec8b0501f213ce6fd76ef762411bce20e4ff9c5a95dac40f53ae2b12c5bdd13",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-foreign-session": {
-      "outcome_sha": "9914a374e3162e392b7fcf6a775b25bc349fd44109d81e31f6bd19c46b815c09",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "9b2ec95d41320a38582907daa9b9c9ad390638841872edd3cfbeece7b60e8874",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-full": {
-      "outcome_sha": "1716b27174a703aeb55a51b5bdeab9a58885b3c9366fb3f09712c823d631b6ed",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-input": {
-      "outcome_sha": "1716b27174a703aeb55a51b5bdeab9a58885b3c9366fb3f09712c823d631b6ed",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-merge": {
-      "outcome_sha": "fc04fec20cf190b2f9d43d14fdafdc6efc910b9588dbb8be7f369bf12201a58c",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "5f1d7693341a2b1bea560b7d2a2be0da19f4b45bbadb287f901f84cff72bd33f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-missing-metadata": {
-      "outcome_sha": "b6fc046aba9b1a026390322b8ddbaa3824810b18417a3a59a0577988bf58888c",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "b0cfc7cd1928d2e1e2b66f0d890b3c8453e887f48d5be0a16d44eb77e36b5d95",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-new-stamp": {
-      "outcome_sha": "b02325089b763f9cca164adfc8f3080fb3c10164ef267ec3878bb689852a0a74",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "08dcd26a03130270a6a3dd74d05c9abf964788f5222469cb08edebef91bc8c47",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-new-uid": {
-      "outcome_sha": "1b2c455faa1f34b989830290aba6547d7f38662a86a44db227047afb1246576e",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-repair": {
-      "outcome_sha": "114f6692ffb7735fe9fe6f9c65dc03d25922c78aa69e24e62aa11dbf754ac6b6",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "9a78ab992378d711265b740e910954bd4998a31555cb5d44bd7eda32243e8046",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-short": {
-      "outcome_sha": "f25bbf0e9d5ad8d039fe4516d6429a53a0db405cc48ebdc33b9cc3171871cc85",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "2d8bbc10dd014d2f9375169f655c57d01c5ce168c2a1034ccec636778e63eaa5",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-zero": {
-      "outcome_sha": "85796e1e5475f3236a3e002272473b407f1ca2bf23e1253adedb4ac5c04960c2",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "d3073f8408dacb76e144da81703ad375d6a440ce9d02ecafa22d98b860836971",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "protect-after-filter-copy": {
-      "outcome_sha": "a246f570ceb20afd9d6e0a1a6da656443ea53b48be2bcd482654bc5a6fea5481",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "c8ce01f5d6cdcfd3f531d7342d51f702a1630f237e36f97f90180ad38d9e3192",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "protect-large-assistant": {
-      "outcome_sha": "6418a69566bfdbd6a040899f0c05c3d3c500cb59355d915cb1c913180de35140",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "9e5ba68bbd1076690696e5e4b1e7aaf238de3c8e4cec323251b7c180de303bb9",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "protect-large-user": {
-      "outcome_sha": "c0131ec17aab9c41fbb89f0d5df6606b54d070e7ec29ecf3bf536c398531f1c4",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "0df6891908dafbfaf2b78cdabb2f8501366c6a125648dff47489ac5009512344",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "protect-path-error": {
-      "outcome_sha": "d933fb6aef7c84afad6f5cda73cec58201d22bd5918b8f82d17f0ca9af80a219",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "352525a3c28c381d6bc1cc05530ab8d0bdd396052420d596996f36e41acb9efc",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "reconcile-tool-after-new": {
-      "outcome_sha": "182e78afd9e928f6d5f91216a10a4e6143e21b6fe85c2bccf0cb3e7965e48008",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "78d932e838a0b342a5afa25be2d50d130c2d6fb1ea845c04641cf35a0c356e70",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "repeated-equal-occurrences": {
-      "outcome_sha": "480bf34f73468d8895de439c70c004e9e40216bbce40ebd09e4b9e8ae81a626e",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "b66e74141d6ec68a5551fa6c9caa3a042a3858135b20489351e432f9974ca58c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "repeated-tool-id": {
-      "outcome_sha": "cd10319f8b730e9e5d52b44526525971561eca21fbf751846530d86f01e01568",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "8f4231770658dfbca52aff035930d346d7ccc72a4ae72db1a5345cd86124b7b4",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "replay-build-mapped-ignore": {
-      "outcome_sha": "4f38d7ab5c79110083ed38450964fa8943e381e2195d740426ddd4145cf83bdc",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "9895704074931ec5cffb6078c20d094c16b2ab1e6336af63a2b0b86d1ed4e535",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "replay-build-quarantine-prefix": {
-      "outcome_sha": "7f793e447fd6dd979e04a190da8f6673b083e148d143e05e0cec82462c3870b2",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "da83cdcc5bde68d7c666be6a5f768ae6b333bac072c9290676d9793df5314e74",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "row-filter-generated-append-error": {
-      "outcome_sha": "f63f055c032e2140d3f301e90b88daec2292179d03f7148b290ec1e0927019fe",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "874230875112835f711049274f3fdd97bea4cffe6d42e8fedb7847d3007eb9ec",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "row-filter-ignore-ledger-lock": {
-      "outcome_sha": "bd4cf4f02baa8557de7273d45dd274179ad180e328775ecab4138b1d88c26203",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "33474d00806c48a2f415c3270372ec5a3560904d095d4970e371932a946d2aa0",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "row-filter-ignored-append-error": {
-      "outcome_sha": "3f56ffe1f1390ddd00c7317496ceac8ef5f96f62dd807b8a07f8cdbb2dafcef7",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "eb4bd089208db13599496286680fe550a8a6e76e5e524b0db66686231d66cdbb",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "scaffold-metadata": {
-      "outcome_sha": "d184f6c9c5f1b291fc8a590c09f5d4805a71276ac938f3784e7bdcc65a8872bc",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "8f1d4a919c5533445740f48043c9e454dbf7ac96ad5c0b39579fd940d81f3c26",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sequence-compaction": {
-      "outcome_sha": "f3e4d0a11d835be206842761ba7921f173e2a907ee648b0d7f4851f8bc4cf2ce",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "2e9712b282201b6620e519a7eedb6a897876ab17a9dd0492d3a3d0fcbfc138c6",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sequence-host-merge": {
-      "outcome_sha": "a1980d8064636061dbd57068e51f8ca318ef6cfea08c2e4c0a4065687f37555d",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "4d8dceef8ba470aee3aec750fb01c9eb4e4232ba238959075b4308b26164ceb0",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sequence-rewrite": {
-      "outcome_sha": "def18c33a9af3f5b192e295e53c2e85a8e14b84b435e3449398db30bf16cd407",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "4724ba25115bac1ba138283a8a6fdd4f378c94fddbf1d9c53db4f41fcd896df0",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sequence-rotation": {
-      "outcome_sha": "47c5a4570caafab9cce0ccccc622e32d4fb5fa1cfeed041af5647ef275b77659",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "3e2fd39772f7a59cd42a2ce49a65a96cdae9d81537870d64e87ef947bcace2d7",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-append": {
-      "outcome_sha": "697bbc833a7d3826366179b5c331203aeb3923b4280c7a9bed2b5d33fc9aae0b",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "8ef36b8df91b5bf693c2ad826888b92fb8c3e8df810f28204eb28c37d79b5c21",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-duplicate-existing-tail": {
-      "outcome_sha": "7a32093374e4930c78ac782ab5e7cd54e8a94b1d0442d443782cbb2e80432a70",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "702139d7b61dfcdb50f1b9ea3277e11f1056d4d8e47126d5a32f8b1bc20e8cc2",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-duplicate-tail": {
-      "outcome_sha": "ff597a1b4a91dce7619557468e0890f737185c516081f6b9532899b63b224488",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "84741f353c6d65bdb06945005dd3d18201d873d66b818f50b0c6fcad902f679f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-durable": {
-      "outcome_sha": "832d945207d96944cf3c9f3e5dd7a53d4749e6977e031db126d6ceaa2839baad",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "0b115b03d0f2495bbdd6c3efac4a0ee3096fcad6e0f05d70bcb3c1da48016051",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-locked": {
-      "outcome_sha": "986e65b36029ea06cbe775c513c4ea29e89e1993bc117d684fb6b5f38bedd8c6",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "fabbadeebb3188c1a31eef57f683668d5ef514717a2a5cd878f24329ff2eabf5",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-locked-existing-tail": {
-      "outcome_sha": "f98196dd6fd2c535cdabfcad71af986c17f4706d0b4e7a320d08dbd56cd598e8",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "a1f5b8966f775ff29d98f57f860c15ba9e467b00d19ae8eb7d4fd72a4378bd13",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-metadata": {
-      "outcome_sha": "b61a8f6b8fc770f0d4453b3d8d970598d97125d856445a45126a5fe28cd9706c",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "9f42b0bcef170e51636e96a1bb5e4c3f29fad2b9ca590fb07698975c09c8f6e8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-prematch": {
-      "outcome_sha": "32357c872573a634184ccd08769ce3afa2f539f070a3829a4e411b1e797cb4c1",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "325dd7d33e5d2c20b13eea87d1544d3bafeadcddf3b80d6b3d2bf1b9c860ff2a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-probe": {
-      "outcome_sha": "e79111f08534ff1495ef67029f7f8389ce05eec3d0e81374cf7627981d3ebb35",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "75ef8732b1cfa13523983c3c392341dc5fab3e49501544e7e7ec6f520621ebd5",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-relation": {
-      "outcome_sha": "b142e7987f30c8e8a8dc2d9c61302359edd2910979029a08f15781f4b38057c0",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "327761efc4b799251295e613f8dafff272078e8e941d5aee9127cd69d5465bf5",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-snapshot": {
-      "outcome_sha": "4c0cd2fce3554e68481f14771bcf43c9c0b1545e97286c75e996aa08af8820f8",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "2923a8946aa09bc590416a89b6c94e521e8b11cef40f7308b074e4cedd506b4d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tool-segments-after-new": {
-      "outcome_sha": "ee0bcc3f3a23d1ef78accdaa56d201699192a85f72252ab36d91da222f98908d",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "56232c0ea6412c873730f9a12e0d3e38b49f41e476db16e50d913a90b19062be",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tool-stub-host-held": {
-      "outcome_sha": "a2e7b5c1245bcc420c4c6a1f62b6878d3a238f3d16e75664d3426472cb0b6669",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "276b41143ee452f766d32b32d40d77966bf2273918746a6f7ba0ff06042a6f45",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tool-stub-pair": {
-      "outcome_sha": "4af76b264c812d8eac09de796f56dcdfe1d381c8b281d135dcfcaf0c0d2cedec",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "7cb56d23f271b1858714dba893fd0a4155b288ff2a83604865cafd0013a497d3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tool-stub-recovery": {
-      "outcome_sha": "56cec9faeae615ff14d78b91a19e6114a00728350469374527d5e667b9a4942e",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "d669255161446b04979f08827577c650db1ac104f9169bfdf2f5d4e0cdda090d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tool-stub-single": {
-      "outcome_sha": "5bafeeaf86e8422cb49f15a39963f33df04c83057c59959a20643c296e23b2bf",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "4269640ed7d887c85fb28985a86a8ab4f566936d83f649e415ca1e878dcd4c00",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tool-stub-warm": {
-      "outcome_sha": "eccecfb6b2af319d7fbcaf59ef9e885e78e270c8b012c908542702e3384a1c40",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "f712252c4fe8a5695e0d056f86c07603676cfc95c47e7035de6cea6b03f9eff3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tools-changed": {
-      "outcome_sha": "3bb8d8aacfd5d7eafdbf042f02cdfae4c866d1b448eb29b1904b72d941bcc8b9",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "6ba60f2ff4096db9cd0aa6a883033aaa3adf7cd1973d71c492635d8adb477ecf",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tools-delta": {
-      "outcome_sha": "b921ab6034c297c3b769c6303cc3d85c10d2945051fd1e401a8e32abc01f39dc",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "5be34b81cc5d8662bbd6e6fd32dbe8066126d7b2c952d331262b09edd074269c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tools-full": {
-      "outcome_sha": "eb40d6edadcd2cea93a197e4e0f6395e26a5ae4b2144c8e5df86bf6bc7a2913f",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "07339ec6af4ec78849a2bb8932fbd95d98f37e062881cc99b4d5acf4471e4f55",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tools-new": {
-      "outcome_sha": "62a5c4b56f231d8361b2ec8b4e08dd8c995be30ddd01118f020456c54f2625d9",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "940a6614f351853a308b5dd10f0e69bf5573c8cd20c60a4ad54d833452853b51",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tools-prefix": {
-      "outcome_sha": "e66dd58d0d4ec4d4324dd1dc2951a16de63ff652305e094cfe2cba21747496a7",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "b29824f161b017f6944b1478c493e4f4e3e9f8e83a9b0a1a26efe7ebe828e789",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tools-rewrite": {
-      "outcome_sha": "69f039aae8b566c067f3e855a5816458cc96f35e522b8ea7a2e864b8538e0a61",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "e150f005ca77c7c40e7de336893b17ecb739e5daf622f685f4a8c0050b98e51b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tools-suffix": {
-      "outcome_sha": "a99a74bc5f0ff88fd779c885993eea8c5c3e94af29447c5f53d8e680cdbae857",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "c2e46fd26dc29e4dbc087799b963f705907c940f14a3726a805396c9ad34b980",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tools-warm": {
-      "outcome_sha": "35dd333ae5ecb9e670ca962c413888621f09aaef715afca1918929428fa1a0a6",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "1adac9f41456db1d3542ce6b8de56b35d99cf6d89aa608b995352fa02b78d08f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "turns-changed": {
-      "outcome_sha": "c3d5ac8eb376e4d7e1ec3849a679e4b43052a7e81cbfd6e3374f6cff4eedc647",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "5f4bc585c603698139c8384290d82c007fa8adc2add15a1f3d696fc97866630c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "turns-delta": {
-      "outcome_sha": "613f8daa9165abb776ec2b43e78d4bcd391ef8eadc0c073e5f719eb4f1f4d21b",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "e763b7e88499398a30bcf8ff0ff94a8f53c8b71e3bb65f7fbfca7be90dd54517",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "turns-full": {
-      "outcome_sha": "8ce111b53575ca4f54d902b7fa1d6fd442e6d97befa30e4108ca1573dae85d8d",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "ee6a090cc46fb06e55bba1f0c4828b97657e19a5cf7e162b6f03dd9098afe0da",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "turns-new": {
-      "outcome_sha": "6b7c9a5c6b8ec14050b06c6baba227b0591de4d2b701538af03a1bc423c3de70",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "c689c7cb3e43b86ebb171361691f8937bc45e163587afbb3682d9c1e3380468c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "turns-prefix": {
-      "outcome_sha": "4f54ff1f9c5f9bf2a5e17a1322dbeb9b6c9afe287c40b1b05b49c8a28f6281c7",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "e8cb62995f4e1ee095dae582590668fa1e57d80241e20d416f4635d7236894c7",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "turns-rewrite": {
-      "outcome_sha": "12b745b5ecd8f53f3622ffea416366ea182786a1f07e1125d97edb6a33dea466",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "057b81e97bf7bdf12e345a5af440759725a4557c1f5a2d7d56d281f84ffd9f7c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "turns-suffix": {
-      "outcome_sha": "35d2120d6411e3b01db06df93d6ea13a163480175d4e25597a25dcf79c42b8d0",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "b4c7eeb11f2b38e21a66fbeb57e921fec991137672d1670581f060370556c273",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "turns-warm": {
-      "outcome_sha": "76199a1429ac3955894800e9d815f99a0f255cbdcec28a8abf271928852de32b",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "21e6992058975e99ff6ec24b66a93fc2bc099e17c350c4d04af3c9e264479745",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "uid-bindings-new": {
-      "outcome_sha": "690d2e5818b2cb5a75706a17e297c2d57c3b5d6ba4fa955d8bfa87fe8cca986f",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "75164b925cd8a90c34ced6d3bca7c028869aa1a28af23f71145f1e24a521fa02",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "uid-bindings-new-occurrence": {
-      "outcome_sha": "784d36357b3268632f21ffbdad6a20746aee38b48421763de2bb5fd3de904bb4",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "750512c61431425e257610243b5cb75e2562aad15698d593340cbe09bec1fcef",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "uid-bindings-replay": {
-      "outcome_sha": "59ddafb6d1d7b1b2d5b7a59281f8800dba2a82d287fd87a026e5781d161843f2",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "97bc59f1a6d715247b206224d2b831a9b68faab4527475b3be626d39c513a229",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "whitespace-changed": {
-      "outcome_sha": "31ac0e72c0888ba9ac6c3133d8942ad312f734a3e1d1e74fb4d39a999c7b515d",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "ce0e1820a4a091935d09074aa68b12d77663cf2dcd6c4fc53e91da6ff255a3db",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "whitespace-delta": {
-      "outcome_sha": "1c5d5fd42cb0997b3ad0922b08442ebd8190887ea1124f1b828ac92c93a3f9cb",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "e50dff5b292e9810f25e44a5cdbc7ef6acb66bb5abebcdfc85fbe374877a9321",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "whitespace-full": {
-      "outcome_sha": "a62875eaca00a25cf69598923f59663af4c2e2e1dff5fa2da8d1863b71964a97",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "0f5bbbf36b7a904de099a2a69d67f9bbb2c20dbe182ac78b645948f7d48fefc4",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "whitespace-new": {
-      "outcome_sha": "08cab749ab77c7c31469c51407db392da229bd23c77a233d9e5cce818ef1e9a7",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "844fe2df684a3b630a1598a0dd034fdd69a5b24361e46d2cc51cdfb8a53901d2",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "whitespace-prefix": {
-      "outcome_sha": "5c585ae92e1da6e4ed1c43c77123e8d97bd4c25e809c5274d04fa534dba97b48",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "def901a3960233e999c74da550924e5b8f079ac5a4888288022c09357bdd867d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "whitespace-rewrite": {
-      "outcome_sha": "02963cfd7e579babbd7ef1026efa8468cec2899e9bd4d2de283539547595d4c2",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "038a117d19e4c2fcec7cb5d0a8f7b6bc37beb7e03d17b4df027a828681ad5aa2",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "whitespace-suffix": {
-      "outcome_sha": "3e268c4a3cfceba3fef920d579215ace9105f3f1664ce128fe7c2b27163a8b83",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "159ac3c4062b1deb9e99356ecea55b7b8895542736b8ea53ff5b7724fcc0d295",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "whitespace-warm": {
-      "outcome_sha": "11387fbb85cd8e938eb1d18700666034070207cba95cd8cf692adadd2be0463b",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
+      "outcome_sha": "d87c009c9995b4fba0dea72f6b6c9dc9acbd29683a49d277b3820cf60068ad63",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     }
   },
   "compress": {
