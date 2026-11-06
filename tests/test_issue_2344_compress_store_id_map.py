@@ -56,14 +56,23 @@ def test_compress_leaves_no_store_id_map_behind(tmp_path):
 def test_reused_address_cannot_store_a_carried_ignored_placeholder(tmp_path, monkeypatch):
     engine = _engine(tmp_path)
     try:
+        pass_keys = []
+        end_phase = engine._end_pre_leaf_phase
+
+        def record_pass_keys(*args, **kwargs):
+            # Runs in compress()'s cleanup while the pass's own map is still installed.
+            pass_keys.extend(engine._compress_run.store_ids_by_message_id)
+            return end_phase(*args, **kwargs)
+
+        monkeypatch.setattr(engine, "_end_pre_leaf_phase", record_pass_keys)
         _, result = _first_pass(engine)
-        left_behind = list(engine._compress_run.store_ids_by_message_id)  # empty once the pass owns its map
+        assert pass_keys  # the pass mapped its working copies, so the stand-in below always substitutes
 
         def reused_id(obj):
             # Deterministic stand-in for CPython reusing a freed working copy's address: a placeholder copy built
-            # during the next ingest gets the id() of whatever the compress pass left in the map.
-            if left_behind and isinstance(obj, dict) and PLACEHOLDER in str(obj.get("content", "")):
-                return left_behind[0]
+            # during the next ingest gets the id() of a working copy the compress pass mapped.
+            if isinstance(obj, dict) and PLACEHOLDER in str(obj.get("content", "")):
+                return pass_keys[0]
             return builtins.id(obj)
 
         monkeypatch.setattr(placeholder_ledger, "id", reused_id, raising=False)
