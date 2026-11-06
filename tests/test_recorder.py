@@ -1922,11 +1922,11 @@ def test_fix_r2_07_payload_pin_defers_copy_and_hash(lab, link_error):
     release = threading.Event()
     snapshot, monitor, sha = rm.Recorder._snapshot, rm.Recorder._monitor_on, rm._sha256_file
     hashed, copies = [], []
-    copyfileobj = shutil.copyfileobj
+    payload_copy = rm.Recorder._payload_copy
     def copy_on_writer(*args, **kwargs):
         copies.append(threading.current_thread().name)
-        return copyfileobj(*args, **kwargs)
-    lab.mp.setattr(shutil, "copyfileobj", copy_on_writer)
+        return payload_copy(*args, **kwargs)
+    lab.mp.setattr(rm.Recorder, "_payload_copy", staticmethod(copy_on_writer))
     if link_error:
         lab.mp.setattr(os, "link", lambda *a, **kw: (_ for _ in ()).throw(OSError(getattr(errno, link_error), link_error)))
     def deferred(self, *args):
@@ -3885,3 +3885,128 @@ def test_2280_q1_string_first_cause_keeps_seq_hole(tmp_path):
 ])
 def test_2280_q4_docs_describe_stop_and_snapshot(wording):
     assert wording in (REPO / "docs" / "recorder.md").read_text()
+
+
+@needs312
+@pytest.mark.parametrize("keep_marker", [True, False])
+def test_2283_writer_failure_precedes_later_cap(lab, keep_marker):
+    rec, rm, _ = _round2_recorder(lab)
+    append = rec.writer._append
+    def fail_one(event, **kwargs):
+        if event["kind"] == "writer_failure_probe":
+            raise ValueError("injected event failure")
+        return append(event, **kwargs)
+    lab.mp.setattr(rec.writer, "_append", fail_one)
+    first_hole = rec.last_seq + 1
+    rec._emit({"kind": "writer_failure_probe"}, single=True)
+    assert rec.writer.drain(5)
+    assert rec.first_cause == {"cause": "writer:ValueError", "seq": first_hole}
+    with rec.writer.io:
+        rec.max_bytes = rec.writer.total_bytes + rm.DIAG_RESERVE
+        rec._emit({"kind": "cap_probe"}, single=True)
+    assert rec.writer.drain(5)
+    assert rec.stopped == "cap"
+    assert any(e["kind"] == "cap" for e in recorder_module_events(rec))
+    rec = lab.stop()
+    if not keep_marker:
+        for path in (rec.proc / "events").glob("*.jsonl"):
+            lines = [line for line in path.read_text().splitlines() if json.loads(line)["kind"] != "cap"]
+            path.write_text("\n".join(lines) + "\n")
+    reader = importlib.import_module(rm.__package__ + ".recorder_read")
+    recording = reader.read(rec.proc)
+    assert recording["prefix_end"] == first_hole - 1
+    assert recording["cause"] == "writer:ValueError"
+
+
+@pytest.mark.parametrize("hole", [True, False])
+def test_2283_legacy_cap_reason_is_not_a_cause(tmp_path, hole):
+    import recorder_read as reader
+    proc = tmp_path / "proc" / "legacy"
+    (proc / "events").mkdir(parents=True)
+    events = [{"kind": "process_start", "seq": 1},
+              {"kind": "cap", "seq": 3 if hole else 2, "reason": "bytes=1 free=2"}]
+    (proc / "events" / "one.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    (proc / "STATUS.json").write_text(json.dumps({"snapshot": {"state": "ok"}}))
+    recording = reader.read(proc)
+    assert recording["prefix_end"] == 1
+    assert recording["cause"] == "cap"
+
+
+@needs312
+@pytest.mark.parametrize("site", ["link_fallback", "snapshot"])
+def test_2283_payload_copy_bounds_a_growing_source(lab, site):
+    rec, rm, _ = _round2_recorder(lab)
+    source_dir = lab.tmp / "growing-payloads"
+    source_dir.mkdir()
+    source = source_dir / "payload.json"
+    reserved = (128 << 10) + 17
+    source.write_bytes(b"x" * reserved)
+    proc = lab.tmp / "copy-probe"
+    target = proc / "snapshot" / "large-outputs" / source.name
+    target.parent.mkdir(parents=True)
+    if site == "snapshot":
+        os.link(source, target)
+    copy_source = target if site == "snapshot" else source
+    original_open = open
+    reads, grown = [], []
+    class GrowingSource:
+        def __init__(self, handle):
+            self.handle = handle
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.handle.close()
+        def read(self, size=-1):
+            reads.append(size)
+            data = self.handle.read(size)
+            if not grown:
+                with original_open(copy_source, "ab") as handle:
+                    handle.write(b"y" * (64 << 10))
+                grown.append(True)
+            return data
+    def grow_on_read(path, mode="r", *args, **kwargs):
+        handle = original_open(path, mode, *args, **kwargs)
+        return GrowingSource(handle) if Path(path) == copy_source and mode == "rb" and not grown else handle
+    def refuse_link(*args):
+        raise OSError("injected cross-device link failure")
+    with rec.writer.io, lab.mp.context() as patch:
+        patch.setattr(rec, "proc", proc)
+        patch.setattr(rec, "write_status", lambda: None)
+        patch.setattr("builtins.open", grow_on_read)
+        patch.setattr(os, "link", refuse_link)
+        before = rec.writer.total_bytes
+        if site == "snapshot":
+            rec._snapshot_body(None, source_dir)
+            manifest_path = proc / "snapshot" / "large-outputs.manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            assert manifest[0]["size"] == reserved
+            admitted_other = manifest_path.stat().st_size
+        else:
+            rec._capture_payloads(source_dir)
+            admitted_other = 0
+        assert grown and source.stat().st_size > reserved
+        assert target.stat().st_size == reserved
+        assert reads and all(0 < size <= 64 << 10 for size in reads)
+        assert rec.writer.total_bytes - before == reserved + admitted_other
+
+
+@needs312
+def test_2283_checkpoint_reserves_seal_marker_headroom(lab):
+    rec, rm, _ = _round2_recorder(lab)
+    with rec.writer.io:
+        size = rec.db_path.stat().st_size
+        rec.max_bytes = rec.writer.total_bytes + rm.DIAG_RESERVE + size + 10
+        rec._checkpoint(24)
+    assert rec.writer.drain(5)
+    assert rec.stopped is None
+    assert rec.counters["recorder.checkpoint_skipped"] == 1
+    assert rec.last_checkpoint is None and not rec.pins
+    assert not (rec.proc / "checkpoint" / "24" / "lcm.db").exists()
+    rec._emit({"kind": "after_checkpoint_headroom"}, single=True)
+    assert rec.writer.drain(5)
+    assert any(e["kind"] == "after_checkpoint_headroom" for e in recorder_module_events(rec))
+
+
+def test_2283_docs_bound_diagnostic_floor_with_status():
+    assert "up to 64 KiB plus one STATUS file below the disk floor" in (
+        REPO / "docs" / "recorder.md").read_text()
