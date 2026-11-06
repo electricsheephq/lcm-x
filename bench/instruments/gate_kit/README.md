@@ -18,8 +18,8 @@ python -m bench.instruments.gate_kit.audit --state-db <hermes home>/state.db --l
   created beside them. An immutable open does not read a `-wal` file, so a database with a non-empty `-wal` beside it
   is refused (exit 2), as is one with a non-empty (hot) rollback `-journal`; a symlinked path is checked beside its target: checkpoint or roll it back first (open it once after the run has stopped, or copy it with its `-wal` and
   checkpoint the copy).
-- `--out` is refused (exit 2) when it is, or resolves to, an input database, log or events file, or when it sits in a
-  database's directory (beside its `-wal` and `-journal`). The result is written to a temporary file in `--out`'s
+- `--out` is refused (exit 2) when it is, or resolves to, an input database, log, events or externalized payload file,
+  or anywhere under the audited home or a database's directory. The result is written to a temporary file in `--out`'s
   directory and renamed over it.
 - `--since` (a naive ISO time is UTC): a lineage is scored when any member started at or after it, and only those
   members count: a rotation child in the window is scored without its earlier parent's rows or the copies of them it
@@ -28,8 +28,9 @@ python -m bench.instruments.gate_kit.audit --state-db <hermes home>/state.db --l
 - `--log`: the run's Hermes logs, in a Hermes format (`<asctime> <LEVEL> [<session>] <logger>: <message>`, the
   verbose `<asctime> - <logger> - <LEVEL> [<session>] - <message>`, or the ACP host's stderr
   `<asctime> [<LEVEL>] <logger>: <message>`, which has no session field). A pattern counts only at the start of a
-  message logged by LCM-X's own logger (a `hermes_lcm` module); a compaction or recorder line logged to two files counts once. A compaction
-  line without a session takes the `session=` its message names, else the session of the nearest unused driver
+  message logged by LCM-X's own logger (a `hermes_lcm` module); a compaction or recorder line logged to two files counts once. A
+  session-less copy matching a session-bearing compaction's timestamp and message is dropped; distinct sessions stay
+  distinct. A line without a session takes the `session=` its message names, else the session of the nearest unused driver
   `compress_request` it falls within (2 s before to 120 s after the request); else it counts toward `compactions` but
   not toward `compactions_then_restart` (`coverage_basis.compactions_without_session`).
 - Log times keep their milliseconds, so a restart and an ingest in the same second keep their order.
@@ -71,7 +72,7 @@ rows), `tool_calls.stored_keys`/`compare` (tool calls and results), `externalize
 | Output | Fields |
 |---|---|
 | `parity` | per lineage and in total (every scored lineage, #1931 bucket B children included): `expected_rows`, `stored_rows`, `missing_rows` (exact-content deficit), `surplus_rows`, `visible_surplus_rows`, `silent_surplus_rows`, `split_assistant_keys`, `externalized_unresolved`; `zero_row_lineages` (expected rows but none stored); per session: lineage, source, stored rows. |
-| `coverage` | each floor's `value`, `floor`, `met`; `unknown` when its input is missing (never met). Compactions are LCM-X's `LCM compaction #` lines tagged with a scored session; delegated children are the ended, scored bucket A children; host sources leave out `subagent` and `tool`. `coverage_basis` names each basis and gives the store's depth-0 message leaves (a pass may write several, so they are not the count). |
+| `coverage` | each floor's `value`, `floor`, `met`; `unknown` when its input is missing (never met). Compactions are LCM-X's `LCM compaction #` lines tagged with a scored session; delegated children are the ended, scored bucket A children; host sources count scored sessions only, leaving out `subagent` and `tool`. `coverage_basis` names each basis and gives the store's depth-0 message leaves (a pass may write several, so they are not the count). |
 | `uid_coverage` | per host source: rows stored, rows with a canonical `host_uid_bindings` row; `table absent` when the store has none. |
 | `m3` | rows in the window's lineages that carry `generated_unproven` or are the `store_id` side of `possible_replay_of`, over the rows stored there; the rate and every store id. An `undo_retained` row leaves the numerator for `possible_replay_of` only. |
 | `undo_retained` | `rows` and `store_ids`: stored rows that are a host undo's retained occurrence (`undo_retained_rows`). A TUI undo soft-deletes the undone rows in the host (`active = 0`, `compacted = 0`), so they are not expected; LCM-X keeps its copy and stores the resend as a new occurrence. A stored row is excused when the host holds such an undone row of the same session and row key and the stored row's `observed_at` equals that row's timestamp; each undone row excuses one stored copy, and a row with NULL `observed_at` is never excused. An inactive row with the same session, key and timestamp as a displayed row (the original an in-place compaction, `replace_messages` or `deactivate_message` leaves beside its live clone) excuses nothing. Excused rows are neither expected nor surplus and stay out of M3's numerator (they count in its denominator). `host_rewind_count`: the host's `sessions.rewind_count` per audited session, as a cross-check. |

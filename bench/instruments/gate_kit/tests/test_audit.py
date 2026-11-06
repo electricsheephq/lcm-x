@@ -424,6 +424,15 @@ def test_a_frame_marker_auxiliary_subagent_child_stays_scored(tmp_path):
     assert out["parity"]["zero_row_lineages"] == ["A1"]
 
 
+def test_auxiliary_sources_do_not_meet_the_host_source_floor(tmp_path):
+    sessions = dict(ONE, BG=("cron", None, 3000.0, "completed"))
+    line = ("2026-11-06 10:00:00 INFO hermes_lcm.engine: LCM session decision: session=BG platform=cron "
+            "parent=- decision=auxiliary reason=background_review engine=lcm\n")
+    out = Home(tmp_path, sessions, turn(1) + turn(2, "BG"), stored=turn(1)).run([line])
+    assert out["issue_1931"]["auxiliary_excluded"] == ["BG"]
+    assert out["coverage"]["host_sources"] == {"value": 1, "floor": 2, "met": False}
+
+
 def test_a_frame_marker_auxiliary_top_level_session_stays_scored(tmp_path):
     line = ("2026-11-06 10:00:00,000 INFO hermes_lcm.engine: LCM session decision: session=S1 platform=cli parent=- "
             "decision=auxiliary reason=frame_marker engine=lcm\n")
@@ -469,6 +478,23 @@ def test_log_tz_decides_whether_a_compaction_precedes_a_restart(tmp_path, tz, co
 
 ACP_AT = datetime(2026, 11, 6, 10, 0, 30, tzinfo=timezone.utc).timestamp()
 ACP_LINE = "2026-11-06 10:00:30 [INFO] hermes_plugins.hermes_lcm_x.compaction: LCM compaction #1: 9 messages → 4{}\n"
+
+
+@pytest.mark.parametrize("count", [1, 2])
+@pytest.mark.parametrize("acp_first", [False, True])
+def test_mixed_log_compactions_keep_distinct_sessions(tmp_path, count, acp_first):
+    sessions = {f"S{i}": ONE["S1"] for i in range(1, count + 1)}
+    file_log = "".join(f"2026-11-06 10:00:30 INFO [{sid}] hermes_lcm.compaction: "
+                       "LCM compaction #1: 9 messages → 4\n" for sid in sessions)
+    logs = [ACP_LINE.format(""), file_log] if acp_first else [file_log, ACP_LINE.format("")]
+    events = [{"t": ACP_AT - 20, "kind": "compress_request", "session": "S1"}]
+    events += [{"t": ACP_AT + 60, "kind": "restart_cold", "session": sid} for sid in sessions]
+    home = Home(tmp_path, sessions, [row for sid in sessions for row in turn(1, sid)])
+    out = home.run(logs, events, log_tz="UTC")
+    assert out["coverage"]["compactions"]["value"] == count
+    assert out["coverage"]["compactions_then_restart"]["value"] == count
+    records = audit.read_logs(sorted(home.dir.glob("run-*.log")), "UTC")["compactions"]
+    assert {sid for sid, _at, _msg in records} == set(sessions)
 
 
 @pytest.mark.parametrize("request_at,suffix,attributed", [
@@ -791,6 +817,35 @@ def test_out_is_written_whole_with_no_temporary_file_left(tmp_path):
     assert audit.main(["--state-db", str(home.state), "--lcm-db", str(home.lcm), "--out", str(tmp_path / "out" / "r.json")]) == 0
     assert [p.name for p in (tmp_path / "out").iterdir()] == ["r.json"]
     assert json.loads((tmp_path / "out" / "r.json").read_text())["instrument"] == "gate-kit-audit-v1"
+
+
+@pytest.mark.parametrize("where", ["payload", "link", "resolved-payload", "home-subdir"])
+def test_out_refuses_externalized_payloads_and_home_descendants(tmp_path, where):
+    ref = "payload-c1.json"
+    placeholder = (f"[Externalized tool output: tool=read_file; tool_call_id=c1; chars=10; bytes=10; "
+                   f'read it with lcm_expand(externalized_ref="{ref}"); ref={ref}]')
+    host = turn(1) + [("S1", call("c1")), ("S1", result("c1"))]
+    home = Home(tmp_path, ONE, host, stored=host[:3] + [("S1", dict(result("c1"), content=placeholder))])
+    payload_dir = home.dir / audit.externalized.PAYLOAD_DIRNAME
+    payload_dir.mkdir()
+    payload = payload_dir / ref
+    payload.write_text(json.dumps({"content": result("c1")["content"]}))
+    assert home.run()["gate"]["bars"]["externalized_unresolved"]["value"] == 0
+    before = payload.read_bytes()
+    out = payload
+    if where == "link":
+        out = tmp_path / "link.json"
+        out.symlink_to(payload)
+    elif where == "resolved-payload":
+        out = tmp_path / ref
+        payload.rename(out)
+        payload.symlink_to(out)
+    elif where == "home-subdir":
+        out = home.dir / "nested" / "report.json"
+        out.parent.mkdir()
+    with pytest.raises(SystemExit) as stop:
+        audit.main(["--state-db", str(home.state), "--lcm-db", str(home.lcm), "--out", str(out)])
+    assert stop.value.code == 2 and payload.read_bytes() == before
 
 
 def test_a_generated_unproven_row_stays_in_m3_when_it_matches_an_undone_row(tmp_path):
