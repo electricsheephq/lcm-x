@@ -16,8 +16,8 @@ inputs:
 runs:
   using: composite
   steps:
-    # The built library is cached per runner image and compiler, version, archive hash and this file, so a
-    # changed compile option or toolchain rebuilds it. The version check below runs on every job, hit or miss.
+    # The built library is cached per image family (ImageOS), architecture, gcc version, SQLite version, archive hash
+    # and this file, so a changed compile option or compiler rebuilds it. The version check below runs on every job.
     - name: Key the SQLite build cache
       id: sqlite-key
       shell: bash
