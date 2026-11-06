@@ -113,3 +113,8 @@ restores the snapshot, drives the recorded roots in order on one thread per reco
 attempts and persisted-output inputs, restores the recorded effective configuration in the replay home, and compares every root's return and the in-scope tables.
 
 Replaying a recording that captured a `config.yaml` needs PyYAML; the harness imports it only then.
+
+A root that exceeds the replayer's per-root timeout is abandoned: the replay fails with "isolation kept", and the
+model-call block stays installed while that worker thread is alive. The environment, `sys.path`, the clock and the
+secrets are restored as usual, so an abandoned root that later reads an `LCM_*` setting sees the caller's value. Treat
+the process as spent after such a failure.

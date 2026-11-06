@@ -1056,7 +1056,11 @@ class Recorder:
             store = entry.engine.__dict__.get("_store")
             if not entry.rec.get("_ledger_ready", False) and store is not None and \
                     store.__dict__.get("_ingest_ledger_schema_ready"):
-                salt = store.ingest_ledger_salt()
+                try:   # read outside self.lock (F5); a raising read must not skip this root's cleanup below
+                    salt = store.ingest_ledger_salt()
+                except Exception as exc:
+                    salt = None
+                    self.failed("ledger_salt", exc)
         with self.lock:
             try:
                 if self.stopped is not None:
