@@ -126,6 +126,7 @@ class LedgerSnapshot(Protocol):
     by_digest: dict
     by_stamp: dict
     uid_bindings: dict
+    alt_stamp_counts: dict
     coverage: Coverage
     pending_digests: set
     query_count: int
@@ -188,8 +189,11 @@ class SqliteLedgerSnapshot:
                 self._stamps[b["occ_id"]].add(b["stamp"])
             if b["disposition"] in ("stored", "migrated", "ambiguous") and b["role"] is not None:
                 self.by_digest[b["identity_digest"]].append(b)
+        self.alt_stamp_counts = Counter()
         for o in read("SELECT * FROM stamp_observations WHERE lineage=?", (lineage,)):
             self._stamps[o["occ_id"]].add(o["stamp"])
+            if o["kind"] == "alt_stamp":
+                self.alt_stamp_counts[o["occ_id"]] += 1
         tables = {r["name"] for r in read("SELECT name FROM sqlite_master WHERE type='table'")}
         self.uid_bindings = defaultdict(list)
         by_store = defaultdict(list)
@@ -437,7 +441,8 @@ class _Pass:
                 self.by_role_call[b["role"], b["tool_call_id"] or ""].append(b)
         self.rank3_index, self.stored_segments, self.user_before = {}, {}, {}
         user = None
-        for b in sorted(snapshot.bindings.values(), key=lambda b: b["ordinal"] or 0):
+        for b in sorted((b for b in snapshot.bindings.values() if b["ordinal"] is not None),
+                        key=lambda b: b["ordinal"]):
             self.user_before[b["occ_id"]] = user
             if b["role"] == "user":
                 user = b
@@ -623,6 +628,11 @@ class _Pass:
             if self.old_revision(b):
                 self.reject(row.index, target, "revision")
                 self.counts["run.revision_cut"] += 1
+                break
+            if (self.mode != "off" and row.uid and b["uids"]
+                    and {row.uid, *row.absorbed_uids} != b["uids"] | b["constituents"]):
+                self.reject(row.index, target, "veto_uid")
+                self.counts["run.veto_uid"] += 1
                 break
             if self.positive(row, b) or self.current_uid(row, target):
                 evidence = "run_keyed"
@@ -845,7 +855,7 @@ class _Pass:
                         if placed.verdict != "replay":
                             rank3 = False
                         else:
-                            user = self.user_before[target]
+                            user = self.user_before.get(target)
                             rank3 = user is not None and user["occ_id"] == placed.target
                     if self.known_stamp(row) and not self.s.stamps(target):
                         rank3 = False
@@ -932,7 +942,7 @@ class _Pass:
                             if ledger.identity_digest(self.s.salt, dict(self.message(row), content=prefix)) == entry.identity_digest:
                                 targets = [target]
                                 following = record["entries"][row.index + 1:row.index + 2]
-                                if following and following[0].ref in self.s.bindings:
+                                if following and not following[0].is_descriptor and following[0].ref in self.s.bindings:
                                     donor = self.s.payload(following[0].ref)
                                     if content[offset:].lstrip("\n") == donor["content"]:
                                         targets.append(following[0].ref)
@@ -1048,7 +1058,7 @@ class _Pass:
                 else:
                     b = self.s.bindings[ref]
                     if row.stamp is not None and row.stamp not in self.s.stamps(ref) and verdict.evidence in (
-                            "run_keyed", "run_unkeyed", "rank1") and len(self.s.stamps(ref)) < 5:
+                            "run_keyed", "run_unkeyed", "rank1") and self.s.alt_stamp_counts.get(ref, 0) < 4:
                         self.plan.alt_stamps.append((ref, row.stamp))
                     if self.mode != "off" and row.uid and row.uid not in bound_uids:
                         self.plan.uid_bindings.append((b["store_id"], row.uid, "canonical", "anchor_replay"))
@@ -1102,7 +1112,7 @@ def classify(view, snapshot: LedgerSnapshot, oracle: IdentityOracle, *, uid_mode
     unreliable = snapshot.stamp_policy == "stamp_unreliable"
     first = _Pass(view, snapshot, oracle, uid_mode, unreliable)
     result = first.execute()
-    proven = set()
+    proven, contributing_rows = set(), set()
     if not unreliable:
         for row in view:
             u = first.latest(row.uid)
@@ -1111,11 +1121,13 @@ def classify(view, snapshot: LedgerSnapshot, oracle: IdentityOracle, *, uid_mode
                     if first.match(row, b) and row.stamp and snapshot.stamps(b["occ_id"]) and (
                             row.stamp not in snapshot.stamps(b["occ_id"])):
                         proven.add(b["occ_id"])
+                        contributing_rows.add(row.index)
             for e in snapshot.emissions:
                 if (e["eligible"] and e["output_index"] == row.index and e["descriptor_digest"] == row.identity_digest
                         and row.stamp and e["observed_stamp"] and row.stamp != e["observed_stamp"]):
                     proven.add(Descriptor(e["view_seq"], e["output_index"]))
-        if len(proven) >= 3:
+                    contributing_rows.add(row.index)
+        if len(proven) >= 3 and len(contributing_rows) >= 3:
             result = _Pass(view, snapshot, oracle, uid_mode, True).execute()
             result.writes.stamp_unreliable = True
             result.counters.update(first.counts)

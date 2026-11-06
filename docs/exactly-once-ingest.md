@@ -242,7 +242,7 @@ No step reopens an earlier one.
   - An anchored run on a proposed emission adopts it.
 - **The base** is that record R. With no anchored run, the base is the history: the lineage's kept bindings in ordinal order.
 - **The previous vector** is always the newest ingest vector, selected independently of the run (A6, C11 iv).
-- **All-restamp control (M14, #1511).** Plan `stamp_unreliable` only for occurrence-proven differing stamps on at least three distinct occurrences in one view: eligible current uid bindings in `on`, or identity-and-output-index matches to three distinct otherwise eligible emissions whose recorded `observed_stamp` differs. NULL emission stamps do not count. Differing stamps and identities alone never mark. Rerun classification once on the same snapshot with stamps missing; replace the first result, retain the mark and add both passes' counters. Strong binds still plan new `alt_stamp` observations; the writer-side cap remains a separate trigger.
+- **All-restamp control (M14, #1511).** Plan `stamp_unreliable` only for occurrence-proven differing stamps on at least three distinct occurrences in one view: eligible current uid bindings in `on`, or identity-and-output-index matches to three distinct otherwise eligible emissions whose recorded `observed_stamp` differs. At least three distinct incoming rows must contribute proof; historical alternatives for one row cannot multiply that row's contribution. NULL emission stamps do not count. Differing stamps and identities alone never mark. Rerun classification once on the same snapshot with stamps missing; replace the first result, retain the mark and add both passes' counters. Strong binds still plan new `alt_stamp` observations; the writer-side cap remains a separate trigger.
 
 #### 3.4.3 The head: one definition (L1-2)
 The head is the ordinal from which this view may bind occurrences. Take the first rule that applies:
@@ -483,7 +483,7 @@ These ship with the P2 flip:
 
 ## 5a. P2 rulings (classifier PR 1; acceptance before the P2 flip)
 Sources: the r3.2 findings of the Codex reviewer (A) and of the Claude reviewer (C).
-- A1: mark only occurrence-proven restamps on three distinct occurrences/descriptors per view, then rerun once without stamps; uid proof requires identity or an allowed alias equal to the latest revision, so edits do not count; `test_c_a1_fresh_restamp`, `test_c17_occurrence_proven_restamp`, `test_c_m14_uid_edits_are_not_restamps`.
+- A1: mark only occurrence-proven restamps on three distinct occurrences/descriptors from at least three distinct incoming rows per view, then rerun once without stamps; uid proof requires identity or an allowed alias equal to the latest revision, so edits do not count; `test_c_a1_fresh_restamp`, `test_c17_occurrence_proven_restamp`, `test_c_m14_uid_edits_are_not_restamps`, `test_run9_t2_one_row_cannot_supply_three_restamps`, `test_run9_t2_three_distinct_rows_positive_control`.
 - A2: h2 needs m increasing matches among the first eight kept occurrences; h3 needs two increasing eligible uid matches in `on`; `test_c01_h2_and_c02_h3`.
 - A3: older uid revisions never replay in `shadow` or `on`; inside-Window reverts supersede the latest revision, outside hits only carry doubt; `test_c_a3_revert`, `test_c03_a3_original`.
 - A5 and C7/C10: pair NEW rows with same-identity unbound base entries in order; keyed reorders stand but empty their gap; `test_c04_a5_swap`, `test_c05_keyed_middle_and_c13_1449`, `test_c_crossed_and_clamped_placements`.

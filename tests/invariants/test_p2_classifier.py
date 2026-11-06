@@ -631,6 +631,124 @@ def test_c_segment_cut_before_run_start(factory):
     assert [possible(v) for v in result.rows[1:]] == [[3], [4]]
 
 
+def test_run9_t1_run_binding_uid_veto_on(factory):
+    original = [msg("H", 1), msg("A", 2)]
+    engine = history(factory, [original], "on")
+    adopted = [original[0], msg("A", 2, "uA")]
+    materialize(engine, adopted, classify(engine, adopted, "on"))
+    snap = snapshot(engine)
+    old = next(b for b in snap.bindings.values() if b["content"] == "A")
+    assert old["uids"] == {"uA"}
+    result = classify(engine, [original[0], msg("A", 2, "uDiff")], "on", snap=snap)
+    assert verdicts(result) == ["replay", "new"]
+    assert result.rows[1].reason == "veto_uid" and possible(result.rows[1]) == [old["occ_id"]]
+    assert result.run.k == 1 and result.counters["run.veto_uid"] == 1
+    assert (old["store_id"], "uDiff", "canonical", "anchor_replay") not in result.writes.uid_bindings
+    assert (classifier.NewRow(1), "uDiff", "canonical", "stored_new") in result.writes.uid_bindings
+
+
+def test_run9_t1_run_binding_uid_veto_shadow(factory):
+    engine = history(factory, [[msg("A", 1), msg("B", 2)]], "shadow")
+    adopted = [msg("A", 1, "old")]
+    materialize(engine, adopted, classify(engine, adopted, "shadow"))
+    snap = snapshot(engine)
+    old = next(b for b in snap.bindings.values() if b["content"] == "A")
+    assert old["uids"] == {"old"}
+    result = classify(engine, [msg("A", 1, "fresh"), msg("B", 2)], "shadow", snap=snap)
+    assert result.rows[0].verdict == "new" and result.rows[0].reason == "veto_uid"
+    assert possible(result.rows[0]) == [old["occ_id"]]
+    assert result.run is None and result.counters["run.veto_uid"] == 1
+    assert (old["store_id"], "fresh", "canonical", "anchor_replay") not in result.writes.uid_bindings
+    assert (classifier.NewRow(0), "fresh", "canonical", "stored_new") in result.writes.uid_bindings
+
+
+def _run9_restamp_emissions(factory, slots):
+    engine = history(factory, [[msg("U", 1)]])
+    summaries = [pure_summary(engine, "user") for _ in range(max(slots) + 1)]
+    for slot in slots:
+        emit(engine, [*summaries[:slot], summaries[slot]], {slot: "summary"})
+    with engine._store.atomic():
+        engine._store._conn.execute("UPDATE ledger_emissions SET observed_stamp=CAST(view_seq AS TEXT)")
+    return engine, [dict(s, timestamp=100 + i) for i, s in enumerate(summaries)]
+
+
+def test_run9_t2_one_row_cannot_supply_three_restamps(factory):
+    engine, view = _run9_restamp_emissions(factory, [0, 0, 0])
+    snap = snapshot(engine)
+    assert len(snap.emissions) == 3 and all(e["eligible"] for e in snap.emissions)
+    assert len({e["observed_stamp"] for e in snap.emissions}) == 3
+    result = classify(engine, view, snap=snap)
+    assert not result.writes.stamp_unreliable and not result.counters["m14.rerun"]
+    assert verdicts(result) == ["new"] and result.rows[0].reason == "veto_stamp"
+
+
+def test_run9_t2_three_distinct_rows_positive_control(factory):
+    engine, view = _run9_restamp_emissions(factory, [0, 0, 1, 2])
+    # Two incoming rows already match three emissions. They must not mark;
+    # adding the third independent row must still enable the ordinary rerun.
+    below = classify(engine, view[:2])
+    assert not below.writes.stamp_unreliable and not below.counters["m14.rerun"]
+    result = classify(engine, view)
+    assert result.writes.stamp_unreliable and result.counters["m14.rerun"] == 1
+    assert verdicts(result) == ["replay"] * 3
+
+
+def test_run9_t3_following_descriptor_is_not_a_host_donor(factory):
+    engine = history(factory, [[msg("U", 1), msg("TAIL", 2)]])
+    summary, following = pure_summary(engine, "user"), pure_summary(engine, "user")
+    emit(engine, [summary, following], {0: "summary", 1: "summary"})
+    snap = snapshot(engine)
+    record = next(r for r in snap.records if r["kind"] == "emission")
+    first, second = record["entries"]
+    assert first.is_descriptor and second.is_descriptor
+    assert snap.bindings[second.ref]["content"] == "TAIL"  # Separate id counters collide.
+    result = classify(engine, [dict(summary, content=summary["content"] + "\n\nTAIL")], snap=snap)
+    assert verdicts(result) == ["new"] and result.rows[0].deferred == "partial"
+    assert possible(result.rows[0]) == [classifier.Descriptor(record["view_seq"], 0)]
+
+
+def test_run9_t4_null_ordinal_user_is_not_a_rank3_anchor(factory):
+    original = [msg("U", 1), *pair()]
+    engine = history(factory, [original])
+    with engine._store.atomic():
+        engine._store._conn.execute("UPDATE occurrence_bindings SET ordinal=NULL WHERE store_id=1")
+    snap = snapshot(engine)
+    incoming = classifier.build_view(snap.salt, original, uid_mode="off")
+    phase = classifier._Pass(incoming, snap, classifier.EngineOracle(engine), "off", False)
+    assistant = next(b for b in snap.bindings.values() if b["role"] == "assistant")
+    user = next(b for b in snap.bindings.values() if b["role"] == "user")
+    # Isolate rank 3 with an accepted user that has no ordered position.
+    phase.head = classifier.Head("h1", assistant["ordinal"])
+    phase.accept(0, user["occ_id"], "run_keyed")
+    phase.weak(segments=True)
+    assert [v.verdict for v in phase.rows] == ["replay", "new", "new"]
+
+
+@pytest.mark.parametrize("other_kind", ["carried", "legacy"])
+def test_run9_t5_alt_stamp_cap_counts_only_alt_observations(factory, other_kind):
+    engine = history(factory, [[msg("A", 1, "uA")]], "on")
+    snap = snapshot(engine)
+    bound = next(iter(snap.bindings.values()))
+    with engine._store.atomic():
+        for stamp in (60, 61, 62):
+            ledger.add_stamp_observation(engine._store._conn, snap.lineage, bound["occ_id"],
+                                         str(float(stamp)), "alt_stamp", 1)
+        if other_kind == "carried":
+            ledger.add_stamp_observation(engine._store._conn, snap.lineage, bound["occ_id"],
+                                         "50.0", "carried_stamp", 1)
+        else:
+            engine._store.add_message_relations([[(bound["store_id"], "alt_stamp", None, None, 40.),
+                                                  (bound["store_id"], "alt_stamp", None, None, 41.)]])
+    assert len(snapshot(engine).stamps(bound["occ_id"])) >= 5
+    result = classify(engine, [msg("A", 70, "uA")], "on")
+    assert verdicts(result) == ["replay"] and result.rows[0].evidence == "rank1"
+    assert result.writes.alt_stamps == [(bound["occ_id"], "70.0")]
+    materialize(engine, [msg("A", 70, "uA")], result)
+    # Four alt_stamp rows exhaust that kind's allowance, regardless of union size.
+    capped = classify(engine, [msg("A", 71, "uA")], "on")
+    assert not capped.writes.alt_stamps
+
+
 @pytest.mark.latency
 def test_e_cost(factory):
     """Nearest-rank percentiles, fresh snapshots, warm SQLite/OS page caches.
