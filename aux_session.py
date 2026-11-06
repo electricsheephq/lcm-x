@@ -25,6 +25,8 @@ from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
+from .sqlite_util import _is_ingest_busy_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -915,10 +917,13 @@ class DelegateChildMixin:
             # Closing may have begun while this pass waited for the child-store lock.
             if self._compaction_is_closing():
                 return messages
-            pre_store = self._store_delegate_child_turn(session_id, messages, platform=_DELEGATE_SOURCE, require_agent=True)
-            if pre_store is None:
-                # #2306: compacting now would drop rows that were never stored. Keep the view; the next
-                # compression or turn retries the store (the failure is already counted and warned).
+            store_outcome: Dict[str, Any] = {}
+            pre_store = self._store_delegate_child_turn(
+                session_id, messages, platform=_DELEGATE_SOURCE, require_agent=True, outcome=store_outcome)
+            if pre_store is None and _is_ingest_busy_error(store_outcome.get("error") or Exception()):
+                # #2306: compacting now would drop rows that were never stored. A lock clears, so keep the view;
+                # the next compression or turn retries the store. Other failures compact as before (a store
+                # that keeps failing saves nothing by stalling the child) and stay visible below.
                 self._note_delegate_child_fallback(session_id, "compaction skipped: input not stored")
                 return messages
             try:
@@ -926,7 +931,7 @@ class DelegateChildMixin:
                     tail = self._store.get_session_tail(session_id, limit=1)
                     view = [msg for msg in messages
                             if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
-                    if tail and view and self._session_end_prefix_compare_identity(
+                    if pre_store is not None and tail and view and self._session_end_prefix_compare_identity(
                         tail[-1], session_id=session_id,
                     ) == self._session_end_prefix_compare_identity(view[-1], session_id=session_id):
                         stored_tail = tail
@@ -1094,6 +1099,8 @@ class DelegateChildMixin:
                 with self._attribution_span("delegate_child_store", len(messages)):
                     return self._append_delegate_child_rows(session_id, messages, link)
         except Exception as exc:
+            if isinstance(outcome, dict):
+                outcome["error"] = exc
             self._note_delegate_child_fallback(session_id, f"rows not stored: {type(exc).__name__}: {exc}")
             return None
 

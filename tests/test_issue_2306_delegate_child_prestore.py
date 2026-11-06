@@ -104,3 +104,35 @@ def test_failed_pre_compaction_store_skips_compaction_and_loses_nothing(
     assert not missing, f"child rows never stored: turn indices {missing} of {len(sent)}"
     assert all(contents.count(text) == 1 for text in sent)
     assert contents.count("after compression 0") == 1 and contents.count("after compression 1") == 1
+
+
+def test_non_lock_store_failure_still_compacts(host, monkeypatch, caplog):  # noqa: F811
+    """Only a lock or busy error skips the compaction: a store that keeps failing for another reason saves nothing
+    by stalling the child, so the compaction runs as before and the failure stays visible."""
+    load, clone = host
+    ctx, module = load()
+    engine = clone(ctx)
+    engine.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    child.start(engine)
+    view = payload_view(12)
+    child.turn(ctx, view[:5], engine)
+    batch = engine._store._append_protected_batch
+    calls = []
+
+    def fail_once(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("disk I/O error")
+        return batch(*args, **kwargs)
+
+    monkeypatch.setattr(engine._store, "_append_protected_batch", fail_once)
+    monkeypatch.setattr(engine, "_get_host_fallback_compressor", lambda: None)
+    monkeypatch.setattr(engine, "_bypass_compaction_target_tokens", lambda **kwargs: 64)
+    with caplog.at_level("WARNING"):
+        compacted = child.compress(engine, view)
+    assert calls
+    assert len(compacted) < len(view)
+    messages = [record.getMessage() for record in caplog.records]
+    assert not any("compaction skipped" in message for message in messages)
+    assert any("compression boundary not recorded: input not stored" in message for message in messages)

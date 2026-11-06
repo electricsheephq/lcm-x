@@ -594,7 +594,7 @@ def test_failed_compress_pre_store_does_not_publish_boundary(host, monkeypatch, 
     def fail_once(*args, **kwargs):
         attempts.append(args)
         if len(attempts) == 1:
-            raise sqlite3.OperationalError("synthetic append failure")
+            raise sqlite3.OperationalError("database is locked")
         return append(*args, **kwargs)
 
     compacted = [{"role": "user", "content": "compressed head"}, *original[-2:]]
