@@ -126,6 +126,8 @@ def read(proc, *, checkpoint=None, verify=True) -> dict:
     proc = Path(proc)
     root = proc.parent.parent
     raw = load_events(proc)
+    if not any(e.get("kind") == "process_start" for e in raw):
+        raise RecordingError("recording is not replayable: no process_start")
     status = json.loads((proc / "STATUS.json").read_text()) if (proc / "STATUS.json").exists() else {}
     seqs = {s for event in raw for s in _seqs(event)}
     end, cause = 1, "end"
@@ -148,6 +150,8 @@ def read(proc, *, checkpoint=None, verify=True) -> dict:
         lost = max(lost, event.get("lost", 0))
         if found and first < end:
             end, cause = first, found
+    if cause in ("end", "seq_hole") and status.get("end_state") in ("cap", "disk_floor", "gap"):
+        cause = status["end_state"]
     sealed = None
     if checkpoint is not None:
         sealed = next((e for e in raw if e.get("kind") == "checkpoint_sealed" and e["hours"] == checkpoint), None)

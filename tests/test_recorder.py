@@ -787,9 +787,9 @@ def test_writer_stall_admits_one_oversized_view_then_gaps(lab, monkeypatch):
     assert reading["cause"] == "gap"
     assert len([e for e in reading["events"] if e["kind"] == "gap"]) == 0  # the gap itself ends the prefix
     events = recorder_module_events(rec)
-    assert [e["kind"] for e in events].count("gap") == 1
-    turn_complete = next(e for e in reading["roots"] if e["name"] == "on_turn_complete")
-    assert [m["n"] for m in turn_complete["args"]["messages"].messages] == list(range(2_000))
+    assert [e["kind"] for e in events].count("gap") == 0
+    assert not any(e["name"] == "on_turn_complete" for e in reading["roots"])
+    assert rec.counters["dropped_after_stop"] >= 2  # includes the queued gap marker
 
 
 def recorder_module_events(rec):
@@ -1361,7 +1361,8 @@ def test_fix_r1_08_sync_cap_is_single(lab):
     rec.writer.sync = True
     rec.max_bytes = 0
     rec.cap("test")
-    assert [e["kind"] for e in recorder_module_events(rec)].count("cap") == 1
+    assert [e["kind"] for e in recorder_module_events(rec)].count("cap") == 0
+    assert rec.stopped == "cap"  # a marker cannot exceed the hard cap
 
 
 @needs312
@@ -2720,6 +2721,10 @@ def test_2263_s5_replay_root_timeout_restores_environment(lab):
     lab.mp.setattr(rr, "ROOT_TIMEOUT", 0.02)
     env = {k: v for k, v in os.environ.items() if k.startswith("LCM_")}
     wall = time.time
+    missing = object()
+    agent = importlib.import_module("agent")
+    saved_module = sys.modules.get("agent.auxiliary_client", missing)
+    saved_attribute = vars(agent).get("auxiliary_client", missing)
     def prepared(module):
         prepare(module)
         cls = importlib.import_module(module.__name__ + ".engine").LCMEngine
@@ -2731,6 +2736,17 @@ def test_2263_s5_replay_root_timeout_restores_environment(lab):
         assert time.time is wall
     finally:
         release.set()
+        if saved_module is missing:
+            sys.modules.pop("agent.auxiliary_client", None)
+        else:
+            sys.modules["agent.auxiliary_client"] = saved_module
+        if saved_attribute is missing:
+            vars(agent).pop("auxiliary_client", None)
+        else:
+            agent.auxiliary_client = saved_attribute
+
+    assert sys.modules.get("agent.auxiliary_client", missing) is saved_module
+    assert vars(agent).get("auxiliary_client", missing) is saved_attribute
 
 
 @needs312
@@ -2832,8 +2848,8 @@ def test_2269_r1_refused_snapshot_is_not_replayable(lab, caplog):
     lab.engines.append(ctx.offered)
     rec = _recorder()
     assert rec.writer.drain(5)
-    status = json.loads((rec.proc / "STATUS.json").read_text())
-    assert status["replayable"] is False
+    assert rec.snapshot == {"state": "refused", "cause": "disk_floor"}
+    assert not (rec.proc / "STATUS.json").exists()  # diagnostics must respect the floor too
     reader = importlib.import_module(module.__name__ + ".recorder_read")
     with pytest.raises(reader.RecordingError, match="not replayable"):
         reader.read(rec.proc)
@@ -3078,3 +3094,307 @@ def test_2269_r1_off_on_comparison_detects_python_timestamp_change(tmp_path, col
         conn.execute(f"UPDATE {table} SET {field} = 2")
     after = store_rows(db, excluded_columns=SQL_CLOCK_COLUMNS, excluded_prefixes=())
     assert before[table] != after[table]
+
+
+# #2279: recorder-only failures and bounds; no host/model calls.
+@needs312
+def test_2279_a_first_write_failure_closes_pin(lab):
+    home = prepared_home(lab)
+    module = load_plugin(REPO, prefix="hermes_lcm_rec")
+    lab.modules.append(module)
+    prepare(module)
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    pins, failed = [], threading.Event()
+    original_pin, original_open = rm._pin, os.open
+    def pin(path):
+        conn = original_pin(path)
+        pins.append(conn)
+        with sqlite3.connect(path) as writer:
+            writer.execute("CREATE TABLE after_recorder_pin (x)")
+        writer.close()
+        return conn
+    def fail_first(path, *args, **kwargs):
+        if "lcm-recorder" in str(path) and args[0] & os.O_CREAT and not failed.is_set():
+            failed.set()
+            raise OSError(28, "injected ENOSPC")
+        return original_open(path, *args, **kwargs)
+    lab.mp.setattr(rm, "_pin", pin)
+    lab.mp.setattr(os, "open", fail_first)
+    lab.host.home = home
+    lab.mp.setenv("LCM_RECORDER_ENABLED", "1")
+    lab.mp.setenv("LCM_RECORDER_DIR", str(home / "lcm-recorder"))
+    ctx = FakeCtx()
+    try:
+        module.register(ctx)
+        lab.engines.append(ctx.offered)
+        rec = _recorder()
+        assert failed.wait(2)
+        rec.writer.drain(2)
+        rec.writer.join(2)
+        assert rec.writer.dead is not None
+        for conn in pins:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                conn.execute("SELECT 1")
+        assert not isinstance(rec.writer.dead, BaseException) or rec.writer.dead.__traceback__ is None
+        assert not rec.writer.items
+        with sqlite3.connect(home / "lcm.db", timeout=0.1) as check:
+            assert check.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+        check.close()
+    finally:
+        for conn in pins:
+            conn.close()
+
+
+@needs312
+def test_2279_b_snapshot_exceeds_cap(lab):
+    home = prepared_home(lab)
+    limit = (home / "lcm.db").stat().st_size - 1
+    lab.mp.setenv("LCM_RECORDER_MAX_BYTES", str(limit))
+    _, ctx = lab.load(home)
+    rec = _recorder()
+    rec.writer.drain(5)
+    assert rec.stopped == "cap"
+    assert rec.snapshot == {"state": "refused", "cause": "cap"}
+    assert not (rec.proc / "snapshot" / "lcm.db").exists()
+    assert recorder_module_events(rec) == []
+    assert sum(p.stat().st_size for p in rec.root.rglob("*") if p.is_file()) <= limit
+    assert isinstance(ctx.offered.get_status(), dict)
+
+
+@needs312
+@pytest.mark.parametrize("stop", ["cap", "gap", "exit_timeout"])
+def test_2279_b_queued_events_dropped_after_stop(lab, stop):
+    module, _ = lab.load(lab.home())
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    before = len(recorder_module_events(rec))
+    entered, release = threading.Event(), threading.Event()
+    rec.writer.offer(("call", lambda: (entered.set(), release.wait(5))))
+    assert entered.wait(2)
+    count = 4
+    try:
+        for n in range(count):
+            rec._emit({"kind": "queued_probe", "n": n, "body": rm.Blob("x" * 5000)}, single=True)
+        if stop == "cap":
+            rec.max_bytes = rec.writer.total_bytes
+            rec.writer.offer(("call", lambda: None))
+            # The first queued event must fail admission before writing a blob or line.
+        else:
+            rec.stopped = rec.end_state = stop
+    finally:
+        release.set()
+    assert rec.writer.drain(5)
+    assert rec.stopped == stop
+    assert len(recorder_module_events(rec)) == before
+    assert rec.counters["dropped_after_stop"] == count
+    assert not list((rec.root / "blobs").rglob("*.tmp"))
+
+
+@needs312
+def test_2279_c_session_end_uses_own_argument(lab):
+    module, ctx = lab.load(lab.home())
+    ctx.offered.on_session_start("current", platform="cli")
+    ctx.offered.on_session_end("other", [])
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    events = recorder_module_events(rec)
+    event = next(e for e in events if e.get("name") == "on_session_end")
+    assert event["session"] == "other"
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    # Exercise the real frame-locals type on this interpreter, independent of event identity.
+    def own(session_id):
+        frame = sys._getframe()
+        return rec._session_of(frame.f_code, frame.f_locals, ctx.offered)
+    assert own("other") == "other"
+    from collections import UserDict
+    assert rec._session_of(None, UserDict(session_id="other"), ctx.offered) == "other"
+    assert rm.current() is rec
+
+
+@needs312
+def test_2279_d_replay_without_store_secrets(lab):
+    _, ctx = lab.load(lab.home())
+    ctx.offered.get_status()
+    rec = lab.stop()
+    stores = []
+    def older(module):
+        prepare(module)
+        store = importlib.import_module(module.__name__ + ".store")
+        lab.mp.delattr(store, "secrets")
+        stores.append(store)
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "older", prepare=older)
+    assert rep.diffs == []
+    assert not hasattr(stores[0], "secrets")
+
+
+@needs312
+@pytest.mark.parametrize("backup_kind", ["snapshot", "checkpoint"])
+@pytest.mark.parametrize("root", ["on_session_end", "shutdown"])
+def test_2279_e_session_end_does_not_wait_for_backup(lab, backup_kind, root):
+    home = prepared_home(lab)
+    module = load_plugin(REPO, prefix="hermes_lcm_rec")
+    lab.modules.append(module)
+    prepare(module)
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    original = rm._backup
+    entered, release = threading.Event(), threading.Event()
+    def blocked(conn, path):
+        if backup_kind in str(path):
+            entered.set()
+            assert release.wait(10)
+        return original(conn, path)
+    lab.mp.setattr(rm, "_backup", blocked)
+    lab.host.home = home
+    lab.mp.setenv("LCM_RECORDER_ENABLED", "1")
+    lab.mp.setenv("LCM_RECORDER_DIR", str(home / "lcm-recorder"))
+    ctx = FakeCtx()
+    try:
+        module.register(ctx)
+        lab.engines.append(ctx.offered)
+        rec = _recorder()
+        if backup_kind == "checkpoint":
+            assert rec.writer.drain(5)
+            rec._checkpoint(24)
+        assert entered.wait(2)
+        start = time.monotonic()
+        if root == "on_session_end":
+            ctx.offered.on_session_end("other", [])
+        else:
+            ctx.offered.shutdown()
+        assert time.monotonic() - start < 0.5
+        assert not release.is_set()
+    finally:
+        release.set()
+
+
+@needs312
+@pytest.mark.parametrize("kind", ["event", "blob", "payload", "snapshot", "checkpoint", "status"])
+@pytest.mark.parametrize("bound", ["cap", "floor"])
+def test_2279_b_each_write_checks_planned_size(lab, kind, bound):
+    module, _ = lab.load(prepared_home(lab))
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    source = lab.tmp / "payloads"
+    source.mkdir()
+    (source / "new.json").write_bytes(b"p" * 4096)
+    before = {p: p.read_bytes() for p in rec.root.rglob("*") if p.is_file()}
+    # One byte remains: checking only current usage would incorrectly admit each write.
+    if bound == "cap":
+        rec.max_bytes = rec.writer.total_bytes + 1
+    else:
+        usage = shutil.disk_usage(rec.root)
+        lab.mp.setattr(shutil, "disk_usage", lambda path: usage._replace(free=rm.DISK_FLOOR + 1))
+    def attempt():
+        if kind == "event":
+            rec.writer._append({"kind": "oversized", "seq": rec._next(), "text": "e" * 4096})
+        elif kind == "blob":
+            rec.writer._blob(rm.Blob("b" * 4096))
+        elif kind == "payload":
+            rec._capture_payloads(source)
+        elif kind == "snapshot":
+            rec._snapshot(rec._pin_db(), source)
+        elif kind == "checkpoint":
+            rec._checkpoint(24)
+        else:
+            rec.write_status()
+    with rec.writer.io:
+        rec.writer._process(("call", attempt))
+    assert rec.writer.drain(5)
+    after = {p: p.read_bytes() for p in rec.root.rglob("*") if p.is_file()}
+    assert after == before
+    assert not rec.pins
+    if kind == "payload" and bound == "floor":
+        assert rec.payload_snapshot["cause"] == "disk_floor"
+    elif kind == "checkpoint" and bound == "floor":
+        assert rec.last_checkpoint is None
+    else:
+        assert rec.stopped == ("cap" if bound == "cap" else "disk_floor")
+
+
+@needs312
+def test_2279_b_existing_bytes_include_all_files(lab):
+    _, _ = lab.load(lab.home())
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    with rec.writer.io:
+        before = rec._existing_bytes()
+        for name in ("snapshot/lcm.db", "snapshot/large-outputs/p.json", "checkpoint/24/lcm.db", "STATUS.json"):
+            path = rec.root / "proc" / "older-process" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x" * 100)
+        assert rec._existing_bytes() == before + 400
+
+
+@needs312
+def test_2279_e_ordinary_event_drain_still_waits(lab):
+    _, ctx = lab.load(lab.home())
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    entered, release, ended = threading.Event(), threading.Event(), threading.Event()
+    rec.writer.offer(("call", lambda: (entered.set(), release.wait(5))))
+    assert entered.wait(2)
+    thread = threading.Thread(target=lambda: (ctx.offered.on_session_end("other", []), ended.set()), daemon=True)
+    try:
+        thread.start()
+        assert not ended.wait(0.1)
+    finally:
+        release.set()
+        thread.join(3)
+    assert ended.is_set()
+    assert any(e.get("name") == "on_session_end" for e in recorder_module_events(rec))
+
+
+@needs312
+@pytest.mark.parametrize("site", ["before_queue", "backup_open", "checkpoint_open"])
+def test_2279_a_pin_cleanup_sibling_failures(lab, site):
+    home = prepared_home(lab)
+    module = load_plugin(REPO, prefix="hermes_lcm_rec")
+    lab.modules.append(module)
+    prepare(module)
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    pins, writers = [], []
+    original_pin, original_connect, original_init = rm._pin, sqlite3.connect, rm._Writer.__init__
+    def pin(path):
+        conn = original_pin(path)
+        pins.append(conn)
+        return conn
+    def init(self, rec):
+        original_init(self, rec)
+        writers.append(self)
+    def connect(path, *args, **kwargs):
+        if ("/snapshot/lcm.db" if site == "backup_open" else "/checkpoint/24/lcm.db") in str(path):
+            raise OSError(28, "injected backup open failure")
+        return original_connect(path, *args, **kwargs)
+    lab.mp.setattr(rm, "_pin", pin)
+    lab.mp.setattr(rm._Writer, "__init__", init)
+    if site == "before_queue":
+        def fail(*args):
+            raise OSError(28, "injected before queue")
+        lab.mp.setattr(rm.Recorder, "_process_facts", fail)
+    else:
+        lab.mp.setattr(sqlite3, "connect", connect)
+    lab.host.home = home
+    lab.mp.setenv("LCM_RECORDER_ENABLED", "1")
+    lab.mp.setenv("LCM_RECORDER_DIR", str(home / "lcm-recorder"))
+    ctx = FakeCtx()
+    module.register(ctx)
+    lab.engines.append(ctx.offered)
+    writer = writers[0]
+    if site == "checkpoint_open":
+        assert writer.drain(5)
+        writer.rec._checkpoint(24)
+    writer.join(5)
+    try:
+        assert not writer.is_alive()
+        assert pins
+        for conn in pins:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                conn.execute("SELECT 1")
+        assert not writer.items and not writer.rec.pins
+        if writer.rec.state_db is not None:
+            assert writer.rec.state_db.conn is None
+    finally:
+        for conn in pins:
+            conn.close()

@@ -1,8 +1,8 @@
 # Event recorder (opt-in, #2243)
 
 The recorder writes what Hermes asks of the LCM engine to local files so the run can be replayed offline against
-another build. It is off by default and needs Python 3.12 or newer (it uses `sys.monitoring`). Recording never changes
-what LCM stores, returns or logs to the host; with the flag off, `recorder.py` is never imported and nothing is set or
+another build. It is off by default and needs Python 3.12 or newer (it uses `sys.monitoring`). Recording preserves what LCM stores and returns during ordinary calls;
+`KeyboardInterrupt` propagates by design, and the recorder logs its own diagnostics. With the flag off, `recorder.py` is never imported and nothing is set or
 created.
 
 ## Turning it on and off
@@ -11,7 +11,7 @@ created.
 | --- | --- | --- |
 | `LCM_RECORDER_ENABLED` | `false` | Install the recorder at plugin registration. |
 | `LCM_RECORDER_DIR` | `$HERMES_HOME/lcm-recorder/` | Where recordings go. |
-| `LCM_RECORDER_MAX_BYTES` | 20 GiB | Cap on event segments and shared blobs across every recording under `LCM_RECORDER_DIR` (snapshots and checkpoints are not counted). |
+| `LCM_RECORDER_MAX_BYTES` | 20 GiB | Cap on all recorder writes under `LCM_RECORDER_DIR`: events, shared blobs, snapshots, payload copies, manifests, checkpoints and status files. |
 
 All three are read with the profile-scoped environment at registration; restart the host to change them. On Python
 3.11 the flag logs one warning and installs nothing. If `sys.monitoring` tool ids 3 and 4 are both taken, it logs one
@@ -68,13 +68,16 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
 
 ## Limits, coverage and the replayable prefix
 
-- **Cap and disk floor:** when the recording reaches `LCM_RECORDER_MAX_BYTES`, or free disk falls below 20 GiB, a
-  `cap` event is written and recording stops. The cap spans every recording under `LCM_RECORDER_DIR`, including
-  shared `blobs/`. Other recordings' bytes are counted when a recorder starts, so recorders running at the same time
-  can together pass the cap; each still stops at the disk floor. Before snapshots, payload copies and checkpoints, free space minus the planned write must remain
-  at least 20 GiB. A refused snapshot records `disk_floor` in STATUS and writes no events. LCM keeps running unchanged.
-- **Queue admission:** the writer queue admits at most 10,000 events or 512 MiB; an event refused there writes a
-  `gap` event and recording stops.
+- **Cap and disk floor:** every write is admitted before it starts against `LCM_RECORDER_MAX_BYTES` and the
+  requirement that free space minus its planned size remain at least 20 GiB. This includes events, blobs, snapshots,
+  payload copies, manifests, checkpoints and status files. Existing files anywhere under `LCM_RECORDER_DIR` count
+  at startup; subsequent planned writes count conservatively, including temporary copies and status replacements.
+  Concurrent recorder processes can together pass the cap because each counts other processes' bytes at startup.
+  A refused initial snapshot writes no events. When a bound refuses a write, recording stops; queued events are
+  dropped and counted as `dropped_after_stop`. A `cap` marker and STATUS diagnostics are written only if they fit
+  both bounds; when no diagnostic fits, the last complete event prefix remains readable. LCM keeps running.
+- **Queue admission:** the writer queue admits at most 10,000 events or 512 MiB; an event refused there stops
+  recording with `gap` in STATUS when it fits, and queued events are dropped.
 - **Coverage ends:** recording stops being complete at the first of: a gap, the cap, a value that cannot be copied
   (`unsupported`), `hermes_home_changed`, a lost observation, a root stack mismatch, or a recorder failure (`recorder.failed`; the failure
   never reaches the engine or Hermes). `STATUS.json` names the first cause and its seq.
@@ -87,7 +90,8 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
 - **Ended without exit:** Hermes ends its gateway and CLI with `os._exit`, so atexit never runs and a recording
   normally ends as "ended without exit". That is a normal end; the sealed checkpoints are the comparison points. When
   atexit does run, the recorder writes `exit_begin` and records the exit flushes synchronously after a successful
-  drain. A drain timeout stops admission with `exit_timeout` in status. Recording stops in a forked child (`fork`)
+  drain. Session end and shutdown skip the ordinary 2 s event drain while a snapshot or checkpoint backup is
+  pending or running. A drain timeout stops admission with `exit_timeout` in status. Recording stops in a forked child (`fork`)
   before it can wait on inherited locks; the parent recording continues.
 
 ## Declared gaps (not failures)
