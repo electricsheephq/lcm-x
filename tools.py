@@ -4137,6 +4137,16 @@ def _lcm_recall_next_row(conn, session_id: str, store_id: int) -> dict[str, Any]
     return dict(found) if found is not None else None
 
 
+def _lcm_recall_delivered_pairs(entries, pairs, limit):
+    """Keep receipts whose reply the window delivers, also as a collapsed duplicate."""
+    delivered: set[Any] = set()
+    for entry in entries[:limit]:
+        if entry["hit"].get("kind") != "summary":
+            delivered.add(entry["hit"].get("store_id"))
+            delivered.update(entry["hit"].get("duplicate_store_ids", []))
+    return [pair for pair in pairs if pair["store_id"] in delivered]
+
+
 def _lcm_recall_adjacent_reply(
     engine, ordered, source_rows, *, limit, deadline, excluded, allowed, read_next=None,
 ):
@@ -4178,7 +4188,8 @@ def _lcm_recall_adjacent_reply(
                 continue
             content = str(neighbour.get("content") or "")
             sid = neighbour.get("session_id")
-            source_seen, reply_seen = row.get("observed_at"), neighbour.get("observed_at")
+            source_seen = _normalize_observed_at(row.get("observed_at"))
+            reply_seen = _normalize_observed_at(neighbour.get("observed_at"))
             if (sid != session_id
                     or (neighbour.get("conversation_id") or "") != (row.get("conversation_id") or "")
                     or neighbour.get("role") not in ("user", "assistant")
@@ -4186,7 +4197,7 @@ def _lcm_recall_adjacent_reply(
                     or neighbour.get("tool_calls") or not content.strip()
                     or neighbour.get("source") == _SUBAGENT_SOURCE
                     or (source_seen is not None and reply_seen is not None
-                        and float(reply_seen) < float(source_seen))):
+                        and reply_seen < source_seen)):
                 continue
             store_id = int(neighbour["store_id"])
             existing = next((i for i, entry in enumerate(placed)
@@ -4231,9 +4242,7 @@ def _lcm_recall_adjacent_reply(
     finally:
         if conn is not None:
             conn.close()
-    delivered = {entry["hit"].get("store_id") for entry in placed[:limit]
-                 if entry["hit"].get("kind") != "summary"}
-    return placed, [pair for pair in pairs if pair["store_id"] in delivered], None
+    return placed, _lcm_recall_delivered_pairs(placed, pairs, limit), None
 
 
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
@@ -4741,9 +4750,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         )
 
     if adjacent_pairs:  # receipts name only replies the final window delivers
-        delivered_ids = {entry["hit"].get("store_id") for entry in ordered[:limit]
-                         if entry["hit"].get("kind") != "summary"}
-        adjacent_pairs = [pair for pair in adjacent_pairs if pair["store_id"] in delivered_ids]
+        adjacent_pairs = _lcm_recall_delivered_pairs(ordered, adjacent_pairs, limit)
     _annotate_subagent_lineage(engine, [entry["hit"] for entry in ordered if isinstance(entry.get("hit"), dict)])
     session_delivery = None
     if kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) == "session":

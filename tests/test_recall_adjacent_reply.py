@@ -454,3 +454,29 @@ def test_reads_use_a_private_read_only_connection(ranked, monkeypatch):
     assert payload["provenance"]["adjacent_reply"]
     assert seen and all(conn is not e._store.connection for conn in seen)
     assert len({id(conn) for conn in seen}) == 1
+
+
+def test_receipt_kept_when_reply_is_delivered_as_a_collapsed_duplicate():
+    ordered = [_entry("s", 10, {0: 1}, 3), _entry("t", 30, {0: 2}, 2), _entry("t", 40, {0: 3}, 1),
+               _entry("u", 99, {1: 9}, 0.1)]
+    ordered[3]["hit"]["duplicate_store_ids"] = [11]
+    rows = {10: {"session_id": "s", "conversation_id": "", "role": "user", "content": "x"}}
+    read = Mock(return_value={"store_id": 11, "session_id": "s", "conversation_id": "",
+                              "role": "assistant", "content": "a"})
+    placed, pairs, reason = _step(ordered, rows, read, limit=3)
+    assert reason is None
+    assert [e["hit"]["store_id"] for e in placed][:2] == [10, 99]
+    assert pairs == [{"store_id": 11, "after_store_id": 10}]
+
+
+def test_text_or_invalid_observed_at_skips_only_the_time_check():
+    ordered = [_entry("s", 100, {0: 1}, 3)]
+    rows = {100: {"session_id": "s", "conversation_id": "", "role": "user", "content": "x",
+                  "observed_at": "not a time"}}
+    reply = {"store_id": 101, "session_id": "s", "conversation_id": "", "role": "assistant",
+             "content": "reply", "observed_at": 1_000_000_000.0}
+    placed, pairs, reason = _step(ordered, rows, Mock(return_value=reply), limit=4)
+    assert reason is None and pairs == [{"store_id": 101, "after_store_id": 100}]
+    rows[100]["observed_at"] = "2033-05-18T03:33:20+00:00"  # aware ISO text is honoured
+    placed, pairs, reason = _step(ordered, rows, Mock(return_value=reply), limit=4)
+    assert reason is None and pairs == []
