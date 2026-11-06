@@ -462,7 +462,10 @@ def deliver_recall(
     unmarked = json.dumps(response, ensure_ascii=ensure_ascii)
     response["provenance"]["delivery_order"] = "time"
     marked = json.dumps(response, ensure_ascii=ensure_ascii)
-    return marked if len(marked) <= response_char_cap else unmarked
+    # answer_ready caps the whole envelope; snippets budgets hits only.
+    if detail == "answer_ready" and len(marked) > response_char_cap:
+        return unmarked
+    return marked
 
 
 def _fit_answer_ready_response(
