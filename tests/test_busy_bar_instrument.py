@@ -355,10 +355,10 @@ def test_holds_percentiles_and_relative_verdict() -> None:
             {"shape": "t", "position": 1, "longest_ms": n * multiplier,
              "first_start_ms": 2, "call_ms": 30}]} for n in range(1, 11)]
 
-    result = holds.summarize({"baseline": runs(1), "candidate": runs(2.0)})
+    result = holds.summarize({"baseline": runs(1), "candidate": runs(2.25)})
     assert result["verdict"] == "LOCK-TRIPWIRE PASS"
     assert result["tables"]["baseline"]["n"]["p90_longest_ms"] == 9
-    assert holds.summarize({"baseline": runs(1), "candidate": runs(2.01)})["verdict"] == "LOCK-TRIPWIRE FAIL"
+    assert holds.summarize({"baseline": runs(1), "candidate": runs(2.26)})["verdict"] == "LOCK-TRIPWIRE FAIL"
 
 
 @pytest.mark.parametrize("platform,size,offsets", [

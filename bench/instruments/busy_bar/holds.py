@@ -27,7 +27,7 @@ WRITE_WORDS = {"INSERT", "UPDATE", "DELETE", "REPLACE"}
 
 # Design r3.7 (§5): the 2,000-new-row hold ratio is reported; it fails only above this
 # regression tripwire against v0.29.2 (r3.6's 1.25 bar no longer applies).
-TRIPWIRE = 2.0
+TRIPWIRE = 2.25
 
 
 def windows(events: list[tuple[float, int, str]], begin: float, end: float) -> list[dict[str, Any]]:

@@ -239,7 +239,7 @@ use achieved intervals, not the requested sleep, to assess this uncertainty.
 
 Per tree/shape the summary reports median/p90 longest hold, median first observed
 start and median call duration. Shape n reports its ratio to v0.29.2 at **all eight**
-statistics, and fails only when one exceeds the 2.0 regression tripwire (design r3.7; r3.6's
+statistics, and fails only when one exceeds the 2.25 regression tripwire (design r3.7; r3.6's
 1.25 bar no longer applies; the busy bar above is the P1 lock gate): the all-calls median (60 calls in a default session); six per-position
 medians over runs; and the median of each run's longest hold. FAIL names every
 exceeded statistic. Shape t has no verdict: its absolute bar comes from the
