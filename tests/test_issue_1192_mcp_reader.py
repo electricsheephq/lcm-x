@@ -623,6 +623,7 @@ def test_t7_prefix_configured_profile_uses_vector_arms(tmp_path, monkeypatch, _h
     assert payload["reader"]["degraded"] == []
     assert payload["provenance"]["coverage"]["summary"] in {"full", "bounded"}
     assert payload["provenance"]["coverage"]["chunk"] in {"full", "bounded"}
+    assert payload["reader"]["capabilities"]["embeddings"] is True  # #2180: the flag agrees with the gate
 
 
 def test_t7_warmed_fastembed_model_is_present_for_the_first_recall(tmp_path, monkeypatch):
@@ -994,6 +995,7 @@ def test_t9_protocol_session_over_stdio(spawned_fx, tmp_path):
     tools = by_id[3]["result"]["tools"]
     assert [t["name"] for t in tools] == ["lcm_recall", "lcm_grep", "lcm_expand", "lcm_load_session"]
     assert all(t["inputSchema"]["type"] == "object" for t in tools)
+    assert all(t["annotations"] == {"readOnlyHint": True} for t in tools)  # #2180, over the wire
     bad = [r for r in replies if r.get("id") is None]
     assert [r["error"]["code"] for r in bad] == [-32600, -32600, -32700]
     assert by_id[4]["result"] == {}
@@ -1058,6 +1060,7 @@ def test_t9_tools_list_honours_disabled_tools_and_production_schemas(monkeypatch
         production = getattr(schemas, definition["name"].upper())
         assert definition["inputSchema"] == production["parameters"]
         assert definition["description"] == production["description"] + mcp_reader.READER_NOTE
+        assert definition["annotations"] == {"readOnlyHint": True}  # #2180
     assert [d["name"] for d in mcp_reader.tool_definitions({"lcm_grep", "lcm_recall"})] == [
         "lcm_expand", "lcm_load_session", "lcm_describe"]
 

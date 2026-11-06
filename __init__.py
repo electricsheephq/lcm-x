@@ -255,6 +255,7 @@ def _answer_ready_baseline(active_engine, question: str, payload: dict):
             "include_occurrence_time": True,
         },
         delivery_unit="hits",
+        delivery_order="score",
     )
     recalled = json.loads(raw) if isinstance(raw, str) else raw
     hits = recalled.get("hits") if isinstance(recalled, dict) else None
@@ -335,7 +336,7 @@ def _pre_llm_context(active_engine, payload: dict) -> dict | None:
                 baseline_refs=baseline_refs,
                 question_as_of=question_date,
                 retrieve=lambda recall_args: active_engine.handle_tool_call(
-                    "lcm_recall", recall_args, delivery_unit="hits"
+                    "lcm_recall", recall_args, delivery_unit="hits", delivery_order="score"
                 ),
                 enabled=True,
                 render_baseline_context=baseline_was_internal,
@@ -872,6 +873,8 @@ def register(ctx):
                                 return
 
                 if not result.used:
+                    if result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT:
+                        engine._log_session_ingest_outcome(session_id, reason="resident_engine_conflict")
                     logger.warning(
                         "LCM post_llm_call skipped ingest: stable engine use ended with %s",
                         result.status.value,

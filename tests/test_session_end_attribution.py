@@ -175,7 +175,7 @@ def test_classifier_short_circuits_without_identity_pass(published, monkeypatch,
 def test_debug_gate_avoids_clocks_at_info(published, monkeypatch, caplog):
     engine, _host, _output = published
     monkeypatch.setattr(engine_module.time, "perf_counter", lambda: pytest.fail("disabled span read clock"))
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.INFO, logger="hermes_lcm.engine"):
         with engine._attribution_span("preflight", 3):
             pass
 

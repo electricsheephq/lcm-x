@@ -47,6 +47,7 @@ if __name__ == "__main__":
 
 import tests.conftest  # noqa: F401
 from tests.behaviour.frontier_observer import HOLDER_NAME, legacy_frontier_fields, observed_attribute
+from tests.behaviour.trace_config import LCMConfig, trace_config
 from tests.phase0_hygiene import product_env_keys
 from tests.harness import engine_context, pin_char_counter
 
@@ -151,6 +152,8 @@ class Canonical:
             return {'bytes': hashlib.sha256(value).hexdigest()}
         if isinstance(value, re.Pattern):
             return {'pattern': value.pattern}
+        if isinstance(value, LCMConfig):
+            return trace_config(value, self.value)
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
             return {f.name: self.value(getattr(value, f.name), f.name) for f in dataclasses.fields(value)}
         if isinstance(value, dict):
@@ -518,7 +521,7 @@ def observe(case: Scenario, root: Path) -> Trace:
                 cls = getattr(importlib.import_module('hermes_lcm.' + module_name), class_name)
                 for name, method in vars(cls).items():
                     if not name.startswith('_') and inspect.isfunction(method):
-                        services[method.__code__] = module_name + '.' + name
+                        services[inspect.unwrap(method).__code__] = module_name + '.' + name
             calls: dict[int, str] = {}
             entries = 0
             lineage_loaded: set[int] = set()

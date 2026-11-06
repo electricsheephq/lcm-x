@@ -16,6 +16,14 @@ from tests import test_reliability_scorers as fixture
 SPLIT = {"visible_surplus_rows", "silent_surplus_rows", "silent_surplus_examples"}
 
 
+@pytest.mark.parametrize("kind", ["supersedes", "generated_unproven"])
+def test_silent_surplus_examples_exclude_the_kept_copy(kind):
+    key = ("assistant", "synthetic-digest")
+    result = multiset.split_surplus([(key, 2, [1, 2, 2])], [(2, kind, None)])
+    assert (result["visible_surplus_rows"], result["silent_surplus_rows"]) == (1, 1)
+    assert result["silent_surplus_examples"] == [dict(store_id=2, role=key[0], sha256=key[1])]
+
+
 def score(tmp_path, rows, relations=None, **kwargs):
     before = fixture.make(tmp_path, rows=rows, events=kwargs.pop("events", []), bars=["B2"], **kwargs)
     db = tmp_path / "cell" / "db" / "lcm.db"

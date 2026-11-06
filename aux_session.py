@@ -25,6 +25,8 @@ from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
+from .sqlite_util import _is_ingest_busy_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -83,6 +85,23 @@ def explicit_subagent_lineage(session_id: str) -> Dict[str, str]:
 
 
 class AuxiliarySessionMixin:
+    def _log_auxiliary_session_decision(self, session_id, *, platform="", parent="", reason="inherited_bypass"):
+        try:
+            agent = self._delegate_child_agent(session_id)
+            auxiliary = agent is not None and _is_auxiliary_agent(agent)
+            record = explicit_subagent_lineage(session_id)
+            decision = "delegate_child" if not auxiliary and agent is not None and _is_delegate_agent(agent) else "auxiliary"
+            reason = ("background_review" if "background_review" in (
+                getattr(agent, "_memory_write_origin", ""), getattr(agent, "_memory_write_context", "")
+            ) else "toolsets_memory_only") if auxiliary else "subagent_start" if record else (
+                "frame_marker" if agent is not None else reason
+            )
+            parent = parent or record.get("parent_session_id", "") or str(getattr(agent, "_parent_session_id", "") or "")
+            self._log_session_decision(session_id, decision, reason, platform=platform, parent=parent)
+            return reason
+        except Exception:
+            return "unknown"  # Diagnostics cannot change bind or ingest outcomes.
+
     def _thread_context_auxiliary_stack(self) -> list[str]:
         stack = getattr(self._thread_context, "auxiliary_session_stack", None)
         if stack is None:
@@ -915,7 +934,18 @@ class DelegateChildMixin:
             # Closing may have begun while this pass waited for the child-store lock.
             if self._compaction_is_closing():
                 return messages
-            pre_store = self._store_delegate_child_turn(session_id, messages, platform=_DELEGATE_SOURCE, require_agent=True)
+            store_outcome: Dict[str, Any] = {}
+            pre_store = self._store_delegate_child_turn(
+                session_id, messages, platform=_DELEGATE_SOURCE, require_agent=True, outcome=store_outcome)
+            if pre_store is None and _is_ingest_busy_error(store_outcome.get("error") or Exception()):
+                # #2306: compacting now would drop rows that were never stored. A lock clears, so keep the view;
+                # the next compression or turn retries the store. Other failures compact as before (a store
+                # that keeps failing saves nothing by stalling the child) and stay visible below.
+                self._note_delegate_child_fallback(session_id, "compaction skipped: input not stored")
+                state = self._bypass_compress_state()
+                state["_last_compression_status"] = "noop"
+                state["_last_compression_noop_reason"] = "compaction skipped: input not stored"
+                return messages
             try:
                 if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
                     tail = self._store.get_session_tail(session_id, limit=1)
@@ -1017,14 +1047,18 @@ class DelegateChildMixin:
         """The parent link of a DELEGATE child, or None for an AUXILIARY or unproven session."""
         agent = self._delegate_child_agent(session_id)
         if agent is not None and _is_auxiliary_agent(agent):
+            self._log_auxiliary_session_decision(session_id, platform=platform)
             _DELEGATE_AUXILIARY_IDS.add(self._delegate_child_key(session_id))
+            self._log_session_ingest_outcome(session_id, reason="auxiliary")
             return None  # AUXILIARY wins over every delegate signal
         if self._delegate_child_key(session_id) in _DELEGATE_AUXILIARY_IDS:
+            self._log_session_ingest_outcome(session_id, reason="auxiliary_lineage")
             return None
         platform = platform or self._lcm_session_last_platform.get(session_id, "") or _DELEGATE_SOURCE
         if (agent is None and require_agent) or self._session_id_matches_lcm_bypass_filters(
             session_id, platform=platform,
         ):
+            self._log_session_ingest_outcome(session_id, reason="no_agent" if agent is None and require_agent else "bypass_pattern")
             return None
         record = explicit_subagent_lineage(session_id)
         stored_link = self._stored_delegate_child_link(session_id)
@@ -1041,18 +1075,25 @@ class DelegateChildMixin:
         source, parent = (stored_link["source"], stored_link["parent_session_id"]) if stored_link else next(
             ((name, value) for name, value in [("compression", compression_parent), *candidates] if value), ("", ""))
         if not delegate:
+            # Not a skip: the caller still decides this session's route (#2042).
             return None
         if not parent or parent == session_id:
             self._note_delegate_child_fallback(session_id, "rows not stored: no parent identity resolves")
+            self._log_session_ingest_outcome(session_id, reason="no_parent")
             return None
         if parent == self._session_id:
             parent_platform = self._session_platform
             if self._session_ignored or (self._session_stateless and not self._is_known_delegate_child(parent)):
+                self._log_session_ingest_outcome(session_id, reason="ignored_parent")
                 return None
         else:
             parent_platform = self._lcm_session_last_platform.get(parent, "") or self._host_session_parent(parent)[1]
         if self._session_id_matches_lcm_bypass_filters(parent, platform=parent_platform):
+            self._log_session_ingest_outcome(session_id, reason="parent_bypass_pattern")
             return None
+        self._log_session_decision(session_id, "delegate_child",
+                                   "state_db_subagent" if source == "state_db" else "frame_marker" if source == "parent_frame" else source,
+                                   platform=platform, parent=parent)
         return {
             "parent_session_id": parent, "source": source,
             "child_subagent_id": record.get("child_subagent_id") or str(getattr(agent, "_subagent_id", "") or ""),
@@ -1089,6 +1130,8 @@ class DelegateChildMixin:
                 with self._attribution_span("delegate_child_store", len(messages)):
                     return self._append_delegate_child_rows(session_id, messages, link)
         except Exception as exc:
+            if isinstance(outcome, dict):
+                outcome["error"] = exc
             self._note_delegate_child_fallback(session_id, f"rows not stored: {type(exc).__name__}: {exc}")
             return None
 

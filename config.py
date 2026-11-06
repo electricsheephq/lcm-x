@@ -256,8 +256,13 @@ _host_message_uid_mode_warned = False
 
 
 def host_message_uid_mode() -> str:
-    """``LCM_HOST_MESSAGE_UID``: ``off`` disables UID capture and alias-guard reads; ``shadow`` (default)
-    observes only; ``on`` behaves exactly like ``shadow``. Alias UID conflicts are count-only diagnostics (#1519).
+    """``LCM_HOST_MESSAGE_UID``: ``off`` disables UID capture and new bindings, and stops these binding reads:
+    store-complete copy exclusion (#1124), the tail-rewind veto for a bound stored row, tool-segment replay
+    binding, the survival-fit carrier split and the alias-conflict count. It does not stop the NULL-stamp audit
+    proof (#1403, ``identity_anchor``): bindings left from an earlier ``shadow`` run can still prove an
+    occurrence there after a switch to ``off``. ``shadow`` (default) writes bindings and never skips a row on a
+    UID alone, but its bindings are read as evidence by all of the above. In every mode, an incoming
+    ``message_uid`` on the row vetoes the stamp-tail rewind. ``on`` behaves exactly like ``shadow``. Alias UID conflicts are count-only diagnostics (#1519).
     An unknown value means ``shadow``, with one WARNING per process."""
     global _host_message_uid_mode_warned
     raw = (lcm_env_get("LCM_HOST_MESSAGE_UID") or "").strip().lower()
@@ -483,6 +488,8 @@ _SUPPORTED_LCM_CONFIG_YAML_KEYS = {
     "summary_reasoning_effort",
     "expansion_reasoning_effort",
     "embedding_query_prefix", "embedding_document_prefix",
+    "large_output_active_replay_stub_threshold_tokens",
+    "large_output_active_replay_stub_aged_threshold_tokens",
 }
 
 
@@ -831,6 +838,7 @@ def companion_enable_command() -> str:
 
 _ENV_CHOICES = {
     "recall_delivery_unit": (("hits", "session"), str.lower, "ignored; using 'hits'"),
+    "recall_delivery_order": (("score", "time"), str.lower, "ignored; using 'score'"),
     "embedding_provider": (
         tuple(spelling for spellings in EMBEDDING_PROVIDER_SPELLINGS.values() for spelling in spellings),
         str.lower, "provider resolution raises ProviderUnavailable when requested",
@@ -965,6 +973,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("recall_scan_budget_s", "LCM_RECALL_SCAN_BUDGET_S", float),
     _EnvFieldSpec("recall_reference_strict", "LCM_RECALL_REFERENCE_STRICT", bool),
     _EnvFieldSpec("recall_delivery_unit", "LCM_RECALL_DELIVERY_UNIT", str),
+    _EnvFieldSpec("recall_delivery_order", "LCM_RECALL_DELIVERY_ORDER", str),
     _EnvFieldSpec("recall_fts_anchor", "LCM_RECALL_FTS_ANCHOR", bool),
     _EnvFieldSpec("proactive_recall_enabled", "LCM_PROACTIVE_RECALL_ENABLED", bool),
     _EnvFieldSpec("proactive_recall_min_score", "LCM_PROACTIVE_RECALL_MIN_SCORE", float),
@@ -1023,6 +1032,8 @@ _PARSER_BY_TYPE = {
 # Fields whose env reading needs provenance tracking or a computed default;
 # ``from_env`` handles these explicitly, so the uniform loop skips them.
 _SOURCE_TRACKED_ENV_FIELDS = frozenset({
+    "large_output_active_replay_stub_threshold_tokens",
+    "large_output_active_replay_stub_aged_threshold_tokens",
     "fresh_tail_count",
     "fresh_tail_max_tokens",
     "leaf_chunk_tokens",
@@ -1339,6 +1350,7 @@ class LCMConfig:
     # the answer_ready response is byte-identical to the pre-F35 delivery.
     recall_reference_strict: bool = True
     recall_delivery_unit: str = "hits"
+    recall_delivery_order: str = "score"
     # lcm_recall FTS anchor slot: with two or more arms, the FTS arm's best
     # message is kept inside the delivered window (at most one session evicted).
     # Evidence (#950): frozen LongMemEval-M LOCAL replay, R@10 0.898 -> 0.905 (470 q).
@@ -1535,6 +1547,21 @@ class LCMConfig:
 
         c.ignored_config_yaml_lcm_keys = _ignored_lcm_config_yaml_keys(cfg_yaml, env=env)
 
+        for name in ("large_output_active_replay_stub_threshold_tokens",
+                     "large_output_active_replay_stub_aged_threshold_tokens"):
+            default = getattr(c, name)
+            raw, source = _lcm_config_string_with_source("LCM_" + name.upper(), name, str(default), env=env)
+            warning = None
+            try:
+                value = int(raw)
+                if value < 500 and not (value == 0 and "_aged_" in name):
+                    raise ValueError("below floor")
+            except (ValueError, TypeError):
+                value, source = default, "default"
+                warning = f"invalid {name} ignored; use at least 500 tokens (aged 0 inherits first-sight)"
+            setattr(c, name, value)
+            _record(name, f"env:LCM_{name.upper()}" if source == "env" else source, warning)
+
         # Source-tracked fields (provenance recording and/or a computed default)
         # stay explicit; the uniform loop below skips them.
         c.fresh_tail_count, source, warning = _parse_int_env_with_source(
@@ -1688,6 +1715,9 @@ class LCMConfig:
         c.recall_delivery_unit = c.recall_delivery_unit.strip().lower()
         if c.recall_delivery_unit not in ("hits", "session"):
             c.recall_delivery_unit = "hits"
+        c.recall_delivery_order = c.recall_delivery_order.strip().lower()
+        if c.recall_delivery_order not in ("score", "time"):
+            c.recall_delivery_order = "score"
 
         # Pattern-list overrides carry a source sidecar and stay explicit.
         raw_sensitive_patterns = lcm_env_get("LCM_SENSITIVE_PATTERNS")

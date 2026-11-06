@@ -36,6 +36,7 @@ STRING = (D, *VALUES[1:])
 # Frozen ENV_FIELD_SPECS rows: field, environment key, parser, default.
 CONFIG_ROWS = (
     ('recall_delivery_unit', 'LCM_RECALL_DELIVERY_UNIT', 'str', 'hits'),
+    ('recall_delivery_order', 'LCM_RECALL_DELIVERY_ORDER', 'str', 'score'),
     # config._parse_bool_env -> LCMConfig.from_env (construction time).
     ('fresh_tail_pressure_yield_enabled', 'LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED', 'bool', True),
     ('dynamic_leaf_chunk_enabled', 'LCM_DYNAMIC_LEAF_CHUNK_ENABLED', 'bool', False),
@@ -177,12 +178,16 @@ SPECIAL = {
     "embeddings_enabled": FLAG,  # R3: unset local ON; invalid/blank stays OFF.
     "embedding_provider": (D, D, *VALUES[2:]),  # R4: blank provider follows unset local default.
     "recall_delivery_unit": ("hits",) * 16,
+    "recall_delivery_order": ("score",) * 16,
     "fresh_tail_max_tokens": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, HUGE),
     "leaf_target_ratio": (D, D, D, D, 1.0, D, D, D, D, D, D, D, D, D, 0.5, D),
     "leaf_target_min_tokens": (D, D, D, D, 1, D, D, D, D, D, D, D, D, D, D, D),
     "leaf_target_max_tokens": (D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, HUGE),
     "summary_prompt_version": (1,) * 16,
     "stub_first_exit_target_ratio": (D, D, D, D, 1.0, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
+    # #1982: below the 500-token floor falls back to the default; the aged threshold also accepts 0.
+    "large_output_active_replay_stub_threshold_tokens": (D,) * 15 + (HUGE,),
+    "large_output_active_replay_stub_aged_threshold_tokens": (D, D, D, D, D, 0) + (D,) * 9 + (HUGE,),
 }
 
 

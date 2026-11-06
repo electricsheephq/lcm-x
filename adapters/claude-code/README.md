@@ -5,9 +5,9 @@ Claude Code sessions into a local, lossless LCM-X store, and gives the agent rea
 search and read it (`lcm_recall`, `lcm_grep`, `lcm_expand`, `lcm_load_session`, `lcm_describe`).
 Claude Code's own compaction is unchanged, and the plugin adds nothing to the context by itself.
 
-**Status: preview in development (0.1.0-dev).** The hooks record which transcript changed and
-start the capture worker, which writes every message and tool result to the store. The worker
-and recall need the read-only MCP reader (#1216), which lands first. Design:
+**Status: preview (0.1.0), opt-in.** The hooks record which transcript changed and start the
+capture worker, which writes every message and tool result to the store; the read-only MCP reader
+serves recall. Release notes: [claude-code-v0.1.0](../../.github/release-notes/claude-code-v0.1.0.md). Design:
 [docs/claude-code-adapter.md](../../docs/claude-code-adapter.md).
 
 ## Try it from a checkout
@@ -46,7 +46,9 @@ record `runtime_missing` or `package_missing` until it is fixed. A bare command 
 `python3.12` counts as relative and is not looked up on `PATH`: give its full path.
 
 Grok Build sessions are not captured in this release: its session-file reader is not included, so
-hooks log each Grok event as `grok_capture_off` and spool nothing.
+hooks log each Grok event as `grok_capture_off` and spool nothing. Under Grok Build the MCP server
+starts no reader (and says why on stderr) unless the Grok store home holds an `lcm.db` or a
+`reader-override.json`.
 
 A `reader-override.json` in the store home makes the server start another reader in place of the
 plain one, and hands it the plain reader's command. Anything wrong with the file starts the plain

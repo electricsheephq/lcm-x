@@ -43,6 +43,7 @@ if __name__ == "__main__":
 
 import tests.conftest  # noqa: E402, F401
 from tests.behaviour.frontier_observer import observed_attribute  # noqa: E402
+from tests.behaviour.trace_config import LCMConfig, trace_config  # noqa: E402
 from tests.phase0_hygiene import product_env_keys
 from tests.harness import engine_context, pin_char_counter  # noqa: E402
 
@@ -222,6 +223,8 @@ class Canonical:
         if isinstance(value, (str, Path)):
             return self.text(str(value), identity=not in_payload and path in {
                 "message_uid", "_absorbed_message_uids", "_tool_call_uids", "_tool_call_uid"})
+        if isinstance(value, LCMConfig):
+            return trace_config(value, lambda v, name: self.value(v, name, in_payload=in_payload))
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
             return {f.name: self.value(getattr(value, f.name), f.name, in_payload=in_payload)
                     for f in dataclasses.fields(value)}

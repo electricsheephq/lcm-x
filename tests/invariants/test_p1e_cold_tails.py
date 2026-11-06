@@ -1213,7 +1213,7 @@ def test_resumed_engine_resend_keeps_the_earlier_cold_occurrence(engines, monkey
 @pytest.mark.parametrize("then", ["same", "older"])
 @pytest.mark.parametrize("shape", ["uidless", "uids", "two_conflicts", "tool_conflict", "same_reply_text",
     "scaffold_row", "store_longer", pytest.param("ignored_row", marks=pytest.mark.xfail(strict=True,
-        reason="known limit: an ignored row plus a stamp conflict takes the cold start (DECISION-1838 known limits)"))])
+        reason="#2247: known limit: an ignored row plus a stamp conflict takes the cold start; planned for v0.30.x (DECISION-1838 known limits)"))])
 def test_noop_ingest_after_a_resumed_resend_keeps_the_earlier_occurrence(engines, monkeypatch, then, shape):
     engine = ignoring(engines()) if shape == "ignored_row" else engines()
     queued, resent = cold_resend_views(shape)
@@ -1326,7 +1326,10 @@ def test_kept_conflict_exit_warning_names_the_stamp_conflict(engines, monkeypatc
                 locker.close()
         before = count(engine, "tail.unflushed")
         caplog.clear()
-        engine._retry_pending_session_tails(exiting=True)
+        # #2256: the shutdown budget, as shutdown() passes it; the 50 ms default could expire under CI load
+        # before the exit count ran, leaving the conservative "SQLite lock" label and the whole view count.
+        engine._retry_pending_session_tails(exiting=True, deadline=time.monotonic()
+                                            + maintenance_scheduler._SESSION_END_SHUTDOWN_TIMEOUT_MS / 1000)
         assert engine._pending_session_tails == [tail]
         rows = committed_rows(tail["store"].db_path, "S")
         absent_suffix = int(not any(r["content"] == "absent reply" for r in rows))

@@ -244,6 +244,12 @@ def main() -> int:
     if home is None:
         print("lcm-x: %s must be an absolute path" % lcmx_runtime.HOMES[host][0], file=sys.stderr)
         return 1
+    if host == "grok-build" and not os.path.lexists(home / OVERRIDE) and not os.path.lexists(home / "lcm.db"):
+        # The hooks capture no Grok Build event in this release (grok_capture_off), so nothing fills
+        # this store: offer no recall tools that could only fail, unless an override supplies recall.
+        print("lcm-x: Grok Build sessions are not captured in this release, so there is nothing to recall "
+              "at %s; no recall tools are offered" % home, file=sys.stderr)
+        return 0
     runtime = lcmx_runtime.runtime_command(environ, home)
     package = lcmx_runtime.package_root(environ)
     reader = package / "scripts" / "lcm_x_mcp.py" if package else None

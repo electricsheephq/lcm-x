@@ -977,6 +977,23 @@ def test_regression_exact_time_facts_against_plain_sql(tmp_path, name):
         engine.shutdown()
 
 
+@pytest.mark.parametrize('count', [5, 6])
+def test_lookup_fact_cap_honors_caller_limit(tmp_path, count):
+    engine = make_engine(tmp_path)
+    try:
+        for i in range(count):
+            sid = engine._store.append('one', {'role': 'user', 'content': f'Alex fact {i}'})
+            snapshot = engine._assertions.snapshot_source(sid)
+            engine._assertions.publish_source(snapshot, [AssertionCandidate(
+                0, len(snapshot.content), 'person:alex', f'note{i}', value_text=snapshot.content)])
+        card = call(engine, name='Alex', limit=5)
+        assert len(card['facts']) == 5
+        assert card['facts_truncated'] is (count > 5)
+        assert len(call(engine, action='list', limit=1)['entities']) == 1
+    finally:
+        engine.shutdown()
+
+
 def test_batched_negative_relation_probe_invalidates_after_other_engine_writes_carried_stamp(tmp_path):
     first = make_engine(tmp_path, assertions=False)
     second = make_engine(tmp_path, assertions=False)
