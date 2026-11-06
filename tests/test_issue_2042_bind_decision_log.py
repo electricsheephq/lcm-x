@@ -490,3 +490,28 @@ def test_diagnostics_log_outside_auxiliary_lock(engines, caplog, monkeypatch):
     engine._log_session_ingest_outcome("unlocked", rows=1)
     assert len(lines(caplog, session="unlocked")) == len(lines(caplog, "LCM session first store:")) == 1
     assert_safe_logs(caplog)
+
+
+@pytest.mark.parametrize("reason,skipped", [("frame_marker", False), ("subagent_start", False),
+                                            ("toolsets_memory_only", True)])
+def test_bypassed_delegate_child_ingest_is_not_logged_as_skipped(engines, caplog, monkeypatch, reason, skipped):
+    # A delegated child under a stateless thread context is stored by its own path, which logs its own outcome.
+    engine = engines()
+    engine.on_session_start("parent", platform="desktop")
+    monkeypatch.setattr(engine, "_thread_context_stateless", lambda: True)
+    monkeypatch.setattr(engine, "_bypass_lcm_session_id", lambda: "bypassed-child")
+    monkeypatch.setattr(engine, "_log_auxiliary_session_decision", lambda session_id, **kwargs: reason)
+    engine._log_bypassed_ingest()
+    assert lines(caplog, "LCM session skipped:") == (
+        [f"LCM session skipped: session=bypassed-child reason={reason}"] if skipped else [])
+
+
+def test_session_start_decision_log_cannot_fail_the_bind(engines, monkeypatch):
+    engine = engines()
+
+    def failing_log(*args, **kwargs):
+        raise RuntimeError("diagnostic failure")
+
+    monkeypatch.setattr(engine, "_log_session_decision", failing_log)
+    engine.on_session_start("parent", platform="desktop")
+    assert engine._session_id == "parent"

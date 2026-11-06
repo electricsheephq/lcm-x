@@ -182,7 +182,9 @@ class BypassMixin:
                     "bypass_lineage" if self._lcm_current_start_allows_bypass_lineage else "stateless_pattern"
                 ) if self._session_stateless else "no_session"
                 self._log_session_decision(session_id, decision, reason, platform=self._session_platform)
-            self._log_session_ingest_outcome(session_id, reason=reason)
+            if reason not in ("subagent_start", "frame_marker"):
+                # A delegated child is stored by its own path, which logs its own outcome.
+                self._log_session_ingest_outcome(session_id, reason=reason)
         except Exception:
             pass  # Diagnostics cannot change bypass outcomes.
 

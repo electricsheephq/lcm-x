@@ -3946,13 +3946,16 @@ class LCMEngine(
         finally:
             # Publish after every metadata path, including rejected stale/invalid inputs.
             self._publish_ingest_context_window()
-            self._log_session_decision(
-                self._session_id, "ignored" if self._session_ignored else "stateless" if self._session_stateless else "store",
-                "ignore_pattern" if self._session_ignored else (
-                    "bypass_lineage" if self._lcm_current_start_allows_bypass_lineage else "stateless_pattern"
-                ) if self._session_stateless else "default",
-                platform=self._session_platform, parent=str(kwargs.get("parent_session_id") or ""),
-            )
+            try:
+                self._log_session_decision(
+                    self._session_id, "ignored" if self._session_ignored else "stateless" if self._session_stateless else "store",
+                    "ignore_pattern" if self._session_ignored else (
+                        "bypass_lineage" if self._lcm_current_start_allows_bypass_lineage else "stateless_pattern"
+                    ) if self._session_stateless else "default",
+                    platform=self._session_platform, parent=str(kwargs.get("parent_session_id") or ""),
+                )
+            except Exception:
+                pass  # Diagnostics cannot change bind outcomes.
 
     def _apply_session_start_runtime_metadata(self, session_id: str, kwargs: Dict[str, Any]) -> None:
         self._session_id = session_id
