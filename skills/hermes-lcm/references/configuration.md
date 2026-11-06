@@ -112,6 +112,7 @@ Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/
 - `LCM_TEMPORAL_ROLLUPS_ENABLED` (default `true` from v0.27.0): background day/week rollup summaries; the first session bind creates the rollup tables and schedules maintenance; `false` opts out;
 - `LCM_LEAF_TARGET_RATIO` (default `0.20`), `LCM_LEAF_TARGET_MIN_TOKENS` (default `2000`) and `LCM_LEAF_TARGET_MAX_TOKENS` (default `2000`): leaf summary target `min(MAX, max(MIN, int(source_tokens * RATIO)))`; the first summary call gets twice the target as `max_tokens`. Defaults give a fixed 2,000-token target. Setting only RATIO has no effect while MIN equals MAX and warns; set `LCM_LEAF_TARGET_MAX_TOKENS` above MIN to enable the ratio. A MIN above the default cap also needs MAX, otherwise MIN resets with a warning naming that key (#614, #1138);
 - `LCM_DATABASE_PATH`: profile-local SQLite path when the default is unsuitable;
+- `LCM_RECORDER_ENABLED` (default `false`, needs Python 3.12 or newer, #2243): opt-in event recorder that writes the engine calls Hermes makes, the message views and the state they read to local files under the profile, for offline replay; `LCM_RECORDER_DIR` (default `$HERMES_HOME/lcm-recorder/`) sets where and `LCM_RECORDER_MAX_BYTES` (default 20 GiB) caps event segments and blobs. Recording never changes what LCM stores or returns; with the flag off nothing is imported or created. The files hold message content. See [docs/recorder.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/recorder.md);
 - `LCM_NATIVE_RECOVERY` (default `false`): removed in v0.25.0; ignored if set
 - `LCM_SURVIVAL_FIT` (default `true`) and `LCM_SURVIVAL_RESERVE` (default `0.15`): when compaction cannot bring the list under the model window, the oldest whole user turns leave live context (an oversized newest turn is projected) so the session survives; rows stay stored and searchable, a WARNING `LCM survival fit applied` is logged, the user is warned once and `/lcm doctor` reports `survival_fit` as history without changing its status. The `lcm_doctor` tool returns that history in its top-level `survival_fit` field (null when no fit is recorded); it is not a health check and does not affect `overall`. `lcm_status.last_survival_fit` describes the latest fit in the current session, or null, including `cause` when recorded; doctor history retains `last_cause`. The reserve is the share of the window kept free;
 - `LCM_HOST_MESSAGE_UID` (default `shadow`; `off`, `shadow`, `on`; env only): on a host whose messages carry `message_uid`, record which stored row each uid was bound to in the droppable `host_uid_bindings` table and count agreement with the existing identity matching; ingest decisions are unchanged. `/lcm doctor` reports `host_uid_*` counts. `off`: no capture, no table writes, no counts, no log line. Under `shadow` and `on`, canonical uid evidence can also exclude a proven hidden re-ingest copy of an assistant message from leaf summary input (the row stays stored and searchable); `off` disables that. `on` behaves exactly like `shadow`: both record count-only would-reject alias UID-conflict diagnostics in the debug log without changing matching, stored rows, bindings, or ingest writes. `off` performs no UID/binding reads on this diagnostic path. Unknown values behave as `shadow` and warn once. No-op on hosts without uids;
@@ -363,7 +364,7 @@ comma-separated values. Keep their existing source tracking and parsing rules.
 
 ## Hand-written reference: side-channel environment readers
 
-These 12 keys are read outside `config.py`, directly or through helper
+These 15 keys are read outside `config.py`, directly or through helper
 wrappers. They are not loaded into `LCMConfig`; listing them does not
 consolidate or change their readers. Reader filenames are relative to the
 checkout root. Credential entries list only variable names, never values.
@@ -372,6 +373,9 @@ checkout root. Credential entries list only variable names, never values.
 | --- | --- | --- | --- |
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `config.py`, `engine.py` | Absolute compaction threshold override; also settable as `lcm.context_threshold_tokens` in config.yaml; an integer env value wins, including `0` to turn the YAML pin off; empty or non-integer env values fall back to YAML | registration for YAML, provenance, and routed-profile env pins; each `_set_context_length()` call with a positive context length for live env on non-routed hosts, through model updates, session-start metadata, or cloning |
 | `LCM_ENABLE_SLASH_COMMAND` | `__init__.py` | Optional slash-command registration | plugin registration |
+| `LCM_RECORDER_ENABLED` | `__init__.py` | Opt-in event recorder (#2243); Python 3.12 or newer | plugin registration |
+| `LCM_RECORDER_DIR` | `recorder.py` | Recording directory | plugin registration, when the recorder starts |
+| `LCM_RECORDER_MAX_BYTES` | `recorder.py` | Cap on recorded event segments and blobs | plugin registration, when the recorder starts |
 | `LCM_SENDER_CAPTURE` | `sender_capture.py` | Profile-aware pending sender capture; default `true`, `0` disables capture without removing columns or backfilling history | each call — pending association creation through the profile-aware boolean resolver |
 | `LCM_HERMES_BASE_DIR` | `config.py` (called by `engine.py`, `externalize.py`, `diagnostics.py`) | Storage containment boundary; process-wide, never read from a routed profile | each call — storage-directory resolution or state-database containment validation; `_get_allowed_hermes_base()` also reads it when called (tests only; no production caller) |
 | `LCM_IDENTITY_ANCHOR` | `config.py` (called by `identity_anchor.py`, `reconcile.py`, `engine.py`, `store_complete.py`) | Identity-anchor switch | each call — `identity_anchor_enabled()` checks during ingest, replay identity handling, and compaction |
@@ -383,7 +387,7 @@ checkout root. Credential entries list only variable names, never values.
 | `LCM_EMBEDDING_BACKFILL_BATCH_SIZE` | `command.py` | Backfill claim batch size | each call — backfill batch estimates, apply-run batch sizing, and automatic embedding-maintenance pass sizing |
 | `LCM_EMBEDDING_API_KEY` | `embedding_provider.py` | Default credential variable for the compatible endpoint; name selectable via `LCM_EMBEDDING_API_KEY_ENV` | plugin registration — availability probe when compatible embeddings are enabled; also re-read at each compatible-provider `_request()` and availability probe (doctor and automatic maintenance) |
 
-Restart the host for `LCM_ENABLE_SLASH_COMMAND`; the other keys take effect on
+Restart the host for `LCM_ENABLE_SLASH_COMMAND` and the three `LCM_RECORDER_*` keys; the other keys take effect on
 the next named operation (FTS controls on the next database open, and
 `LCM_EMBEDDING_API_KEY` on the next request or probe despite its initial
 registration-time check), provided the running process's environment has been

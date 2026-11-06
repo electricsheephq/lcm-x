@@ -88,6 +88,7 @@ BOOLEAN_POLICIES = {
         LCM_TEMPORAL_ROLLUPS_ENABLED LCM_BACKGROUND_LEAF_PREP_ENABLED LCM_SENDER_CAPTURE
     """.split(), (None, TRUE_VALUES, FALSE_VALUES)),
     "LCM_ENABLE_SLASH_COMMAND": (False, TRUE_VALUES, ()),
+    "LCM_RECORDER_ENABLED": (False, TRUE_VALUES, ()),
     "LCM_IDENTITY_ANCHOR": (True, (), FALSE_VALUES),
     "LCM_FTS_INTEGRITY_BACKGROUND": (True, (), FALSE_VALUES),
 }
@@ -107,6 +108,8 @@ RAW_READERS = {
     "db_bootstrap.py": {"_integrity_check_interval_hours"},
     "embedding_provider.py": {"probe_provider_availability", "_request", "rerank", "__init__"},
     "engine.py": {"_set_context_length"},
+    # The default-off recorder (#2243): its directory, its byte cap and the HERMES_SESSION_* fallback.
+    "recorder.py": {"install", "start", "_command_context"},
 }
 
 

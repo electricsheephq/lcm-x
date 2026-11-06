@@ -44,6 +44,22 @@
     "import_module('agent.message_metadata').PERSISTENCE_ONLY_MESSAGE_FIELDS"
   ],
   [
+    "recorder.py",
+    "Path(sys.modules['agent.context_engine'].__file__).resolve().parents[1]"
+  ],
+  [
+    "recorder.py",
+    "Path(sys.modules[type(engine).__module__].__file__).resolve().parent"
+  ],
+  [
+    "recorder.py",
+    "importlib.import_module(package + '.escalation')"
+  ],
+  [
+    "recorder.py",
+    "importlib.import_module(package + '.ingest_persisted')"
+  ],
+  [
     "runtime_identity.py",
     "Path(__file__).resolve().parent"
   ],
