@@ -9,6 +9,7 @@ import re
 import pytest
 
 from bench.instruments.reliability.scorers.multiset import split_surplus
+from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.escalation import _strip_reasoning_blocks
 from hermes_lcm.ingest_ledger import stripped_replay_content
@@ -366,3 +367,24 @@ def test_20_empty_tool_key_is_one_to_one_and_counted(host, field, value):
     sources = _ingest_copies(host, [deepcopy(row), deepcopy(row)])
     assert _pairs(host.engine) == [(sources[0], target)]
     assert _counts(host.engine)["ledger.replay_pairs.cursor0_unlinked"] == 1
+
+
+def test_21_recorder_direct_off_current_session_end(tmp_path, caplog):
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "s3-direct.db")))
+    try:
+        engine.on_session_start("ended", platform="cli", context_length=1_000)
+        opener = {"role": "user", "content": "opener"}
+        engine.ingest([opener])
+        engine.on_session_start("foreground", platform="cli", context_length=1_000)
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger="hermes_lcm"):
+            engine.on_session_end("ended", [opener, {"role": "assistant", "content": "final"}])
+        rows = engine._store.get_range("ended")
+        assert [row["content"] for row in rows] == ["opener", "final"]
+        records = _route_records(caplog)
+        assert len(records) == 1 and records[0].levelno == logging.INFO
+        assert records[0].getMessage() == (
+            f"LCM ingest route: session=ended route=S3 cursor=1 reason=off-current session end "
+            f"stored={rows[1]['store_id']}-{rows[1]['store_id']} rows=1 replay_pairs=0 stripped=0")
+    finally:
+        engine.shutdown()

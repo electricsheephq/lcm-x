@@ -5303,10 +5303,12 @@ class LCMEngine(
             suffix = messages[prefix_count:]
             if suffix:
                 try:
-                    self._append_off_current_session_end_suffix(
+                    ids = self._append_off_current_session_end_suffix(
                         session_id, suffix, source=off_current_source,
                         conversation_id=off_current_normal_conversation_id,
                     )
+                    self._ingest_telemetry(self._log_ingest_route, session_id, "S3", prefix_count,
+                                           "off-current session end", ids)
                 except Exception as exc:
                     if queue_off_current_busy_tail(exc):
                         return
