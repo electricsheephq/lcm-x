@@ -83,7 +83,8 @@ from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
 from .rollup_store import RollupStore
 from .session_patterns import build_session_match_keys, matches_session_pattern
-from .store import build_message_fts_spec, build_message_stem_fts_spec, delete_chunk_inflight, delete_host_uid_bindings, delete_ingest_ledger_rows, delete_message_relations, delete_session_lineage
+from .store import build_message_fts_spec, build_message_stem_fts_spec, delete_chunk_inflight, delete_host_uid_bindings, delete_ingest_ledger_rows, delete_message_relations, delete_session_lineage, \
+    run_session_purges
 from .survival_fit import SURVIVAL_FIT_COUNTER_KEY as SURVIVAL_FIT_COUNTER_KEY, survival_counter_store_key as survival_counter_store_key
 from .host_uid import host_uid_doctor_lines as host_uid_doctor_lines
 from .chunking import (
@@ -108,6 +109,7 @@ from .embedding_provider import (
     _VOYAGE_CONTEXT_MAX_REQUEST_CHUNKS,
     _VOYAGE_CONTEXT_REQUEST_TOKEN_BUDGET,
     _VOYAGE_MAX_BATCH_ITEMS,
+    _is_local_embedding_provider,
     _is_voyage_context_model,
     _plan_contextualized_requests,
     default_chunk_model,
@@ -1442,6 +1444,7 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
             "WHERE scope.session_id = messages.session_id)"
         ))
         delete_session_lineage(conn, f"SELECT session_id FROM {scope_table}")
+        run_session_purges(conn, f"SELECT session_id FROM {scope_table}")
         msg_cur = conn.execute(
             f"DELETE FROM messages WHERE EXISTS ("
             f"SELECT 1 FROM {scope_table} AS scope "
@@ -5291,15 +5294,6 @@ def _chunk_backfill_remaining(
         in_flight = 0
         uncertain = 0
     return remaining, in_flight, uncertain
-
-
-# Providers that embed on this machine and never transmit text off-box. The raw-
-# text consent gate on the chunk corpus is waived for these (F1).
-_LOCAL_EMBEDDING_PROVIDERS = frozenset({"fastembed", "ollama"})
-
-
-def _is_local_embedding_provider(provider_name: str) -> bool:
-    return str(provider_name or "").strip().lower() in _LOCAL_EMBEDDING_PROVIDERS
 
 
 def _chunk_backfill_text(

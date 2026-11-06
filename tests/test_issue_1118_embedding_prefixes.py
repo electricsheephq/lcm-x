@@ -501,7 +501,7 @@ def drained_chunk_backfill(engine):
 
 @pytest.mark.parametrize("batch", (False, True))
 def test_remote_prefixed_chunk_ingest_discloses_backlog(tmp_path, monkeypatch, batch):
-    from hermes_lcm import embedding_maintenance
+    from hermes_lcm import embedding_provider
 
     with engine_context(tmp_path, window=8192, embeddings_enabled=True,
                         embedding_provider="ollama", embedding_model="prefix-test",
@@ -511,7 +511,7 @@ def test_remote_prefixed_chunk_ingest_discloses_backlog(tmp_path, monkeypatch, b
         monkeypatch.setattr(command, "resolve_provider", lambda *a, **kw: provider)
         assert isinstance(command._embedding_register_profiles(
             engine._config, engine._store.db_path, allow_download=False), dict)
-        assert not embedding_maintenance._automatic_chunks_allowed(engine._config, command)
+        assert not embedding_provider._automatic_chunks_allowed(engine._config)
         engine._store.append("session-a", {"role": "user", "content": "initial remote chunk"})
         assert drained_chunk_backfill(engine)["embedded"] == 1
         assert tools._lcm_recall_catchup_reason(engine, provider, "chunk") is None
