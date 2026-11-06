@@ -20,8 +20,10 @@ python -m bench.instruments.gate_kit.audit --state-db <hermes home>/state.db --l
 - `--log-tz`: the zoneinfo name the log times are written in (for example `UTC` or `Europe/Berlin`). Default: the
   audit machine's local zone. Pass the run host's zone when they differ: it decides whether a compaction came before a
   driver restart event. An unknown zone exits 2.
-- `--events`: the driver's event log, one JSON object per line: `{"t": epoch, "kind": "restart_cold" | "restart_warm"
-  | "undo_resend" | "delegate_prompt" | "compress_request", "session": id}`.
+- `--events`: the driver's event log (`drive.py`, below), one JSON object per line: `{"t": epoch, "kind":
+  "restart_cold" | "restart_warm" | "undo_resend" | "delegate_prompt" | "compress_request", "session": id, "detail":
+  short non-content text}`. Lines of any other kind (the driver also writes `turn`, `source2_session`,
+  `context_window`, `error` and a final `summary`) are ignored.
 - Exit 0 with the result written (the verdict is inside); exit 2 on an unreadable input. Stdout is a four-line summary.
 
 The output holds counts, rates, booleans, session ids and store ids only. Message content, tool arguments and
@@ -78,3 +80,58 @@ exit drain; neither is a section 5 shape, so they are not attributed.
   session decision line `LCM session decision: session=<id> ... decision=auxiliary`. A log without the decision line
   (builds before it) can show an auxiliary child as a child with 0 rows.
 - More than 10 silent copies of one key: the rest are counted but not listed, so they stay unattributed.
+
+## The driver (`drive.py`)
+`drive.py` runs the driven run against a prepared Hermes home and writes the events log the audit reads. It plans the
+operations from the seed and every section 5 floor x1.2 (rounded up), then runs them one at a time through two real
+host processes:
+
+| Entry point | Operations |
+|---|---|
+| `hermes acp` (`reliability/acp_driver.py`) | turns from a fixed prompt bank (plain questions, `read_file`/todo/`lcm_grep` tool prompts, word-for-word repeats of earlier tool prompts, long pasted text), `/compress` after a long-text turn, `delegate_task` prompts, cancel-and-resend (`session/cancel` while the prompt is in flight, then the same prompt), cold restarts (SIGKILL the process group, a new process, `session/load`) |
+| TUI gateway (`python -m tui_gateway.entry`) | the second host source (`tui` sessions), warm restarts (`session.close`, which ends the session in the context engine, then `session.resume` in the same process), undo-and-resend (`session.undo`, then the same prompt), `session.compress` |
+
+ACP has no session end and no undo, which is why the TUI gateway carries those three. Every restart follows a
+compaction in its session and is followed by more turns. Delegated children are counted from `state.db` (read-only);
+when they fall short after the plan, the driver sends more delegate prompts, up to twice the target.
+
+```
+python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --hermes-src <host tree> \
+  --home <HERMES_HOME> --workdir <dir> --events <events.jsonl> [--turns N] [--children N] [--seed 2055] \
+  [--max-hours 6] [--prompt-timeout 600] [--cancel-after 2] [--dry-run]
+```
+- `--dry-run` prints the targets and the planned counts and exits. `--turns`/`--children` can raise a target, never
+  lower it below the floor x1.2.
+- A `--home`, `--workdir` or `--events` at or under the live `~/.hermes` is refused.
+- The host processes get the invoking environment with `HERMES_HOME` set to the home and `HOME`/`TMPDIR` set to
+  `<workdir>/host-home`; their stderr goes to `<workdir>/host-logs/`. The read_file prompts name files the driver
+  writes under `<workdir>/notes/`.
+- A failed operation is an `error` event (a model error, a cancel that came too late, a JSON-RPC error with its code, a
+  host process that died) and the run continues; nothing is retried silently. A process that died is replaced on its
+  next operation. `--max-hours` stops the plan and still writes the summary.
+- The events log never holds prompt or reply text: a prompt is its bank index (a test plants a sentinel to hold this).
+  The last line is `{"kind": "summary", "planned", "executed", "errors", "delegate", "context_length", ...}`.
+
+**Preparing the home.** The driver never reads, prints or edits keys or model config. The operator prepares:
+- the model through the home's own provider config (`model:` in `config.yaml` and the home's `.env`);
+- a small context window, `model.context_length` in `config.yaml`, so compactions follow from the long-text turns;
+  the driver reports the value the host uses (ACP `/context`) as a `context_window` event and in the summary;
+- `delegate_task` enabled: the `delegation` toolset in `platform_toolsets` for `acp` (and `tui`), with `file`, `todo`
+  and `context_engine`;
+- LCM-X installed and enabled as the context engine;
+- a host tree whose TUI gateway has `session.close`, `session.resume` and `session.undo`, run from the host venv.
+
+Then audit the run: `audit.py --state-db <home>/state.db --lcm-db <home>/lcm.db --log <home>/logs/agent.log --log
+<workdir>/host-logs/acp.stderr --events <events.jsonl> --out <result.json>`. The ACP host logs only to its stderr, as
+`<asctime> [<LEVEL>] <logger>: <message>` with no session field (acp_adapter/entry.py `_setup_logging`); the TUI
+gateway logs to `<home>/logs/agent.log`. The run ends with stdin EOF to both hosts (a `host_exit` event each), so the
+gateway ends its sessions before the audit reads the home.
+
+**Tests** (`tests/test_drive.py`): the planner (floors x1.2, deterministic, repeats, restart placement), the executor
+against stub processes (no prompt or reply text in the events, a late cancel is an error), the events contract with
+`audit.py --events`, and a host-backed smoke: 12 operations, one of each kind, through a real `hermes acp` and TUI
+gateway against the localhost fake provider (`reliability/fake_provider.py`, under `sandbox-exec` where present), then
+the audit over the home. The smoke takes its host from the reliability hosts file (`$LCM_RELIABILITY_HOSTS` or the
+default path; `$LCM_GATE_KIT_HOST` picks one by name) and skips with the reason when none is configured.
+
+**Claim class: `instrument`.** The driver produces the run; it proves nothing about the gate by itself.
