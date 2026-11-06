@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1286-reasons/readonly_store.py
+# hypothesis_version: 6.141.1
+
+[0.05, 1000, 5000, ', ', 'BEGIN', 'COMMIT', '_conn', 'derived', 'error', 'host_uid_bindings', 'lcm_lifecycle_state', 'matching_names', 'messages_fts', 'metadata', 'missing_tables', 'nodes_fts', 'plain', 'rb', 'ready', 'utf-8']

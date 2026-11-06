@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1286-reasons/maintenance_scheduler.py
+# hypothesis_version: 6.141.1
+
+[0.0, 0.5, 10.0, 1000, 5000, 'engine', 'exit flush', 'lifecycle lock', 'temporal rollup']

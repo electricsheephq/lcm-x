@@ -1,0 +1,4 @@
+# file: /Users/m1/repos/worktrees/lcm-x-1286-reasons/recorder_read.py
+# hypothesis_version: 6.141.1
+
+[b'\n', '$', '$b', '$d', '$f', '$row', '$set_items', '$t', '$v', '*', '*.jsonl', '-', 'STATUS.json', 'blob_mismatch', 'blob_missing', 'blob_torn', 'blobs', 'c', 'cap', 'cause', 'checkpoint', 'checkpoint_sealed', 'children', 'ctx_capture', 'disk_floor', 'e', 'end', 'end_state', 'ended without exit', 'events', 'exception', 'exit', 'exit_begin', 'first_cause', 'gap', 'hours', 'kind', 'large-outputs', 'lcm.db', 'loss', 'lost', 'lost_observation', 'marks', 'messages', 'n', 'no_database', 'ok', 'ops', 'parent_seq', 'payload_manifest', 'payloads', 'payloads_missing', 'prefix_end', 'proc', 'process_start', 'reason', 'refused', 'replayable', 'result', 'roots', 'sealed', 'seq', 'seq_enter', 'seq_exit', 'seq_hole', 'snapshot', 'stack_mismatch', 'state', 'status', 't', 't_enter', 'through', 'unavailable', 'value', 'writer:']
