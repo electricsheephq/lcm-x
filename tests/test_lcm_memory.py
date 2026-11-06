@@ -388,6 +388,24 @@ def test_punctuation_strip_reaches_fixed_point(seeded):
     assert call(engine, name='alex . .')['facts'] == expected
 
 
+def test_name_normalisation_linear_punctuation_strip_and_length_caps(seeded):
+    import time
+    from hermes_lcm import memory_tools
+
+    engine, _ = seeded
+    long_punct = '.' * 50_000 + ' Alex ' + '!' * 50_000
+    started = time.perf_counter()
+    assert memory_tools._name(long_punct) == 'alex'
+    assert memory_tools._name('.' * 50_000) == ''
+    assert time.perf_counter() - started < 0.5
+    cap = memory_tools._MAX_ENTITY_NAME_CHARS
+    assert 'error' not in call(engine, name='a' * cap, aliases=['b' * cap])
+    name_err = call(engine, name='a' * (cap + 1))
+    assert 'error' in name_err and str(cap) in name_err['error']
+    alias_err = call(engine, name='Alex', aliases=['b' * (cap + 1)])
+    assert 'error' in alias_err and str(cap) in alias_err['error']
+
+
 def test_carried_stamp_card_times(tmp_path):
     engine = make_engine(tmp_path, assertions=False)
     try:
@@ -957,3 +975,27 @@ def test_regression_exact_time_facts_against_plain_sql(tmp_path, name):
                 assert {k: snippet[k] for k in memory_tools._time(exact)} == memory_tools._time(exact)
     finally:
         engine.shutdown()
+
+
+def test_batched_negative_relation_probe_invalidates_after_other_engine_writes_carried_stamp(tmp_path):
+    first = make_engine(tmp_path, assertions=False)
+    second = make_engine(tmp_path, assertions=False)
+    try:
+        previous = first._store.append('one', {'role': 'user', 'content': 'Previous turn.', 'timestamp': 1690000000})
+        carried = first._store.append('one', {'role': 'user', 'content': 'Quinn carried turn.', 'timestamp': 1690000000})
+        # First engine looks up when message_relations does not exist yet.
+        initial = call(first, name='Quinn')
+        assert initial['first_seen'].get('time_uncertain') is None
+        assert first._store._memory_relation_connections.get(first._store.connection) is False
+        # Second engine on the same database creates message_relations and writes the first carried_stamp row.
+        second._store.add_message_relations([[(carried, 'carried_stamp', previous, None, 1690000000.0)]])
+        # First engine's next lookup must invalidate the stale negative probe and report time_uncertain: carried.
+        updated = call(first, name='Quinn')
+        entries = [updated['first_seen'], updated['last_seen']]
+        for session in updated['sessions']:
+            entries.extend([session['first_seen'], session['last_seen'], *session['snippets']])
+        assert all(entry.get('time_uncertain') == 'carried' for entry in entries)
+        assert first._store._memory_relation_connections.get(first._store.connection) is True
+    finally:
+        second.shutdown()
+        first.shutdown()
