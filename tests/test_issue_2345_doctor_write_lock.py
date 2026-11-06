@@ -4,7 +4,8 @@ or half-commit a concurrent foreground ingest.
 Each test runs two real threads. The ingest thread pauses after the first row
 of a two-row batch and starts the doctor thread. It resumes once the doctor
 thread either asks for the store write lock (fixed code: it then waits for the
-ingest to commit) or has finished without it (the unfixed race).
+ingest to commit) or has finished without it (the unfixed race). Nothing of the
+batch may be lost, and no other connection may see half of it.
 """
 
 import sqlite3
@@ -77,6 +78,8 @@ def _run_race(state, doctor):
             state.doctor_thread = threading.Thread(target=run_doctor)
             state.doctor_thread.start()
             assert state.doctor_reached.wait(_WAIT_S)
+            # Another connection must not see half the batch before the ingest commits.
+            state.ingest["visible_mid_batch"] = len(_rows(state.db, "live"))
         return []
 
     def run_ingest():
@@ -105,6 +108,7 @@ def _rows(db, session_id):
 
 def _assert_ingest_kept(state):
     assert "error" not in state.ingest, state.ingest
+    assert state.ingest["visible_mid_batch"] == 0
     ids = state.ingest["ids"]
     assert len(set(ids)) == 2
     assert _rows(state.db, "live") == [(ids[0], _ROWS[0]["content"]), (ids[1], _ROWS[1]["content"])]
