@@ -953,4 +953,14 @@ def build_evidence_pack(
         "novel_exact_refs": [],
         "usage": {},
     }
-    return json.dumps(response, ensure_ascii=False)
+    encoded = json.dumps(response, ensure_ascii=False)
+    if len(encoded) <= RESPONSE_CHAR_CAP:
+        return encoded
+    # Constant-size fallback: no caller text, partial evidence or computation.
+    return json.dumps({
+        "status": "fallback", "evidence": [], "computation": None, "selection": None,
+        "completeness": {"state": "partial", "reason_code": "response_char_cap_exceeded",
+                         "product_verified": False},
+        "retrieval": {"status": "truncated"},
+        "truncation": {"response_truncated": True},
+    }, separators=(",", ":"))
