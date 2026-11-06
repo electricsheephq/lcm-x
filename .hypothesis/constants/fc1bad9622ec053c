@@ -1,4 +1,0 @@
-# file: /Users/m1/repos/worktrees/lcmx-r2-adjacent/bench/instruments/reliability/plugin_tree.py
-# hypothesis_version: 6.141.1
-
-['-', '--format=tar', '--verify', '-C', '_', '_parse_bool_env', 'archive', 'config.py', 'data', 'dir', 'enabled', 'engine', 'engine.py', 'exec', 'git', 'hermes_plugins.', 'lcm_env_get', 'module', 'os', 'plugin.yaml', 'plugin_identity.py', 'reconcile.py', 'ref', 'reused', 'rev-parse', 'sha', 'tree', 'tree_sha256', '{']
