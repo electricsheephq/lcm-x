@@ -846,6 +846,21 @@ def start_reader(env, tmp_path, monkeypatch):
     return start
 
 
+def test_grok_build_offers_no_recall_tools_over_a_store_nothing_writes(start_reader, env, monkeypatch, capsys):
+    """REGRESSION (#2267): the hooks capture no Grok Build event, so under Grok Build with no lcm.db
+    and no reader override the launcher starts no reader and says why. A store there still starts one."""
+    grok = Path(env["LCMX_GROK_HOME"])
+    monkeypatch.setenv("GROK_SESSION_ID", "g-1")
+    assert start_reader.launcher.main() == 0  # an exec would raise from the fixture's recorder
+    err = capsys.readouterr().err
+    assert "Grok Build sessions are not captured" in err and str(grok) in err
+    assert not grok.exists()
+    grok.mkdir()
+    (grok / "lcm.db").write_bytes(b"")
+    which, _path, argv, _environment = start_reader()
+    assert which == "plain" and argv[argv.index("--store") + 1] == str(grok / "lcm.db")
+
+
 def _plain_reader(env, tmp_path, runtime=(sys.executable,)):
     home = Path(env["LCMX_CC_HOME"])
     return [*runtime, str(tmp_path / "package" / "scripts" / "lcm_x_mcp.py"), "--store", str(home / "lcm.db"),
