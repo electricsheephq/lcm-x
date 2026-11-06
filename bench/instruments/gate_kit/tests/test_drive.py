@@ -170,12 +170,36 @@ def test_events_carry_no_prompt_or_reply_text(tmp_path):
     lines = [json.loads(x) for x in raw.splitlines()]
     assert not any(t[:40] in raw for t in texts)
     assert all(set(e) >= {"t", "kind", "session", "detail"} for e in lines)
-    assert summary["executed"] == summary["planned"]["ops"] and summary["errors"] == {}
+    assert summary["executed"] == summary["planned"]["ops"] and summary["errors"] == {} and summary["exit"] == 0
     assert summary["context_length"] == 32000
     kinds = Counter(e["kind"] for e in lines)
     assert kinds["restart_cold"] == 6 and kinds["restart_warm"] == 6 and kinds["undo_resend"] == 12
     assert kinds["source2_session"] == drive.TUI_SLOTS and kinds["delegate_prompt"] == 12
     assert log.count("kill") >= 6 and lines[-1]["kind"] == "summary"
+
+
+@pytest.mark.parametrize("where,line", [
+    ("host-logs/tui.stderr", "LCM-X is NOT active in this process: Hermes ignored register_context_engine()"),
+    ("agent.log", "2026-11-07 02:42:50,585 WARNING run_agent: Context engine 'lcm-x' not found — falling back"),
+])
+def test_a_host_without_lcmx_stops_the_run(tmp_path, where, line):
+    d, ev, _log = stub_driver(tmp_path)
+    target = d.workdir / where if where.startswith("host-logs") else tmp_path / "logs" / where  # home = tmp_path
+
+    class LoudTui(StubTui):
+        def ready(self, _t):  # the host writes the notice while it loads, before its first turn completes
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(line + "\n")
+    d.make_tui = LoudTui
+    ops = [{"op": "turn", "slot": "A1", "prompt": 0}, {"op": "turn", "slot": "T1", "prompt": 1},
+           {"op": "turn", "slot": "T1", "prompt": 2}, {"op": "turn", "slot": "A1", "prompt": 3}]
+    summary = d.run(ops, drive.targets())
+    lines = [json.loads(x) for x in ev.path.read_text().splitlines()]
+    bad = [e["detail"] for e in lines if e["kind"] == "error"]
+    assert bad == [f"lcm_inactive entry=tui source={Path(where).name}"]
+    assert summary["stopped"] == "lcm_inactive" and summary["exit"] == drive.EXIT_LCM_INACTIVE != 0
+    assert summary["executed"] == {"turn": 2}  # nothing after the first T1 turn ran
+    assert summary["errors"] == {"lcm_inactive": 1}
 
 
 def test_a_late_cancel_is_an_error_not_an_undo(tmp_path):
@@ -308,8 +332,8 @@ def test_smoke_against_fake_provider_then_audit(tmp_path):
     proxy = FP.ProxySink(art / "proxy-attempts.jsonl")
     cell = {"id": "gate-kit/smoke", "in_place": True, "lcm_env": {}, "window": 64000,
             "toolsets": ["todo", "context_engine", "file", "delegation"]}
-    (home / "config.yaml").write_text(PC.config_yaml(cell, plugin, provider.base_url)
-                                      + "  tui: [todo, context_engine, file, delegation]\n")
+    config = PC.config_yaml(cell, plugin, provider.base_url).replace("plugins:\n", "plugins:\n  load_timeout_seconds: 60\n")
+    (home / "config.yaml").write_text(config + "  tui: [todo, context_engine, file, delegation]\n")
     base = {"PATH": "/usr/bin:/bin", "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost",
             "LCM_SUMMARY_MODEL": "rel/lcm-summary", "LCM_SUMMARY_SPEND_MAX_CALLS": "100000",
             "PYTHONPYCACHEPREFIX": str(tmp_path / "pycache"),
@@ -327,7 +351,7 @@ def test_smoke_against_fake_provider_then_audit(tmp_path):
         proxy.stop()
     lines = [json.loads(x) for x in ev.path.read_text().splitlines()]
     detail = [(e["kind"], e["detail"]) for e in lines if e["kind"] != "summary"]
-    assert summary["errors"] == {}, (summary, detail, (workdir / "host-logs" / "acp.stderr").read_text()[-3000:])
+    assert summary["errors"] == {} and summary["exit"] == 0, (summary, detail, (workdir / "host-logs" / "acp.stderr").read_text()[-3000:])
     assert summary["executed"] == summary["planned"]["ops"], detail
     assert not (art / "proxy-attempts.jsonl").exists() or not (art / "proxy-attempts.jsonl").read_text().strip()
     assert S not in ev.path.read_text() and hold[:40] not in ev.path.read_text()

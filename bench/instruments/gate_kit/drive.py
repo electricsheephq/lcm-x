@@ -41,6 +41,11 @@ from bench.instruments.reliability.hosts import under_real_hermes  # noqa: E402
 
 ACP_SLOTS, TUI_SLOTS = 6, 3
 EXIT_GRACE = 60.0  # seconds a host gets to exit on stdin EOF at the end of the run
+# LCM-X is not the context engine in a host process: the plugin's own notice when its load overran
+# plugins.load_timeout_seconds (LCM-X __init__.py), and the host's fallback warning (agent/agent_init.py:1901). Such a
+# host stores nothing in lcm.db, so its rows would read as a loss: the run stops (exit 3) before it reaches the audit.
+INACTIVE = re.compile(r"LCM-X is NOT active in this process|Context engine 'lcm(?:-x)?' not found")
+EXIT_LCM_INACTIVE = 3
 PLANNED_FLOORS = ("turns", "delegated_children", "compactions", "compactions_then_restart", "restarts_cold",
                   "restarts_warm", "undo_resend", "tool_calls", "tool_call_repeats")
 
@@ -268,8 +273,9 @@ class Driver:
         self.src, self.home, self.workdir, self.ev = Path(src), Path(home), Path(workdir), events
         self.timeout, self.cancel_after = prompt_timeout, cancel_after
         self.stop_at = time.monotonic() + max_hours * 3600
-        logs = workdir / "host-logs"
+        logs = self.logs = workdir / "host-logs"
         logs.mkdir(parents=True, exist_ok=True)
+        self.scanned: dict[Path, int] = {}
         acp_argv = [*wrap, str(Path(python).parent / "hermes"), "acp"]
         tui_env = {**env, "PYTHONPATH": str(src)}
         self.make_acp = acp_factory or (lambda: AD.AcpProcess(acp_argv, env, workdir, logs / "acp.stderr"))
@@ -419,6 +425,29 @@ class Driver:
         except sqlite3.Error:
             return None
 
+    def inactive(self, entry: str) -> list[tuple[str, str]]:
+        """LCM-X-inactive lines written since the last check: each host's stderr (the ACP host logs only there,
+        acp_adapter/entry.py:65-76), and the home's agent.log, whose new lines belong to the host that just ran."""
+        found = []
+        for who, path in (("acp", self.logs / "acp.stderr"), ("tui", self.logs / "tui.stderr"),
+                          (entry, self.home / "logs" / "agent.log")):
+            try:
+                with open(path, "rb") as fh:
+                    fh.seek(self.scanned.get(path, 0))
+                    new = fh.read()
+            except OSError:
+                continue
+            self.scanned[path] = self.scanned.get(path, 0) + len(new)
+            if INACTIVE.search(new.decode("utf-8", "replace")):
+                found.append((who, path.name))
+        return found
+
+    def stop_if_inactive(self, entry: str) -> bool:
+        bad = self.inactive(entry)
+        for who, source in bad:
+            self.ev.write("error", None, f"lcm_inactive entry={who} source={source}")
+        return bool(bad)
+
     def guarded(self, o: dict) -> None:
         try:
             self.op(o)
@@ -440,6 +469,9 @@ class Driver:
                     stopped = "max_hours"
                     break
                 self.guarded(o)
+                if self.stop_if_inactive("acp" if o["slot"].startswith("A") else "tui"):
+                    stopped = "lcm_inactive"
+                    break
             # Children are counted from state.db: keep prompting until the target or the attempt budget (2x).
             extra, delegates = 0, CATS["delegate"]
             while stopped is None and self.done["delegate"] < 2 * tg["delegated_children"]:
@@ -451,15 +483,20 @@ class Driver:
                     break
                 self.guarded({"op": "delegate", "slot": "A1", "prompt": delegates[extra % len(delegates)]})
                 extra += 1
+                if self.stop_if_inactive("acp"):
+                    stopped = "lcm_inactive"
         finally:
             self.drop("acp", graceful=True)
             self.drop("tui", graceful=True)
+        if stopped != "lcm_inactive" and self.stop_if_inactive("tui"):  # lines written while the hosts exited
+            stopped = "lcm_inactive"
         summary = {"planned": planned_counts(ops), "executed": dict(self.done), "errors": dict(self.ev.errors),
                    "prompts_by_category": dict(self.prompts),
                    "delegate": {"prompts": self.done["delegate"], "extra_prompts": extra,
                                 "children_in_state_db": self.children()},
                    "context_length": self.context, "stopped": stopped, "sessions": len(self.slots)}
         self.ev.write("summary", None, "end of run", **summary)
+        summary["exit"] = EXIT_LCM_INACTIVE if stopped == "lcm_inactive" else 0
         return summary
 
 
@@ -496,7 +533,10 @@ def main(argv=None) -> int:
     summary = d.run(ops, tg)
     print(json.dumps({k: summary[k] for k in ("executed", "errors", "delegate", "context_length", "stopped")},
                      sort_keys=True))
-    return 0
+    if summary["exit"]:
+        print("LCM-X was not active in a host process (an lcm_inactive error event): do not audit this run; raise "
+              "plugins.load_timeout_seconds in the home and run again", file=sys.stderr)
+    return summary["exit"]
 
 
 if __name__ == "__main__":

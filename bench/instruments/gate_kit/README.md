@@ -118,11 +118,16 @@ python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --
   the driver reports the value the host uses (ACP `/context`) as a `context_window` event and in the summary;
 - `delegate_task` enabled: the `delegation` toolset in `platform_toolsets` for `acp` (and `tui`), with `file`, `todo`
   and `context_engine`;
-- LCM-X installed and enabled as the context engine;
+- LCM-X installed and enabled as the context engine, with `plugins.load_timeout_seconds: 60` in `config.yaml`: under
+  the default 10 s a slow plugin load leaves a host on the built-in compressor, writing nothing to `lcm.db`;
 - a host tree whose TUI gateway has `session.close`, `session.resume` and `session.undo`, run from the host venv.
 
 Then audit the run: `audit.py --state-db <home>/state.db --lcm-db <home>/lcm.db --log <home>/logs/agent.log --log
-<workdir>/host-logs/acp.stderr --events <events.jsonl> --out <result.json>`. The ACP host logs only to its stderr, as
+<workdir>/host-logs/acp.stderr --events <events.jsonl> --out <result.json>`. Audit only a run whose events show no
+`lcm_inactive` error: after every operation the driver scans each host's stderr and `<home>/logs/agent.log` for
+LCM-X's "LCM-X is NOT active in this process" notice and the host's "Context engine 'lcm-x' not found" fallback; on
+either it records `{"kind": "error", "detail": "lcm_inactive entry=<acp|tui> source=<file>"}`, stops the run and exits
+3, because that host's rows would otherwise read as a loss. The ACP host logs only to its stderr, as
 `<asctime> [<LEVEL>] <logger>: <message>` with no session field (acp_adapter/entry.py `_setup_logging`); the TUI
 gateway logs to `<home>/logs/agent.log`. The run ends with stdin EOF to both hosts (a `host_exit` event each), so the
 gateway ends its sessions before the audit reads the home.
