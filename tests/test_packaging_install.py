@@ -363,16 +363,15 @@ def test_validate_release_checks_last_commit_when_origin_main_missing(tmp_path):
 
 
 def test_plugin_manifest_lists_all_registered_tools():
-    import yaml
-
     repo_root = Path(__file__).resolve().parent.parent
     manifest = (repo_root / "plugin.yaml").read_text(encoding="utf-8")
-    parsed = yaml.safe_load(manifest)
-    assert parsed["config_schema"] == {
-        "voyage_api_key": {"type": "secret", "env": "VOYAGE_API_KEY"},
-        "embedding_api_key": {"type": "secret", "env": "LCM_EMBEDDING_API_KEY"},
-    }
-    assert not {"VOYAGE_API_KEY", "LCM_EMBEDDING_API_KEY"} & set(parsed.get("requires_env", []))
+    # Text checks: CI has no YAML parser installed.
+    assert ("config_schema:\n"
+            "  voyage_api_key:\n    type: secret\n    env: VOYAGE_API_KEY\n"
+            "  embedding_api_key:\n    type: secret\n    env: LCM_EMBEDDING_API_KEY\n") in manifest
+    assert manifest.count("config_schema:") == 1
+    requires_env = manifest.split("requires_env:", 1)[1].split("\n\n", 1)[0] if "requires_env:" in manifest else ""
+    assert "VOYAGE_API_KEY" not in requires_env and "LCM_EMBEDDING_API_KEY" not in requires_env
 
     for tool_name in ALL_LCM_TOOLS:
         assert f"  - {tool_name}\n" in manifest
