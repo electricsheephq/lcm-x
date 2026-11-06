@@ -502,3 +502,17 @@ def test_plan_rebinds_writes_nothing(engines):
         conn.set_trace_callback(None)
     assert plan["pairs"] == list(enumerate(ids))
     assert all(s.lstrip().upper().startswith("SELECT") for s in statements)
+
+
+def test_long_bound_prefix_still_rebinds_its_lag_row(engines):
+    # #2254: the cap counts candidate keys, not every incoming entry. A matched
+    # prefix whose rows are already bound can never pair, so it does not count.
+    engine = engines()
+    view = history(4100)
+    ids = unbound(engine, view[:-1])
+    bind(engine, ids, view[:-1], range(1, len(ids) + 1))
+    lag = unbound(engine, view[-1:])[0]
+    write(engine, view, matched=dict(enumerate(ids)))
+    assert not count(engine, "rebind.skipped.too_large")
+    assert [b["store_id"] for b in migrated(engine)] == [lag]
+    assert mark(engine) == lag
