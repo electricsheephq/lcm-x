@@ -563,8 +563,16 @@ def test_w6_scope_longest_chain_parameter_bound(tmp_path):
         assert senders(e) == [expected()]
 
 
+@pytest.fixture
+def _w6_embeddings_off(monkeypatch):
+    # #2194: with fastembed installed, embedding maintenance writes compete with the sender UPDATE.
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
+
+
+@pytest.mark.usefixtures("_w6_embeddings_off")  # usefixtures run before hook_context builds the engine
 @pytest.mark.parametrize("anchor", ["0", "1"])
 def test_w6_scope_t1_long_session_exactly_one(hook_context, monkeypatch, anchor, record_property, caplog):
+    assert hook_context.engine._config.embeddings_enabled is False
     monkeypatch.setenv("LCM_IDENTITY_ANCHOR", anchor)
     from tests.test_sender_capture import test_t1_preflight_before_hook_updates_only_watched_row
     test_t1_preflight_before_hook_updates_only_watched_row(hook_context, record_property, caplog)
@@ -578,10 +586,15 @@ def test_w6_scope_todo_fold_positive(tmp_path, monkeypatch, anchor):
 
 @pytest.mark.parametrize("anchor", ["0", "1"])
 def test_w6_scope_carrier_strip_positive(tmp_path, monkeypatch, anchor):
+    import functools
+    from tests import test_compression_boundary as boundary
     from tests.test_compression_boundary import _compacted_engine, _summary_message
     monkeypatch.setenv("LCM_IDENTITY_ANCHOR", anchor)
+    # #2194: the helper builds a bare LCMConfig, whose embeddings default on when fastembed is installed.
+    monkeypatch.setattr(boundary, "LCMConfig", functools.partial(boundary.LCMConfig, embeddings_enabled=False))
     e, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     try:
+        assert e._config.embeddings_enabled is False
         row = message(500)
         carrier = dict(row, content=_summary_message(compressed)["content"] + "\n\n" + row["content"])
         assert e._generated_context_carrier_remainder(carrier) == row["content"]
