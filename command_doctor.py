@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -118,7 +119,10 @@ def collect_doctor(engine: Any) -> DoctorFacts:
 
     try:
         node_fts_count = int(dag_conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0])
-        node_fts_integrity = command.check_external_content_fts_integrity(dag_conn, command.build_nodes_fts_spec())
+        # #2345: summary-tree writers hold the DAG lock on this shared connection.
+        with getattr(engine._dag, "_db_lock", nullcontext()):
+            node_fts_integrity = command.check_external_content_fts_integrity(
+                dag_conn, command.build_nodes_fts_spec())
         node_fts = _fts_text_status(node_fts_integrity)
     except Exception as exc:  # pragma: no cover - defensive
         node_fts_count = f"error: {exc}"

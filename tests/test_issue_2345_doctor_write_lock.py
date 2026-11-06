@@ -166,3 +166,31 @@ def test_ingest_detects_a_foreign_rollback_or_commit(race, foreign):
     # The owner rolls back what it can; the engine reconciles from a cursor that never moved.
     assert [content for _id, content in _rows(race.db, "live")] == (
         [] if foreign == "rollback" else [_ROWS[0]["content"]])
+
+
+def test_fts_integrity_checks_hold_their_connections_write_lock(tmp_path, monkeypatch):
+    """The checks' SAVEPOINT/ROLLBACK TO must run under the lock that the same
+    connection's writers take: the store write lock for the message store and the
+    DAG lock for the summary tree."""
+    from hermes_lcm import tools
+    from hermes_lcm.command_doctor import collect_doctor
+    from tests.test_command_doctor import doctor_engine
+
+    with doctor_engine(tmp_path, "healthy", monkeypatch) as engine:
+        seen = []
+        real = command.check_external_content_fts_integrity
+
+        def check(conn, spec):
+            owner = "store" if conn is engine._store.connection else "dag" if conn is engine._dag.connection else "?"
+            lock = engine._store._write_lock if owner == "store" else engine._dag._db_lock
+            seen.append((owner, lock._is_owned()))
+            return real(conn, spec)
+
+        monkeypatch.setattr(command, "check_external_content_fts_integrity", check)
+        monkeypatch.setattr(tools, "check_external_content_fts_integrity", check)
+        for run in (lambda: command._scan_fts_repair(engine), lambda: collect_doctor(engine),
+                    lambda: tools.lcm_doctor({}, engine=engine)):
+            seen.clear()
+            run()
+            assert seen and all(held for _owner, held in seen), seen
+            assert {owner for owner, _held in seen} <= {"store", "dag"}, seen

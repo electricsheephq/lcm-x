@@ -5532,11 +5532,12 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
 
     # 1b. FTS5 integrity, separated from generic SQLite integrity so malformed
     # inverted indexes point at the exact table and repair path.
-    # #2345: the store check's SAVEPOINT/ROLLBACK TO runs under the store write lock,
-    # so it cannot interleave with a foreground ingest on that shared connection.
+    # #2345: each check's SAVEPOINT/ROLLBACK TO runs under the lock its connection's
+    # writers take, so it cannot interleave with an ingest or a summary-tree write.
     for check_name, conn, lock, spec in (
         ("messages_fts_integrity", engine._store.connection, engine._store._write_lock, build_message_fts_spec()),
-        ("nodes_fts_integrity", engine._dag.connection, nullcontext(), build_nodes_fts_spec()),
+        ("nodes_fts_integrity", engine._dag.connection, getattr(engine._dag, "_db_lock", nullcontext()),
+         build_nodes_fts_spec()),
     ):
         try:
             with lock:
