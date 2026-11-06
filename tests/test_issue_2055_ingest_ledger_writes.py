@@ -343,6 +343,7 @@ def test_11_off_sql_matches_pinned_part_a(engines, monkeypatch):
 
     The expected statements were captured once from the Part A engine, so the test needs no git history.
     """
+    # #2293 step 1, M2: remove two redundant folded-tail SELECTs; keep the ledger-off write protocol.
     from tests.behaviour.reconcile_trace_harness import install_clock
     install_clock(monkeypatch)
     candidate = engines(mode="off", initialized=False)
