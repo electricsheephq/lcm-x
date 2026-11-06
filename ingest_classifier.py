@@ -249,6 +249,71 @@ class IdentityOracle(Protocol):
     def has_generated_marker(self, row): ...
 
 
+def _memo_key(value):
+    """Exact, type-tagged JSON input, retaining object order and float signs."""
+    kind = type(value)
+    if kind is str:
+        return value
+    if kind is dict:
+        return kind, tuple((_memo_key(k), _memo_key(v)) for k, v in value.items())
+    if kind in (list, tuple):
+        return kind, tuple(_memo_key(v) for v in value)
+    if kind is float:
+        return kind, value.hex()
+    if kind in (int, bool, type(None)):
+        return kind, value
+    raise TypeError("not a JSON memo input")
+
+
+class _IdentityMemo:
+    """One pass's helper reuse, without modifying or retaining engine state.
+
+    Bind only the replay method here; all store-dependent rules still call the
+    real engine. Store/config/home are fixed for this adapter's lifetime.
+    """
+    _message_replay_identity = ReconcileMixin._message_replay_identity
+
+    def __init__(self, engine):
+        self.engine = engine
+        self.calls, self.strings, self.contents = {}, {}, {}
+
+    def __getattr__(self, name):
+        return getattr(self.engine, name)
+
+    def _canonical(self, value):
+        if isinstance(value, dict):
+            return {k: self._canonical(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._canonical(v) for v in value]
+        if type(value) is str:
+            if value not in self.strings:
+                self.strings[value] = ReconcileMixin._canonicalize_tool_call_identity_value(value)
+            return self.strings[value]
+        return ReconcileMixin._canonicalize_tool_call_identity_value(value)
+
+    def _stable_tool_calls_identity(self, calls):
+        if not calls:
+            return ""
+        try:
+            key = _memo_key(calls)
+        except TypeError:
+            return self.engine._stable_tool_calls_identity(calls)
+        if key not in self.calls:
+            try:
+                self.calls[key] = json.dumps(self._canonical(calls), sort_keys=True,
+                                             separators=(",", ":"), ensure_ascii=False)
+            except (TypeError, ValueError):
+                self.calls[key] = str(calls)
+        return self.calls[key]
+
+    def _restore_ingest_payload_placeholders_in_content_identity(self, content, *, session_id, hermes_home=None):
+        key = content, session_id, hermes_home
+        if key not in self.contents:
+            self.contents[key] = self.engine._restore_ingest_payload_placeholders_in_content_identity(
+                content, session_id=session_id, hermes_home=hermes_home)
+        return self.contents[key]
+
+
 class EngineOracle:
     """Adapter for an already-bound engine. Never accesses the engine's store property.
 
@@ -263,6 +328,13 @@ class EngineOracle:
         self.store = engine._bound_store_unopened()
         if self.store is None:
             raise ValueError("EngineOracle requires an already opened bound store")
+
+    def _for_pass(self):
+        if getattr(self.engine._message_replay_identity, "__func__", None) is not ReconcileMixin._message_replay_identity:
+            return self
+        oracle = EngineOracle.__new__(EngineOracle)
+        oracle.engine, oracle.store = _IdentityMemo(self.engine), self.store
+        return oracle
 
     @staticmethod
     def identity_tuple(row):
@@ -345,6 +417,7 @@ _REASONS = ("veto_uid", "veto_stamp", "veto_tool_call_id", "refused", "revision"
 
 class _Pass:
     def __init__(self, view, snapshot, oracle, mode, ignore_stamps):
+        oracle = oracle._for_pass() if type(oracle) is EngineOracle else oracle
         self.view, self.s, self.oracle, self.mode = view, snapshot, oracle, mode
         self.ignore_stamps = ignore_stamps
         self.rows = [RowVerdict("skip" if r.never_stored else "new") for r in view]
@@ -352,7 +425,7 @@ class _Pass:
         self.candidates, self.target_rejections = defaultdict(list), defaultdict(set)
         self.used, self.counts = set(), Counter()
         self._placed = None
-        self.aliases, self.incoming = {}, {}
+        self.aliases, self.incoming, self.messages = {}, {}, {}
         self.by_store, self.by_role_call = defaultdict(list), defaultdict(list)
         self.uid_revisions = {uid: [u for u in rows if u["kind"] in ("canonical", "version")]
                               for uid, rows in snapshot.uid_bindings.items()}
@@ -468,8 +541,17 @@ class _Pass:
     def incoming_digests(self, row):
         if row.index not in self.incoming:
             self.incoming[row.index] = {ledger_digest(self.s.salt, *t) for t in
-                                        self.oracle.incoming_aliases(_thaw(row.message), self.s)} | {row.identity_digest}
+                                        self.oracle.incoming_aliases(self.message(row), self.s)} | {row.identity_digest}
         return self.incoming[row.index]
+
+    def message(self, row):
+        # The engine adapter only reads these structures; arbitrary injected
+        # oracles retain the original independent-copy behaviour.
+        if type(self.oracle) is not EngineOracle:
+            return _thaw(row.message)
+        if row.index not in self.messages:
+            self.messages[row.index] = _thaw(row.message)
+        return self.messages[row.index]
 
     def stored_digests(self, b):
         if b["occ_id"] not in self.aliases:
@@ -577,7 +659,7 @@ class _Pass:
                     return
         kept = sorted((b for bs in self.s.by_digest.values() for b in bs), key=lambda b: b["ordinal"])
         m = min(3, len(kept))
-        eligible = [r for r in self.view if not r.never_stored and not self.oracle.has_generated_marker(_thaw(r.message))]
+        eligible = [r for r in self.view if not r.never_stored and not self.oracle.has_generated_marker(self.message(r))]
         if m and len(eligible) >= m:
             last, hits = -1, []
             for row in eligible[:m]:
@@ -669,7 +751,7 @@ class _Pass:
                     if match is not None and self.mode == "on" and set(row.absorbed_uids) <= match["constituents"]:
                         if self.accept(row.index, match["occ_id"], "rank1"):
                             continue
-                    content = normalize_content_value(_thaw(row.message).get("content")) or ""
+                    content = normalize_content_value(self.message(row).get("content")) or ""
                     old = latest and (latest["content"] or "")
                     if match is None and old and content.startswith(old) and content != old:
                         if self.mode == "on":
@@ -746,7 +828,7 @@ class _Pass:
                     self.reject(row.index, target, "head_h4" if self.head.ordinal is None else "window")
                     continue
                 if positive and not match:
-                    content = normalize_content_value(_thaw(row.message).get("content")) or ""
+                    content = normalize_content_value(self.message(row).get("content")) or ""
                     if b["content"] and content.startswith(b["content"]) and content != b["content"]:
                         self.defer(row.index, "partial", [target])
                     else:
@@ -829,7 +911,7 @@ class _Pass:
         for row, verdict in zip(self.view, self.rows):
             if verdict.verdict != "new" or verdict.deferred or verdict.reason == "revision":
                 continue
-            content = normalize_content_value(_thaw(row.message).get("content")) or ""
+            content = normalize_content_value(self.message(row).get("content")) or ""
             for record in self.s.records:
                 if not record["eligible"]:
                     continue
@@ -847,7 +929,7 @@ class _Pass:
                     if emission and emission["eligible"]:
                         for offset in range(1, len(content)):
                             prefix = content[:offset].rstrip("\n")
-                            if ledger.identity_digest(self.s.salt, dict(_thaw(row.message), content=prefix)) == entry.identity_digest:
+                            if ledger.identity_digest(self.s.salt, dict(self.message(row), content=prefix)) == entry.identity_digest:
                                 targets = [target]
                                 following = record["entries"][row.index + 1:row.index + 2]
                                 if following and following[0].ref in self.s.bindings:
@@ -857,7 +939,7 @@ class _Pass:
                                 self.defer(row.index, "partial", targets)
                                 break
                             suffix = content[offset:].lstrip("\n")
-                            if ledger.identity_digest(self.s.salt, dict(_thaw(row.message), content=suffix)) == entry.identity_digest:
+                            if ledger.identity_digest(self.s.salt, dict(self.message(row), content=suffix)) == entry.identity_digest:
                                 self.defer(row.index, "partial", [target])
                                 break
                 elif target in self.s.bindings:
@@ -938,7 +1020,7 @@ class _Pass:
                 if target is not None and verdict.reason not in ("segment", "deferred"):
                     reasons = self.target_rejections[row.index, target]
                     verdict.reason = next((r for r in _REASONS if r in reasons), "no_witness")
-                if self.oracle.has_generated_marker(_thaw(row.message)) or row.identity_digest in self.s.pending_digests:
+                if self.oracle.has_generated_marker(self.message(row)) or row.identity_digest in self.s.pending_digests:
                     descriptor = next((r.target for r in verdict.relations if isinstance(r.target, Descriptor)), None)
                     verdict.relations.append(Relation("generated_unproven", descriptor))
                 ref = NewRow(row.index)
