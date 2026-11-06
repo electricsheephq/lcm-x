@@ -15,8 +15,10 @@ def trace_config(config: LCMConfig, serialize: Callable[[Any, str], Any]) -> dic
     """Use each harness's value serializer without changing other dataclasses.
 
     The committed baseline is deliberately never refreshed from live defaults:
-    changing a known default must remain visible. Only previously unseen fields
-    compare against a fresh LCMConfig(), so default-off additions cause no churn.
+    changing a known default must remain visible. A field missing from the
+    baseline compares against a fresh LCMConfig(), so a new field at its default
+    moves no golden; test_baseline_lists_every_config_field then requires the
+    same PR to pin that default.
     """
     result = {"__trace_config__": BASELINE["version"]}
     current_defaults = None

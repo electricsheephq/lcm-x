@@ -54,3 +54,16 @@ def test_other_dataclasses_keep_full_serialization(canonical):
 
 def test_config_outcome_changes_are_digest_bound():
     assert outcome_gate(["--base-ref", "origin/main"]) == 0
+
+
+def test_baseline_lists_every_config_field():
+    """A new LCMConfig field must add its default to the pinned baseline in the same PR.
+
+    That changes no golden (a field at its baseline default is omitted), and a later change to
+    that default then moves the fingerprint instead of tracking the live default silently.
+    """
+    from tests.behaviour.trace_config import BASELINE
+    fields = {field.name for field in dataclasses.fields(LCMConfig)}
+    missing, stale = sorted(fields - set(BASELINE["defaults"])), sorted(set(BASELINE["defaults"]) - fields)
+    assert not missing and not stale, (
+        f"update tests/fixtures/trace_config_baseline.json: add {missing} at their defaults, remove {stale}")
