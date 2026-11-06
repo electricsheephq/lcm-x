@@ -78,7 +78,7 @@ rows), `tool_calls.stored_keys`/`compare` (tool calls and results), `externalize
 | `recorder` | `LCM ingest route:` lines per route; the #2305 rate (`persisted_batch` at cursor 0 over storing ingests); stripped links per replay pair; `recorder absent` when there is no line. |
 | `exempted_surplus` | silent surplus rows exempted under #1674 or #2203, rows listed for a hand check, unattributed rows, store ids for each, and the exempted fraction against the 1% bar. The fraction counts distinct store rows: a row with content and a tool call is one row under two keys. `unattributed_silent_rows` (the bar's value) counts key copies; `unattributed_silent_distinct_rows` counts store rows. The rules are `attribute_silent_surplus`. |
 | `issue_1931` | buckets A (`source = 'subagent'`) and B (any other source) of ended non-rotation children: n, children with 0 rows, missing, silent surplus, lineage rows matching the host parent; `pass_A`; AUXILIARY sessions excluded. |
-| `gate` | each bar's value and pass, the verdict, and `hand_checks`: each reason the verdict is held for a hand check (`merged_carrier_repeat` with host ids, `exempted_1674`, `exempted_2203` and `view_order_ambiguous` with store ids). |
+| `gate` | each bar's value and pass, the verdict, and `hand_checks`: each reason the verdict is held for a hand check (see "Hand checks"). |
 
 Bars: no lineage with expected rows and none stored; no exact-content deficit; no unresolved externalized payload (the
 unresolved row is also a deficit of the host row it held, as in B2); no unattributed silent surplus; exempted surplus
@@ -111,6 +111,23 @@ the second's prefix holds the first copy, which no host row takes.
 `session_end` without a tail rule is an ordinary session-end flush, and `warm_tail` is a tail retry that is not the
 exit drain; neither is a section 5 shape, so they are not attributed. Rows listed for a hand check count as silent
 surplus.
+
+## Hand checks
+Each entry of `gate.hand_checks` names a reason; any entry makes the verdict `GATE PASS PENDING HAND CHECK` (unless a
+data bar fails or a floor is unmet). The detectors marked "detector" only add an entry: they never change a count.
+
+| Reason | Ids | What to check |
+|---|---|---|
+| `exempted_1674`, `exempted_2203` | store ids | the exempted rows (see "Surplus limits") |
+| `view_order_ambiguous` | store ids | repeated text allowed more than one in-order matching |
+| `merged_carrier_repeat` | host ids | a merged row of a text the lineage also holds at another time was not counted: a merged copy or a resend |
+| `merged_carrier_window_repeat` (detector) | host ids | with `--since`, a merged row in the window whose text an earlier, unscored segment holds: the window does not expect the parent's occurrence, so a resend and a replay look alike |
+| `merged_carrier_same_stamp_multiplicity` (detector) | host ids | two or more merged rows of one session with one text and one time, counted as one occurrence |
+| `stamp_swap` (detector) | store ids | parity matches by content: for a key the host holds more than once in a session, every stored copy is stamped and their `observed_at` values are not among the host's times of that key (as multisets), so one occurrence may stand in for another (an undone row kept twice while its resend is lost). Unstamped copies are not judged. |
+
+Known false FAIL, cleared by hand and not fixed: a #2203 or #1674 re-store of several rows (host A, B, C; stored A, B,
+C, A, B, C) exempts at most the first copy; the later copies' prefix holds the earlier copy, which no host row takes,
+so rows 5 and 6 stay unattributed and the gate fails. It fails safe.
 
 ## AUXILIARY sessions
 A session LCM-X classes AUXILIARY stores nothing, so it is not scored. It is excluded when LCM-X's

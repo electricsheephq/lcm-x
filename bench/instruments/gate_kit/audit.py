@@ -226,6 +226,7 @@ def host_expected(rows, group, markers, strip, scored=None):
     Returns (expected per lineage, carrier rows excluded per lineage, hand checks)."""
     _header, prefixes = markers
     per_segment, first, plain, merged = Counter(), {}, set(), set()
+    merged_rows, earlier_texts = defaultdict(list), defaultdict(list)  # for the hand-check detectors only
     for row in rows:
         rid, sid, role, content, calls, call_id, summary, ts, tool_name, displayed = row[:10]
         if summary or not displayed:
@@ -238,6 +239,9 @@ def host_expected(rows, group, markers, strip, scored=None):
             per_segment[(identity, sid)] += 1
         else:  # merged rows of one text and time are one occurrence, and the same one as a plain row of it
             merged.add((identity, sid))
+            merged_rows[(identity, sid)].append(rid)
+        if scored is not None and sid not in scored and role == "user" and multiset.norm(text or ""):
+            earlier_texts[(identity[0], multiset.norm(text))].append(rid)
     for slot in merged - set(per_segment):
         per_segment[slot] = 1
     copies, earlier = Counter(), Counter()
@@ -250,6 +254,19 @@ def host_expected(rows, group, markers, strip, scored=None):
         if identity[1][0] == "user" and multiset.norm(first[identity][1] or ""):
             by_text[(identity[0], multiset.norm(first[identity][1]))].append(identity)
     hand_checks = []
+    # Detectors: they only add hand checks, never change a count. Two merged rows of one session with one text and
+    # one time are one occurrence above; and a merged row in the window whose text an earlier, unscored segment holds
+    # may be a resend that the window's subtraction does not see.
+    for (identity, sid), ids in sorted(merged_rows.items(), key=lambda m: m[1]):
+        if not multiset.norm(first[identity][1] or ""):
+            continue  # a carrier with no user text behind it
+        if len(ids) > 1:
+            hand_checks.append({"reason": "merged_carrier_same_stamp_multiplicity", "lineage": identity[0],
+                                "host_ids": sorted(ids)})
+        earlier_ids = earlier_texts.get((identity[0], multiset.norm(first[identity][1] or "")))
+        if scored is not None and sid in scored and earlier_ids:
+            hand_checks.append({"reason": "merged_carrier_window_repeat", "lineage": identity[0],
+                                "host_ids": sorted(earlier_ids + ids)})
     for (g, _text), identities in by_text.items():
         dropped = [i for i in identities[1:] if i not in plain]
         if dropped:
@@ -423,6 +440,29 @@ def read_events(path):
     return [e for e in events if isinstance(e, dict) and e.get("kind") in EVENT_KINDS]
 
 
+def stamp_swaps(stored_rows, host_rows, strip):
+    """Hand-check detector (it changes no count): parity matches rows by content, not time. For a row key the host
+    holds more than once in a session (displayed or undone rows, a clone with its original's key and time once), when
+    every stored copy of that key in the session is stamped and their observed_at values are not contained in the
+    host's timestamps of the key (as multisets), one occurrence may stand in for another (an undone row kept twice
+    while its resend is lost, say). Unstamped copies are not judged here. Returns the hand checks, with the key's
+    store ids. ``stored_rows``: (store_id, session, role, content, tool_calls, tool_call_id, observed_at)."""
+    host = defaultdict(set)
+    for row in host_rows:
+        if not row[6] and (row[9] or row[10]) and row[7] is not None:
+            host[(row[1], host_row_key(row, strip))].add(float(row[7]))
+    stored = defaultdict(list)
+    for store_id, session, role, content, calls, call_id, observed in stored_rows:
+        stored[(session, row_key(role, content, calls, call_id))].append((store_id, observed))
+    out = []
+    for slot, copies in sorted(stored.items(), key=lambda c: min(c[1])):
+        times = host.get(slot, set())
+        if len(times) > 1 and all(o is not None for _i, o in copies) and (
+                Counter(float(o) for _i, o in copies) - Counter(times)):
+            out.append({"reason": "stamp_swap", "session": slot[0], "store_ids": sorted(i for i, _o in copies)})
+    return out
+
+
 def view_order(host_rows, stored_rows, strip):
     """Section 5's view-order condition of #1674 and #2203, as far as the store and the host establish it: returns
     ``in_order(session, copy)``: "ordered", "ambiguous" or "unplaced" for the session's stored rows before store id
@@ -582,6 +622,8 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     lost_ids = [s for s in ext["store_ids"] if audited(s)]  # unreadable payloads: kept, even with no readable row
     retained = set(undo_retained_rows([r for rows in by_lineage.values() for r in rows],
                                       [r for r in host_rows if r[1] in scored], strip))
+    hand_checks += stamp_swaps([r for rows in by_lineage.values() for r in rows],
+                               [r for r in host_rows if r[1] in scored], strip)
     for g, rows in by_lineage.items():  # kept rows of an undone occurrence: out of parity, surplus and M3's numerator
         by_lineage[g] = [r for r in rows if r[0] not in retained]
     lost = Counter(group(extra[s][1]) for s in lost_ids)

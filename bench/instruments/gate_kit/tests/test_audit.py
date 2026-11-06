@@ -804,3 +804,57 @@ def test_unattributed_silent_rows_are_key_copies_and_distinct_rows_are_reported(
     ex = Home(tmp_path, ONE, host, stored=host + [("S1", speak_and_call)]).run()["exempted_surplus"]
     assert (ex["unattributed_silent_rows"], ex["unattributed_silent_distinct_rows"]) == (2, 1)
     assert ex["unattributed_silent_rows_unit"] == "key copies"
+
+
+WINDOWED = {"P": ("cli", None, 100.0, "compression", 50.0), "Q": ("cli", "P", 3000.0, "user_exit", 100.0)}
+
+
+@pytest.mark.parametrize("text", ["continue", "a new request"], ids=["parent-text", "control"])
+def test_a_merged_carrier_repeating_an_out_of_window_parents_text_is_a_hand_check(tmp_path, text):
+    # Astra: P (50-100) holds "continue"@90; its child Q holds a verified carrier plus "continue"@110; the store holds
+    # P's original and an unmarked Q copy; with --since 100 parity passes, so the detector names both host rows.
+    host = [("P", dict(u("continue"), _ts=90.0)),
+            ("Q", {"role": "user", "content": CARRIER + "\n\n" + S + " " + text, "_ts": 110.0})]
+    out = Home(tmp_path, WINDOWED, host, stored=[("P", u("continue")), ("Q", u(text))], nodes=[("Q", [1])]).run(
+        since=100.0)
+    windowed = [{"reason": "merged_carrier_window_repeat", "lineage": "P", "host_ids": [1, 2]}]
+    assert out["gate"]["hand_checks"] == (windowed if text == "continue" else [])
+    assert outcome(out) == ("HAND CHECK" if text == "continue" else "PASS")
+
+
+@pytest.mark.parametrize("rows", [2, 1], ids=["two-carriers", "control"])
+def test_merged_carriers_of_one_text_and_time_in_one_session_are_a_hand_check(tmp_path, rows):
+    # Astra: two rows at one time, each a different verified carrier plus "continue", count as one occurrence.
+    host = [("S1", {"role": "user", "content": CARRIER.replace("node 1", f"node {n}") + "\n\n" + S + " continue",
+                    "_ts": T0 + 401}) for n in (1, 2)][:rows]
+    out = Home(tmp_path, ONE, host, stored=[("S1", stamped(u("continue"), T0 + 401))],
+               nodes=[("S1", [1]), ("S1", [2])]).run()
+    same = [{"reason": "merged_carrier_same_stamp_multiplicity", "lineage": "S1", "host_ids": [1, 2]}]
+    assert out["gate"]["hand_checks"] == (same if rows == 2 else []) and out["parity"]["totals"]["missing_rows"] == 0
+    assert outcome(out) == ("HAND CHECK" if rows == 2 else "PASS")
+
+
+@pytest.mark.parametrize("second", [T0, T0 + 5], ids=["both-at-T1", "control"])
+def test_copies_stamped_off_the_hosts_times_are_a_stamp_swap(tmp_path, second):
+    # Scout: the host holds "continue" at T1 and T2; the store holds it twice at T1. Parity matches by content.
+    host = [("S1", dict(u("continue"), _ts=T0)), ("S1", dict(a("ok"), _ts=T0 + 1)), ("S1", dict(u("continue"), _ts=T0 + 5))]
+    stored = [("S1", stamped(u("continue"), T0)), ("S1", stamped(a("ok"), T0 + 1)), ("S1", stamped(u("continue"), second))]
+    out = Home(tmp_path, ONE, host, stored=stored).run()
+    assert out["gate"]["hand_checks"] == ([{"reason": "stamp_swap", "session": "S1", "store_ids": [1, 3]}]
+                                          if second == T0 else [])
+    assert outcome(out) == ("HAND CHECK" if second == T0 else "PASS")
+
+
+@pytest.mark.parametrize("lost", [True, False], ids=["undone-pair-twice", "control"])
+def test_an_undone_pair_kept_twice_while_its_resend_is_lost_is_a_stamp_swap(tmp_path, lost):
+    host = [("S1", dict(m, _ts=T0 + n)) for n, (_s, m) in enumerate(turn(1))] + [
+        ("S1", undone(u("question 2"), T0 + 20)), ("S1", undone(a("answer 2"), T0 + 21)),
+        ("S1", dict(u("question 2"), _ts=T0 + 30)), ("S1", dict(a("answer 2"), _ts=T0 + 31))]
+    stored = [("S1", stamped(m, m["_ts"])) for _s, m in host[:4]] + (
+        [("S1", stamped(m, m["_ts"])) for _s, m in host[2:4]] if lost else [("S1", stamped(m, m["_ts"])) for _s, m in host[4:]])
+    out = Home(tmp_path, ONE, host, stored=stored).run()
+    assert out["parity"]["totals"]["missing_rows"] == 0 and out["undo_retained"]["rows"] == 2
+    swaps = [{"reason": "stamp_swap", "session": "S1", "store_ids": [3, 5]},
+             {"reason": "stamp_swap", "session": "S1", "store_ids": [4, 6]}]
+    assert out["gate"]["hand_checks"] == (swaps if lost else [])
+    assert outcome(out) == ("HAND CHECK" if lost else "PASS")
