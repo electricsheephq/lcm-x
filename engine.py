@@ -7579,6 +7579,9 @@ class LCMEngine(
                                 "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if conn.execute(
                                     "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else set()
                             pairs, linked, candidate_ids, stripped_count = [], set(), set(), 0
+                            # Per-list start: the leading targets already used are skipped once, not per row, so N
+                            # copies of one payload match in linear time under the write lock.
+                            starts = {}
                             # Complete the exact pass before any stripped copy can spend a target.
                             for strip, index in ((False, earlier), (True, stripped_earlier)):
                                 for sid, role, content, call_id, calls, name, stamp in new_rows:
@@ -7590,7 +7593,11 @@ class LCMEngine(
                                         candidate_ids.add(sid)
                                     if stripped is None and (strip or not call_id and not calls):
                                         continue
-                                    target = next((old for old, old_stamp in candidates if old not in used
+                                    begin = starts.get(id(candidates), 0)
+                                    while begin < len(candidates) and candidates[begin][0] in used:
+                                        begin += 1
+                                    starts[id(candidates)] = begin
+                                    target = next((old for old, old_stamp in candidates[begin:] if old not in used
                                                    and (stamp is None or old_stamp is None or stamp == old_stamp)), None)
                                     if target is not None:
                                         pairs.append([(sid, "possible_replay_of", target, None, None)])

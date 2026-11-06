@@ -406,3 +406,19 @@ def test_22_earlier_rows_are_read_in_one_linear_scan(host):
     assert len(_pairs(host.engine)) == 2
     earlier = [sql for sql in statements if "FROM messages" in sql and "store_id<" in sql.replace(" ", "")]
     assert len(earlier) == 1 and not any("json_extract(k.value" in sql for sql in statements)
+
+
+def test_23_many_identical_copies_link_one_to_one_oldest_first(host):
+    # #2335 review: N copies of one payload link one-to-one, oldest target first, without rescanning used targets.
+    _turns(host, "reasoning")
+    before = host.engine._store.get_session_messages(SID)
+    copies = [{"role": "user", "content": "same payload"} for _ in range(40)]
+    host.engine.ingest([{"role": "user", "content": "first head", "timestamp": host.stamp()}, *copies])
+    host.restart()
+    host.engine.ingest([{"role": "user", "content": "different head", "timestamp": host.stamp()}, *copies])
+    rows = host.engine._store.get_session_messages(SID)[len(before):]
+    originals = [r["store_id"] for r in rows if r["content"] == "same payload"][:40]
+    pairs = _pairs(host.engine)
+    linked = [target for _, target in pairs if target in originals]
+    assert len(linked) >= 20 and linked == originals[:len(linked)]  # oldest targets first, none skipped
+    assert len({target for _, target in pairs}) == len(pairs)
