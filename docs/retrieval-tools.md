@@ -72,7 +72,11 @@ selected neighbours stay put; neighbours deeper in the pool move up without
 duplication and keep their own score and arms. Newly read replies inherit their
 source score. Both carry `adjacent_to` and arm `adjacent`, and shift the tail beyond the hit limit without deleting it.
 `provenance.adjacent_reply` lists the inserted/moved `{store_id, after_store_id}`
-pairs that the final window delivers. At most three single-row reads share the recall deadline; a failed read
+pairs whose reply is among the final delivered hits (also as a collapsed
+duplicate), after answer_ready selection, refill and the response cap. Its source
+can be absent from the hits when the caller has already seen it. In answer_ready
+the list is left out when it does not fit the cap; the hit still carries
+`adjacent_to`. At most three single-row reads share the recall deadline; a failed read
 or deadline discards the whole step and adds `provenance.adjacent_reply_unavailable`.
 Citation, session-density and character caps still apply; time delivery order
 still sorts the selected hits. Session delivery and internal callers skip the
