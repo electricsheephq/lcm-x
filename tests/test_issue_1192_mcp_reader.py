@@ -400,7 +400,13 @@ def _drop_fields(text: str) -> str:
 
 
 def test_t2_outputs_equal_a_normal_engine_byte_for_byte(fx, monkeypatch):
-    """REGRESSION: reader output minus the envelope == the same call through a normal engine."""
+    """REGRESSION: reader output minus the envelope == the same call through a normal engine.
+
+    Recency scores read the wall clock (#2260), so both passes see one instant: a few seconds
+    between them could move a rounded score. Nothing on these paths waits on the wall clock;
+    deadlines use time.monotonic."""
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
     reader = make_reader(fx, monkeypatch)
     reader_texts = []
     for name, args in sweep(fx):
