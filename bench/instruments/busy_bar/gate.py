@@ -12,11 +12,11 @@ from typing import Any
 if __package__:
     from .cells import CELLS
     from .driver import (DEFAULT_B_VIEW_ROWS, DEFAULT_K, DEFAULT_SEED, DEFAULT_WINDOW_MS,
-                         identity_reasons, prescribed_operations)
+                         WALL_KINDS, WALL_NOTE, identity_reasons, prescribed_operations, success_wall_ms)
 else:
     from cells import CELLS
     from driver import (DEFAULT_B_VIEW_ROWS, DEFAULT_K, DEFAULT_SEED, DEFAULT_WINDOW_MS,
-                        identity_reasons, prescribed_operations)
+                        WALL_KINDS, WALL_NOTE, identity_reasons, prescribed_operations, success_wall_ms)
 
 
 def nonstandard_workload(name: str, runs: list[dict[str, Any]]) -> list[str]:
@@ -84,8 +84,18 @@ def comparison(baseline: list[dict[str, Any]], candidate: list[dict[str, Any]]) 
     failed = [cell for cell in CELLS
               if tables["candidate"][cell]["total"]["busy"] >
               math.ceil(1.25 * tables["baseline"][cell]["total"]["busy"]) + 1]
+    wall: dict[str, Any] = {"note": WALL_NOTE}
+    for name, runs in (("baseline", baseline), ("candidate", candidate)):
+        wall[name] = {cell: success_wall_ms([record for run in runs for record in run["operations"]
+                                           if cell == "overall" or run["cell"] == cell])
+                      for cell in (*CELLS, "overall")}
+    wall["p95_ratio"] = {
+        cell: {kind: cand / base if base and cand is not None else None
+               for kind in WALL_KINDS
+               for base, cand in [(wall["baseline"][cell][kind]["p95"], wall["candidate"][cell][kind]["p95"])]}
+        for cell in (*CELLS, "overall")}
     return {"verdict": "INCONCLUSIVE" if reasons else "GATE FAIL" if failed else "GATE PASS",
-            "reasons": reasons, "failed_cells": failed, "tables": tables}
+            "reasons": reasons, "failed_cells": failed, "tables": tables, "success_wall_ms": wall}
 
 
 def extension_cells(baseline: list[dict[str, Any]], candidate: list[dict[str, Any]]) -> list[str]:
@@ -191,6 +201,7 @@ def report(result: dict[str, Any]) -> str:
             lines.append(f"EXTENSION {cell}: 20-run busy {base}/{cand}; final busy {final_base}/{final_cand}")
         lines.append("POSITIVE CONTROL (100 ms; never gating)")
         lines.extend(report(result["control"]).splitlines()[:-1])
+    lines.append("success_wall_ms: " + json.dumps(result["success_wall_ms"], sort_keys=True))
     lines.append(result["verdict"])
     lines.extend(result["reasons"])
     if result["verdict"] in ("GATE FAIL", "SMOKE FAIL"):

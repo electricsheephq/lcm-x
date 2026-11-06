@@ -90,6 +90,49 @@ def test_real_operation_combines_counter_and_root_log() -> None:
     assert operations.records[0]["signals"] == ["write-lock-recovery", "ledger.emission_busy"]
 
 
+def test_success_wall_summary_and_recording(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = iter((1.0, 1.125))
+    monkeypatch.setattr(driver, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    operations = driver.Operations(driver.Capture(), candidate=False)
+    assert operations(None, "A", "ingest", lambda: "ok", 0) == "ok"
+    assert operations.records[0]["wall_ms"] == 125
+    records = [{"op": "ingest", "wall_ms": value} for value in range(1, 21)]
+    records += [{"op": "ingest", "wall_ms": 999, flag: True}
+                for flag in ("error", "busy", "inconclusive")]
+    records.append({"op": "ingest"})  # Older ledgers remain readable, without fabricated timings.
+    summary = driver.success_wall_ms(records)
+    assert summary["ingest"] == summary["overall"] == {"n": 20, "p50": 10, "p95": 19, "max": 20}
+    assert summary["compress"] == {"n": 0, "p50": None, "p95": None, "max": None}
+    assert summary["note"] == driver.WALL_NOTE
+
+
+@pytest.mark.parametrize("busy", [0, 2])
+def test_success_wall_is_reported_without_changing_gate(busy: int) -> None:
+    baseline, candidate = ledger(0), ledger(busy)
+    before = evaluate(baseline, candidate, control(1), control(1))
+    for rows, duration in ((baseline, 10), (candidate, 1000)):
+        for row in rows:
+            for record in row["operations"]:
+                record["wall_ms"] = duration
+    after = evaluate(baseline, candidate, control(1), control(1))
+    wall = after.pop("success_wall_ms")
+    before.pop("success_wall_ms")
+    assert after == before  # Every existing result field, including verdict and tables, is identical.
+    assert wall["p95_ratio"]["overall"]["overall"] == 100
+    for cell in cells.CELLS:
+        assert wall["baseline"][cell]["ingest"]["p95"] == 10
+    assert driver.WALL_NOTE in gate.report({**after, "success_wall_ms": wall})
+    for row in baseline:
+        for record in row["operations"]:
+            record["wall_ms"] = 0
+    zero = gate.comparison(baseline, candidate)["success_wall_ms"]
+    assert zero["baseline"]["overall"]["overall"]["p95"] == 0
+    assert all(value is None for value in zero["p95_ratio"]["overall"].values())
+    assert wall["p95_ratio"]["ingest"]["compress"] is None  # No compression in this cell.
+    assert wall["baseline"]["overall"]["compress"]["n"] == 1
+    assert wall["baseline"]["overall"]["session-end"]["n"] == 1
+
+
 def ledger(busy: int, k: int = 2) -> list[dict]:
     """One run per cell with the driver's prescribed operations; each engine's first `busy` operations are busy."""
     rows = []
