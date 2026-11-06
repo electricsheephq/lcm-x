@@ -360,7 +360,7 @@ class Harness:
                 failure = exc
             record = records[-1]
             log = Path(record["mcp_log"])
-            events = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+            events = [json.loads(line) for line in log.read_text().split("\n") if line.strip()] if log.exists() else []
             initialized = next((e for e in events if e.get("event") == "initialize"), {})
             offered = next((e for e in reversed(events) if e.get("event") == "tools/list"), {})
             status = initialized.get("startup_status", "no_initialize")
