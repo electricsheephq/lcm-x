@@ -409,7 +409,8 @@ def test_22_earlier_rows_are_read_in_one_linear_scan(host):
 
 
 def test_23_many_identical_copies_link_one_to_one_oldest_first(host):
-    # #2335 review: N copies of one payload link one-to-one, oldest target first, without rescanning used targets.
+    # #2335 review: N copies of one payload link one-to-one, oldest target first. This checks the pairing only;
+    # the matcher's linear cost is measured separately.
     host.turn(reply="ok")
     host.live += [{"role": "user", "content": "same payload"} for _ in range(40)]
     host.engine.ingest(host.live)

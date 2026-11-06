@@ -522,7 +522,8 @@ def test_p1h_shared_evidence_map_is_merged_once():
 
 def test_p1h_replay_links_are_checked_against_stored_content(tmp_path, monkeypatch):
     # #2335 review: the product links on stored bytes. When resolution expands only the older row's placeholder,
-    # the split must still compare the stored contents, or a linked copy would count as silent.
+    # the split must still receive the stored contents. This checks the map score() passes; the effect on the
+    # split is checked in the gate-kit audit's test_replay_links_are_checked_against_stored_content.
     fixture.make(tmp_path, rows=[("assistant", "[stored]"), ("assistant", "<think>r</think>[stored]")], events=[])
     resolve, seen = bars.externalized.resolve, {}
 
