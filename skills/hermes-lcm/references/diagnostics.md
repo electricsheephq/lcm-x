@@ -27,11 +27,11 @@ When `/lcm` runs with session context, it compares the task-local session profil
 
 ## SQLite connections and file descriptors
 
-In [`engine.py`](../../../engine.py), `_ensure_storage` opens storage lazily;
+In `engine.py`, `_ensure_storage` opens storage lazily;
 `_bind_storage` creates the message, DAG and lifecycle stores (three core
 connections per bound engine). `clone_for_agent` creates a separate runtime engine,
 so count clones that actually opened storage, not unused prototypes. The core
-stores open their handles through [`sqlite_session.py`](../../../sqlite_session.py)
+stores open their handles through `sqlite_session.py`
 `open_connection`. Optional assertion/entity stores each add one; query views and
 adaptive retrieval share a query-view connection. Vector stores and temporary
 rollup, tool, integrity and embedding work can add more. Pending tails can retain
@@ -41,8 +41,8 @@ Use `lsof -nP -p "$PID"` for each process, matching the configured database path
 from `lcm_status`. Count numeric FD rows with that exact NAME separately from WAL,
 SHM, `mem` and deleted-file rows. Do not infer a fixed connection-to-FD ratio or
 declare a leak from a flat count. Compare repeated samples with agent/maintenance
-activity; investigate sustained growth or deleted descriptors. See the
-[operator guide](../../../docs/operator-guide.md#sqlite-connection-and-descriptor-counts).
+activity; investigate sustained growth or deleted descriptors. See the operator
+guide's "SQLite connection and descriptor counts" section.
 
 ## Survival-fit history
 
