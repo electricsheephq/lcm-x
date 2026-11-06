@@ -87,14 +87,15 @@ def _root_sources(event, module):
     time.time = lambda: event["t_enter"][0] + (wall() - started)
     time.time_ns = lambda: int(time.time() * 1_000_000_000)
     store = importlib.import_module(module.__name__ + ".store")
-    source = store.secrets
-    if event.get("ledger_salt"):
+    source = getattr(store, "secrets", None)
+    if source is not None and event.get("ledger_salt"):
         salt = bytes.fromhex(event["ledger_salt"])
         store.secrets = types.SimpleNamespace(token_bytes=lambda n: salt if n == len(salt) else source.token_bytes(n))
     try:
         yield
     finally:
-        store.secrets = source
+        if source is not None:
+            store.secrets = source
         time.time, time.time_ns = wall, ns
 
 
