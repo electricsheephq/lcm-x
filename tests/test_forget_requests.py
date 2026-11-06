@@ -132,8 +132,9 @@ def test_adjacent_and_far_thresholds():
     assert covers(row(8, "green tea"), f)
     assert covers(row(9, "green tea"), f)
     assert not covers(row(9, "green"), f)  # 25%, adjacent
-    assert covers(row(2, "green tea"), f)  # two of four, far
+    assert not covers(row(2, "green tea"), f)  # two of four, far
     assert not covers(row(2, "green"), f)
+    assert not covers(row(2, "green tea lemon honey"), f)  # 100%, far
     f["content"] += " sugar"
     assert covers(row(8, "green tea"), f)  # 40%, adjacent
     assert not covers(row(2, "green tea"), f)  # 40%, far
@@ -141,18 +142,30 @@ def test_adjacent_and_far_thresholds():
 
 def test_order_scope_and_precision():
     f = row(10, "Forget my green tea", previous_ids=[9], observed_at=200)
-    for r in (row(10, "green tea"), row(11, "green tea"),
-              row(1, "green tea", scope="other"), row(1, "green tea", "other", observed_at=300)):
-        assert not covers(r, f)
-    assert not covers(row(50, "green tea", "other", observed_at=100), f)
-    assert covers(row(1, "green tea", "other", observed_at=100), f)
-    assert covers(row(1, "green tea", "other", observed_at=200), f)
-    assert covers(row(1, "green tea", "other"), f)
+    for ident in (10, 11, 50):
+        assert not covers(row(ident, "green tea", observed_at=100),
+                          {**f, "previous_ids": [ident]})
+    assert not covers(row(9, "green tea", scope="other"), f)
+    assert not covers(row(9, "green tea", observed_at=300), f)
+    assert covers(row(9, "green tea", observed_at=100), f)
+    assert covers(row(9, "green tea", observed_at=200), f)
+    assert covers(row(9, "green tea"), f)
+    for stamp in (100, 200, 300, None):
+        assert not covers(row(9, "green tea", "other", observed_at=stamp), f)
     f["session_order"] = 5
-    assert covers(row(1, "green tea", "other"), f)
+    assert covers(row(9, "green tea"), f)
     for text in ("Forget it", "Forget my tea"):
         f["content"] = text
         assert not covers(row(9, "green tea"), f)
+
+
+def test_question_rows_are_never_covered():
+    f = row(10, "Please forget my green tea preference", previous_ids=[8, 9])
+    question = "Can you suggest some green tea brands?"
+    assert not covers(row(8, question, role="user"), f)
+    assert not covers(row(8, question + "  ", role="user"), f)
+    assert not covers(row(9, question, role="assistant"), f)
+    assert covers(row(9, "Your green tea preference is noted", role="assistant"), f)
 
 
 def test_later_restatement_in_old_session_without_observed_at():

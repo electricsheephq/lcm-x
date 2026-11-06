@@ -613,8 +613,9 @@ Deletion commands must be explicit requests; negated deletion/forgetting command
 do not qualify. Ordinary file/library instructions and vague
 phrases such as "forget it" do not qualify. Requests need at least two detail
 words, excluding contractions, pronouns, short words and stopwords; possessive
-`'s` is stripped. The two preceding messages in the same session need 30% word
-coverage; other earlier messages need two shared detail words and 50% coverage.
+`'s` is stripped. Only the two messages just before the request in the same
+session can be covered, with 30% word coverage; earlier messages and other
+sessions are never covered, and a message ending in a question mark is never covered.
 A covered row must have a smaller insertion-order `store_id` than the forget
 turn and, when both have `observed_at`, a time no later than the forget turn.
 Self and later turns are never covered, even when event times are missing.

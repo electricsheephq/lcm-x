@@ -92,7 +92,10 @@ def covers(row: dict, forget: dict) -> bool:
     shared = len(words & forget_content_words(row.get("content") or ""))
     adjacent = (row["session_id"] == forget["session_id"]
                 and row["store_id"] in forget.get("previous_ids", ()))
-    return (adjacent and shared / len(words) >= .3) or (shared >= 2 and shared / len(words) >= .5)
+    # A question never states the detail to be forgotten.
+    if str(row.get("content") or "").rstrip().endswith("?"):
+        return False
+    return adjacent and shared / len(words) >= .3
 
 
 def event_time(row: dict) -> str | None:

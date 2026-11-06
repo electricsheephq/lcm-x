@@ -57,6 +57,7 @@ def test_adjacent_replacement_count_provenance_and_no_writes(engine):
 
 
 def test_far_and_one_word_and_later(engine):
+    far = add(engine, "green tea", stamp=1600000000)
     old = add(engine, "green tea", session="old", stamp=1600000000)
     one = add(engine, "green coffee", session="old", stamp=1600000001)
     for _ in range(4):
@@ -65,8 +66,7 @@ def test_far_and_one_word_and_later(engine):
     later = add(engine, "green tea again", stamp=1700200000)
     result = recall(engine, limit=10)
     ids = {h["store_id"] for h in result["hits"]}
-    assert old not in ids
-    assert {f, one, later} <= ids
+    assert {far, old, f, one, later} <= ids
 
 
 @pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
@@ -223,8 +223,10 @@ def test_subagent_user_rows_never_request_forgetting(engine):
 
 
 def test_only_delivered_window_has_receipts_but_entire_pool_is_withheld(engine):
-    ids = [add(engine, f"green tea detail {i}") for i in range(8)]
-    add(engine, "Forget my green tea", stamp=1700100000)
+    ids = []
+    for i in range(4):
+        ids.extend(add(engine, f"green tea detail {i * 2 + j}") for j in range(2))
+        add(engine, "Forget my green tea", stamp=1700100000 + i)
     engine._config.recall_honour_forget = False
     window = {h["store_id"] for h in recall(engine, limit=2)["hits"]}
     engine._config.recall_honour_forget = True
@@ -240,7 +242,7 @@ def test_session_only_removes_rows_and_preserves_unaffected_provenance(engine, m
 
     old = add(engine, "green tea", session="covered")
     f = add(engine, "Forget my green tea. " + "padding " * 5000,
-            session="forget", stamp=1700100000)
+            session="covered", stamp=1700100000)
     healthy = add(engine, "green tea", session="healthy", stamp=1700200000)
     engine._config.recall_delivery_unit = "session"
     original_fts = tools._lcm_recall_fts_arm
@@ -260,14 +262,14 @@ def test_session_only_removes_rows_and_preserves_unaffected_provenance(engine, m
     monkeypatch.setattr(tools, "_lcm_recall_fts_arm", without_forget)
     monkeypatch.setattr(recall_session, "deliver_session", capture)
     result = recall(engine)
-    assert {h["store_id"] for h in result["hits"]} == {healthy}
-    assert {h["store_id"] for h in raw_payloads[0]["hits"]} == {old, healthy}
+    assert {h["store_id"] for h in result["hits"]} == {f, healthy}
+    assert {h["store_id"] for h in raw_payloads[0]["hits"]} == {old, f, healthy}
     before = {s["session_id"]: s for s in raw_payloads[0]["provenance"]["delivery"]["sessions"]}
     after = {s["session_id"]: s for s in result["provenance"]["delivery"]["sessions"]}
     assert after["healthy"] == before["healthy"]
     assert after["covered"]["complete"] is False
     assert after["covered"]["omission_reason"] == "forget_requested"
-    assert after["covered"]["returned_id_ranges"] == []
+    assert after["covered"]["returned_id_ranges"] == [[f, f]]
     assert result["provenance"]["delivery"]["response_chars"] < result["provenance"]["delivery"]["char_budget"]
 
 
@@ -291,7 +293,7 @@ def test_seen_forget_replacement_is_not_novel_in_answer_ready_hits(engine, monke
 
 def test_session_delta_rebuild_excludes_seen_refs():
     old = dict(store_id=1, session_id="s", content="green tea")
-    f = dict(store_id=2, session_id="s", content="Forget my green tea", role="user")
+    f = dict(store_id=2, session_id="s", content="Forget my green tea", role="user", previous_ids=[1])
     hits = [dict(**r, score=1, exact_ref=f"lcm:{r['store_id']}:0-{len(r['content'])}") for r in [old, f]]
     ref = hits[1]["exact_ref"]
     payload = dict(hits=hits, delta={}, provenance=dict(delivery=dict(sessions=[dict(session_id="s")])))
@@ -355,7 +357,7 @@ def test_tool_call_and_result_rows_are_never_covered():
 
 @pytest.mark.parametrize("unit", ["hits", "session"])
 def test_near_cap_forget_receipts_are_trimmed(engine, monkeypatch, unit):
-    ids = {add(engine, f"green tea detail {i}") for i in range(25)}
+    ids = {add(engine, f"green tea detail {i}") for i in range(2)}
     f = add(engine, "Forget my green tea", stamp=1700100000)
     engine._config.recall_delivery_unit = unit
     original = tools.recall_delivery.deliver_recall
@@ -393,7 +395,7 @@ def test_near_cap_forget_receipts_are_trimmed(engine, monkeypatch, unit):
 ])
 def test_session_ranges_preserve_source_runs_after_filtering(ids, ranges, expected):
     rows = {i: dict(store_id=i, session_id="s", content="green tea" if i == 3 else "unrelated") for i in ids}
-    f = dict(store_id=10, session_id="s", content="Forget my green tea")
+    f = dict(store_id=10, session_id="s", content="Forget my green tea", previous_ids=[3])
     meta = dict(session_id="s", complete=True, returned_id_ranges=ranges)
     payload = dict(hits=list(rows.values()), provenance=dict(delivery=dict(sessions=[meta])))
     forget.filter_session_payload(payload, rows, [f], "s")
