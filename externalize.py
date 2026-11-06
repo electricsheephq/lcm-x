@@ -1319,10 +1319,6 @@ def find_externalized_tool_result_content_for_call(
     persisted_output_preview_sha256: str | None = None,
     require_persisted_output_file_not_newer: bool = False,
     allow_redacted_preview_match: bool = True,
-    require_missing_file_generation_metadata: bool = False,
-    persisted_output_file_size: int | None = None,
-    persisted_output_file_mtime_ns: int | None = None,
-    persisted_output_file_ctime_ns: int | None = None,
     config,
     hermes_home: str = "",
 ) -> str | None:
@@ -1369,18 +1365,6 @@ def find_externalized_tool_result_content_for_call(
                 if expected_chars is not None and marker.get("expected_chars") != expected_chars:
                     continue
                 if persisted_output_source_path and marker.get("source_path") != persisted_output_source_path:
-                    continue
-                if require_missing_file_generation_metadata and (
-                    marker.get("file_size") is not None
-                    or marker.get("file_mtime_ns") is not None
-                    or marker.get("file_ctime_ns") is not None
-                ):
-                    continue
-                if persisted_output_file_size is not None and marker.get("file_size") != persisted_output_file_size:
-                    continue
-                if persisted_output_file_mtime_ns is not None and marker.get("file_mtime_ns") != persisted_output_file_mtime_ns:
-                    continue
-                if persisted_output_file_ctime_ns is not None and marker.get("file_ctime_ns") != persisted_output_file_ctime_ns:
                     continue
                 if (
                     persisted_output_preview_sha256

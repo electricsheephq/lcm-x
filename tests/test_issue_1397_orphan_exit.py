@@ -28,12 +28,12 @@ sys.path.insert(0, repo)
 spec = importlib.util.spec_from_file_location("hermes_lcm", Path(repo) / "__init__.py", submodule_search_locations=[repo])
 package = importlib.util.module_from_spec(spec)
 sys.modules["hermes_lcm"] = package
-from hermes_lcm import engine, embedding_provider
+from hermes_lcm import engine, embedding_provider, maintenance_scheduler
 
 started, release, pass_done, quiescing = (threading.Event() for _ in range(4))
 state = {"waits": [], "finished": False}
 clock = [1000.0]
-engine._EMBEDDING_EXIT_TIMEOUT_S = 0.5
+maintenance_scheduler._EMBEDDING_EXIT_TIMEOUT_S = 0.5
 slots = embedding_provider._LOCAL_EMBED_WORKER_SLOTS
 
 def finish():
@@ -81,7 +81,7 @@ def job():
         # Deterministically spend part of the SAME deadline on scheduler work.
         clock[0] += 0.2
 
-scheduler = engine._EMBEDDING_MAINTENANCE_SCHEDULER
+scheduler = maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER
 assert scheduler.schedule(("orphan-exit", "embeddings"), job)
 assert started.wait(10)
 assert pass_done.wait(10)
@@ -123,6 +123,7 @@ real_quiesce = scheduler.quiesce
 def observed_quiesce(timeout):
     state["timeout"] = timeout
     engine.time = SimpleNamespace(monotonic=exit_now)
+    maintenance_scheduler.time = engine.time
     embedding_provider.time = SimpleNamespace(monotonic=lambda: clock[0])
     embedding_provider._LOCAL_EMBED_WORKER_SLOTS = ObservedSlots()
     return real_quiesce(timeout)

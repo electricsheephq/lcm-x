@@ -136,7 +136,7 @@ def test_default_normal_host_retains_semantic(recall_engine, monkeypatch, ready_
 
 
 def test_cpu_limited_default_still_arms_maintenance(default_engine, monkeypatch):
-    engine_mod = importlib.import_module("hermes_lcm.engine")
+    scheduler_mod = importlib.import_module("hermes_lcm.maintenance_scheduler")
     maintenance = importlib.import_module("hermes_lcm.embedding_maintenance")
     monkeypatch.setattr(tools, "effective_cpus", lambda: 1)
     assert tools.default_semantic_cpu_limited(default_engine._config)
@@ -144,7 +144,7 @@ def test_cpu_limited_default_still_arms_maintenance(default_engine, monkeypatch)
     # Restore before conftest's own model-preparation isolation context exits.
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(maintenance, "start_local_model_prepare", lambda *args, **kwargs: prepared.append(args))
-        patch.setattr(engine_mod._EMBEDDING_MAINTENANCE_SCHEDULER, "schedule",
+        patch.setattr(scheduler_mod._EMBEDDING_MAINTENANCE_SCHEDULER, "schedule",
                       lambda *args, **kwargs: scheduled.append((args, kwargs)))
         default_engine._schedule_embedding_maintenance()
     assert prepared and scheduled

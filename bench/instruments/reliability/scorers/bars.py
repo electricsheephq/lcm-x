@@ -250,6 +250,8 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     try:
         full = con.execute("select store_id, session_id, role, content, tool_calls, tool_call_id from messages"
                            " order by store_id").fetchall()
+        relations = con.execute("select store_id, kind, related_store_id from message_relations").fetchall() if \
+            con.execute("select 1 from sqlite_master where type='table' and name='message_relations'").fetchone() else []
         stored = [r[:4] for r in full]
         nodes = con.execute("select node_id, session_id, source_ids from summary_nodes where source_type = 'messages'").fetchall()
     finally:
@@ -274,6 +276,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
 
     user_pat, reply_pat = r"\[([A-Z]\d{2,3})\] user turn", r"reply to ([A-Z]\d{2,3})\b"
     b1, b1_tags, b1_per, b2_parts, b1_lic = {}, [0, 0], {}, {}, []
+    surplus_keys = []
     for g, (items, rows) in per.items():
         label = "" if g == "chat" else f"{g}:"
         want_u = tag_counts([t for r, t in items if r == "user"], user_pat)
@@ -299,7 +302,8 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         b1_tags[0] += len(want_u)
         b1_tags[1] += len(want_a)
         b1_per[g] = len(mism)
-        b2_parts[g] = multiset.score(items, rows, None if host is None else host.get(g, {}).get("keys", {}))
+        b2_parts[g] = multiset.score(items, rows, None if host is None else host.get(g, {}).get("keys", {}),
+                                      surplus_keys=surplus_keys)
     numbers["B1"] = {"user_tags": b1_tags[0], "reply_tags": b1_tags[1], "mismatched": len(b1), "per_session": b1_per,
                      "host_parity_licensed": host_parity.summary(b1_lic, host_why)}
     if b1:
@@ -327,7 +331,10 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
             if a["turn"] in recovery_turns and tool_calls.completed(a) and d.get("ok") and d.get("recovery_result_sha256") \
                     and d.get("id") in {c["id"] for c in a["tool_issues"]} - {s["id"] for s in a["tool_seen"]}:
                 bound["expected"][(attempt_group(a, group), "tool", d["id"], d["recovery_result_sha256"])] += 1
-    tools = tool_calls.compare(bound["expected"], bound["loose"], tool_calls.stored_keys(b2_full, group))
+    tool_ids = {}
+    tool_keys = tool_calls.stored_keys(b2_full, group, store_ids=tool_ids)
+    tools = tool_calls.compare(bound["expected"], bound["loose"], tool_keys,
+                               store_ids=tool_ids, surplus_keys=surplus_keys)
     externalized.mismatches(ext, b2_full, ext_ids, per, group, bound["expected"], bound["loose"], host, b2_parts)
     numbers["B2"]["externalized"] = ext
     numbers["B2"].update(tools)
@@ -339,6 +346,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         failed["B2"] = {**numbers["B2"], "missing": [dict(e, session=g) for g, m in bad.items() for e in m["missing"]],
                         "duplicated": [dict(e, session=g) for g, m in bad.items() for e in m["duplicated"]],
                         "extra": [dict(e, session=g) for g, m in bad.items() for e in m["extra"]]}
+    numbers["B2"].update(multiset.split_surplus(surplus_keys, relations))
     conflicts = counted(cell, phases, "publication_invariant_conflict")
     numbers["B3"] = {"publication_invariant_conflict": conflicts}
     if conflicts:

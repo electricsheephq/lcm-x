@@ -24,7 +24,7 @@ This page states what we are building and how we will know it works. The [roadma
    - Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`).
    - Deleting on purpose: the operator's `/lcm doctor clean apply` (off by default, takes a backup first) and, once it ships, forgetting a memory on request ([#1171](https://github.com/electricsheephq/lcm-x/issues/1171)).
 2. **The right evidence at the right moment.**
-   - Recall finds what matters across months of history. Full-text search is built in today; local semantic search is built in and on by default from v0.29.0 if it passes its measurement, and a built-in reranker follows once it passes its measurement, re-screened in facts that update (today reranking needs the Voyage cloud provider).
+   - Recall finds what matters across months of history. Full-text search is built in today; local semantic search is built in and on by default since v0.29.0 (an exception to the quality rule below), and a built-in reranker follows once it passes its measurement, re-screened in facts that update (today reranking needs the Voyage cloud provider).
    - Next (with compaction you don't notice): evidence the agent needs is put in front of it before it answers, not only when it thinks to search.
    - The agent can always open the exact source behind what it was shown.
 3. **Memory that grows.**
@@ -44,7 +44,7 @@ This page states what we are building and how we will know it works. The [roadma
 - **A durable store** (SQLite) with:
   - a summary DAG;
   - externalized large outputs;
-  - full-text search, with optional semantic search and cloud reranking today; local semantic search (built in and on by default from v0.29.0 if it passes its measurement), a built-in reranker and source-linked derived memory (facts that update) next.
+  - full-text search, with optional semantic search and cloud reranking today; local semantic search (built in and on by default since v0.29.0), a built-in reranker and source-linked derived memory (facts that update) next.
 - **Agent tools** (`lcm_*`), **operator commands** (`/lcm`, the doctor), and, from LCM-X for Claude Code, a read-only endpoint so other harnesses can read the same memory, plus adapters that capture other harnesses into their own store.
 
 ## What LCM-X is not
@@ -59,8 +59,9 @@ This page states what we are building and how we will know it works. The [roadma
 - **Proven quality ships on.**
   - A feature becomes the default when it passes one pre-declared, paired measurement on held-out questions, read by a frontier model.
   - The measurement must show a significant gain in evidence or answer quality.
+  - Local semantic search is the exception so far: it has been on by default since v0.29.0 by a release decision, without the significant answer-quality gain this rule asks for (v0.29.0 claims none), and its measurement continues ([#950](https://github.com/electricsheephq/lcm-x/issues/950)).
   - It ships on even when it uses more tokens; we publish tokens per query beside every number, and every default can be turned off. Token cost is not a gate; losslessness and the user's wait are.
-- **Built in, not bolted on.** From v0.29.0 the default install includes local semantic search, on by default if it passes its measurement; a local reranker follows if it passes its measurement. Cloud providers are optional upgrades. The built-in models are the best we can run locally, chosen by measurement and checked again when better open models ship ([#1715](https://github.com/electricsheephq/lcm-x/issues/1715)).
+- **Built in, not bolted on.** The default install includes local semantic search, on by default since v0.29.0 (the exception noted above); a local reranker follows if it passes its measurement. Cloud providers are optional upgrades. The built-in models are the best we can run locally, chosen by measurement and checked again when better open models ship ([#1715](https://github.com/electricsheephq/lcm-x/issues/1715)).
 - **Local first, offline capable.** The memory layer needs no cloud: one SQLite database, with a folder beside it for large externalized payloads, and local embeddings, built in from v0.29.0. With a local summariser model it runs fully offline. So agents on laptops today, and on-device agents and robots later (research), keep their whole memory on the device.
 - **The user's wait is a product metric.** Compaction time and prompt-cache breaks count as much as summary quality.
 - **Defaults target the best measured quality.** We choose, tune and gate defaults on the reference machine: an Apple M-series laptop (M3 or newer) with 16 GB of RAM. Smaller hosts are an option, not a priority. They adapt on their own, using shorter time budgets and lighter work and falling back to full-text search instead of making the user wait, and they never lower the default that everyone else gets. Robots and on-device agents are expected to carry more compute than the reference machine, not less.

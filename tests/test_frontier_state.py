@@ -408,3 +408,20 @@ def test_end_consumed_keeps_captured_dict(transition_state: Any) -> None:
     state.mark_end_consumed(proof)
     assert proof == previous | {"end_consumed": True}
     assert_frontier_transition(transition_state, {})
+
+
+@pytest.mark.parametrize("mode", ["clone", "deepcopy"])
+def test_fresh_agent_copies_have_own_empty_telemetry(engine: Any, mode: str) -> None:
+    sample = engine._new_ingest_lock_record([{}], 1)
+    sample["hold_ms"] = 1.
+    engine._record_ingest_lock(sample, {})
+    clone = engine.clone_for_agent() if mode == "clone" else copy.deepcopy(engine)
+    try:
+        assert clone._ingest_lock_guard is not engine._ingest_lock_guard
+        assert clone._ingest_lock_records is not engine._ingest_lock_records
+        assert clone._ingest_lock_totals is not engine._ingest_lock_totals
+        assert not clone._ingest_lock_records and not clone._ingest_lock_totals
+        assert list(engine._ingest_lock_records) == [sample]
+        assert sum(engine._ingest_lock_totals[k] for k in ("le_50_ms", "le_250_ms", "gt_250_ms", "no_hold")) == 1
+    finally:
+        clone.shutdown()

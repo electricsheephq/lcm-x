@@ -280,6 +280,10 @@ def ingest_ledger_mode() -> str:
     return raw if raw in ("off", "shadow") else "shadow"
 
 
+def identity_anchor_enabled() -> bool:
+    return _parse_bool_env("LCM_IDENTITY_ANCHOR", True, unknown=True, true_values=())
+
+
 def _parse_int_env_with_source(
     key: str,
     default: int,
@@ -643,19 +647,15 @@ def _lcm_absolute_threshold_tokens_with_source(
     return value, source, warning
 
 
-def _hermes_auxiliary_compression_timeout_ms(default: int) -> int:
+def _hermes_auxiliary_compression_timeout_ms_with_source(default: int) -> tuple[int, str]:
     """Read Hermes auxiliary.compression.timeout when no LCM override is present.
 
     Hermes uses seconds for the auxiliary compression timeout, while LCM stores
     the summary timeout in milliseconds. Aligning the default keeps LCM summary
     calls from timing out earlier than the host compression route unless
-    ``LCM_SUMMARY_TIMEOUT_MS`` is explicitly configured.
+    ``LCM_SUMMARY_TIMEOUT_MS`` is explicitly configured. Returns the value in
+    milliseconds and its source.
     """
-    value, _source = _hermes_auxiliary_compression_timeout_ms_with_source(default)
-    return value
-
-
-def _hermes_auxiliary_compression_timeout_ms_with_source(default: int) -> tuple[int, str]:
     cfg = _load_hermes_config_yaml()
     try:
         auxiliary = cfg.get("auxiliary") or {}
@@ -827,8 +827,7 @@ _ENV_CHOICES = {
 
 # Deprecation/removal versions shared by the loader and generated reference.
 ENV_FIELD_DEPRECATIONS: dict[str, tuple[str, str]] = {
-    "cache_friendly_condensation_enabled": ("v0.28.0", "v0.30.0"),
-    "large_output_transcript_gc_enabled": ("v0.28.0", "v0.30.0"),
+    "deferred_maintenance_enabled": ("v0.30.0", "v0.31.0"),
 }
 
 
@@ -1079,11 +1078,9 @@ class LCMConfig:
     dynamic_leaf_chunk_enabled: bool = False
     # Upper bound for the working dynamic leaf chunk threshold
     dynamic_leaf_chunk_max: int = 40_000
-    # When enabled, suppress follow-on condensation after a leaf pass unless
-    # debt/pressure says the extra churn is worth it
+    # Removed in v0.30.0; parsed and ignored (#1246)
     cache_friendly_condensation_enabled: bool = False
-    # Minimum number of same-depth fanin groups before one follow-on
-    # condensation pass is allowed in cache-friendly mode
+    # Removed in v0.30.0; parsed and ignored (#1246)
     cache_friendly_min_debt_groups: int = 2
     # When enabled, turns can persist raw-backlog maintenance debt and use
     # later bounded catch-up passes to reduce it.
@@ -1091,7 +1088,7 @@ class LCMConfig:
     # Maximum extra leaf passes a debt-triggered later turn may spend on
     # catch-up work.
     deferred_maintenance_max_passes: int = 4
-    # Disabled at 0.0. When set, only bypass cache-friendly/deferred polite
+    # Disabled at 0.0. When set, only bypass deferred maintenance polite
     # gates once prompt pressure reaches this fraction of the context window.
     critical_budget_pressure_ratio: float = 0.0
     # Run one bounded synchronous sweep after threshold pressure is reached.
@@ -1207,8 +1204,7 @@ class LCMConfig:
     # stubbed from this many tokens. 0 = use the first-sight threshold above; a
     # value above the first-sight threshold is capped at it.
     large_output_active_replay_stub_aged_threshold_tokens: int = 2_000
-    # When enabled, already-externalized summarized tool-result transcript rows may
-    # be rewritten to compact GC placeholders after successful leaf compaction.
+    # Removed in v0.30.0; parsed and ignored (#1246)
     large_output_transcript_gc_enabled: bool = False
 
     # -- Models ---
