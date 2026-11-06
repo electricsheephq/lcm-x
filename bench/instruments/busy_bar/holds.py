@@ -98,10 +98,20 @@ def probe(tree: Path, work: Path, rows: int, trace: bool = False) -> dict[str, A
         views.append(("t", 1, views[-1][2] + cells.turn(6 * rows + 1, "B")))
         for shape, position, host_view in views:
             events.clear()
+            stored_before = engine._store._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            failures_before = getattr(engine, "_consecutive_ingest_failures", 0)
             begin = time.monotonic_ns()
             engine.ingest(host_view)
             end = time.monotonic_ns()
+            # ingest() records internal failures without raising; a failed or short ingest would
+            # hold the lock briefly and could pass the tripwire, so it fails the probe instead.
+            stored = engine._store._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] - stored_before
+            expected = len(host_view) if shape == "n" else len(host_view) - len(views[-2][2])
+            if stored != expected or getattr(engine, "_consecutive_ingest_failures", 0) != failures_before:
+                raise RuntimeError(f"{shape} call {position} stored {stored} rows, expected {expected}, "
+                                   "or recorded an ingest failure")
             call = {"shape": shape, "position": position, "view_rows": len(host_view),
+                    "rows_stored": stored,
                     "begin_ns": begin, "end_ns": end, "call_ms": (end - begin) / 1e6}
             if trace:
                 call["trace"] = events.copy()
