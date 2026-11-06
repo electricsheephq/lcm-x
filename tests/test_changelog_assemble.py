@@ -138,7 +138,7 @@ def test_bad_file_name_exits_1_and_changes_nothing(tmp_path):
 
 def test_file_mode_preserved_and_no_temp_file_left(tmp_path):
     repo = make_repo(tmp_path, {"1-a.md": "- New: x.\n"})
-    os.chmod(repo / "CHANGELOG.md", 0o644)
+    os.chmod(repo / "CHANGELOG.md", 0o640)
     assert run(repo).returncode == 0
-    assert stat.S_IMODE(os.stat(repo / "CHANGELOG.md").st_mode) == 0o644
+    assert stat.S_IMODE(os.stat(repo / "CHANGELOG.md").st_mode) == 0o640
     assert sorted(p.name for p in repo.iterdir()) == ["CHANGELOG.md", "changelog.d"]
