@@ -1542,18 +1542,26 @@ def test_a_bounded_drain_never_waits_for_the_lock_and_the_next_worker_captures_e
 
 def test_a_bounded_drain_cut_by_its_deadline_keeps_whole_batches_and_its_record(tmp_path, home, hermes, monkeypatch):
     """A PreCompact drain that hits its bound keeps each batch it committed whole, leaves its
-    spool record, and the next worker captures the rest exactly once."""
+    spool record, and the next worker captures the rest exactly once.
+
+    The worker's clock is the real one plus an offset that jumps past the bound once the first
+    batch commits, so the bound passes exactly then however long the worker's startup takes
+    (#2198: a 0.2 s wall-clock bound could pass before the first batch on a slow runner)."""
     entries = [_entry("user", f"u{index}", f"line {index}") for index in range(9)]
     _record(_hook(), home, _transcript(tmp_path, entries))
     real_read, real_ingest = cc.read_lines, cc.ingest_lines
     monkeypatch.setattr(cc, "read_lines", lambda path, offset, **_kw: real_read(path, offset, max_lines=2))
+    offset = [0.0]
+    clock = SimpleNamespace(**{name: getattr(time, name) for name in dir(time) if not name.startswith("_")})
+    clock.monotonic = lambda: time.monotonic() + offset[0]
+    monkeypatch.setattr(cc, "time", clock)
 
-    def slow(store, lineage, cursor, lines):
+    def bounded(store, lineage, cursor, lines):
         result = real_ingest(store, lineage, cursor, lines)
-        time.sleep(0.3)  # the bound passes after this batch commits
+        offset[0] = 3600.0  # the bound passes after this batch commits
         return result
-    monkeypatch.setattr(cc, "ingest_lines", slow)
-    report = cc.run_worker(home, deadline_s=0.2, hermes_home=hermes, settle_s=0)
+    monkeypatch.setattr(cc, "ingest_lines", bounded)
+    report = cc.run_worker(home, deadline_s=60, hermes_home=hermes, settle_s=0)
     assert not report["complete"] and report["deadline"] and "lock" not in report and cc.pending(home)
     store = _open(home, hermes)
     try:
@@ -1561,6 +1569,7 @@ def test_a_bounded_drain_cut_by_its_deadline_keeps_whole_batches_and_its_record(
     finally:
         store.close()
     monkeypatch.setattr(cc, "ingest_lines", real_ingest)
+    monkeypatch.setattr(cc, "time", time)
     assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
     store = _open(home, hermes)
     try:
