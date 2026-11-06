@@ -100,6 +100,7 @@
       "fts": 0.5,
       "summary": 1.0
     },
+    "recall_delivery_order": "score",
     "recall_delivery_unit": "hits",
     "recall_fts_anchor": true,
     "recall_query_timeout_s": 8.0,

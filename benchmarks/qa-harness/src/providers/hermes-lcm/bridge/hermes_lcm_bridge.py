@@ -349,7 +349,7 @@ class Bridge:
                 engine._lcm_embedding_provider_cache = (cache_key, self.embedder)
 
             payload = json.loads(
-                lcm_tools.lcm_recall({"query": query, "limit": limit}, engine=engine)
+                lcm_tools.lcm_recall({"query": query, "limit": limit}, engine=engine, delivery_order="score")
             )
         finally:
             vector_store.close()

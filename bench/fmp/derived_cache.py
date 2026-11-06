@@ -40,7 +40,7 @@ def backend_call(backend, spec, messages, records, **kwargs):
     def runner(*args,**kw):
         proc=original(*args,**kw)  # retain the unmodified event trace before outcome classification
         events=[]
-        for line in proc.stdout.splitlines():
+        for line in proc.stdout.split("\n"):  # JSON strings may hold U+2028/U+2029/U+0085 raw (#2246)
             try:
                 events.append(json.loads(line))
             except ValueError:
