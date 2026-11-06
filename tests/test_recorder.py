@@ -2687,13 +2687,9 @@ def test_2263_17_home_change_cuts_prefix(lab, change):
     assert len(roots) == 2  # diagnosis continues after the loss
     assert loss["seq"] <= roots[0]["seq_enter"]
     assert not any(e["kind"] == "sessions" and e["seq"] > loss["seq"] for e in events)
-    try:
-        reading = reader.read(rec.proc)
-    except reader.RecordingError:
-        pass
-    else:
-        assert reading["prefix_end"] <= roots[0]["seq_enter"]
-        assert reading["cause"] == "hermes_home_changed"
+    reading = reader.read(rec.proc)
+    assert reading["prefix_end"] <= roots[0]["seq_enter"]
+    assert reading["cause"] == "hermes_home_changed"
 
 
 @needs312
