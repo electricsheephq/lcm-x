@@ -136,8 +136,11 @@ def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[di
                                                 "surplus_rows", "tool_surplus_rows", "tool_missing_rows")}
                     ext = b2.get("externalized")
                     n["externalized"] = ext.get("deficit_rows") if isinstance(ext, dict) else None
-                    # Fail closed: every count present and a non-negative int, and the split covers all surplus.
-                    if (any(type(v) is not int or v < 0 for v in n.values())
+                    # Fail closed: a proven verdict (PASS, or FAIL with its bars), every count present and a
+                    # non-negative int, and the split covers all surplus. An UNSUPPORTED or INCONCLUSIVE row
+                    # did not prove its scenario, so clean counts never satisfy B2S.
+                    if (r["verdict"] not in ("PASS", "FAIL")
+                            or any(type(v) is not int or v < 0 for v in n.values())
                             or n["visible_surplus_rows"] + n["silent_surplus_rows"]
                             != n["surplus_rows"] + n["tool_surplus_rows"]
                             or n["deficit_rows"] or n["silent_surplus_rows"] or n["tool_missing_rows"]

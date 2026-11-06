@@ -399,8 +399,8 @@ with a positive or missing deficit count; B1 mismatches and B2 surplus remain ac
 loss), positive silent surplus, or missing/invalid visibility split fails closed. Invalid means any of the
 counts is missing, not an int or negative, or `visible_surplus_rows + silent_surplus_rows` differs from
 `surplus_rows + tool_surplus_rows`. Visible surplus alone passes B2S while still failing B2. B2S checks
-receipts even on a reported PASS; a B2S-gated row reported UNSUPPORTED or INCONCLUSIVE carries no numbers and
-fails closed. This change promotes no `CELL_GATE` entry and does not prove that the P1 gate passes.
+receipts even on a reported PASS. A B2S-gated row reported UNSUPPORTED, INCONCLUSIVE or any verdict other than
+PASS or FAIL fails closed even when its counts are clean, because its scenario was not proven. This change promotes no `CELL_GATE` entry and does not prove that the P1 gate passes.
 
 ### Claim boundary
 R2 proves the plugin's behaviour through a real `hermes acp` process on the pinned host shas, with every model route

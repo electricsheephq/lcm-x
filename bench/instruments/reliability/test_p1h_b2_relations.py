@@ -247,3 +247,23 @@ def test_p1h_b2s_fails_closed_on_rows_without_numbers(monkeypatch, verdict):
     row.update(verdict=verdict, numbers={})
     problems = ci.gate(rows, set())
     assert any("['B2S']" in p for p in problems)
+
+
+@pytest.mark.parametrize("verdict", ["UNSUPPORTED", "INCONCLUSIVE", "SKIPPED"])
+def test_p1h_b2s_fails_closed_on_unproven_verdicts_with_clean_numbers(monkeypatch, verdict):
+    # Bot review on #2291: a scenario that was not proven never satisfies B2S, however clean its counts.
+    monkeypatch.setitem(ci.CELL_GATE, PERSISTENT, ("in-process", ("B2S",)))
+    rows = rows_for(PERSISTENT, "fixture", "in-process", [])
+    row = next(r for r in rows if r["cell"] == PERSISTENT)
+    row.update(verdict=verdict, numbers={"B2": dict(FULL)})
+    problems = ci.gate(rows, set())
+    assert len(problems) == 1 and "['B2S']" in problems[0]
+
+
+def test_p1h_b2s_proven_pass_with_clean_numbers_still_passes(monkeypatch):
+    # The control for the case above: the same clean counts on a PASS row satisfy B2S.
+    monkeypatch.setitem(ci.CELL_GATE, PERSISTENT, ("in-process", ("B2S",)))
+    rows = rows_for(PERSISTENT, "fixture", "in-process", [])
+    row = next(r for r in rows if r["cell"] == PERSISTENT)
+    row.update(verdict="PASS", numbers={"B2": dict(FULL)})
+    assert ci.gate(rows, set()) == []
