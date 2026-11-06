@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from tests.p1_gate import GateFailure, expect_from_view, gate_result, record, store_outcome
+from tests.p1_gate import expect_from_view, gate_result, record, store_outcome
 from tests.test_host_uid_shadow import _engine, _m, _state_db
 from tests.test_issue_2055_ingest_transaction import durable, _no_background_maintenance as _no_background_maintenance
 from tests.test_issue_2055_ingest_ledger_writes import engines as engines
@@ -91,18 +91,10 @@ os._exit(0)
 '''
 
 
-M_XFAIL = pytest.mark.xfail(
-    strict=True, raises=GateFailure,
-    reason="#2305: the cold bind after a mid-history insert re-stores unstamped rows as silent surplus "
-           "(the no-crash control shows the same rows; P1 gate blocker)")
-# #2305's silent surplus per m shape; loss is never expected, and a different count is a new failure.
-M_SILENT = {"insert": 7, "field_chain_replace": 9}
-
-
 @pytest.mark.parametrize("boundary,shape", [
     *((point, None) for point in ("b", "c", "d", "e", "f", "INSERT", "h", "i", "j", "k", "l")),
-    pytest.param("m", "insert", marks=M_XFAIL, id="m-insert"),
-    pytest.param("m", "field_chain_replace", marks=M_XFAIL, id="m-field-chain-replace"),
+    pytest.param("m", "insert", id="m-insert"),  # #2305: the cold bind's copies are linked (visible), never silent
+    pytest.param("m", "field_chain_replace", id="m-field-chain-replace"),
 ])
 def test_former_commit_process_death(tmp_path, monkeypatch, boundary, shape):
     if boundary == "m":
@@ -208,10 +200,8 @@ os._exit(0)
         assert host.rows() == control_rows
         outcome = store_outcome(fresh._store._conn, expected)
         assert outcome == control_outcome
-        record(dict(family="process_death", boundary="m", shape=shape, strict_xfail=True), outcome, fresh)
-        assert outcome["loss"] == 0, outcome  # Loss is never an expected failure.
-        assert outcome["silent"] == M_SILENT[shape], outcome  # Only #2305's known rows.
-        raise GateFailure(outcome)
+        record(dict(family="process_death", boundary="m", shape=shape), outcome, fresh)
+        assert outcome["loss"] == outcome["silent"] == 0, outcome
     finally:
         fresh.shutdown()
 
