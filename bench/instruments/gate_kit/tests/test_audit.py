@@ -379,6 +379,31 @@ def test_log_tz_decides_whether_a_compaction_precedes_a_restart(tmp_path, tz, co
     assert out["coverage"]["compactions_then_restart"]["value"] == counted
 
 
+ACP_AT = datetime(2026, 11, 6, 10, 0, 30, tzinfo=timezone.utc).timestamp()
+ACP_LINE = "2026-11-06 10:00:30 [INFO] hermes_plugins.hermes_lcm_x.compaction: LCM compaction #1: 9 messages → 4{}\n"
+
+
+@pytest.mark.parametrize("request_at,suffix,attributed", [
+    (ACP_AT - 20, "", True),  # the driver's compress_request 20 s before the line
+    (ACP_AT - 600, "", False),  # too long before: no session, counted in compactions only
+    (None, " session=S1", True),  # the message names its session
+], ids=["nearest-request", "no-request-in-window", "session-in-message"])
+def test_acp_stderr_compaction_lines(tmp_path, request_at, suffix, attributed):
+    # acp_adapter/entry.py logs "<asctime> [<LEVEL>] <logger>: <message>" to stderr, with no session field.
+    events = [{"t": ACP_AT + 60, "kind": "restart_cold", "session": "S1"}]
+    if request_at is not None:
+        events.append({"t": request_at, "kind": "compress_request", "session": "S1"})
+    out = Home(tmp_path, ONE, turn(1)).run([ACP_LINE.format(suffix)], events, log_tz="UTC")
+    assert out["coverage"]["compactions"]["value"] == 1
+    assert out["coverage"]["compactions_then_restart"]["value"] == int(attributed)
+    assert out["coverage_basis"]["compactions_without_session"] == int(not attributed)
+
+
+def test_acp_stderr_lines_of_other_loggers_do_not_count(tmp_path):
+    line = "2026-11-06 10:00:30 [INFO] agent.context_compressor: LCM compaction #1: 9 messages → 4\n"
+    assert Home(tmp_path, ONE, turn(1)).run([line])["coverage"]["compactions"]["value"] == 0
+
+
 def test_unknown_log_tz_is_an_input_error(tmp_path):
     home = Home(tmp_path, ONE, turn(1))
     with pytest.raises(SystemExit) as stop:

@@ -38,12 +38,20 @@ FLOORS = {"turns": 200, "delegated_children": 10, "compactions": 20, "compaction
 BAR = 0.01  # the 1% bar of the exempted surplus and of M3 (section 5)
 DELEGATE_SOURCE = "subagent"  # aux_session.py:807 _DELEGATE_SOURCE: a delegate child's state.db sessions.source
 NOT_ENTRY_SOURCES = frozenset({DELEGATE_SOURCE, "tool"})  # child sessions, not host entry points
-# Log lines, in either Hermes format (hermes_logging.py _LOG_FORMAT and _LOG_FORMAT_VERBOSE):
-# "<asctime> <LEVEL>[ [<session>]] <logger>: <message>" or "<asctime> - <logger> - <LEVEL>[ [<session>]] - <message>".
+# Log lines, in the Hermes formats (hermes_logging.py _LOG_FORMAT and _LOG_FORMAT_VERBOSE):
+# "<asctime> <LEVEL>[ [<session>]] <logger>: <message>" or "<asctime> - <logger> - <LEVEL>[ [<session>]] - <message>";
+# and the ACP host's stderr format, which has no session field (acp_adapter/entry.py _setup_logging):
+# "<asctime> [<LEVEL>] <logger>: <message>".
 # A pattern counts only in the message of a line whose logger is LCM-X's (a module of the hermes_lcm package).
 LOG_LINE = re.compile(r"^(?P<ts>\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d)(?:[,.]\d+)? (?:"
                       r"(?P<level>[A-Z]+)(?: \[(?P<sid>[^\]\s]+)\])? (?P<logger>[\w.]+): |"
-                      r"- (?P<logger2>[\w.]+) - (?P<level2>[A-Z]+)(?: \[(?P<sid2>[^\]\s]+)\])? - )(?P<msg>.*)$")
+                      r"- (?P<logger2>[\w.]+) - (?P<level2>[A-Z]+)(?: \[(?P<sid2>[^\]\s]+)\])? - |"
+                      r"\[(?P<level3>[A-Z]+)\] (?P<logger3>[\w.]+): )(?P<msg>.*)$")
+MESSAGE_SESSION = re.compile(r"\bsession=([^\s,;)]+)")
+# A compaction line without a session is tied to the driver's compress_request for a session when the line falls
+# within this window around the request (seconds before, after): log times have one-second resolution, and the
+# compaction follows the request after the summary model call.
+COMPRESS_REQUEST_WINDOW = (2.0, 120.0)
 LCM_LOGGER = re.compile(r"(?:^|\.)hermes_lcm(?:_x)?(?:\.|$)")
 COMPACTION = re.compile(r"LCM compaction #\d+:")  # compaction.py:2910, one line per published LCM pass
 # A session LCM classes AUXILIARY (stores nothing): engine.py:2770's late reclassification, and the #2042 session
@@ -241,18 +249,17 @@ def log_time(stamp: str, tz):
 
 def read_logs(paths, tz=None):
     """LCM-X's own log lines: compactions (deduplicated across files), AUXILIARY lines and recorder lines."""
-    out = {"compactions": set(), "auxiliary": defaultdict(set), "ingests": [], "untagged_compactions": 0}
+    out = {"compactions": set(), "auxiliary": defaultdict(set), "ingests": []}
     for path in paths:
         for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
             m = LOG_LINE.match(line)
-            if not m or not LCM_LOGGER.search(m["logger"] or m["logger2"]):
+            if not m or not LCM_LOGGER.search(m["logger"] or m["logger2"] or m["logger3"]):
                 continue
             sid, msg, at = m["sid"] or m["sid2"], m["msg"], log_time(m["ts"], tz)
             if COMPACTION.match(msg):
-                if sid:
-                    out["compactions"].add((sid, at, msg))  # a line logged to two files counts once
-                else:
-                    out["untagged_compactions"] += 1
+                in_message = MESSAGE_SESSION.search(msg)
+                # A line logged to two files counts once; no session yet means none in the line (ACP stderr).
+                out["compactions"].add((sid or (in_message.group(1) if in_message else None), at, msg))
             if hit := RECLASSIFIED.match(msg):
                 out["auxiliary"][hit.group(1)].add("first_ingest_reclassification")
             if hit := DECISION.match(msg):
@@ -263,6 +270,25 @@ def read_logs(paths, tz=None):
                                        "range": (int(hit["a"]), int(hit["b"])), "rows": int(hit["rows"]),
                                        "pairs": int(hit["pairs"]), "stripped": int(hit["stripped"])})
     return out
+
+
+def attribute_compactions(lines, events):
+    """Give each compaction line without a session the session of the nearest unused driver compress_request whose
+    time it falls within (COMPRESS_REQUEST_WINDOW); a line left without one keeps None (it counts toward compactions,
+    never toward compactions_then_restart). Returns the lines and how many stayed without a session."""
+    requests = sorted((float(e.get("t") or 0), str(e.get("session") or "")) for e in events or ()
+                      if e["kind"] == "compress_request")
+    used, out = set(), []
+    for sid, at in lines:
+        if sid is None and at is not None:
+            near = [(abs(at - t), i) for i, (t, _s) in enumerate(requests) if i not in used
+                    and t - COMPRESS_REQUEST_WINDOW[0] <= at <= t + COMPRESS_REQUEST_WINDOW[1]]
+            if near:
+                i = min(near)[1]
+                used.add(i)
+                sid = requests[i][1]
+        out.append((sid, at))
+    return out, sum(1 for sid, _at in out if sid is None)
 
 
 def auxiliary_sessions(lines: dict) -> tuple[set, set]:
@@ -426,9 +452,11 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
         events = [e for e in events if str(e.get("session") or "") in audited_sessions
                   and (since is None or float(e.get("t") or 0) >= since)]
     kinds = Counter(e["kind"] for e in events) if events is not None else None
-    # Compaction lines: deduplicated, tagged with a scored session, and inside the window when one is given.
-    compaction_lines = sorted((sid, at) for sid, at, _msg in log["compactions"]
-                              if sid in audited_sessions and (since is None or at >= since))
+    # Compaction lines: deduplicated, inside the window when one is given, of an audited session or of none.
+    compaction_lines = sorted(((sid, at) for sid, at, _msg in log["compactions"]
+                               if (sid is None or sid in audited_sessions) and (since is None or at >= since)),
+                              key=lambda c: (c[1], c[0] or ""))
+    compaction_lines, unattributed_compactions = attribute_compactions(compaction_lines, events)
     restarts = None
     if events is not None:
         restarts = defaultdict(list)
@@ -436,7 +464,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
             if e["kind"] in RESTARTS:
                 restarts[group(str(e.get("session") or ""))].append(float(e.get("t") or 0))
     then_restart = "unknown" if not logs or restarts is None else sum(
-        1 for sid, at in compaction_lines if any(t > at for t in restarts.get(group(sid), ())))
+        1 for sid, at in compaction_lines if sid and any(t > at for t in restarts.get(group(sid), ())))
     value = {"turns": turns, "delegated_children": sum(1 for k in buckets["A"] if k in parity),
              "compactions": len(compaction_lines) if logs else "unknown", "compactions_then_restart": then_restart,
              "tool_calls": sum(calls.values()), "tool_call_repeats": sum(n - 1 for n in calls.values()),
@@ -446,9 +474,11 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     value["restarts"] = value["restarts_cold"] + value["restarts_warm"] if kinds is not None else "unknown"
     coverage = {k: {"value": value[k], "floor": f, "met": isinstance(value[k], int) and value[k] >= f}
                 for k, f in FLOORS.items()}
-    coverage_basis = {"compactions": "log lines 'LCM compaction #' of LCM-X's logger, tagged with a scored session, "
-                                     "deduplicated (compaction.py:2910)" if logs else "no log given",
-                      "untagged_compaction_lines": log["untagged_compactions"],
+    coverage_basis = {"compactions": "log lines 'LCM compaction #' of LCM-X's logger, deduplicated (compaction.py:2910);"
+                                     " a line without a session takes its message's session=, else the nearest"
+                                     " driver compress_request, else counts only here" if logs else "no log given",
+                      "compactions_without_session": unattributed_compactions,
+                      "compress_request_window_s": list(COMPRESS_REQUEST_WINDOW),
                       "store_depth0_message_leaves": sum(n for s, n in leaves.items() if group(s) in parity),
                       "delegated_children": "ended, scored #1931 bucket A children",
                       "host_sources": "distinct sessions.source in the window, without subagent and tool",

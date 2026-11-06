@@ -22,9 +22,13 @@ python -m bench.instruments.gate_kit.audit --state-db <hermes home>/state.db --l
   members count: a rotation child in the window is scored without its earlier parent's rows or the copies of them it
   carries. Stored rows under a session the host does not know count when ingested at or after it. Driver events,
   compaction lines and recorder lines count only for audited sessions, at or after it.
-- `--log`: the run's Hermes logs, in either Hermes format (`<asctime> <LEVEL> [<session>] <logger>: <message>` or the
-  verbose `<asctime> - <logger> - <LEVEL> [<session>] - <message>`). A pattern counts only at the start of a message
-  logged by LCM-X's own logger (a `hermes_lcm` module); a line logged to two files counts once.
+- `--log`: the run's Hermes logs, in a Hermes format (`<asctime> <LEVEL> [<session>] <logger>: <message>`, the
+  verbose `<asctime> - <logger> - <LEVEL> [<session>] - <message>`, or the ACP host's stderr
+  `<asctime> [<LEVEL>] <logger>: <message>`, which has no session field). A pattern counts only at the start of a
+  message logged by LCM-X's own logger (a `hermes_lcm` module); a line logged to two files counts once. A compaction
+  line without a session takes the `session=` its message names, else the session of the nearest unused driver
+  `compress_request` it falls within (2 s before to 120 s after the request); else it counts toward `compactions` but
+  not toward `compactions_then_restart` (`coverage_basis.compactions_without_session`).
 - `--log-tz`: the zoneinfo name the log times are written in (for example `UTC` or `Europe/Berlin`). Default: the
   audit machine's local zone. Pass the run host's zone when they differ: it decides whether a compaction or a
   recorder line came before a driver restart event. An unknown zone exits 2.
