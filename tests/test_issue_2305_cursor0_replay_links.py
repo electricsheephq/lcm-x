@@ -410,18 +410,14 @@ def test_22_earlier_rows_are_read_in_one_linear_scan(host):
 
 def test_23_many_identical_copies_link_one_to_one_oldest_first(host):
     # #2335 review: N copies of one payload link one-to-one, oldest target first, without rescanning used targets.
-    _turns(host, "reasoning")
-    before = host.engine._store.get_session_messages(SID)
-    copies = [{"role": "user", "content": "same payload"} for _ in range(40)]
-    host.engine.ingest([{"role": "user", "content": "first head", "timestamp": host.stamp()}, *copies])
-    host.restart()
-    host.engine.ingest([{"role": "user", "content": "different head", "timestamp": host.stamp()}, *copies])
-    rows = host.engine._store.get_session_messages(SID)[len(before):]
-    originals = [r["store_id"] for r in rows if r["content"] == "same payload"][:40]
-    pairs = _pairs(host.engine)
-    linked = [target for _, target in pairs if target in originals]
-    assert len(linked) >= 20 and linked == originals[:len(linked)]  # oldest targets first, none skipped
-    assert len({target for _, target in pairs}) == len(pairs)
+    host.turn(reply="ok")
+    host.live += [{"role": "user", "content": "same payload"} for _ in range(40)]
+    host.engine.ingest(host.live)
+    targets = [r["store_id"] for r in host.engine._store.get_session_messages(SID) if r["content"] == "same payload"]
+    assert len(targets) == 40
+    sources = _ingest_copies(host, [{"role": "user", "content": "same payload"} for _ in range(40)])
+    assert len(sources) == 40
+    assert _pairs(host.engine) == list(zip(sources, targets))  # every copy linked, oldest target first
 
 
 def test_24_stamped_copies_take_the_oldest_allowed_target(host, monkeypatch):
@@ -451,25 +447,78 @@ def test_25_a_rebound_conversation_never_spends_the_previous_conversations_rows(
     # but a replay target must share the copy's conversation as well as its session.
     host.turn(reply="ok")
     earlier = [r["store_id"] for r in host.engine._store.get_session_messages(SID) if r["content"] == "ok"]
-    host.engine.shutdown()
-    host.engine = engine = LCMEngine(config=host.engine._config, hermes_home=str(host.tmp_path / "home"))
-    host.engines.append(engine)
-    engine.on_session_start(SID, platform="telegram", conversation_id="other-conversation", context_length=200_000)
+
+    def rebind():
+        host.engine.shutdown()
+        host.engine = engine = LCMEngine(config=host.engine._config, hermes_home=str(host.tmp_path / "home"))
+        host.engines.append(engine)
+        engine.on_session_start(SID, platform="telegram", conversation_id="other-conversation", context_length=200_000)
+        return engine
+
+    engine = rebind()
     engine.ingest([{"role": "system", "content": "system prompt"},
                    {"role": "user", "content": "different head", "timestamp": host.stamp()},
                    {"role": "assistant", "content": "ok"}])
-    rows = engine._store.get_session_messages(SID)
-    later = [r["store_id"] for r in rows if r["content"] == "ok" and r["store_id"] not in earlier]
-    assert earlier and later  # both conversations stored their own reply
+    later = [r["store_id"] for r in engine._store.get_session_messages(SID)
+             if r["content"] == "ok" and r["store_id"] not in earlier]
+    assert earlier and len(later) == 1  # both conversations stored their own reply
+    assert not [pair for pair in _pairs(engine) if pair[1] in earlier]
+    # A cursor-0 copy in the rebound conversation links to that conversation's row, never to the earlier one.
+    engine = rebind()
+    engine.ingest([{"role": "user", "content": "another head", "timestamp": host.stamp()},
+                   {"role": "assistant", "content": "ok"}])
+    _assert_cursor0(engine)
+    source = engine._store.get_session_messages(SID)[-1]["store_id"]
+    assert (source, later[0]) in _pairs(engine)
     assert not [pair for pair in _pairs(engine) if pair[1] in earlier]
 
 
-def test_26_padded_legacy_conversation_ids_still_link_within_their_conversation(host):
-    # #2335 review: legacy stores can hold a padded (or NULL) id for the same conversation. Ids are compared through
-    # the store's normalizer, so the earlier rows remain targets; a blank id is not a wildcard (test_25).
+@pytest.mark.parametrize("stored_id,links", [
+    ("' ' || conversation_id || ' '", True),  # a padded id for the same conversation
+    ("NULL", False),  # no conversation: it normalizes to '', which never matches a named one
+])
+def test_26_legacy_conversation_ids_link_only_within_their_conversation(host, stored_id, links):
+    # #2335 review: legacy stores can hold a padded id for the same conversation. Ids are compared through the
+    # store's normalizer, so those earlier rows remain targets; a blank or NULL id is not a wildcard (test_25).
     targets = _ok_candidates(host)
     conn = host.engine._store._conn
-    conn.execute("UPDATE messages SET conversation_id = ' ' || conversation_id || ' ' WHERE session_id = ?", (SID,))
+    conn.execute(f"UPDATE messages SET conversation_id = {stored_id} WHERE session_id = ?", (SID,))
     conn.commit()
     sources = _ingest_copies(host, [{"role": "assistant", "content": "ok"}] * 2)
-    assert _pairs(host.engine) == list(zip(sources, targets[:2]))
+    assert len(sources) == 2
+    assert _pairs(host.engine) == (list(zip(sources, targets[:2])) if links else [])
+
+
+def test_27_reasoning_strip_equals_the_regex_it_replaces():
+    # #2335 review: the linear stripper must give exactly what _THINK_BLOCK_RE.sub gives, Unicode case folds included.
+    import random
+    from hermes_lcm import escalation
+
+    pieces = ["<think>", "</think>", "<THINK >", "</Think\n>", "<thinking>", "</thinking>", "<thought>", "</thought>",
+              "<reasoning>", "</reasoning>", "<reaſoning>", "</reaſoning>", "<REASONING_SCRATCHPAD>",
+              "</reasoning_scratchpad>", "<thinK>", "<thİnk>", "</thınk>", "<", ">", "/", "a", " ", "\n",
+              "<think", "think>", "</"]
+    rng = random.Random(2305)
+    for _ in range(20000):
+        text = "".join(rng.choice(pieces) for _ in range(rng.randint(0, 12)))
+        want = escalation._THINK_BLOCK_RE.sub("", text) if text and "<" in text else text
+        assert _strip_reasoning_blocks(text) == want, text
+
+
+def test_28_unclosed_reasoning_tags_are_matched_once_per_spelling(monkeypatch):
+    # #2335 review: the regex rescans to the end for every unclosed opening tag (16,000 took ~17 s under the ingest
+    # write lock). A spelling with no closing tag is tried once; later openings with that spelling are skipped.
+    from hermes_lcm import escalation
+
+    calls = []
+
+    class Counting:
+        def match(self, text, pos):
+            calls.append(pos)
+            return block.match(text, pos)
+
+    block = escalation._THINK_BLOCK_RE
+    monkeypatch.setattr(escalation, "_THINK_BLOCK_RE", Counting())
+    text = "<think>" * 16000 + "<thought>a</thought>" + "<THINK>" * 100 + "tail"
+    assert _strip_reasoning_blocks(text) == "<think>" * 16000 + "<THINK>" * 100 + "tail"
+    assert len(calls) == 2  # one failed <think>, one closed <thought>; <THINK> lowercases to the failed spelling

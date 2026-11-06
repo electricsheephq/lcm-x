@@ -7643,6 +7643,12 @@ class LCMEngine(
                             # Legacy rows may hold a padded or NULL id for the same conversation: compare normalized.
                             new_rows = [(*row[:7], _normalize_conversation_id_value(row[7])) for row in new_rows]
                             keys = {(conv, role, call_id, calls, name) for _, role, _, call_id, calls, name, _, conv in new_rows}
+                            # Only an earlier row whose content or stripped content equals a copy's can be a target,
+                            # so the scan keeps those rows alone: memory is bounded by the batch, not the session.
+                            exact_wanted = {(conv, role, content, call_id, calls, name)
+                                            for _, role, content, call_id, calls, name, _, conv in new_rows}
+                            stripped_wanted = {(conv, role, ingest_ledger.stripped_replay_content(content), call_id, calls, name)
+                                               for _, role, content, call_id, calls, name, _, conv in new_rows}
                             earlier, stripped_earlier = {}, {}
                             # One linear scan over the session's earlier rows (index order), filtered by key in
                             # Python: a per-key join re-scans the key set for every row and holds the lock far longer.
@@ -7653,10 +7659,13 @@ class LCMEngine(
                                 conv = _normalize_conversation_id_value(conv)
                                 if (conv, role, call_id, calls, name) not in keys:
                                     continue
-                                earlier.setdefault((conv, role, content, call_id, calls, name), []).append((sid, stamp))
+                                key = (conv, role, content, call_id, calls, name)
+                                if key in exact_wanted:
+                                    earlier.setdefault(key, []).append((sid, stamp))
                                 stripped = ingest_ledger.stripped_replay_content(content)
-                                if stripped is not None:
-                                    stripped_earlier.setdefault((conv, role, stripped, call_id, calls, name), []).append((sid, stamp))
+                                key = (conv, role, stripped, call_id, calls, name)
+                                if stripped is not None and key in stripped_wanted:
+                                    stripped_earlier.setdefault(key, []).append((sid, stamp))
                             used = {row[0] for row in conn.execute(
                                 "SELECT related_store_id FROM message_relations "
                                 "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if conn.execute(

@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -496,17 +497,47 @@ def test_p1h_stripped_tool_result_link_uses_the_stored_rows():
 
 def test_p1h_shared_evidence_map_is_merged_once():
     # score() attaches one shared stored-row map to every surplus group; it must be read once, not once per group.
-    class CountingMap(dict):
+    # A Mapping, not a dict subclass: dict.update copies a dict subclass without calling any method we could count.
+    class CountingMap(Mapping):
         reads = 0
 
-        def items(self):
+        def __init__(self, rows):
+            self.rows = rows
+
+        def __getitem__(self, key):
+            return self.rows[key]
+
+        def __len__(self):
+            return len(self.rows)
+
+        def __iter__(self):
             CountingMap.reads += 1
-            return super().items()
+            return iter(self.rows)
 
     shared = CountingMap({1: ("S0", "user", "a"), 2: ("S0", "user", "a")})
     groups = [(("user", f"k{i}"), 0, [1], [], shared) for i in range(50)]
     multiset.split_surplus(groups, [])
-    assert CountingMap.reads <= 1
+    assert CountingMap.reads == 1
+
+
+def test_p1h_replay_links_are_checked_against_stored_content(tmp_path, monkeypatch):
+    # #2335 review: the product links on stored bytes. When resolution expands only the older row's placeholder,
+    # the split must still compare the stored contents, or a linked copy would count as silent.
+    fixture.make(tmp_path, rows=[("assistant", "[stored]"), ("assistant", "<think>r</think>[stored]")], events=[])
+    resolve, seen = bars.externalized.resolve, {}
+
+    def expand_first(rows, home):
+        out, ext, ids = resolve(rows, home)
+        return [(r[0], r[1], r[2], "expanded", *r[4:]) if r[0] == 1 else r for r in out], ext, ids
+
+    def split(groups, relations, rows=None):
+        seen.update(rows)
+        return {}
+
+    monkeypatch.setattr(bars.externalized, "resolve", expand_first)
+    monkeypatch.setattr(bars.multiset, "split_surplus", split)
+    bars.score({"bars": ["B2"], "plugin": {}}, tmp_path / "cell")
+    assert seen == {1: ("S0", "assistant", "[stored]"), 2: ("S0", "assistant", "<think>r</think>[stored]")}
 
 
 def test_silent_example_names_unexplained_surplus_copy():

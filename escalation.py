@@ -442,12 +442,34 @@ class SummarySpendGuard:
             self._backoff_until = 0.0
 
 
+_THINK_OPEN_RE = re.compile(_THINK_BLOCK_RE.pattern.split(".*?")[0], re.IGNORECASE)
+
+
 def _strip_reasoning_blocks(text: str) -> str:
     """Remove <think>/<thinking>/<reasoning>/<thought>/<REASONING_SCRATCHPAD>
-    blocks from ``text``. Idempotent and safe on text without any tags."""
+    blocks from ``text``. Idempotent and safe on text without any tags.
+
+    Equal to ``_THINK_BLOCK_RE.sub("", text)`` in linear time (#2305 runs it under the ingest write lock).
+    The regex alone rescans to the end for every unclosed opening tag, which is quadratic. A tag spelling
+    that once found no closing tag finds none later either, so later openings with that spelling are skipped.
+    """
     if not text or "<" not in text:
         return text
-    return _THINK_BLOCK_RE.sub("", text)
+    out, last, at, unclosed = [], 0, 0, set()
+    while (opening := _THINK_OPEN_RE.search(text, at)) is not None:
+        # The backreference compares lowercased characters, so the lowercased tag names its closing tags.
+        tag = opening.group("tag").lower()
+        block = None if tag in unclosed else _THINK_BLOCK_RE.match(text, opening.start())
+        if block is None:
+            unclosed.add(tag)
+            at = opening.start() + 1
+            continue
+        out.append(text[last:opening.start()])
+        last = at = block.end()
+    if not out:
+        return text
+    out.append(text[last:])
+    return "".join(out)
 
 
 def stripped_replay_content(content):
