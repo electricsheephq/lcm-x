@@ -5858,6 +5858,7 @@ class LCMEngine(
 
     def get_status(self) -> Dict[str, Any]:
         status = super().get_status()
+        status["ingest_ledger"] = dict(getattr(self, "_ingest_ledger_counters", {}))
         try:
             status["ingest_lock"] = self._ingest_lock_status()
         except Exception as exc:
@@ -7528,6 +7529,36 @@ class LCMEngine(
         try:
             # Register after the inner savepoint releases, including the crossed return.
             with committed_delta(), _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
+                if attempt.get("cursor0_batch") and attempt["stored"]:
+                    # #2305: annotate the batch, never consume or change a message.
+                    # Compare stored bytes (including tool fields), not the host view's digest.
+                    first = min(attempt["stored"].values())
+                    earlier = {}
+                    for sid, role, content, call_id, calls, stamp in conn.execute(
+                        "SELECT store_id,role,content,tool_call_id,tool_calls,observed_at "
+                        "FROM messages WHERE session_id=? AND store_id<? ORDER BY store_id",
+                        (self._session_id, first)):
+                        earlier.setdefault((role, content, call_id, calls), []).append((sid, stamp))
+                    used = {row[0] for row in conn.execute(
+                        "SELECT related_store_id FROM message_relations "
+                        "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if conn.execute(
+                            "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else set()
+                    pairs, unlinked = [], 0
+                    for sid, role, content, call_id, calls, stamp in conn.execute(
+                        "SELECT store_id,role,content,tool_call_id,tool_calls,observed_at "
+                        "FROM messages WHERE session_id=? AND store_id IN "
+                        "(SELECT value FROM json_each(?)) ORDER BY store_id",
+                        (self._session_id, json.dumps(sorted(attempt["stored"].values())))):
+                        candidates = earlier.get((role, content, call_id, calls), ())
+                        target = next((old for old, old_stamp in candidates if old not in used
+                                       and (stamp is None or old_stamp is None or stamp == old_stamp)), None)
+                        if target is not None:
+                            pairs.append([(sid, "possible_replay_of", target, None, None)])
+                            used.add(target)
+                        elif candidates:
+                            unlinked += 1
+                    delta["ledger.replay_pairs.cursor0"] += store.add_message_relations(pairs)
+                    delta["ledger.replay_pairs.cursor0_unlinked"] += unlinked
                 key = "session_lineage:" + str(self._session_id)
                 persisted = conn.execute("SELECT value FROM ledger_meta WHERE key=?", (key,)).fetchone()
                 lineage = persisted[0] if persisted else attempt["lineage"]
@@ -8156,6 +8187,12 @@ class LCMEngine(
 
         if getattr(self, "_ingest_ledger_attempt", None) is not None:
             try:
+                # Freeze this transaction's decision; warm appends can retain an older status.
+                self._ingest_ledger_attempt["cursor0_batch"] = (
+                    reconciled_existing_session and cursor == 0
+                    and self._last_ingest_reconciliation.get("action") == "persisted batch"
+                    and self._last_ingest_reconciliation.get("reason") == "persisted ambiguous delta"
+                    and self._last_ingest_reconciliation.get("cursor") == 0)
                 self._ingest_ledger_attempt["matched"] = {
                     idx: int(rows[0]["store_id"]) for idx, rows in (anchor_plan or {}).get("matched", {}).items() if len(rows) == 1}
             except Exception as exc:
