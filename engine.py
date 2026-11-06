@@ -233,9 +233,9 @@ def _stamp_generated_model_only(messages, generated_rows, *, copy_rows: bool = F
     Hermes keeps the first row's metadata. A group containing human text must
     remain visible; a group made entirely by LCM can stay model-only.
     """
-    key = _model_only_display_metadata_key() if generated_rows else None
-    if key is None:
+    if not generated_rows:
         return
+    key = _model_only_display_metadata_key()
     generated_ids = {id(row) for row in generated_rows}
     hide_keys = _model_only_display_metadata_keys()
     start = 0
@@ -256,6 +256,8 @@ def _stamp_generated_model_only(messages, generated_rows, *, copy_rows: bool = F
                 continue
             original = row.get("display_metadata") or {}
             if generated_only:
+                if key is None:
+                    continue
                 metadata = {**original, key: True}
             else:
                 metadata = {k: v for k, v in original.items() if k not in hide_keys}
