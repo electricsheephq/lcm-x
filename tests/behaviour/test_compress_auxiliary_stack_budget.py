@@ -327,7 +327,6 @@ def test_finish_phase_callbacks_preserve_auxiliary_at_host_depth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str,
 ) -> None:
     """Measure real finish-phase estimator, image and summary host paths."""
-    import ast
     import inspect
     import json
     import re
@@ -340,17 +339,6 @@ def test_finish_phase_callbacks_preserve_auxiliary_at_host_depth(
     host_estimate = survival._host_estimate
     harness.pin_char_counter(monkeypatch)
     monkeypatch.setattr(survival, "_host_estimate", host_estimate)
-    compaction = importlib.import_module("hermes_lcm.compaction")
-    source = inspect.getsource(compaction)
-    driver = next(n for n in ast.walk(ast.parse(source))
-                  if isinstance(n, ast.FunctionDef) and n.name == "_compress_impl")
-    f1 = next((n for n in driver.body if isinstance(n, ast.If)
-               and ast.unparse(n.test) == "not leaf_compacted_this_turn"), None)
-    f2 = next((n.lineno for n in driver.body if isinstance(n, ast.Assign)
-               and ast.unparse(n.targets[0]) == "pre_condensation_context"), None)
-    f3 = next((n.lineno for n in driver.body if isinstance(n, ast.Expr)
-               and isinstance(n.value, ast.Call)
-               and ast.unparse(n.value.func) == "self._refresh_raw_backlog_debt"), None)
     agent = _LateAuxiliaryAgent()
     distances: dict[str, dict[str, int]] = {}
     paths: dict[str, dict[str, list[str]]] = {}
@@ -385,16 +373,6 @@ def test_finish_phase_callbacks_preserve_auxiliary_at_host_depth(
                 if name in {"_finish_without_leaf", "_condense_after_leaves", "_finish_with_leaf"}:
                     phase = {"_finish_without_leaf": "F1", "_condense_after_leaves": "F2",
                              "_finish_with_leaf": "F3"}[name]
-                    break
-                if name == "_compress_impl":
-                    if f3 is not None and frame.f_lineno >= f3:
-                        phase = "F3"
-                    elif f2 is not None and frame.f_lineno >= f2:
-                        phase = "F2"
-                    elif f1 is not None and f1.lineno <= frame.f_lineno <= f1.end_lineno:
-                        phase = "F1"
-                    else:
-                        return
                     break
                 chain.append(name)
                 frame = frame.f_back
