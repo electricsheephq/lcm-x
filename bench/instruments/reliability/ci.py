@@ -113,7 +113,7 @@ def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[di
         where = f"{r['verdict']} {r['host']} {r['cell']} ({r.get('transport', 'in-process')})"
         if r["verdict"] == "ERROR":
             problems.append(f"{where}: {str(r.get('reason', ''))[:200]}")
-        elif r["verdict"] == "FAIL" and in_gate_set(r["cell"]):
+        elif (r["verdict"] == "FAIL" or "B2S" in CELL_GATE.get(r["cell"], ("", ()))[1]) and in_gate_set(r["cell"]):
             targets = set(r.get("targets") or [])
             open_targets = targets & open_issues
             transport = r.get("transport", "in-process")
@@ -130,6 +130,15 @@ def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[di
                     deficit = b2.get("deficit_rows")
                     if deficit is None or deficit > 0:
                         failed.add("B2D")
+                if "B2S" in bars:
+                    b2 = (r.get("numbers") or {}).get("B2") or {}
+                    counts = [b2.get(k) for k in ("deficit_rows", "silent_surplus_rows", "visible_surplus_rows")]
+                    tools = b2.get("tool_missing_rows", 0)
+                    external = (b2.get("externalized") or {}).get("deficit_rows", 0)
+                    if any(type(n) is not int or n < 0 for n in counts) or counts[0] or counts[1] or tools or external:
+                        failed.add("B2S")
+                if not failed and r["verdict"] != "FAIL":
+                    continue
                 if failed:
                     failed &= set(bars) | ({"B9"} if lane == "acp-process" and r["host"] == "upstream-uid" else set())
                     if not failed:

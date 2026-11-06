@@ -97,33 +97,44 @@ def bind(atts: list[dict], lineage_of=lambda a: "chat", *, license_wire_notices:
     return {"gaps": gaps, "failures": failures, "expected": expected, "loose": loose, "wire_notices": wire_notices}
 
 
-def stored_keys(rows, lineage=lambda sid: "chat") -> Counter:
+def stored_keys(rows, lineage=lambda sid: "chat", *, store_ids=None) -> Counter:
     """rows: (store_id, session_id, role, content, tool_calls, tool_call_id). An assistant row whose ``tool_calls``
     is not a JSON list of objects is one ``(lineage, "malformed_tool_calls", store_id)`` key: never expected, so it is
     B2 surplus, never silently "no calls". Only SQL NULL means no calls: ``''`` is malformed text."""
     keys = Counter()
+
+    def record(key, store_id):
+        keys[key] += 1
+        if store_ids is not None:
+            store_ids.setdefault(key, []).append(store_id)
+
     for store_id, session, role, content, calls, call_id in rows:
         g = lineage(session)
         if role == "tool":
-            keys[(g, "tool", call_id, hashlib.sha256((content or "").encode()).hexdigest())] += 1
+            record((g, "tool", call_id, hashlib.sha256((content or "").encode()).hexdigest()), store_id)
         elif role == "assistant" and calls is not None:
             try:
                 entries = json.loads(calls)
             except ValueError:
                 entries = None
             if not isinstance(entries, list) or not all(isinstance(c, dict) for c in entries):
-                keys[(g, "malformed_tool_calls", store_id)] += 1
+                record((g, "malformed_tool_calls", store_id), store_id)
                 continue
             for c in entries:
                 fn = c.get("function") or {}
-                keys[(g, "call", c.get("id"), fn.get("name"), canon(fn.get("arguments") or "{}"))] += 1
+                record((g, "call", c.get("id"), fn.get("name"), canon(fn.get("arguments") or "{}")), store_id)
     return keys
 
 
-def compare(expected: Counter, loose: set, stored: Counter) -> dict:
+def compare(expected: Counter, loose: set, stored: Counter, *, store_ids=None, surplus_keys=None) -> dict:
     missing = {k: n - stored[k] for k, n in expected.items() if stored[k] < n}
     surplus = {k: stored[k] - expected[k] - (1 if k in loose else 0) for k in stored
                if stored[k] > expected[k] + (1 if k in loose else 0)}
+    if surplus_keys is not None:
+        for key, n in surplus.items():
+            role = "tool" if key[1] == "tool" else "assistant"
+            digest = hashlib.sha256(json.dumps(key[1:], sort_keys=True).encode()).hexdigest()
+            surplus_keys.append(((role, digest), n, list(store_ids[key])))
     return {"tool_items": sum(expected.values()), "tool_missing_rows": sum(missing.values()),
             "tool_surplus_rows": sum(surplus.values()),
             "tool_missing": [list(k[:4]) for k in sorted(missing, key=json.dumps)[:5]],

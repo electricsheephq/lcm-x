@@ -246,7 +246,7 @@ def embedded_credits(texts, want, stored_rows, stored, paired, host):
 
 
 def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict | None = None,
-          *, _key=None) -> dict:
+          *, _key=None, surplus_keys=None) -> dict:
     """``expected``: (role, text) items; ``stored_rows``: (store_id, session_id, role, content); ``host``: the
     lineage's host occurrences (key -> {"n", "ids"}), or None."""
     stored_rows = sorted(stored_rows, key=lambda r: r[0])
@@ -308,12 +308,16 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
                 entry["licensed"] = lic["licensed"]
             if have - n > entry.get("licensed", 0):
                 duplicated.append(entry)
+                if surplus_keys is not None:
+                    surplus_keys.append((key, have - n - entry.get("licensed", 0), list(stored[key])))
     extra = []
     for k, v in stored.items():
         if k not in want:
             lic = licence(k, len(v), 0, host, v, spent[k])
             licensed += [lic] if lic else []
             if len(v) > (lic or {}).get("licensed", 0):
+                if surplus_keys is not None:
+                    surplus_keys.append((k, len(v) - (lic or {}).get("licensed", 0), list(v)))
                 extra.append({"role": k[0], "copies": len(v) - (lic or {}).get("licensed", 0), "store_ids": v[:6]})
     # #804: a held user composite whose parts the host durably stored apart is stored here as those parts, each
     # licensed by host parity; the composite key is then not a deficit. Only the occurrences the host did not store
@@ -429,3 +433,60 @@ def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
             out.update(verdict="FAIL", out_of_order={"transcript_index": index, "role": role})
             break
     return out
+
+
+def split_surplus(groups, relations):
+    """Maximum matching of relation witnesses to rows, with each key capped at its unlicensed surplus.
+
+    Flow: key quota -> unique self/pair witness -> stored row (capacity one globally).
+    Full ID lists include expected copies: the maximum decides which copies can be surplus.
+    """
+    graph, source, sink = defaultdict(dict), ("source",), ("sink",)
+
+    def edge(a, b, capacity=1):
+        if b not in graph[a]:
+            graph[a][b], graph[b][a] = capacity, 0
+
+    self_ids = {sid for sid, kind, _other in relations if kind in ("supersedes", "generated_unproven")}
+    pairs = sorted({tuple(sorted((sid, other))) for sid, kind, other in relations
+                    if kind == "possible_replay_of" and other is not None and sid != other})
+    for index, (_key, surplus, ids) in enumerate(groups):
+        quota, held = ("key", index), set(ids)
+        edge(source, quota, surplus)
+        witnesses = [("self", sid) for sid in sorted(held & self_ids)]
+        witnesses += [("pair", a, b) for a, b in pairs if a in held and b in held]
+        for witness in witnesses:
+            before, after = ("in", witness), ("out", witness)
+            edge(quota, before)
+            edge(before, after)
+            for sid in witness[1:]:
+                row = ("row", sid)
+                edge(after, row)
+                edge(row, sink)
+    visible = 0
+    while True:
+        parent, queue = {source: None}, [source]
+        for node in queue:
+            for nxt, capacity in graph[node].items():
+                if capacity > 0 and nxt not in parent:
+                    parent[nxt] = node
+                    queue.append(nxt)
+            if sink in parent:
+                break
+        if sink not in parent:
+            break
+        node = sink
+        while parent[node] is not None:
+            previous = parent[node]
+            graph[previous][node] -= 1
+            graph[node][previous] += 1
+            node = previous
+        visible += 1
+    examples = []
+    for index, (key, surplus, ids) in enumerate(groups):
+        silent = graph[source][("key", index)]
+        # Deterministic representatives from rows not explained by the matching.
+        unexplained = [sid for sid in sorted(set(ids)) if graph[("row", sid)].get(sink, 1)]
+        examples += [{"store_id": sid, "role": key[0], "sha256": key[1]} for sid in unexplained[:silent]]
+    return {"visible_surplus_rows": visible, "silent_surplus_rows": sum(n for _k, n, _ids in groups) - visible,
+            "silent_surplus_examples": sorted(examples, key=lambda e: (e["store_id"], e["role"], e["sha256"]))[:10]}

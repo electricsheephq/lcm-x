@@ -98,6 +98,20 @@ the host reported `interrupted`. Any other assistant row is surplus.
   existing edge-whitespace rule; tool-result hashes remain exact). Missing/unreadable payloads or
   absent content are real deficits and fail B2; `numbers.B2.externalized` reports resolved/unresolved
   counts, loss reasons and up to 10 store ids, separately from ordinary deficits.
+- **B2 visibility split (P1h, design r3.5 §5).** `numbers.B2.visible_surplus_rows` and
+  `silent_surplus_rows` partition only the existing unlicensed user, assistant and tool surplus, across all
+  stored lineages. B2's verdict, existing numbers and `failed_bars.B2` stay unchanged. Host-parity licences,
+  embedded credits, merges and projections retain their existing accounting.
+  `supersedes` / `generated_unproven` explain their own row; an unordered `possible_replay_of` pair explains
+  one endpoint only when both rows have the same B2 key in the same lineage. `composite`, `split`, foreign-key
+  pairs and absent relation tables explain nothing. Maximum matching assigns distinct witnesses to distinct
+  stored rows, capped by each key's unlicensed surplus; a stored row explains at most one copy, including
+  assistant rows with multiple tool entries. Duplicate/reversed pairs and repeated self relations add no capacity.
+  Complete store-ID lists drive this split; existing truncated display lists stay as they are.
+  `silent_surplus_examples` merges user, assistant and tool examples (up to 10, sorted by store ID/role/hash):
+  `{store_id, role, sha256}`. Tool hashes are SHA256 of `json.dumps(key[1:], sort_keys=True)` (the existing
+  tool key without its lineage, with default JSON separators); call/malformed-call roles are `assistant`.
+  Examples are deterministic representatives among rows left unexplained by the matching.
 - **Host-parity licence (D-A, DESIGN-436 REVISION 2 P-HOST; `scorers/host_parity.py`).** A stored USER-row surplus
   of a B2 key (or a B1 user tag) in lineage L is licensed only up to what the cell's own host state.db holds in L:
   `min(surplus, host_count - expected)`, floored at 0. host_count is what one host view holds: the most ACTIVE rows
@@ -376,6 +390,11 @@ at B1/B2. The last three gate on UID-capable hosts; stamp-only failures remain e
 and #1501/#1506 targets via `ISSUE_HOSTS`. Other continuity cells remain outside the gate.
 On runtime hosts, R1 `publication-failure/rotation-child-persistent` gates only on derived `B2D`: a B2 FAIL
 with a positive or missing deficit count; B1 mismatches and B2 surplus remain accepted under #1588, independently of #1797's open state.
+
+`B2S` is an available exact-cell CI predicate beside `B2D`: any deficit (including tool/externalized
+loss), positive silent surplus, or missing/invalid visibility split fails closed. Visible surplus alone
+passes B2S while still failing B2. B2S checks receipts even on a reported PASS; this change promotes no
+`CELL_GATE` entry and does not prove that the P1 gate passes.
 
 ### Claim boundary
 R2 proves the plugin's behaviour through a real `hermes acp` process on the pinned host shas, with every model route
