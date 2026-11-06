@@ -873,6 +873,8 @@ def register(ctx):
                                 return
 
                 if not result.used:
+                    if result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT:
+                        engine._log_session_ingest_outcome(session_id, reason="resident_engine_conflict")
                     logger.warning(
                         "LCM post_llm_call skipped ingest: stable engine use ended with %s",
                         result.status.value,

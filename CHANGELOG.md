@@ -6,11 +6,13 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: compaction no longer leaves its per-pass message-to-store-id map in engine state after the pass. A later ingest could match a reused memory address against that stale map and store a carried "message ignored" placeholder as a real row (an extra row, nothing lost; v0.30.0 "0 silent surplus") (#2344).
 - Fix: `/lcm doctor clean apply`, `/lcm doctor repair apply`, the backup flush and the doctor FTS integrity checks take the store write lock, so a command that lands during a multi-row ingest waits for it to commit instead of rolling back or half-committing its rows (#2345).
 - Fix: the session-end raw-flush warning reports `unflushed=unknown` while the ingest cursor awaits reconciliation, and the count is described as a cursor-based estimate, not a durability count (#1364).
 - Fix: opt-in pre-compaction extraction installs its absolute deadline as the host stream deadline, so a slowly streaming extraction call stops at that deadline, as summary calls already do (#1149).
 - Fix: on hosts that advertise no model-only display key, a stale `model_only` marker is cleared from generated rows in a mixed user group, so merged human text stays visible (#1436).
 - New: opt-in `recall_delivery_order="time"` / `LCM_RECALL_DELIVERY_ORDER=time` delivers the same selected `lcm_recall` hits oldest to newest by host observation time, with untimed hits and summaries last. The default `score`, session delivery, and internal recall retain their existing order.
+- New: per-engine session decision and first-store/skipped INFO logs identify bind and bypass rules without message or pattern text (#2042).
 
 - Removed: cache-friendly follow-on condensation and transcript GC (#1246); their keys remain parsed and ignored with one warning per process when enabled, and legacy GC placeholders remain readable.
 

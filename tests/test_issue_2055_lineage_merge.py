@@ -472,3 +472,33 @@ def test_merge_ordinal_overflow_keeps_both_histories(engines):
     assert adopt(engine) == P
     assert ledger_state(engine) == before and count(engine, "lineage_merge_failed") == 1
     assert not getattr(engine, "_ledger_adopted", ())
+
+
+def test_p1_gate_failed_adoption_then_later_ingests(engines, monkeypatch):
+    from tests.p1_gate import expect_from_view, record, store_outcome
+
+    engine = engines(sessions=[])
+    view = history()
+    engine.ingest(deepcopy(view[:2]))
+    resolution(engine, monkeypatch, L)
+    merge = ledger.merge_provisional
+    fired = []
+
+    def fail(*args, **kwargs):
+        merge(*args, **kwargs)
+        fired.append(True)
+        raise sqlite3.OperationalError("injected adoption savepoint failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger, "merge_provisional", fail)
+        engine.ingest(deepcopy(view[:3]))
+    assert fired and count(engine, "lineage_merge_failed") >= 1
+    assert meta(engine, "adopted_from:" + P) is None
+    assert {row["lineage"] for row in sql_rows(engine, "occurrence_bindings")} == {P}
+    engine.ingest(deepcopy(view))
+    view += [_m("user", "new turn", 8.), _m("assistant", "new reply", 9.)]
+    engine.ingest(deepcopy(view))
+    assert contents(engine) == [row["content"] for row in view]
+    outcome = store_outcome(engine._store._conn, expect_from_view(view, "conv"))
+    record(dict(family="savepoint", boundary="adoption"), outcome, engine)
+    assert outcome["loss"] == outcome["silent"] == 0, outcome

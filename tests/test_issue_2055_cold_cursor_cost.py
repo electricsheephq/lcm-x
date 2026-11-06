@@ -131,7 +131,9 @@ def test_p1h_lock_bar_replay_and_new_rows(engines, monkeypatch):
             suffix = [
                 _m("user" if i % 2 == 0 else "assistant", f"new row {turn}:{i}", float(50001 + turn * 2000 + i))
                 for i in range(new_count)]
-            incoming = suffix if shape == "new_rows" else view + suffix
+            if shape == "stored_view_suffix":
+                view += suffix
+            incoming = suffix if shape == "new_rows" else view
             if shape != "new_rows":
                 force_today(engine, monkeypatch)
             engine._ingest_messages([dict(row) for row in incoming])
