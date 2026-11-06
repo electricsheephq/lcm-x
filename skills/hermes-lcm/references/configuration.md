@@ -56,6 +56,13 @@ refused before links or host calls. Native Hermes CLI aliases remain available.
 
 ## High-impact controls
 
+Under `lcm:` in `config.yaml`, `large_output_active_replay_stub_threshold_tokens`
+(first sight; default 10,000) and `large_output_active_replay_stub_aged_threshold_tokens`
+(at compaction; default 2,000) accept integer token thresholds of at least 500.
+Their corresponding `LCM_` environment keys take precedence. Invalid values keep
+the declared default and report a configuration warning. Aged `0` uses the first-sight
+value; an aged value above first-sight is capped at first-sight when used.
+
 Local embeddings are on by default, with provider `fastembed`. The configured
 model remains empty; only fastembed supplies the effective default
 `BAAI/bge-small-en-v1.5`. Explicit models win with an explicit provider; runtime
