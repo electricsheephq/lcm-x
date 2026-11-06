@@ -1568,11 +1568,14 @@ LCM-X memory while Hermes keeps running. It is a stdio MCP server over ONE store
 and serves five tools with their production schemas and outputs: `lcm_recall`,
 `lcm_grep`, `lcm_expand`, `lcm_load_session` and `lcm_describe`.
 
-Register it with the Hermes venv Python (3.10 or newer; an older interpreter
+The reader needs a source checkout of this repository (`git clone
+https://github.com/electricsheephq/lcm-x`): the Hermes catalog payload does not
+carry `scripts/`, so a catalog install has no `scripts/lcm_x_mcp.py`. Register it
+from the checkout with the Hermes venv Python (3.10 or newer; an older interpreter
 exits with one line saying so):
 
 ```bash
-claude mcp add lcm-x -- <hermes-venv-python> <plugin_dir>/scripts/lcm_x_mcp.py \
+claude mcp add lcm-x -- <hermes-venv-python> <lcm-x-checkout>/scripts/lcm_x_mcp.py \
   --store <path/to/lcm.db> --hermes-home <HERMES_HOME> [--log-dir <dir>]
 ```
 

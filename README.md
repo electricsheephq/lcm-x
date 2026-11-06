@@ -1097,11 +1097,14 @@ when those sources still belong to a previous session.
 
 `scripts/lcm_x_mcp.py` is a stdio MCP server over one Hermes profile's LCM-X
 store. It serves `lcm_recall`, `lcm_grep`, `lcm_expand`, `lcm_load_session` and
-`lcm_describe` with the same schemas and outputs as inside Hermes. Run it with the
-Hermes venv Python (3.10 or newer):
+`lcm_describe` with the same schemas and outputs as inside Hermes. It is not in
+the Hermes catalog payload, so a catalog install has no `scripts/lcm_x_mcp.py`:
+run it from a source checkout of this repository (`git clone
+https://github.com/electricsheephq/lcm-x`), with the Hermes venv Python (3.10 or
+newer):
 
 ```bash
-claude mcp add lcm-x -- <hermes-venv-python> <plugin_dir>/scripts/lcm_x_mcp.py \
+claude mcp add lcm-x -- <hermes-venv-python> <lcm-x-checkout>/scripts/lcm_x_mcp.py \
   --store <path/to/lcm.db> --hermes-home <HERMES_HOME>
 ```
 
