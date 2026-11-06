@@ -225,8 +225,10 @@ either it records `{"kind": "error", "detail": "lcm_inactive entry=<acp|tui> sou
 gateway logs to `<home>/logs/agent.log`. The run ends with stdin EOF to both hosts (a `host_exit` event each), so the
 gateway ends its sessions before the audit reads the home.
 
-**Exit-3 recovery.** Raise `plugins.load_timeout_seconds` in the prepared home and rerun with a new `--events` path.
-Existing log bytes are excluded from inactive-host detection. Do not combine failed-run coverage with a fresh run:
+**Exit-3 recovery.** Raise `plugins.load_timeout_seconds` and rerun with a new `--events` path, preferably in a fresh
+prepared home. The audit scores every session in `state.db`, not only those in the events file, so in a retained home
+record the retry's start time and pass it to the audit as `--since`; otherwise the failed run's sessions read as
+deficits. Existing log bytes are excluded from inactive-host detection. Do not combine failed-run coverage with a fresh run:
 use `--append-events` only when intentionally retaining the earlier events and accounting for them in the audit.
 
 **Tests** (`tests/test_drive.py`): the planner (floors x1.2, deterministic, repeats, restart placement), the executor
