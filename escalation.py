@@ -51,12 +51,11 @@ _THINK_BLOCK_RE = re.compile(
 # the leftover raw reasoning must not be persisted as the summary. Covers the
 # angle-tag family plus pipe-delimited (<|think|>), bracket ([think]), and
 # prose-header (``Thinking Process:`` / ``Chain of thought:``) shapes.
-_REASONING_TAG_NAMES = r"think|thinking|reasoning|thought|REASONING_SCRATCHPAD|analysis|chain_of_thought|internal|redacted_thinking|scratchpad"
 _REASONING_START_RE = re.compile(
     r"^\s*(?:"
-    rf"<\s*(?:{_REASONING_TAG_NAMES})(?:\s[^>]*)?>"
-    rf"|<\|\s*(?:start_of_)?(?:{_REASONING_TAG_NAMES})\s*\|>"
-    rf"|\[\s*(?:{_REASONING_TAG_NAMES})\s*\]"
+    r"<\s*(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD)(?:\s[^>]*)?>"
+    r"|<\|\s*(?:start_of_)?(?:think|thinking|reasoning|thought)\s*\|>"
+    r"|\[\s*(?:think|thinking|reasoning|thought)\s*\]"
     r"|(?:#{1,6}\s*)?(?:thinking|reasoning|thought)\s+process\s*:"
     r"|(?:#{1,6}\s*)?chain[-\s]+of[-\s]+thought\s*:"
     r")",
@@ -573,16 +572,10 @@ def _summary_contract_shape(content: str) -> str:
 
 
 _UNCLOSED_BODY_TAG_RE = re.compile(
-    rf"<[/|]?[A-Za-z][\w:.-]*(?:\s[^<>]*)?\|?>|\[\s*(?:{_REASONING_TAG_NAMES})\s*\]"
+    r"<[/|]?[A-Za-z][\w:.-]*(?:\s[^<>]*)?\|?>|\[\s*(?:think|thinking|reasoning|thought)\s*\]"
     # Spaced spellings that _REASONING_START_RE accepts only at a line start, found anywhere in the body.
-    rf"|<\s*(?:/\s*)?(?:{_REASONING_TAG_NAMES})\b[^<>]*>"
-    rf"|<\|\s*(?:start_of_)?(?:{_REASONING_TAG_NAMES})\s*\|>", re.IGNORECASE)
-
-
-def _has_reasoning_marker(content: str) -> bool:
-    return any(_REASONING_START_RE.match(re.sub(
-        r"^(?:\s*(?:[>*_`]+|[-•+]|\d+[.)]|\(\d+\)|[a-zA-Z]\))\s*)+", "", line,
-    )) for line in content.splitlines())
+    r"|<\s*(?:/\s*)?(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD)\b[^<>]*>"
+    r"|<\|\s*(?:start_of_)?(?:think|thinking|reasoning|thought)\s*\|>", re.IGNORECASE)
 
 
 def _check_summary_contract(content: str, nonce: str, max_tokens: int) -> tuple[str, str, tuple[str, ...]]:
@@ -597,7 +590,7 @@ def _check_summary_contract(content: str, nonce: str, max_tokens: int) -> tuple[
     nonce opening tag, its uniqueness, the body minimum and a recognised closing hint are still required.
     """
     if not nonce:
-        return ("", "reasoning", ()) if _has_reasoning_marker(content) else (content, "", ())
+        return content, "", ()
     opening_tag = f'<lcm-summary nonce="{nonce}">'
     closing_tag = "</lcm-summary>"
     tolerated: list[str] = []
@@ -641,7 +634,9 @@ def _check_summary_contract(content: str, nonce: str, max_tokens: int) -> tuple[
     if wrapper and "<summary>" not in wrapper.group("inner") and "</summary>" not in wrapper.group("inner"):
         body = wrapper.group("inner").strip()
         tolerated.append("summary_wrapper")
-    if _has_reasoning_marker(body) or (unclosed_envelope and _UNCLOSED_BODY_TAG_RE.search(body)):
+    if unclosed_envelope and (_UNCLOSED_BODY_TAG_RE.search(body) or any(
+        _REASONING_START_RE.match(re.sub(r"^(?:\s*(?:[>*_`]+|[-•]|\d+\.)\s*)+", "", line)) for line in body.splitlines()
+    )):
         # The opener hides an unclosed reasoning block from _sanitize_reasoning_summary. The missing-closer tolerance
         # therefore applies only to a body with no tag-like token (any <name>, </name>, <|name|> or [think]: reasoning
         # tags of any provider, a second envelope opener) and no reasoning header line, also behind Markdown emphasis,

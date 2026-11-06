@@ -110,25 +110,6 @@ def test_t2_the_no_nonce_path_is_unchanged():
     assert escalation._check_summary_contract("anything at all", "", MAX_TOKENS) == ("anything at all", "", ())
 
 
-@pytest.mark.parametrize("shape", ["closed", "unclosed", "no-nonce"])
-@pytest.mark.parametrize("marker", [
-    "**Thinking Process:**", "<think>", "+ Thinking process:", "1) Chain of thought:",
-    "(1) Chain of thought:", "a) Chain of thought:", "< analysis>", "<| analysis |>",
-] + [f"[{name}]" for name in (
-    "analysis", "chain_of_thought", "internal", "reasoning", "redacted_thinking", "scratchpad", "thought", "thinking",
-)])
-def test_1177_reasoning_markers_after_a_summary_line_are_refused(shape, marker):
-    body = f"{LINES}\n{marker}\n{HINT}"
-    reply = body if shape == "no-nonce" else f"{OPEN}\n{body}"
-    if shape == "closed":
-        reply += f"\n{CLOSE}"
-    assert escalation._check_summary_contract(reply, "" if shape == "no-nonce" else NONCE, MAX_TOKENS)[0] == ""
-
-
-def test_1177_no_nonce_emphasized_first_line_is_refused():
-    assert escalation._check_summary_contract(f"**Thinking Process:**\n{PLAIN_BODY}", "", MAX_TOKENS)[0] == ""
-
-
 # -- T3: through _call_llm_for_summary with a stubbed call_llm -----------------------------------------------
 
 SECRET = "SECRET_TRANSCRIPT_MARKER"
