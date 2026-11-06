@@ -199,16 +199,17 @@ def test_failed_delegates_consume_plan_and_topup_attempt_budget(tmp_path, monkey
     assert summary["delegate"]["attempts"] == 2 and summary["delegate"]["prompts"] == 0
 
 
-@pytest.mark.parametrize("shape", ["unfinished", "rotation", "auxiliary", "ended"])
+@pytest.mark.parametrize("shape", ["unfinished", "rotation", "auxiliary", "previous_run", "ended"])
 def test_delegate_topup_counts_only_audit_eligible_children(tmp_path, shape):
     d, _ev, _log = stub_driver(tmp_path)
+    t0 = d.run_start - 100 if shape == "previous_run" else d.run_start  # a retained home's earlier run
     with sqlite3.connect(tmp_path / "state.db") as con:
         con.execute("create table sessions (id text, source text, parent_session_id text, started_at real,"
                     " ended_at real, end_reason text)")
-        con.execute("insert into sessions values ('parent', 'subagent', NULL, 0, 10, 'compression')")
+        con.execute("insert into sessions values ('parent', 'subagent', NULL, ?, ?, 'compression')", (t0, t0 + 10))
         con.executemany("insert into sessions values (?, 'subagent', 'parent', ?, ?, NULL)",
-                        [(f"child{i}", 10 if shape == "rotation" else 1,
-                          None if shape == "unfinished" else 20) for i in range(12)])
+                        [(f"child{i}", t0 + (10 if shape == "rotation" else 1),
+                          None if shape == "unfinished" else t0 + 20) for i in range(12)])
     if shape == "auxiliary":
         (tmp_path / "logs").mkdir()
         (tmp_path / "logs" / "agent.log").write_text("".join(

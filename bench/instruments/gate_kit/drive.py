@@ -276,6 +276,8 @@ class Driver:
         self.src, self.home, self.workdir, self.ev = Path(src), Path(home), Path(workdir), events
         self.timeout, self.cancel_after = prompt_timeout, cancel_after
         self.stop_at = time.monotonic() + max_hours * 3600
+        # Children of an earlier run in a retained home are outside this run, as the audit's --since excludes them.
+        self.run_start = time.time()
         logs = self.logs = workdir / "host-logs"
         logs.mkdir(parents=True, exist_ok=True)
         self.scanned: dict[Path, int] = {}
@@ -453,7 +455,8 @@ class Driver:
         self.done[kind] += 1
 
     def children(self) -> int | None:
-        """Delegated children so far, read-only from state.db (audit.py counts them the same way)."""
+        """This run's delegated children so far, read-only from state.db (audit.py counts them the same way,
+        with --since set to the run's start)."""
         try:
             con = sqlite3.connect(f"file:{self.home / 'state.db'}?mode=ro", uri=True, timeout=5)
             try:
@@ -461,7 +464,7 @@ class Driver:
                 paths = (self.logs / "acp.stderr", self.logs / "tui.stderr", self.home / "logs" / "agent.log")
                 aux, _unproven = AUDIT.auxiliary_sessions(AUDIT.read_logs(p for p in paths if p.is_file())["auxiliary"])
                 return sum(s not in aux and v["source"] == DELEGATE_SOURCE and AUDIT.eligible_child(s, sessions)
-                           for s, v in sessions.items())
+                           and (v["started"] or 0) >= self.run_start for s, v in sessions.items())
             finally:
                 con.close()
         except (sqlite3.Error, OSError, ValueError):
