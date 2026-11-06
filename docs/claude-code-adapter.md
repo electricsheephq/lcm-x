@@ -526,6 +526,10 @@ gate's instrument (see "The audit" in the test plan).
 
 ## Release mechanics
 
+The release rules (the gate, no rc tag, the draft release) are in
+`bench/specs/RELEASE-READINESS-V1.md`, "Claude Code unit releases"; the steps are in
+`docs/process/claude-code-unit-release.md`.
+
 LCM-X for Claude Code is its own release unit, versioned by the plugin manifest
 (`adapters/claude-code/.claude-plugin/plugin.json`; `0.1.0` is the preview).
 - A release is an annotated tag `claude-code-v<version>` on a `main` commit. The Hermes release

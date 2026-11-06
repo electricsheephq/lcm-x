@@ -8,6 +8,9 @@ needs a live soak. Docs/bench-only releases may skip to GA with a note in the re
 
 Release dates are ceilings, not schedules: a release ships as soon as its gate passes; scope is never added to fill time; a failed invariant is never moved.
 
+This gate governs the Hermes plugin's releases (`v*` tags). LCM-X for Claude Code is a separate
+release unit with its own train line, tag, gate and assets: see "Claude Code unit releases" below.
+
 ## Release trains (from v0.29.2)
 
 A release is a train. One release candidate carries every fix that is merged and ready when
@@ -27,6 +30,70 @@ its rc1 is cut, and the gauntlet runs once for the whole train, not once per fix
 - **After the cut,** a train's tree changes only by fix-and-respin (Pipeline step 4). A fix
   that misses the cut waits for the next train.
 - **Minor releases** are trains cut from main at their milestone's gate.
+
+## Claude Code unit releases (`claude-code-v*`, from 0.1.0)
+
+LCM-X for Claude Code (`adapters/claude-code/`, design: `docs/claude-code-adapter.md`) is its own
+release unit and runs its own train line. Its releases never carry Hermes rows, and Hermes trains
+never wait for it.
+
+- **Version and tag.** The unit's version is `version` in
+  `adapters/claude-code/.claude-plugin/plugin.json`. A release is an annotated tag
+  `claude-code-v<version>` on a commit of `main`'s first-parent history. The Hermes workflows fire
+  only on `v*` tags; `.github/workflows/claude-code-release.yml` fires only on `claude-code-v*`.
+- **What it ships.** The asset `lcm-x-claude-code-<version>.tar.gz`, its `.sha256` and
+  `bundle.json`, built from the tag's tree alone by `scripts/build_claude_code_unit.py`: the plugin
+  folder with core vendored at `lcm-x/`. `bundle.json` names the unit version, the tag, the full
+  core commit and core's own version (`plugin.yaml`). The same commit gives the same archive.
+- **The candidate.** One PR sets the manifest's `version` (for example `0.1.0-dev` to `0.1.0`)
+  and adds `.github/release-notes/claude-code-v<version>.md`. Its merge commit is the candidate.
+  The gate runs on an asset built from that commit, and the tag goes on that same commit, so the
+  gated tree and the tagged tree are one tree. A fix after a failed gate makes a new candidate,
+  and the gate runs again on it.
+- **The gate** (all four, on the candidate's asset; the design's "Test plan with real Claude Code
+  sessions" defines R1-R10 and the audit):
+  1. **Audit gate.** Every R1-R10 session's audit exits 0 with `verified: true`: every transcript
+     line accounted for, 0 lost, 0 duplicated, no spool record waiting or failed. Sessions with
+     Claude Code's local transcript GC on are listed without a lossless claim.
+  2. **Real sessions R1-R10** through Claude Code, each with a record: the backend, the machine
+     (model and RAM), the runtime mode, the exact interpreter version, the load average at the
+     start, the audit's `ok` and `verified`, per-event hook latency (n, p50, p95, max) with each
+     session's first hook apart, `PreCompact` p50/p95/max and its paths, and the audit's peak
+     memory and the store size. Latency is recorded, not gated, until #2141's quiet-host
+     measurement sets a bar. An audit over 2 GB, audit memory growing roughly linearly with the
+     store, a `PreCompact` p95 over 2 s or any run reaching the 10 s bound goes to the release
+     manager before the tag.
+  3. **Growth check** on a transcript of about 670,000 lines: the store against the transcripts it
+     holds stays under about 1.5×. It re-runs when a file that shapes the stored bytes changed
+     since its last run (the capture store, ingest, externalization or sanitizing).
+  4. **CLI smoke** (`scripts/claude_code_unit_smoke.py`) from the candidate's asset with no Hermes
+     and no host stub, in both runtime modes: a fresh venv, and a Python found on `PATH`. The tag
+     workflow runs it again on the tag.
+
+  Install records (macOS in a clean environment, which may be a scratch `HOME` and Claude Code
+  config directory; Linux in a fresh container) go with the gate's receipt: whether capture wrote
+  rows and how many manual steps it took.
+- **No rc tag.** A unit release has no `-rcN` tag. The gate already binds the exact candidate tree
+  (above), and the tag workflow publishes nothing: it re-checks the tag, rebuilds the asset, runs
+  the CLI smoke and leaves a **draft** release. The release manager publishes the draft after
+  reading the workflow run. An rc tag would also need its own manifest version (`0.1.0-rc1`), so the
+  final tag's tree would differ from the gated tree by a product file.
+- **When the gate re-runs.** Every unit release runs the gate on its candidate.
+  `scripts/claude_code_unit_delta.py` lists the files the unit depends on that changed since the
+  last `claude-code-v*` tag (the import closure of the worker and the reader, plus the plugin
+  folder); a later release cites that list in its receipt. The binding gate run is the one on the
+  candidate; runs on earlier commits are rehearsals.
+- **Receipt and notes.** The gate's receipt is a result card (`RESULT-MANIFEST.json` and
+  `RESULT.md`): counts, ids, hashes and timings only, never transcript content. It is attached to
+  the release. The notes (`.github/release-notes/claude-code-v<version>.md`) say in user terms what
+  the unit does, how to opt in, what it does not do yet and its known issues, and repeat the core
+  commit and core version from `bundle.json`.
+- **Publishing.** The release manager publishes the draft as a prerelease while the unit's version
+  is below 1.0.0, and never marks it as the latest release: "latest" stays with the Hermes line.
+- **Shared core.** The unit ships core at its own tagged commit. A Hermes release does not release
+  the unit, and a unit release does not release Hermes. Changes to shared core files are judged by
+  the Hermes row selection like any other core change; changes that touch only the adapter and the
+  read-only reader take the row-selector table's unit entries and select no Hermes rows.
 
 ## Pipeline
 
