@@ -451,3 +451,10 @@ def test_p1h_b2s_proven_pass_with_clean_numbers_still_passes(monkeypatch):
     row = next(r for r in rows if r["cell"] == PERSISTENT)
     row.update(verdict="PASS", numbers={"B2": dict(FULL)})
     assert ci.gate(rows, set()) == []
+
+
+def test_silent_example_names_unexplained_surplus_copy():
+    key = ("assistant", "digest")
+    out = multiset.split_surplus([(key, 2, [1, 2, 2])], [(2, "generated_unproven", None)])
+    assert (out["visible_surplus_rows"], out["silent_surplus_rows"]) == (1, 1)
+    assert out["silent_surplus_examples"] == [{"store_id": 2, "role": "assistant", "sha256": "digest"}]

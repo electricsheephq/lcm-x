@@ -12,6 +12,7 @@ from contextlib import contextmanager, nullcontext
 import pytest
 
 from hermes_lcm.sqlite_util import _SqliteSavepointError
+from tests.p1_gate import GateFailure, expect_from_view, install_former_commit_faults, record, store_outcome
 from tests.test_host_uid_shadow import _engine, _m, _state_db
 
 
@@ -56,11 +57,22 @@ class Crash(BaseException):
     """Escapes each writer's Exception handler, like a process exit before COMMIT."""
 
 
-@pytest.mark.parametrize("fault", ["error", "crash"])
-@pytest.mark.parametrize("boundary", ["b", "c", "d", "e", "f", "INSERT", "h", "i", "j", "k"])
+M_CRASH_XFAIL = pytest.mark.xfail(
+    strict=True, raises=GateFailure,
+    reason="#2305: an in-process crash at the proof re-key leaves 9 silent surplus rows (P1 gate blocker)")
+
+
+@pytest.mark.parametrize("boundary,fault", [
+    *((boundary, fault) for boundary in ("b", "c", "d", "e", "f", "INSERT", "h", "i", "j", "k", "l", "m")
+      for fault in ("error", "crash") if (boundary, fault) != ("m", "crash")),
+    pytest.param("m", "crash", marks=M_CRASH_XFAIL, id="m-crash"),
+])
 def test_fault_at_each_former_commit(ingest_case, monkeypatch, caplog, boundary, fault):
     caplog.set_level("DEBUG")
     engine, seed, host = ingest_case
+    if boundary == "m":
+        _rekey_fault_case(engine, monkeypatch, caplog, fault)
+        return
     store = engine._store
     before = durable(engine)
     frontier = copy.deepcopy(engine._frontier)
@@ -79,88 +91,9 @@ def test_fault_at_each_former_commit(ingest_case, monkeypatch, caplog, boundary,
             fired.append(point)
             raise (Crash if fault == "crash" else sqlite3.OperationalError)("injected former commit " + point)
 
-    def wrap(target, name, point, after=None):
-        original = getattr(target, name)
-
-        def wrapped(*args, **kwargs):
-            result = original(*args, **kwargs)
-            if after:
-                after(*args, **kwargs)
-            fail(point(*args, **kwargs) if callable(point) else point)
-            return result
-
-        monkeypatch.setattr(target, name, wrapped)
-
-    capture = engine._capture_host_rewrites
-
-    def rewrites(messages):
-        capture(messages)
-        if boundary == "b":
-            row = store.get(seed)
-            changed = {**messages[0], "content": " seed"}
-            engine._host_rewrite_state()[0][seed] = (engine._message_replay_identity(row), row["content"], [changed])
-            capture([changed])
-
-    monkeypatch.setattr(engine, "_capture_host_rewrites", rewrites)
-    wrap(engine, "_capture_host_rewrite", "b")
-    reconcile = engine._reconcile_ingest_cursor_from_store
-    rewrite_carry = store.write_metadata_json
-    in_c = []
-
-    def metadata(keys, *args, **kwargs):
-        result = rewrite_carry(keys, *args, **kwargs)
-        if in_c and any(key.startswith("compaction_commit_proof:") for key in keys):
-            fail("c")
-        return result
-
-    monkeypatch.setattr(store, "write_metadata_json", metadata)
-
-    def reconciled(*args, **kwargs):
-        result = reconcile(*args, **kwargs)
-        key = engine._replay_snapshot_metadata_key("compaction_commit_proof")
-        store.write_metadata_json([key], json.dumps({"carry_ranges": []}))
-        in_c.append(True)
-        try:
-            engine._rewrite_own_carry_ranges([], "transaction probe", [])
-        finally:
-            in_c.clear()
-        return result
-
-    monkeypatch.setattr(engine, "_reconcile_ingest_cursor_from_store", reconciled)
-    backfill = store.backfill_observed_at_many
-
-    def backfilled(pairs):
-        result = backfill([*pairs, (seed, 10.)])
-        fail("d")
-        return result
-
-    monkeypatch.setattr(store, "backfill_observed_at_many", backfilled)
-    prematch = engine._identity_anchor_prematch
-
-    def prematched(*args, **kwargs):
-        if boundary == "e":
-            engine._capture_merged_user_head({**host[0], "content": "seed\n\nextra", "_merged_turn_prefix": "seed"},
-                                             [(store.get(seed), ())], set())
-        return prematch(*args, **kwargs)
-
-    monkeypatch.setattr(engine, "_identity_anchor_prematch", prematched)
-    wrap(engine, "_record_ws_host_rewrite", "e")
-
-    def anchor_evidence(plan, remainder_ids=None):
-        store.add_message_relations([[(seed, "alt_stamp", None, None, 10.)]])
-        store.write_metadata_json([engine._identity_anchor_carry_key()], "[]")
-
-    wrap(engine, "_identity_anchor_commit", lambda plan, remainder_ids=None: "f" if remainder_ids is None else "i",
-         anchor_evidence)
-    wrap(store, "_append_protected_batch", "INSERT")
-    for point, name in (("h", "_identity_anchor_mark_carried"), ("j", "_identity_anchor_record_versions")):
-        def evidence(*args, _point=point, **kwargs):
-            newest = store.get_session_tail("S", limit=1)[0]["store_id"]
-            store.add_message_relations([[(newest, "carried_stamp" if _point == "h" else "supersedes",
-                                          seed, None, 10.)]])
-        wrap(engine, name, point, evidence)
-    wrap(store, "_host_uid_write", "k")
-    aborts = fault == "crash" or boundary == "INSERT"
+    install_former_commit_faults(engine, monkeypatch.setattr, boundary, fail)
+    # l is unguarded: a non-busy error aborts the entire transaction.
+    aborts = fault == "crash" or boundary in {"INSERT", "l"}
     if fault == "crash":
         with pytest.raises(Crash):
             engine._ingest_messages(host)
@@ -194,6 +127,11 @@ def test_fault_at_each_former_commit(ingest_case, monkeypatch, caplog, boundary,
         0 if boundary == "k" and not aborts else 1)
     engine.ingest(host)
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
+    outcome = store_outcome(store._conn, expect_from_view(host, "conv"))
+    record(dict(family="former_commit", boundary=boundary, fault=fault), outcome, engine)
+    if outcome["loss"] or outcome["silent"]:
+        raise GateFailure(outcome)  # Only m-crash may be expected to fail (#2305); gate_result counts it FAIL.
+
 
 
 @pytest.mark.parametrize("load_fails", [False, True])
@@ -1262,3 +1200,41 @@ def test_begin_waits_for_a_writer_within_the_existing_budget(ingest_case):
     assert released.is_set() and not errors and engine._ingest_failure_count == 0
     assert engine._last_ingest_attribution["busy_snapshot_retry"] is False
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
+
+
+def _rekey_fault_case(fixture_engine, monkeypatch, caplog, fault):
+    from pathlib import Path
+    from tests.p1_gate import prepare_rekey_case
+
+    root = Path(fixture_engine._hermes_home) / "rekey"
+    root.mkdir()
+    host, view, expected = prepare_rekey_case(root, "field_chain_replace")
+    engine = host.engine
+    before = durable(engine)
+    fired = []
+
+    def fire(point):
+        if not fired:
+            fired.append(point)
+            raise (Crash if fault == "crash" else sqlite3.OperationalError)("injected re-key fault")
+
+    try:
+        with monkeypatch.context() as patch:
+            install_former_commit_faults(engine, patch.setattr, "m", fire)
+            if fault == "crash":
+                with pytest.raises(Crash):
+                    engine._ingest_messages(view)
+                assert durable(engine) == before
+            else:
+                engine.ingest(view)
+                assert engine._ingest_failure_count == 0
+                assert "re-key failed" in caplog.text
+        assert fired == ["m"]
+        engine.ingest(view)
+        engine.ingest(view)
+        outcome = store_outcome(engine._store._conn, expected)
+        record(dict(family="former_commit", boundary="m", fault=fault), outcome, engine)
+        if outcome["loss"] or outcome["silent"]:
+            raise GateFailure(outcome)  # Only m-crash may be expected to fail (#2305); gate_result counts it FAIL.
+    finally:
+        host.close()
