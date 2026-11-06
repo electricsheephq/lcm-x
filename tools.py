@@ -3221,7 +3221,9 @@ def _lcm_recall_summary_event_time_rows(
     Returns ``({node_id: {"event_time_start", "event_time_end"}}, reason)``:
     the MIN/MAX host ``observed_at`` over ALL the node's source messages,
     walked through condensed nodes with no cap, in one statement for the whole
-    batch. Write times (``messages.timestamp``, ``earliest_at``/``latest_at``,
+    batch. A span over any stamped source carrying a ``carried_stamp`` relation
+    (the message path's ``time_uncertain: "carried"`` test) also gets
+    ``time_uncertain: "carried"``. Write times (``messages.timestamp``, ``earliest_at``/``latest_at``,
     ``created_at``) are never used; a node with no stamped source is absent.
     ``reason`` follows ``_lcm_recall_event_time_rows``: ``"deadline"`` or
     ``"read_error"``, and then the mapping is empty (atomic), on the same
@@ -3247,6 +3249,11 @@ def _lcm_recall_summary_event_time_rows(
         )
         conn.execute("PRAGMA query_only=ON")
         conn.set_progress_handler(interrupt_if_expired, 1000)
+        # Stores predating the optional relation table have no carried markers
+        # (the same fallback as MessageStore.get_carried_stamp_ids).
+        relation = "message_relations" if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
+        ).fetchone() else "(SELECT NULL AS store_id, NULL AS kind)"
         rows = conn.execute(
             f"""WITH RECURSIVE walk(root, source_type, source_id) AS (
                     SELECT n.node_id, n.source_type, CAST(j.value AS INTEGER)
@@ -3263,7 +3270,8 @@ def _lcm_recall_summary_event_time_rows(
                        MAX(CASE WHEN {_OBSERVED_AT_SQL_SAFE} THEN m.observed_at END),
                        group_concat(CASE WHEN typeof(m.observed_at) IN ('text', 'integer', 'real')
                                          AND NOT ({_OBSERVED_AT_SQL_SAFE})
-                                    THEN json_quote(m.observed_at) END, ',')
+                                    THEN json_quote(m.observed_at) END, ','),
+                       MAX(m.store_id IN (SELECT store_id FROM {relation} WHERE kind = 'carried_stamp'))
                 FROM walk JOIN messages m
                   ON walk.source_type = 'messages' AND m.store_id = walk.source_id
                 WHERE m.observed_at IS NOT NULL
@@ -3281,7 +3289,7 @@ def _lcm_recall_summary_event_time_rows(
     if time.monotonic() >= deadline:
         return {}, "deadline"
     spans: dict[int, dict[str, str]] = {}
-    for root, low, high, other in rows:
+    for root, low, high, other, carried in rows:
         values = [low, high, *(json.loads(f"[{other}]") if other else [])]
         normalized = [v for v in map(_normalize_observed_at, values) if v is not None]
         if normalized:
@@ -3290,6 +3298,8 @@ def _lcm_recall_summary_event_time_rows(
                 for key, value in (("event_time_start", min(normalized)),
                                    ("event_time_end", max(normalized)))
             }
+            if carried:
+                spans[int(root)]["time_uncertain"] = "carried"
     return spans, None
 
 

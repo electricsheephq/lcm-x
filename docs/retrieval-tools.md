@@ -71,7 +71,8 @@ lcm:
 
 `event_time_start` and `event_time_end` are the earliest and latest host
 `observed_at` over all the summary's source messages, through condensed nodes,
-formatted like a message's `event_time`. A summary whose sources carry no host
+formatted like a message's `event_time`; when any stamped source carries a
+carried stamp, the summary also has `time_uncertain: "carried"`. A summary whose sources carry no host
 time has neither field; the existing `timestamp` (LCM's write time) is unchanged.
 The read runs inside the recall deadline; a late or failed read omits the fields
 from every summary and sets `provenance.summary_event_time_unavailable` to
