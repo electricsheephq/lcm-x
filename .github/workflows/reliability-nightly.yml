@@ -30,7 +30,6 @@ jobs:
         host: [ref-0.21.5, floor-0.21.3, r34.4-0.21.5, r34.10-0.21.5, r34.15-0.21.5, upstream-main, upstream-uid]
     env:
       OUT: ${{ github.workspace }}/reliability-out
-      HERMES_DISABLE_LAZY_INSTALLS: "1"  # #985: as the other host workflows; reaches prep and R1 (R2 hosts get their own env)
       DEFAULT_WINDOW_REPORT_ONLY: "true"  # One switch for command failures; verdict promotion needs qualification.
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
