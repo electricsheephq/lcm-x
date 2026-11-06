@@ -116,13 +116,17 @@ def opt(cols: set, name: str, default: str) -> str:
     return name if name in cols else f"{default} as {name}"
 
 
+def read_sessions(con):
+    sc = columns(con, "sessions")
+    return {r[0]: dict(zip(("source", "parent", "started", "ended", "end_reason", "rewind_count"), r[1:]))
+            for r in con.execute("select id, " + ", ".join(opt(sc, c, d) for c, d in (
+                ("source", "''"), ("parent_session_id", "NULL"), ("started_at", "0"), ("ended_at", "NULL"),
+                ("end_reason", "NULL"), ("rewind_count", "NULL"))) + " from sessions")}
+
+
 def read_host(path: Path):
     with ro(path) as con:
-        sc, mc = columns(con, "sessions"), columns(con, "messages")
-        sessions = {r[0]: dict(zip(("source", "parent", "started", "ended", "end_reason", "rewind_count"), r[1:]))
-                    for r in con.execute("select id, " + ", ".join(opt(sc, c, d) for c, d in (
-                        ("source", "''"), ("parent_session_id", "NULL"), ("started_at", "0"), ("ended_at", "NULL"),
-                        ("end_reason", "NULL"), ("rewind_count", "NULL"))) + " from sessions")}
+        sessions, mc = read_sessions(con), columns(con, "messages")
         # Displayed: active, or archived history. Undone: soft-deleted by a rewind (hermes_state_messages.py
         # rewind_to_message sets active = 0 and leaves compacted = 0); without the compacted column none is known.
         displayed = "(active = 1 OR compacted = 1)" if "compacted" in mc else "1"
@@ -140,6 +144,12 @@ def compression_child(sid: str, sessions: dict) -> bool:
     p = sessions.get(s["parent"] or "")
     return bool(p and p["end_reason"] == "compression" and p["source"] == s["source"]
                 and (p["ended"] is None or (s["started"] or 0) >= p["ended"] - 1))
+
+
+def eligible_child(sid: str, sessions: dict) -> bool:
+    """An ended, non-rotation child; callers also restrict source and scored sessions."""
+    s = sessions[sid]
+    return bool(s["parent"] and s["ended"] is not None and not compression_child(sid, sessions))
 
 
 def lineage_of(sessions: dict):
@@ -663,7 +673,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     buckets = {"A": [], "B": []}
     for s in sorted(scored):
         v = sessions[s]
-        if v["parent"] and v["ended"] is not None and not compression_child(s, sessions):
+        if eligible_child(s, sessions):
             buckets["A" if v["source"] == DELEGATE_SOURCE else "B"].append(s)
 
     # Coverage floors (section 5, "The driven run").

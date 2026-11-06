@@ -169,7 +169,8 @@ host processes:
 | TUI gateway (`python -m tui_gateway.entry`) | the second host source (`tui` sessions), warm restarts (`session.close`, which ends the session in the context engine, then `session.resume` in the same process), undo-and-resend (`session.undo`, then the same prompt), `session.compress` |
 
 ACP has no session end and no undo, which is why the TUI gateway carries those three. Every planned restart follows a
-compaction in its session and is followed by more turns. Delegated children are counted from `state.db` (read-only);
+compaction in its session and is followed by more turns. Delegated children are counted from `state.db` (read-only)
+using the audit's ended, non-rotation subagent-child predicate, excluding proven AUXILIARY sessions in the host logs;
 when they fall short after the plan, the driver sends more delegate prompts, up to twice the target in total
 attempts (including failed attempts and those made by the plan). The summary separates attempts from completed prompts.
 
@@ -193,7 +194,9 @@ python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --
   records one `restart_cold` for the planned slot only after its load succeeds. Siblings get `restart_cold_shared`
   at the kill; crash-affected ACP and TUI sessions get it after reload/resume. Shared events support restart-copy
   attribution but never the cold-restart floor. `restart_warm` requires a successful close and resume; `undo_resend`
-  requires a successful second send. `--max-hours` stops the plan and still writes the summary.
+  requires a successful first send (ACP cancellation or TUI completion) and a successful second send. A rejected
+  first TUI send skips undo. After a successful close, a failed resume leaves the slot unbound so its next operation
+  resumes it again. `--max-hours` stops the plan and still writes the summary.
 - `compress_request` is recorded before the triggering long-text turn; `compress_result` records the later manual
   compression outcome separately, so the audit's attribution window starts before automatic compaction can occur.
   A failed long-text turn writes `compress_request_failed`; the audit excludes that request from attribution.

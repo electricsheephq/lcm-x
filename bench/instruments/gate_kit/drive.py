@@ -35,6 +35,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from bench.instruments.gate_kit import audit as AUDIT  # noqa: E402
 from bench.instruments.gate_kit.audit import DELEGATE_SOURCE, FLOORS  # noqa: E402
 from bench.instruments.reliability import acp_driver as AD  # noqa: E402
 from bench.instruments.reliability.hosts import under_real_hermes  # noqa: E402
@@ -428,7 +429,8 @@ class Driver:
             if self.send(slot, o["prompt"]) == "end_turn":
                 self.ev.write("undo_resend", self.slots[slot]["session"], f"slot={slot} via=acp_cancel")
         elif kind == "undo_resend":
-            self.send(slot, o["prompt"])
+            if self.send(slot, o["prompt"]) != "complete":
+                return  # send() already records the failed turn; never undo a previous turn
             removed = self.tui.call("session.undo", {"session_id": self.tui_rt(slot)}, self.timeout).get("removed")
             if not removed:
                 self.ev.write("error", self.slots[slot]["session"], f"undo_removed_nothing slot={slot}")
@@ -445,10 +447,8 @@ class Driver:
             if not closed:
                 self.ev.write("error", self.slots[slot]["session"], f"warm_not_closed slot={slot}")
                 return
-            res = self.tui.call("session.resume", {"session_id": self.slots[slot]["session"], "omit_messages": True},
-                                self.timeout)
-            self.slots[slot].update(rt=res["session_id"],
-                                    session=res.get("stored_session_id") or self.slots[slot]["session"])
+            self.tui_loaded.discard(slot)
+            self.tui_rt(slot)  # rebind only after resume succeeds; a later operation can retry a failed resume
             self.ev.write("restart_warm", self.slots[slot]["session"], f"slot={slot} closed={bool(closed)}")
         self.done[kind] += 1
 
@@ -457,11 +457,14 @@ class Driver:
         try:
             con = sqlite3.connect(f"file:{self.home / 'state.db'}?mode=ro", uri=True, timeout=5)
             try:
-                return con.execute("SELECT COUNT(*) FROM sessions WHERE parent_session_id IS NOT NULL AND source = ?",
-                                   (DELEGATE_SOURCE,)).fetchone()[0]
+                sessions = AUDIT.read_sessions(con)
+                paths = (self.logs / "acp.stderr", self.logs / "tui.stderr", self.home / "logs" / "agent.log")
+                aux, _unproven = AUDIT.auxiliary_sessions(AUDIT.read_logs(p for p in paths if p.is_file())["auxiliary"])
+                return sum(s not in aux and v["source"] == DELEGATE_SOURCE and AUDIT.eligible_child(s, sessions)
+                           for s, v in sessions.items())
             finally:
                 con.close()
-        except sqlite3.Error:
+        except (sqlite3.Error, OSError, ValueError):
             return None
 
     def inactive(self, entry: str) -> list[tuple[str, str]]:

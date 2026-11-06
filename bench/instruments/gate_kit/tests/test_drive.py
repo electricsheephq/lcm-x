@@ -199,6 +199,28 @@ def test_failed_delegates_consume_plan_and_topup_attempt_budget(tmp_path, monkey
     assert summary["delegate"]["attempts"] == 2 and summary["delegate"]["prompts"] == 0
 
 
+@pytest.mark.parametrize("shape", ["unfinished", "rotation", "auxiliary", "ended"])
+def test_delegate_topup_counts_only_audit_eligible_children(tmp_path, shape):
+    d, _ev, _log = stub_driver(tmp_path)
+    with sqlite3.connect(tmp_path / "state.db") as con:
+        con.execute("create table sessions (id text, source text, parent_session_id text, started_at real,"
+                    " ended_at real, end_reason text)")
+        con.execute("insert into sessions values ('parent', 'subagent', NULL, 0, 10, 'compression')")
+        con.executemany("insert into sessions values (?, 'subagent', 'parent', ?, ?, NULL)",
+                        [(f"child{i}", 10 if shape == "rotation" else 1,
+                          None if shape == "unfinished" else 20) for i in range(12)])
+    if shape == "auxiliary":
+        (tmp_path / "logs").mkdir()
+        (tmp_path / "logs" / "agent.log").write_text("".join(
+            f"2026-11-06 10:00:00 INFO hermes_lcm.engine: LCM reclassified session child{i} "
+            "as auxiliary at first ingest\n" for i in range(12)))
+    expected = 12 if shape == "ended" else 0
+    count = d.children()
+    summary = d.run([], {"delegated_children": 12})
+    assert count == summary["delegate"]["children_in_state_db"] == expected
+    assert summary["delegate"]["extra_prompts"] == (0 if expected else 24)
+
+
 def test_cli_paths_are_absolute_for_hosts_and_prompts(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "home").mkdir()
@@ -335,6 +357,57 @@ def test_busy_tui_resend_has_no_undo_event(tmp_path):
     d.tui.call = busy
     d.op({"op": "undo_resend", "slot": "T1", "prompt": drive.CATS["undo"][0]})
     assert len(submits) == 2 and not any(e["kind"] == "undo_resend" for e in audit.read_events(ev.path))
+
+
+@pytest.mark.parametrize("status", ["busy", "error"])
+def test_failed_first_tui_send_skips_undo(tmp_path, status):
+    d, ev, _log = stub_driver(tmp_path)
+    d.tui_rt("T1")
+    call, calls = d.tui.call, []
+
+    def reject(method, params, timeout):
+        calls.append(method)
+        if method == "prompt.submit" and calls.count(method) == 1:
+            return {"status": status}
+        return call(method, params, timeout)
+
+    d.tui.call = reject
+    d.op({"op": "undo_resend", "slot": "T1", "prompt": drive.CATS["undo"][0]})
+    assert "session.undo" not in calls and calls.count("prompt.submit") == 1
+    assert ev.errors[f"turn_submit_{status}"] == 1
+    assert not any(e["kind"] == "undo_resend" for e in audit.read_events(ev.path))
+
+
+@pytest.mark.parametrize("stop", ["busy", "error"])
+def test_failed_first_acp_send_skips_resend(tmp_path, stop):
+    d, ev, _log = stub_driver(tmp_path)
+    d.acp_sid("A1")
+    calls = []
+    d.acp.prompt = lambda *_a: (calls.append(1) or "", stop)
+    d.op({"op": "undo_resend", "slot": "A1", "prompt": drive.CATS["undo"][0]})
+    assert calls == [1] and ev.errors[f"turn_{stop}"] == 1
+    assert not any(e["kind"] == "undo_resend" for e in audit.read_events(ev.path))
+
+
+def test_failed_warm_resume_retries_before_next_turn(tmp_path):
+    d, ev, _log = stub_driver(tmp_path)
+    d.tui_rt("T1")
+    call, resumes = d.tui.call, []
+
+    def fail_once(method, params, timeout):
+        if method == "session.resume":
+            resumes.append(1)
+            if len(resumes) == 1:
+                raise drive.AD.JsonRpcError(method, {"code": -32000, "message": "resume failed"})
+        return call(method, params, timeout)
+
+    d.tui.call = fail_once
+    d.guarded({"op": "restart_warm", "slot": "T1"})
+    assert not d.tui.live
+    assert d.send("T1", 0) == "complete"
+    assert len(resumes) == 2 and "T1" in d.tui_loaded
+    assert d.tui.live[d.slots["T1"]["rt"]] == d.slots["T1"]["session"]
+    assert not any(e["kind"] == "restart_warm" for e in audit.read_events(ev.path))
 
 
 @pytest.mark.parametrize("closed", [False, True])
