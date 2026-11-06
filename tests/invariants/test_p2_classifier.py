@@ -564,6 +564,74 @@ def test_c19_failed_emission_restart(factory, monkeypatch):
     assert classifier.Relation("generated_unproven", None) in result.rows[0].relations
 
 
+def test_c_run_keyed_incoming_uid_other_occurrence_h4(factory):
+    # R7 / step 2 R0: u2 keys X even though u2 currently binds Y.
+    engine = history(factory, [[msg("X")], [msg("X"), msg("Y", uid="u2")]], "on")
+    result = classify(engine, [msg("X", uid="u2")], "on")
+    assert result.run is None and result.head.kind == "h4"
+    assert verdicts(result) == ["new"]
+    assert result.rows[0].reason == "no_witness" and possible(result.rows[0]) == [2]
+    assert not any(r.kind == "supersedes" for r in result.rows[0].relations)
+    assert result.writes.uid_bindings == [(classifier.NewRow(0), "u2", "version", "version_new")]
+
+
+def test_c_run_keyed_incoming_uid_other_occurrence_window(factory):
+    # H corroborates h1; step 4 E5a's latest binding Y lies inside the Window.
+    h = msg("H", 1)
+    engine = history(factory, [[h, msg("X"), msg("Y", uid="u2")]], "on")
+    snap = snapshot(engine)
+    previous = next(r for r in snap.records if r["kind"] == "ingest")
+    x = previous["entries"][1].ref
+    latest = next(b for b in snap.bindings.values() if "u2" in b["uids"])
+    result = classify(engine, [h, msg("X", uid="u2")], "on", snap=snap)
+    assert result.run.k == 1 and result.head.kind == "h1"
+    assert latest["ordinal"] >= result.head.ordinal
+    assert verdicts(result) == ["replay", "new"]
+    # Q5: the run-entry candidate precedes rank 1's latest-revision candidate.
+    assert possible(result.rows[1]) == [x] and result.rows[1].reason == "no_witness"
+    assert classifier.Relation("supersedes", latest["occ_id"]) in result.rows[1].relations
+    assert result.writes.uid_bindings == [(classifier.NewRow(1), "u2", "version", "version_new")]
+
+
+def test_c_gateway_anchor_rank2_then_rank3_no_run(factory):
+    # R8: D is not a segment member and PR 1 cannot accept it at rank 5.
+    original = [msg("U", 1), *pair(), msg("D", role="assistant")]
+    engine = history(factory, [original, [msg("W", 5)], [msg("Y", 6)]])
+    result = classify(engine, original + [msg("N", 7)])
+    assert result.run is None and result.head.kind == "h2"
+    assert verdicts(result) == ["replay", "replay", "replay", "new", "new"]
+    assert [v.evidence for v in result.rows[:3]] == ["rank2", "rank3", "rank3"]
+    assert result.rows[3].deferred == "rank5" and result.rows[3].reason == "deferred"
+    assert possible(result.rows[3]) == [4]
+    assert result.rows[4].reason is None and not result.rows[4].relations
+
+
+def test_c_m14_uid_edits_are_not_restamps(factory):
+    original = [msg(t, i + 1, "u" + t) for i, t in enumerate("ABC")]
+    engine = history(factory, [original], "on")
+    result = classify(engine, [msg(t + " (edited)", i + 4, "u" + t) for i, t in enumerate("ABC")], "on")
+    assert not result.writes.stamp_unreliable and not result.counters["m14.rerun"]
+    assert verdicts(result) == ["new"] * 3
+    assert [u[2:] for u in result.writes.uid_bindings] == [("version", "version_new")] * 3
+
+
+def test_c_segment_cut_before_run_start(factory):
+    original = [msg("U"), *pair(), msg("D", role="assistant")]
+    engine = history(factory, [original])
+    snap = snapshot(engine)
+    record = next(r for r in snap.records if r["kind"] == "ingest")
+    view = [dict(original[1], content="fresh assistant"), original[2], original[3]]
+    result = classify(engine, view, snap=snap)
+    assert result.run is None
+    assert result.base == classifier.Record("ingest", record["view_seq"])
+    assert result.head == classifier.Head("h1", snap.bindings[3]["ordinal"])
+    assert verdicts(result) == ["new"] * 3
+    assert result.counters["run.segment_cut"] == 2
+    assert [v.reason for v in result.rows[1:]] == ["segment", "segment"]
+    assert [possible(v) for v in result.rows[1:]] == [[3], [4]]
+
+
+@pytest.mark.latency
 def test_e_cost(factory):
     """Nearest-rank percentiles, fresh snapshots, warm SQLite/OS page caches.
 
@@ -572,25 +640,38 @@ def test_e_cost(factory):
     engine = factory()
     original = [msg(f"row {i}", i + 1) for i in range(2000)]
     engine._ingest_messages(original)
-    cases = {"exact": original}
+    cases = {"exact": (engine, original, "off")}
     # Evict both vectors; three prefix rows corroborate h2 without a run.
     engine2 = factory("duplicates")
     duplicate_history = [msg(f"row {i % 20}", i + 1) for i in range(2000)]
     engine2._ingest_messages(duplicate_history)
     engine2._ingest_messages([msg("evict1", 3001)])
     engine2._ingest_messages([msg("evict2", 3002)])
-    cases["no_run_duplicates"] = duplicate_history
-    for name, view in cases.items():
-        target = engine if name == "exact" else engine2
+    cases["no_run_duplicates"] = (engine2, duplicate_history, "off")
+    tool_engine = factory("tool-heavy")
+    tool_history = []
+    for i in range(667):
+        assistant, tool = pair(3 * i + 2)
+        assistant["tool_calls"][0]["id"] = tool["tool_call_id"] = f"c{i}"
+        tool_history.extend([msg(f"u{i}", 3 * i + 1), assistant, tool])
+    tool_engine._ingest_messages(tool_history)
+    tool_engine._ingest_messages([msg("evict1", 99998)])
+    tool_engine._ingest_messages([msg("evict2", 99999)])
+    cases["no_run_tools"] = (tool_engine, tool_history, "off")
+    uid_engine = factory("uid-exact", "on")
+    uid_history = [msg(f"row {i}", i + 1, f"uid{i:05d}") for i in range(2000)]
+    uid_engine._ingest_messages(uid_history)
+    cases["uid_on_exact"] = (uid_engine, uid_history, "on")
+    for name, (target, view, mode) in cases.items():
         salt = target._store.ingest_ledger_salt()
-        incoming = classifier.build_view(salt, view, uid_mode="off")
+        incoming = classifier.build_view(salt, view, uid_mode=mode)
         timings, pairs, row_pairs, queries = [], [], [], []
         for _ in range(20):
             statements = []
             target._store._conn.set_trace_callback(statements.append)
             started = time.perf_counter_ns()
             snap = snapshot(target)
-            result = classifier.classify(incoming, snap, classifier.EngineOracle(target), uid_mode="off")
+            result = classifier.classify(incoming, snap, classifier.EngineOracle(target), uid_mode=mode)
             timings.append((time.perf_counter_ns() - started) / 1_000_000)
             target._store._conn.set_trace_callback(None)
             pairs.append(result.counters["candidate_pairs"])
@@ -600,7 +681,8 @@ def test_e_cost(factory):
             # ten snapshot reads; count that query in the measured path too.
             assert len(statements) == result.counters["queries"] + 1
             assert all(v.verdict == "replay" for v in result.rows)
-            assert (result.run is not None) == (name == "exact")
+            assert (result.run is not None) == (name in ("exact", "uid_on_exact"))
+            assert result.head.kind == ("h1" if result.run else "h2")
         timings.sort()
         card = dict(case=name, samples=20, method="nearest-rank", cache="warm OS/SQLite, fresh snapshot",
                     p50_ms=timings[math.ceil(.50 * 20) - 1], p99_ms=timings[-1],

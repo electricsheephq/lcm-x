@@ -79,6 +79,7 @@ TURN_PATH_FILES = {
 }
 # Explicit exclusions: classify every top-level Python module, not just reachable dependencies.
 NON_TURN_PATH_FILES = {
+    "ingest_classifier.py",  # Pure, unwired P2 classifier; L1 moves it to TURN_PATH_FILES when wired.
     "recorder.py",  # Default-off recorder (#2243): register() imports it only when LCM_RECORDER_ENABLED is on.
     "recorder_read.py",  # Offline recording reader (#2243): imports nothing from the plugin.
     "entity_ops.py",  # Default-off entity event operations and resolved view.

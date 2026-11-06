@@ -126,23 +126,27 @@ def m2(row, target, snap, mode, unreliable):
     return ledger.identity_digest(snap.salt, row) == bound["identity_digest"]
 
 
-def check_cell(factory, first, second, *, kind, mode, shape="same", ledger1="shadow", label="cell"):
+def check_cell(factory, first, second, *, kind, mode, shape="same", ledger1="shadow", label="cell", evict=False):
     """Return the second plan; assert every cell without a failure cap."""
-    seen = {occ for occ, _ in first}
+    history_rows = first + ([(90, U("evict1")), (91, U("evict2"))] if evict else [])
+    seen = {occ for occ, _ in history_rows}
     v1 = [witness(occ, row, kind) for occ, row in first]
     v2 = [witness(occ, reload_shape(row, shape) if occ in seen else row, kind) for occ, row in second]
     engines = []
     for name in ("module", "base"):
         engine = factory(name, mode, ledger_mode=ledger1)
         engine._ingest_messages(deepcopy(v1))
+        if evict:
+            for occ, row in history_rows[len(first):]:
+                engine._ingest_messages([witness(occ, row, kind)])
         if shape != "warm":
             engine = factory(name, mode, cold_of=engine)
         engines.append(engine)
     engine, base = engines
     snap = snapshot(engine)
     initial = engine._store.get_session_messages("S")
-    assert len(initial) == len(first), "fixture must assign each initial store row independently"
-    ground = {row["store_id"]: occ for row, (occ, _) in zip(initial, first)}
+    assert len(initial) == len(history_rows), "fixture must assign each initial store row independently"
+    ground = {row["store_id"]: occ for row, (occ, _) in zip(initial, history_rows)}
     result = classify(engine, v2, mode, snap=snap)
     base._ingest_messages(deepcopy(v2))
     base_count = len(base._store.get_session_messages("S"))
@@ -157,6 +161,11 @@ def check_cell(factory, first, second, *, kind, mode, shape="same", ledger1="sha
         "SELECT count(*) FROM messages m WHERE session_id='S' AND NOT EXISTS "
         "(SELECT 1 FROM occurrence_bindings b WHERE b.store_id=m.store_id)").fetchone()[0]
     assert result.coverage == classifier.Coverage("partial" if unbound else "complete", unbound)
+    cold_c1_preledger = label.startswith("C1/") and shape != "warm" and ledger1 == "off"
+    if label.startswith("C1/"):
+        assert bool(unbound) == cold_c1_preledger, ("HARD_BAR C1 partial coverage class", table)
+    assert not unbound or cold_c1_preledger or label.startswith("PRE_preledger/") or label == "UPGRADE", (
+        "HARD_BAR unexpected partial coverage", table)
     explanations, replay_targets = [], set()
     if not unbound:  # Full pre-ledger acceptance belongs to L2b.
         for i, ((occ, raw), row, verdict) in enumerate(zip(second, v2, result.rows)):
@@ -212,6 +221,23 @@ def test_classifier_twin(factory, case, live, occurrence, shape, kind, mode):
     first, replay, fresh, ledger1 = cases(live)[case]
     check_cell(factory, first, replay if occurrence == "replay" else fresh, kind=kind, mode=mode,
                shape=shape, ledger1=ledger1, label=f"{case}/{live}/{occurrence}")
+
+
+@pytest.mark.parametrize("occurrence", ["replay", "fresh"])
+def test_gateway_no_run_twin(factory, occurrence):
+    first = list(enumerate([U("q"), A(), T(), dict(D(), _nowit=1)], 1))
+    second = (first if occurrence == "replay" else
+              list(enumerate([U("q"), A(), T(), dict(D(), _nowit=1)], 5))) + [(9, U("next"))]
+    result, _, _, _ = check_cell(factory, first, second, kind="gw", mode="off", evict=True,
+                                label=f"GATEWAY_no_run/{occurrence}")
+    assert result.run is None
+    if occurrence == "replay":
+        assert result.head.kind == "h2"
+        assert verdicts(result) == ["replay", "replay", "replay", "new", "new"]
+        assert [v.evidence for v in result.rows[:3]] == ["rank2", "rank3", "rank3"]
+        assert result.rows[3].deferred == "rank5" and possible(result.rows[3]) == [4]
+    else:
+        assert verdicts(result) == ["new"] * 5
 
 
 def c1(live, seq):

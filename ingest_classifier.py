@@ -350,6 +350,35 @@ class _Pass:
         self.used, self.counts = set(), Counter()
         self._placed = None
         self.aliases, self.incoming = {}, {}
+        self.by_store, self.by_role_call = defaultdict(list), defaultdict(list)
+        self.uid_revisions = {uid: [u for u in rows if u["kind"] in ("canonical", "version")]
+                              for uid, rows in snapshot.uid_bindings.items()}
+        sessions = defaultdict(list)
+        for b in snapshot.bindings.values():
+            self.by_store[b["store_id"]].append(b)
+            sessions[b["session_id"]].append(b)
+            if b["disposition"] in ("stored", "migrated", "ambiguous") and b["role"] is not None:
+                self.by_role_call[b["role"], b["tool_call_id"] or ""].append(b)
+        self.rank3_index, self.stored_segments, self.user_before = {}, {}, {}
+        user = None
+        for b in sorted(snapshot.bindings.values(), key=lambda b: b["ordinal"] or 0):
+            self.user_before[b["occ_id"]] = user
+            if b["role"] == "user":
+                user = b
+        for bindings in sessions.values():
+            segment = None
+            for b in sorted(bindings, key=lambda b: b["ordinal"] or 0):
+                if b["role"] == "assistant" and b.get("tool_calls"):
+                    segment = []
+                    self.stored_segments[b["occ_id"]] = segment
+                elif segment is not None:
+                    segment.append(b)
+        self.anchor_before = {}
+        anchor = None
+        for row in view:
+            self.anchor_before[row.index] = anchor
+            if row.role == "user":
+                anchor = row.index
         self.head, self.run, self.base = Head("h4", None), None, "history"
         self.previous = next((r for r in snapshot.records if r["kind"] == "ingest"), None)
         self.segments = defaultdict(list)
@@ -384,15 +413,14 @@ class _Pass:
         return None if self.ignore_stamps else row.stamp
 
     def uid_rows(self, uid):
-        return [u for u in self.s.uid_bindings.get(uid, ()) if u["kind"] in ("canonical", "version")]
+        return self.uid_revisions.get(uid, ())
 
     def latest(self, uid):
         bindings = self.uid_rows(uid)
         return bindings[-1] if bindings else None
 
     def eligible(self, u):
-        return not u["disagree_seen"] and (u["proof_kind"] == "stored_new" or any(
-            b["store_id"] == u["store_id"] for b in self.s.bindings.values()))
+        return not u["disagree_seen"] and (u["proof_kind"] == "stored_new" or u["store_id"] in self.by_store)
 
     def current_uid(self, row, target):
         u = self.latest(row.uid)
@@ -425,19 +453,26 @@ class _Pass:
     def match(self, row, b):
         if row.identity_digest == b["identity_digest"]:
             return "identity"
-        if row.index not in self.incoming:
-            self.incoming[row.index] = {ledger_digest(self.s.salt, *t) for t in
-                                        self.oracle.incoming_aliases(_thaw(row.message), self.s)}
-        if b["occ_id"] not in self.aliases:
-            self.aliases[b["occ_id"]] = {ledger_digest(self.s.salt, *t): witnessed for t, witnessed in
-                                        self.oracle.stored_aliases(self.s.payload(b["occ_id"]), self.s)}
-        incoming = self.incoming[row.index] | {row.identity_digest}
+        incoming = self.incoming_digests(row)
+        self.stored_digests(b)
         if b["identity_digest"] in incoming:
             return "alias"
         matches = incoming & self.aliases[b["occ_id"]].keys()
         if matches:
             return "name" if all(self.aliases[b["occ_id"]][d] for d in matches) else "alias"
         return None
+
+    def incoming_digests(self, row):
+        if row.index not in self.incoming:
+            self.incoming[row.index] = {ledger_digest(self.s.salt, *t) for t in
+                                        self.oracle.incoming_aliases(_thaw(row.message), self.s)} | {row.identity_digest}
+        return self.incoming[row.index]
+
+    def stored_digests(self, b):
+        if b["occ_id"] not in self.aliases:
+            self.aliases[b["occ_id"]] = {ledger_digest(self.s.salt, *t): witnessed for t, witnessed in
+                                        self.oracle.stored_aliases(self.s.payload(b["occ_id"]), self.s)}
+        return self.aliases[b["occ_id"]]
 
     def entry_target(self, record, entry):
         if entry.is_descriptor:
@@ -507,7 +542,9 @@ class _Pass:
             if self.positive(row, b) or self.current_uid(row, target):
                 evidence = "run_keyed"
             else:
-                incoming_key = self.known_stamp(row) is not None or self.current_uid(row, target)
+                u = self.latest(row.uid)
+                incoming_key = self.known_stamp(row) is not None or (
+                    self.mode == "on" and u is not None and self.eligible(u))
                 stored_key = (not self.ignore_stamps and bool(self.s.stamps(target))) or (
                     self.mode == "on" and any(self.eligible(u) for uid in b["uids"] for u in self.uid_rows(uid)
                                               if u["store_id"] == b["store_id"]))
@@ -554,8 +591,7 @@ class _Pass:
             for row in self.view:
                 u = self.latest(row.uid)
                 if u and self.eligible(u):
-                    hit = next((b for b in self.s.bindings.values() if b["store_id"] == u["store_id"]
-                                and self.match(row, b)), None)
+                    hit = next((b for b in self.by_store.get(u["store_id"], ()) if self.match(row, b)), None)
                     if hit:
                         hits.append(hit)
             if hits and any(b["ordinal"] > hits[0]["ordinal"] for b in hits[1:]):
@@ -576,10 +612,15 @@ class _Pass:
         if self._placed is None:
             self._placed = [(j, self.ordinal(v.target)) for j, v in enumerate(self.rows)
                             if v.verdict == "replay" and self.ordinal(v.target) is not None]
-        placed = [p for p in self._placed if p[0] not in outside] if outside else self._placed
+        placed = self._placed
         index = bisect_left(placed, (i,))
-        left = placed[index - 1][1] if index else None
+        left_index = index - 1
+        while left_index >= 0 and placed[left_index][0] in outside:
+            left_index -= 1
+        left = placed[left_index][1] if left_index >= 0 else None
         if index < len(placed) and placed[index][0] == i:
+            index += 1
+        while index < len(placed) and placed[index][0] in outside:
             index += 1
         right = placed[index][1] if index < len(placed) else None
         return left, right
@@ -605,8 +646,8 @@ class _Pass:
             if verdict.verdict != "new":
                 continue
             if self.mode != "off" and row.uid and (u := self.latest(row.uid)):
-                candidates = [b for b in self.s.bindings.values() if b["store_id"] in
-                              {v["store_id"] for v in self.uid_rows(row.uid)}]
+                stores = {v["store_id"] for v in self.uid_rows(row.uid)}
+                candidates = [b for store in stores for b in self.by_store.get(store, ())]
                 candidates.sort(key=lambda b: b["store_id"], reverse=True)
                 latest = next((b for b in candidates if b["store_id"] == u["store_id"]), None)
                 match = next((b for b in candidates if self.match(row, b)), None)
@@ -656,16 +697,31 @@ class _Pass:
         candidates = {b["occ_id"]: b for b in self.s.by_stamp.get(self.known_stamp(row), ())
                       if b["role"] == row.role}
         if row.tool_segment is not None:
-            for bindings in self.s.by_digest.values():
+            key = row.role, row.tool_call_id
+            bindings = self.by_role_call.get(key, ())
+            if len(bindings) > 1:
+                # Index the complete identity/alias sets once, preserving every
+                # candidate and witness rule even for a reused call id.
+                if key not in self.rank3_index:
+                    index = defaultdict(list)
+                    for b in bindings:
+                        for digest in self.stored_digests(b).keys() | {b["identity_digest"]}:
+                            index[digest].append(b)
+                    self.rank3_index[key] = index
+                for digest in self.incoming_digests(row):
+                    for b in self.rank3_index[key].get(digest, ()):
+                        candidates[b["occ_id"]] = b
+            else:
                 for b in bindings:
-                    if (b["role"] == row.role and (b["tool_call_id"] or "") == row.tool_call_id
-                            and b["occ_id"] not in candidates and self.match(row, b)):
+                    if b["occ_id"] not in candidates and self.match(row, b):
                         candidates[b["occ_id"]] = b
         return sorted(candidates.values(), key=lambda b: b["ordinal"], reverse=True)
 
-    def weak(self):
+    def weak(self, *, segments):
         options = defaultdict(list)
         for row, verdict in zip(self.view, self.rows):
+            if (row.tool_segment is not None) != segments:
+                continue
             if verdict.verdict != "new" or verdict.deferred or verdict.reason == "revision":
                 continue
             candidates = self.row_candidates(row)
@@ -698,15 +754,13 @@ class _Pass:
                     continue
                 rank3 = row.tool_segment is not None and match
                 if rank3 and not positive:
-                    anchor = next((r.index for r in reversed(self.view[:row.index]) if r.role == "user"), None)
+                    anchor = self.anchor_before[row.index]
                     if anchor is not None:
                         placed = self.rows[anchor]
                         if placed.verdict != "replay":
                             rank3 = False
                         else:
-                            user = next((v for v in sorted(self.s.bindings.values(), key=lambda x: x["ordinal"] or 0,
-                                                         reverse=True) if v["role"] == "user"
-                                         and v["ordinal"] < b["ordinal"]), None)
+                            user = self.user_before[target]
                             rank3 = user is not None and user["occ_id"] == placed.target
                     if self.known_stamp(row) and not self.s.stamps(target):
                         rank3 = False
@@ -719,7 +773,7 @@ class _Pass:
                 else:
                     self.reject(row.index, target, "no_witness")
         units, members = [], set()
-        for start, indexes in self.segments.items():
+        for start, indexes in (self.segments.items() if segments else ()):
             if len(indexes) < 2:
                 continue
             members.update(indexes)
@@ -729,17 +783,13 @@ class _Pass:
             for assistant in assistants:
                 mapping = {start: (assistant, self.rows[start].evidence if start in fixed else
                                    next(e for b, e in options[start] if b is assistant))}
-                stored = sorted((b for b in self.s.bindings.values() if b["session_id"] == assistant["session_id"]),
-                                key=lambda b: b["ordinal"] or 0)
-                pos = next(j for j, b in enumerate(stored) if b["occ_id"] == assistant["occ_id"])
+                stored = self.stored_segments.get(assistant["occ_id"], ())
                 answered = set()
                 for i in indexes[1:]:
                     choices = ([self.s.bindings[fixed[i]]] if i in fixed and isinstance(fixed[i], int)
                                else [b for b, _ in options[i]])
                     hit = None
-                    for b in stored[pos + 1:]:
-                        if b["role"] == "assistant" and b.get("tool_calls"):
-                            break
+                    for b in stored:
                         if b in choices and b["tool_call_id"] == self.view[i].tool_call_id and b["occ_id"] not in answered:
                             hit = b
                             break
@@ -828,10 +878,13 @@ class _Pass:
                 cuts.append(start)
                 for i in indexes:
                     self.cut(i)
-        if self.run and any(self.run.i <= start < self.run.i + self.run.k for start in cuts):
+        if self.run and any(start < self.run.i + self.run.k and
+                            any(self.run.i <= i < self.run.i + self.run.k for i in self.segments[start])
+                            for start in cuts):
             original = self.run.k
-            end = min(start for start in cuts if self.run.i <= start < self.run.i + self.run.k)
-            for i in range(end, self.run.i + self.run.k):
+            end = min(start for start in cuts if any(
+                self.run.i <= i < self.run.i + self.run.k for i in self.segments[start]))
+            for i in range(max(end, self.run.i), self.run.i + self.run.k):
                 self.cut(i)
             self.counts["run.segment_cut"] += original
             self.run = self.run._replace(k=end - self.run.i) if end > self.run.i else None
@@ -934,7 +987,10 @@ class _Pass:
         self.run_search()
         self.choose_head()
         self.strong()
-        self.weak()
+        # Step 5: non-segment rank-2 anchors must survive C11 before rank 3
+        # evaluates their segments. The segment pass uses those final gaps.
+        self.weak(segments=False)
+        self.weak(segments=True)
         self.discovery()
         self.finish()
         return Classification(self.s.lineage, self.base,
@@ -966,8 +1022,8 @@ def classify(view, snapshot: LedgerSnapshot, oracle: IdentityOracle, *, uid_mode
         for row in view:
             u = first.latest(row.uid)
             if uid_mode == "on" and u and first.eligible(u):
-                for b in snapshot.bindings.values():
-                    if b["store_id"] == u["store_id"] and row.stamp and snapshot.stamps(b["occ_id"]) and (
+                for b in first.by_store.get(u["store_id"], ()):
+                    if first.match(row, b) and row.stamp and snapshot.stamps(b["occ_id"]) and (
                             row.stamp not in snapshot.stamps(b["occ_id"])):
                         proven.add(b["occ_id"])
             for e in snapshot.emissions:
