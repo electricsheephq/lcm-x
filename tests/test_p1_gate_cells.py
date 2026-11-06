@@ -224,3 +224,21 @@ def test_gate_summary_keeps_expected_failures_red():
     assert gate_result([{**clean, "result": "FAIL"}]) == "FAIL"
     for key in ("loss", "silent"):
         assert gate_result([{**clean, "outcome": {"loss": 0, "silent": 0, key: 1}}]) == "FAIL"
+
+
+@pytest.mark.parametrize("content", [
+    [{"type": "text", "text": "héllo"}],
+    {"b": 1, "a": [2, 3]},
+    '[{"type":"text","text":"literal json string"}]',
+])
+def test_store_outcome_matches_the_stores_content_serialization(tmp_path, content):
+    from hermes_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "lcm.db")
+    try:
+        store.append("S", {"role": "user", "content": content})
+        expected = expect_from_view([{"role": "user", "content": content}], "S")
+        outcome = store_outcome(store._conn, expected)
+    finally:
+        store.close()
+    assert (outcome["loss"], outcome["visible"], outcome["silent"]) == (0, 0, 0), outcome

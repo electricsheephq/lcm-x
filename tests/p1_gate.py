@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from bench.instruments.reliability.scorers.multiset import split_surplus
+from hermes_lcm.message_content import normalize_content_value
 
 
 def _value(value):
@@ -22,12 +23,12 @@ def _calls(value):
 
 
 def expect_from_view(rows, lineage):
-    return {lineage: [(row["role"], _value(row.get("content")), row.get("tool_call_id"),
+    return {lineage: [(row["role"], normalize_content_value(row.get("content")), row.get("tool_call_id"),
                       _calls(row.get("tool_calls"))) for row in rows]}
 
 
 def store_outcome(conn, expected):
-    wanted = Counter((lineage, role, _value(content), call_id, _calls(calls))
+    wanted = Counter((lineage, role, normalize_content_value(content), call_id, _calls(calls))
                      for lineage, rows in expected.items() for role, content, call_id, calls in rows)
     ids = defaultdict(list)
     for sid, session, conversation, role, content, call_id, calls in conn.execute(
