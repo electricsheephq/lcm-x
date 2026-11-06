@@ -110,6 +110,11 @@ def _seqs(event):
     return (event["seq"],) if "seq" in event else (event["seq_enter"], event["seq_exit"])
 
 
+def _marker_cause(event):
+    reason = event.get("reason")
+    return reason if reason in ("cap", "disk_floor") else event.get("kind", "seq_hole")
+
+
 def load_events(proc: Path) -> list:
     """Every complete event line; a torn last line of a segment is not an event."""
     events = []
@@ -137,14 +142,14 @@ def read(proc, *, checkpoint=None, verify=True) -> dict:
         # Dropped queued data and open calls leave holes before the diagnostic stop marker.
         marker = min((e for e in raw if e.get("kind") in ("gap", "cap") and e["seq"] >= end),
                      key=lambda e: e["seq"], default={})
-        cause = marker.get("reason", marker.get("kind", "seq_hole"))
+        cause = _marker_cause(marker)
     ordered = sorted(raw, key=lambda e: min(_seqs(e)))
     lost = 0
     for event in ordered:
         first = min(_seqs(event))
         found = None
         if event.get("kind") in ("gap", "cap"):
-            found = event.get("reason", event["kind"])
+            found = _marker_cause(event)
         elif event.get("lost_observation") or event.get("status") == "stack_mismatch":
             found = event.get("lost_observation") or "stack_mismatch"
         elif event.get("lost", 0) > lost:
@@ -153,6 +158,10 @@ def read(proc, *, checkpoint=None, verify=True) -> dict:
         if found and first < end:
             end, cause = first, found
     first = status.get("first_cause") or {}
+    writer_cause = first.get("cause")
+    if (isinstance(writer_cause, str) and writer_cause.startswith("writer:") and
+            isinstance(first.get("seq"), int) and first["seq"] == end and end not in seqs):
+        cause = writer_cause
     stop = status.get("end_state")
     if stop not in ("cap", "disk_floor", "gap"):
         stop = first.get("cause")

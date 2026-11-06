@@ -70,7 +70,8 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
 
 - **Cap and disk floor:** every write is admitted before it starts against `LCM_RECORDER_MAX_BYTES` and the
   requirement that free space minus its planned size remain at least 20 GiB. A 64 KiB diagnostic reserve inside
-  the cap is withheld from data writes; STATUS and cap/gap markers can use it and up to 64 KiB below the disk floor.
+  the cap is withheld from data writes; STATUS and cap/gap markers can use it and
+  up to 64 KiB plus one STATUS file below the disk floor (STATUS checks only its growth).
   This includes events, blobs, snapshots,
   payload copies, manifests, checkpoints and status files. Existing files anywhere under `LCM_RECORDER_DIR` count
   at startup; subsequent planned writes count conservatively, including payload links and temporary copies.

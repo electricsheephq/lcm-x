@@ -823,11 +823,12 @@ class Recorder:
                 for path in files:
                     rel = path.relative_to(payload_dir)
                     _mkdir((out / rel).parent)
-                    self._reserve(path.stat().st_size)
+                    reserved = path.stat().st_size
+                    self._reserve(reserved)
                     try:
                         os.link(path, out / rel)
                     except OSError:  # another filesystem, or links refused or unsupported there
-                        self._payload_copy(path, out / rel)
+                        self._payload_copy(path, out / rel, reserved)
                 result["payloads"] = "ok"
         else:
             result["payloads"] = "absent"
@@ -835,11 +836,16 @@ class Recorder:
         self.payload_snapshot = result
 
     @staticmethod
-    def _payload_copy(source, target):
+    def _payload_copy(source, target, size):
         st = source.stat()
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with open(source, "rb") as src, os.fdopen(fd, "wb") as dst:
-            shutil.copyfileobj(src, dst)
+            while size:
+                chunk = src.read(min(size, 64 << 10))
+                if not chunk:
+                    break
+                dst.write(chunk)
+                size -= len(chunk)
         os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
 
     def _snapshot_refused(self, cause="disk_floor"):
@@ -873,8 +879,9 @@ class Recorder:
             if not path.is_file():
                 continue
             tmp = path.with_name(path.name + ".snapshot-tmp")
-            self._reserve(path.stat().st_size)
-            self._payload_copy(path, tmp)
+            reserved = path.stat().st_size
+            self._reserve(reserved)
+            self._payload_copy(path, tmp, reserved)
             os.replace(tmp, path)
             st = path.stat()
             manifest.append({"name": str(path.relative_to(snap / "large-outputs")), "size": st.st_size,
@@ -1597,6 +1604,8 @@ class Recorder:
             try:
                 size = (pinned.execute("PRAGMA page_count").fetchone()[0] *
                         pinned.execute("PRAGMA page_size").fetchone()[0]) if pinned is not None else 0
+                if not self._admit(size + 4096, reserve=False, checkpoint=hours):
+                    return
                 if not self._admit(size, checkpoint=hours):
                     return
                 _backup(pinned, self.proc / "checkpoint" / str(hours) / "lcm.db")
