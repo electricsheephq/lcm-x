@@ -2463,7 +2463,7 @@ def _annotate_forget_requested(engine, payload, rows, *, deadline, excluded=()):
         return
     forgets, stored, reason = forget_requests.read_forget_rows(
         engine._store.db_path, [r["store_id"] for r in rows if r.get("store_id") is not None],
-        excluded=excluded, deadline=deadline,
+        excluded=excluded, deadline=deadline, subagent_source=_SUBAGENT_SOURCE,
     )
     if reason:
         payload.setdefault("provenance", {})["forget_unavailable"] = reason
@@ -4650,16 +4650,17 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     forget_info = {}
     forgets, forget_rows = [], {}
     delivery_ordered = ordered
+    session_mode = kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) == "session"
     if getattr(engine._config, "recall_honour_forget", False):
         forgets, forget_rows, reason = forget_requests.read_forget_rows(
             engine._store.db_path,
             [e["hit"]["store_id"] for e in ordered
              if e["hit"].get("kind") != "summary" and e["hit"].get("store_id") is not None],
-            allowed=candidate_session_ids, deadline=deadline,
+            allowed=candidate_session_ids, deadline=deadline, subagent_source=_SUBAGENT_SOURCE,
         )
         if reason:
             forget_info["forget_unavailable"] = reason
-        else:
+        elif not session_mode:
             ordered, safe_count, receipts = forget_requests.withhold(
                 ordered, forget_rows, forgets, limit, engine.current_session_id)
             delivery_ordered = ordered[:safe_count]
@@ -4668,7 +4669,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
     _annotate_subagent_lineage(engine, [entry["hit"] for entry in ordered if isinstance(entry.get("hit"), dict)])
     session_delivery = None
-    if kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) == "session":
+    if session_mode:
         from .recall_session import deliver_session
         session_delivery = partial(
             deliver_session, engine=engine, deadline=deadline, excluded=excluded_session_ids,
@@ -4680,19 +4681,15 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     session_forget_rows = {}
     if session_delivery is not None and forgets:
         original_delivery = session_delivery
-        session_orders = {r["session_id"]: r["session_order"]
-                          for r in [*forget_rows.values(), *forgets]}
-
         def capture_event_time(row):
-            session_forget_rows[row["store_id"]] = {
-                **row, "session_order": session_orders.get(row["session_id"], float("inf"))}
+            session_forget_rows[row["store_id"]] = row
             return _lcm_recall_event_time(row)
 
         def session_delivery(entries, envelope):
             raw = original_delivery(entries, envelope, event_time_fields=capture_event_time)
             payload = json.loads(raw)
             receipts = forget_requests.filter_session_payload(
-                payload, session_forget_rows, forgets, engine.current_session_id)
+                payload, session_forget_rows, forgets, engine.current_session_id, seen_refs=seen_refs)
             if receipts:
                 forget_info["forget_withheld"] = list({r["store_id"]: r for r in
                     [*forget_info.get("forget_withheld", []), *receipts]}.values())

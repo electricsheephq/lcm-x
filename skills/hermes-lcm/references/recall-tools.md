@@ -147,24 +147,39 @@ return their existing `status: disabled` responses.
 
 Set `recall_honour_forget: true` in LCM configuration or
 `LCM_RECALL_HONOUR_FORGET=true` (default `false`) to withhold earlier message
-hits covered by command-form USER forget requests during automatic `lcm_recall`
+hits covered by explicit memory-forget USER requests during automatic `lcm_recall`
 delivery, including proactive recall, the pre-answer baseline and evidence packs.
-The forget turn replaces covered hits where possible; uncovered pool hits refill
-remaining slots. Nothing is deleted or rewritten in the store. Summary hits are
-never withheld and may still contain the detail.
+In hits mode, the forget turn replaces covered hits where possible; uncovered
+pool hits refill remaining slots. Session delivery only removes covered rows;
+it never inserts a forget turn, and only affected sessions receive changed
+completeness/omission/range metadata. Nothing is deleted or rewritten in the
+store. Summary hits are never withheld and may still contain the detail.
 
-Detection scans at most the 200 most recent keyword-matching user rows in the
-searched store/session scope under the request deadline. Requests need at least
-two detail words. The two preceding messages in the same session need 30% word
+Detection uses the existing full-text index to select at most the 200 newest
+user rows matching `forget OR remember OR memory OR memorize OR retain OR disregard`
+in the searched store/session scope under the request deadline, then applies
+conservative request patterns. If the index is absent, a keyword scan is used.
+Subagent-source rows, fenced/inline code, blockquote lines and double-quoted
+text are excluded from detection. Ordinary file/library instructions and vague
+phrases such as "forget it" do not qualify. Requests need at least two detail
+words, excluding contractions, pronouns, short words and stopwords; possessive
+`'s` is stripped. The two preceding messages in the same session need 30% word
 coverage; other earlier messages need two shared detail words and 50% coverage.
-Cross-session order uses observed event time when available, otherwise session
-store order. Self and later turns are never covered.
+A covered row must have a smaller insertion-order `store_id` than the forget
+turn and, when both have `observed_at`, a time no later than the forget turn.
+Self and later turns are never covered, even when event times are missing.
 
 `provenance.forget_withheld` records `store_id`, `forget_store_id` and
-`forget_event_time` (null if unknown). A failed or expired read leaves delivery
+`forget_event_time` (null if unknown) only for rows in the delivery window before
+withholding, not every covered row in the candidate pool. All covered pool rows
+are excluded from refill. In session mode receipts describe removed delivered
+rows. `fts_anchor` provenance describes ranking before withholding.
+A failed or expired read leaves delivery
 unchanged and sets `provenance.forget_unavailable` to `read_error` or `deadline`.
 This is conservative, bounded delivery suppression, not erasure or a guarantee
 that every paraphrase is found. Explicit `lcm_grep` and raw-message `lcm_expand`
 return covered rows unchanged with an added `forget_requested` object containing
 `forget_store_id` and `on` (event date or null). `lcm_describe` is metadata-only
-and unchanged. With the flag off, these reads and annotations are skipped.
+and unchanged. Known limits: `lcm_load_session` and caller-supplied `baseline_refs`
+can return covered rows without annotation. With the flag off, these reads and
+annotations are skipped and output is unchanged.

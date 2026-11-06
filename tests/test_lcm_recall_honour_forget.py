@@ -1,5 +1,6 @@
 """Read-path integration with a real, synthetic store and no semantic provider."""
 import json
+import sqlite3
 from types import SimpleNamespace
 import time
 
@@ -21,8 +22,8 @@ def engine(tmp_path):
     dag.close()
 
 
-def add(e, text, role="user", session="s", stamp=1700000000):
-    return e._store.append(session, dict(role=role, content=text, timestamp=stamp))
+def add(e, text, role="user", session="s", stamp=1700000000, source=""):
+    return e._store.append(session, dict(role=role, content=text, timestamp=stamp), source=source)
 
 
 def recall(e, **args):
@@ -40,11 +41,14 @@ def test_adjacent_replacement_count_provenance_and_no_writes(engine):
     old, reply, f = seeded(engine)
     add(engine, "Green gardens unrelated", stamp=1700200000)
     before = engine._store.connection.execute("SELECT * FROM messages ORDER BY store_id").fetchall()
+    engine._config.recall_honour_forget = False
+    window = {h["store_id"] for h in recall(engine)["hits"]}
+    engine._config.recall_honour_forget = True
     result = recall(engine)
     assert f in [h["store_id"] for h in result["hits"]]
     assert not {old, reply} & {h["store_id"] for h in result["hits"]}
     assert result["total_results"] == 2
-    assert {r["store_id"] for r in result["provenance"]["forget_withheld"]} == {old, reply}
+    assert {r["store_id"] for r in result["provenance"]["forget_withheld"]} == {old, reply} & window
     assert all(r["forget_store_id"] == f and r["forget_event_time"] == "2023-11-16T02:00:00Z"
                for r in result["provenance"]["forget_withheld"])
     assert next(h for h in result["hits"] if h["store_id"] == f)["event_time"] == "2023-11-16T02:00:00Z"
@@ -65,8 +69,10 @@ def test_far_and_one_word_and_later(engine):
 
 
 @pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
-def test_off_is_whole_json_identical_to_unset(engine, monkeypatch, detail):
+@pytest.mark.parametrize("unit", ["hits", "session"])
+def test_off_is_whole_json_identical_to_unset(engine, monkeypatch, detail, unit):
     seeded(engine)
+    engine._config.recall_delivery_unit = unit
     # SimpleNamespace gives a genuinely absent key, unlike a dataclass class default.
     config = vars(engine._config).copy()
     config.pop("recall_honour_forget")
@@ -182,8 +188,6 @@ def test_expand_summary_source_rows_stay_truthful(engine):
 
 
 def test_one_snapshot_read_and_unknown_date(engine, monkeypatch):
-    import sqlite3
-
     old = add(engine, "green tea", stamp=None)
     f = add(engine, "Forget my green tea", stamp=None)
     statements, connections = [], []
@@ -201,3 +205,121 @@ def test_one_snapshot_read_and_unknown_date(engine, monkeypatch):
     assert len(connections) == 1 and "mode=ro" in connections[0][0][0]
     assert len([s for s in statements if s.startswith("WITH requests")]) == 1
     assert not any(s.startswith(("INSERT", "UPDATE", "DELETE")) for s in statements)
+
+
+def test_subagent_user_rows_never_request_forgetting(engine):
+    old = add(engine, "green tea")
+    delegated = add(engine, "Forget my green tea", source=tools._SUBAGENT_SOURCE)
+    fs, _, reason = forget.read_forget_rows(engine._store.db_path, [old], deadline=time.monotonic() + 1)
+    assert reason is None and fs == []
+    assert {old, delegated} <= {h["store_id"] for h in recall(engine)["hits"]}
+
+
+def test_only_delivered_window_has_receipts_but_entire_pool_is_withheld(engine):
+    ids = [add(engine, f"green tea detail {i}") for i in range(8)]
+    add(engine, "Forget my green tea", stamp=1700100000)
+    engine._config.recall_honour_forget = False
+    window = {h["store_id"] for h in recall(engine, limit=2)["hits"]}
+    engine._config.recall_honour_forget = True
+    result = recall(engine, limit=2)
+    receipts = result["provenance"]["forget_withheld"]
+    assert 0 < len(receipts) <= 2
+    assert {r["store_id"] for r in receipts} == window & set(ids)
+    assert not set(ids) & {h["store_id"] for h in result["hits"]}
+
+
+def test_session_only_removes_rows_and_preserves_unaffected_provenance(engine, monkeypatch):
+    from hermes_lcm import recall_session
+
+    old = add(engine, "green tea", session="covered")
+    f = add(engine, "Forget my green tea. " + "padding " * 5000,
+            session="forget", stamp=1700100000)
+    healthy = add(engine, "green tea", session="healthy", stamp=1700200000)
+    engine._config.recall_delivery_unit = "session"
+    original_fts = tools._lcm_recall_fts_arm
+    original_delivery = recall_session.deliver_session
+    raw_payloads = []
+
+    def without_forget(*a, **kw):
+        hits, error = original_fts(*a, **kw)
+        hits[:] = [h for h in hits if h["store_id"] != f]
+        return hits, error
+
+    def capture(*a, **kw):
+        raw = original_delivery(*a, **kw)
+        raw_payloads.append(json.loads(raw))
+        return raw
+
+    monkeypatch.setattr(tools, "_lcm_recall_fts_arm", without_forget)
+    monkeypatch.setattr(recall_session, "deliver_session", capture)
+    result = recall(engine)
+    assert {h["store_id"] for h in result["hits"]} == {healthy}
+    assert {h["store_id"] for h in raw_payloads[0]["hits"]} == {old, healthy}
+    before = {s["session_id"]: s for s in raw_payloads[0]["provenance"]["delivery"]["sessions"]}
+    after = {s["session_id"]: s for s in result["provenance"]["delivery"]["sessions"]}
+    assert after["healthy"] == before["healthy"]
+    assert after["covered"]["complete"] is False
+    assert after["covered"]["omission_reason"] == "forget_requested"
+    assert after["covered"]["returned_id_ranges"] == []
+    assert result["provenance"]["delivery"]["response_chars"] < result["provenance"]["delivery"]["char_budget"]
+
+
+def test_seen_forget_replacement_is_not_novel_in_answer_ready_hits(engine, monkeypatch):
+    old, reply, f = seeded(engine)
+    real = tools._lcm_recall_fts_arm
+
+    def without_forget(*a, **kw):
+        hits, error = real(*a, **kw)
+        hits[:] = [h for h in hits if h["store_id"] != f]
+        return hits, error
+
+    monkeypatch.setattr(tools, "_lcm_recall_fts_arm", without_forget)
+    ref = f"lcm:{f}:0-{len('Please forget my green tea preference')}"
+    result = recall(engine, detail="answer_ready", seen_refs=[ref])
+    assert result["hits"] == []
+    assert result["delta"]["novel_refs"] == []
+    assert result["delta"]["novel_ref_count"] == 0 and not result["delta"]["progress"]
+    assert result["delta"]["termination_reason"] == "no_novel_exact_ref"
+
+
+def test_session_delta_rebuild_excludes_seen_refs():
+    old = dict(store_id=1, session_id="s", content="green tea")
+    f = dict(store_id=2, session_id="s", content="Forget my green tea", role="user")
+    hits = [dict(**r, score=1, exact_ref=f"lcm:{r['store_id']}:0-{len(r['content'])}") for r in [old, f]]
+    ref = hits[1]["exact_ref"]
+    payload = dict(hits=hits, delta={}, provenance=dict(delivery=dict(sessions=[dict(session_id="s")])))
+    forget.filter_session_payload(payload, {1: old, 2: f}, [f], "s", seen_refs={ref})
+    assert payload["delta"]["novel_refs"] == []
+    assert payload["delta"]["termination_reason"] == "no_novel_exact_ref"
+
+
+def test_fts_candidate_path_is_used_scoped_and_read_only(engine, monkeypatch):
+    old, _, f = seeded(engine)
+    add(engine, "Forget my green tea", session="excluded", stamp=1700300000)
+    add(engine, "Forget my green tea", session="outside", stamp=1700400000)
+    statements = []
+    real_connect = sqlite3.connect
+
+    def connect(*a, **kw):
+        conn = real_connect(*a, **kw)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(forget.sqlite3, "connect", connect)
+    fs, _, reason = forget.read_forget_rows(engine._store.db_path, [old], allowed=["s", "excluded"],
+                                           excluded=["excluded"], deadline=time.monotonic() + 1)
+    assert reason is None and [r["store_id"] for r in fs] == [f]
+    query = next(s for s in statements if s.startswith("WITH requests"))
+    assert "messages_fts MATCH" in query and "instr(lower" not in query
+    assert "forget OR remember OR memory OR memorize OR retain OR disregard" in query
+    assert not any(s.startswith(("INSERT", "UPDATE", "DELETE", "CREATE")) for s in statements)
+
+
+def test_scan_fallback_when_fts_is_absent(tmp_path):
+    path = tmp_path / "no-fts.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE messages (store_id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
+                     "content TEXT, source TEXT, observed_at REAL, timestamp REAL)")
+        conn.execute("INSERT INTO messages VALUES (1, 's', 'user', 'Forget my green tea', '', NULL, 1)")
+    fs, _, reason = forget.read_forget_rows(path, [], deadline=time.monotonic() + 1)
+    assert reason is None and [r["store_id"] for r in fs] == [1]

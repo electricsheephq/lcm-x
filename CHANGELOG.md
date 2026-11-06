@@ -7,6 +7,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 ## Unreleased
 
 - Add off-by-default `recall_honour_forget` / `LCM_RECALL_HONOUR_FORGET`: automatic recall withholds message hits covered by user forget requests without changing storage; explicit grep/expand keep rows and annotate the request. Summary hits remain unchanged.
+- Fix opt-in forget precision: require explicit memory requests, ignore quoted/code/subagent text and contraction fragments, and never cover later-inserted rows. Candidate detection uses bounded full-text search; receipts describe withheld delivery rows. Session mode removes covered rows without inserting forget turns or changing unaffected session metadata; seen refs stay non-novel. `fts_anchor` describes ranking before withholding. Known limits: `lcm_load_session` and caller-supplied `baseline_refs` return covered rows without annotation.
 
 - Removed: cache-friendly follow-on condensation and transcript GC (#1246); their keys remain parsed and ignored with one warning per process when enabled, and legacy GC placeholders remain readable.
 
