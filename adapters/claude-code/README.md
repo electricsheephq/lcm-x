@@ -46,7 +46,9 @@ record `runtime_missing` or `package_missing` until it is fixed. A bare command 
 `python3.12` counts as relative and is not looked up on `PATH`: give its full path.
 
 Grok Build sessions are not captured in this release: its session-file reader is not included, so
-hooks log each Grok event as `grok_capture_off` and spool nothing.
+hooks log each Grok event as `grok_capture_off` and spool nothing. Under Grok Build the MCP server
+starts no reader (and says why on stderr) unless the Grok store home holds an `lcm.db` or a
+`reader-override.json`.
 
 A `reader-override.json` in the store home makes the server start another reader in place of the
 plain one, and hands it the plain reader's command. Anything wrong with the file starts the plain

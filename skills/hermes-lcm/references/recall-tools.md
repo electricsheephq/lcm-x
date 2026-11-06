@@ -10,6 +10,22 @@ and inspect omissions. The entire JSON is capped at 16,000 estimated tokens and
 64,000 characters. Neighbors have zero score and no retrieval arms. Existing
 exact refs, `seen_refs`, occurrence-time validation and explicit exclusions apply.
 
+## Empty optional arrays
+
+An empty optional array (`[]`) behaves like omitting the argument, with the
+following contracts and exceptions:
+
+- `externalized_refs` is optional, and an empty list is the same as omitting it;
+  explicit invalid, missing, symlinked, or foreign-session refs are rejected
+  rather than silently widened
+- `lcm_query_state(kinds=[])` uses the default kinds, without a kind filter.
+- `lcm_expand_query(session_ids=[])` uses the current session.
+- `seen_refs=[]` behaves like omission outside `detail='answer_ready'`. With
+  `detail='answer_ready'`, supplying `seen_refs` opts into the exact-ref delta
+  cursor contract, even when empty; omission preserves the baseline response.
+- Required arrays retain their documented meaning: for example, empty proposal
+  `selections` selects nothing and empty `missing_facets` declares none missing.
+
 ## Current compacted conversation
 
 ### `lcm_grep`

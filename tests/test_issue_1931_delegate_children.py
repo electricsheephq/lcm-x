@@ -268,9 +268,15 @@ def test_recall_scopes_for_child_rows(host):
         return {hit["session_id"]: hit.get("lineage") for hit in payload["results"]}
 
     assert sessions() == {"child": "subagent of parent", "grandchild": "subagent of child"}
-    assert sessions(session_scope="all") == {"child": "subagent of parent", "grandchild": "subagent of child",
-                                             "sibling-child": "subagent of sibling"}
+    parent.ingest([{"role": "user", "content": f"parent {MARKER}"}])
+    assert sessions() == {"parent": None, "child": "subagent of parent", "grandchild": "subagent of child"}
+    assert sessions(exclude_current_session=True) == {"child": "subagent of parent", "grandchild": "subagent of child"}
+    assert sessions(exclude_session_ids=["parent"]) == {"child": "subagent of parent", "grandchild": "subagent of child"}
+    assert sessions(exclude_current_session=True, exclude_session_ids=["grandchild"]) == {"child": "subagent of parent"}
+    assert sessions(session_scope="all") == {"parent": None, "child": "subagent of parent",
+                                             "grandchild": "subagent of child", "sibling-child": "subagent of sibling"}
     assert sessions(session_scope="session", session_id="sibling-child") == {"sibling-child": "subagent of sibling"}
+    assert sessions(session_scope="session", session_id="sibling-child", exclude_session_ids=["sibling-child"]) == {}
     # Deleting a parent's messages keeps its children's links; deleting a child's removes the child's own link.
     parent._store.delete_session_messages("parent")
     parent._store.delete_session_messages("grandchild")

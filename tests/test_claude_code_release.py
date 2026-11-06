@@ -40,6 +40,15 @@ def test_the_unit_depends_on_the_import_closure_of_its_entry_points():
     assert delta.relevant(changed, dependencies) == ["adapters/claude-code/bin/lcmx_hook.py", "store.py"]
 
 
+def test_a_plugin_yaml_only_change_is_a_unit_change(monkeypatch, capsys):
+    """REGRESSION (#2188): plugin.yaml is read at run time (the bundle's core_version, the reader's
+    version), so a change to it alone is reported and fails --check."""
+    delta = _script("claude_code_unit_delta")
+    monkeypatch.setattr(delta, "changed_since", lambda ref, root=delta.ROOT: ["plugin.yaml"])
+    assert delta.main(["--since", "HEAD", "--check"]) == 1
+    assert json.loads(capsys.readouterr().out)["changed"] == ["plugin.yaml"]
+
+
 def test_the_unit_asset_bundles_the_exact_core_commit(tmp_path):
     build = _script("build_claude_code_unit")
     asset = build.build("HEAD", tmp_path / "one")
