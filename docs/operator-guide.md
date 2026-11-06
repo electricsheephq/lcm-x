@@ -426,8 +426,10 @@ settings do not update LCM-X's threshold.
 
 ### Session-end warning says `final messages may be absent` or `retry pending`
 
-The interrupted or SQLite-lock raw-flush warning includes `unflushed=N`: the pending message count
-before the final ingest attempt, without message content. The outer ingest/finalize warning includes
+The interrupted or SQLite-lock raw-flush warning includes `unflushed=N`: a cursor-based estimate
+before the final ingest attempt, not a durability count, without message content. While the ingest
+cursor awaits reconciliation (after a rebind, a lossy proof or a tail recovery), it reports
+`unflushed=unknown`. The outer ingest/finalize warning includes
 the same field only when ingest has not finished. The session-end SQLite busy timeout stays 50 ms.
 When a lock skip keeps the rows in memory, the warning says `retry pending at the next session start
 or end in this process, at engine shutdown, or at a normal interpreter exit (not os._exit)` and names
