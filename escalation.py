@@ -22,7 +22,7 @@ from typing import Callable, Optional
 
 from . import tokens as _token_module
 from .model_routing import apply_lcm_model_route, apply_lcm_reasoning_effort
-from .summary_attempt import SummaryAttempt, SummaryTiming
+from .summary_attempt import SummaryAttempt, SummaryContentFilterError, SummaryTiming
 # Re-exported for existing callers.
 from .summary_attempt import is_summary_content_filter_error, is_summary_context_length_error, is_summary_route_config_error  # noqa: F401
 from .summary_outcome import SummaryOutcomeFacts, SummaryOutcomeKind, classify_summary_outcome
@@ -701,6 +701,8 @@ def _call_llm_for_summary(prompt: str, max_tokens: int,
             call_kwargs["route_info"] = route_info
         with _host_stream_deadline_scope():
             response = call_llm(**call_kwargs)
+        if getattr(response.choices[0], "finish_reason", None) == "content_filter":
+            raise SummaryContentFilterError("content_filter")
         content = response.choices[0].message.content
         if not isinstance(content, str):
             content = str(content) if content else ""

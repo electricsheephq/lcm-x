@@ -6,6 +6,12 @@ import re
 from dataclasses import dataclass
 
 
+class SummaryContentFilterError(RuntimeError):
+    """A provider reported a refused completion instead of raising HTTP 400."""
+
+    status_code = 400
+
+
 @dataclass(frozen=True)
 class SummaryTiming:
     """Clock observations at the existing provider boundary."""
