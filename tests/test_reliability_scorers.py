@@ -364,7 +364,8 @@ FLOOR_SHA, REF_SHA = "345cd2b057a452236de401d3534b8502a7465e8d", "f97608f178d1ff
     (True, True, ("n0", "n1"), "FAIL", 2, True, False),  # the notice is never an acceptable stored body
     (True, False, ("r0", "r1"), "FAIL", 0, True, False),  # no dispatch sha (an older transcript): nothing is licensed
     (False, True, ("r0", "r1"), "FAIL", 0, True, False),  # the probe did not see the host's own notice: nothing is licensed
-    (True, True, ("r0", "r1"), "FAIL", 0, False, False),  # a failed dispatch is never licensed
+    # #1098: a semantically failed result is still licensed and stored as dispatched; the cell fails on the result
+    (True, True, ("r0", "r1"), "FAIL", 2, False, False),
     (True, True, ("r0", "r1"), "FAIL", 2, True, True),  # a licensed call whose stored row is lost still fails
 ])
 def test_b2_scores_the_dispatched_result_behind_a_host_wire_notice(tmp_path, flagged, dispatch_sha, stored, verdict, licensed,
@@ -385,6 +386,8 @@ def test_b2_scores_the_dispatched_result_behind_a_host_wire_notice(tmp_path, fla
     assert lic["rows"] == licensed and [r["id"] for r in lic["records"]] == ["call_T01_0_0", "call_T01_0_1"][:licensed]
     if licensed:
         assert lic["records"][0] == {"id": "call_T01_0_0", "notice_sha256": sha("n0"), "result_sha256": sha("r0")}
+    if not dispatch_ok:  # #1098: no storage findings on top of the failed result
+        assert "B2" not in out["failed_bars"], out["failed_bars"]
 
 
 @pytest.mark.parametrize("host_sha", [REF_SHA, None])

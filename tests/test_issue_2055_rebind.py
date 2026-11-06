@@ -502,3 +502,33 @@ def test_plan_rebinds_writes_nothing(engines):
         conn.set_trace_callback(None)
     assert plan["pairs"] == list(enumerate(ids))
     assert all(s.lstrip().upper().startswith("SELECT") for s in statements)
+
+
+def test_long_bound_prefix_still_rebinds_its_lag_row(engines):
+    # #2254: the cap counts candidate keys, not every incoming entry. A matched
+    # prefix whose rows are already bound can never pair, so it does not count.
+    engine = engines()
+    view = history(4100)
+    ids = unbound(engine, view[:-1])
+    bind(engine, ids, view[:-1], range(1, len(ids) + 1))
+    lag = unbound(engine, view[-1:])[0]
+    write(engine, view, matched=dict(enumerate(ids)))
+    assert not count(engine, "rebind.skipped.too_large")
+    assert [b["store_id"] for b in migrated(engine)] == [lag]
+    assert mark(engine) == lag
+
+
+def test_bound_alias_twin_does_not_rebind_candidate(engines):
+    # #2254 review: a bound row with an alternate stamp and an unbound candidate sharing its identity and
+    # stamp stay ambiguous under the candidate-key cap, so the candidate is not rebound.
+    engine = engines()
+    bound_view = [_m("user", "same", 1.)]
+    bound_id = unbound(engine, bound_view)[0]
+    bind(engine, [bound_id], bound_view, [1])
+    with engine._store.ingest_atomic():
+        engine._store.add_message_relations([[(bound_id, "alt_stamp", None, None, 2.)]])
+    candidate = _m("user", "same", 2.)
+    candidate_id = unbound(engine, [candidate])[0]
+    write(engine, [{**bound_view[0], "timestamp": 2.}, candidate], matched={0: bound_id})
+    assert candidate_id not in {b["store_id"] for b in migrated(engine)}
+    assert count(engine, "rebind.skipped.ambiguous") == 2

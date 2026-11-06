@@ -260,12 +260,27 @@ def recover_hermes_persisted_output_with_file_stat(
     if recovered_with_stat is None:
         return None
     recovered, file_stat = recovered_with_stat
-    if len(recovered) != expected_chars:
-        return None
     preview_prefix = _persisted_output_preview_prefix(text)
-    if not preview_prefix or not recovered.startswith(preview_prefix):
+    if not preview_prefix:
         return None
-    return recovered, file_stat
+    # Exact content is authoritative when it already meets the marker's contract.
+    if len(recovered) == expected_chars and recovered.startswith(preview_prefix):
+        return recovered, file_stat
+    # Hermes counts the in-memory text before a Windows text-mode write expands
+    # every LF to CRLF. Try the LF form only when the file has no bare LF (every
+    # "\n" belongs to a "\r\n"); a mixed-ending file was not produced by that
+    # translation, so it keeps the marker instead. A file ending in a lone CR is
+    # also refused: it cannot be told apart from a translated file that lost its
+    # final LF byte, so recovering it could silently change the last character.
+    if (
+        "\r\n" in recovered
+        and recovered.count("\n") == recovered.count("\r\n")
+        and not recovered.endswith("\r")
+    ):
+        canonical = recovered.replace("\r\n", "\n")
+        if len(canonical) == expected_chars and canonical.startswith(preview_prefix):
+            return canonical, file_stat
+    return None
 
 
 def recover_hermes_persisted_output(text: str | None, *, hermes_home=None) -> str | None:
