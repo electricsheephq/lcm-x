@@ -52,6 +52,8 @@ def test_t9_three_store_delivered_identity(tmp_path, monkeypatch, anchor, captur
     clock = {name: getattr(time, name) for name in dir(time) if not name.startswith("_")}
     clock["time"] = lambda: 1700000000.0
     monkeypatch.setattr("hermes_lcm.store.time", SimpleNamespace(**clock))
+    # lcm_recall scores recency from tools.py's wall clock; pin it the same way.
+    monkeypatch.setattr("hermes_lcm.tools.time", SimpleNamespace(**clock))
     outcomes = []
     for shape in ("stamped", "null", "pre-s0"):
         view = [message(), dict(role="assistant", content="synthetic answer", timestamp=101.0)]
