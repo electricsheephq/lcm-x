@@ -24,6 +24,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -40,16 +41,21 @@ DELEGATE_SOURCE = "subagent"  # aux_session.py:805 _DELEGATE_SOURCE: a delegate 
 # Log lines. Hermes formats "<asctime> <LEVEL>[ [<session>]] <logger>: <message>" (hermes_logging.py _LOG_FORMAT).
 LOG_HEAD = re.compile(r"^(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d)(?:[,.]\d+)?\s+(?:- \S+ - )?[A-Z]+(?: \[([^\]\s]+)\])?")
 COMPACTION = "LCM compaction #"  # compaction.py:2910, one line per published LCM pass
-# aux_session.py logs no line when it classes a session AUXILIARY (_delegate_child_link, aux_session.py:1017-1022);
-# the only per-session "auxiliary" classification line that never covers a delegate child is engine.py:2770.
-AUXILIARY = re.compile(r"LCM reclassified session (\S+) as auxiliary at first ingest")
-ROUTE = re.compile(r"LCM ingest route: session=(?P<session>\S+) route=(?P<route>\S+) cursor=(?P<cursor>-?\d+) "
-                   r"reason=.*? stored=(?P<a>\d+)-(?P<b>\d+) rows=(?P<rows>\d+) replay_pairs=(?P<pairs>\d+) "
+# A session LCM classes AUXILIARY (stores nothing): engine.py:2770's late reclassification, and the #2042 session
+# decision line (decision=auxiliary). aux_session.py:1017-1022 classes the #1931 AUXILIARY case without a line of its own.
+AUXILIARY = (re.compile(r"LCM reclassified session (\S+) as auxiliary at first ingest"),
+             re.compile(r"LCM session decision: session=(\S+) .*?\bdecision=auxiliary\b"))
+# The #2305 route recorder (engine.py _log_ingest_route): one line per ingest that stores rows. The reason is free
+# text (spaces, parentheses), so it is matched lazily; route spaces become underscores (normalised again here).
+ROUTE = re.compile(r"LCM ingest route: session=(?P<session>\S+) route=(?P<route>.+?) cursor=(?P<cursor>-?\d+) "
+                   r"reason=(?P<reason>.*?) stored=(?P<a>\d+)-(?P<b>\d+) rows=(?P<rows>\d+) replay_pairs=(?P<pairs>\d+) "
                    r"stripped=(?P<stripped>\d+)")
-# Recorder route names (normalised: lower case, '-' and ' ' to '_'). The recorder PR fixes the spelling; keep in step.
-ROUTE_2305 = "persisted_ambiguous_delta"  # the cursor-0 persisted batch (#2305)
-ROUTE_RESTART_REPLAY, ROUTE_COLD_TAIL, ROUTE_EXIT_DRAIN = "restart_replay", "cold_tail_retry", "exit_drain"
-ROUTE_WARM_CURSOR0, ROUTE_COMPOSITE = "warm_cursor0", "composite"
+# Route tokens: the reconciliation action of a re-bound engine's first ingest (reconcile.py: advanced cursor,
+# persisted batch, skipped batch), the warm default ``foreground``/``append``, and the tail routes: ``cold`` (a retried
+# cold tail through the ingest), ``S3`` (the S3 tail retry), ``session_end`` and ``warm_tail``.
+ROUTE_2305 = "persisted_batch"  # at cursor 0: reconcile.py "persisted ambiguous delta", the #2305 shape
+# The pending-tail retry logs its match rule as the reason (engine.py _match_pending_tail): only these mark a drain.
+TAIL_RULES = frozenset({"digest", "off", "no_ledger", "salt_changed", "read_failed"})
 EVENT_KINDS = ("restart_cold", "restart_warm", "undo_resend", "delegate_prompt", "compress_request")
 
 
@@ -174,20 +180,29 @@ def read_store(path: Path):
     return rows, relations, uids, lineage, leaves
 
 
-def read_logs(paths):
+def log_time(stamp: str, tz):
+    """A log asctime as epoch seconds, read in ``tz`` (a zoneinfo name), or in this machine's zone when None."""
+    stamp = stamp.replace("T", " ")
+    if tz is None:
+        return time.mktime(time.strptime(stamp, "%Y-%m-%d %H:%M:%S"))
+    return datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo(tz)).timestamp()
+
+
+def read_logs(paths, tz=None):
     out = {"compactions": [], "auxiliary": set(), "ingests": []}
     for path in paths:
         for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
             head = LOG_HEAD.match(line)
             sid = head.group(2) if head else None
-            at = time.mktime(time.strptime(head.group(1).replace("T", " "), "%Y-%m-%d %H:%M:%S")) if head else None
+            at = log_time(head.group(1), tz) if head else None
             if COMPACTION in line:
                 out["compactions"].append((sid, at))
-            if m := AUXILIARY.search(line):
-                out["auxiliary"].add(m.group(1))
+            for pattern in AUXILIARY:
+                if m := pattern.search(line):
+                    out["auxiliary"].add(m.group(1))
             if m := ROUTE.search(line):
-                out["ingests"].append({"session": m["session"], "route": m["route"].lower().replace("-", "_").replace(
-                    " ", "_"), "cursor": int(m["cursor"]), "range": (int(m["a"]), int(m["b"])), "rows": int(m["rows"]),
+                out["ingests"].append({"session": m["session"], "route": m["route"].strip().replace(" ", "_"),
+                    "reason": m["reason"].strip(), "cursor": int(m["cursor"]), "range": (int(m["a"]), int(m["b"])), "rows": int(m["rows"]),
                     "pairs": int(m["pairs"]), "stripped": int(m["stripped"])})
     return out
 
@@ -199,33 +214,53 @@ def read_events(path):
     return [e for e in events if isinstance(e, dict) and e.get("kind") in EVENT_KINDS]
 
 
-def attribute_silent_surplus(silent, ingests, observed):
+def attribute_silent_surplus(silent, ingests, observed, user_rows):
     """Section 5 (r3.8) "Surplus and other limits": attribute each silent surplus row to #1674, #2203, #849 or #1961
     ONLY from the one recorder line whose session matches and whose stored range holds the row; zero or several such
-    lines leave the row unattributed (ambiguity fails as silent surplus).
-    - #1674: a restart-replay route with cursor > 0; the copy has observed_at NULL and an earlier copy of the same key
-      in the same session has observed_at set. A cursor-0 persisted batch (#2305) is never #1674.
-    - #2203: a cold-tail retry or exit-drain route, and the copy has observed_at NULL.
-    - #849: the composite-path route.
-    - #1961: a warm cursor-0 route; the carrier-merge condition is not checkable here, so the row is reported as
-      "needs manual check" and stays silent surplus for the gate.
-    Not checked here (the store does not hold it): the view-order conditions of #1674 and #2203, and #849's
-    "next prompt also stored as its own row"; the receipt checks them by hand.
-    ``silent``: [(store_id, session, ids holding the same key)]; ``observed``: store_id -> observed_at."""
-    out = {"#1674": [], "#2203": [], "#849": [], "#1961_needs_manual_check": [], "unattributed": []}
+    lines leave the row unattributed (ambiguity fails as silent surplus). Only #1674 and #2203 are exempted here;
+    #849 and #1961 rows are listed for a hand check and stay silent surplus for the gate. Line numbers cite the
+    recorder PR's engine.py (``_log_ingest_route`` at 7140-7160).
+    ``silent``: [(store_id, session, ids holding the same key)]; ``observed``: store_id -> observed_at;
+    ``user_rows``: store_id -> (session, text) for stored user rows (compared in memory only)."""
+    out = {"#1674": [], "#2203": [], "#849_needs_manual_check": [], "#1961_needs_manual_check": [], "unattributed": []}
+    prompts = defaultdict(list)  # session -> [(store_id, edge-stripped user text)]
+    for other, (s, t) in user_rows.items():
+        if multiset.norm(t):
+            prompts[s].append((other, multiset.norm(t)))
     for sid, session, ids in silent:
         lines = [i for i in ingests if i["session"] == session and i["range"][0] <= sid <= i["range"][1]]
         limit = "unattributed"
         if len(lines) == 1:
-            route, cursor, unstamped = lines[0]["route"], lines[0]["cursor"], observed.get(sid) is None
-            if route == ROUTE_RESTART_REPLAY and cursor > 0 and unstamped and any(
+            route, cursor, reason = lines[0]["route"], lines[0]["cursor"], lines[0]["reason"]
+            unstamped = observed.get(sid) is None
+            text = multiset.norm(user_rows.get(sid, (None, ""))[1])
+            if route == ROUTE_2305 and cursor == 0:
+                pass  # #2305's cursor-0 persisted batch: never exempted, never #1674 (section 5)
+            # #1674 (restart replay): the first ingest of a re-bound engine reconciles, and the recorder logs the
+            # reconciliation action as the route (engine.py:8218); "advanced cursor" past a replayed prefix
+            # (reconcile.py, every replayed-prefix reason) with cursor > 0. The copy is unstamped and an earlier copy
+            # of its key in the session is stamped. Not checked: the view-order condition.
+            elif route == "advanced_cursor" and cursor > 0 and unstamped and any(
                     other < sid and observed.get(other) is not None for other in ids):
                 limit = "#1674"
-            elif route in (ROUTE_COLD_TAIL, ROUTE_EXIT_DRAIN) and unstamped:
+            # #2203: a cold-start retry of a queued tail, through the ingest (route "cold", engine.py:7141) or the S3
+            # retry (route "S3", engine.py:11794); or the exit drain, route "session_end" logged by the pending-tail
+            # retry with exiting=True (engine.py:11844), told apart from an ordinary session-end flush (also
+            # "session_end", engine.py:7142) by its reason, the tail match rule. The copy is unstamped. Not checked:
+            # that the view differs from the stored rows by no host insertion or reordering. "warm_tail" (a retry
+            # that is not the exit drain) is neither section 5 shape, so it is not attributed.
+            elif unstamped and (route in ("cold", "S3") or (route == "session_end" and reason in TAIL_RULES)):
                 limit = "#2203"
-            elif route == ROUTE_COMPOSITE:
-                limit = "#849"
-            elif route == ROUTE_WARM_CURSOR0 and cursor == 0:
+            # #849 (a composite of an unanswered prompt and the next prompt across a restart): the recorder has no
+            # composite-path route, so only the row's shape is checked here, in memory: a user row whose text is
+            # another prompt plus "\n\n" plus a user row stored apart in the same session.
+            elif text and any(other != sid and len(text) > len(t) + 2 and text.endswith("\n\n" + t)
+                              for other, t in prompts[session]):
+                limit = "#849_needs_manual_check"
+            # #1961 (a warm re-ingest after the host merged LCM's carrier): a warm engine does not reconcile, so the
+            # recorder logs the default route "foreground" (engine.py:8218); at cursor 0. The carrier-merge condition
+            # needs the host view, so the row is listed for a hand check.
+            elif route == "foreground" and cursor == 0:
                 limit = "#1961_needs_manual_check"
         out[limit].append(sid)
     return {k: sorted(v) for k, v in out.items()}
@@ -252,10 +287,10 @@ def score_lineage(g, items, tools, rows, relations):
             "silent_surplus_rows": len(silent) + truncated, "silent_unlisted_rows": truncated}, silent
 
 
-def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None) -> dict:
+def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, log_tz=None) -> dict:
     sessions, host_rows = read_host(state_db)
     stored, relations, uids, store_lineage, leaves = read_store(lcm_db)
-    log = read_logs(logs)
+    log = read_logs(logs, log_tz)
     events = read_events(events_path)
     group = lineage_of(sessions)
     aux = set(log["auxiliary"])
@@ -347,13 +382,14 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None) -
     recorder = {"present": bool(ingests), **({"status": "recorder absent"} if not ingests else {}),
                 "ingests_per_route": dict(sorted(Counter(i["route"] for i in ingests).items())),
                 "storing_ingests": len(storing),
-                "rate_2305": sum(i["route"] == ROUTE_2305 for i in storing) / len(storing) if storing else None,
+                "rate_2305": sum(i["route"] == ROUTE_2305 and i["cursor"] == 0 for i in storing) / len(storing) if storing else None,
                 "stripped_links": sum(i["stripped"] for i in ingests), "replay_pairs": pairs,
                 "stripped_per_replay_pair": sum(i["stripped"] for i in ingests) / pairs if pairs else None}
 
     observed = {r[0]: r[6] for r in stored}
-    attributed = attribute_silent_surplus(sorted(silent_rows, key=lambda r: r[0]), ingests, observed)
-    exempt = sum(len(attributed[k]) for k in ("#1674", "#2203", "#849"))
+    user_rows = {r[0]: (r[1], r[3]) for r in resolved if r[2] == "user"}
+    attributed = attribute_silent_surplus(sorted(silent_rows, key=lambda r: r[0]), ingests, observed, user_rows)
+    exempt = sum(len(attributed[k]) for k in ("#1674", "#2203"))
     unattributed = totals["silent_surplus_rows"] - exempt
     exempted = {"per_limit": {k: len(v) for k, v in attributed.items()},
                 "store_ids": {k: v for k, v in attributed.items()}, "exempted_rows": exempt,
@@ -403,11 +439,14 @@ def main(argv=None) -> int:
     ap.add_argument("--log", type=Path, action="append", default=[])
     ap.add_argument("--since")
     ap.add_argument("--events", type=Path)
+    ap.add_argument("--log-tz", help="zoneinfo name the log times are in (default: this machine's local zone)")
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args(argv)
     try:
-        result = audit(a.state_db, a.lcm_db, a.log, parse_since(a.since), a.events)
-    except (OSError, sqlite3.Error, ValueError) as exc:
+        if a.log_tz:
+            ZoneInfo(a.log_tz)  # an unknown zone is an input error, before any database is opened
+        result = audit(a.state_db, a.lcm_db, a.log, parse_since(a.since), a.events, a.log_tz)
+    except (OSError, sqlite3.Error, ValueError, ZoneInfoNotFoundError) as exc:
         ap.exit(2, f"audit failed: {type(exc).__name__}: {exc}\n"[:400])
     a.out.write_text(json.dumps(result, indent=1, sort_keys=True) + "\n")
     t, gate = result["parity"]["totals"], result["gate"]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -76,7 +77,7 @@ class Home:
                 dag.add_node(SummaryNode(session_id=sid, summary=f"{S} leaf", source_ids=ids, created_at=1.0))
             dag.close()
 
-    def run(self, logs=(), events=None, since=None):
+    def run(self, logs=(), events=None, since=None, log_tz=None):
         paths = []
         for i, text in enumerate(logs):
             paths.append(self.dir / f"run-{i}.log")
@@ -85,7 +86,7 @@ class Home:
         if events is not None:
             ev = self.dir / "events.jsonl"
             ev.write_text("".join(json.dumps(e) + "\n" for e in events))
-        return audit.audit(self.state, self.lcm, paths, since, ev)
+        return audit.audit(self.state, self.lcm, paths, since, ev, log_tz)
 
 
 ONE = {"S1": ("cli", None, 2000.0, "user_exit")}
@@ -164,26 +165,88 @@ def test_m3_rate_and_ids(tmp_path):
 
 
 def test_recorder_parsing_and_2305_rates(tmp_path):
-    log = (route("S1", "persisted-ambiguous-delta", 0, 1, 2, pairs=2, stripped=1) + route("S1", "warm_cursor0", 0, 3, 4)
-           + route("S1", "restart_replay", 2, 5, 5, pairs=2) + "noise line\n")
-    out = Home(tmp_path, ONE, turn(1) + turn(2)).run([log])
+    log = (route("S1", "persisted batch", 0, 1, 2, pairs=2, stripped=1) + route("S1", "persisted_batch", 3, 3, 3)
+           + route("S1", "foreground", 0, 4, 4) + route("S1", "advanced_cursor", 2, 5, 5, pairs=2) + "noise line\n")
+    out = Home(tmp_path, ONE, turn(1) + turn(2) + turn(3)).run([log])
     r = out["recorder"]
-    assert r["present"] and r["ingests_per_route"] == {"persisted_ambiguous_delta": 1, "restart_replay": 1,
-                                                       "warm_cursor0": 1}
-    assert (r["storing_ingests"], r["rate_2305"], r["stripped_per_replay_pair"]) == (3, 1 / 3, 0.25)
+    assert r["present"] and r["ingests_per_route"] == {"advanced_cursor": 1, "foreground": 1, "persisted_batch": 2}
+    assert (r["storing_ingests"], r["rate_2305"], r["stripped_per_replay_pair"]) == (4, 1 / 4, 0.25)
 
 
-@pytest.mark.parametrize("line", [None, "persisted_ambiguous_delta", "restart_replay"])
-def test_1674_attribution_needs_a_matching_recorder_line(tmp_path, line):
-    host = turn(1)
-    log = [route("S1", line, 0 if line == "persisted_ambiguous_delta" else 2, 3, 3)] if line else []
-    out = Home(tmp_path, ONE, host, stored=host + [host[0]], stamps={0}).run(log)
-    ex = out["exempted_surplus"]
-    if line == "restart_replay":
+def attribution(tmp_path, log, stored_extra, stamps=frozenset({0}), host=None):
+    host = host or turn(1)
+    return Home(tmp_path, ONE, host, stored=host + stored_extra, stamps=stamps).run(log)["exempted_surplus"]
+
+
+@pytest.mark.parametrize("line", [None, ("persisted_batch", 0), ("advanced_cursor", 2), ("advanced_cursor", 0)])
+def test_1674_needs_an_advanced_cursor_line_past_zero(tmp_path, line):
+    ex = attribution(tmp_path, [route("S1", *line, 3, 3)] if line else [], [("S1", u("question 1"))])
+    if line == ("advanced_cursor", 2):
         assert ex["store_ids"]["#1674"] == [3] and ex["unattributed_silent_rows"] == 0
         assert ex["fraction"] == 1 / 3 and ex["met"] is False
     else:
         assert ex["store_ids"]["#1674"] == [] and ex["store_ids"]["unattributed"] == [3]
+
+
+def test_1674_needs_an_earlier_stamped_copy(tmp_path):
+    ex = attribution(tmp_path, [route("S1", "advanced_cursor", 2, 3, 3)], [("S1", u("question 1"))], stamps=frozenset())
+    assert ex["store_ids"]["#1674"] == [] and ex["store_ids"]["unattributed"] == [3]
+
+
+@pytest.mark.parametrize("name,reason,limit", [("S3", "tail retry", "#2203"), ("cold", "append", "#2203"),
+                                               ("session_end", "digest", "#2203"),
+                                               ("session_end", "append", "unattributed"),
+                                               ("warm_tail", "digest", "unattributed")])
+def test_2203_routes(tmp_path, name, reason, limit):
+    line = route("S1", name, 0, 3, 3).replace("reason=some reason text", f"reason={reason}")
+    ex = attribution(tmp_path, [line], [("S1", u("question 1"))])
+    assert ex["store_ids"][limit] == [3]
+
+
+def test_849_and_1961_are_listed_for_a_hand_check_and_stay_silent(tmp_path):
+    host = [("S1", u("first")), ("S1", u("second"))]
+    composite = {"role": "user", "content": f"{S} first\n\n{S} second"}
+    (tmp_path / "c").mkdir()
+    ex = attribution(tmp_path / "c", [route("S1", "foreground", 2, 3, 3)], [("S1", composite)], host=host)
+    assert ex["store_ids"]["#849_needs_manual_check"] == [3] and ex["unattributed_silent_rows"] == 1
+    (tmp_path / "w").mkdir()
+    ex = attribution(tmp_path / "w", [route("S1", "foreground", 0, 3, 3)], [("S1", u("question 1"))])
+    assert ex["store_ids"]["#1961_needs_manual_check"] == [3] and ex["exempted_rows"] == 0
+
+
+@pytest.mark.parametrize("line", [
+    "2026-11-06 10:00:00,000 INFO [A1] hermes_lcm.engine: LCM reclassified session A1 as auxiliary at first ingest "
+    "after bind-time detection missed\n",
+    "2026-11-06 10:00:00,000 INFO hermes_lcm.engine: LCM session decision: session=A1 platform=subagent parent=P "
+    "decision=auxiliary reason=background_review engine=lcm\n"], ids=["reclassified", "session-decision"])
+def test_auxiliary_children_are_excluded(tmp_path, line):
+    host = turn(1, "P") + turn(2, "A1")
+    out = Home(tmp_path, {k: v for k, v in CHILDREN.items() if k != "B1"}, host, stored=turn(1, "P")).run([line])
+    assert out["issue_1931"]["auxiliary_excluded"] == ["A1"] and out["issue_1931"]["A"]["n"] == 0
+    assert out["parity"]["zero_row_lineages"] == [] and out["parity"]["totals"]["missing_rows"] == 0
+
+
+def test_a_store_decision_is_not_auxiliary(tmp_path):
+    line = ("2026-11-06 10:00:00,000 INFO hermes_lcm.engine: LCM session decision: session=A1 platform=subagent "
+            "parent=P decision=delegate_child reason=subagent_start engine=lcm\n")
+    out = Home(tmp_path, {k: v for k, v in CHILDREN.items() if k != "B1"}, turn(2, "A1"), stored=[]).run([line])
+    assert out["issue_1931"]["auxiliary_excluded"] == [] and out["issue_1931"]["A"]["zero_row_children"] == ["A1"]
+
+
+@pytest.mark.parametrize("tz,counted", [("UTC", 0), ("Asia/Tokyo", 1)])
+def test_log_tz_decides_whether_a_compaction_precedes_a_restart(tmp_path, tz, counted):
+    restart = datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc).timestamp()  # 10:00 UTC is after it, 10:00 JST before
+    log = "2026-11-06 10:00:00,000 INFO [S1] hermes_lcm.compaction: LCM compaction #1: done\n"
+    out = Home(tmp_path, ONE, turn(1)).run([log], [{"t": restart, "kind": "restart_cold", "session": "S1"}], log_tz=tz)
+    assert out["coverage"]["compactions_then_restart"]["value"] == counted
+
+
+def test_unknown_log_tz_is_an_input_error(tmp_path):
+    home = Home(tmp_path, ONE, turn(1))
+    with pytest.raises(SystemExit) as stop:
+        audit.main(["--state-db", str(home.state), "--lcm-db", str(home.lcm), "--log-tz", "Nowhere/Zone",
+                    "--out", str(tmp_path / "r.json")])
+    assert stop.value.code == 2
 
 
 def floor_run(tmp_path, *, compactions=20):
@@ -201,7 +264,7 @@ def floor_run(tmp_path, *, compactions=20):
     events = [{"t": 1e10, "kind": k, "session": "P"} for k in ("restart_cold", "restart_warm", "undo_resend")
               for _ in range(5)] + [{"t": 1e10, "kind": "undo_resend", "session": "P"}] * 5
     log = "".join(f"2026-11-06 10:00:{i:02d},000 INFO [P] hermes_lcm.compaction: LCM compaction #{i + 1}: done\n"
-                  for i in range(compactions)) + route("P", "warm_cursor0", 0, 1, 2)
+                  for i in range(compactions)) + route("P", "foreground", 0, 1, 2)
     home = Home(tmp_path, sessions, host, lineage=lineage, nodes=[("P", [11])])
     return home.run([log], events)
 

@@ -10,13 +10,16 @@ cites its output next to the run's identity (rc tree, host sha, run window) and 
 ## Run
 ```
 python -m bench.instruments.gate_kit.audit --state-db <hermes home>/state.db --lcm-db <lcm.db> \
-  [--log <file> ...] [--since <ISO-8601 or epoch seconds>] [--events <driver events.jsonl>] --out <result.json>
+  [--log <file> ...] [--log-tz <zone>] [--since <ISO-8601 or epoch seconds>] [--events <driver events.jsonl>] \
+  --out <result.json>
 ```
 - Both databases are opened with read-only `mode=ro` URIs; nothing is copied or written beside them.
 - `--since`: only host sessions started at or after it (a naive ISO time is UTC). Stored rows under a session the
   host does not know count when ingested at or after it.
-- `--log`: the run's Hermes/LCM logs (`<asctime> <LEVEL> [<session>] <logger>: <message>`). Log times are read in the
-  audit machine's local time zone; set `TZ` to the run host's zone when they differ.
+- `--log`: the run's Hermes/LCM logs (`<asctime> <LEVEL> [<session>] <logger>: <message>`).
+- `--log-tz`: the zoneinfo name the log times are written in (for example `UTC` or `Europe/Berlin`). Default: the
+  audit machine's local zone. Pass the run host's zone when they differ: it decides whether a compaction came before a
+  driver restart event. An unknown zone exits 2.
 - `--events`: the driver's event log, one JSON object per line: `{"t": epoch, "kind": "restart_cold" | "restart_warm"
   | "undo_resend" | "delegate_prompt" | "compress_request", "session": id}`.
 - Exit 0 with the result written (the verdict is inside); exit 2 on an unreadable input. Stdout is a four-line summary.
@@ -39,22 +42,39 @@ unchanged: `multiset.score` (user and assistant rows), `tool_calls.stored_keys`/
 | `coverage` | each floor's `value`, `floor`, `met`; `unknown` when its input is missing (never met). Compactions are `LCM compaction #` log lines; `coverage_basis` names each basis and also gives the store's depth-0 message leaves (a pass may write several, so they are not the count). |
 | `uid_coverage` | per host source: rows stored, rows with a canonical `host_uid_bindings` row; `table absent` when the store has none. |
 | `m3` | rows in the window's lineages that carry `generated_unproven` or are the `store_id` side of `possible_replay_of`, over the rows stored there; the rate and every store id. |
-| `recorder` | `LCM ingest route:` lines per route; the #2305 rate (cursor-0 persisted batches over storing ingests); stripped links per replay pair; `recorder absent` when there is no line. |
-| `exempted_surplus` | silent surplus rows attributed to #1674, #2203 or #849, rows needing a manual #1961 check, unattributed rows, store ids for each, and the exempted fraction against the 1% bar. The rules are `attribute_silent_surplus`. |
+| `recorder` | `LCM ingest route:` lines per route; the #2305 rate (`persisted_batch` at cursor 0 over storing ingests); stripped links per replay pair; `recorder absent` when there is no line. |
+| `exempted_surplus` | silent surplus rows attributed to #1674 or #2203, rows listed for a #849 or #1961 hand check, unattributed rows, store ids for each, and the exempted fraction (#1674 and #2203 only) against the 1% bar. The rules are `attribute_silent_surplus`. |
 | `issue_1931` | buckets A (`source = 'subagent'`) and B (any other source) of ended non-rotation children: n, children with 0 rows, missing, silent surplus, lineage rows matching the host parent; `pass_A`; AUXILIARY sessions excluded. |
 | `gate` | each bar's value and pass, and the verdict: `GATE FAIL` when a data bar fails, else `INCOMPLETE` when a floor is unmet or the recorder is absent, else `GATE PASS`. |
+
+## Surplus limits and recorder routes
+A silent surplus row is attributed only from the one `LCM ingest route:` line of its session whose stored range holds
+it; none or several leave it unattributed. Route tokens are the recorder's (spaces become underscores): `foreground`,
+`append`, `advanced_cursor`, `persisted_batch`, `skipped_batch`, `cold`, `session_end`, `warm_tail` and `S3`.
+
+| Limit | Route | Also checked | Result |
+|---|---|---|---|
+| #1674 restart replay | `advanced_cursor`, cursor > 0 (a re-bound engine's reconciliation) | copy unstamped, an earlier copy of its key in the session stamped | exempted |
+| #2203 cold-tail retry | `cold` or `S3` | copy unstamped | exempted |
+| #2203 exit drain | `session_end` whose reason is a tail match rule (`digest`, `off`, `no_ledger`, `salt_changed`, `read_failed`) | copy unstamped | exempted |
+| #849 composite | none: the recorder has no composite route | a user row equal to another prompt, `\n\n`, and a user row stored apart in the session | hand check; stays silent |
+| #1961 carrier merge | `foreground` at cursor 0 (a warm engine) | the carrier merge needs the host view | hand check; stays silent |
+| #2305 | `persisted_batch` at cursor 0 | | never exempted |
+
+`session_end` without a tail rule is an ordinary session-end flush, and `warm_tail` is a tail retry that is not the
+exit drain; neither is a section 5 shape, so they are not attributed.
 
 ## What it does not prove
 - The run itself: that the driver covered every reliability shape, that the host and rc trees are the ones named,
   and the latency, lock and class D bars. The receipt states those.
-- Attribution is from recorder lines only, and checks the route, cursor and `observed_at` conditions. The view-order
-  conditions of #1674 and #2203, #1961's carrier merge and #849's "next prompt also stored" are hand checks; a
-  #1961 candidate stays silent surplus until checked. The recorder's route names are constants at the top of
-  `audit.py` and must match the recorder as merged.
+- Attribution checks the route, cursor and `observed_at` conditions only. The view-order conditions of #1674 and
+  #2203 (no mid-history insertion or reordering) and the restart in the log for #1674 are hand checks. #849 and
+  #1961 rows are never exempted by the audit: their routes cannot be told apart from ordinary ones.
 - The host count undercounts a key only when its genuine repeats are spread over sessions that do not re-issue each
   other's rows; Hermes re-issues every durable row on a rotation, so a lineage's latest session holds them all.
 - A user row the host persisted with an LCM-X carrier is not expected; if the host held a user's text only inside
   such a row, its loss would not show here.
-- AUXILIARY sessions are recognised only by `LCM reclassified session <id> as auxiliary at first ingest`; the #1931
-  AUXILIARY class logs no line of its own, so an unlogged auxiliary child appears as a child with 0 rows.
+- AUXILIARY sessions are recognised by `LCM reclassified session <id> as auxiliary at first ingest` and by the
+  session decision line `LCM session decision: session=<id> ... decision=auxiliary`. A log without the decision line
+  (builds before it) can show an auxiliary child as a child with 0 rows.
 - More than 10 silent copies of one key: the rest are counted but not listed, so they stay unattributed.
