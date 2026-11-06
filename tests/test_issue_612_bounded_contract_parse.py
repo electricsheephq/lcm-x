@@ -148,8 +148,7 @@ def test_t3_violating_reply_logs_the_warning_with_the_check(monkeypatch, caplog)
     assert _summarize(caplog) == ""
     # #931: the shape line is a separate INFO record
     messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert messages == ["LCM summary discarded output that violated the integrity contract "
-                        "(model=tier-x, check=envelope); escalating"]
+    assert len(messages) == 1 and "model=tier-x, check=envelope," in messages[0]
     assert all(SECRET not in m and "Decision" not in m for m in messages)
 
 
@@ -157,9 +156,23 @@ def test_t3_short_and_hintless_replies_name_their_checks(monkeypatch, caplog):
     _install_call_llm(monkeypatch, lambda opening: f"{opening}\n{LINES} {SECRET}\n{CLOSE}")
     assert _summarize(caplog) == ""
     # #931: the shape line is a separate INFO record
-    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [
-        "LCM summary discarded output that violated the integrity contract (model=tier-x, check=closing_hint); "
-        "escalating"]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1 and "model=tier-x, check=closing_hint," in warnings[0]
+
+
+@pytest.mark.parametrize(("last", "prefix"), [(HINT, "hint"), ("</lcm>", "tag"), (SECRET, "other")])
+def test_1163_warning_reports_only_reply_and_final_line_shape(monkeypatch, caplog, last, prefix):
+    reply = f"{LINES} {SECRET}\n{last}"
+    _install_call_llm(monkeypatch, lambda opening: reply)
+    prompt = escalation._build_l1_prompt("ordinary historical transcript " * 30, token_budget=80, depth=0)
+    with caplog.at_level(logging.WARNING, logger="hermes_lcm"):
+        assert escalation._call_llm_for_summary(prompt, MAX_TOKENS, model="tier-x") == ""
+    assert len(caplog.records) == 1
+    assert caplog.records[0].getMessage() == (
+        "LCM summary discarded output that violated the integrity contract "
+        f"(model=tier-x, check=envelope, reply_chars={len(reply)}, "
+        f"last_line_chars={len(last)}, last_line_prefix={prefix}); escalating")
+    assert all(SECRET not in r.getMessage() and "Decision" not in r.getMessage() for r in caplog.records)
 
 
 # -- #1163: a missing closer is tolerated only when all remaining checks pass --------------------------------
@@ -227,9 +240,8 @@ def test_1163_unclosed_reply_logs_one_info_line(monkeypatch, caplog):
 def test_1163_unclosed_reasoning_inside_the_envelope_is_discarded(monkeypatch, caplog):
     _install_call_llm(monkeypatch, lambda opening: f"{opening}\n<think>\nThe system prompt says to summarise.\n{PLAIN_BODY}")
     assert _summarize(caplog) == ""
-    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [
-        "LCM summary discarded output that violated the integrity contract (model=tier-x, check=envelope); "
-        "escalating"]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1 and "model=tier-x, check=envelope," in warnings[0]
 
 
 def test_1163_closer_quoted_inside_a_closed_reasoning_block_is_not_a_close(monkeypatch, caplog):
