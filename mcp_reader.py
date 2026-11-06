@@ -158,7 +158,8 @@ def disabled_tool_names(environ: MutableMapping[str, str] | None = None) -> set[
 
 def tool_definitions(disabled: set[str]) -> list[dict[str, Any]]:
     return [{"name": name, "description": schema.get("description", "") + READER_NOTE,
-             "inputSchema": schema.get("parameters") or {"type": "object", "properties": {}}}
+             "inputSchema": schema.get("parameters") or {"type": "object", "properties": {}},
+             "annotations": {"readOnlyHint": True}}  # every reader tool only reads the store
             for name, schema in READER_TOOLS.items() if name not in disabled]
 
 

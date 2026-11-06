@@ -235,7 +235,7 @@ def probe_capabilities(conn: sqlite3.Connection, db_path: str | Path) -> StoreCa
                                                  "host_uid_bindings"])
         embeddings = not verify_embedding_schema(conn) and conn.execute(
             "SELECT 1 FROM lcm_embedding_profile WHERE active = 1 AND archived_at IS NULL "
-            "AND task = 'summary' LIMIT 1"
+            "AND task IN ('summary', 'summary+prefix') LIMIT 1"  # as the reader's identity gate
         ).fetchone() is not None
         return StoreCapabilities(
             schema_version=version,
