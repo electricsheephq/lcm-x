@@ -336,6 +336,7 @@ def test_protection_reuses_precomputed_tool_names(engines, monkeypatch):
     engine._ingest_messages([seed, call, result])
     assert calls and calls[0] is False
     assert True not in calls  # the protection step reuses the map built before BEGIN
+    assert engine._store.get_session_messages("S")[-1]["content"] == "result body"  # protection ran
 
 
 def test_protection_recomputes_tool_names_when_view_changes(engines, monkeypatch):
@@ -404,20 +405,25 @@ def test_marker_hint_recomputed_when_row_changes(engines, monkeypatch):
     assert "generated_unproven" in _relation_kinds(engine, content)
 
 
-def test_oversized_payload_is_not_counted_before_begin(engines, monkeypatch):
+@pytest.mark.parametrize("role", ["tool", "user"])
+def test_oversized_tool_result_is_not_counted_before_begin(engines, monkeypatch, role):
     engine = engines()
     engine._config.large_output_externalization_enabled = True
-    seed = _m("user", "seed", 10.)
-    engine._ingest_messages([seed])
+    seed, call, result = _tool_view()
+    engine._ingest_messages([seed, call])
     big = "x" * (engine._config.large_output_externalization_threshold_chars + 1)
+    row = {**result, "content": big} if role == "tool" else _m("user", big, 12.)
     unlocked = []
     real_count = engine_module.count_message_tokens
 
-    def count(row):
+    def count(counted):
         if not engine._store._conn.in_transaction:
-            unlocked.append(row.get("content") == big)
-        return real_count(row)
+            unlocked.append(counted.get("content") == big)
+        return real_count(counted)
 
     monkeypatch.setattr(engine_module, "count_message_tokens", count)
-    engine._ingest_messages([seed, _m("user", big, 11.)])
-    assert True not in unlocked  # the raw payload is not tokenized before BEGIN
+    engine._ingest_messages([seed, call, row])
+    if role == "tool":
+        assert True not in unlocked  # externalized: its raw estimate could never be reused
+    else:
+        assert True in unlocked  # user text below the #1016 floor keeps its pre-BEGIN estimate

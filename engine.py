@@ -8640,8 +8640,9 @@ class LCMEngine(
             except Exception:
                 pass  # Retry at the original call site, with its original error boundary.
             config = self._config
-            # Externalization replaces an oversized payload with a placeholder,
+            # Externalization replaces an oversized tool result with a placeholder,
             # so its raw estimate could never be reused; leave it to the lock.
+            # User and assistant text has a much higher floor (#1016), so keep it.
             oversized = (int(getattr(config, "large_output_externalization_threshold_chars", 0) or 0)
                          if getattr(config, "large_output_externalization_enabled", False) else 0)
             for index in range(min(max(self._ingest_cursor, 0), len(inputs)), len(inputs)):
@@ -8650,7 +8651,8 @@ class LCMEngine(
                     hints["markers"][index] = self._lcm_generated_marker(row)
                 except Exception:
                     pass
-                if oversized and len(row.get("content") or "") > oversized:
+                content = row.get("content")
+                if oversized and row.get("role") == "tool" and type(content) is str and len(content) > oversized:
                     continue
                 if _token_counter._encoder_ready and type(row.get("content")) in (str, type(None)):
                     try:
