@@ -542,8 +542,8 @@ LCM-X for Claude Code is its own release unit, versioned by the plugin manifest
   - `bundle.json`: the unit version, the tag, the full core commit and core's own version.
 
   The asset is `lcm-x-claude-code-<version>.tar.gz`, with its `.sha256` beside it. The build
-  refuses a tag that does not name the manifest's version. The release notes repeat the core
-  commit and version.
+  refuses a tag that does not name the manifest's version. The release body repeats the core
+  commit and version: the tag workflow adds them from `bundle.json`.
 - A unit release needs two passes on its candidate:
   - the unit gate: the audit gate, with its local-GC qualification;
   - the CLI smoke (`scripts/claude_code_unit_smoke.py`). It needs #1216 on `main`.
@@ -584,8 +584,8 @@ The adapter writes no #2055 ledger tables. This is how its records adopt them on
 ## Test plan with real Claude Code sessions
 
 Headless `claude -p` sessions with the plugin loaded by `--plugin-dir` and an isolated store home,
-plus one interactive lane as client zero. R0-R10 run before 2026-11-03 on Claude Code backed by an
-Anthropic-compatible GLM endpoint; each run records its backend, and at least one R-test is repeated
+plus one interactive lane as client zero. R0 ran on 2026-11-01; R1-R10 run on each unit release's
+candidate, on Claude Code backed by an Anthropic-compatible GLM endpoint; each run records its backend, and at least one R-test is repeated
 on Anthropic models afterwards. Only synthetic stores and the test lane's own sessions are used.
 
 | Run | What it proves |
@@ -627,7 +627,7 @@ committed row, and store growth (the growth gate above).
 
 **Install records**, one per supported platform (macOS and Linux):
 - **Setup:** only the documented install steps, on a fresh machine. On macOS this may be a clean
-  account environment, named as such in the record.
+  environment (a scratch `HOME` and Claude Code config directory), named as such in the record.
 - **Recorded:** whether capture writes rows or records `runtime_missing`, and how many manual steps
   it took.
 - **Without Claude Code:** the CLI smoke (`scripts/claude_code_unit_smoke.py`) runs the same path

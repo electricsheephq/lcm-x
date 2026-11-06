@@ -44,12 +44,16 @@ never wait for it.
 - **What it ships.** The asset `lcm-x-claude-code-<version>.tar.gz`, its `.sha256` and
   `bundle.json`, built from the tag's tree alone by `scripts/build_claude_code_unit.py`: the plugin
   folder with core vendored at `lcm-x/`. `bundle.json` names the unit version, the tag, the full
-  core commit and core's own version (`plugin.yaml`). The same commit gives the same archive.
+  core commit and core's own version (`plugin.yaml`). The same commit built from the same ref gives
+  the same archive. The gate's asset is built from the candidate's sha and the release's from its tag,
+  so the two share the commit and tree and differ only in `bundle.json`'s `ref` (and so in the
+  archive's hash).
 - **The candidate.** One PR sets the manifest's `version` (for example `0.1.0-dev` to `0.1.0`)
   and adds `.github/release-notes/claude-code-v<version>.md`. Its merge commit is the candidate.
   The gate runs on an asset built from that commit, and the tag goes on that same commit, so the
-  gated tree and the tagged tree are one tree. A fix after a failed gate makes a new candidate,
-  and the gate runs again on it.
+  gated tree and the tagged tree are one tree. A fix after a failed gate lands as its own PR; that
+  PR's merge commit is the new candidate (the manifest already holds the release version), and the
+  gate runs again on it.
 - **The gate** (all four, on the candidate's asset; the design's "Test plan with real Claude Code
   sessions" defines R1-R10 and the audit):
   1. **Audit gate.** Every R1-R10 session's audit exits 0 with `verified: true`: every transcript
@@ -67,17 +71,24 @@ never wait for it.
      holds stays under about 1.5×. It re-runs when a file that shapes the stored bytes changed
      since its last run (the capture store, ingest, externalization or sanitizing).
   4. **CLI smoke** (`scripts/claude_code_unit_smoke.py`) from the candidate's asset with no Hermes
-     and no host stub, in both runtime modes: a fresh venv, and a Python found on `PATH`. The tag
-     workflow runs it again on the tag.
+     and no host stub, in both runtime modes: a fresh venv, and a Python found on `PATH`, on Python
+     3.11 and 3.14 (the versions the tag workflow runs). The tag workflow runs it again on the tag.
 
-  Install records (macOS in a clean environment, which may be a scratch `HOME` and Claude Code
-  config directory; Linux in a fresh container) go with the gate's receipt: whether capture wrote
+  Every R run, R10 included, uses a scratch `HOME` and a scratch Claude Code config directory, never
+  a user's own Claude Code setup. Install records (macOS in a clean environment: a scratch `HOME`
+  and Claude Code config directory, not a new OS account; Linux in a fresh container) go with the gate's receipt: whether capture wrote
   rows and how many manual steps it took.
 - **No rc tag.** A unit release has no `-rcN` tag. The gate already binds the exact candidate tree
   (above), and the tag workflow publishes nothing: it re-checks the tag, rebuilds the asset, runs
   the CLI smoke and leaves a **draft** release. The release manager publishes the draft after
   reading the workflow run. An rc tag would also need its own manifest version (`0.1.0-rc1`), so the
-  final tag's tree would differ from the gated tree by a product file.
+  final tag's tree would differ from the gated tree by a product file. What an rc would absorb, a
+  failure found only after the tag (the workflow's checks, or its Python 3.14 smoke), is narrowed by
+  running the smoke on 3.11 and 3.14 before the tag. If the tag's workflow still fails, nothing is
+  published: the fix lands as a new candidate and the release takes the next patch version, since
+  deleting a pushed tag stays with the code owner.
+- **Authority.** A unit tag is the unit's GA cut after its release gate passes, so the
+  release-manager delegation in AGENTS.md covers tagging and publishing it.
 - **When the gate re-runs.** Every unit release runs the gate on its candidate.
   `scripts/claude_code_unit_delta.py` lists the files the unit depends on that changed since the
   last `claude-code-v*` tag (the import closure of the worker and the reader, plus the plugin
@@ -86,14 +97,16 @@ never wait for it.
 - **Receipt and notes.** The gate's receipt is a result card (`RESULT-MANIFEST.json` and
   `RESULT.md`): counts, ids, hashes and timings only, never transcript content. It is attached to
   the release. The notes (`.github/release-notes/claude-code-v<version>.md`) say in user terms what
-  the unit does, how to opt in, what it does not do yet and its known issues, and repeat the core
-  commit and core version from `bundle.json`.
+  the unit does, how to opt in, what it does not do yet and its known issues. They cannot name the
+  commit that carries them, so the tag workflow adds the bundled core commit and core version from
+  `bundle.json` as the last line of the release body.
 - **Publishing.** The release manager publishes the draft as a prerelease while the unit's version
   is below 1.0.0, and never marks it as the latest release: "latest" stays with the Hermes line.
 - **Shared core.** The unit ships core at its own tagged commit. A Hermes release does not release
   the unit, and a unit release does not release Hermes. Changes to shared core files are judged by
   the Hermes row selection like any other core change; changes that touch only the adapter and the
-  read-only reader take the row-selector table's unit entries and select no Hermes rows.
+  read-only reader select no Hermes rows once the row-selector's class table carries unit entries
+  for them (proposed with the selector, #2091).
 
 ## Pipeline
 
