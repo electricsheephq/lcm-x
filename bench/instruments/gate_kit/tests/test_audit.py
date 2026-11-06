@@ -198,7 +198,8 @@ def test_a_repeat_split_across_segments_is_expected_twice(tmp_path):
 
 
 def test_two_identical_sends_in_one_batch_both_count(tmp_path):
-    # One insert batch stamps every row with one time, so both rows share a display identity; both are still expected.
+    # Two identical rows with one timestamp share a display identity (the host offsets each row of a batch by 1e-6 s,
+    # so this is the worst case); both are still expected.
     host = [("S1", dict(u("yes"), _ts=5.0)), ("S1", dict(u("yes"), _ts=5.0)), ("S1", a("ok"))]
     out = Home(tmp_path, ONE, host, stored=host[1:]).run()
     assert out["parity"]["totals"]["expected_rows"] == 3 and out["parity"]["totals"]["missing_rows"] == 1
@@ -623,3 +624,107 @@ def test_an_unresolved_externalized_payload_fails_its_own_bar(tmp_path):
     out = Home(tmp_path, ONE, host, stored=host[:3] + [("S1", dict(result("c1"), content=placeholder))]).run()
     assert out["gate"]["bars"]["externalized_unresolved"] == {"value": 1, "pass": False}
     assert out["parity"]["totals"]["missing_rows"] == 1  # the host's result is a deficit too, as in B2
+
+
+@pytest.mark.parametrize("copies", [1, 2])
+def test_an_in_place_compaction_clone_does_not_excuse_a_stored_copy(tmp_path, copies):
+    # In-place compaction rewinds the carried original (active 0, compacted 0) next to a live clone with its timestamp:
+    # the original is not an undone row, and the one stored copy is the clone's.
+    host = [("S1", undone(u("question 1"), T0)), ("S1", dict(u("question 1"), _ts=T0)), ("S1", dict(a("answer 1"), _ts=T0 + 1))]
+    stored = [("S1", stamped(u("question 1"), T0))] * copies + [("S1", stamped(a("answer 1"), T0 + 1))]
+    out = Home(tmp_path, ONE, host, stored=stored).run()
+    t = out["parity"]["totals"]
+    assert out["undo_retained"]["rows"] == 0
+    assert (t["expected_rows"], t["missing_rows"], t["silent_surplus_rows"]) == (2, 0, copies - 1)
+
+
+def test_a_rotation_child_holding_more_copies_than_its_earlier_parent_expects_the_rest(tmp_path):
+    again = dict(u("again"), _ts=1500.0)  # the parent's row, carried to the child, and the child's second copy of it
+    out = Home(tmp_path, ROTATED, [("P", again), ("P2", again), ("P2", again)], stored=[("P", u("again"))]).run(since=1000.8)
+    assert out["parity"]["lineages"]["P"]["expected_rows"] == 1 and out["parity"]["totals"]["missing_rows"] == 1
+
+
+CARRIER = "[Recent Summary (d0, node 1)]\n" + S + " summary\n[Expand for details: lcm_expand(node_id=1)]"
+
+
+@pytest.mark.parametrize("separator", ["\n\n", "\n\n---\n\n"])
+def test_a_user_request_merged_behind_a_summary_carrier_is_expected(tmp_path, separator):
+    merged = {"role": "user", "content": CARRIER + separator + S + " the unique request"}
+    host = [("S1", merged), ("S1", a("answer"))]
+    (tmp_path / "lost").mkdir()
+    lost = Home(tmp_path / "lost", ONE, host, stored=[("S1", a("answer"))]).run()
+    assert lost["parity"]["totals"]["missing_rows"] == 1 and lost["gate"]["verdict"] == "GATE FAIL"
+    (tmp_path / "kept").mkdir()
+    kept = Home(tmp_path / "kept", ONE, host, stored=[("S1", u("the unique request")), ("S1", a("answer"))]).run()
+    assert kept["parity"]["totals"]["missing_rows"] == kept["parity"]["totals"]["surplus_rows"] == 0
+    assert kept["parity"]["lineages"]["S1"]["host_carrier_rows_excluded"] == 0
+
+
+def test_a_carrier_merged_onto_a_copy_of_a_kept_user_row_expects_it_once(tmp_path):
+    # The host keeps the user's row and persists a merged copy of it behind the summary: one occurrence, as LCM-X's
+    # merged-pair match counts it.
+    merged = {"role": "user", "content": CARRIER + "\n\n" + S + " question 1"}
+    out = Home(tmp_path, ONE, turn(1) + [("S1", merged)], stored=turn(1)).run()
+    assert out["parity"]["totals"]["expected_rows"] == 2 and out["parity"]["totals"]["missing_rows"] == 0
+
+
+def test_a_carrier_with_no_user_text_is_still_not_expected(tmp_path):
+    host = [("S1", {"role": "user", "content": CARRIER})] + turn(1)
+    out = Home(tmp_path, ONE, host, stored=turn(1)).run()
+    assert out["parity"]["totals"]["missing_rows"] == 0
+    assert out["parity"]["lineages"]["S1"]["host_carrier_rows_excluded"] == 1
+
+
+@pytest.mark.parametrize("line", [("S3", 0), ("advanced_cursor", 2)])
+def test_a_host_insertion_stored_before_the_copy_is_neither_2203_nor_1674(tmp_path, line):
+    # The host inserted X mid-history after question 2 was stored; a retry stores X and then question 2 again (#2305's
+    # insert drained through a retry route): the stored rows no longer follow the host's in order.
+    host = turn(1) + [("S1", u("inserted"))] + turn(2)
+    stored = turn(1) + turn(2) + [("S1", u("inserted")), ("S1", u("question 2"))]
+    out = Home(tmp_path, ONE, host, stored=stored, stamps={2}).run([route("S1", *line, 5, 6)], RESTART_BEFORE)
+    ex = out["exempted_surplus"]
+    assert out["parity"]["totals"]["silent_surplus_rows"] == 1
+    assert ex["store_ids"]["#2203"] == ex["store_ids"]["#1674"] == [] and ex["store_ids"]["unattributed"] == [6]
+    assert out["gate"]["verdict"] == "GATE FAIL"
+
+
+def test_a_restart_earlier_in_the_same_second_precedes_the_ingest(tmp_path):
+    second = datetime(2026, 11, 6, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+    line = route("S1", "advanced_cursor", 2, 3, 3).replace("10:00:00,000", "10:00:00,900")
+    out = Home(tmp_path, ONE, turn(1), stored=turn(1) + [("S1", u("question 1"))], stamps={0}).run(
+        [line], [{"t": second + 0.1, "kind": "restart_cold", "session": "S1"}], log_tz="UTC")
+    assert out["exempted_surplus"]["store_ids"]["#1674"] == [3]
+
+
+@pytest.mark.parametrize("where", ["the-lcm-db", "a-link-to-it", "beside-it"])
+def test_out_may_not_overwrite_or_sit_beside_an_input_database(tmp_path, where):
+    home = Home(tmp_path, ONE, turn(1))
+    before = home.lcm.read_bytes()
+    out = {"the-lcm-db": home.lcm, "a-link-to-it": tmp_path / "r.json", "beside-it": home.dir / "r.json"}[where]
+    if where == "a-link-to-it":
+        out.symlink_to(home.lcm)
+    with pytest.raises(SystemExit) as stop:
+        audit.main(["--state-db", str(home.state), "--lcm-db", str(home.lcm), "--out", str(out)])
+    assert stop.value.code == 2 and home.lcm.read_bytes() == before
+    assert where == "a-link-to-it" or not (home.dir / "r.json").exists()
+
+
+def test_out_is_written_whole_with_no_temporary_file_left(tmp_path):
+    home = Home(tmp_path, ONE, turn(1))
+    (tmp_path / "out").mkdir()
+    assert audit.main(["--state-db", str(home.state), "--lcm-db", str(home.lcm), "--out", str(tmp_path / "out" / "r.json")]) == 0
+    assert [p.name for p in (tmp_path / "out").iterdir()] == ["r.json"]
+    assert json.loads((tmp_path / "out" / "r.json").read_text())["instrument"] == "gate-kit-audit-v1"
+
+
+def test_a_generated_unproven_row_stays_in_m3_when_it_matches_an_undone_row(tmp_path):
+    out = undo_home(tmp_path, relations=[(3, "generated_unproven", None)])
+    assert out["undo_retained"]["store_ids"] == [3, 4] and out["m3"]["store_ids"] == [3]
+
+
+def test_unattributed_silent_rows_are_key_copies_and_distinct_rows_are_reported(tmp_path):
+    speak_and_call = dict(call("c1"), content=f"{S} let me read it")
+    host = [("S1", u("question 1")), ("S1", speak_and_call), ("S1", result("c1"))]
+    ex = Home(tmp_path, ONE, host, stored=host + [("S1", speak_and_call)]).run()["exempted_surplus"]
+    assert (ex["unattributed_silent_rows"], ex["unattributed_silent_distinct_rows"]) == (2, 1)
+    assert ex["unattributed_silent_rows_unit"] == "key copies"

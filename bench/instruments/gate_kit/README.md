@@ -18,6 +18,9 @@ python -m bench.instruments.gate_kit.audit --state-db <hermes home>/state.db --l
   created beside them. An immutable open does not read a `-wal` file, so a database with a non-empty `-wal` beside it
   is refused (exit 2), as is one with a non-empty (hot) rollback `-journal`; a symlinked path is checked beside its target: checkpoint or roll it back first (open it once after the run has stopped, or copy it with its `-wal` and
   checkpoint the copy).
+- `--out` is refused (exit 2) when it is, or resolves to, an input database, log or events file, or when it sits in a
+  database's directory (beside its `-wal` and `-journal`). The result is written to a temporary file in `--out`'s
+  directory and renamed over it.
 - `--since` (a naive ISO time is UTC): a lineage is scored when any member started at or after it, and only those
   members count: a rotation child in the window is scored without its earlier parent's rows or the copies of them it
   carries. Stored rows under a session the host does not know count when ingested at or after it. Driver events,
@@ -29,6 +32,7 @@ python -m bench.instruments.gate_kit.audit --state-db <hermes home>/state.db --l
   line without a session takes the `session=` its message names, else the session of the nearest unused driver
   `compress_request` it falls within (2 s before to 120 s after the request); else it counts toward `compactions` but
   not toward `compactions_then_restart` (`coverage_basis.compactions_without_session`).
+- Log times keep their milliseconds, so a restart and an ingest in the same second keep their order.
 - `--log-tz`: the zoneinfo name the log times are written in (for example `UTC` or `Europe/Berlin`). Default: the
   audit machine's local zone. Pass the run host's zone when they differ: it decides whether a compaction or a
   recorder line came before a driver restart event. An unknown zone exits 2.
@@ -47,10 +51,15 @@ an in-place compaction archives the displayed history (`active = 0, compacted = 
 carried tail (`active = 0, compacted = 0`). The displayed rows are `active = 1 OR compacted = 1`, and the display
 collapses rows with the same display identity: role, content (edge-stripped, as B2 keys it), timestamp and tool
 fields, or a tool-calling assistant row's call ids. A carried handoff copy takes its original's timestamp, so it
-collapses with it; a genuine repeat has its own timestamp. One insert batch stamps all its rows with one time, so two
-identical sends in one batch share an identity: an identity counts as many times as the most displayed rows any one
-segment holds of it, and a key's expected count is the sum of those over the lineage's distinct identities. Host summary rows (`_compressed_summary`) and user rows
-that begin with LCM-X's own generated-carrier markers are not expected.
+collapses with it; a genuine repeat has its own timestamp (the host offsets each row of an insert batch by 1e-6 s). An
+identity counts as many times as the most displayed rows any one segment holds of it, and a key's expected count is
+the sum of those over the lineage's distinct identities. With `--since`, a scored segment expects only the copies of
+an identity beyond the most any earlier, unscored segment holds. Host summary rows (`_compressed_summary`) are not
+expected. A user row that begins with LCM's summary carrier (`[<Label> Summary (dN, node N)]` parts, each ending
+`[Expand for details: ...]`, as the host merges it with the next user row) is expected as the user text behind the
+carrier, as LCM-X matches it, but only beyond the plain rows of that text the lineage already expects (the merge
+copies a user row the host keeps); a row that is only a carrier, or begins with one of LCM-X's prefix carriers (objective,
+task list, overflow recovery), is not expected.
 
 Stored rows are scored with the reliability harness's B2 instruments, unchanged: `multiset.score` (user and assistant
 rows), `tool_calls.stored_keys`/`compare` (tool calls and results), `externalized.resolve` (externalized payloads) and
@@ -61,10 +70,10 @@ rows), `tool_calls.stored_keys`/`compare` (tool calls and results), `externalize
 | `parity` | per lineage and in total (every scored lineage, #1931 bucket B children included): `expected_rows`, `stored_rows`, `missing_rows` (exact-content deficit), `surplus_rows`, `visible_surplus_rows`, `silent_surplus_rows`, `split_assistant_keys`, `externalized_unresolved`; `zero_row_lineages` (expected rows but none stored); per session: lineage, source, stored rows. |
 | `coverage` | each floor's `value`, `floor`, `met`; `unknown` when its input is missing (never met). Compactions are LCM-X's `LCM compaction #` lines tagged with a scored session; delegated children are the ended, scored bucket A children; host sources leave out `subagent` and `tool`. `coverage_basis` names each basis and gives the store's depth-0 message leaves (a pass may write several, so they are not the count). |
 | `uid_coverage` | per host source: rows stored, rows with a canonical `host_uid_bindings` row; `table absent` when the store has none. |
-| `m3` | rows in the window's lineages that carry `generated_unproven` or are the `store_id` side of `possible_replay_of`, over the rows stored there; the rate and every store id. |
-| `undo_retained` | `rows` and `store_ids`: stored rows that are a host undo's retained occurrence (`undo_retained_rows`). A TUI undo soft-deletes the undone rows in the host (`active = 0`, `compacted = 0`), so they are not expected; LCM-X keeps its copy and stores the resend as a new occurrence. A stored row is excused when the host holds such an undone row of the same session and row key and the stored row's `observed_at` equals that row's timestamp; each undone row excuses one stored copy, and a row with NULL `observed_at` is never excused. Excused rows are neither expected nor surplus and stay out of M3's numerator (they count in its denominator). `host_rewind_count`: the host's `sessions.rewind_count` per audited session, as a cross-check. |
+| `m3` | rows in the window's lineages that carry `generated_unproven` or are the `store_id` side of `possible_replay_of`, over the rows stored there; the rate and every store id. An `undo_retained` row leaves the numerator for `possible_replay_of` only. |
+| `undo_retained` | `rows` and `store_ids`: stored rows that are a host undo's retained occurrence (`undo_retained_rows`). A TUI undo soft-deletes the undone rows in the host (`active = 0`, `compacted = 0`), so they are not expected; LCM-X keeps its copy and stores the resend as a new occurrence. A stored row is excused when the host holds such an undone row of the same session and row key and the stored row's `observed_at` equals that row's timestamp; each undone row excuses one stored copy, and a row with NULL `observed_at` is never excused. An inactive row with the same session, key and timestamp as a displayed row (the original an in-place compaction, `replace_messages` or `deactivate_message` leaves beside its live clone) excuses nothing. Excused rows are neither expected nor surplus and stay out of M3's numerator (they count in its denominator). `host_rewind_count`: the host's `sessions.rewind_count` per audited session, as a cross-check. |
 | `recorder` | `LCM ingest route:` lines per route; the #2305 rate (`persisted_batch` at cursor 0 over storing ingests); stripped links per replay pair; `recorder absent` when there is no line. |
-| `exempted_surplus` | silent surplus rows exempted under #1674 or #2203, rows listed for a hand check, unattributed rows, store ids for each, and the exempted fraction against the 1% bar. The fraction counts distinct store rows: a row with content and a tool call is one row under two keys. The rules are `attribute_silent_surplus`. |
+| `exempted_surplus` | silent surplus rows exempted under #1674 or #2203, rows listed for a hand check, unattributed rows, store ids for each, and the exempted fraction against the 1% bar. The fraction counts distinct store rows: a row with content and a tool call is one row under two keys. `unattributed_silent_rows` (the bar's value) counts key copies; `unattributed_silent_distinct_rows` counts store rows. The rules are `attribute_silent_surplus`. |
 | `issue_1931` | buckets A (`source = 'subagent'`) and B (any other source) of ended non-rotation children: n, children with 0 rows, missing, silent surplus, lineage rows matching the host parent; `pass_A`; AUXILIARY sessions excluded. |
 | `gate` | each bar's value and pass, and the verdict. |
 
@@ -81,12 +90,17 @@ it; none or several leave it unattributed. Route tokens are the recorder's (spac
 
 | Limit | Route | Also checked | Result |
 |---|---|---|---|
-| #1674 restart replay | `advanced_cursor`, cursor > 0 (a re-bound engine's reconciliation) | copy unstamped; an earlier copy of its key in the session stamped; a driver restart of the lineage before the recorder line | exempted; hand check without `--events` |
-| #2203 cold-tail retry | `cold` or `S3` | copy unstamped | exempted |
-| #2203 exit drain | `session_end` whose reason is a tail match rule (`digest`, `off`, `no_ledger`, `salt_changed`, `read_failed`) | copy unstamped | exempted |
+| #1674 restart replay | `advanced_cursor`, cursor > 0 (a re-bound engine's reconciliation) | copy unstamped; view order; an earlier copy of its key in the session stamped; a driver restart of the lineage before the recorder line | exempted; hand check without `--events` |
+| #2203 cold-tail retry | `cold` or `S3` | copy unstamped; view order | exempted |
+| #2203 exit drain | `session_end` whose reason is a tail match rule (`digest`, `off`, `no_ledger`, `salt_changed`, `read_failed`) | copy unstamped; view order | exempted |
 | #849 composite | none: the recorder has no composite route | a user row equal to another prompt, `\n\n`, and a user row stored apart in the session | hand check; stays silent |
 | #1961 carrier merge | `foreground` at cursor 0 (a warm engine) | the carrier merge needs the host view | hand check; stays silent |
 | #2305 | `persisted_batch` at cursor 0 | | never exempted |
+
+View order (`view_order`): the session's stored rows, through the end of the recorder line's range, follow the host's
+rows of the session (displayed or undone, in id order, carried clones dropped) in order; a stored row that matches no
+later host row passes only as a re-stored copy of a row already matched. A host insertion stored before or with the
+copy (a #2305 insert drained through a retry route) or a reordering fails it, and the row stays unattributed.
 
 `session_end` without a tail rule is an ordinary session-end flush, and `warm_tail` is a tail retry that is not the
 exit drain; neither is a section 5 shape, so they are not attributed. Rows listed for a hand check count as silent
@@ -104,15 +118,17 @@ under `issue_1931.auxiliary_unproven`.
 - The run itself: that the driver covered every reliability shape, that the host and rc trees are the ones named,
   and the latency, lock and class D bars. The receipt states those.
 - Every exemption is a hand check (hence `GATE PASS PENDING HAND CHECK`): the audit checks the route, cursor,
-  `observed_at` and restart conditions, not the view-order conditions of #1674 and #2203 (no mid-history insertion
-  or reordering; a #2305 insert drained through a retry route is not #2203). #849 and #1961 rows are never exempted
-  by the audit: their routes cannot be told apart from ordinary ones.
+  `observed_at`, restart and view-order conditions, but view order is read from the host's final rows, not from the
+  view the ingest saw (the store keeps no view). #849 and #1961 rows are never exempted by the audit: their routes
+  cannot be told apart from ordinary ones.
 - The expected count relies on the host carrying a handoff copy's timestamp from its original. The host does this
   best-effort, and a copy it rewrote (a pruned tool result) keeps no match: such a copy counts as one more expected
   row, so the audit errs toward reporting a deficit, never toward hiding one. A host without the `compacted` column
-  counts every row as displayed. The host's user-handoff normalisation is not repeated; LCM-X's carriers are
-  excluded by marker instead.
-- A user row the host persisted with an LCM-X carrier is not expected; if the host held a user's text only inside
-  such a row, its loss would not show here.
+  counts every row as displayed. The host's user-handoff normalisation is not repeated.
+- A summary carrier's parts are delimited by their structure, not verified against LCM-X's DAG as LCM-X does. A
+  merged carrier's text counts only beyond the plain rows that hold it, so a genuine resend of a text that the host
+  also merged behind a carrier counts once. A row
+  that begins with a prefix carrier (objective, task list, overflow recovery) is not expected, since where the carrier
+  ends is not marked: if the host held a user's text only behind such a carrier, its loss would not show here.
 - A log without the session decision line (builds before it) can show an auxiliary child as a child with 0 rows.
 - More than 10 silent copies of one key: the rest are counted but not listed, so they stay unattributed.
