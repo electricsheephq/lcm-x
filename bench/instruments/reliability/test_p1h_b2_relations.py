@@ -243,20 +243,25 @@ def test_p1h_a_row_that_holds_a_call_twice_explains_one_copy():
     assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == (1, 1)
 
 
-@pytest.mark.parametrize("relations,want", [
+@pytest.mark.parametrize("composite,relations,want", [
     # Bot review on #2291: a host merge record consumes rows 1 and 2 as the expected composite's parts, and row 3
-    # re-stores part "alpha" with a pair to row 1. The consumed copy is a kept copy pinned by the record, so the pair
-    # explains row 3.
-    ([(3, "possible_replay_of", 1)], (1, 0)),
+    # re-stores part "alpha" with a pair to row 1. The consumed copy stays in alpha's ID list as its one kept copy,
+    # so the pair explains row 3.
+    ("alpha\n\nbeta", [(3, "possible_replay_of", 1)], (1, 0)),
     # Controls: a pair to the consumed copy of another key (row 2, "beta") explains nothing; so does no relation.
-    ([(3, "possible_replay_of", 2)], (0, 1)),
-    ([], (0, 1)),
-], ids=["pair-to-consumed-part", "pair-to-other-part", "no-relation"])
-def test_p1h_a_merge_consumed_copy_is_a_pair_partner(relations, want):
-    composite = "alpha\n\nbeta"
-    parts = [("user", multiset.h("alpha")), ("user", multiset.h("beta"))]
+    ("alpha\n\nbeta", [(3, "possible_replay_of", 2)], (0, 1)),
+    ("alpha\n\nbeta", [], (0, 1)),
+    # Delta review on #2291: the record consumes two alpha copies, so alpha keeps two copies and takes its worst
+    # case. A silent re-store (row 2) stored before the genuine part (row 3) cannot be told apart, so neither a pair
+    # nor a self relation on row 3 explains the surplus.
+    ("alpha\n\nalpha", [(3, "possible_replay_of", 1)], (0, 1)),
+    ("alpha\n\nalpha", [(3, "supersedes", None)], (0, 1)),
+], ids=["pair-to-consumed-part", "pair-to-other-part", "no-relation", "two-consumed-pair", "two-consumed-self"])
+def test_p1h_merge_consumed_copies_stay_in_the_key(composite, relations, want):
+    parts = [("user", multiset.h(p)) for p in composite.split("\n\n")]
     host = {("user", multiset.h(composite)): {"n": 1, "ids": [9], "merges": [{"host_row_id": 9, "parts": parts}]}}
-    out, split = _split([("user", composite)], [(1, "user", "alpha"), (2, "user", "beta"), (3, "user", "alpha")],
+    second = composite.split("\n\n")[1]
+    out, split = _split([("user", composite)], [(1, "user", "alpha"), (2, "user", second), (3, "user", "alpha")],
                         relations, host=host)
     assert (out["deficit_rows"], out["surplus_rows"]) == (0, 1)
     assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == want

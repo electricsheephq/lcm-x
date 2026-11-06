@@ -261,7 +261,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
     want = Counter(key_of(role, text) for role, text in expected if norm(text))
     texts = {key_of(role, text): text for role, text in expected}
     composites, paired, spent = [], Counter(), Counter()
-    consumed = defaultdict(list)  # copies a host merge record took as a composite's parts: kept, pinned by it
+    consumed = defaultdict(list)  # copies a host merge record took as a composite's parts: kept copies of their key
     embedded, span_credits = embedded_credits(texts, want, stored_rows, stored, paired, host)
     embedded_ids = {c["store_id"] for c in span_credits}
     # #823: each active host merge record covers one missing composite. Reserve transcript rows first;
@@ -311,7 +311,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
             if have - n > entry.get("licensed", 0):
                 duplicated.append(entry)
                 if surplus_keys is not None:
-                    surplus_keys.append((key, have - n - entry.get("licensed", 0), list(stored[key]), list(consumed[key])))
+                    surplus_keys.append((key, have - n - entry.get("licensed", 0), stored[key] + consumed[key]))
     extra = []
     for k, v in stored.items():
         if k not in want:
@@ -319,7 +319,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
             licensed += [lic] if lic else []
             if len(v) > (lic or {}).get("licensed", 0):
                 if surplus_keys is not None:
-                    surplus_keys.append((k, len(v) - (lic or {}).get("licensed", 0), list(v), list(consumed[k])))
+                    surplus_keys.append((k, len(v) - (lic or {}).get("licensed", 0), v + consumed[k]))
                 extra.append({"role": k[0], "copies": len(v) - (lic or {}).get("licensed", 0), "store_ids": v[:6]})
     # #804: a held user composite whose parts the host durably stored apart is stored here as those parts, each
     # licensed by host parity; the composite key is then not a deficit. Only the occurrences the host did not store
@@ -451,9 +451,8 @@ def split_surplus(groups, relations):
     copy. A key that keeps two or more copies counts its worst case, because a silent re-store stored before a
     related later copy cannot be told apart: its surplus fills rows without a self relation first, then the
     self-related rows that hold the most copies, and each self-related row it reaches explains one copy; pairs
-    explain nothing there. A group's optional fourth item lists the copies a host merge record consumed as a
-    composite's parts: kept copies pinned by that record, outside the ID list and its store order, which a pair may
-    link to a later copy.
+    explain nothing there. A copy that a host merge record consumed as a composite's part is a kept copy of its key
+    and stays in the key's ID list: it counts toward the copies the key keeps, and a pair can link a later copy to it.
     """
     graph, source, sink = defaultdict(dict), ("source",), ("sink",)
 
@@ -465,16 +464,15 @@ def split_surplus(groups, relations):
     pairs = sorted({tuple(sorted((sid, other))) for sid, kind, other in relations
                     if kind == "possible_replay_of" and other is not None and sid != other})
     caps = []
-    for index, (_key, surplus, ids, *pinned) in enumerate(groups):
+    for index, (_key, surplus, ids) in enumerate(groups):
         quota, held, count = ("key", index), set(ids), Counter(ids)
-        ends = held | set(pinned[0] if pinned else ())  # a pair may link a later copy to a merge-consumed copy
         copies = sorted(ids)  # one row can hold a key twice (a repeated tool-call entry): count copies, not rows
         kept = len(copies) - surplus  # the key's expected, licensed or loose-allowed copies
         if kept <= 1:
             # Store order identifies the expected copy: only the key's last `surplus` copies can be explained.
             cap, later = surplus, set(copies[max(0, kept):]) if surplus > 0 else set()
             witnesses = [("self", sid) for sid in sorted(later & self_ids)]
-            witnesses += [("pair", a, b) for a, b in pairs if a in ends and b in ends and (a in later or b in later)]
+            witnesses += [("pair", a, b) for a, b in pairs if a in held and b in held and (a in later or b in later)]
         else:
             # Worst case: the surplus fills rows without a self relation first, then the self-related rows that hold
             # the most copies; each self-related row it reaches explains one copy, and pairs explain nothing.
@@ -517,7 +515,7 @@ def split_surplus(groups, relations):
             node = previous
         visible += 1
     examples = []
-    for index, (key, surplus, ids, *_pinned) in enumerate(groups):
+    for index, (key, surplus, ids) in enumerate(groups):
         silent = surplus - (caps[index] - graph[source][("key", index)])  # surplus minus what the matching explained
         if not silent:
             continue
@@ -528,5 +526,5 @@ def split_surplus(groups, relations):
         unexplained = sorted((sid for sid, n in count.items() if n > 1 - graph[("row", index, sid)].get(sink, 1)),
                              key=lambda sid: (sid not in self_ids, sid))
         examples += [{"store_id": sid, "role": key[0], "sha256": key[1]} for sid in unexplained[-silent:]]
-    return {"visible_surplus_rows": visible, "silent_surplus_rows": sum(g[1] for g in groups) - visible,
+    return {"visible_surplus_rows": visible, "silent_surplus_rows": sum(n for _k, n, _ids in groups) - visible,
             "silent_surplus_examples": sorted(examples, key=lambda e: (e["store_id"], e["role"], e["sha256"]))[:10]}
