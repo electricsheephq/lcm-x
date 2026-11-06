@@ -182,11 +182,24 @@ jobs:
           name: claude-code-unit
           path: dist/
 
+      # The notes cannot name the commit that carries them, so the bundled core comes from bundle.json.
+      - name: Release body (curated notes plus the bundled core)
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          tag = os.environ["TAG"]
+          bundle = json.load(open("dist/bundle.json"))
+          notes = open(f".github/release-notes/{tag}.md", encoding="utf-8").read().rstrip("\n")
+          line = (f"Bundled core: LCM-X commit `{bundle['core_commit']}`, core version {bundle['core_version']} "
+                  f"(from the asset's `bundle.json`).")
+          open("release-body.md", "w", encoding="utf-8").write(f"{notes}\n\n{line}\n")
+          EOF
+
       - name: Create the draft GitHub Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           tag_name: ${{ env.TAG }}
-          body_path: .github/release-notes/${{ env.TAG }}.md
+          body_path: release-body.md
           draft: true
           prerelease: ${{ needs.verify.outputs.prerelease }}
           make_latest: "false"
