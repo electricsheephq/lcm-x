@@ -788,8 +788,8 @@ def test_writer_stall_admits_one_oversized_view_then_gaps(lab, monkeypatch):
     assert len([e for e in reading["events"] if e["kind"] == "gap"]) == 0  # the gap itself ends the prefix
     events = recorder_module_events(rec)
     assert [e["kind"] for e in events].count("gap") == 1
-    turn_complete = next(e for e in reading["roots"] if e["name"] == "on_turn_complete")
-    assert [m["n"] for m in turn_complete["args"]["messages"].messages] == list(range(2_000))
+    assert not any(e["name"] == "on_turn_complete" for e in reading["roots"])
+    assert rec.counters["dropped_after_stop"] >= 1  # queued data only
 
 
 def recorder_module_events(rec):
@@ -1283,7 +1283,7 @@ def test_fix_r1_05_logging_outside_recorder_lock(lab):
             rec.lose("probe")
         rec.writer.drain(5)
         rec.writer.sync = True
-        rec.cap("probe")
+        rec._admit(rec.max_bytes + 1)
         rec.writer.drain(5)
         assert observed and not any(observed)
     finally:
@@ -1360,8 +1360,9 @@ def test_fix_r1_08_sync_cap_is_single(lab):
     rec.writer.drain(5)
     rec.writer.sync = True
     rec.max_bytes = 0
-    rec.cap("test")
-    assert [e["kind"] for e in recorder_module_events(rec)].count("cap") == 1
+    rec._admit(rec.max_bytes + 1)
+    assert [e["kind"] for e in recorder_module_events(rec)].count("cap") == 0
+    assert rec.stopped == "cap"  # a marker cannot exceed the hard cap
 
 
 @needs312
@@ -1921,11 +1922,11 @@ def test_fix_r2_07_payload_pin_defers_copy_and_hash(lab, link_error):
     release = threading.Event()
     snapshot, monitor, sha = rm.Recorder._snapshot, rm.Recorder._monitor_on, rm._sha256_file
     hashed, copies = [], []
-    copyfileobj = shutil.copyfileobj
+    payload_copy = rm.Recorder._payload_copy
     def copy_on_writer(*args, **kwargs):
         copies.append(threading.current_thread().name)
-        return copyfileobj(*args, **kwargs)
-    lab.mp.setattr(shutil, "copyfileobj", copy_on_writer)
+        return payload_copy(*args, **kwargs)
+    lab.mp.setattr(rm.Recorder, "_payload_copy", staticmethod(copy_on_writer))
     if link_error:
         lab.mp.setattr(os, "link", lambda *a, **kw: (_ for _ in ()).throw(OSError(getattr(errno, link_error), link_error)))
     def deferred(self, *args):
@@ -1989,7 +1990,7 @@ def test_fix_r2_c8_cap_never_waits_for_host_lock(lab):
     rec._atexit()
     def tick():
         with rec.writer.io:
-            rec.cap("exit disk floor")
+            rec._admit(rec.max_bytes + 1)
     with rec.lock:
         thread = threading.Thread(target=tick, daemon=True)
         thread.start()
@@ -1997,7 +1998,7 @@ def test_fix_r2_c8_cap_never_waits_for_host_lock(lab):
         done = not thread.is_alive()
     thread.join(1)
     assert done
-    rec.cap("retry")
+    rec.writer.drain(5)
     assert rec.stopped == "cap"
 
 
@@ -2215,7 +2216,7 @@ def test_fix_r3_05_cap_after_a_finished_engine_is_read_as_cap(lab):
     rec.writer.drain(5)
     rec.writer.sync = True
     rec.gone.append(10_000)
-    rec.cap("test")
+    rec._admit(rec.max_bytes + 1)
     assert rec.writer.drain(5)
     reader = importlib.import_module(module.__name__ + ".recorder_read")
     assert reader.read(rec.proc)["cause"] == "cap"
@@ -2314,7 +2315,7 @@ def test_2263_01_disk_floor(lab, site):
         assert rec.stopped == "disk_floor"
         status = json.loads((rec.proc / "STATUS.json").read_text())
         assert status["first_cause"]["cause"] == "disk_floor"
-        assert not list((rec.proc / "events").glob("*.jsonl"))
+        assert all(e["kind"] == "cap" for e in recorder_module_events(rec))
         assert not (rec.proc / "snapshot" / "lcm.db").exists()
     elif site == "_checkpoint":
         rec._checkpoint(24)
@@ -2720,6 +2721,10 @@ def test_2263_s5_replay_root_timeout_restores_environment(lab):
     lab.mp.setattr(rr, "ROOT_TIMEOUT", 0.02)
     env = {k: v for k, v in os.environ.items() if k.startswith("LCM_")}
     wall = time.time
+    missing = object()
+    agent = importlib.import_module("agent")
+    saved_module = sys.modules.get("agent.auxiliary_client", missing)
+    saved_attribute = vars(agent).get("auxiliary_client", missing)
     def prepared(module):
         prepare(module)
         cls = importlib.import_module(module.__name__ + ".engine").LCMEngine
@@ -2731,6 +2736,17 @@ def test_2263_s5_replay_root_timeout_restores_environment(lab):
         assert time.time is wall
     finally:
         release.set()
+        if saved_module is missing:
+            sys.modules.pop("agent.auxiliary_client", None)
+        else:
+            sys.modules["agent.auxiliary_client"] = saved_module
+        if saved_attribute is missing:
+            vars(agent).pop("auxiliary_client", None)
+        else:
+            agent.auxiliary_client = saved_attribute
+
+    assert sys.modules.get("agent.auxiliary_client", missing) is saved_module
+    assert vars(agent).get("auxiliary_client", missing) is saved_attribute
 
 
 @needs312
@@ -2832,8 +2848,8 @@ def test_2269_r1_refused_snapshot_is_not_replayable(lab, caplog):
     lab.engines.append(ctx.offered)
     rec = _recorder()
     assert rec.writer.drain(5)
-    status = json.loads((rec.proc / "STATUS.json").read_text())
-    assert status["replayable"] is False
+    assert rec.snapshot == {"state": "refused", "cause": "disk_floor"}
+    assert not (rec.proc / "STATUS.json").exists()  # injected refusal covers diagnostics too
     reader = importlib.import_module(module.__name__ + ".recorder_read")
     with pytest.raises(reader.RecordingError, match="not replayable"):
         reader.read(rec.proc)
@@ -3078,3 +3094,919 @@ def test_2269_r1_off_on_comparison_detects_python_timestamp_change(tmp_path, col
         conn.execute(f"UPDATE {table} SET {field} = 2")
     after = store_rows(db, excluded_columns=SQL_CLOCK_COLUMNS, excluded_prefixes=())
     assert before[table] != after[table]
+
+
+# #2279: recorder-only failures and bounds; no host/model calls.
+@needs312
+def test_2279_a_first_write_failure_closes_pin(lab):
+    home = prepared_home(lab)
+    module = load_plugin(REPO, prefix="hermes_lcm_rec")
+    lab.modules.append(module)
+    prepare(module)
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    pins, failed = [], threading.Event()
+    original_pin, original_open = rm._pin, os.open
+    def pin(path):
+        conn = original_pin(path)
+        pins.append(conn)
+        with sqlite3.connect(path) as writer:
+            writer.execute("CREATE TABLE after_recorder_pin (x)")
+        writer.close()
+        return conn
+    def fail_first(path, *args, **kwargs):
+        if "lcm-recorder" in str(path) and args[0] & os.O_CREAT and not failed.is_set():
+            failed.set()
+            raise OSError(28, "injected ENOSPC")
+        return original_open(path, *args, **kwargs)
+    lab.mp.setattr(rm, "_pin", pin)
+    lab.mp.setattr(os, "open", fail_first)
+    lab.host.home = home
+    lab.mp.setenv("LCM_RECORDER_ENABLED", "1")
+    lab.mp.setenv("LCM_RECORDER_DIR", str(home / "lcm-recorder"))
+    ctx = FakeCtx()
+    try:
+        module.register(ctx)
+        lab.engines.append(ctx.offered)
+        rec = _recorder()
+        assert failed.wait(2)
+        rec.writer.drain(2)
+        rec.writer.join(2)
+        assert rec.writer.dead is not None
+        for conn in pins:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                conn.execute("SELECT 1")
+        assert rec.writer.dead == "OSError"
+        assert not rec.writer.items
+        with sqlite3.connect(home / "lcm.db", timeout=0.1) as check:
+            assert check.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+        check.close()
+    finally:
+        for conn in pins:
+            conn.close()
+
+
+@needs312
+def test_2279_b_snapshot_exceeds_cap(lab):
+    home = prepared_home(lab)
+    limit = (home / "lcm.db").stat().st_size - 1
+    lab.mp.setenv("LCM_RECORDER_MAX_BYTES", str(limit))
+    _, ctx = lab.load(home)
+    rec = _recorder()
+    rec.writer.drain(5)
+    assert rec.stopped == "cap"
+    assert rec.snapshot == {"state": "refused", "cause": "cap"}
+    assert not (rec.proc / "snapshot" / "lcm.db").exists()
+    assert all(e["kind"] == "cap" for e in recorder_module_events(rec))
+    assert sum(p.stat().st_size for p in rec.root.rglob("*") if p.is_file()) <= limit
+    assert isinstance(ctx.offered.get_status(), dict)
+
+
+@needs312
+@pytest.mark.parametrize("stop", ["cap", "gap", "exit_timeout"])
+def test_2279_b_queued_events_dropped_after_stop(lab, stop):
+    module, _ = lab.load(lab.home())
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    before = len(recorder_module_events(rec))
+    entered, release = threading.Event(), threading.Event()
+    rec.writer.offer(("call", lambda: (entered.set(), release.wait(5))))
+    assert entered.wait(2)
+    count = 4
+    try:
+        for n in range(count):
+            rec._emit({"kind": "queued_probe", "n": n, "body": rm.Blob("x" * 5000)}, single=True)
+        if stop == "cap":
+            rec.max_bytes = rec.writer.total_bytes + (64 << 10)
+            rec.writer.offer(("call", lambda: None))
+            # The first queued event must fail admission before writing a blob or line.
+        else:
+            rec.stopped = rec.end_state = stop
+    finally:
+        release.set()
+    assert rec.writer.drain(5)
+    assert rec.stopped == stop
+    events = recorder_module_events(rec)
+    assert len(events) == before + (stop == "cap")
+    assert rec.counters["dropped_after_stop"] == count
+    assert not list((rec.root / "blobs").rglob("*.tmp"))
+
+
+@needs312
+def test_2279_c_session_end_uses_own_argument(lab):
+    module, ctx = lab.load(lab.home())
+    ctx.offered.on_session_start("current", platform="cli")
+    ctx.offered.on_session_end("other", [])
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    events = recorder_module_events(rec)
+    event = next(e for e in events if e.get("name") == "on_session_end")
+    assert event["session"] == "other"
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    # Exercise the real frame-locals type on this interpreter, independent of event identity.
+    def own(session_id):
+        frame = sys._getframe()
+        return rec._session_of(frame.f_code, frame.f_locals, ctx.offered)
+    assert own("other") == "other"
+    from collections import UserDict
+    assert rec._session_of(None, UserDict(session_id="other"), ctx.offered) == "other"
+    assert rm.current() is rec
+
+
+@needs312
+def test_2279_d_replay_without_store_secrets(lab):
+    _, ctx = lab.load(lab.home())
+    ctx.offered.get_status()
+    rec = lab.stop()
+    stores = []
+    def older(module):
+        prepare(module)
+        store = importlib.import_module(module.__name__ + ".store")
+        lab.mp.delattr(store, "secrets")
+        stores.append(store)
+    rep = replay(rec.proc, plugin_root=REPO, workdir=lab.tmp / "older", prepare=older)
+    assert rep.diffs == []
+    assert not hasattr(stores[0], "secrets")
+
+
+@needs312
+@pytest.mark.parametrize("backup_kind", ["snapshot", "checkpoint"])
+@pytest.mark.parametrize("root", ["on_session_end", "shutdown"])
+def test_2279_e_session_end_does_not_wait_for_backup(lab, backup_kind, root):
+    home = prepared_home(lab)
+    module = load_plugin(REPO, prefix="hermes_lcm_rec")
+    lab.modules.append(module)
+    prepare(module)
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    original = rm._backup
+    entered, release = threading.Event(), threading.Event()
+    def blocked(conn, path):
+        if backup_kind in str(path):
+            entered.set()
+            assert release.wait(10)
+        return original(conn, path)
+    lab.mp.setattr(rm, "_backup", blocked)
+    lab.host.home = home
+    lab.mp.setenv("LCM_RECORDER_ENABLED", "1")
+    lab.mp.setenv("LCM_RECORDER_DIR", str(home / "lcm-recorder"))
+    ctx = FakeCtx()
+    try:
+        module.register(ctx)
+        lab.engines.append(ctx.offered)
+        rec = _recorder()
+        if backup_kind == "checkpoint":
+            assert rec.writer.drain(5)
+            rec._checkpoint(24)
+        assert entered.wait(2)
+        start = time.monotonic()
+        if root == "on_session_end":
+            ctx.offered.on_session_end("other", [])
+        else:
+            ctx.offered.shutdown()
+        assert time.monotonic() - start < 0.5
+        assert not release.is_set()
+    finally:
+        release.set()
+
+
+@needs312
+@pytest.mark.parametrize("kind", ["event", "blob", "payload", "snapshot", "checkpoint", "status"])
+@pytest.mark.parametrize("bound", ["cap", "floor"])
+def test_2279_b_each_write_checks_planned_size(lab, kind, bound):
+    module, _ = lab.load(prepared_home(lab))
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    source = lab.tmp / "payloads"
+    source.mkdir()
+    (source / "new.json").write_bytes(b"p" * 4096)
+    before = {p: p.read_bytes() for p in rec.root.rglob("*") if p.is_file()}
+    # One byte remains: checking only current usage would incorrectly admit each write.
+    if bound == "cap":
+        rec.max_bytes = rec.writer.total_bytes + (64 << 10) + 1
+    else:
+        usage = shutil.disk_usage(rec.root)
+        lab.mp.setattr(shutil, "disk_usage", lambda path: usage._replace(free=rm.DISK_FLOOR + 1))
+    def attempt():
+        if kind == "event":
+            rec.writer._append({"kind": "oversized", "seq": rec._next(), "text": "e" * 4096})
+        elif kind == "blob":
+            rec.writer._blob(rm.Blob("b" * 4096))
+        elif kind == "payload":
+            rec._capture_payloads(source)
+        elif kind == "snapshot":
+            rec._snapshot(rec._pin_db(), source)
+        elif kind == "checkpoint":
+            rec._checkpoint(24)
+        else:
+            rec.write_status()
+    with rec.writer.io:
+        rec.writer._process(("call", attempt))
+    assert rec.writer.drain(5)
+    after = {p: p.read_bytes() for p in rec.root.rglob("*") if p.is_file()}
+    # Data files remain unchanged; reserved diagnostics may record the refusal.
+    for path, data in after.items():
+        if path.name == "STATUS.json" or path.suffix == ".jsonl":
+            continue
+        assert before.get(path) == data
+    assert not rec.pins
+    if kind == "status":
+        assert rec.stopped is None
+    elif kind == "payload" and bound == "floor":
+        assert rec.payload_snapshot["cause"] == "disk_floor"
+    elif kind == "checkpoint":
+        assert rec.last_checkpoint is None and rec.stopped is None
+        assert rec.counters["recorder.checkpoint_skipped"] == 1
+    else:
+        assert rec.stopped == ("cap" if bound == "cap" else "disk_floor")
+
+
+@needs312
+def test_2279_b_existing_bytes_include_all_files(lab):
+    _, _ = lab.load(lab.home())
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    with rec.writer.io:
+        before = rec._existing_bytes()
+        for name in ("snapshot/lcm.db", "snapshot/large-outputs/p.json", "checkpoint/24/lcm.db", "STATUS.json"):
+            path = rec.root / "proc" / "older-process" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x" * 100)
+        assert rec._existing_bytes() == before + 400
+
+
+@needs312
+def test_2279_e_ordinary_event_drain_still_waits(lab):
+    _, ctx = lab.load(lab.home())
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    entered, release, ended = threading.Event(), threading.Event(), threading.Event()
+    rec.writer.offer(("call", lambda: (entered.set(), release.wait(5))))
+    assert entered.wait(2)
+    thread = threading.Thread(target=lambda: (ctx.offered.on_session_end("other", []), ended.set()), daemon=True)
+    try:
+        thread.start()
+        assert not ended.wait(0.1)
+    finally:
+        release.set()
+        thread.join(3)
+    assert ended.is_set()
+    assert any(e.get("name") == "on_session_end" for e in recorder_module_events(rec))
+
+
+@needs312
+@pytest.mark.parametrize("site", ["before_queue", "backup_open", "checkpoint_open"])
+def test_2279_a_pin_cleanup_sibling_failures(lab, site):
+    home = prepared_home(lab)
+    module = load_plugin(REPO, prefix="hermes_lcm_rec")
+    lab.modules.append(module)
+    prepare(module)
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    pins, writers = [], []
+    original_pin, original_connect, original_init = rm._pin, sqlite3.connect, rm._Writer.__init__
+    def pin(path):
+        conn = original_pin(path)
+        pins.append(conn)
+        return conn
+    def init(self, rec):
+        original_init(self, rec)
+        writers.append(self)
+    def connect(path, *args, **kwargs):
+        if ("/snapshot/lcm.db" if site == "backup_open" else "/checkpoint/24/lcm.db") in str(path):
+            raise OSError(28, "injected backup open failure")
+        return original_connect(path, *args, **kwargs)
+    lab.mp.setattr(rm, "_pin", pin)
+    lab.mp.setattr(rm._Writer, "__init__", init)
+    if site == "before_queue":
+        def fail(*args):
+            raise OSError(28, "injected before queue")
+        lab.mp.setattr(rm.Recorder, "_process_facts", fail)
+    else:
+        lab.mp.setattr(sqlite3, "connect", connect)
+    lab.host.home = home
+    lab.mp.setenv("LCM_RECORDER_ENABLED", "1")
+    lab.mp.setenv("LCM_RECORDER_DIR", str(home / "lcm-recorder"))
+    ctx = FakeCtx()
+    module.register(ctx)
+    lab.engines.append(ctx.offered)
+    writer = writers[0]
+    if site == "checkpoint_open":
+        assert writer.drain(5)
+        writer.rec._checkpoint(24)
+    writer.join(5)
+    try:
+        assert not writer.is_alive()
+        assert pins
+        for conn in pins:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                conn.execute("SELECT 1")
+        assert not writer.items and not writer.rec.pins
+        if writer.rec.state_db is not None:
+            assert writer.rec.state_db.conn is None
+    finally:
+        for conn in pins:
+            conn.close()
+
+
+def _round2_recorder(lab):
+    module, ctx = lab.load(prepared_home(lab))
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    return rec, importlib.import_module(module.__name__ + ".recorder"), ctx
+
+
+@needs312
+def test_2280_r1_status_reservation_is_largest_size(lab):
+    rec, _, _ = _round2_recorder(lab)
+    with rec.writer.io:
+        before = rec.writer.total_bytes
+        largest = 0
+        for n in range(2500):
+            rec.marks["probe"] = {"vary": "x" * (n % 100)}
+            rec.write_status()
+            largest = max(largest, (rec.proc / "STATUS.json").stat().st_size)
+        assert rec.writer.total_bytes - before <= 2 * largest
+
+
+@needs312
+@pytest.mark.parametrize("bound", ["cap", "disk_floor"])
+def test_2280_r1_event_refusal_has_marker_and_status(lab, bound):
+    rec, rm, _ = _round2_recorder(lab)
+    refused = {"kind": "too_large", "seq": rec._next(), "text": "x" * 8192}
+    need = len((json.dumps(refused, separators=(",", ":")) + "\n").encode())
+    with rec.writer.io:
+        if bound == "cap":
+            rec.max_bytes = rec.writer.total_bytes + (64 << 10) + 4096
+        else:
+            usage = shutil.disk_usage(rec.root)
+            lab.mp.setattr(shutil, "disk_usage", lambda _: usage._replace(free=rm.DISK_FLOOR + 4096))
+        rec.writer._process(("event", refused))
+    assert rec.writer.drain(5)
+    status = json.loads((rec.proc / "STATUS.json").read_text())
+    assert status["end_state"] == bound
+    markers = [e for e in recorder_module_events(rec) if e["kind"] == "cap"]
+    assert len(markers) == 1
+    assert markers[0]["reason"] == bound and markers[0]["need"] == need
+    assert importlib.import_module(rm.__package__ + ".recorder_read").read(rec.proc)["cause"] == bound
+    assert rec.writer.drain(5)
+    assert len([e for e in recorder_module_events(rec) if e["kind"] == "cap"]) == 1
+
+
+@needs312
+def test_2280_r1_gap_is_diagnostic_not_dropped_data(lab):
+    rec, rm, _ = _round2_recorder(lab)
+    entered, release = threading.Event(), threading.Event()
+    rec.writer.offer(("call", lambda: (entered.set(), release.wait(5))))
+    assert entered.wait(2)
+    try:
+        lab.mp.setattr(rm, "MAX_QUEUE_EVENTS", 2)
+        rec._emit({"kind": "queued"}, single=True)
+        rec._emit({"kind": "overflow"}, single=True)
+        assert rec.stopped == "gap"
+    finally:
+        release.set()
+    assert rec.writer.drain(5)
+    assert [e["kind"] for e in recorder_module_events(rec)].count("gap") == 1
+    assert rec.counters["dropped_after_stop"] == 1
+
+
+@needs312
+@pytest.mark.parametrize("stage", ["precheck", "seal"])
+@pytest.mark.parametrize("bound", ["cap", "disk_floor"])
+def test_2280_r2_checkpoint_refusal_keeps_events(lab, caplog, stage, bound):
+    rec, rm, _ = _round2_recorder(lab)
+    size = rec.db_path.stat().st_size
+    usage = shutil.disk_usage(rec.root)
+    def constrain():
+        if bound == "cap":
+            rec.max_bytes = rec.writer.total_bytes + (64 << 10) + size // 2
+        else:
+            lab.mp.setattr(shutil, "disk_usage", lambda _: usage._replace(free=rm.DISK_FLOOR + size // 2))
+    with rec.writer.io:
+        if stage == "precheck":
+            constrain()
+            rec._checkpoint(24)
+        else:
+            queued = []
+            offer = rec.writer.offer
+            lab.mp.setattr(rec.writer, "offer", lambda item, **kw: queued.append(item) or True)
+            rec._checkpoint(24)
+            lab.mp.setattr(rec.writer, "offer", offer)
+            constrain()
+            rec.writer._process(queued[0])
+    assert rec.writer.drain(5)
+    assert rec.stopped is None
+    assert rec.counters["recorder.checkpoint_skipped"] == 1
+    assert not rec.pins and rec.last_checkpoint is None
+    assert sum("checkpoint +24h skipped" in r.message and bound in r.message for r in caplog.records) == 1
+    rec._emit({"kind": "after_checkpoint"}, single=True)
+    assert rec.writer.drain(5)
+    assert any(e["kind"] == "after_checkpoint" for e in recorder_module_events(rec))
+
+
+@needs312
+def test_2280_r3_dead_writer_snapshot_offer_closes_pin(lab):
+    home = prepared_home(lab)
+    module = load_plugin(REPO, prefix="hermes_lcm_rec")
+    lab.modules.append(module)
+    prepare(module)
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    pin = rm._pin
+    pins = []
+    lab.mp.setattr(rm._Writer, "_run", lambda self: None)
+    def after_death(path):
+        _recorder().writer.join(5)
+        _recorder().writer.dead = "OSError"
+        conn = pin(path)
+        pins.append(conn)
+        with sqlite3.connect(path) as writer:
+            writer.execute("CREATE TABLE after_pin (x)")
+        writer.close()
+        return conn
+    lab.mp.setattr(rm, "_pin", after_death)
+    lab.host.home = home
+    lab.mp.setenv("LCM_RECORDER_ENABLED", "1")
+    ctx = FakeCtx()
+    try:
+        module.register(ctx)
+        lab.engines.append(ctx.offered)
+        with sqlite3.connect(home / "lcm.db", timeout=0.1) as check:
+            assert check.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+        check.close()
+        assert not _recorder().pins
+    finally:
+        for conn in pins:
+            conn.close()
+
+
+@needs312
+def test_2280_r4_segment_close_failure_finishes_cleanup(lab, caplog):
+    rec, _, _ = _round2_recorder(lab)
+    hooks = []
+    lab.mp.setattr(threading, "excepthook", hooks.append)
+    class BadClose:
+        def __init__(self, real):
+            self.real = real
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+        def close(self):
+            self.real.close()
+            raise OSError(28, "buffered ENOSPC")
+    with rec.writer.io:
+        rec.writer.segment = BadClose(rec.writer.segment)
+        with rec.writer.cv:
+            rec.writer.closed = True
+            rec.writer.cv.notify()
+    rec.writer.join(5)
+    assert not rec.writer.is_alive()
+    assert hooks == []
+    assert json.loads((rec.proc / "STATUS.json").read_text())["end_state"] == "writer_failed"
+    assert "writer:OSError" in caplog.text and not rec.warnings
+
+
+@needs312
+def test_2280_r4_pin_pop_race_does_not_raise(lab):
+    rec, _, _ = _round2_recorder(lab)
+    class Vanishing(set):
+        def __bool__(self):
+            self.clear()
+            return True
+    rec.pins = Vanishing()
+    rec._close_pins()
+
+
+@needs312
+def test_2280_r6_start_tolerates_vanishing_file(lab):
+    home = prepared_home(lab)
+    root = home / "lcm-recorder"
+    root.mkdir()
+    vanished = root / "STATUS.other.tmp"
+    vanished.write_text("other process")
+    walk = os.walk
+    def disappearing(*args, **kwargs):
+        for directory, dirs, files in walk(*args, **kwargs):
+            if Path(directory) == root and vanished.name in files:
+                vanished.unlink()
+            yield directory, dirs, files
+    lab.mp.setattr(os, "walk", disappearing)
+    _, ctx = lab.load(home)
+    rec = _recorder()
+    assert rec is not None and rec.opened
+    assert not vanished.exists()
+    assert rec.writer.drain(5)
+    assert isinstance(ctx.offered.get_status(), dict)
+
+
+@needs312
+def test_2280_r7_failed_snapshot_blocks_start_and_checkpoint(lab):
+    home = prepared_home(lab)
+    module = load_plugin(REPO, prefix="hermes_lcm_rec")
+    lab.modules.append(module)
+    prepare(module)
+    rm = importlib.import_module(module.__name__ + ".recorder")
+    backup = rm._backup
+    def fail_snapshot(conn, dest):
+        if "snapshot" in dest.parts:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"partial database")
+            raise sqlite3.OperationalError("injected snapshot failure")
+        return backup(conn, dest)
+    lab.mp.setattr(rm, "_backup", fail_snapshot)
+    lab.host.home = home
+    lab.mp.setenv("LCM_RECORDER_ENABLED", "1")
+    ctx = FakeCtx()
+    module.register(ctx)
+    lab.engines.append(ctx.offered)
+    rec = _recorder()
+    assert rec.writer.drain(5)
+    status = json.loads((rec.proc / "STATUS.json").read_text())
+    assert status["snapshot"] == {"state": "failed", "cause": "OperationalError"}
+    assert status["replayable"] is False
+    reader = importlib.import_module(module.__name__ + ".recorder_read")
+    with pytest.raises(reader.RecordingError, match="not replayable"):
+        reader.read(rec.proc)
+    rec._checkpoint(24)
+    assert rec.writer.drain(5)
+    assert rec.writer.drain(5)  # seal queues its marker behind the first drain's sync item
+    with pytest.raises(reader.RecordingError, match="not replayable"):
+        reader.read(rec.proc, checkpoint=24)
+    # A stale replayable flag must not allow a partial start database either.
+    status["replayable"] = True
+    (rec.proc / "STATUS.json").write_text(json.dumps(status))
+    with pytest.raises(reader.RecordingError, match="not replayable"):
+        reader.read(rec.proc)
+    with pytest.raises(reader.RecordingError, match="not replayable"):
+        reader.read(rec.proc, checkpoint=24)
+
+
+@needs312
+def test_2280_r8_checkpoint_warning_keeps_only_exception_text(lab):
+    rec, _, _ = _round2_recorder(lab)
+    def fail_pin():
+        raise sqlite3.OperationalError("pin unavailable")
+    lab.mp.setattr(rec, "_pin_db", fail_pin)
+    with rec.writer.io:
+        rec._checkpoint(24)
+        warning = rec.warnings[-1]
+        assert all(not isinstance(value, BaseException) for value in warning)
+        assert "OperationalError" in str(warning) and "pin unavailable" in str(warning)
+
+
+@needs312
+@pytest.mark.parametrize("end_state,first_seq,expected", [
+    ("cap", 4, "seq_hole"), ("cap", 2, "cap"), ("exit_begin", 2, "cap")])
+def test_2280_r9_reader_relabels_only_stop_boundary(lab, end_state, first_seq, expected):
+    rec, rm, _ = _round2_recorder(lab)
+    rec = lab.stop()
+    for path in (rec.proc / "events").glob("*.jsonl"):
+        path.unlink()
+    (rec.proc / "events" / "synthetic.jsonl").write_text(
+        json.dumps({"kind": "process_start", "seq": 1}) + "\n" +
+        json.dumps({"kind": "probe", "seq": 3}) + "\n")
+    status = json.loads((rec.proc / "STATUS.json").read_text())
+    status.update(end_state=end_state, first_cause={"cause": "cap", "seq": first_seq})
+    (rec.proc / "STATUS.json").write_text(json.dumps(status))
+    reader = importlib.import_module(rm.__package__ + ".recorder_read")
+    assert reader.read(rec.proc)["cause"] == expected
+
+
+@needs312
+def test_2280_r9_cap_then_atexit_preserves_cause(lab):
+    rec, rm, _ = _round2_recorder(lab)
+    with rec.writer.io:
+        rec.max_bytes = rec.writer.total_bytes + (64 << 10)
+        rec._admit(1)
+    assert rec.writer.drain(5)
+    rec._atexit()
+    assert rec.writer.drain(5)
+    # Exercise the STATUS fallback when no diagnostic marker fits or survives.
+    with rec.writer.io:
+        rec.writer.segment.flush()
+        for path in (rec.proc / "events").glob("*.jsonl"):
+            lines = [line for line in path.read_text().splitlines() if json.loads(line)["kind"] != "cap"]
+            path.write_text("\n".join(lines) + "\n")
+        reader = importlib.import_module(rm.__package__ + ".recorder_read")
+        assert reader.read(rec.proc)["cause"] == "cap"
+
+
+@needs312
+@pytest.mark.parametrize("bound", ["cap", "disk_floor"])
+def test_2280_r1_refused_diagnostic_does_not_stop(lab, bound):
+    rec, rm, _ = _round2_recorder(lab)
+    with rec.writer.io:
+        before = dict(rec.counters)
+        if bound == "cap":
+            need = rec.max_bytes + 1
+        else:
+            need = 1
+            usage = shutil.disk_usage(rec.root)
+            lab.mp.setattr(shutil, "disk_usage", lambda _: usage._replace(free=rm.DISK_FLOOR - (64 << 10)))
+        assert not rec._admit(need, diagnostic=True)
+        assert rec.stopped is None and rec.end_state == "running"
+        assert dict(rec.counters) == before and rec.first_cause is None
+
+
+@needs312
+def test_2280_r5_backup_counter_updates_hold_condition(lab):
+    rec, _, _ = _round2_recorder(lab)
+    writer_class = type(rec.writer)
+    observed = []
+    class Checked(writer_class):
+        def __setattr__(self, name, value):
+            if name == "backups":
+                observed.append(self.cv._is_owned())
+            super().__setattr__(name, value)
+    with rec.writer.io:
+        rec.writer.__class__ = Checked
+        try:
+            rec.writer.sync = True
+            assert rec.writer.offer(("backup", lambda: None))
+            assert observed == [True, True]
+        finally:
+            rec.writer.__class__ = writer_class
+            rec.writer.sync = False
+
+
+@needs312
+def test_2280_r1_status_replacements_are_serialized(lab):
+    rec, _, _ = _round2_recorder(lab)
+    replace, open_file = os.replace, os.open
+    entered, release, second_started, second_open = (threading.Event() for _ in range(4))
+    errors = []
+    def replacing(source, dest):
+        if Path(dest) == rec.proc / "STATUS.json" and threading.current_thread().name == "status-first":
+            entered.set()
+            assert release.wait(5)
+        return replace(source, dest)
+    def opening(path, *args, **kwargs):
+        if "STATUS.json" in str(path) and threading.current_thread().name == "status-second":
+            second_open.set()
+        return open_file(path, *args, **kwargs)
+    def writing():
+        if threading.current_thread().name == "status-second":
+            second_started.set()
+        try:
+            rec.write_status()
+        except BaseException as exc:
+            errors.append(exc)
+    lab.mp.setattr(os, "replace", replacing)
+    lab.mp.setattr(os, "open", opening)
+    first = threading.Thread(target=writing, name="status-first")
+    second = threading.Thread(target=writing, name="status-second")
+    with rec.writer.io:
+        try:
+            first.start()
+            assert entered.wait(2)
+            second.start()
+            assert second_started.wait(2)
+            assert not second_open.wait(0.1)
+        finally:
+            release.set()
+            first.join(5)
+            if second.ident is not None:
+                second.join(5)
+        assert not first.is_alive() and not second.is_alive() and not errors
+
+
+def _round3_constrain(lab, rec, rm, bound, headroom=0):
+    if bound == "cap":
+        rec.max_bytes = rec.writer.total_bytes + rm.DIAG_RESERVE + headroom
+    else:
+        usage = shutil.disk_usage(rec.root)
+        lab.mp.setattr(shutil, "disk_usage", lambda _: usage._replace(free=rm.DISK_FLOOR + headroom))
+
+
+@needs312
+@pytest.mark.parametrize("bound", ["cap", "disk_floor"])
+def test_2280_q1_queued_events_name_bound(lab, bound):
+    """Real writer: a refused event followed by two queued events leaves three holes."""
+    rec, rm, _ = _round2_recorder(lab)
+    first_hole = rec.last_seq + 1
+    entered, release = threading.Event(), threading.Event()
+    assert rec.writer.offer(("call", lambda: (entered.set(), release.wait(5))))
+    try:
+        assert entered.wait(2)
+        rec._emit({"kind": "refused", "text": "x" * 8192}, single=True)
+        rec._emit({"kind": "queued_one"}, single=True)
+        rec._emit({"kind": "queued_two"}, single=True)
+        _round3_constrain(lab, rec, rm, bound, headroom=4096)
+    finally:
+        release.set()
+    assert rec.writer.drain(5)
+    raw = recorder_module_events(rec)
+    assert not any(e["kind"] in ("refused", "queued_one", "queued_two") for e in raw)
+    assert rec.counters["dropped_after_stop"] == 3
+    marker = next(e for e in raw if e["kind"] == "cap")
+    status = json.loads((rec.proc / "STATUS.json").read_text())
+    assert first_hole < status["first_cause"]["seq"] < marker["seq"]
+    recording = importlib.import_module(rm.__package__ + ".recorder_read").read(rec.proc)
+    assert recording["prefix_end"] == first_hole - 1
+    assert recording["cause"] == bound
+
+
+@needs312
+def test_2280_q1_refused_call_names_cap(lab):
+    """A real monitored engine call allocates enter and exit before the writer refuses it."""
+    rec, rm, ctx = _round2_recorder(lab)
+    first_hole = rec.last_seq + 1
+    entered, release = threading.Event(), threading.Event()
+    assert rec.writer.offer(("call", lambda: (entered.set(), release.wait(5))))
+    try:
+        assert entered.wait(2)
+        ctx.offered.get_status()
+        with rec.writer.cv:
+            call = next(item[1] for (item, _) in rec.writer.items
+                        if item[0] == "event" and item[1].get("name") == "get_status")
+            assert call["seq_enter"] == first_hole < call["seq_exit"]
+        _round3_constrain(lab, rec, rm, "cap")
+    finally:
+        release.set()
+    assert rec.writer.drain(5)
+    raw = recorder_module_events(rec)
+    assert not any(e.get("name") == "get_status" for e in raw)
+    assert next(e for e in raw if e["kind"] == "cap")["seq"] > call["seq_exit"]
+    recording = importlib.import_module(rm.__package__ + ".recorder_read").read(rec.proc)
+    assert recording["prefix_end"] == first_hole - 1
+    assert recording["cause"] == "cap"
+
+
+@needs312
+def test_2280_q1_open_parent_names_cap(lab):
+    """A real monitored parent stays open while one child writes and its sibling is refused."""
+    rec, rm, ctx = _round2_recorder(lab)
+    first_hole = rec.last_seq + 1
+    def parent():
+        ctx.offered.get_status()
+        assert rec.writer.drain(5)
+        children = [e for e in recorder_module_events(rec) if e.get("name") == "get_status"]
+        assert len(children) == 1
+        assert children[0]["parent_seq"] == first_hole < children[0]["seq_enter"]
+        entered, release = threading.Event(), threading.Event()
+        assert rec.writer.offer(("call", lambda: (entered.set(), release.wait(5))))
+        try:
+            assert entered.wait(2)
+            ctx.offered.get_status()
+            _round3_constrain(lab, rec, rm, "cap")
+        finally:
+            release.set()
+        assert rec.writer.drain(5)
+        assert rec.stopped == "cap"
+    rec._register("tool", ("parent", parent), {})
+    parent()
+    assert rec.writer.drain(5)
+    raw = recorder_module_events(rec)
+    assert not any(e.get("name") == "parent" for e in raw)
+    assert len([e for e in raw if e.get("name") == "get_status"]) == 1
+    recording = importlib.import_module(rm.__package__ + ".recorder_read").read(rec.proc)
+    assert recording["prefix_end"] == first_hole - 1
+    assert recording["cause"] == "cap"
+
+
+def test_2280_q1_string_first_cause_keeps_seq_hole(tmp_path):
+    """Synthetic segment isolates an unrelated hole with an uncapturable string seq in STATUS."""
+    import recorder_read as reader
+    proc = tmp_path / "proc" / "synthetic"
+    (proc / "events").mkdir(parents=True)
+    (proc / "events" / "one.jsonl").write_text(
+        json.dumps({"kind": "process_start", "seq": 1}) + "\n" +
+        json.dumps({"kind": "probe", "seq": 3}) + "\n")
+    (proc / "STATUS.json").write_text(json.dumps({
+        "snapshot": {"state": "ok"}, "replayable": True, "end_state": "cap",
+        "first_cause": {"cause": "uncapturable", "seq": "tool:opaque"}}))
+    recording = reader.read(proc)
+    assert recording["prefix_end"] == 1
+    assert recording["cause"] == "seq_hole"
+
+
+@pytest.mark.parametrize("wording", [
+    "A refused initial snapshot writes no events except the `cap` marker.",
+    "For a stop at a bound, the seq is the last one assigned when the stop happened.",
+    "A failed start snapshot is unreplayable, including from a sealed checkpoint.",
+])
+def test_2280_q4_docs_describe_stop_and_snapshot(wording):
+    assert wording in (REPO / "docs" / "recorder.md").read_text()
+
+
+@needs312
+@pytest.mark.parametrize("keep_marker", [True, False])
+def test_2283_writer_failure_precedes_later_cap(lab, keep_marker):
+    rec, rm, _ = _round2_recorder(lab)
+    append = rec.writer._append
+    def fail_one(event, **kwargs):
+        if event["kind"] == "writer_failure_probe":
+            raise ValueError("injected event failure")
+        return append(event, **kwargs)
+    lab.mp.setattr(rec.writer, "_append", fail_one)
+    first_hole = rec.last_seq + 1
+    rec._emit({"kind": "writer_failure_probe"}, single=True)
+    assert rec.writer.drain(5)
+    assert rec.first_cause == {"cause": "writer:ValueError", "seq": first_hole}
+    with rec.writer.io:
+        rec.max_bytes = rec.writer.total_bytes + rm.DIAG_RESERVE
+        rec._emit({"kind": "cap_probe"}, single=True)
+    assert rec.writer.drain(5)
+    assert rec.stopped == "cap"
+    assert any(e["kind"] == "cap" for e in recorder_module_events(rec))
+    rec = lab.stop()
+    if not keep_marker:
+        for path in (rec.proc / "events").glob("*.jsonl"):
+            lines = [line for line in path.read_text().splitlines() if json.loads(line)["kind"] != "cap"]
+            path.write_text("\n".join(lines) + "\n")
+    reader = importlib.import_module(rm.__package__ + ".recorder_read")
+    recording = reader.read(rec.proc)
+    assert recording["prefix_end"] == first_hole - 1
+    assert recording["cause"] == "writer:ValueError"
+
+
+@pytest.mark.parametrize("hole", [True, False])
+def test_2283_legacy_cap_reason_is_not_a_cause(tmp_path, hole):
+    import recorder_read as reader
+    proc = tmp_path / "proc" / "legacy"
+    (proc / "events").mkdir(parents=True)
+    events = [{"kind": "process_start", "seq": 1},
+              {"kind": "cap", "seq": 3 if hole else 2, "reason": "bytes=1 free=2"}]
+    (proc / "events" / "one.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    (proc / "STATUS.json").write_text(json.dumps({"snapshot": {"state": "ok"}}))
+    recording = reader.read(proc)
+    assert recording["prefix_end"] == 1
+    assert recording["cause"] == "cap"
+
+
+@needs312
+@pytest.mark.parametrize("site", ["link_fallback", "snapshot"])
+def test_2283_payload_copy_bounds_a_growing_source(lab, site):
+    rec, rm, _ = _round2_recorder(lab)
+    source_dir = lab.tmp / "growing-payloads"
+    source_dir.mkdir()
+    source = source_dir / "payload.json"
+    reserved = (128 << 10) + 17
+    source.write_bytes(b"x" * reserved)
+    proc = lab.tmp / "copy-probe"
+    target = proc / "snapshot" / "large-outputs" / source.name
+    target.parent.mkdir(parents=True)
+    if site == "snapshot":
+        os.link(source, target)
+    copy_source = target if site == "snapshot" else source
+    original_open = open
+    reads, grown = [], []
+    class GrowingSource:
+        def __init__(self, handle):
+            self.handle = handle
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.handle.close()
+        def read(self, size=-1):
+            reads.append(size)
+            data = self.handle.read(size)
+            if not grown:
+                with original_open(copy_source, "ab") as handle:
+                    handle.write(b"y" * (64 << 10))
+                grown.append(True)
+            return data
+    def grow_on_read(path, mode="r", *args, **kwargs):
+        handle = original_open(path, mode, *args, **kwargs)
+        return GrowingSource(handle) if Path(path) == copy_source and mode == "rb" and not grown else handle
+    def refuse_link(*args):
+        raise OSError("injected cross-device link failure")
+    with rec.writer.io, lab.mp.context() as patch:
+        patch.setattr(rec, "proc", proc)
+        patch.setattr(rec, "write_status", lambda: None)
+        patch.setattr("builtins.open", grow_on_read)
+        patch.setattr(os, "link", refuse_link)
+        before = rec.writer.total_bytes
+        if site == "snapshot":
+            rec._snapshot_body(None, source_dir)
+            manifest_path = proc / "snapshot" / "large-outputs.manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            assert manifest[0]["size"] == reserved
+            admitted_other = manifest_path.stat().st_size
+        else:
+            rec._capture_payloads(source_dir)
+            admitted_other = 0
+        assert grown and source.stat().st_size > reserved
+        assert target.stat().st_size == reserved
+        assert reads and all(0 < size <= 64 << 10 for size in reads)
+        assert rec.writer.total_bytes - before == reserved + admitted_other
+
+
+@needs312
+def test_2283_checkpoint_reserves_seal_marker_headroom(lab):
+    rec, rm, _ = _round2_recorder(lab)
+    with rec.writer.io:
+        size = rec.db_path.stat().st_size
+        rec.max_bytes = rec.writer.total_bytes + rm.DIAG_RESERVE + size + 10
+        rec._checkpoint(24)
+    assert rec.writer.drain(5)
+    assert rec.stopped is None
+    assert rec.counters["recorder.checkpoint_skipped"] == 1
+    assert rec.last_checkpoint is None and not rec.pins
+    assert not (rec.proc / "checkpoint" / "24" / "lcm.db").exists()
+    rec._emit({"kind": "after_checkpoint_headroom"}, single=True)
+    assert rec.writer.drain(5)
+    assert any(e["kind"] == "after_checkpoint_headroom" for e in recorder_module_events(rec))
+
+
+def test_2283_docs_bound_diagnostic_floor_with_status():
+    assert "up to 64 KiB plus one STATUS file below the disk floor" in (
+        REPO / "docs" / "recorder.md").read_text()

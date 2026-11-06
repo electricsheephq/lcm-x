@@ -1,8 +1,8 @@
 # Event recorder (opt-in, #2243)
 
 The recorder writes what Hermes asks of the LCM engine to local files so the run can be replayed offline against
-another build. It is off by default and needs Python 3.12 or newer (it uses `sys.monitoring`). Recording never changes
-what LCM stores, returns or logs to the host; with the flag off, `recorder.py` is never imported and nothing is set or
+another build. It is off by default and needs Python 3.12 or newer (it uses `sys.monitoring`). Recording preserves what LCM stores and returns during ordinary calls;
+`KeyboardInterrupt` propagates by design, and the recorder logs its own diagnostics. With the flag off, `recorder.py` is never imported and nothing is set or
 created.
 
 ## Turning it on and off
@@ -11,7 +11,7 @@ created.
 | --- | --- | --- |
 | `LCM_RECORDER_ENABLED` | `false` | Install the recorder at plugin registration. |
 | `LCM_RECORDER_DIR` | `$HERMES_HOME/lcm-recorder/` | Where recordings go. |
-| `LCM_RECORDER_MAX_BYTES` | 20 GiB | Cap on event segments and shared blobs across every recording under `LCM_RECORDER_DIR` (snapshots and checkpoints are not counted). |
+| `LCM_RECORDER_MAX_BYTES` | 20 GiB | Cap on all recorder writes under `LCM_RECORDER_DIR`: events, shared blobs, snapshots, payload copies, manifests, checkpoints and status files. |
 
 All three are read with the profile-scoped environment at registration; restart the host to change them. On Python
 3.11 the flag logs one warning and installs nothing. If `sys.monitoring` tool ids 3 and 4 are both taken, it logs one
@@ -68,26 +68,40 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
 
 ## Limits, coverage and the replayable prefix
 
-- **Cap and disk floor:** when the recording reaches `LCM_RECORDER_MAX_BYTES`, or free disk falls below 20 GiB, a
-  `cap` event is written and recording stops. The cap spans every recording under `LCM_RECORDER_DIR`, including
-  shared `blobs/`. Other recordings' bytes are counted when a recorder starts, so recorders running at the same time
-  can together pass the cap; each still stops at the disk floor. Before snapshots, payload copies and checkpoints, free space minus the planned write must remain
-  at least 20 GiB. A refused snapshot records `disk_floor` in STATUS and writes no events. LCM keeps running unchanged.
-- **Queue admission:** the writer queue admits at most 10,000 events or 512 MiB; an event refused there writes a
-  `gap` event and recording stops.
+- **Cap and disk floor:** every write is admitted before it starts against `LCM_RECORDER_MAX_BYTES` and the
+  requirement that free space minus its planned size remain at least 20 GiB. A 64 KiB diagnostic reserve inside
+  the cap is withheld from data writes; STATUS and cap/gap markers can use it and
+  up to 64 KiB plus one STATUS file below the disk floor (STATUS checks only its growth).
+  This includes events, blobs, snapshots,
+  payload copies, manifests, checkpoints and status files. Existing files anywhere under `LCM_RECORDER_DIR` count
+  at startup; subsequent planned writes count conservatively, including payload links and temporary copies.
+  STATUS reserves only growth up to twice its largest size, covering the old file beside its replacement.
+  Concurrent recorder processes can together pass the cap because each counts other processes' bytes at startup.
+  A refused initial snapshot writes no events except the `cap` marker.
+  When a bound refuses data other than a checkpoint, recording stops; queued events are
+  dropped and counted as `dropped_after_stop`. One `cap` marker names the cause and refused planned size, followed
+  by STATUS, using the diagnostic reserve; if no diagnostic fits, the last complete prefix remains readable.
+  A diagnostic refusal never stops recording. LCM keeps running.
+- **Queue admission:** the writer queue admits at most 10,000 events or 512 MiB; an event refused there stops
+  recording with a diagnostic `gap` marker and STATUS when they fit; dropped queued data excludes the marker.
 - **Coverage ends:** recording stops being complete at the first of: a gap, the cap, a value that cannot be copied
   (`unsupported`), `hermes_home_changed`, a lost observation, a root stack mismatch, or a recorder failure (`recorder.failed`; the failure
   never reaches the engine or Hermes). `STATUS.json` names the first cause and its seq.
+  For a stop at a bound, the seq is the last one assigned when the stop happened.
 - **Replayable prefix:** the reader returns events up to the first missing seq or the first coverage end, whichever
   comes first. A missing, torn or hash-mismatched blob cuts the prefix before its event with a `blob_*` cause.
   Everything before it is complete; a checkpoint crossing a hole or damaged blob is rejected.
+  A failed start snapshot is unreplayable, including from a sealed checkpoint.
+  Checkpoint replay starts from the start snapshot and compares against the checkpoint backup.
 - **Checkpoints:** at +24, +72 and +144 hours, between roots, the recorder backs up `lcm.db` and writes a
   `checkpoint_sealed` event with the seq it covers. Reading with a checkpoint returns the prefix through that seq, and
-  a replay of it must match the backup, without needing an exit.
+  a replay of it must match the backup, without needing an exit. A checkpoint refused by the cap or disk floor
+  is skipped, counted as `recorder.checkpoint_skipped`, and warned with its cause; recording continues.
 - **Ended without exit:** Hermes ends its gateway and CLI with `os._exit`, so atexit never runs and a recording
   normally ends as "ended without exit". That is a normal end; the sealed checkpoints are the comparison points. When
   atexit does run, the recorder writes `exit_begin` and records the exit flushes synchronously after a successful
-  drain. A drain timeout stops admission with `exit_timeout` in status. Recording stops in a forked child (`fork`)
+  drain. Session end and shutdown skip the ordinary 2 s event drain while a snapshot or checkpoint backup is
+  pending or running. A drain timeout stops admission with `exit_timeout` in status. Recording stops in a forked child (`fork`)
   before it can wait on inherited locks; the parent recording continues.
 
 ## Declared gaps (not failures)

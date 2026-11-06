@@ -25,6 +25,7 @@ import threading
 import time
 import weakref
 from collections import Counter, deque
+from collections.abc import Mapping
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,7 @@ SESSION_COLUMNS = ("id", "source", "parent_session_id", "started_at", "ended_at"
 COMMAND_CONTEXT = ("HERMES_SESSION_ID", "HERMES_SESSION_KEY", "HERMES_SESSION_PROFILE")
 MAX_QUEUE_EVENTS, MAX_QUEUE_BYTES = 10_000, 512 << 20
 DEFAULT_MAX_BYTES, DISK_FLOOR = 20 << 30, 20 << 30
+DIAG_RESERVE = 64 << 10
 CHECKPOINT_HOURS = (24, 72, 144)
 _SYNC_ROOTS = frozenset({"on_session_end", "shutdown"})
 _CO_SKIP = inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR | inspect.CO_ITERABLE_COROUTINE
@@ -209,8 +211,12 @@ def _pin(db_path: Path):
     if not db_path.exists():
         return None
     conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, check_same_thread=False, timeout=5)
-    conn.execute("BEGIN")
-    conn.execute("SELECT * FROM sqlite_master LIMIT 1").fetchall()
+    try:
+        conn.execute("BEGIN")
+        conn.execute("SELECT * FROM sqlite_master LIMIT 1").fetchall()
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -219,18 +225,36 @@ def _disk_room(target: Path, need: int) -> bool:
 
 
 def _backup(conn, dest: Path) -> dict:
-    _mkdir(dest.parent)
-    if conn is None:
-        return {"path": None, "state": "no_database"}
-    target = sqlite3.connect(dest)
+    target = None
     try:
+        _mkdir(dest.parent)
+        if conn is None:
+            return {"path": None, "state": "no_database"}
+        target = sqlite3.connect(dest)
+        target.execute("PRAGMA journal_mode=OFF")  # disposable copy: no unbudgeted rollback journal
         conn.backup(target, pages=-1)
+        os.chmod(dest, 0o600)
+        return {"path": str(dest), "state": "ok", "bytes": dest.stat().st_size}
     finally:
-        target.close()
-        conn.rollback()
-        conn.close()
-    os.chmod(dest, 0o600)
-    return {"path": str(dest), "state": "ok", "bytes": dest.stat().st_size}
+        try:
+            if target is not None:
+                target.close()
+        finally:
+            _close_pin(conn)
+
+
+def _close_pin(conn):
+    if conn is not None:
+        try:
+            conn.rollback()
+        except sqlite3.ProgrammingError:  # already closed by _backup
+            pass
+        finally:
+            conn.close()
+
+
+class _Stopped(Exception):
+    """A planned recorder write was refused; never escapes into the host."""
 
 
 _SESSION_SELECT = f"SELECT {', '.join(SESSION_COLUMNS)} FROM sessions"
@@ -387,15 +411,22 @@ class _Writer(threading.Thread):
         self.dead = None
         self.closed = False
         self.stall = None  # tests hold the writer on an Event
+        self.backups = 0
+        self.budget = threading.RLock()
 
     def offer(self, item, nbytes=256, force=False) -> bool:
         if self.dead is not None or self.closed:
             return False
         if self.sync:
+            if item[0] == "backup":
+                with self.cv:
+                    self.backups += 1
             with self.io:
                 self._process(item)
             return True
         with self.cv:
+            if item[0] == "backup":
+                self.backups += 1
             if not force and (self.events >= MAX_QUEUE_EVENTS or (self.events and self.bytes + nbytes > MAX_QUEUE_BYTES)):
                 return False
             self.items.append((item, nbytes))
@@ -404,14 +435,22 @@ class _Writer(threading.Thread):
             self.cv.notify()
         return True
 
-    def drain(self, timeout: float) -> bool:
-        if self.dead is not None or self.closed:
+    def drain(self, timeout: float, skip_backup=False) -> bool:
+        if self.dead is not None or self.closed or (skip_backup and self.backups):
             return False
         self.rec._flush_gone()
         done = threading.Event()
         if not self.offer(("sync", done), 0, force=True):
             return False
-        return done.wait(timeout)
+        deadline = time.monotonic() + timeout
+        while not done.is_set():
+            if skip_backup and self.backups:
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            done.wait(min(remaining, 0.01) if skip_backup else remaining)
+        return True
 
     def run(self):
         try:
@@ -428,7 +467,26 @@ class _Writer(threading.Thread):
                 for item, _size in self.items:
                     if item[0] == "sync":
                         item[1].set()
-            self.rec._log_pending()
+                    elif item[0] == "event":
+                        self.rec.counters["dropped_after_stop"] += 1
+                self.items.clear()
+                self.events = self.bytes = self.backups = 0
+            for cleanup in (self.rec._close_pins, self._close_state,
+                            lambda: self.segment.close() if self.segment is not None else None,
+                            self.rec.write_status, self.rec._log_pending):
+                try:
+                    cleanup()
+                except BaseException as exc:
+                    try:
+                        self.rec.writer_failed(("cleanup", None), exc)
+                    except BaseException:
+                        pass
+
+    def _close_state(self):
+        with self.rec.lock:
+            if self.rec.state_db is not None and self.rec.state_db.conn is not None:
+                conn, self.rec.state_db.conn = self.rec.state_db.conn, None
+                conn.close()
 
     def _run(self):
         while not self.closed:
@@ -453,6 +511,8 @@ class _Writer(threading.Thread):
 
     def _tick(self, force=False):
         now = time.monotonic()
+        # Diagnostics may use the reserve; only an actual data write can stop recording.
+        self.rec.cap()
         if self.segment is not None and (force or now - self.last_fsync >= 1.0):
             self.segment.flush()
             os.fsync(self.segment.fileno())
@@ -460,32 +520,32 @@ class _Writer(threading.Thread):
         if force or now - self.last_status >= 1.0:
             self.last_status = now
             self.rec.write_status()
-            if self.dead is None and self.rec.stopped is None:
-                free = shutil.disk_usage(self.rec.root).free
-                if self.total_bytes >= self.rec.max_bytes or free < DISK_FLOOR:
-                    self.rec.cap(f"bytes={self.total_bytes} free={free}")
 
     def _process(self, item):
         kind = item[0]
-        if self.dead is not None:
-            if kind == "sync":
-                item[1].set()
+        if kind == "event" and (self.dead is not None or self.rec.stopped is not None):
+            self.rec.counters["dropped_after_stop"] += 1
             return
         try:
-            if kind == "event":
-                if self.rec.stopped == "disk_floor":
-                    return
-                self._append(item[1])
-            elif kind == "call":
+            if kind in ("event", "diagnostic"):
+                self._append(item[1], diagnostic=kind == "diagnostic")
+            elif kind in ("call", "backup"):
                 item[1]()
             elif kind == "sync":
                 self._tick(force=True)
                 self.rec._log_pending()
                 item[1].set()
+        except _Stopped:
+            if kind == "event":
+                self.rec.counters["dropped_after_stop"] += 1
         except Exception as exc:
             self.rec.writer_failed(item, exc)
             if kind == "sync":
                 item[1].set()
+        finally:
+            if kind == "backup":
+                with self.cv:
+                    self.backups -= 1
 
     def _blob(self, blob):
         data = canonical(blob.copy)
@@ -493,6 +553,7 @@ class _Writer(threading.Thread):
         if sha not in self.known_blobs:
             path = self.rec.root / "blobs" / sha[:2] / sha
             if not path.exists():
+                self.rec._reserve(len(data))
                 _mkdir(path.parent)
                 tmp = path.with_name(f"{sha}.{os.getpid()}.tmp")
                 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -507,19 +568,19 @@ class _Writer(threading.Thread):
                         os.fsync(fd)
                     finally:
                         os.close(fd)
-                self.total_bytes += len(data)
             self.known_blobs.add(sha)
         return {"$b": sha}
 
-    def _append(self, event):
+    def _append(self, event, *, diagnostic=False):
         line = json.dumps(plain(event, self._blob), separators=(",", ":"), ensure_ascii=False, allow_nan=False) + "\n"
+        data = line.encode()
+        if not self.rec._admit(len(data), diagnostic=diagnostic):
+            raise _Stopped()
         name = time.strftime("%Y%m%d", time.gmtime())
         if self.segment is None or not self.segment_name.startswith(name) or self.segment_bytes > 1 << 30:
             self._open_segment(name)
-        data = line.encode()
         self.segment.write(data)
         self.segment_bytes += len(data)
-        self.total_bytes += len(data)
         if self.sync:
             self._tick(force=True)
 
@@ -594,6 +655,9 @@ class Recorder:
         self.session = ""
         self.cur = None
         self.monitoring = False
+        self.pins = set()
+        self.status_lock, self.status_reserved = threading.Lock(), 0
+        self.pending_cap = None
 
     # -- install ---------------------------------------------------------------------------------------
     def start(self, ctx, engine):
@@ -604,15 +668,15 @@ class Recorder:
             self.max_bytes = int(raw) if raw not in (None, "") else DEFAULT_MAX_BYTES
         except ValueError:
             logger.warning("LCM recorder: LCM_RECORDER_MAX_BYTES=%r is not an integer; using 20 GiB", raw)
+        self.writer.total_bytes = self._existing_bytes()
         self.writer.start()
         payload_dir = self._payload_dir(engine)
         need = self.db_path.stat().st_size if self.db_path.exists() else 0
         need += sum(p.stat().st_size for p in payload_dir.rglob("*") if p.is_file())
-        if not _disk_room(self.root, need):
-            self._snapshot_refused()
+        if not self._admit(need, reserve=False):
+            self._snapshot_refused(self.stopped)
             return
-        pinned = _pin(self.db_path)
-        self.writer.total_bytes = self._existing_bytes()
+        pinned = self._pin_db()
         self._token(engine)
         self._resolve(type(engine))
         self.home = _hermes_home(engine)
@@ -622,7 +686,9 @@ class Recorder:
         facts = self._process_facts(engine, home, state_path)
         self.env_digest = hash(json.dumps(plain(facts["env"]), sort_keys=True))
         self._capture_payloads(payload_dir)
-        self.writer.offer(("call", lambda: self._snapshot(pinned, payload_dir)), force=True)
+        if not self.writer.offer(("backup", lambda: self._snapshot(pinned, payload_dir)), force=True):
+            _close_pin(pinned)
+            self.pins.discard(pinned)
         self._emit({"kind": "process_start", **facts}, single=True)
         self.opened = True
         self._seed(self.engines[engine], engine)
@@ -651,10 +717,53 @@ class Recorder:
 
     def _existing_bytes(self) -> int:
         total = 0
-        for base in [self.root / "blobs", *(p / "events" for p in (self.root / "proc").glob("*"))]:
-            for dirpath, _dirs, files in os.walk(base):
-                total += sum(os.stat(os.path.join(dirpath, f)).st_size for f in files)
+        for directory, _, files in os.walk(self.root):
+            for name in files:
+                try:
+                    total += (Path(directory) / name).stat().st_size
+                except OSError:
+                    pass  # another process can replace or remove its STATUS temp file
         return total
+
+    def _admit(self, need, *, reserve=True, diagnostic=False, checkpoint=None):
+        with self.writer.budget:
+            if self.stopped is not None and not diagnostic:
+                return False
+            headroom = 0 if diagnostic else DIAG_RESERVE
+            cause = "cap" if self.writer.total_bytes + need > self.max_bytes - headroom else (
+                "disk_floor" if not _disk_room(self.root, need - (DIAG_RESERVE if diagnostic else 0)) else None)
+            if cause is not None:
+                if checkpoint is not None:
+                    self._skip_checkpoint(checkpoint, cause)
+                elif not diagnostic and self.stopped is None:
+                    self.stopped = self.end_state = cause
+                    self.pending_cap = (cause, need)
+                    self.lose(cause)
+                return False
+            if reserve:
+                self.writer.total_bytes += need
+            return True
+
+    def _reserve(self, need):
+        if not self._admit(need):
+            raise _Stopped()
+
+    def _pin_db(self):
+        pinned = _pin(self.db_path)
+        if pinned is not None:
+            self.pins.add(pinned)
+        return pinned
+
+    def _close_pins(self):
+        while True:
+            try:
+                pin = self.pins.pop()
+            except KeyError:
+                return
+            try:
+                _close_pin(pin)
+            except BaseException:
+                pass
 
     def _process_facts(self, engine, home, state_path):
         import dataclasses
@@ -714,10 +823,12 @@ class Recorder:
                 for path in files:
                     rel = path.relative_to(payload_dir)
                     _mkdir((out / rel).parent)
+                    reserved = path.stat().st_size
+                    self._reserve(reserved)
                     try:
                         os.link(path, out / rel)
                     except OSError:  # another filesystem, or links refused or unsupported there
-                        self._payload_copy(path, out / rel)
+                        self._payload_copy(path, out / rel, reserved)
                 result["payloads"] = "ok"
         else:
             result["payloads"] = "absent"
@@ -725,45 +836,63 @@ class Recorder:
         self.payload_snapshot = result
 
     @staticmethod
-    def _payload_copy(source, target):
+    def _payload_copy(source, target, size):
         st = source.stat()
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with open(source, "rb") as src, os.fdopen(fd, "wb") as dst:
-            shutil.copyfileobj(src, dst)
+            while size:
+                chunk = src.read(min(size, 64 << 10))
+                if not chunk:
+                    break
+                dst.write(chunk)
+                size -= len(chunk)
         os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
 
-    def _snapshot_refused(self):
-        self.snapshot = {"state": "refused", "cause": "disk_floor"}
-        self.stopped = self.end_state = "disk_floor"
-        self.lose("disk_floor")
+    def _snapshot_refused(self, cause="disk_floor"):
+        self.snapshot = {"state": "refused", "cause": cause}
+        self.stopped = self.end_state = cause
+        self.lose(cause)
         self.write_status()
 
     def _snapshot(self, pinned, payload_dir: Path):
+        try:
+            self._snapshot_body(pinned, payload_dir)
+        except _Stopped:
+            self._snapshot_refused(self.stopped)
+        except Exception as exc:
+            self.snapshot = {"state": "failed", "cause": type(exc).__name__}
+            raise
+        finally:
+            _close_pin(pinned)
+            self.pins.discard(pinned)
+
+    def _snapshot_body(self, pinned, payload_dir):
         snap = self.proc / "snapshot"
         files = [p for p in (snap / "large-outputs").rglob("*") if p.is_file()]
-        need = (pinned.execute("PRAGMA page_count").fetchone()[0] *
-                pinned.execute("PRAGMA page_size").fetchone()[0]) if pinned is not None else 0
-        need += sum(p.stat().st_size for p in files)
-        if not _disk_room(self.root, need):
-            if pinned is not None:
-                pinned.rollback()
-                pinned.close()
-            self._snapshot_refused()
-            return
+        db_size = (pinned.execute("PRAGMA page_count").fetchone()[0] *
+                   pinned.execute("PRAGMA page_size").fetchone()[0]) if pinned is not None else 0
+        need = db_size + sum(p.stat().st_size for p in files)
+        if not self._admit(need, reserve=False):
+            raise _Stopped()
         manifest = []
         for path in sorted((snap / "large-outputs").rglob("*")):
             if not path.is_file():
                 continue
             tmp = path.with_name(path.name + ".snapshot-tmp")
-            self._payload_copy(path, tmp)
+            reserved = path.stat().st_size
+            self._reserve(reserved)
+            self._payload_copy(path, tmp, reserved)
             os.replace(tmp, path)
             st = path.stat()
             manifest.append({"name": str(path.relative_to(snap / "large-outputs")), "size": st.st_size,
                              "mode": st.st_mode, "uid": st.st_uid, "gid": st.st_gid,
                              "mtime_ns": st.st_mtime_ns, "sha256": _sha256_file(path)})
+        data = json.dumps(manifest, sort_keys=True).encode()
+        self._reserve(len(data))
         fd = os.open(snap / "large-outputs.manifest.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as handle:
-            json.dump(manifest, handle, sort_keys=True)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        self._reserve(db_size)
         self.snapshot = {**_backup(pinned, snap / "lcm.db"), **self.payload_snapshot}
         self.write_status()
 
@@ -1000,7 +1129,7 @@ class Recorder:
             rec = {"kind": kind, "name": name, "seq_enter": seq, "parent_seq": parent.rec["seq_enter"] if parent else None,
                    "thread": threading.current_thread().name, "thread_token": self._thread_token(),
                    "engine": etoken if etoken is not None else "unknown", "t_enter": [time.time(), time.monotonic()],
-                   **self._identity(engine)}
+                   **self._identity(engine), "session": self.session}
             if root and engine is not None:
                 store = engine.__dict__.get("_store")
                 rec["_ledger_ready"] = bool(store and store.__dict__.get("_ingest_ledger_schema_ready"))
@@ -1111,7 +1240,7 @@ class Recorder:
             if entry.root and entry.rec is not None:
                 self._after_root(entry)
         if entry.root and entry.name in _SYNC_ROOTS and self.stopped is None:
-            self.writer.drain(2.0)
+            self.writer.drain(2.0, skip_backup=True)
 
     def _close(self, entry):
         if entry.root:
@@ -1146,7 +1275,7 @@ class Recorder:
 
     def _session_of(self, code, loc, engine) -> str:
         for holder in (loc, loc.get("kwargs"), loc.get("payload"), loc.get("info")):
-            if isinstance(holder, dict) and isinstance(holder.get("session_id"), str) and holder["session_id"]:
+            if isinstance(holder, Mapping) and isinstance(holder.get("session_id"), str) and holder["session_id"]:
                 return holder["session_id"]
         return str(engine.__dict__.get("_session_id") or "") if engine is not None else ""
 
@@ -1453,29 +1582,43 @@ class Recorder:
         if self.inflight == 0 and self.checkpoints and clock() - self.started >= self.checkpoints[0] * 3600:
             self._checkpoint(self.checkpoints.pop(0))
 
+    def _skip_checkpoint(self, hours, cause):
+        self.counters["recorder.checkpoint_skipped"] += 1
+        self.warnings.append(("LCM recorder: checkpoint +%dh skipped: %s", hours, cause))
+
     def _checkpoint(self, hours):
         try:
             size = self.db_path.stat().st_size if self.db_path.exists() else 0
-            room = _disk_room(self.root, size)
-            if not room or shutil.disk_usage(self.root).free < 2 * size:
-                self.counters["recorder.checkpoint_skipped"] += 1
-                self.warnings.append(("LCM recorder: checkpoint +%dh skipped: %s", hours,
-                                      "disk_floor" if not room else "space"))
+            if not self._admit(size, reserve=False, checkpoint=hours):
                 return
-            pinned = _pin(self.db_path)
+            if shutil.disk_usage(self.root).free < 2 * size:
+                self._skip_checkpoint(hours, "space")
+                return
+            pinned = self._pin_db()
         except Exception as exc:
-            self.counters["recorder.checkpoint_skipped"] += 1
-            self.warnings.append(("LCM recorder: checkpoint +%dh skipped: %s", hours, exc))
+            self._skip_checkpoint(hours, f"{type(exc).__name__}: {exc}")
             return
         watermark = self.last_seq
 
         def seal():
-            _backup(pinned, self.proc / "checkpoint" / str(hours) / "lcm.db")
-            self.writer._tick(force=True)
-            self.last_checkpoint = {"hours": hours, "seq": watermark}
-            self._emit({"kind": "checkpoint_sealed", "hours": hours, "through": watermark}, single=True)
-            self.writer._tick(force=True)
-        self.writer.offer(("call", seal), force=True)
+            try:
+                size = (pinned.execute("PRAGMA page_count").fetchone()[0] *
+                        pinned.execute("PRAGMA page_size").fetchone()[0]) if pinned is not None else 0
+                if not self._admit(size + 4096, reserve=False, checkpoint=hours):
+                    return
+                if not self._admit(size, checkpoint=hours):
+                    return
+                _backup(pinned, self.proc / "checkpoint" / str(hours) / "lcm.db")
+                self.writer._tick(force=True)
+                self.last_checkpoint = {"hours": hours, "seq": watermark}
+                self._emit({"kind": "checkpoint_sealed", "hours": hours, "through": watermark}, single=True)
+                self.writer._tick(force=True)
+            finally:
+                _close_pin(pinned)
+                self.pins.discard(pinned)
+        if not self.writer.offer(("backup", seal), force=True):
+            _close_pin(pinned)
+            self.pins.discard(pinned)
 
     # -- events, coverage, failures --------------------------------------------------------------------
     def _flush_gone(self):
@@ -1511,7 +1654,7 @@ class Recorder:
                 self.end_state = "gap"
                 self.counters["recorder.gap"] += 1
                 self.lose("gap")
-                self.writer.offer(("event", {"kind": "gap", "seq": self._next(), "v": FORMAT_VERSION,
+                self.writer.offer(("diagnostic", {"kind": "gap", "seq": self._next(), "v": FORMAT_VERSION,
                                              "pid": os.getpid(), "lost": self.lost}), force=True)
 
     def mark(self, session, name):
@@ -1550,38 +1693,48 @@ class Recorder:
         seq = item[1].get("seq", item[1].get("seq_enter")) if item[0] == "event" else None
         self.lose(f"writer:{type(exc).__name__}", seq)
         if isinstance(exc, OSError) or not isinstance(exc, Exception):
-            self.writer.dead = exc
+            self.writer.dead = type(exc).__name__
+            self.writer.closed = True
             self.stopped = self.stopped or "writer_failed"
             self.end_state = "writer_failed"
 
-    def cap(self, reason):
-        if not self.lock.acquire(blocking=False):
-            return  # The next writer tick (or the host's synchronous tick) retries the cap.
+    def cap(self):
+        if self.pending_cap is None or not self.lock.acquire(blocking=False):
+            return  # only the writer tick appends; retry when the host releases its lock
         try:
-            if self.stopped is not None:
-                return
-            self.stopped = self.end_state = "cap"
-            self.writer._append({"kind": "cap", "reason": reason, "seq": self._next(), "v": FORMAT_VERSION,
-                                 "pid": os.getpid(), "lost": self.lost})
-            self.warnings.append(("LCM recorder: stopped at the size cap or the disk floor (%s)", reason))
+            cause, need = self.pending_cap
+            self.pending_cap = None
+            try:
+                self.writer._append({"kind": "cap", "reason": cause, "need": need, "seq": self._next(),
+                                     "v": FORMAT_VERSION, "pid": os.getpid(), "lost": self.lost}, diagnostic=True)
+            except _Stopped:
+                pass
         finally:
             self.lock.release()
-        self._log_pending()
 
     def write_status(self):
+        with self.status_lock:
+            self._write_status()
+
+    def _write_status(self):
         status = {"v": FORMAT_VERSION, "pid": os.getpid(), "last_seq": self.last_seq, "lost": self.lost,
                   "bytes": self.writer.total_bytes, "counters": dict(self.counters),
                   "marks": {k: dict(v) for k, v in list(self.marks.items())}, "first_cause": self.first_cause,
                   "last_checkpoint": self.last_checkpoint, "end_state": self.end_state,
                   "ended": "ended without exit" if self.end_state in ("running", "gap", "cap") else self.end_state,
                   "ctx_capture": self.ctx_capture, "replayable": self.ctx_capture == "ok"
-                  and getattr(self, "snapshot", {}).get("state") != "refused"
+                  and getattr(self, "snapshot", {}).get("state") in ("ok", "no_database")
                   and getattr(self, "snapshot", {}).get("payloads") != "payloads_missing",
                   "snapshot": getattr(self, "snapshot", None), "wall": self.wall}
+        data = json.dumps(plain(status), sort_keys=True).encode()
+        growth = max(0, 2 * len(data) - self.status_reserved)
+        if not self._admit(growth, diagnostic=True):
+            return
+        self.status_reserved += growth
         tmp = self.proc / f"STATUS.json.{os.getpid()}.tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as handle:
-            json.dump(plain(status), handle, sort_keys=True)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
         os.replace(tmp, self.proc / "STATUS.json")
 
     def _atexit(self):
@@ -1746,8 +1899,8 @@ def install(ctx, engine) -> None:
             mon.set_events(tool, 0)
             mon.free_tool_id(tool)
             raise
-        if recorder.stopped == "disk_floor":
-            logger.warning("LCM recorder snapshot refused: disk_floor (%s)", recorder.proc)
+        if getattr(recorder, "snapshot", {}).get("state") == "refused":
+            logger.warning("LCM recorder snapshot refused: %s (%s)", recorder.stopped, recorder.proc)
         else:
             logger.info("LCM recorder on: %s (tool id %d)", recorder.proc, tool)
     except KeyboardInterrupt:

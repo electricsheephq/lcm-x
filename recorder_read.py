@@ -110,6 +110,11 @@ def _seqs(event):
     return (event["seq"],) if "seq" in event else (event["seq_enter"], event["seq_exit"])
 
 
+def _marker_cause(event):
+    reason = event.get("reason")
+    return reason if reason in ("cap", "disk_floor") else event.get("kind", "seq_hole")
+
+
 def load_events(proc: Path) -> list:
     """Every complete event line; a torn last line of a segment is not an event."""
     events = []
@@ -126,21 +131,25 @@ def read(proc, *, checkpoint=None, verify=True) -> dict:
     proc = Path(proc)
     root = proc.parent.parent
     raw = load_events(proc)
+    if not any(e.get("kind") == "process_start" for e in raw):
+        raise RecordingError("recording is not replayable: no process_start")
     status = json.loads((proc / "STATUS.json").read_text()) if (proc / "STATUS.json").exists() else {}
     seqs = {s for event in raw for s in _seqs(event)}
     end, cause = 1, "end"
     while end in seqs:
         end += 1
     if seqs and end <= max(seqs):
-        # Events refused at a full queue leave a hole just before the gap marker.
-        cause = "gap" if any(e.get("kind") == "gap" and e["seq"] >= end for e in raw) else "seq_hole"
+        # Dropped queued data and open calls leave holes before the diagnostic stop marker.
+        marker = min((e for e in raw if e.get("kind") in ("gap", "cap") and e["seq"] >= end),
+                     key=lambda e: e["seq"], default={})
+        cause = _marker_cause(marker)
     ordered = sorted(raw, key=lambda e: min(_seqs(e)))
     lost = 0
     for event in ordered:
         first = min(_seqs(event))
         found = None
         if event.get("kind") in ("gap", "cap"):
-            found = event["kind"]
+            found = _marker_cause(event)
         elif event.get("lost_observation") or event.get("status") == "stack_mismatch":
             found = event.get("lost_observation") or "stack_mismatch"
         elif event.get("lost", 0) > lost:
@@ -148,6 +157,17 @@ def read(proc, *, checkpoint=None, verify=True) -> dict:
         lost = max(lost, event.get("lost", 0))
         if found and first < end:
             end, cause = first, found
+    first = status.get("first_cause") or {}
+    writer_cause = first.get("cause")
+    if (isinstance(writer_cause, str) and writer_cause.startswith("writer:") and
+            isinstance(first.get("seq"), int) and first["seq"] == end and end not in seqs):
+        cause = writer_cause
+    stop = status.get("end_state")
+    if stop not in ("cap", "disk_floor", "gap"):
+        stop = first.get("cause")
+    if stop in ("cap", "disk_floor", "gap") and (cause == "end" or
+            (cause == "seq_hole" and isinstance(first.get("seq"), int) and end >= first["seq"])):
+        cause = stop
     sealed = None
     if checkpoint is not None:
         sealed = next((e for e in raw if e.get("kind") == "checkpoint_sealed" and e["hours"] == checkpoint), None)
@@ -158,6 +178,9 @@ def read(proc, *, checkpoint=None, verify=True) -> dict:
         if sealed["through"] + 1 < end:
             end, cause = sealed["through"] + 1, "checkpoint"
     prefix = [e for e in raw if max(_seqs(e)) < end]
+    snapshot = status.get("snapshot") or {}
+    if snapshot.get("state") not in ("ok", "no_database"):
+        raise RecordingError("STATUS: recording is not replayable: start snapshot is not ok")
     if status.get("replayable") is False:
         snapshot = status.get("snapshot") or {}
         capture_loss = next((e for e in ordered if e.get("kind") == "loss"

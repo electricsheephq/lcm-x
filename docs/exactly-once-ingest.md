@@ -26,8 +26,8 @@ Tracker: #1993 (v0.30.0, "nothing lost"). Status: reviewed; ready for phase P1 (
     - One stored row is bound twice only through a composite_part or split_part witness.
   - **Key order:** uid > stamp > tool_call_id > position. A disagreement on a stronger key vetoes every weaker rank before it runs: the candidate is not bound, and the row is stored with `possible_replay_of`.
   - A disagreement needs both values known; missing never disagrees.
-  - **Stamp disagreement:** the incoming row has a stamp, the candidate has recorded stamps (its own plus its usable observations, §3.1 item 4), and the incoming stamp is none of them. It vetoes rank 3 (#1967), rank 4 once the emission's observed stamp is recorded (#1003), and rank 5.
-  - **Unkeyed** means no eligible uid and no stamp. On a lineage marked stamp_unreliable (M14), stamps count as missing.
+  - **Stamp disagreement:** the incoming row has a stamp, the candidate has recorded stamps (its binding, usable observations and `messages.observed_at`), and the incoming stamp is none of them. It vetoes rank 3 (#1967), rank 4 once the emission's observed stamp is recorded (#1003), and rank 5. `observed_at` is veto-only: it never witnesses or makes an occurrence keyed.
+  - **Unkeyed** means no known stamp (absent, or the lineage marked or planned `stamp_unreliable`) and no uid keyed in this uid mode. In `on`, an eligible latest uid binding keys the incoming row even when it binds a different occurrence (`test_c_run_keyed_incoming_uid_other_occurrence_h4`, `test_c_run_keyed_incoming_uid_other_occurrence_window`). In `shadow`, a uid never keys or witnesses a row; known unequal uid sets still veto. In `off`, matching treats uids as absent.
 - **E3 Atomic ingest.** Rows, bindings, vectors, relations and evidence commit in ONE `BEGIN IMMEDIATE` transaction on the store connection.
   - The classification may run first on a ledger snapshot outside the lock. Inside the lock the transaction re-reads the lineage's view_seq and marks, and classifies again under the same rules if either changed (§3.2).
   - The one exception is pending session-end tails (§3.5).
@@ -37,26 +37,28 @@ Tracker: #1993 (v0.30.0, "nothing lost"). Status: reviewed; ready for phase P1 (
   - Every changed-slot NEW carries `supersedes`; its target may be a generated entry.
   - A stored NEW row with an LCM generated marker, whether or not a descriptor exists, carries `generated_unproven` (§3.3).
   - The doctor reports all three (§3.9).
-  - A row with no candidate is plain NEW, so repeated ordinary content ("ok", "continue") gets no relation.
+  - In anchored views, a row with no candidate is plain NEW, so repeated ordinary content ("ok", "continue") gets no relation. Under h4, an otherwise candidate-free row equal by identity to a kept binding gets `possible_replay_of` to the newest such binding lineage-wide, reason `head_h4`.
 - **E5 Ranked proof.**
   1. **Host uid, eligible.** The binding is canonical or a recorded revision, `disagree_seen` = 0, and a pre-ledger binding has `proof_kind` = stored_new. Rank 1 decides only in uid mode `on` (M16).
      - An ineligible binding authorizes no skip. Its uid still vetoes weaker ranks when it disagrees.
-     - Rank 1 is subject to the Window and to consume-once, so a reused uid that names an occurrence the view has moved past is stored visibly (#1449). It is exempt from the Order condition: keyed reorders stand, and are logged.
+     - Rank 1 and every E5a outcome require a hit inside the Window. An outside hit (every h4 hit included) is NEW with `possible_replay_of` and no `supersedes`, in `shadow` and `on` (#1449). Every stored NEW row whose valid uid is already bound plans a `version`/`version_new` binding, at every head, including identical stored copies. A uid first bound earlier in this view counts as bound. Rank 1 is consume-once and exempt from Order: keyed reorders stand, and are counted.
   2. **The anchor:** role, host stamp and identity digest (§3.1).
-  3. **tool_call_id plus identity,** scoped to the user anchor before it. A stamp disagreement vetoes it. When the anchor is NEW, its tool segment is NEW unless each row has its own eligible uid (the #1869/#1838 retry loss).
+  3. **tool_call_id plus identity,** scoped to the nearest preceding user row in the view; without one, the leading gap (at or after the head and before the segment's next placed row). Unresolved tool rows never reach rank 3. A stamp disagreement vetoes it; a stamped incoming row also needs a candidate with a positive stamp. `observed_at` never supplies that witness. Evaluate the anchor after non-segment rank-2 placements survive Order; when it is NEW, its tool segment is NEW unless each row has its own eligible uid in `on` (the #1869/#1838 retry loss). Unstamped rank 3 assumes call ids are not reused for fresh executions under one user anchor. A trailing unstamped assistant outside the segment still waits for rank 5 (`test_c_gateway_anchor_rank2_then_rank3_no_run`, `test_gateway_no_run_twin`).
   4. **The emission descriptor,** for generated rows. It binds at its output index within its emission vector, at most once per view. Once the emission's observed stamp is recorded, a disagreeing stamp vetoes it (#1003).
   5. **Ordered alignment** (weak, §3.4.5).
 - **E5a A rank-1 hit only resolves the uid to its revisions (A1, #1428; Astra 5).**
   - Incoming content equal to the latest revision (identity digest or alias), with the absorbed-uid set a subset of that revision's constituents: REPLAY.
-  - Equal to an earlier revision: a revert. It is stored NEW, with `supersedes` to the latest revision and `possible_replay_of` to the matched one.
+  - Equal to an earlier revision: a revert. Inside the Window it is stored NEW, with `supersedes` to the latest revision, `possible_replay_of` to the matched one and the uid's next `version` binding. An older revision never replays, including through the run or in `shadow`.
   - An extension of the latest revision: PARTIAL (§3.4.6), with that revision as base. The uid witnesses the extension even when the stamp changed.
   - Any other content: NEW plus `supersedes` to the latest revision, recorded in the same transaction as the uid's next revision.
   - The canonical binding never moves. UNIQUE (lineage, uid) holds on it.
   - An unknown absorbed uid classifies its own constituent. A merged scaffold's outer uid is engine-minted, so its match may come from rank 2.
+  - In `shadow`, the same uid lookup and Window test apply, but only the NEW outcomes decide. Equality to the latest revision (including an unwitnessed name-elision alias) or an extension continues to weaker evidence without consuming the binding; REPLAY and PARTIAL remain `on`-only.
 - **E5b Same-stamp rules.**
   - Same stamp, and the identity is in the stored occurrence's alias set: REPLAY, subject to E5c and E2b.
     - The alias set covers the pruned-tool alias (`reconcile.py::_pruned_tool_output_identity`, #773), host-rewrite overrides, carrier strip (`reconcile.py::_message_replay_identity` via `_generated_context_carrier_remainder`), and an externalized stub equal to its raw output (`reconcile.py::_message_replay_identity` via `load_externalized_payload`, #588).
     - It applies at rank 2, and at rank 3 when the incoming row has no stamp (scoped to the user anchor).
+    - A named stored tool row also has a name-elided alias for a nameless incoming row, but only with its own equal-stamp witness or eligible equal uid in `on`. Without one it is NEW with `possible_replay_of`, reason `no_witness` (C4); name omission never extends the run or sets the head. Named means the binding identity carries a name, even if `messages.tool_name` is NULL. A digest-equal nameless stored form proves no name was elided; otherwise an empty-name tool alias requires the witness (the conservative fallback when the ledger cannot establish the name). A genuinely nameless externalized-stub alias keeps rank 3; `test_c_c4_externalized_stub_alias`.
   - Same stamp, and the identity extends the stored one: PARTIAL (the §3.4.6 guards).
   - Same stamp, any other identity: NEW plus `possible_replay_of`.
   - A row that goes from no uid to a known uid gets a uid binding for its existing occurrence (#1836 item 4).
@@ -113,6 +115,7 @@ A replay with an unchanged stamp writes nothing except the view vector.
    - An observation is usable from the next view on. A row never certifies itself with the stamp it brought (Astra 7).
    - At most 4 per occurrence and kind (L3-8, L5-9). Reaching the cap on 3 distinct occurrences of a lineage, each capped in either kind (an occurrence capped in both kinds counts once), marks the lineage stamp_unreliable (M14).
    - Readers that need host time for a NULL `observed_at` take the binding's stamp, or else the earliest observation (#1978, L5-10).
+   - Older-reader `messages.observed_at` backfills contribute to vetoes only. They are never positive stamp observations or replay witnesses (PR review 1).
 5. **View vectors (M10):** `ingest_views(lineage, view_seq, kind, state, entries BLOB, prefix_chain BLOB)`.
    - Kind is ingest or emission.
    - Each entry is (identity_digest, stamp_digest or NULL, uidset_digest or NULL, occ_id or descriptor id). uidset_digest covers the uid and the absorbed-uid set, so a view whose only change is a uid or an absorbed uid does not match its previous entry (#1428).
@@ -228,24 +231,25 @@ No step reopens an earlier one.
 8. Everything left is NEW, with `possible_replay_of` when a candidate was rejected (E4).
 
 #### 3.4.2 Base and the anchored run
-- **Eligible records:** this lineage's retained vectors (2 ingest, 2 emission), excluding refused, retry-recovered and below-provenance-floor emission vectors. Emissions must also clear the lineage's recovered high-water mark, as in `emission_candidate` below; when no emission is eligible, P2 uses its history fallback.
+- **Eligible records:** this lineage's retained vectors (2 ingest, 2 emission), excluding refused, retry-recovered and below-provenance-floor emission vectors. Emissions must also clear the lineage's recovered high-water mark, as in `emission_candidate` below. With no eligible record there is no run and the base is history.
 - **Entry match:** two entries match when their identity digests are equal and no known key disagrees. Uid sets that are both known must be equal. Stamps that are both known must be equal, except on a stamp_unreliable lineage.
   - A generated entry whose observed stamp is not yet recorded has a missing stamp, so the host stamping it does not break the run.
-- **The anchored run** is the longest run V[0..k-1] that matches R[j..j+k-1], over eligible records R and offsets j, with k ≥ 1.
-  - It starts at V's first row, skipping rows of a kind LCM-X never stores, such as system rows. Generated rows take part like any other row: their entries compare by identity digest.
-  - Ties go to the newest record, then the smallest j.
-  - Its rows are REPLAY: a strong proof, because the run is exact, in order and contiguous from the view's start. They bind to R's entries, consume-once.
+- **The anchored run** is the longest run V[i..i+k-1] that matches R[j..j+k-1], over eligible records R and offsets j, with k ≥ 1.
+  - Try the first stored-kind row, then the second only when no run starts at the first (A6). Never-stored rows before i are skipped; inside the run entries compare as recorded. Generated rows take part unchanged; do not split merged rows before the search.
+  - Ties go to the newest record, then the smallest j, then the smallest i.
+  - Each row needs a resolved occurrence or eligible descriptor and consume-once. An older uid revision cuts the run in `shadow` and `on`. `run_keyed` needs a positive stamp or eligible current uid in `on`; `run_unkeyed` requires both sides unkeyed with no known key disagreement. Otherwise cut with visible doubt. Descriptor binds use `rank4`, including C9's stamp intent.
   - The fast path (A12b) is the case j = 0 against the durable cursor. When the prefix chains are equal it is decided with O(1) ledger I/O, otherwise entry by entry.
   - An offset j > 0 is a sliding-window host (#1566).
   - An anchored run on a proposed emission adopts it.
 - **The base** is that record R. With no anchored run, the base is the history: the lineage's kept bindings in ordinal order.
-- **All-restamp control (M14, #1511).** Suppose the search finds at least 3 consecutive entries that match on identity digest and uid set, where every one has known stamps that differ. Then the lineage is marked stamp_unreliable (logged; the doctor shows it), and the search runs again without stamps.
+- **The previous vector** is always the newest ingest vector, selected independently of the run (A6, C11 iv).
+- **All-restamp control (M14, #1511).** Plan `stamp_unreliable` only for occurrence-proven differing stamps on at least three distinct occurrences in one view: eligible current uid bindings in `on`, or identity-and-output-index matches to three distinct otherwise eligible emissions whose recorded `observed_stamp` differs. At least three distinct incoming rows must contribute proof; historical alternatives for one row cannot multiply that row's contribution. NULL emission stamps do not count. Differing stamps and identities alone never mark. Rerun classification once on the same snapshot with stamps missing; replace the first result, retain the mark and add both passes' counters. Strong binds still plan new `alt_stamp` observations; the writer-side cap remains a separate trigger.
 
 #### 3.4.3 The head: one definition (L1-2)
 The head is the ordinal from which this view may bind occurrences. Take the first rule that applies:
 - **(h1) Anchored run:** the ordinal of R's first ordinal-carrying entry at or after j. When R's own entries after j carry none (an evicted emission's tail), use the emission's `next_occ_id`.
-- **(h2) Full-history replay (#1674):** the view's first row that is not generated, and not of a kind LCM-X never stores, has the identity digest of one of the lineage's first 8 kept occurrences. The head is the ordinal of the earliest such occurrence.
-- **(h3) Keyed view:** the ordinal of the first eligible rank-1 match in VIEW order.
+- **(h2) Full-history replay (#1674):** let m = min(3, kept occurrences); zero kept occurrences or fewer than m eligible view rows fails. Match the first m non-generated stored-kind view rows by identity, consume-once and strictly increasing ordinal, among the first 8 kept occurrences. Take the lexicographically earliest increasing tuple; its first ordinal is the head.
+- **(h3) Keyed view:** only in uid mode `on`, the first eligible rank-1 match in view order sets the head when a second eligible match follows in both view order and ordinal. Evaluate eligibility before applying the resulting Window.
 - **(h4) No head.** The view is anchorless. Ranks 2-3, aliases and rank 5 accept nothing, and every row with a candidate is stored NEW with `possible_replay_of` (Astra 1: without independent placement evidence, store visibly).
 
 An alias, a stamp observation, or a rank-2, rank-3 or rank-5 match never sets the head.
@@ -268,9 +272,9 @@ Traces:
   - A composite's parts must increase, and its remainder is placed right after its last part.
 
 #### 3.4.5 Rank 5, per gap (weak)
-- **Target.** The lineage's kept bindings (stored, migrated, ambiguous) inside the gap's ordinal interval, in ordinal order, minus the occurrences this view already bound.
+- **Target.** The lineage's kept bindings (stored, migrated, ambiguous) inside the gap's ordinal interval, in ordinal order, minus the occurrences this view already bound and superseded occurrences. The previous vector for changed-slot pairing is the newest ingest vector, independently of the run (A6, C11 iv).
   - Aligning against history instead of one vector keeps dropped rows reachable across evictions (Astra 6, L2-2, #1573, #1547). Example: [A,B] → [A] → [A,A] → restart → [A,B] binds B to the stored B.
-  - A superseded occurrence in the target matches only as history. A slot that matches it is a revert: stored NEW, with `supersedes` to the current row of its chain and `possible_replay_of` to the matched row (L2-3).
+  - Superseded occurrences are excluded from rank-5 lo_d/hi_d counts. A slot matching one takes the revert path: NEW with `supersedes` to the current chain head and `possible_replay_of` to the matched row (L2-3; code deferred to PR 2).
 - **Counts (Astra 10, L2-1).**
   - Definitions: n_d is the number of the gap's incoming slots with digest d. lo_d and hi_d are the fewest and the most of those slots matched over all maximum alignments (order-preserving, consume-once).
   - lo_d slots are REPLAY (weak, accepted).
@@ -278,11 +282,11 @@ Traces:
   - hi_d − lo_d slots are AMBIGUOUS: stored with `possible_replay_of` at their view position. A tie never skips a row.
   - One canonical alignment, the leftmost maximum alignment, decides which slots get which label, and their ordinals. Its matched d-slots, taken in view order, are REPLAY up to lo_d and AMBIGUOUS after that. Its unmatched d-slots are AMBIGUOUS up to (hi_d − its matched count) and NEW after that.
   - Twins alone never create ambiguity. With base [x, y] and incoming [x, x, y], every maximum alignment matches exactly one x, so the leftmost x is REPLAY and the other is NEW.
-  - A swap [p, q] → [q, p] gives lo = 0 and hi = 1 for both digests, so both rows are stored with `possible_replay_of`.
+  - For [p, q] → [q, p], the run first binds q at j = 1. The head excludes p, which is NEW with `possible_replay_of` (A5, `window`); rank 5 never reopens the run.
   - The number stored is never below the number of new rows (no loss), and never more than Σ(hi_d − lo_d) above it, all of them visible.
   - An identical run of unchanged length is matched in full by every maximum alignment. That is M2.
 - **Supersedes pairing (L3-2).** The accepted matches (of any rank) cut the gap into sub-gaps.
-  - When a sub-gap holds as many unmatched entries of the base VECTOR as NEW rows, they pair in order as changed slots: NEW plus `supersedes`.
+  - When a sub-gap holds as many unmatched entries of the newest ingest VECTOR as NEW rows, they pair in order as changed slots: NEW plus `supersedes` (PR 2).
   - Otherwise nothing pairs, and each unmatched entry is a plain drop.
   - Rows dropped in older views never pair.
 - **Computation and bound (Astra 12, L2-4).**
@@ -304,7 +308,7 @@ Traces:
   - the composite's stamp;
   - a usable stamp observation of it;
   - an eligible rank-1 uid (this covers a same-uid extension whose stamp changed);
-  - a **retained-prefix witness** (Astra 7, #545). The base vector holds the donor at this slot in the immediately previous view. The slot's left neighbour is placed, or the slot leads its gap at the head. The composite begins with the donor's exact bytes. This covers the unstamped merge-append: each step stores only the new tail.
+  - a **retained-prefix witness** (Astra 7, #545). The newest ingest vector (selected independently of the run) holds the donor at this slot in the immediately previous view. The slot's left neighbour is placed, or the slot leads its gap at the head. The composite begins with the donor's exact bytes. This covers the unstamped merge-append: each step stores only the new tail.
   - Neither NULL equality nor the candidate's own stamp witnesses a part.
 - (b) The parts are back-to-back rows in one view run, with nothing between them.
 - (c) The decomposition is unique and ordered, and uses each stored row once.
@@ -463,7 +467,7 @@ These ship with the P2 flip:
     - C1-C3 and the INSERT boundary also run with process death (`os._exit`), not only with in-process exceptions. The only accepted untested fault is a failed `generated_unproven` relation write (§3.3). A generated row stored by a tail retry is judged like any other row.
     - Surplus is checked across the whole store, not only in the cell's session. A surplus row is visible when it carries a `supersedes` or `generated_unproven` relation, or is linked by a `possible_replay_of` pair to the row it duplicates, in either direction (E4; the P1f merge pairs are not ordered by store id). Any other surplus row fails, including one that carries only `composite` or `split`.
     - The lock bar is read from the per-ingest counters on the 2,000-row synthetic ingest harness (tests/test_issue_2055_cold_cursor_cost.py), in two shapes: the stored-view replay it runs today, and a 2,000-row view of new rows, so that the INSERT and the writes after it fall inside the measured hold. P1h marks the harness `latency` and asserts the bar behind an opt-in environment switch; ordinary runs skip it and report the measured values. The gate's value comes from one run on a declared quiet host. The gate cells record their per-ingest holds beside it.
-    - The busy bar compares v0.29.2 (its GA tree is the rc1 tree, 7594beb7, plus release notes) with the candidate. It runs host-level versions of the gate cells: the same operation sequences, driven through the public engine API while a second LCM engine writes to the same store on a fixed contention schedule, loading each tree by path. It counts busy failures per operation, for both engines: an ingest, compression or session end counts once if at least one busy line is logged while it runs, however many lines it logs. Lines are matched by substring in both trees, so every variant counts: `sqlite_util`'s write-lock recovery warning, `LCM ingest failed` lines whose error is SQLite busy or locked, and `skipped due to SQLite lock`.
+    - The busy bar compares v0.29.2 (its GA tree is the rc1 tree, 7594beb7, plus release notes) with the candidate. It runs host-level versions of the gate cells: the same operation sequences, driven through the public engine API while a second LCM engine writes to the same store on a fixed contention schedule, loading each tree by path. It counts busy failures per operation, for both engines: an ingest, compression or session end counts once if at least one busy line is logged while it runs, however many lines it logs. Lines are matched by substring in both trees, so every variant counts: `sqlite_util`'s write-lock recovery warning, `LCM ingest failed` lines whose error is SQLite busy or locked, and `skipped due to SQLite lock`. In the candidate, an operation also counts when the engine's busy counters rise while it runs: `ledger.emission_busy` for the compression exit write, whose warning is logged only once per engine, and `ledger.tail.busy_at_end` for a session end, which repeats its log line. An operation counts once even when both signals fire; v0.29.2 has neither counter, so nothing is added there.
     - Per-ingest and tail `possible_replay_of` writes stay P2 work, unless a gate cell shows a surplus row that is not visible as defined above. In that case P1h adds them before the gate can pass.
 - **G, admission** (in parallel with P1; a gate prerequisite). #1931 and its delegated-child reliability cell, then #2042 after its split. Own spec, own PR.
 - **P2, classifier.**
@@ -489,19 +493,28 @@ These ship with the P2 flip:
     - The denominator is rows stored in the audit window.
   - The P1 latency and lock bars hold.
 
-## 5a. P2 open items (P2-blocking; closed in the P2 spec, each with a named regression, before the P2 flip)
+## 5a. P2 rulings (classifier PR 1; acceptance before the P2 flip)
 Sources: the r3.2 findings of the Codex reviewer (A) and of the Claude reviewer (C).
-- A1: the M14 restamp control can erase stamps that tell new rows apart. Keep the veto unless restamping has independent evidence; otherwise store visibly.
-- A2: h2 and h3 let a stale candidate or a reused uid set its own head. Require head evidence independent of the candidate; otherwise h4.
-- A3: the anchored run can accept an older revision of a uid before E5a runs. Validate revisions before accepting anchored entries.
-- A5 and C7/C10: head selection defeats the [p, q] → [q, p] and keyed [B, A] rules, and rows outside every interval get no candidate. A NEW row equal to an unbound entry of the base record (under h4, of the durable cursor) gets possible_replay_of; state the keyed-reorder outcome.
-- A6 and C6: the retained-prefix witness is unreachable for [R] → [R+N1], and an emission merged into V[0] has no anchor. Select the previous vector independently of the run; split an emission-merged V[0] by its descriptor before the search; let the run start at a small V[i] with an empty leading gap.
-- C8: P2 migration enumerates unbound rows with an anti-join against bindings, including residuals below P1g's examined-through mark; it never uses that mark as its base. Run once at the P2 transition so #758(a) stays measurable.
-- Deferred P1f/P1g work: leaf and proof mark writers (§3.1 item 6), the legacy partial-chain cache (F0), and canonical uid/revision merging (merge step 4, §3.8).
-- C9: the first ingest that binds a generated row records its observed stamp, for every kind, so the #1003 veto arms.
-- PR review 1: after a rollback, an older reader can backfill `messages.observed_at` with no relation. At re-upgrade, import those backfills as legacy stamp observations, so the stamp veto sees them. Named regression: downgrade, backfill, re-upgrade.
-- PR review 2: rank 5's target includes superseded occurrences, so an incoming row equal to a superseded one is counted as REPLAY. Exclude superseded occurrences from the lo_d/hi_d counts; a match to one takes the NEW path with `supersedes` and `possible_replay_of`. Named regression: x, then x superseded by x', then x again.
-- C11: the 4M-cell budget against one h2 core; M14's trigger strength; "in every LIS" with several same-stamp candidates; a history base never pairs supersedes (#7).
+- A1: mark only occurrence-proven restamps on three distinct occurrences/descriptors from at least three distinct incoming rows per view, then rerun once without stamps; uid proof requires identity or an allowed alias equal to the latest revision, so edits do not count; `test_c_a1_fresh_restamp`, `test_c17_occurrence_proven_restamp`, `test_c_m14_uid_edits_are_not_restamps`, `test_run9_t2_one_row_cannot_supply_three_restamps`, `test_run9_t2_three_distinct_rows_positive_control`.
+- A2: h2 needs m increasing matches among the first eight kept occurrences; h3 needs two increasing eligible uid matches in `on`; `test_c01_h2_and_c02_h3`.
+- A3: older uid revisions never replay in `shadow` or `on`; inside-Window reverts supersede the latest revision, outside hits only carry doubt; `test_c_a3_revert`, `test_c03_a3_original`.
+- A5 and C7/C10: pair NEW rows with same-identity unbound base entries in order; keyed reorders stand but empty their gap; `test_c04_a5_swap`, `test_c05_keyed_middle_and_c13_1449`, `test_c_crossed_and_clamped_placements`.
+- A6 and C6: try the first stored-kind row, then the second only if no run starts at the first; never split before search; previous means newest ingest; `test_c06_a6_second_row_and_c08_previous`, `test_c09_c9_emission_and_c07_merged_prefix` (PARTIAL acceptance waits for PR 2).
+- C8 waits: lazy per-gap migration after the lock probes (L2b); its anti-join includes unbound rows below the examined-through mark; coverage assertion in `test_classifier_twin`.
+- Deferred P1f/P1g work stays in L2b: leaf/proof writers, legacy partial-chain cache and uid/revision merging; PR 1 changes no writer (purity: `test_a_purity_and_b_input_parity`).
+- C9: every descriptor bind plans its first observed stamp, including run binds; L1 must add the conditional writer; `test_c09_c9_emission_and_c07_merged_prefix`.
+- PR review 1: backfilled `observed_at` participates only in vetoes, never positive witnesses; `test_c10_observed_at_veto_only`, `test_c10_user_backfill_never_witnesses`.
+- PR review 2: exclude superseded occurrences from rank-5 counts and take the visible revert path; code and x → x′ → x regression wait for PR 2; uid revert guard: `test_c_a3_revert`.
+- C11 i waits: finalize the DP budget after the rank-5 benchmark (PR 2; PR 1 cost probe: `test_e_cost`).
+- C11 ii: M14 uses occurrence proof rather than differing identities/stamps; `test_c_a1_fresh_restamp`, `test_c17_occurrence_proven_restamp`.
+- C11 iii: collect complete segment mappings and all row pairs, accept only unique levels among maximum increasing sequences; `test_c11_same_stamp_twins_uniqueness`, `test_c_c4_name_elision`.
+- C11 iv: supersedes pairing uses the newest ingest vector even with history base; pairing code waits for PR 2; selector: `test_c06_a6_second_row_and_c08_previous`.
+
+PR 1 returns plans only: no engine wiring, PARTIAL acceptance or rank-5 alignment. Deferred rows store all incoming bytes with `possible_replay_of`; discovery precedes the single segment cut. A cut keeps the original head/base and reports only the committed run. Outcome reasons `deferred` and `segment` take precedence over rejection reasons. See `tests/invariants/test_p2_classifier.py` and `tests/invariants/test_1232_classifier_twins.py`.
+
+A cut whose assistant precedes the run start removes the entire run and its later replays (`test_c_segment_cut_before_run_start`). C1's 504 non-skipped executions split into 288 fully asserted and 216 cold, ledger-off, partial-coverage executions (72 per cold shape). The latter retain stored-row and third-view checks; their full loss/silent-surplus bar belongs to pre-ledger L2b. The suite asserts that no other C1 class has partial coverage. PR 1's pure classifier remains outside the turn-path file map until L1 wires it; its four-fixture local cost bar is marked `latency` and excluded by CI's `-m "not latency"` selection; the 50 ms bar binds only with `LCM_E_COST_BAR=1` on a declared quiet host.
+
+L1 integration obligations: map uid intents to `add_host_uid_bindings`, observations to `add_stamp_observation`, adoptions to `set_emission_state`, neighbours to `plan_ordinals`, and resolved vector entries to `write_view`. C9 needs a conditional stamp writer; `set_emission_state` does not write stamps. Establish neutrality of oracle cache fills in shadow runs and assert ledger-off engine behavior unchanged on all 448 source cells. The twins establish their distinct-occurrence stamp model, not arbitrary stamp-collision safety.
 
 ## 6. Decisions (the release manager decides; review may challenge them)
 - **M1 Lineage:** §3.8, keyed by the persisted host_uid key (A8), with the five-step provisional merge.
