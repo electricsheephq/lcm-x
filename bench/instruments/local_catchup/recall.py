@@ -258,7 +258,7 @@ def worker(request):
                     start = time.perf_counter()
                     fts.clear()
                     with foreground_request():
-                        payload = json.loads(mod("tools").lcm_recall({"query": queries[q["id"]]}, engine=reader))
+                        payload = json.loads(mod("tools").lcm_recall({"query": queries[q["id"]]}, engine=reader, delivery_order="score"))
                     end = time.perf_counter()
                     after = vector_counts(a.db, manifest) if before else {}
                     honesty_arms = [arm for kind, arm in (("chunks", "chunk"), ("leaves", "summary"))

@@ -2548,7 +2548,7 @@ def production_recall_hits(
             chunk_provider_embedder,
         )
     payload = json.loads(
-        lcm_tools.lcm_recall({"query": question.question, "limit": limit}, engine=engine, delivery_unit="hits")
+        lcm_tools.lcm_recall({"query": question.question, "limit": limit}, engine=engine, delivery_unit="hits", delivery_order="score")
     )
     if recall_health is not None:
         recall_health["degraded"] = bool(payload.get("degraded"))
