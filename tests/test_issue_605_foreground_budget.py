@@ -212,13 +212,16 @@ def test_a_oversized_frontier_ends_by_60_and_no_leaf_starts_past_the_soft_target
     near +87, so the compaction stops at +58 with no leaf. (r2 asserted one condensation and a leaf ending by +58;
     the r1 half-budget split admitted condensations at +0 and +29 and a first leaf ending at +87.) #909's leaf
     reserve makes the next condensation hit its reduced hard budget; the leaf still hits the soft target."""
+    # #1481: count simulated time only, like the stop-line tests, so host load cannot move the boundary.
+    ticks = iter(i / 100_000 for i in range(100_000))
+    monkeypatch.setattr(clock, "_real", lambda: next(ticks))
     engine = _engine(tmp_path,
         # #1013 part B: foreground timing excludes background rollup calls
         large_output_externalization_enabled=False,
         large_output_active_replay_stubbing_enabled=False,
         temporal_rollups_enabled=False,
     )
-    for _ in range(8):  # 29 s walls (30 s would sit on the 60 s boundary with the real clock's slack)
+    for _ in range(8):  # 29 s walls (30 s would sit exactly on the 60 s boundary)
         engine._foreground_estimates.record_call("", 29.0)
     provider = _provider(monkeypatch, clock, default=29.0)
     _depth_0_nodes(engine, 6)
