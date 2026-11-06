@@ -26,6 +26,12 @@ REQUIRED_CI_CHECK_PAIRS = (
 # the merge-group run covers the merged tree and must be verified on the merge commit.
 REQUIRED_PR_ONLY_CHECK_PAIRS = (("differential", 15368),)
 REQUIRED_CHECK_PAIRS = REQUIRED_CI_CHECK_PAIRS + REQUIRED_PR_ONLY_CHECK_PAIRS
+# #1382: the Actions workflow (by name, as `gh pr checks --json workflow` reports it) that must produce each
+# required check. A same-named job from another workflow does not satisfy it.
+REQUIRED_CHECK_WORKFLOWS = {
+    **{context: "CI" for context, _ in REQUIRED_CI_CHECK_PAIRS},
+    **{context: "Differential" for context, _ in REQUIRED_PR_ONLY_CHECK_PAIRS},
+}
 # Changed-path risk map for the land-pr review obligation. It is a readiness hint
 # only: it names the review lanes land-pr requires and never fails readiness.
 REVIEW_POLICY_FILES = {
@@ -193,6 +199,8 @@ def _trusted_checks(
         ]
         if len(exact) > 1 and not allow_multiple:
             blockers.append(f"TRUSTED_CHECK_DUPLICATE:{context}:{integration_id}")
+        elif any(check.get("workflow") != REQUIRED_CHECK_WORKFLOWS.get(context) for check in exact):
+            blockers.append(f"TRUSTED_CHECK_WORKFLOW_MISMATCH:{context}:{integration_id}")
         elif not passing or len(passing) != len(exact):
             blockers.append(f"TRUSTED_CHECK_UNSATISFIED:{context}:{integration_id}")
         else:

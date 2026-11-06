@@ -52,6 +52,7 @@ def passing_checks(head_sha: str = HEAD) -> list[dict[str, object]]:
     return [
         {
             **required,
+            "workflow": "Differential" if required["context"] == "differential" else "CI",
             "head_sha": head_sha,
             "base_sha": BASE,
             "status": "completed",
@@ -235,6 +236,40 @@ def test_same_named_wrong_app_check_is_rejected():
     assert "TRUSTED_CHECK_UNSATISFIED:workflow-lint:15368" in receipt[
         "blocker_codes"
     ]
+
+
+@pytest.mark.parametrize("mode", ["readiness", "post_merge"])
+@pytest.mark.parametrize("context", ["test (3.12)", "differential"])
+def test_required_check_from_its_protected_workflow_is_accepted(mode, context):
+    payload = post_merge_payload() if mode == "post_merge" else ready_payload()
+    check = next(c for c in payload["checks"] if c["context"] == context)
+    assert check["workflow"] == ("Differential" if context == "differential" else "CI")
+
+    receipt = evaluate(payload)
+
+    assert not any(code.startswith("TRUSTED_CHECK_") for code in receipt["blocker_codes"])
+    assert {"context": context, "integration_id": 15368} in receipt["matched_trusted_checks"]
+
+
+@pytest.mark.parametrize("mode", ["readiness", "post_merge"])
+@pytest.mark.parametrize("context,workflow", [
+    ("test (3.12)", "Differential"), ("test (3.12)", "Renamed CI"), ("test (3.12)", None),
+    ("differential", "CI"),
+])
+def test_same_named_check_from_another_workflow_is_rejected(mode, context, workflow):
+    """#1382: name, app and head alone do not bind a required check; its workflow must match too."""
+    payload = post_merge_payload() if mode == "post_merge" else ready_payload()
+    check = next(c for c in payload["checks"] if c["context"] == context)
+    if workflow is None:
+        del check["workflow"]
+    else:
+        check["workflow"] = workflow
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert f"TRUSTED_CHECK_WORKFLOW_MISMATCH:{context}:15368" in receipt["blocker_codes"]
+    assert {"context": context, "integration_id": 15368} not in receipt["matched_trusted_checks"]
 
 
 def test_retired_ai_review_check_is_not_required():
