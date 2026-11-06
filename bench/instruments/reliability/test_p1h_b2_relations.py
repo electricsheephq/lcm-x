@@ -164,7 +164,7 @@ def test_p1h_tool_id_collection_keeps_full_keys_and_counts():
 
 
 FULL = {"deficit_rows": 0, "silent_surplus_rows": 0, "visible_surplus_rows": 0, "surplus_rows": 0,
-        "tool_surplus_rows": 0, "tool_missing_rows": 0, "externalized": {"deficit_rows": 0}}
+        "tool_surplus_rows": 0, "tool_missing_rows": 0, "externalized": {"deficit_rows": 0}, "split_keys": 0}
 
 
 @pytest.mark.parametrize("numbers,failed,verdict,want", [
@@ -191,6 +191,9 @@ FULL = {"deficit_rows": 0, "silent_surplus_rows": 0, "visible_surplus_rows": 0, 
     ({**FULL, "surplus_rows": 9}, ["B2"], "FAIL", True),
     ({**FULL, "visible_surplus_rows": 1, "surplus_rows": 2}, ["B2"], "FAIL", True),
     ({**FULL, "visible_surplus_rows": 3, "surplus_rows": 2}, ["B2"], "FAIL", True),
+    # Bot review on #2291: a split reply fails closed, and so does a missing split count.
+    ({**FULL, "split_keys": 1, "surplus_rows": 2, "visible_surplus_rows": 2}, ["B2"], "FAIL", True),
+    ({**FULL, "split_keys": None}, [], "PASS", True),
 ], ids=lambda value: None)
 def test_p1h_b2s_gate_fails_closed(monkeypatch, numbers, failed, verdict, want):
     original = copy.deepcopy(ci.CELL_GATE)
@@ -256,6 +259,26 @@ def test_p1h_b2s_fails_closed_on_unproven_verdicts_with_clean_numbers(monkeypatc
     rows = rows_for(PERSISTENT, "fixture", "in-process", [])
     row = next(r for r in rows if r["cell"] == PERSISTENT)
     row.update(verdict=verdict, numbers={"B2": dict(FULL)})
+    problems = ci.gate(rows, set())
+    assert len(problems) == 1 and "['B2S']" in problems[0]
+
+
+def test_p1h_b2s_fails_a_split_reply_that_hides_a_lost_copy(monkeypatch):
+    # Bot review on #2291, scorer to gate: two expected copies of one reply, one stored split pair. The scorer
+    # counts no deficit for the split key, and both fragments are visible surplus; B2S must still fail.
+    keys = []
+    out = multiset.score([("assistant", "one two")] * 2,
+                         [(1, "S", "assistant", "one "), (2, "S", "assistant", "two")], surplus_keys=keys)
+    split = multiset.split_surplus(keys, [(1, "generated_unproven", None), (2, "generated_unproven", None)])
+    assert (out["split_keys"], out["deficit_rows"], out["surplus_rows"]) == (1, 0, 2)
+    assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == (2, 0)
+    numbers = {**FULL, **{k: out[k] for k in ("deficit_rows", "surplus_rows", "split_keys")},
+               "visible_surplus_rows": split["visible_surplus_rows"],
+               "silent_surplus_rows": split["silent_surplus_rows"]}
+    monkeypatch.setitem(ci.CELL_GATE, PERSISTENT, ("in-process", ("B2S",)))
+    rows = rows_for(PERSISTENT, "fixture", "in-process", ["B2"])
+    row = next(r for r in rows if r["cell"] == PERSISTENT)
+    row.update(verdict="FAIL", numbers={"B2": numbers})
     problems = ci.gate(rows, set())
     assert len(problems) == 1 and "['B2S']" in problems[0]
 

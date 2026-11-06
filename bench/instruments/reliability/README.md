@@ -398,7 +398,9 @@ with a positive or missing deficit count; B1 mismatches and B2 surplus remain ac
 `B2S` is an available exact-cell CI predicate beside `B2D`: any deficit (including tool/externalized
 loss), positive silent surplus, or missing/invalid visibility split fails closed. Invalid means any of the
 counts is missing, not an int or negative, or `visible_surplus_rows + silent_surplus_rows` differs from
-`surplus_rows + tool_surplus_rows`. Visible surplus alone passes B2S while still failing B2. B2S checks
+`surplus_rows + tool_surplus_rows`. A split assistant reply (`split_keys` above 0) also fails B2S: the scorer
+counts no deficit for a split key whatever its expected count, so a split could hide a lost copy. Visible
+surplus alone passes B2S while still failing B2. B2S checks
 receipts even on a reported PASS. A B2S-gated row reported UNSUPPORTED, INCONCLUSIVE or any verdict other than
 PASS or FAIL fails closed even when its counts are clean, because its scenario was not proven. This change promotes no `CELL_GATE` entry and does not prove that the P1 gate passes.
 
