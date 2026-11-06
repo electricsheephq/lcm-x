@@ -150,3 +150,19 @@ def test_backup_flush_does_not_commit_half_an_ingest(race):
     with sqlite3.connect(race.doctor["result"]["backup_path"]) as backup:
         # The backup is taken after the ingest committed: both rows or none, never half the batch.
         assert backup.execute("SELECT COUNT(*) FROM messages WHERE session_id = 'live'").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("foreign", ["rollback", "commit"])
+def test_ingest_detects_a_foreign_rollback_or_commit(race, foreign):
+    # A writer that skips the store write lock (the pre-#2345 doctor shape) ends the ingest's transaction
+    # mid-batch. Python opens a new one for the next row, so only the attempt savepoint shows the loss.
+    def foreign_end(engine):
+        getattr(engine._store._conn, foreign)()
+
+    _run_race(race, foreign_end)
+
+    assert race.ingest.get("error", "").startswith("_SqliteSavepointError: "), race.ingest
+    assert "lost before COMMIT" in race.ingest["error"]
+    # The owner rolls back what it can; the engine reconciles from a cursor that never moved.
+    assert [content for _id, content in _rows(race.db, "live")] == (
+        [] if foreign == "rollback" else [_ROWS[0]["content"]])
