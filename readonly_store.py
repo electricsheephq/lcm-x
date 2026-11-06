@@ -55,8 +55,10 @@ _WAL_HEADER_OFFSET = 18  # SQLite header bytes 18/19 (write/read format) == 2 in
 
 # Closing ANY fd for an inode drops this process's SQLite POSIX locks on it.
 # Never close these fds, even after replacement: retain them for the process lifetime.
+# A replaced store's old inode stays open (its disk space is not freed) until process exit.
 # The cache grows with the distinct database inodes (including replacements) we see.
 _HEADER_FDS: dict[tuple[int, int], int] = {}
+_HEADER_RETAINED_FDS: list[int] = []
 _HEADER_FDS_LOCK = threading.Lock()
 
 # Structural FTS verdicts are cached per process: the probe COUNT(*)s the content
@@ -96,7 +98,12 @@ def _wal_header_state(db_path: str | Path) -> bool | None:
                 fd = _HEADER_FDS.get(key)
                 if fd is None:
                     fd = os.open(resolved, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
-                    _HEADER_FDS[key] = fd
+                    stat = os.fstat(fd)
+                    key = (stat.st_dev, stat.st_ino)
+                    if key in _HEADER_FDS:
+                        _HEADER_RETAINED_FDS.append(fd)
+                    else:
+                        _HEADER_FDS[key] = fd
             header = os.pread(fd, _WAL_HEADER_OFFSET + 2, 0)
         else:  # Windows has no pread and does not use POSIX record locks.
             with path.open("rb") as handle:
